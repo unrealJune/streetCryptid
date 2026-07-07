@@ -11,3 +11,6 @@ package-lock.json
 yarn.lock
 pnpm-lock.yaml
 assets/
+
+# design archive (mockups + generated OSM data + renders) — reference only, not app code
+docs/design/

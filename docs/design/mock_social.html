@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>streetCryptid — field survey (real map)</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+:root{
+  --void:#060c14; --navy:#0a1420; --panel:#0b1826;
+  --ink:#DCEBF0; --steel:#8AA6B2; --steeld:#5E7986; --line:#17293a;
+  --amber:#EDA23C; --amberd:#B9761E; --ok:#6FD08A;
+  --edge:rgba(6,12,20,.85); --scrim:rgba(6,12,20,.55);
+  --glass:rgba(11,21,32,.64); --glassbd:rgba(130,170,190,.16);
+  --island:rgba(10,20,31,.92); --islandbd:rgba(130,170,190,.16);
+  --shadow:rgba(0,0,0,.7); --seg:#15293a; --seghi:#fff2dd; --dot:#a8d0d9;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--void);}
+body{display:flex;align-items:center;justify-content:center;min-height:100vh;
+  font-family:'IBM Plex Mono',monospace;-webkit-font-smoothing:antialiased;}
+.stage{width:506px;height:960px;display:flex;align-items:center;justify-content:center;
+  background:radial-gradient(120% 90% at 50% 0%,#0b1420 0%,#070d15 60%,#05090f 100%);}
+.phone{width:420px;height:874px;border-radius:52px;background:#05090f;
+  padding:12px;box-shadow:0 0 0 2px #16222e,0 30px 80px rgba(0,0,0,.6),inset 0 0 0 6px #0a121b;}
+.screen{width:100%;height:100%;border-radius:42px;overflow:hidden;position:relative;
+  background:var(--navy);display:flex;flex-direction:column;}
+.statusbar{position:absolute;top:0;left:0;right:0;z-index:9;display:flex;align-items:center;justify-content:space-between;padding:14px 26px 4px;}
+.statusbar .time{font-family:'Rajdhani';font-weight:700;font-size:17px;color:var(--ink);letter-spacing:.5px;}
+.statusbar .ico{display:flex;gap:7px;align-items:center;color:var(--ink);}
+.notch{position:absolute;top:12px;left:50%;transform:translateX(-50%);width:120px;height:30px;background:#05090f;border-radius:0 0 18px 18px;z-index:6;}
+/* full-bleed map */
+.mapwrap{position:absolute;inset:0;overflow:hidden;background:var(--navy);}
+#map{position:absolute;inset:0;}
+.mapedge{position:absolute;inset:0;pointer-events:none;z-index:3;
+  box-shadow:inset 0 38px 46px -40px var(--edge),inset 0 -70px 60px -64px var(--edge);}
+.topscrim{position:absolute;top:0;left:0;right:0;height:108px;z-index:2;pointer-events:none;
+  background:linear-gradient(180deg,var(--scrim),transparent);}
+
+/* right floating map controls */
+.controls{position:absolute;right:15px;bottom:330px;z-index:8;display:flex;flex-direction:column;gap:11px;}
+.cbtn{width:46px;height:46px;border-radius:16px;border:1px solid var(--glassbd);
+  background:var(--glass);backdrop-filter:blur(14px) saturate(1.2);
+  display:flex;align-items:center;justify-content:center;color:var(--steel);
+  box-shadow:0 10px 24px -14px var(--shadow);}
+.cbtn.on{color:var(--amber);border-color:var(--amberd);}
+
+/* bottom island — floating "where you are" */
+.island{position:absolute;left:14px;right:14px;bottom:16px;z-index:8;
+  background:var(--island);
+  backdrop-filter:blur(20px) saturate(1.1);
+  border:1px solid var(--islandbd);border-radius:26px;
+  box-shadow:0 18px 44px -22px var(--shadow);
+  padding:11px 22px 20px;}
+.grab{width:38px;height:5px;border-radius:3px;background:rgba(138,166,178,.28);margin:2px auto 16px;}
+.st{font-family:'Rajdhani';font-weight:700;font-size:30px;color:var(--ink);letter-spacing:.2px;line-height:1;}
+.nb{font-family:'IBM Plex Mono';font-size:10.5px;letter-spacing:1.7px;color:var(--steel);margin-top:9px;text-transform:uppercase;}
+.cov{display:flex;align-items:center;gap:15px;margin-top:18px;}
+.covbar{flex:1;display:flex;gap:2px;height:7px;align-items:stretch;}
+.covbar i{flex:1;border-radius:1px;background:var(--seg);display:block;}
+.covbar i.on{background:var(--amber);}
+.covnum{font-family:'Rajdhani';font-weight:700;font-size:20px;color:var(--ink);letter-spacing:.3px;line-height:1;}
+.covnum span{font-size:12px;color:var(--steel);margin-left:1px;}
+.detail{display:none;margin-top:17px;padding-top:15px;border-top:1px solid var(--line);}
+.island.expanded .detail{display:flex;align-items:center;justify-content:space-between;gap:18px;}
+.stats{display:flex;gap:26px;}
+.stat{font-family:'IBM Plex Mono';font-size:9.5px;letter-spacing:1.4px;color:var(--steeld);text-transform:uppercase;display:flex;align-items:baseline;gap:6px;}
+.stat b{font-family:'Rajdhani';font-weight:700;font-size:18px;color:var(--ink);letter-spacing:0;}
+
+/* ===== SOCIAL: friends roster sheet ===== */
+.shd{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:2px;}
+.shd h2{font-family:'Rajdhani';font-weight:700;font-size:19px;color:var(--ink);letter-spacing:2.4px;text-transform:uppercase;}
+.shd .onl{font-family:'IBM Plex Mono';font-size:10px;letter-spacing:1px;color:var(--steel);display:flex;align-items:center;gap:7px;text-transform:uppercase;}
+.shd .onl i{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(111,208,138,.16);}
+.roster{display:flex;flex-direction:column;}
+.fr{display:grid;grid-template-columns:auto 1fr auto;align-items:center;column-gap:15px;padding:13px 2px;border-top:1px solid var(--line);}
+.fr:first-child{border-top:0;padding-top:6px;}
+.fr.off{opacity:.52;}
+.cav{display:flex;flex-direction:column;align-items:center;gap:4px;width:66px;}
+.cav pre{font-family:'IBM Plex Mono',monospace;font-size:8.5px;line-height:1.1;color:var(--ok);white-space:pre;margin:0;}
+.fr.off .cav pre{color:var(--steel);}
+.cav .cap{font-family:'IBM Plex Mono';font-size:7px;letter-spacing:1px;color:var(--steeld);text-transform:uppercase;}
+.fmid{min-width:0;}
+.fmid .h{font-family:'Rajdhani';font-weight:700;font-size:16.5px;color:var(--ink);letter-spacing:.3px;line-height:1;}
+.fmid .h b{color:var(--ok);font-weight:700;}
+.fmid .l{font-family:'IBM Plex Mono';font-size:9.5px;letter-spacing:.5px;color:var(--steel);margin-top:5px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.sg{display:flex;align-items:center;gap:9px;margin-top:9px;}
+.sgbar{width:70px;display:flex;gap:2px;height:5px;}
+.sgbar i{flex:1;border-radius:1px;background:var(--seg);}
+.sgbar i.on{background:var(--ok);}
+.sg .p{font-family:'IBM Plex Mono';font-size:9px;letter-spacing:.8px;color:var(--steeld);text-transform:uppercase;}
+.frt{text-align:right;align-self:start;padding-top:2px;}
+.frt .d{font-family:'Rajdhani';font-weight:700;font-size:15px;color:var(--ink);white-space:nowrap;}
+.frt .d.dim{color:var(--steel);font-size:12px;}
+.frt .go{font-family:'IBM Plex Mono';font-size:14px;color:var(--steeld);margin-top:8px;}
+
+/* ===== SOCIAL: friend profile ===== */
+.prof{padding:2px 4px 6px;}
+.pf-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
+.pf-back{display:flex;align-items:center;gap:7px;font-family:'IBM Plex Mono';font-size:10px;letter-spacing:1.4px;color:var(--steel);text-transform:uppercase;}
+.pf-onl{font-family:'IBM Plex Mono';font-size:10px;letter-spacing:1px;color:var(--ok);display:flex;align-items:center;gap:7px;text-transform:uppercase;}
+.pf-onl i{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(111,208,138,.16);}
+.pf-hero{display:flex;flex-direction:column;align-items:center;gap:11px;padding:8px 0 2px;}
+.pf-hero pre{font-family:'IBM Plex Mono',monospace;font-size:15px;line-height:1.14;color:var(--ok);white-space:pre;margin:0;}
+.pf-name{font-family:'Rajdhani';font-weight:700;font-size:27px;color:var(--ink);letter-spacing:.5px;line-height:1;}
+.pf-name b{color:var(--ok);}
+.pf-sub{font-family:'IBM Plex Mono';font-size:9.5px;letter-spacing:1.7px;color:var(--steel);text-transform:uppercase;}
+.pf-shared{margin-top:18px;padding-top:16px;border-top:1px solid var(--line);}
+.pf-row{display:flex;align-items:flex-end;justify-content:space-between;}
+.pf-row .lab{font-family:'IBM Plex Mono';font-size:10px;letter-spacing:1.6px;color:var(--steeld);text-transform:uppercase;}
+.pf-row .big{font-family:'Rajdhani';font-weight:700;font-size:30px;color:var(--ink);line-height:.9;}
+.pf-row .big span{font-size:15px;color:var(--steel);}
+.pf-bar{display:flex;gap:2px;height:7px;margin-top:12px;}
+.pf-bar i{flex:1;border-radius:1px;background:var(--seg);}
+.pf-bar i.on{background:var(--ok);}
+.pf-note{font-family:'IBM Plex Mono';font-size:10px;letter-spacing:.4px;color:var(--steel);margin-top:13px;line-height:1.5;}
+.pf-note b{color:var(--amber);font-weight:600;}
+.pf-btn{margin-top:17px;padding:13px;border-radius:14px;border:1px solid var(--ok);
+  background:rgba(111,208,138,.08);color:var(--ok);font-family:'Rajdhani';font-weight:700;
+  font-size:14px;letter-spacing:1.8px;text-transform:uppercase;text-align:center;}
+</style>
+</head>
+<body>
+<div class="stage"><div class="phone"><div class="screen">
+  <div class="notch"></div>
+  <div class="statusbar">
+    <span class="time">09:41</span>
+    <span class="ico">
+      <svg width="20" height="12" viewBox="0 0 20 12"><g fill="currentColor"><rect x="0" y="7" width="3" height="5" rx="1"/><rect x="5" y="4.5" width="3" height="7.5" rx="1"/><rect x="10" y="2" width="3" height="10" rx="1"/><rect x="15" y="0" width="3" height="12" rx="1" opacity=".45"/></g></svg>
+      <svg width="18" height="13" viewBox="0 0 18 13"><path d="M9 12.2 1 4.4a11 11 0 0 1 16 0z" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="9" cy="10.4" r="1.3" fill="currentColor"/></svg>
+      <svg width="26" height="13" viewBox="0 0 26 13"><rect x="1" y="1" width="21" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".8"/><rect x="3" y="3" width="15" height="7" rx="1.5" fill="currentColor"/><rect x="23.5" y="4" width="2" height="5" rx="1" fill="currentColor"/></svg>
+    </span>
+  </div>
+  <div class="mapwrap" id="mapwrap">
+    <canvas id="map"></canvas>
+    <div class="mapedge"></div>
+  </div>
+  <div class="topscrim"></div>
+  <div class="controls">
+    <div class="cbtn"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="M3 13l9 5 9-5"/><path d="M3 17.6l9 5 9-5"/></svg></div>
+    <div class="cbtn" style="color:var(--ok);border-color:var(--ok)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="9" cy="8" r="3.1"/><path d="M3.6 19.6a5.4 5.4 0 0 1 10.8 0"/><path d="M16.2 5.3a3.1 3.1 0 0 1 0 5.4"/><path d="M17.6 14.3a5.4 5.4 0 0 1 3.4 5.3"/></svg></div>
+    <div class="cbtn on"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3.6"/><path d="M12 2v3.4M12 18.6V22M2 12h3.4M18.6 12H22"/></svg></div>
+  </div>
+  <div class="island" id="sheet">
+    <div class="grab"></div>
+    <div id="sheetbody"></div>
+  </div>
+</div></div></div>
+
+<script src="mapdata.js"></script>
+<script src="zoomdata.js"></script>
+<script>
+// island meta populated in main()
+
+const cv=document.getElementById('map'),wrap=document.getElementById('mapwrap'),ctx=cv.getContext('2d');
+const DPR=window.devicePixelRatio||1;let W=0,H=0;
+const S=2.0;
+
+// ---- palette ----
+// ---- themes ----
+const THEMES={
+  deepsea:{
+    css:{'--void':'#060c14','--navy':'#0a1420','--panel':'#0b1826','--ink':'#DCEBF0','--steel':'#8AA6B2','--steeld':'#6E8A97','--line':'#17293a','--amber':'#EDA23C','--amberd':'#B9761E','--ok':'#6FD08A','--edge':'rgba(6,12,20,.85)','--scrim':'rgba(6,12,20,.55)','--glass':'rgba(11,21,32,.64)','--glassbd':'rgba(130,170,190,.16)','--island':'rgba(10,20,31,.92)','--islandbd':'rgba(130,170,190,.16)','--shadow':'rgba(0,0,0,.7)',    '--seg':'#15293a','--seghi':'#fff2dd','--dot':'#68d2ce'},
+        BG:[9,18,30],VEIL:[214,236,240],ACC:[240,166,64],contact:[111,208,138],
+    TERR:[[0,[34,66,74]],[.45,[46,120,130]],[.72,[120,196,198]],[1,[212,236,234]]],
+    WATER:[[0,[26,74,128]],[.5,[38,110,176]],[1,[86,168,232]]],
+    PARK:[[0,[30,84,58]],[.5,[54,140,86]],[1,[120,206,132]]],
+    labelBg:'rgba(9,17,27,.82)',streetLabel:[184,208,216],parkLabel:[132,198,150]
+  },
+  nocturne:{
+    css:{'--void':'#08081a','--navy':'#0e0e22','--panel':'#14142a','--ink':'#E7E9FB','--steel':'#9aa0c8','--steeld':'#7d82ac','--line':'#22224a','--amber':'#F0657F','--amberd':'#B23a52','--ok':'#63D0B0','--edge':'rgba(7,7,20,.85)','--scrim':'rgba(7,7,20,.55)','--glass':'rgba(16,16,34,.64)','--glassbd':'rgba(150,150,205,.18)','--island':'rgba(14,14,30,.92)','--islandbd':'rgba(150,150,210,.18)','--shadow':'rgba(0,0,0,.72)',    '--seg':'#22224a','--seghi':'#ffdfe7','--dot':'#5cc8e0'},
+        BG:[12,12,30],VEIL:[224,228,252],ACC:[244,110,136],contact:[99,208,176],
+    TERR:[[0,[44,42,78]],[.42,[96,100,168]],[.72,[168,176,220]],[1,[236,238,250]]],
+    WATER:[[0,[38,44,104]],[.5,[62,80,180]],[1,[104,132,236]]],
+    PARK:[[0,[36,64,78]],[.5,[58,124,132]],[1,[110,196,190]]],
+    labelBg:'rgba(12,12,28,.82)',streetLabel:[188,196,232],parkLabel:[150,200,200]
+  },
+  daybreak:{
+    css:{'--void':'#c9d3da','--navy':'#eef2f5','--panel':'#ffffff','--ink':'#152633','--steel':'#4d6675','--steeld':'#5b7480','--line':'#d6dee4','--amber':'#C6791A','--amberd':'#9a5c10','--ok':'#2f9e6a','--edge':'rgba(238,242,245,.9)','--scrim':'rgba(238,242,245,.6)','--glass':'rgba(255,255,255,.78)','--glassbd':'rgba(30,55,72,.14)','--island':'rgba(255,255,255,.9)','--islandbd':'rgba(30,55,72,.12)','--shadow':'rgba(40,60,80,.28)',    '--seg':'#d3dde3','--seghi':'#C6791A','--dot':'#1a848e'},
+        BG:[236,240,244],VEIL:[18,62,84],ACC:[214,124,26],contact:[38,150,100],
+    TERR:[[0,[176,190,200]],[.4,[108,132,148]],[.72,[52,84,106]],[1,[20,44,64]]],
+    WATER:[[0,[150,192,224]],[.5,[74,140,196]],[1,[30,104,170]]],
+    PARK:[[0,[158,200,168]],[.5,[80,164,110]],[1,[34,128,80]]],
+    labelBg:'rgba(255,255,255,.82)',streetLabel:[46,78,98],parkLabel:[30,110,78]
+  }
+};
+const params=new URLSearchParams(location.search);
+const themeName=params.get('theme')||'daybreak';
+const T=THEMES[themeName]||THEMES.deepsea;
+(function(){const r=document.documentElement;for(const k in T.css)r.style.setProperty(k,T.css[k]);})();
+const TERR=T.TERR,WATER=T.WATER,PARK=T.PARK,ACC=T.ACC,BG=T.BG,VEIL=T.VEIL,CT=T.contact||[111,208,138];
+// ---- dataset (geography + zoom) ----
+const META={
+  caphill:{street:'15th Ave E',        hood:'Capitol Hill · Seattle', cov:34, streets:128, km:'8.4', home:[0.52,0.585]},
+  union:  {street:'Fairview Ave N',     hood:'Lake Union · Seattle',   cov:23, streets:96,  km:'6.1', home:[0.50,0.72]},
+  greenlk:{street:'E Green Lake Way N',  hood:'Green Lake · Seattle',   cov:41, streets:74,  km:'9.7', home:[0.64,0.40]},
+  core:   {street:'Pike St',            hood:'Downtown · Seattle',     cov:29, streets:52,  km:'3.8', home:[0.50,0.55]},
+};
+const dataName=params.get('data')||'caphill';
+const M=META[dataName]||META.caphill;
+const OSM=(window.OSMSETS&&(window.OSMSETS[dataName]||window.OSMSETS.caphill));
+
+// ---- zoom tier: the bottom-bar (island) + map scope both change with zoom ----
+// coverage DECREASES as you zoom out (walked the block, barely scratched the state)
+const ZOOM=params.get('zoom')||'hood';                 // street | hood | city | region
+const ZTIERS={
+  street:{hero:'15th Ave E',  sub:'CAPITOL HILL · SEATTLE', cov:58, s1:['21','blocks'],   s2:['0.4','km²'], lg:['walked','frontier'],  mag:2.35},
+  hood:  {hero:'Capitol Hill',sub:'SEATTLE · DISTRICT 3',   cov:34, s1:['142','sectors'],  s2:['5.1','km²'], lg:['explored','frontier'], mag:1},
+  city:  {hero:'Seattle',     sub:'KING COUNTY · WA',       cov:12, s1:['9/21','hoods'],  s2:['58','km²'],  lg:['explored','frontier'], mag:1},
+  region:{hero:'Washington',  sub:'PACIFIC NORTHWEST',      cov:3,  s1:['4/39','cities'], s2:['1.4k','km²'],lg:['visited','planned'],   mag:1},
+};
+const ZT=ZTIERS[ZOOM]||ZTIERS.hood;
+
+// ---- SOCIAL: friends as other signals on the shared map ----
+// each friend carries an ASCII "cryptid" sigil (terminal-native identity, not a mascot to catch)
+const CRY={
+  moth: String.raw`  \.    ./
+   \(oo)/
+    )~~(
+   /_||_\ `,
+  jack: String.raw`  \Y/\Y/
+   (o.o)
+   (>w<)
+   /"  "\ `,
+  hound:String.raw`  /^--^\
+  ( o  o )
+   \ ~~ /
+  _/'  '\_`,
+};
+// pos = normalized [x,y] on the hood canvas; shared = % of streets you've both walked
+const FRIENDS=[
+  {handle:'wanderer', species:'mothman',   glyph:CRY.moth,  pos:[0.60,0.25], hood:'Volunteer Park', loc:'15th Ave E',  dist:'0.3 km', shared:41, online:true},
+  {handle:'nightowl', species:'jackalope', glyph:CRY.jack,  pos:[0.25,0.30], hood:'Fremont',        loc:'N 36th St',   dist:'2.1 km', shared:18, online:true},
+  {handle:'fog_dog',  species:'black shuck',glyph:CRY.hound, pos:[0.80,0.82], hood:'Ballard',        loc:'Market St',   dist:'4.4 km', shared:27, online:false, seen:'4h ago'},
+];
+const socialView=params.get('social')||'roster';   // 'roster' | 'profile'
+
+const fogMode=(ZOOM==='city'||ZOOM==='region')?'hex':(params.get('fog')||'hex');   // 'soft' | 'hex' | 'grid'
+let CELL=+params.get('cell')||(fogMode==='grid'?64:42);
+if(ZOOM==='street')CELL=58; if(ZOOM==='city')CELL=56; if(ZOOM==='region')CELL=64;
+const MAG=ZT.mag||1, FOCUS=(OSM&&M.home)||[0.5,0.5];
+function clamp(v,a,b){return v<a?a:v>b?b:v;}
+function smooth(a,b,x){const t=clamp((x-a)/(b-a),0,1);return t*t*(3-2*t);}
+function hash(x,y){const s=Math.sin(x*12.9898+y*78.233)*43758.5453;return s-Math.floor(s);}
+function ramp(st,t){t=clamp(t,0,1);for(let i=0;i<st.length-1;i++){if(t<=st[i+1][0]){const a=st[i],b=st[i+1],k=(t-a[0])/((b[0]-a[0])||1);return[a[1][0]+(b[1][0]-a[1][0])*k,a[1][1]+(b[1][1]-a[1][1])*k,a[1][2]+(b[1][2]-a[1][2])*k];}}return st[st.length-1][1];}
+function mix(c,d,t){return[c[0]+(d[0]-c[0])*t,c[1]+(d[1]-c[1])*t,c[2]+(d[2]-c[2])*t];}
+function rgba(c,a){return`rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;}
+function distSeg(px,py,ax,ay,bx,by){const dx=bx-ax,dy=by-ay,l=dx*dx+dy*dy||1;let t=((px-ax)*dx+(py-ay)*dy)/l;t=clamp(t,0,1);return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));}
+function distPath(px,py,P){let d=1e9;for(let i=0;i<P.length-1;i++){const q=distSeg(px,py,P[i][0],P[i][1],P[i+1][0],P[i+1][1]);if(q<d)d=q;}return d;}
+// flat-top hex: pixel -> cube-rounded axial key; hex outline path
+function hexKey(x,y,R){let q=(2/3*x)/R,r=(-1/3*x+Math.sqrt(3)/3*y)/R,s=-q-r,rq=Math.round(q),rr=Math.round(r),rs=Math.round(s);const dq=Math.abs(rq-q),dr=Math.abs(rr-r),ds=Math.abs(rs-s);if(dq>dr&&dq>ds)rq=-rr-rs;else if(dr>ds)rr=-rq-rs;return rq+','+rr;}
+function hexPath(cx,cy,R){ctx.beginPath();for(let i=0;i<6;i++){const a=Math.PI/3*i,px=cx+R*Math.cos(a),py=cy+R*Math.sin(a);i?ctx.lineTo(px,py):ctx.moveTo(px,py);}ctx.closePath();}
+
+// ---- projection ----
+const [BS,BW,BN,BE]=OSM.bbox;
+const lat0=(BS+BN)/2, cosL=Math.cos(lat0*Math.PI/180);
+const PW=(BE-BW)*cosL, PH=(BN-BS);
+let scale,offx,offy;
+function setProj(){scale=Math.max(W/PW,H/PH);offx=(W-PW*scale)/2;offy=(H-PH*scale)/2;
+  if(MAG!==1){const fx=FOCUS[0]*W,fy=FOCUS[1]*H;offx=fx-(fx-offx)*MAG;offy=fy-(fy-offy)*MAG;scale*=MAG;}}
+function P(lat,lon){return[offx+(lon-BW)*cosL*scale, offy+(BN-lat)*scale];}
+
+const RGRAY=[128,170,205,225,245], RW=[2.2,3.0,4.2,5.4,7.0];
+
+function layout(){const r=wrap.getBoundingClientRect();W=Math.round(r.width);H=Math.round(r.height);
+  cv.width=W*DPR;cv.height=H*DPR;cv.style.width=W+'px';cv.style.height=H+'px';ctx.setTransform(DPR,0,0,DPR,0,0);}
+
+function maskCanvas(drawFn){const c=document.createElement('canvas');c.width=W;c.height=H;const x=c.getContext('2d');
+  x.fillStyle='#000';x.fillRect(0,0,W,H);drawFn(x);return x.getImageData(0,0,W,H).data;}
+
+let streetD,parkD,waterD, exPaths, opPt, streetLabels, discovered=new Set(), cells=[];
+
+function build(){
+  setProj();
+  const streets=OSM.ways.filter(w=>w.k==='s');
+  const parks=OSM.ways.filter(w=>w.k==='p');
+  const waters=OSM.ways.filter(w=>w.k==='w');
+  const rivers=OSM.ways.filter(w=>w.k==='r');
+
+  // street mask (draw low class first, high class on top)
+  const sorted=streets.slice().sort((a,b)=>a.c-b.c);
+  streetD=maskCanvas(x=>{x.lineCap='round';x.lineJoin='round';
+    for(const w of sorted){const gcol=RGRAY[w.c];x.strokeStyle=`rgb(${gcol},${gcol},${gcol})`;x.lineWidth=RW[w.c];
+      x.beginPath();for(let i=0;i<w.g.length;i++){const p=P(w.g[i][0],w.g[i][1]);i?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]);}x.stroke();}
+  });
+  parkD=maskCanvas(x=>{x.fillStyle='#fff';for(const w of parks){x.beginPath();for(let i=0;i<w.g.length;i++){const p=P(w.g[i][0],w.g[i][1]);i?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]);}x.closePath();x.fill();}});
+  waterD=maskCanvas(x=>{x.fillStyle='#fff';for(const w of waters){x.beginPath();for(let i=0;i<w.g.length;i++){const p=P(w.g[i][0],w.g[i][1]);i?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]);}x.closePath();x.fill();}
+    x.strokeStyle='#fff';x.lineWidth=5;x.lineCap='round';for(const w of rivers){x.beginPath();for(let i=0;i<w.g.length;i++){const p=P(w.g[i][0],w.g[i][1]);i?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]);}x.stroke();}});
+
+  // explored network: several real on-street branches from a home node
+  const coord=new Map(), adj=new Map();
+  for(const w of streets){if(w.c<1||!w.n)continue;for(let i=0;i<w.n.length;i++){const id=w.n[i],p=P(w.g[i][0],w.g[i][1]);coord.set(id,p);
+    if(i>0){const a=w.n[i-1],b=w.n[i];(adj.get(a)||adj.set(a,new Set()).get(a)).add(b);(adj.get(b)||adj.set(b,new Set()).get(b)).add(a);}}}
+  function nearest(pt){let bd=1e18,bn=null;for(const[id,c]of coord){const d=(c[0]-pt[0])**2+(c[1]-pt[1])**2;if(d<bd){bd=d;bn=id;}}return bn;}
+  function bfs(a,b){const prev=new Map();prev.set(a,a);const q=[a];let qi=0;while(qi<q.length){const u=q[qi++];if(u===b)break;const ns=adj.get(u);if(ns)for(const v of ns)if(!prev.has(v)){prev.set(v,u);q.push(v);}}if(!prev.has(b))return null;const path=[];let c=b;while(c!==a){path.push(coord.get(c));c=prev.get(c);}path.push(coord.get(a));return path.reverse();}
+  const home=[W*M.home[0],H*M.home[1]], homeN=nearest(home);
+  const ends=[[W*0.50,H*0.13],[W*0.83,H*0.30],[W*0.90,H*0.58],[W*0.66,H*0.93],[W*0.15,H*0.75],[W*0.20,H*0.40],[W*0.80,H*0.83],[W*0.40,H*0.72]];
+  exPaths=[];
+  for(const ep of ends){const en=nearest(ep);const pth=bfs(homeN,en);if(pth&&pth.length>2){
+    const MAX=90;let pp=pth;if(pp.length>MAX){const st=(pp.length-1)/(MAX-1),o=[];for(let i=0;i<MAX;i++)o.push(pp[Math.round(i*st)]);pp=o;}exPaths.push(pp);}}
+  opPt=coord.get(homeN)||home;
+
+  // chunked reveal: a sector is 'discovered' once the walked network enters it (one ping acquires it)
+  discovered=new Set();cells=[];
+  if(fogMode!=='soft'){
+    const R=CELL;
+    if(fogMode==='hex'){
+      for(let col=-1;;col++){const hx=R*1.5*col;if(hx>W+R)break;
+        for(let row=-1;;row++){const hy=R*Math.sqrt(3)*(row+((col&1)?0.5:0));if(hy>H+R)break;
+          const key=hexKey(hx,hy,R),pt=key.split(','),q=+pt[0],r=+pt[1];
+          const disc=distNet(hx,hy)<R*0.95;cells.push({q,r,x:hx,y:hy,disc});if(disc)discovered.add(key);}}
+    }else{
+      for(let gy=0;gy*R<H;gy++)for(let gx=0;gx*R<W;gx++){const hx=gx*R+R/2,hy=gy*R+R/2;
+        const disc=distNet(hx,hy)<R*0.62;cells.push({gx,gy,x:hx,y:hy,disc});if(disc)discovered.add(gx+','+gy);}
+    }
+  }
+
+  // prominent named streets: best (longest, higher-class) way per unique name — works for any dataset
+  const byName={};
+  for(const w of streets){if(!w.nm||w.c<1||w.g.length<4)continue;const sc=w.g.length+w.c*24;const cur=byName[w.nm];if(!cur||sc>cur.sc)byName[w.nm]={w,sc};}
+  const picks=Object.values(byName).sort((a,b)=>b.sc-a.sc).slice(0,14).map(o=>o.w);
+  streetLabels=picks.map(w=>{const m=Math.floor(w.g.length/2);const a=P(w.g[Math.max(0,m-1)][0],w.g[Math.max(0,m-1)][1]),b=P(w.g[Math.min(w.g.length-1,m+1)][0],w.g[Math.min(w.g.length-1,m+1)][1]);
+    let ang=Math.atan2(b[1]-a[1],b[0]-a[0]);if(ang>Math.PI/2)ang-=Math.PI;if(ang<-Math.PI/2)ang+=Math.PI;
+    return{nm:w.nm.toUpperCase(),x:(a[0]+b[0])/2,y:(a[1]+b[1])/2,ang};});
+  // park labels (largest parks with names)
+  window.__parkLabels=parks.map(w=>{let a=0,cx=0,cy=0,n=w.g.length;const pts=w.g.map(q=>P(q[0],q[1]));
+    for(let i=0;i<n;i++){const j=(i+1)%n;const cr=pts[i][0]*pts[j][1]-pts[j][0]*pts[i][1];a+=cr;cx+=(pts[i][0]+pts[j][0])*cr;cy+=(pts[i][1]+pts[j][1])*cr;}
+    a*=0.5;const ar=Math.abs(a);cx/=(6*a);cy/=(6*a);return{nm:(w.nm||'').toUpperCase(),x:cx,y:cy,ar};})
+    .filter(p=>p.nm&&p.ar>1400).sort((a,b)=>b.ar-a.ar).slice(0,5);
+}
+
+function sampleMax(D,x,y){let m=0;const o=[[0,0],[S*.4,0],[-S*.4,0],[0,S*.4],[0,-S*.4]];
+  for(const d of o){const xi=clamp(Math.round(x+d[0]),0,W-1),yi=clamp(Math.round(y+d[1]),0,H-1);const v=D[(yi*W+xi)*4];if(v>m)m=v;}return m;}
+function sample(D,x,y){const xi=clamp(Math.round(x),0,W-1),yi=clamp(Math.round(y),0,H-1);return D[(yi*W+xi)*4];}
+
+function distNet(px,py){let d=1e9;for(const Pp of exPaths){const q=distPath(px,py,Pp);if(q<d)d=q;}return d;}
+function draw(){
+  ctx.clearRect(0,0,W,H);ctx.fillStyle=rgba(BG,1);ctx.fillRect(0,0,W,H);
+  const Rexp=40,FADE=44;
+
+  ctx.shadowBlur=0;
+  const FL={s:0.46,p:0.44,w:0.54,b:0.12}, MX={s:1.0,p:0.95,w:0.90,b:0.70};
+  const COARSE=2;   // undiscovered sectors render at 1/COARSE resolution (low-res ghost)
+  let iy=0;
+  for(let y=S/2;y<H;y+=S,iy++){
+    let ix=0;
+    for(let x=S/2;x<W;x+=S,ix++){
+      const n=hash(ix,iy);
+      let e,dR=1e9;
+      if(fogMode==='soft'){dR=distNet(x,y);e=1-smooth(Rexp,Rexp+FADE,dR);}
+      else{
+        e=discovered.has(fogMode==='hex'?hexKey(x,y,CELL):(((x/CELL)|0)+','+((y/CELL)|0)))?1:0;
+        if(e<0.5&&(ix%COARSE!==0||iy%COARSE!==0))continue;   // low-res in the fog
+      }
+      const coarse=e<0.5&&fogMode!=='soft';
+      let col,val,k;
+      const wv=sample(waterD,x,y), pv=sample(parkD,x,y), sv=sampleMax(streetD,x,y);
+      if(wv>40){val=0.44+0.12*Math.sin(y*0.4+x*0.2);col=ramp(WATER,clamp(0.42+0.5*n,0,1));k='w';if(n<0.08)continue;}
+      else if(pv>40){val=0.58+0.28*n;col=ramp(PARK,clamp(0.48+0.5*n,0,1));k='p';}
+      else if(sv>28){val=clamp(sv/255,0,1);col=ramp(TERR,val);k='s';}
+      else{if(n<0.20+(1-e)*0.16)continue;val=clamp(0.24+0.13*n,0,1);col=ramp(TERR,val);k='b';}
+      // fog of war: explored shows TRUE saturated color; unexplored drains toward gray "ghost city".
+      // water + parkland keep most of their color (never fog out too far); fog is gentle overall.
+      const fog=1-e;
+      const area=(k==='w'||k==='p');
+      const fg=area?Math.min(fog,0.5):fog;
+      const lum=0.299*col[0]+0.587*col[1]+0.114*col[2];
+      let cc=mix(col,[lum,lum,lum],fg*0.74);
+      cc=mix(cc,BG,fg*0.24);
+      let a=FL[k]+(MX[k]-FL[k])*e;
+      let rad;
+      if(coarse){a*=(area?0.72:0.5);rad=(0.55+0.72*val)*1.5;}   // lighter + chunkier low-res
+      else rad=(0.30+0.85*val)*(0.6+0.55*e);                    // sharp hi-res
+      ctx.beginPath();ctx.fillStyle=rgba(cc,a);ctx.arc(x,y,rad,0,6.2832);ctx.fill();
+    }
+  }
+  ctx.shadowBlur=0;
+  drawSectors();
+
+  // street labels
+  ctx.textAlign='center';ctx.textBaseline='middle';ctx.font="600 9px 'IBM Plex Mono',monospace";
+  for(const L of streetLabels){if(L.x<10||L.x>W-10||L.y<8||L.y>H-8)continue;
+    if(Math.hypot(L.x-opPt[0],L.y-opPt[1])<54)continue;
+    ctx.save();ctx.translate(L.x,L.y);ctx.rotate(L.ang);
+    ctx.fillStyle=T.labelBg;ctx.fillRect(-L.nm.length*2.7,-6,L.nm.length*5.4,12);
+    ctx.fillStyle=rgba(T.streetLabel,.92);ctx.fillText(L.nm,0,0);ctx.restore();}
+  // park labels
+  ctx.font="600 9px 'IBM Plex Mono',monospace";ctx.textAlign='center';
+  for(const p of (window.__parkLabels||[])){if(p.x<24||p.x>W-24||p.y<12||p.y>H-12)continue;
+    let ly=p.y;if(Math.abs(p.x-opPt[0])<90&&Math.abs(p.y-opPt[1])<40)ly=opPt[1]+52;
+    const wpx=p.nm.length*5.4;ctx.fillStyle=T.labelBg;ctx.fillRect(p.x-wpx/2-3,ly-7,wpx+6,14);
+    ctx.fillStyle=rgba(T.parkLabel,.96);ctx.fillText(p.nm,p.x,ly);}
+
+  // friends: other live signals on the shared map (contact-green, below YOU in z-order)
+  drawFriends();
+  // you-are-here locator (soft, no crosshair)
+  ctx.save();ctx.translate(opPt[0],opPt[1]);
+  ctx.strokeStyle=rgba(ACC,.16);ctx.lineWidth=1.2;ctx.beginPath();ctx.arc(0,0,22,0,6.2832);ctx.stroke();
+  ctx.strokeStyle=rgba(ACC,.4);ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(0,0,12,0,6.2832);ctx.stroke();
+  ctx.fillStyle=rgba(ACC,1);ctx.beginPath();ctx.arc(0,0,6,0,6.2832);ctx.fill();
+  ctx.fillStyle='rgba(255,251,244,1)';ctx.beginPath();ctx.arc(0,0,2.3,0,6.2832);ctx.fill();ctx.restore();
+  ctx.font="700 13px 'Rajdhani',sans-serif";ctx.textAlign='left';ctx.textBaseline='middle';
+  ctx.fillStyle=T.labelBg;ctx.fillRect(opPt[0]+16,opPt[1]-9,40,18);
+  ctx.fillStyle=rgba(ACC,1);ctx.fillText('YOU',opPt[0]+22,opPt[1]);
+}
+
+function drawSectors(){
+  if(fogMode==='soft')return;
+  const NB=[[1,0],[1,-1],[0,-1],[-1,0],[-1,1],[0,1]], G4=[[1,0],[-1,0],[0,1],[0,-1]];
+  const outline=c=>{if(fogMode==='hex')hexPath(c.x,c.y,CELL);else{ctx.beginPath();ctx.rect(c.gx*CELL,c.gy*CELL,CELL,CELL);}};
+  // locked sectors: faint grid outline so undiscovered chunks read as a structured lattice
+  ctx.lineJoin='round';ctx.lineWidth=1;ctx.strokeStyle=rgba(T.streetLabel,.09);
+  for(const c of cells){if(c.disc)continue;outline(c);ctx.stroke();}
+  // acquired frontier: amber rim on discovered sectors bordering the unknown
+  ctx.lineWidth=1.5;ctx.strokeStyle=rgba(ACC,.42);
+  for(const c of cells){if(!c.disc)continue;let fr=false;
+    const nbs=fogMode==='hex'?NB:G4;
+    for(const n of nbs){const key=fogMode==='hex'?((c.q+n[0])+','+(c.r+n[1])):((c.gx+n[0])+','+(c.gy+n[1]));if(!discovered.has(key)){fr=true;break;}}
+    if(fr){outline(c);ctx.stroke();}}
+}
+
+// friends: contact-green live signals on the shared map + handle chips (hood/street tiers)
+function drawFriends(){
+  ctx.textAlign='left';ctx.textBaseline='middle';
+  for(const f of FRIENDS){
+    const x=W*f.pos[0], y=H*f.pos[1], on=f.online;
+    const col=on?CT:T.streetLabel, aa=on?1:0.5;
+    // presence ring (online only) + core dot
+    if(on){ctx.strokeStyle=rgba(CT,.14);ctx.lineWidth=1.2;ctx.beginPath();ctx.arc(x,y,16,0,6.2832);ctx.stroke();
+      ctx.strokeStyle=rgba(CT,.36);ctx.lineWidth=1.3;ctx.beginPath();ctx.arc(x,y,9.5,0,6.2832);ctx.stroke();}
+    ctx.fillStyle=rgba(col,aa);ctx.beginPath();ctx.arc(x,y,on?4.4:3.4,0,6.2832);ctx.fill();
+    ctx.fillStyle=rgba(BG,1);ctx.beginPath();ctx.arc(x,y,on?1.7:1.3,0,6.2832);ctx.fill();
+    // handle chip
+    const h='@'+f.handle;ctx.font="700 12px 'Rajdhani',sans-serif";
+    const tw=ctx.measureText(h).width;
+    ctx.fillStyle=T.labelBg;ctx.fillRect(x+13,y-9,tw+11,18);
+    ctx.fillStyle=rgba(col,aa);ctx.fillText(h,x+18,y);
+  }
+}
+
+// ==== ZOOM TIERS: city + region flip-dot fields (own projection, land-gated void) ====
+function drawYou(pt,label){
+  ctx.save();ctx.translate(pt[0],pt[1]);
+  ctx.strokeStyle=rgba(ACC,.16);ctx.lineWidth=1.2;ctx.beginPath();ctx.arc(0,0,22,0,6.2832);ctx.stroke();
+  ctx.strokeStyle=rgba(ACC,.4);ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(0,0,12,0,6.2832);ctx.stroke();
+  ctx.fillStyle=rgba(ACC,1);ctx.beginPath();ctx.arc(0,0,6,0,6.2832);ctx.fill();
+  ctx.fillStyle='rgba(255,251,244,1)';ctx.beginPath();ctx.arc(0,0,2.3,0,6.2832);ctx.fill();ctx.restore();
+  if(label){ctx.font="700 13px 'Rajdhani',sans-serif";ctx.textAlign='left';ctx.textBaseline='middle';
+    ctx.fillStyle=T.labelBg;ctx.fillRect(pt[0]+16,pt[1]-9,label.length*8+14,18);
+    ctx.fillStyle=rgba(ACC,1);ctx.fillText(label,pt[0]+22,pt[1]);}
+}
+function projFor(bbox,fit){const [bs,bw,bn,be]=bbox,l0=(bs+bn)/2,cl=Math.cos(l0*Math.PI/180),pw=(be-bw)*cl,ph=(bn-bs);
+  const sc=(fit==='contain'?Math.min(W/pw,H/ph):Math.max(W/pw,H/ph)),ox=(W-pw*sc)/2,oy=(H-ph*sc)/2;
+  return{P:(la,lo)=>[ox+(lo-bw)*cl*sc,oy+(bn-la)*sc]};}
+function fillMask(rings,PJ){return maskCanvas(x=>{x.fillStyle='#fff';for(const r of (rings||[])){const g=r.g||r;if(!g||g.length<3)continue;
+  x.beginPath();for(let i=0;i<g.length;i++){const p=PJ(g[i][0],g[i][1]);i?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]);}x.closePath();x.fill();}});}
+function hexCells(R,discFn){const cells=[],disc=new Set();
+  for(let col=-1;;col++){const hx=R*1.5*col;if(hx>W+R)break;
+    for(let row=-1;;row++){const hy=R*Math.sqrt(3)*(row+((col&1)?0.5:0));if(hy>H+R)break;
+      const key=hexKey(hx,hy,R),pt=key.split(','),q=+pt[0],r=+pt[1];const dd=discFn(hx,hy);cells.push({q,r,x:hx,y:hy,disc:dd});if(dd)disc.add(key);}}
+  return{cells,disc};}
+function labelChip(x,y,txt,colr,alpha){ctx.font="600 8.5px 'IBM Plex Mono',monospace";ctx.textAlign='center';ctx.textBaseline='middle';
+  const w=txt.length*5.1;ctx.fillStyle=T.labelBg;ctx.fillRect(x-w/2-3,y-7,w+6,14);ctx.fillStyle=rgba(colr,alpha);ctx.fillText(txt,x,y);}
+
+function dotFieldZoom(o){
+  const {landD,waterD,streetD,R,disc,cells}=o;
+  ctx.clearRect(0,0,W,H);ctx.fillStyle=rgba(BG,1);ctx.fillRect(0,0,W,H);
+  const FL={s:0.46,w:0.54,b:0.14},MX={s:1.0,w:0.90,b:0.66},COARSE=2;
+  let iy=0;for(let y=S/2;y<H;y+=S,iy++){let ix=0;for(let x=S/2;x<W;x+=S,ix++){const n=hash(ix,iy);
+    const e=disc.has(hexKey(x,y,R))?1:0;
+    if(e<0.5&&(ix%COARSE!==0||iy%COARSE!==0))continue;                 // low-res in the fog
+    const lv=landD?sample(landD,x,y):255, wv=waterD?sample(waterD,x,y):0, sv=streetD?sampleMax(streetD,x,y):0;
+    let col,val,k;
+    if(wv>40){val=0.44+0.12*Math.sin(y*0.4+x*0.2);col=ramp(WATER,clamp(0.42+0.5*n,0,1));k='w';if(n<0.08)continue;}
+    else if(lv>40){if(sv>26){val=clamp(sv/255,0,1);col=ramp(TERR,val);k='s';}
+      else{if(n<0.20+(1-e)*0.16)continue;val=clamp(0.24+0.13*n,0,1);col=ramp(TERR,val);k='b';}}
+    else continue;                                                     // void outside the land shape
+    const coarse=e<0.5,fog=1-e,area=(k==='w'),fg=area?Math.min(fog,0.5):fog;
+    const lum=0.299*col[0]+0.587*col[1]+0.114*col[2];let cc=mix(col,[lum,lum,lum],fg*0.74);cc=mix(cc,BG,fg*0.26);
+    let a=FL[k]+(MX[k]-FL[k])*e,rad;
+    if(coarse){a*=(area?0.72:0.5);rad=(0.55+0.72*val)*1.5;}else rad=(0.30+0.85*val)*(0.6+0.55*e);
+    ctx.beginPath();ctx.fillStyle=rgba(cc,a);ctx.arc(x,y,rad,0,6.2832);ctx.fill();}}
+  // sector outlines: faint locked lattice + amber frontier, clipped to land
+  ctx.lineJoin='round';ctx.lineWidth=1;ctx.strokeStyle=rgba(T.streetLabel,.08);
+  for(const c of cells){if(c.disc)continue;if(!o.latticeAll&&landD&&sample(landD,c.x,c.y)<28)continue;hexPath(c.x,c.y,R);ctx.stroke();}
+  ctx.lineWidth=1.5;ctx.strokeStyle=rgba(ACC,.42);const NB=[[1,0],[1,-1],[0,-1],[-1,0],[-1,1],[0,1]];
+  for(const c of cells){if(!c.disc)continue;let fr=false;for(const nn of NB){if(!disc.has((c.q+nn[0])+','+(c.r+nn[1]))){fr=true;break;}}if(fr){hexPath(c.x,c.y,R);ctx.stroke();}}
+}
+
+function renderCity(){
+  const Z=window.OSMZOOM&&OSMZOOM.seattle; if(!Z){build();draw();return;}
+  const {P:PJ}=projFor(Z.bbox);
+  const landD=fillMask(Z.land,PJ), waterD=fillMask(Z.water,PJ);
+  const arts=Z.ways.slice().sort((a,b)=>a.c-b.c);
+  const streetD=maskCanvas(x=>{x.lineCap='round';x.lineJoin='round';for(const w of arts){const g=RGRAY[w.c];x.strokeStyle=`rgb(${g},${g},${g})`;x.lineWidth=RW[w.c];
+    x.beginPath();for(let i=0;i<w.g.length;i++){const p=PJ(w.g[i][0],w.g[i][1]);i?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]);}x.stroke();}});
+  const core=PJ(47.618,-122.326);                                     // central Seattle (Capitol Hill)
+  const {cells,disc}=hexCells(CELL,(cx,cy)=>sample(landD,cx,cy)>40&&Math.hypot(cx-core[0],cy-core[1])<CELL*2.9);
+  dotFieldZoom({landD,waterD,streetD,R:CELL,disc,cells});
+  const HOODS=[[47.606,-122.334,'DOWNTOWN'],[47.623,-122.320,'CAPITOL HILL'],[47.668,-122.383,'BALLARD'],[47.651,-122.350,'FREMONT'],[47.660,-122.313,'U DISTRICT'],[47.576,-122.386,'WEST SEATTLE'],[47.681,-122.330,'GREEN LAKE'],[47.548,-122.268,'RAINIER']];
+  for(const h of HOODS){const p=PJ(h[0],h[1]);if(p[0]<20||p[0]>W-20||p[1]<44||p[1]>H-28)continue;
+    const inCore=Math.hypot(p[0]-core[0],p[1]-core[1])<CELL*2.9;labelChip(p[0],p[1],h[2],inCore?T.streetLabel:[112,142,156],inCore?0.95:0.68);}
+  drawYou(core,'YOU');
+}
+
+function renderRegion(){
+  const Z=window.OSMZOOM&&OSMZOOM.washington; if(!Z){build();draw();return;}
+  const {P:PJ}=projFor(Z.bbox,'contain');
+  const landD=fillMask(Z.land,PJ);
+  const sea=PJ(47.606,-122.332);
+  const {cells,disc}=hexCells(CELL,(cx,cy)=>sample(landD,cx,cy)>40&&Math.hypot(cx-sea[0],cy-sea[1])<CELL*1.7);
+  dotFieldZoom({landD,waterD:null,streetD:null,R:CELL,disc,cells,latticeAll:true});
+  for(const c of (Z.cities||[])){if(c.name==='SEATTLE')continue;const p=PJ(c.lat,c.lon);if(p[0]<10||p[0]>W-10||p[1]<34||p[1]>H-22)continue;
+    const nearSea=Math.hypot(p[0]-sea[0],p[1]-sea[1]);
+    if(c.visited){ctx.beginPath();ctx.fillStyle=rgba(ACC,.9);ctx.arc(p[0],p[1],3.4,0,6.2832);ctx.fill();
+      ctx.beginPath();ctx.strokeStyle=rgba(ACC,.32);ctx.lineWidth=1.2;ctx.arc(p[0],p[1],6.5,0,6.2832);ctx.stroke();
+      if(nearSea>26)labelChip(p[0],p[1]-12,c.name,T.streetLabel,0.92);}
+    else{ctx.beginPath();ctx.fillStyle=rgba([116,146,160],.55);ctx.arc(p[0],p[1],2.1,0,6.2832);ctx.fill();
+      if(nearSea>34)labelChip(p[0],p[1]-11,c.name,[112,142,156],0.6);}}
+  drawYou(sea,'SEATTLE');
+}
+
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function segs(pct,N){let h='';const fill=Math.round(N*pct/100);for(let i=0;i<N;i++)h+=`<i class="${i<fill?'on':''}"></i>`;return h;}
+function renderRoster(host){
+  const online=FRIENDS.filter(f=>f.online).length;
+  let h=`<div class="shd"><h2>Friends</h2><span class="onl"><i></i>${online} nearby</span></div><div class="roster">`;
+  for(const f of FRIENDS){
+    const loc=f.online?`${esc(f.loc)} · ${esc(f.hood)}`:`last seen ${esc(f.hood)} · ${f.seen}`;
+    const right=f.online?`<div class="d">${f.dist}</div><div class="go">›</div>`:`<div class="d dim">offline</div>`;
+    h+=`<div class="fr ${f.online?'':'off'}">
+      <div class="cav"><pre>${esc(f.glyph)}</pre><span class="cap">${esc(f.species)}</span></div>
+      <div class="fmid">
+        <div class="h"><b>@</b>${esc(f.handle)}</div>
+        <div class="l">${loc}</div>
+        <div class="sg"><span class="sgbar">${segs(f.shared,9)}</span><span class="p">${f.shared}% shared</span></div>
+      </div>
+      <div class="frt">${right}</div>
+    </div>`;
+  }
+  host.innerHTML=h+'</div>';
+}
+function renderProfile(host){
+  const f=FRIENDS.find(x=>x.handle===(params.get('who')||'wanderer'))||FRIENDS[0];
+  host.innerHTML=`<div class="prof">
+    <div class="pf-h"><span class="pf-back">‹ friends</span><span class="pf-onl"><i></i>online now</span></div>
+    <div class="pf-hero">
+      <pre>${esc(f.glyph)}</pre>
+      <div class="pf-name"><b>@</b>${esc(f.handle)}</div>
+      <div class="pf-sub">${esc(f.species)} · ${esc(f.hood)} · ${f.dist}</div>
+    </div>
+    <div class="pf-shared">
+      <div class="pf-row"><span class="lab">shared ground</span><span class="big">${f.shared}<span>%</span></span></div>
+      <div class="pf-bar">${segs(f.shared,28)}</div>
+      <div class="pf-note">You've both walked <b>142 of the same streets</b>. They've explored <b>3 sectors</b> you haven't reached yet.</div>
+    </div>
+    <div class="pf-btn">View @${esc(f.handle)}'s map</div>
+  </div>`;
+}
+function populateSheet(){
+  const host=document.getElementById('sheetbody'); if(!host)return;
+  if(socialView==='profile')renderProfile(host); else renderRoster(host);
+}
+async function main(){layout();try{await document.fonts.ready;}catch(e){}
+  if(ZOOM==='city')renderCity();
+  else if(ZOOM==='region')renderRegion();
+  else{build();draw();}
+  populateSheet();}
+window.addEventListener('load',main);
+</script>
+</body>
+</html>

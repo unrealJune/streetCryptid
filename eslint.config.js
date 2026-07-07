@@ -8,6 +8,6 @@ module.exports = defineConfig([
   // Turn off ESLint rules that conflict with Prettier formatting.
   eslintConfigPrettier,
   {
-    ignores: ['dist/*', 'node_modules/*', '.expo/*', 'expo-env.d.ts'],
+    ignores: ['dist/*', 'node_modules/*', '.expo/*', 'expo-env.d.ts', 'docs/design/**'],
   },
 ]);
