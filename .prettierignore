@@ -1,0 +1,13 @@
+node_modules/
+.expo/
+dist/
+web-build/
+android/
+ios/
+coverage/
+*.log
+bun.lock
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+assets/
