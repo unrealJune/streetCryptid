@@ -32,6 +32,10 @@ yarn-error.*
 
 # local env files
 .env*.local
+.env
+
+# self-hosted infra (private tile server, baked tilesets, etc.) — not part of the public app
+infra/
 
 # typescript
 *.tsbuildinfo

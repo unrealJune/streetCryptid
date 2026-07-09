@@ -3,7 +3,11 @@
   "main": "expo-router/entry",
   "version": "1.0.0",
   "dependencies": {
+    "@expo-google-fonts/ibm-plex-mono": "^0.4.1",
+    "@expo-google-fonts/rajdhani": "^0.4.1",
     "@expo/ui": "~57.0.4",
+    "@mapbox/vector-tile": "^3.0.0",
+    "@shopify/react-native-skia": "2.6.2",
     "expo": "~57.0.4",
     "expo-constants": "~57.0.3",
     "expo-device": "~57.0.0",
@@ -17,6 +21,7 @@
     "expo-symbols": "~57.0.0",
     "expo-system-ui": "~57.0.0",
     "expo-web-browser": "~57.0.0",
+    "pbf": "^5.1.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.0",
@@ -28,12 +33,18 @@
     "react-native-worklets": "0.10.0"
   },
   "devDependencies": {
+    "@types/geojson": "^7946.0.16",
+    "@types/jest": "^29.5.14",
     "@types/react": "~19.2.2",
     "eslint": "^9",
     "eslint-config-expo": "~57.0.0",
     "eslint-config-prettier": "^10.1.8",
+    "geojson-vt": "^4.0.3",
+    "jest": "~29.7.0",
+    "jest-expo": "^57.0.1",
     "prettier": "^3.9.4",
-    "typescript": "~6.0.3"
+    "typescript": "~6.0.3",
+    "vt-pbf": "^3.1.3"
   },
   "scripts": {
     "start": "expo start",
@@ -46,10 +57,28 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
+    "test": "jest",
     "reset-project": "node ./scripts/reset-project.js"
+  },
+  "jest": {
+    "preset": "jest-expo",
+    "setupFiles": [
+      "@shopify/react-native-skia/jestSetup.js"
+    ],
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/.expo/",
+      "/docs/"
+    ],
+    "transformIgnorePatterns": [
+      "node_modules/(?!(.pnpm|react-native|@react-native|@react-native-community|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry/react-native|native-base|standard-navigation|@mapbox|pbf|geojson-vt))",
+      "/node_modules/react-native-reanimated/plugin/",
+      "/node_modules/@react-native/babel-preset/"
+    ]
   },
   "private": true,
   "trustedDependencies": [
+    "@shopify/react-native-skia",
     "unrs-resolver"
   ]
 }

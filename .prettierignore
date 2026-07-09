@@ -14,3 +14,6 @@ assets/
 
 # design archive (mockups + generated OSM data + renders) — reference only, not app code
 docs/design/
+
+# generated map tile fixtures (binary/base64 blobs)
+src/features/map/tiles/__fixtures__/

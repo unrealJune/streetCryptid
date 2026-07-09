@@ -78,8 +78,12 @@ format:
 format-check:
     bun run format:check
 
-# Run the full local gate: types, lint, and formatting.
-check: typecheck lint format-check
+# Run the jest test suite.
+test:
+    bun run test
+
+# Run the full local gate: types, lint, formatting, and tests.
+check: typecheck lint format-check test
 
 # Expo project health check.
 doctor:

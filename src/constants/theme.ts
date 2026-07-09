@@ -1,26 +1,36 @@
 /**
- * Below are the colors that are used in the app. The colors are defined in the light and dark mode.
- * There are many other ways to style your app. For example, [Nativewind](https://www.nativewind.dev/), [Tamagui](https://tamagui.dev/), [unistyles](https://reactnativeunistyles.vercel.app), etc.
+ * App-facing theme tokens. The brand source of truth is `cryptid-theme.ts`
+ * (pure data — chrome + canvas palettes per DESIGN.md); this module derives the
+ * template's `Colors` tokens from it and adds platform font stacks.
  */
 
 import '@/global.css';
 
 import { Platform } from 'react-native';
 
+import { CryptidThemes } from '@/constants/cryptid-theme';
+
+export { CryptidThemes } from '@/constants/cryptid-theme';
+export type { CryptidChrome, CryptidTheme, CryptidThemeName } from '@/constants/cryptid-theme';
+
+/**
+ * Template color tokens, derived from the cryptid themes so the existing themed
+ * components (tabs, text, views) pick up the brand: light = daybreak, dark = deepsea.
+ */
 export const Colors = {
   light: {
-    text: '#000000',
-    background: '#ffffff',
-    backgroundElement: '#F0F0F3',
-    backgroundSelected: '#E0E1E6',
-    textSecondary: '#60646C',
+    text: CryptidThemes.daybreak.chrome.ink,
+    background: CryptidThemes.daybreak.chrome.bg,
+    backgroundElement: CryptidThemes.daybreak.chrome.panel,
+    backgroundSelected: CryptidThemes.daybreak.chrome.hairline,
+    textSecondary: CryptidThemes.daybreak.chrome.steel,
   },
   dark: {
-    text: '#ffffff',
-    background: '#000000',
-    backgroundElement: '#212225',
-    backgroundSelected: '#2E3135',
-    textSecondary: '#B0B4BA',
+    text: CryptidThemes.deepsea.chrome.ink,
+    background: CryptidThemes.deepsea.chrome.bg,
+    backgroundElement: CryptidThemes.deepsea.chrome.panel,
+    backgroundSelected: CryptidThemes.deepsea.chrome.seg,
+    textSecondary: CryptidThemes.deepsea.chrome.steel,
   },
 } as const;
 
