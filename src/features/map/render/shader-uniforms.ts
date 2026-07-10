@@ -7,7 +7,7 @@ import type { MapRegion } from '../engine/map-engine';
 export const DOT_STEP = 2.0;
 
 /** Total float count of the shader's numeric uniform block, in declaration order. */
-export const DOT_FIELD_UNIFORM_FLOATS = 23;
+export const DOT_FIELD_UNIFORM_FLOATS = 24;
 
 /** At/above this build zoom the field renders full street detail (LOD 0). */
 export const LOD_FULL_ZOOM = 14;
@@ -35,6 +35,8 @@ export interface DotFieldUniformInput {
   readonly reveal?: number;
   /** LOD 0..1 override; defaults to {@link lodForZoom}(region build zoom). */
   readonly lod?: number;
+  /** Whether discovered/unexplored styling is visible. */
+  readonly explorationEnabled?: boolean;
 }
 
 /**
@@ -53,6 +55,7 @@ export function packDotFieldUniforms({
   step = DOT_STEP,
   reveal = 1,
   lod,
+  explorationEnabled = true,
 }: DotFieldUniformInput): number[] {
   const { rect, maskWidth, maskHeight, zoom } = region.spec;
   const scale = scaleFor(zoom); // region-logical px per world unit at anchor zoom
@@ -77,6 +80,7 @@ export function packDotFieldUniforms({
     ...rgb(palette.streetLabel), // uStreetLabel
     reveal, // uReveal
     lodValue, // uLod
+    explorationEnabled ? 1 : 0, // uExploration
   ];
 }
 

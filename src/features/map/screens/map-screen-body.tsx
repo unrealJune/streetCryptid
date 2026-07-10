@@ -1,16 +1,20 @@
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { BottomTabInset, Spacing } from '@/constants/theme';
+import { resolveSignalColor } from '@/constants/signal-colors';
+import { BottomTabInset, Spacing, TopTabInset } from '@/constants/theme';
 import {
   CoverageIsland,
+  FriendHistoryIsland,
+  MapLayersControl,
   MapView,
   useMapTheme,
   type MapFriendLocation,
   type MapReadout,
 } from '@/features/map';
-import type { LocationFix } from '@/features/social/core/types';
+import { sampleTrailForMap, selectFriendTrail } from '@/features/social/core/history';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 
 /**
@@ -24,7 +28,25 @@ import { useLocationSharing } from '@/features/social/hooks/use-location-sharing
 export default function MapScreenBody() {
   const theme = useMapTheme();
   const insets = useSafeAreaInsets();
-  const { selfFix, hasLiveSelfFix, friends, locationStatus } = useLocationSharing();
+  const router = useRouter();
+  const params = useLocalSearchParams<{ friend?: string | string[] }>();
+  const requestedFriendId = Array.isArray(params.friend) ? params.friend[0] : params.friend;
+  const { selfFix, hasLiveSelfFix, trail, friends, locationStatus } = useLocationSharing();
+  const routeFriendId = requestedFriendId ?? null;
+  const [selection, setSelection] = useState(() => ({
+    requestId: routeFriendId,
+    selectedId: routeFriendId,
+    sessionFocusId: routeFriendId,
+  }));
+  if (routeFriendId !== selection.requestId) {
+    setSelection({
+      requestId: routeFriendId,
+      selectedId: routeFriendId,
+      sessionFocusId: routeFriendId ?? selection.sessionFocusId,
+    });
+  }
+  const selectedEndpoint = selection.selectedId;
+  const [explorationEnabled, setExplorationEnabled] = useState(true);
   const [readout, setReadout] = useState<{ placeName: string | null; coverage: number }>({
     placeName: null,
     coverage: 0,
@@ -40,20 +62,42 @@ export default function MapScreenBody() {
 
   const mapFriends = useMemo(
     () =>
-      friends.flatMap((presence) =>
-        presence.fix
-          ? [
-              {
-                id: presence.friend.endpointId,
-                handle: presence.friend.handle,
-                location: { lat: presence.fix.lat, lon: presence.fix.lon },
-                stale: presence.freshness === 'stale',
-              },
-            ]
-          : []
-      ),
-    [friends]
+      friends.flatMap((presence) => {
+        if (!presence.fix) return [];
+        const history = selectFriendTrail(trail, presence.friend.endpointId);
+        const sampled = sampleTrailForMap(history);
+        return [
+          {
+            id: presence.friend.endpointId,
+            handle: presence.friend.handle,
+            sigil: presence.friend.sigil,
+            cryptidName: presence.friend.cryptidName,
+            color: resolveSignalColor(presence.friend.color, theme.chrome.green),
+            location: { lat: presence.fix.lat, lon: presence.fix.lon },
+            history: sampled.map((point) => ({
+              lat: point.fix.lat,
+              lon: point.fix.lon,
+            })),
+            historyCount: history.length,
+            latestTs: presence.fix.ts,
+            stale: presence.freshness === 'stale',
+          },
+        ];
+      }),
+    [friends, theme.chrome.green, trail]
   );
+  const selectedFriend = useMemo(
+    () => mapFriends.find((friend) => friend.id === selectedEndpoint) ?? null,
+    [mapFriends, selectedEndpoint]
+  );
+
+  const closeHistory = useCallback(() => {
+    setSelection((current) => ({ ...current, selectedId: null }));
+    if (requestedFriendId) router.setParams({ friend: undefined });
+  }, [requestedFriendId, router]);
+  const selectFriend = useCallback((friendId: string) => {
+    setSelection((current) => ({ ...current, selectedId: friendId }));
+  }, []);
 
   const pct = Math.round(readout.coverage * 100);
   const friendNames = mapFriends.map((friend) => friend.handle).join(', ');
@@ -63,28 +107,50 @@ export default function MapScreenBody() {
         ? 'Your current location is shown.'
         : 'Finding your location.'
       : 'Your location is not available.';
+  const mapAccessibilityLabel = readout.placeName
+    ? `Map near ${readout.placeName}. ${pct} percent of visible sectors explored. ${
+        explorationEnabled ? 'Exploration overlay on.' : 'Exploration overlay off.'
+      } ${locationCopy} ${
+        mapFriends.length > 0
+          ? `${mapFriends.length} friend${mapFriends.length === 1 ? '' : 's'} on the map: ${friendNames}.`
+          : 'No friend locations are available.'
+      }`
+    : 'Map loading.';
+  const sessionFocus = selection.sessionFocusId
+    ? (mapFriends.find((friend) => friend.id === selection.sessionFocusId) ?? null)
+    : null;
+  const initialCenter =
+    sessionFocus?.location ??
+    (hasLiveSelfFix && selfFix ? { lat: selfFix.lat, lon: selfFix.lon } : null);
+  const mapSessionKey = sessionFocus
+    ? `friend-${sessionFocus.id}`
+    : hasLiveSelfFix
+      ? 'gps-centered'
+      : 'default-centered';
 
   return (
     <View style={[styles.container, { backgroundColor: theme.chrome.bg }]}>
-      <View
-        style={styles.mapLayer}
-        accessible
-        accessibilityRole="image"
-        accessibilityLabel={
-          readout.placeName
-            ? `Map near ${readout.placeName}. ${pct} percent of visible sectors explored. ${locationCopy} ${
-                mapFriends.length > 0
-                  ? `${mapFriends.length} friend${mapFriends.length === 1 ? '' : 's'} on the map: ${friendNames}.`
-                  : 'No friend locations are available.'
-              }`
-            : 'Map loading.'
-        }
-      >
+      <View style={styles.mapLayer}>
         <MapSession
-          key={hasLiveSelfFix ? 'gps-centered' : 'default-centered'}
+          accessibilityLabel={mapAccessibilityLabel}
+          explorationEnabled={explorationEnabled}
+          key={mapSessionKey}
           onReadout={onReadout}
-          initialFix={hasLiveSelfFix ? selfFix : null}
+          initialCenter={initialCenter}
+          onSelectFriend={selectFriend}
           friends={mapFriends}
+          selectedFriendId={selectedEndpoint}
+          selfLocation={hasLiveSelfFix && selfFix ? { lat: selfFix.lat, lon: selfFix.lon } : null}
+        />
+      </View>
+      <View
+        pointerEvents="box-none"
+        style={[styles.controlsLayer, { top: insets.top + TopTabInset + Spacing.three }]}
+      >
+        <MapLayersControl
+          enabled={explorationEnabled}
+          onChange={setExplorationEnabled}
+          theme={theme}
         />
       </View>
       <View
@@ -94,31 +160,47 @@ export default function MapScreenBody() {
           { paddingBottom: insets.bottom + BottomTabInset + Spacing.two },
         ]}
       >
-        <CoverageIsland theme={theme} placeName={readout.placeName} coverage={readout.coverage} />
+        {selectedFriend ? (
+          <FriendHistoryIsland friend={selectedFriend} onClose={closeHistory} theme={theme} />
+        ) : (
+          <CoverageIsland coverage={readout.coverage} placeName={readout.placeName} theme={theme} />
+        )}
       </View>
     </View>
   );
 }
 
 function MapSession({
-  initialFix,
+  accessibilityLabel,
+  initialCenter,
+  selfLocation,
   friends,
+  selectedFriendId,
+  explorationEnabled,
   onReadout,
+  onSelectFriend,
 }: {
-  initialFix: LocationFix | null;
+  accessibilityLabel: string;
+  initialCenter: MapFriendLocation['location'] | null;
+  selfLocation: MapFriendLocation['location'] | null;
   friends: readonly MapFriendLocation[];
+  selectedFriendId: string | null;
+  explorationEnabled: boolean;
   onReadout(readout: MapReadout): void;
+  onSelectFriend(friendId: string): void;
 }) {
-  const [initialCenter] = useState(() =>
-    initialFix ? { lat: initialFix.lat, lon: initialFix.lon } : null
-  );
+  const [sessionCenter] = useState(initialCenter);
 
   return (
     <MapView
+      accessibilityLabel={accessibilityLabel}
+      explorationEnabled={explorationEnabled}
       onReadout={onReadout}
-      initialCenter={initialCenter}
-      selfLocation={initialFix ? { lat: initialFix.lat, lon: initialFix.lon } : null}
+      initialCenter={sessionCenter}
+      onSelectFriend={onSelectFriend}
       friends={friends}
+      selectedFriendId={selectedFriendId}
+      selfLocation={selfLocation}
     />
   );
 }
@@ -135,5 +217,9 @@ const styles = StyleSheet.create({
     left: Spacing.three,
     right: Spacing.three,
     bottom: 0,
+  },
+  controlsLayer: {
+    position: 'absolute',
+    right: Spacing.three,
   },
 });

@@ -62,6 +62,8 @@ export interface RegionImageInput {
   readonly lutImage: SkImage;
   /** Load reveal 0..1 (default 1 = fully shown); < 1 renders a hex-by-hex wipe. */
   readonly reveal?: number;
+  /** Show the explored/unexplored fog treatment (default true). */
+  readonly explorationEnabled?: boolean;
   /**
    * Resolution multiplier (default 1). Intermediate reveal frames pass < 1 so the
    * heavy 45-tap dot shader rasterizes fewer pixels during the ~320ms wipe; the
@@ -90,6 +92,7 @@ export function renderRegionImage({
   hexImage,
   lutImage,
   reveal = 1,
+  explorationEnabled = true,
   quality = 1,
 }: RegionImageInput): SkImage | null {
   const effect = getDotFieldEffect();
@@ -103,7 +106,14 @@ export function renderRegionImage({
   const capped = Math.max(1, Math.min(MAX_PIXEL_RATIO, MAX_IMAGE_DIM / longest));
   const pixelRatio = Math.max(0.5, capped * quality);
 
-  const uniforms = packDotFieldUniforms({ region, palette, hexRadius, pixelRatio, reveal });
+  const uniforms = packDotFieldUniforms({
+    region,
+    palette,
+    hexRadius,
+    pixelRatio,
+    reveal,
+    explorationEnabled,
+  });
   if (__DEV__ && uniforms.length !== DOT_FIELD_UNIFORM_FLOATS) {
     console.warn(
       `[map] uniform count ${uniforms.length} != shader's ${DOT_FIELD_UNIFORM_FLOATS} — check order`

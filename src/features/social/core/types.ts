@@ -26,7 +26,7 @@ export interface ContactCard {
   sigil: string;
   /** Human-readable name for the selected/custom ASCII form. */
   cryptidName?: string;
-  /** Six-digit RGB profile signal color (currently fixed to contact-green). */
+  /** Six-digit RGB profile signal color chosen by the friend. */
   color?: string;
   /** X25519 receiving public key (hex) — used to wrap fixes for this device. */
   recvPublic: Hex;

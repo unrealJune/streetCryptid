@@ -3,9 +3,9 @@ import type { IncomingFix, LocationFix } from '../../core/types';
 /**
  * Local, bounded rolling buffer of location fixes — the app-side mirror of the durable iroh-docs
  * trail. Holds our own trail (what we published) plus friends' trails (live + backfilled from
- * docs range-reconciliation). This is a **recovery buffer**, not a rendered breadcrumb: the map
- * shows only the latest point per author (DESIGN's "no path trace" principle), but the buffer
- * lets a rejoining peer recover what it missed. See docs/social/ARCHITECTURE.md §5–6, §9.
+ * docs range-reconciliation). The same bounded history powers a selected friend's map breadcrumb
+ * and profile timeline while still letting a rejoining peer recover what it missed.
+ * See docs/social/ARCHITECTURE.md §5–6, §9.
  */
 
 /** Sentinel author id for our own trail points. */
@@ -70,7 +70,7 @@ export interface TrailStore {
   appendFriend(incoming: IncomingFix): Promise<void>;
   /** Ascending-by-seq points for an author within the rolling window. */
   rangeFor(author: string, sinceTs: number): Promise<TrailPoint[]>;
-  /** Latest point per author — what the map renders. */
+  /** Latest point per author. */
   latestPerAuthor(): Promise<TrailPoint[]>;
   /** Enforce the rolling window now; returns points removed. */
   prune(olderThanTs?: number): Promise<number>;

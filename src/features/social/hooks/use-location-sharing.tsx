@@ -80,10 +80,16 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
 
   const refreshTrail = useCallback(async (service: LocationSharingService): Promise<void> => {
     const requestId = ++trailRefreshId.current;
-    const latest = await service.trailLatest();
+    const latest = await service.trailAll();
     if (requestId !== trailRefreshId.current) return;
     setTrail(latest);
-    const persistedSelf = latest.find((point) => point.author === SELF_AUTHOR)?.fix;
+    const persistedSelf = latest.reduce<LocationFix | null>(
+      (current, point) =>
+        point.author === SELF_AUTHOR && (!current || point.fix.ts > current.ts)
+          ? point.fix
+          : current,
+      null
+    );
     if (persistedSelf) {
       setPersistedSelfFix((current) =>
         !current || persistedSelf.ts > current.ts ? persistedSelf : current

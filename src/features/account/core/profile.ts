@@ -1,3 +1,5 @@
+import { DEFAULT_SIGNAL_COLOR, isSignalColor } from '@/constants/signal-colors';
+
 const art = (...lines: string[]): string => lines.join('\n');
 
 export const CRYPTID_PRESETS = [
@@ -30,7 +32,7 @@ export const CRYPTID_PRESETS = [
 
 export type CryptidPresetId = (typeof CRYPTID_PRESETS)[number]['id'];
 
-export const DEFAULT_SIGNAL_COLOR = '#2F9E6A';
+export { DEFAULT_SIGNAL_COLOR } from '@/constants/signal-colors';
 export const CRYPTID_PROFILE_VERSION = 1 as const;
 export const MAX_SIGIL_LINES = 12;
 export const MAX_SIGIL_COLUMNS = 32;
@@ -136,7 +138,7 @@ export function validateCryptidProfile(draft: CryptidProfileDraft): string[] {
   if (!/^[\t\n\x20-\x7e]*$/.test(sigil)) {
     issues.push('The custom form must use ASCII characters, spaces, tabs, and line breaks only.');
   }
-  if (!/^#[0-9a-f]{6}$/i.test(color)) {
+  if (!isSignalColor(color)) {
     issues.push('Choose a valid six-digit signal color.');
   }
 

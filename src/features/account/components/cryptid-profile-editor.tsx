@@ -12,11 +12,11 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
+import { SIGNAL_COLOR_OPTIONS, signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Fonts, MaxContentWidth, Spacing } from '@/constants/theme';
 import {
   CRYPTID_PRESETS,
   createCryptidProfile,
-  DEFAULT_SIGNAL_COLOR,
   defaultCryptidProfileDraft,
   findCryptidPreset,
   handleInputValue,
@@ -38,13 +38,6 @@ interface CryptidProfileEditorProps {
   notice?: string | null;
   onSave(profile: CryptidProfile): Promise<void>;
   onCancel?: () => void;
-}
-
-function contrastText(color: string): string {
-  const red = Number.parseInt(color.slice(1, 3), 16);
-  const green = Number.parseInt(color.slice(3, 5), 16);
-  const blue = Number.parseInt(color.slice(5, 7), 16);
-  return (red * 299 + green * 587 + blue * 114) / 1000 > 145 ? '#07131F' : '#FFFFFF';
 }
 
 function errorMessage(error: unknown): string {
@@ -73,7 +66,7 @@ export function CryptidProfileEditor({
   );
   const [customName, setCustomName] = useState(initialPreset ? '' : initialDraft.cryptidName);
   const [customArt, setCustomArt] = useState(initialPreset ? '' : initialDraft.sigil);
-  const color = DEFAULT_SIGNAL_COLOR;
+  const [color, setColor] = useState(initialDraft.color);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -84,6 +77,11 @@ export function CryptidProfileEditor({
   const issues = validateCryptidProfile(draft);
   const measurements = sigilMeasurements(sigil);
   const displayHandle = handle.trim().replace(/^@+/, '') || 'unnamed';
+  const colorOptions = SIGNAL_COLOR_OPTIONS.some(
+    (option) => option.value.toLowerCase() === initialDraft.color.toLowerCase()
+  )
+    ? SIGNAL_COLOR_OPTIONS
+    : [{ name: 'Current', value: initialDraft.color }, ...SIGNAL_COLOR_OPTIONS];
 
   const submit = async (): Promise<void> => {
     if (issues.length > 0 || saving) return;
@@ -316,6 +314,54 @@ export function CryptidProfileEditor({
             </View>
           ) : null}
 
+          <EditorSection
+            index="03"
+            title="CHOOSE A SIGNAL"
+            detail="This color marks your ASCII form, map pin, and shared trail on friends' maps."
+          />
+          <View
+            accessibilityLabel="Signal color"
+            accessibilityRole="radiogroup"
+            style={styles.colorOptions}
+          >
+            {colorOptions.map((option) => {
+              const selected = option.value.toLowerCase() === color.toLowerCase();
+              return (
+                <Pressable
+                  accessibilityLabel={`${option.name} signal color`}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: selected }}
+                  key={option.value}
+                  onPress={() => setColor(option.value)}
+                  style={({ pressed }) => [styles.colorOption, { opacity: pressed ? 0.58 : 1 }]}
+                >
+                  <View
+                    style={[
+                      styles.colorRing,
+                      {
+                        borderColor: selected ? option.value : theme.backgroundSelected,
+                      },
+                    ]}
+                  >
+                    <View style={[styles.colorSwatch, { backgroundColor: option.value }]}>
+                      {selected ? (
+                        <View
+                          style={[
+                            styles.colorSelected,
+                            { backgroundColor: signalColorInk(option.value) },
+                          ]}
+                        />
+                      ) : null}
+                    </View>
+                  </View>
+                  <ThemedText type="code" themeColor="textSecondary" style={styles.colorName}>
+                    {option.name.toUpperCase()}
+                  </ThemedText>
+                </Pressable>
+              );
+            })}
+          </View>
+
           <View style={styles.footer}>
             {(saveError ?? issues[0]) ? (
               <ThemedText type="small" style={{ color: chrome.amberDark }}>
@@ -338,7 +384,7 @@ export function CryptidProfileEditor({
                 },
               ]}
             >
-              <ThemedText style={[styles.saveButtonText, { color: contrastText(color) }]}>
+              <ThemedText style={[styles.saveButtonText, { color: signalColorInk(color) }]}>
                 {saving
                   ? 'WRITING IDENTITY...'
                   : mode === 'onboarding'
@@ -513,6 +559,43 @@ const styles = StyleSheet.create({
   },
   customFields: {
     gap: Spacing.two,
+  },
+  colorOptions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.two,
+  },
+  colorOption: {
+    alignItems: 'center',
+    gap: Spacing.one,
+    minHeight: 68,
+    minWidth: 64,
+    paddingHorizontal: Spacing.one,
+    paddingVertical: Spacing.two,
+  },
+  colorRing: {
+    alignItems: 'center',
+    borderRadius: 24,
+    borderWidth: 2,
+    height: 48,
+    justifyContent: 'center',
+    width: 48,
+  },
+  colorSwatch: {
+    alignItems: 'center',
+    borderRadius: 17,
+    height: 34,
+    justifyContent: 'center',
+    width: 34,
+  },
+  colorSelected: {
+    borderRadius: 4,
+    height: 8,
+    width: 8,
+  },
+  colorName: {
+    fontSize: 10,
+    letterSpacing: 0.8,
   },
   fieldLabel: {
     letterSpacing: 1.25,

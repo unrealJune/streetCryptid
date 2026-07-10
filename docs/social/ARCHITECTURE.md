@@ -196,9 +196,10 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   (`app.json` / expo-location config plugin).
 - **web**: relay-only iroh WASM implements the same interface, including an **in-memory**
   iroh-docs replica (ephemeral across reloads, interoperable with native's persistent replica).
-- The friend **trail** is a **recovery buffer**, not a rendered breadcrumb (preserves the
-  product's "no path trace" principle; the map shows only the latest point per author — amber
-  stays "YOU" only, friends are contact-green).
+- The bounded friend **trail** serves both offline recovery and an explicitly selected
+  48-hour history view. The map normally shows only the latest point; selecting a friend
+  connects a sampled set of retained fixes in that friend's chosen profile color. Amber
+  stays "YOU" only, and contact-green remains the legacy/default friend signal.
 
 > Android background execution still follows platform limits: force-stopping the app prevents
 > delivery until the user launches it again. Normal backgrounding uses Expo Location's foreground

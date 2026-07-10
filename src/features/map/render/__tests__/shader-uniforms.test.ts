@@ -65,6 +65,7 @@ describe('packDotFieldUniforms', () => {
     expect(u.slice(18, 21)).toEqual([40 / 255, 80 / 255, 120 / 255]); // uStreetLabel
     expect(u[21]).toBe(1); // uReveal defaults to 1 (fully shown)
     expect(u[22]).toBe(0); // uLod: build zoom 15 → full detail
+    expect(u[23]).toBe(1); // uExploration defaults to visible
   });
 
   it('honors a custom lattice step', () => {
@@ -82,6 +83,10 @@ describe('packDotFieldUniforms', () => {
     const cityRegion = { ...region, spec: { ...region.spec, zoom: 11 } };
     expect(packDotFieldUniforms({ ...base, region: cityRegion })[22]).toBe(1);
     expect(packDotFieldUniforms({ ...base, lod: 0.5 })[22]).toBe(0.5);
+  });
+
+  it('can disable explored/unexplored styling', () => {
+    expect(packDotFieldUniforms({ ...base, explorationEnabled: false })[23]).toBe(0);
   });
 });
 

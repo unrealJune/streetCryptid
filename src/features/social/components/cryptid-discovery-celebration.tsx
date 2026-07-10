@@ -3,6 +3,7 @@ import { Animated, Easing, Modal, Pressable, StyleSheet, useColorScheme, View } 
 import { useReducedMotion } from 'react-native-reanimated';
 
 import { ThemedText } from '@/components/themed-text';
+import { resolveSignalColor } from '@/constants/signal-colors';
 import { CryptidThemes, Spacing } from '@/constants/theme';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import type { Friend } from '../core/types';
@@ -70,7 +71,7 @@ export function CryptidDiscoveryCelebration({ friend, onDone }: CryptidDiscovery
   }, [dance, entrance, friend, onDone, reducedMotion]);
 
   if (!friend) return null;
-  const color = chrome.green;
+  const color = resolveSignalColor(friend.color, chrome.green);
   const rotate = dance.interpolate({
     inputRange: [-1, 0, 1],
     outputRange: ['-13deg', '0deg', '13deg'],
