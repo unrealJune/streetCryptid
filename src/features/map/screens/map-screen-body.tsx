@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { resolveSignalColor } from '@/constants/signal-colors';
 import { Spacing, TopTabInset } from '@/constants/theme';
+import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
 import {
   CoverageIsland,
   FriendHistoryIsland,
@@ -16,6 +17,7 @@ import {
 } from '@/features/map';
 import { sampleTrailForMap, selectFriendTrail } from '@/features/social/core/history';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
+import { SELF_AUTHOR, type TrailPoint } from '@/features/social/net/background/trail-store';
 
 /**
  * The map IS the product: full-bleed dot field with a single floating bottom
@@ -29,6 +31,7 @@ export default function MapScreenBody() {
   const theme = useMapTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const { profile } = useCryptidProfile();
   const params = useLocalSearchParams<{ friend?: string | string[] }>();
   const requestedFriendId = Array.isArray(params.friend) ? params.friend[0] : params.friend;
   const { selfFix, hasLiveSelfFix, trail, friends, locationStatus } = useLocationSharing();
@@ -74,10 +77,7 @@ export default function MapScreenBody() {
             cryptidName: presence.friend.cryptidName,
             color: resolveSignalColor(presence.friend.color, theme.chrome.green),
             location: { lat: presence.fix.lat, lon: presence.fix.lon },
-            history: sampled.map((point) => ({
-              lat: point.fix.lat,
-              lon: point.fix.lon,
-            })),
+            history: trailLocations(sampled),
             historyCount: history.length,
             latestTs: presence.fix.ts,
             stale: presence.freshness === 'stale',
@@ -90,6 +90,29 @@ export default function MapScreenBody() {
     () => mapFriends.find((friend) => friend.id === selectedEndpoint) ?? null,
     [mapFriends, selectedEndpoint]
   );
+  const selfHistory = useMemo(() => {
+    const history = selectFriendTrail(trail, SELF_AUTHOR);
+    const sampled = sampleTrailForMap(history);
+    return {
+      history,
+      sampled: trailLocations(sampled),
+    };
+  }, [trail]);
+  const selfMapLocation = useMemo<MapFriendLocation | null>(() => {
+    if (!selfFix || !profile) return null;
+    return {
+      id: SELF_AUTHOR,
+      handle: profile.handle,
+      sigil: profile.sigil,
+      cryptidName: profile.cryptidName,
+      color: `rgb(${theme.canvas.accent.join(', ')})`,
+      location: { lat: selfFix.lat, lon: selfFix.lon },
+      history: selfHistory.sampled,
+      historyCount: selfHistory.history.length,
+      latestTs: selfFix.ts,
+    };
+  }, [profile, selfFix, selfHistory, theme.canvas.accent]);
+  const selectedHistory = selectedEndpoint === SELF_AUTHOR ? selfMapLocation : selectedFriend;
 
   const closeHistory = useCallback(() => {
     setSelection((current) => ({ ...current, selectedId: null }));
@@ -97,6 +120,9 @@ export default function MapScreenBody() {
   }, [requestedFriendId, router]);
   const selectFriend = useCallback((friendId: string) => {
     setSelection((current) => ({ ...current, selectedId: friendId }));
+  }, []);
+  const selectSelf = useCallback(() => {
+    setSelection((current) => ({ ...current, selectedId: SELF_AUTHOR }));
   }, []);
 
   const pct = Math.round(readout.coverage * 100);
@@ -140,8 +166,11 @@ export default function MapScreenBody() {
           onReadout={onReadout}
           initialCenter={initialCenter}
           onSelectFriend={selectFriend}
+          onSelectSelf={selectSelf}
           friends={mapFriends}
-          selectedFriendId={selectedEndpoint}
+          selectedFriendId={selectedEndpoint === SELF_AUTHOR ? null : selectedEndpoint}
+          selfHistory={selfHistory.sampled}
+          selfSelected={selectedEndpoint === SELF_AUTHOR}
           selfLocation={hasLiveSelfFix && selfFix ? { lat: selfFix.lat, lon: selfFix.lon } : null}
         />
       </View>
@@ -159,8 +188,13 @@ export default function MapScreenBody() {
         pointerEvents="box-none"
         style={[styles.islandLayer, { paddingBottom: islandBottomPadding }]}
       >
-        {selectedFriend ? (
-          <FriendHistoryIsland friend={selectedFriend} onClose={closeHistory} theme={theme} />
+        {selectedHistory ? (
+          <FriendHistoryIsland
+            friend={selectedHistory}
+            onClose={closeHistory}
+            self={selectedEndpoint === SELF_AUTHOR}
+            theme={theme}
+          />
         ) : (
           <CoverageIsland coverage={readout.coverage} placeName={readout.placeName} theme={theme} />
         )}
@@ -178,6 +212,9 @@ function MapSession({
   explorationEnabled,
   onReadout,
   onSelectFriend,
+  onSelectSelf,
+  selfHistory,
+  selfSelected,
 }: {
   accessibilityLabel: string;
   initialCenter: MapFriendLocation['location'] | null;
@@ -187,6 +224,9 @@ function MapSession({
   explorationEnabled: boolean;
   onReadout(readout: MapReadout): void;
   onSelectFriend(friendId: string): void;
+  onSelectSelf(): void;
+  selfHistory: readonly MapFriendLocation['location'][];
+  selfSelected: boolean;
 }) {
   const [sessionCenter] = useState(initialCenter);
 
@@ -197,11 +237,18 @@ function MapSession({
       onReadout={onReadout}
       initialCenter={sessionCenter}
       onSelectFriend={onSelectFriend}
+      onSelectSelf={onSelectSelf}
       friends={friends}
       selectedFriendId={selectedFriendId}
+      selfHistory={selfHistory}
       selfLocation={selfLocation}
+      selfSelected={selfSelected}
     />
   );
+}
+
+function trailLocations(points: readonly TrailPoint[]): MapFriendLocation['location'][] {
+  return points.map((point) => ({ lat: point.fix.lat, lon: point.fix.lon }));
 }
 
 const styles = StyleSheet.create({

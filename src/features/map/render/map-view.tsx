@@ -30,7 +30,14 @@ import {
   transformDistanceSq,
   translationRange,
 } from '../core/gesture';
-import type { CameraState, LatLon, MapReadout, Viewport, WorldRect } from '../core/types';
+import type {
+  CameraState,
+  LatLon,
+  MapReadout,
+  ScreenPoint,
+  Viewport,
+  WorldRect,
+} from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
 import { useMapEngine } from '../hooks/use-map-engine';
 import { latLonToWorld } from '../core/mercator';
@@ -106,20 +113,26 @@ export function MapView({
   onReadout,
   initialCenter = null,
   selfLocation = null,
+  selfHistory = [],
+  selfSelected = false,
   friends = [],
   selectedFriendId = null,
   explorationEnabled = true,
   accessibilityLabel,
+  onSelectSelf,
   onSelectFriend,
 }: {
   /** Surfaces the coverage/place readout to the surrounding chrome. */
   onReadout?: (readout: MapReadout) => void;
   initialCenter?: LatLon | null;
   selfLocation?: LatLon | null;
+  selfHistory?: readonly LatLon[];
+  selfSelected?: boolean;
   friends?: readonly MapFriendLocation[];
   selectedFriendId?: string | null;
   explorationEnabled?: boolean;
   accessibilityLabel?: string;
+  onSelectSelf?: () => void;
   onSelectFriend?: (friendId: string) => void;
 }) {
   const [viewport, setViewport] = useState<Viewport | null>(null);
@@ -236,20 +249,34 @@ export function MapView({
       ),
     [friendAnchors, selectedFriendId]
   );
+  const selfTrailPoints = useMemo(
+    () =>
+      viewport
+        ? selfHistory.map((location) => worldToScreen(anchor, viewport, latLonToWorld(location)))
+        : [],
+    [anchor, selfHistory, viewport]
+  );
   const selectedTrail = useMemo(() => {
-    if (!viewport || !selectedFriendId) return null;
+    if (!viewport) return null;
+    if (selfSelected) {
+      return buildTrail(selfTrailPoints, `rgb(${theme.canvas.accent.join(', ')})`);
+    }
+    if (!selectedFriendId) return null;
     const friend = friends.find((candidate) => candidate.id === selectedFriendId);
     if (!friend) return null;
     const points = friend.history.map((location) =>
       worldToScreen(anchor, viewport, latLonToWorld(location))
     );
-    if (points.length === 0) return null;
-
-    const path = Skia.Path.Make();
-    path.moveTo(points[0][0], points[0][1]);
-    for (const point of points.slice(1)) path.lineTo(point[0], point[1]);
-    return { color: friend.color, path, points };
-  }, [anchor, friends, selectedFriendId, viewport]);
+    return buildTrail(points, friend.color);
+  }, [
+    anchor,
+    friends,
+    selectedFriendId,
+    selfSelected,
+    selfTrailPoints,
+    theme.canvas.accent,
+    viewport,
+  ]);
   useEffect(() => {
     const path = selectedTrail?.path;
     return () => path?.dispose();
@@ -524,8 +551,10 @@ export function MapView({
       {selfAnchor ? (
         <YouLocator
           accent={theme.canvas.accent}
+          onPress={() => onSelectSelf?.()}
           panelColor={theme.chrome.island}
           scale={k}
+          selected={selfSelected}
           translateX={tx}
           translateY={ty}
           x={selfAnchor[0]}
@@ -539,3 +568,11 @@ export function MapView({
 const styles = StyleSheet.create({
   fill: { flex: 1 },
 });
+
+function buildTrail(points: readonly ScreenPoint[], color: string) {
+  if (points.length === 0) return null;
+  const path = Skia.Path.Make();
+  path.moveTo(points[0][0], points[0][1]);
+  for (const point of points.slice(1)) path.lineTo(point[0], point[1]);
+  return { color, path, points };
+}
