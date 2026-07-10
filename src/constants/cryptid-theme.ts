@@ -28,7 +28,7 @@ export interface CryptidChrome {
   readonly amber: string;
   /** AA-tuned darker amber for small text. */
   readonly amberDark: string;
-  /** Contact-green: friends/online. */
+  /** Contact-green: default friend signal and social-system status. */
   readonly green: string;
   readonly edge: string;
   readonly scrim: string;

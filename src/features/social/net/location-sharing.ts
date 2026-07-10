@@ -39,7 +39,12 @@ import type {
 import type { BackgroundLocationProvider } from './background/background-provider';
 import type { BackgroundStartConfig } from './background/background-task';
 import type { FixPublisher, LocationEngine } from './background/location-engine';
-import { createTrailStore, type TrailPoint, type TrailStore } from './background/trail-store';
+import {
+  createTrailStore,
+  SELF_AUTHOR,
+  type TrailPoint,
+  type TrailStore,
+} from './background/trail-store';
 import type { PersistentKV } from './background/fix-outbox';
 import {
   clampMailboxTtlSeconds,
@@ -203,7 +208,7 @@ export class LocationSharingService implements FixPublisher {
   /** JSON signature of the last emitted pairing snapshot, so polling only emits on real change. */
   private lastPairingSig = '';
 
-  /** Local mirror of our own + friends' trails (recovery buffer), persisted across reloads. */
+  /** Local mirror of our own + friends' retained trails, persisted across reloads. */
   private readonly trail: TrailStore = createTrailStore({
     storage: createPersistentTrailStorage(),
   });
@@ -673,7 +678,7 @@ export class LocationSharingService implements FixPublisher {
     return recoveredFriendFixes;
   }
 
-  /** The latest trail point per author — what the map renders (self + friends). */
+  /** The latest trail point per author (self + friends). */
   trailLatest(): Promise<TrailPoint[]> {
     return this.trail.latestPerAuthor();
   }
@@ -681,6 +686,16 @@ export class LocationSharingService implements FixPublisher {
   /** The ascending-by-seq trail for one author within the rolling window (recovery buffer). */
   trailFor(author: string, sinceTs = 0): Promise<TrailPoint[]> {
     return this.trail.rangeFor(author, sinceTs);
+  }
+
+  /** All known authors' retained trails, ordered chronologically for the UI. */
+  async trailAll(sinceTs = 0): Promise<TrailPoint[]> {
+    const authors = [
+      SELF_AUTHOR,
+      ...pool.friendList(this.state).map((friend) => friend.endpointId),
+    ];
+    const ranges = await Promise.all(authors.map((author) => this.trail.rangeFor(author, sinceTs)));
+    return ranges.flat().sort((a, b) => a.fix.ts - b.fix.ts || a.seq - b.seq);
   }
 
   /**

@@ -240,6 +240,31 @@ describe('LocationSharingService — durable trail wiring', () => {
     expect(latest.some((p) => p.author === 'bb22' && p.seq === 5)).toBe(true);
   });
 
+  it('exposes the full retained trail for known friends', async () => {
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+
+    mockHolder.mod.emit('onFix', {
+      author: 'bb22',
+      seq: 51,
+      fix: { lat: 10, lon: 20, accuracyM: 3, headingDeg: 0, ts: 1001 },
+      backfill: false,
+    });
+    mockHolder.mod.emit('onFix', {
+      author: 'bb22',
+      seq: 52,
+      fix: { lat: 11, lon: 21, accuracyM: 3, headingDeg: 0, ts: 1002 },
+      backfill: false,
+    });
+    await flush();
+
+    const full = await svc.trailAll();
+    expect(
+      full.filter((point) => point.author === 'bb22' && point.seq >= 51).map((point) => point.seq)
+    ).toEqual([51, 52]);
+  });
+
   it('surfaces the recovered count from onSync into the snapshot', async () => {
     const svc = new LocationSharingService();
     let recovered: number | null = null;

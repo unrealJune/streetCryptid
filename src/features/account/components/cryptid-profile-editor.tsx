@@ -12,6 +12,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
+import { SIGNAL_COLOR_OPTIONS, signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Fonts, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import {
@@ -36,7 +37,7 @@ import { CryptidAvatar } from './cryptid-avatar';
 const AUTOSAVE_DELAY_MS = 450;
 const PROFILE_MAX_WIDTH = 640;
 
-type ActiveEditor = 'username' | 'icon' | null;
+type ActiveEditor = 'username' | 'icon' | 'signal' | null;
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 interface QueuedProfile {
@@ -50,28 +51,6 @@ interface CryptidProfileEditorProps {
   notice?: string | null;
   onSave(profile: CryptidProfile): Promise<void>;
   onDone?: () => void;
-}
-
-function contrastText(color: string): string {
-  const luminance = (value: string): number => {
-    const channels = [1, 3, 5].map((offset) =>
-      Number.parseInt(value.slice(offset, offset + 2), 16)
-    );
-    const [red, green, blue] = channels.map((channel) => {
-      const normalized = channel / 255;
-      return normalized <= 0.04045
-        ? normalized / 12.92
-        : Math.pow((normalized + 0.055) / 1.055, 2.4);
-    });
-    return red * 0.2126 + green * 0.7152 + blue * 0.0722;
-  };
-  const background = luminance(color);
-  const dark = '#07131F';
-  const ratio = (first: number, second: number): number =>
-    (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
-  const darkContrast = ratio(background, luminance(dark));
-  const lightContrast = ratio(background, 1);
-  return darkContrast >= lightContrast ? dark : '#FFFFFF';
 }
 
 function errorMessage(error: unknown): string {
@@ -97,6 +76,7 @@ export function CryptidProfileEditor({
     initialProfile ? profileToDraft(initialProfile) : defaultCryptidProfileDraft()
   );
   const initialPreset = findCryptidPreset(initialDraft.presetId);
+  const initialColor = initialDraft.color || DEFAULT_SIGNAL_COLOR;
 
   const [handle, setHandle] = useState(handleInputValue(initialDraft.handle));
   const [selectedPresetId, setSelectedPresetId] = useState<CryptidPresetId | null>(
@@ -104,6 +84,7 @@ export function CryptidProfileEditor({
   );
   const [customName, setCustomName] = useState(initialPreset ? '' : initialDraft.cryptidName);
   const [customArt, setCustomArt] = useState(initialPreset ? '' : initialDraft.sigil);
+  const [color, setColor] = useState(initialColor);
   const [activeEditor, setActiveEditor] = useState<ActiveEditor>(
     mode === 'onboarding' ? 'username' : null
   );
@@ -117,7 +98,6 @@ export function CryptidProfileEditor({
   const selectedPreset = findCryptidPreset(selectedPresetId);
   const cryptidName = selectedPreset?.name ?? customName;
   const sigil = selectedPreset?.art ?? customArt;
-  const color = initialDraft.color || DEFAULT_SIGNAL_COLOR;
   const draft = useMemo<CryptidProfileDraft>(
     () => ({ handle, cryptidName, sigil, color, presetId: selectedPresetId }),
     [color, cryptidName, handle, selectedPresetId, sigil]
@@ -129,9 +109,17 @@ export function CryptidProfileEditor({
     [draft, hasIssues]
   );
   const measurements = sigilMeasurements(sigil);
+  const colorOptions = SIGNAL_COLOR_OPTIONS.some(
+    (option) => option.value.toLowerCase() === initialColor.toLowerCase()
+  )
+    ? SIGNAL_COLOR_OPTIONS
+    : [{ name: 'Current', value: initialColor }, ...SIGNAL_COLOR_OPTIONS];
   const bareHandle = handle.trim().replace(/^@+/, '');
   const displayHandle = bareHandle || 'username';
   const iconName = cryptidName.trim() || 'Custom icon';
+  const colorName =
+    colorOptions.find((option) => option.value.toLowerCase() === color.toLowerCase())?.name ??
+    'Custom';
 
   const mountedRef = useRef(true);
   const onSaveRef = useRef(onSave);
@@ -569,6 +557,70 @@ export function CryptidProfileEditor({
                 ) : null}
               </View>
             ) : null}
+
+            <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
+
+            <SettingRow
+              active={activeEditor === 'signal'}
+              label="Signal color"
+              value={colorName}
+              onPress={() => setActiveEditor((current) => (current === 'signal' ? null : 'signal'))}
+            />
+
+            {activeEditor === 'signal' ? (
+              <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
+                <ThemedText style={styles.fieldLabel}>Choose a signal color</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary">
+                  This marks your profile icon, map pin, and shared trail on friends&apos; maps.
+                </ThemedText>
+                <View
+                  accessibilityLabel="Signal color"
+                  accessibilityRole="radiogroup"
+                  style={styles.colorOptions}
+                >
+                  {colorOptions.map((option) => {
+                    const selected = option.value.toLowerCase() === color.toLowerCase();
+                    return (
+                      <Pressable
+                        accessibilityLabel={`${option.name} signal color`}
+                        accessibilityRole="radio"
+                        accessibilityState={{ checked: selected }}
+                        key={option.value}
+                        onPress={() => {
+                          setSaveError(null);
+                          setSaveStatus('idle');
+                          setColor(option.value);
+                        }}
+                        style={({ pressed }) => [
+                          styles.colorOption,
+                          {
+                            backgroundColor: selected
+                              ? `${option.value}14`
+                              : theme.backgroundElement,
+                            borderColor: selected ? option.value : theme.backgroundSelected,
+                            opacity: pressed ? 0.58 : 1,
+                          },
+                        ]}
+                      >
+                        <View style={[styles.colorSwatch, { backgroundColor: option.value }]}>
+                          {selected ? (
+                            <View
+                              style={[
+                                styles.colorSelected,
+                                { backgroundColor: signalColorInk(option.value) },
+                              ]}
+                            />
+                          ) : null}
+                        </View>
+                        <ThemedText type="small" style={styles.colorName}>
+                          {option.name}
+                        </ThemedText>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : null}
           </View>
 
           {mode === 'onboarding' && onDone ? (
@@ -584,7 +636,7 @@ export function CryptidProfileEditor({
                 },
               ]}
             >
-              <ThemedText style={[styles.continueButtonText, { color: contrastText(color) }]}>
+              <ThemedText style={[styles.continueButtonText, { color: signalColorInk(color) }]}>
                 {finishing ? 'Saving...' : 'Continue'}
               </ThemedText>
             </Pressable>
@@ -818,6 +870,38 @@ const styles = StyleSheet.create({
   customFields: {
     gap: Spacing.two,
     paddingTop: Spacing.two,
+  },
+  colorOptions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.two,
+  },
+  colorOption: {
+    alignItems: 'center',
+    borderRadius: 12,
+    borderWidth: 1,
+    flexBasis: '28%',
+    flexGrow: 1,
+    gap: Spacing.one,
+    minHeight: 74,
+    minWidth: 84,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.two,
+  },
+  colorSwatch: {
+    alignItems: 'center',
+    borderRadius: 17,
+    height: 34,
+    justifyContent: 'center',
+    width: 34,
+  },
+  colorSelected: {
+    borderRadius: 4,
+    height: 8,
+    width: 8,
+  },
+  colorName: {
+    fontWeight: '700',
   },
   textInput: {
     borderRadius: 10,

@@ -1,8 +1,9 @@
-import { Circle, Group, type SkFont } from '@shopify/react-native-skia';
 import { useEffect } from 'react';
-import {
+import { StyleSheet, Text, View } from 'react-native';
+import Animated, {
+  cancelAnimation,
   Easing,
-  useDerivedValue,
+  useAnimatedStyle,
   useReducedMotion,
   useSharedValue,
   withRepeat,
@@ -11,54 +12,147 @@ import {
 } from 'react-native-reanimated';
 
 import type { Rgb } from '../core/types';
-import { LocatorLabel } from './locator-label';
 
 interface YouLocatorProps {
   readonly x: number;
   readonly y: number;
+  readonly scale: SharedValue<number>;
+  readonly translateX: SharedValue<number>;
+  readonly translateY: SharedValue<number>;
   readonly accent: Rgb;
   readonly panelColor: string;
-  readonly font: SkFont | null;
 }
 
-/**
- * The single live element of the map: concentric amber rings + core dot (the
- * mock's locator), with a gentle ease-out breath on the outer ring. Honors
- * reduced-motion by rendering the static rings only.
- */
-export function YouLocator({ x, y, accent, panelColor, font }: YouLocatorProps) {
+/** The amber YOU locator stays legible at every map zoom. */
+export function YouLocator({
+  x,
+  y,
+  scale,
+  translateX,
+  translateY,
+  accent,
+  panelColor,
+}: YouLocatorProps) {
   const reducedMotion = useReducedMotion();
-
-  const rgb = `rgb(${accent[0]}, ${accent[1]}, ${accent[2]})`;
-  const rgba = (a: number) => `rgba(${accent[0]}, ${accent[1]}, ${accent[2]}, ${a})`;
-
-  return (
-    <Group transform={[{ translateX: x }, { translateY: y }]}>
-      {!reducedMotion && <PulseRing color={rgb} />}
-      <Circle r={22} color={rgba(0.16)} style="stroke" strokeWidth={1.2} />
-      <Circle r={12} color={rgba(0.4)} style="stroke" strokeWidth={1.4} />
-      <Circle r={6} color={rgb} />
-      <Circle r={2.3} color="rgba(255, 251, 244, 1)" />
-      <LocatorLabel label="YOU" color={rgb} panelColor={panelColor} font={font} />
-    </Group>
+  const pulse = useSharedValue(0);
+  const color = `rgb(${accent[0]}, ${accent[1]}, ${accent[2]})`;
+  const rgba = (alpha: number) => `rgba(${accent[0]}, ${accent[1]}, ${accent[2]}, ${alpha})`;
+  const positionStyle = useAnimatedStyle(
+    () => ({
+      transform: [
+        { translateX: x * scale.value + translateX.value - 30 },
+        { translateY: y * scale.value + translateY.value - 30 },
+      ],
+    }),
+    [x, y]
   );
-}
-
-/** The animated breath, isolated so its hooks never mount under reduced motion. */
-function PulseRing({ color }: { color: string }) {
-  const pulse: SharedValue<number> = useSharedValue(0);
+  const pulseStyle = useAnimatedStyle(() => ({
+    opacity: 0.24 * (1 - pulse.value),
+    transform: [{ scale: 1 + pulse.value * 0.35 }],
+  }));
 
   useEffect(() => {
+    if (reducedMotion) {
+      pulse.value = 0;
+      return;
+    }
     pulse.value = withRepeat(
       withTiming(1, { duration: 2400, easing: Easing.out(Easing.quad) }),
       -1,
       false
     );
-  }, [pulse]);
+    return () => cancelAnimation(pulse);
+  }, [pulse, reducedMotion]);
 
-  // Skia accepts Reanimated-derived values as props: the pulse never re-renders React.
-  const r = useDerivedValue(() => 22 + 8 * pulse.value);
-  const opacity = useDerivedValue(() => 0.22 * (1 - pulse.value));
-
-  return <Circle r={r} opacity={opacity} color={color} style="stroke" strokeWidth={1.2} />;
+  return (
+    <Animated.View pointerEvents="none" style={[styles.anchor, positionStyle]}>
+      <View style={styles.marker}>
+        {!reducedMotion ? (
+          <Animated.View style={[styles.pulse, { borderColor: color }, pulseStyle]} />
+        ) : null}
+        <View style={[styles.outerRing, { borderColor: rgba(0.4) }]} />
+        <View style={[styles.innerRing, { borderColor: rgba(0.72) }]} />
+        <View style={[styles.core, { backgroundColor: color }]}>
+          <View style={[styles.coreDot, { backgroundColor: panelColor }]} />
+        </View>
+        <View style={[styles.label, { backgroundColor: panelColor }]}>
+          <Text allowFontScaling={false} style={[styles.labelText, { color }]}>
+            YOU
+          </Text>
+        </View>
+      </View>
+    </Animated.View>
+  );
 }
+
+const styles = StyleSheet.create({
+  anchor: {
+    height: 64,
+    left: 0,
+    position: 'absolute',
+    top: 0,
+    width: 92,
+    zIndex: 3,
+  },
+  marker: {
+    height: 64,
+    position: 'absolute',
+    width: 92,
+  },
+  pulse: {
+    borderRadius: 28,
+    borderWidth: 1.2,
+    height: 56,
+    left: 2,
+    position: 'absolute',
+    top: 2,
+    width: 56,
+  },
+  outerRing: {
+    borderRadius: 22,
+    borderWidth: 1.2,
+    height: 44,
+    left: 8,
+    position: 'absolute',
+    top: 8,
+    width: 44,
+  },
+  innerRing: {
+    borderRadius: 12,
+    borderWidth: 1.4,
+    height: 24,
+    left: 18,
+    position: 'absolute',
+    top: 18,
+    width: 24,
+  },
+  core: {
+    alignItems: 'center',
+    borderRadius: 6,
+    height: 12,
+    justifyContent: 'center',
+    left: 24,
+    position: 'absolute',
+    top: 24,
+    width: 12,
+  },
+  coreDot: {
+    borderRadius: 2,
+    height: 4,
+    width: 4,
+  },
+  label: {
+    borderRadius: 4,
+    left: 42,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    position: 'absolute',
+    top: 19,
+  },
+  labelText: {
+    fontFamily: 'Rajdhani_700Bold',
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 16,
+  },
+});

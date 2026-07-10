@@ -37,8 +37,9 @@ never by mascots or hype.
 - **Pokémon GO / gamified AR monster-hunting** — no creatures to catch, no XP, no
   battles. The "cryptid" is a personal ASCII sigil, not a collectible.
 - **Fitness / route trackers (Strava, Nike Run, Fog of World's trip mode)** — no
-  per-trip timers, pace, "resume walk," or GPS breadcrumb trails. Reveal is
-  sector-chunked, never a traced path.
+  per-trip timers, pace, "resume walk," or persistent breadcrumb for your own movement.
+  Personal reveal is sector-chunked; a friend's explicitly selected, retained sharing
+  history may appear as a temporary breadcrumb.
 - **Military / tactical cosplay** — no hazard tape, targeting reticles, or
   OPERATOR / SWEEP / TERRITORY jargon. Borrow the MAGI instrument's calm, not its
   war-room.
@@ -54,8 +55,9 @@ never by mascots or hype.
    or "resume" anything. Every screen answers "where have I been?" at a glance.
 2. **The map is the product.** The full-bleed dot-field map is the hero; chrome is a
    few minimal floating "islands." Hide analytics; show territory.
-3. **One honest signal per color.** Amber = you. Contact-green = friends. Teal ramp =
-   the city. No redundant badges, no duplicate status text, no rainbow.
+3. **One honest signal per color.** Amber = you. Each friend owns one chosen signal
+   color (contact-green is the legacy/default signal). Teal ramp = the city. No
+   redundant badges or duplicate status text.
 4. **Reveal in chunks, not traces.** A low-battery background ping acquires a whole
    hex sector. Discovered = crisp and saturated; unexplored = desaturated ghost +
    amber frontier rim.
