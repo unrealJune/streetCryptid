@@ -28,6 +28,8 @@ export interface TrailStorage {
   range(author: string, sinceTs: number): Promise<TrailPoint[]>;
   /** The most recent point per author (by fix.ts). */
   latest(): Promise<TrailPoint[]>;
+  /** Delete every cached point for one author; returns the count removed. */
+  removeAuthor(author: string): Promise<number>;
   /** Delete points with `fix.ts < olderThanTs`; returns the count removed. */
   prune(olderThanTs: number): Promise<number>;
 }
@@ -54,6 +56,13 @@ export class InMemoryTrailStorage implements TrailStorage {
     }
     return [...byAuthor.values()];
   }
+  async removeAuthor(author: string): Promise<number> {
+    const before = this.points.length;
+    for (let i = this.points.length - 1; i >= 0; i--) {
+      if (this.points[i].author === author) this.points.splice(i, 1);
+    }
+    return before - this.points.length;
+  }
   async prune(olderThanTs: number): Promise<number> {
     const before = this.points.length;
     for (let i = this.points.length - 1; i >= 0; i--) {
@@ -72,6 +81,8 @@ export interface TrailStore {
   rangeFor(author: string, sinceTs: number): Promise<TrailPoint[]>;
   /** Latest point per author — what the map renders. */
   latestPerAuthor(): Promise<TrailPoint[]>;
+  /** Remove every cached point for one author. */
+  removeAuthor(author: string): Promise<number>;
   /** Enforce the rolling window now; returns points removed. */
   prune(olderThanTs?: number): Promise<number>;
 }
@@ -108,6 +119,9 @@ export function createTrailStore(opts: TrailStoreOptions): TrailStore {
     },
     async latestPerAuthor(): Promise<TrailPoint[]> {
       return storage.latest();
+    },
+    async removeAuthor(author: string): Promise<number> {
+      return storage.removeAuthor(author);
     },
     async prune(olderThanTs?: number): Promise<number> {
       const threshold = olderThanTs ?? now() - windowMs;

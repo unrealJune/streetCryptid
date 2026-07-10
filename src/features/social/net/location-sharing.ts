@@ -169,6 +169,7 @@ export class LocationSharingService implements FixPublisher {
   private mySubId: string | null = null;
   private mySubRecipients = '';
   private readonly friendSubs = new Map<string, string>();
+  private readonly removingFriends = new Set<string>();
   private seq = 0;
 
   private readonly snapshotListeners = new Set<SnapshotListener>();
@@ -336,6 +337,7 @@ export class LocationSharingService implements FixPublisher {
   }
 
   async addFriend(card: ContactCard): Promise<void> {
+    if (this.removingFriends.has(card.endpointId)) return;
     this.state = pool.addFriend(this.state, card);
     await this.subscribeToFriend(card);
     this.persistPool();
@@ -354,6 +356,49 @@ export class LocationSharingService implements FixPublisher {
     // No re-subscribe needed: future fixes simply omit their wrap.
     this.persistPool();
     this.emit();
+  }
+
+  /** Remove a friend locally, revoke future fixes, and tear down their live subscription. */
+  async removeFriend(endpointId: string): Promise<void> {
+    if (!this.state.friends[endpointId] || this.removingFriends.has(endpointId)) return;
+
+    const wasSharing = pool.isSharingWith(this.state, endpointId);
+    const friendSubId = this.friendSubs.get(endpointId);
+    const mod = this.mod;
+    const previousState = this.state;
+
+    this.removingFriends.add(endpointId);
+    this.friendSubs.delete(endpointId);
+    this.state = pool.removeFriend(this.state, endpointId);
+    try {
+      await savePool(this.kv, this.state);
+    } catch (error) {
+      this.state = previousState;
+      if (friendSubId) this.friendSubs.set(endpointId, friendSubId);
+      this.removingFriends.delete(endpointId);
+      throw error;
+    }
+
+    if (this.discoveredFriend?.endpointId === endpointId) this.discoveredFriend = null;
+    if (this.isNearbyGestureActive()) this.nearbyPairAttempts.add(endpointId);
+    this.emit();
+
+    const cleanup: Promise<void>[] = [];
+    if (mod && friendSubId) {
+      cleanup.push(mod.unsubscribe(friendSubId));
+    }
+    if (wasSharing) cleanup.push(this.ensureMySubscription());
+    cleanup.push(
+      this.trail.removeAuthor(endpointId).then(() => {
+        this.notifyTrailChanged();
+      })
+    );
+
+    const results = await Promise.allSettled(cleanup);
+    if (results.some((result) => result.status === 'rejected')) {
+      this.reportError(new Error('Friend removed, but some cleanup could not finish.'));
+    }
+    this.removingFriends.delete(endpointId);
   }
 
   // ── Bilateral pairing (`streetcryptid/pair/1`) — ARCHITECTURE.md §4 ─────────────────────────
@@ -865,6 +910,8 @@ export class LocationSharingService implements FixPublisher {
   }
 
   private handleFix(event: OnFixEvent): void {
+    if (!this.state.friends[event.author] || this.removingFriends.has(event.author)) return;
+
     const fix: IncomingFix = {
       author: event.author,
       seq: event.seq,
@@ -1183,6 +1230,13 @@ export class LocationSharingService implements FixPublisher {
     if (!this.mod) return;
     const result = await this.mod.pairResult(event.sessionId).catch(() => null);
     if (!result) return;
+    if (this.removingFriends.has(result.peerEndpointId)) {
+      this.pendingPairRequests = this.pendingPairRequests.filter(
+        (request) => request.sessionId !== event.sessionId
+      );
+      this.initiatedRoutes.delete(event.sessionId);
+      return;
+    }
 
     const method = this.initiatedRoutes.get(event.sessionId);
     let friend = this.placeholderFriend(result, method);

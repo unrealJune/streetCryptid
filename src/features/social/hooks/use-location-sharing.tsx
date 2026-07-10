@@ -43,6 +43,7 @@ interface LocationSharingContextValue {
   respondPair(sessionId: string, accept: boolean): Promise<void>;
   refreshPairing(): Promise<void>;
   toggleShare(endpointId: string, on: boolean): Promise<void>;
+  removeFriend(endpointId: string): Promise<void>;
   retryLocation(): Promise<void>;
   clearPairingCelebration(): void;
 }
@@ -280,6 +281,21 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     },
     [run]
   );
+  const removeFriend = useCallback(async (endpointId: string) => {
+    setServiceError(null);
+    const service = serviceRef.current;
+    if (!service) {
+      const message = 'Friend sync is not ready. Try again.';
+      setServiceError(message);
+      throw new Error(message);
+    }
+    try {
+      await service.removeFriend(endpointId);
+    } catch (removeError: unknown) {
+      setServiceError(errorMessage(removeError));
+      throw removeError;
+    }
+  }, []);
   const clearPairingCelebration = useCallback(() => {
     serviceRef.current?.clearPairingCelebration();
   }, []);
@@ -312,6 +328,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       respondPair,
       refreshPairing,
       toggleShare,
+      removeFriend,
       retryLocation,
       clearPairingCelebration,
     }),
@@ -330,6 +347,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       respondPair,
       refreshPairing,
       toggleShare,
+      removeFriend,
       retryLocation,
       clearPairingCelebration,
     ]
