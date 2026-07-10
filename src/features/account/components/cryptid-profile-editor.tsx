@@ -33,6 +33,7 @@ import {
   type CryptidProfileDraft,
 } from '../core/profile';
 import { CryptidAvatar } from './cryptid-avatar';
+import { SignalColorPicker } from './signal-color-picker';
 
 const AUTOSAVE_DELAY_MS = 450;
 const PROFILE_MAX_WIDTH = 640;
@@ -573,6 +574,15 @@ export function CryptidProfileEditor({
                 <ThemedText type="small" themeColor="textSecondary">
                   This marks your profile icon, map pin, and shared trail on friends&apos; maps.
                 </ThemedText>
+                <SignalColorPicker
+                  color={color}
+                  onChange={(value) => {
+                    setSaveError(null);
+                    setSaveStatus('idle');
+                    setColor(value);
+                  }}
+                />
+                <ThemedText style={styles.fieldLabel}>Quick colors</ThemedText>
                 <View
                   accessibilityLabel="Signal color"
                   accessibilityRole="radiogroup"
