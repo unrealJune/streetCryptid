@@ -785,7 +785,7 @@ export class LocationSharingService implements FixPublisher {
     return this.trail.latestPerAuthor();
   }
 
-  /** The ascending-by-seq trail for one author within the rolling window (recovery buffer). */
+  /** The ascending-by-seq trail for one author at or after `sinceTs`. */
   trailFor(author: string, sinceTs = 0): Promise<TrailPoint[]> {
     return this.trail.rangeFor(author, sinceTs);
   }

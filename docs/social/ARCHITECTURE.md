@@ -108,10 +108,10 @@ Per fix, A:
 2. **broadcasts** it on `topicId` (gossip) → live update for online friends, and
 3. **writes** it to the docs namespace under key `author/seq` → durable, replicated.
 
-**Retention (rolling window):** prune doc entries older than the window (default 24–48h)
-so storage stays bounded. Low background ping ⇒ per-fix entries are cheap; if ping
-frequency ever rises, batch fixes into periodic **snapshot** entries to limit
-iroh-blobs per-entry overhead.
+**Retention:** location entries are retained indefinitely. They are removed only through an
+explicit deletion action, such as removing a friend or deliberately pruning history. Low background
+ping ⇒ per-fix entries are cheap; if ping frequency ever rises, batch fixes into periodic
+**snapshot** entries to limit iroh-blobs per-entry overhead.
 
 ## 6. Sharing, recovery, and revocation
 
@@ -180,7 +180,7 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
    expo-location            │ SamplingPolicy   │ durable queue,   ├─▶ gossip.broadcast   (live)
    + TaskManager            │ (motion+battery) │ survives resume  └─▶ docs.write(a/seq)  (durable)
    + Android FG service     ▼                  ▼                             │ range reconciliation
-                       TrailStore (local, bounded rolling window) ◀── backfill onFix (docs sync)
+                       TrailStore (local, indefinite history) ◀────── backfill onFix (docs sync)
 ```
 
 - **Sampling** (`sampling-policy.ts`): battery/motion-aware cadence — back off when stationary
@@ -196,9 +196,9 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   (`app.json` / expo-location config plugin).
 - **web**: relay-only iroh WASM implements the same interface, including an **in-memory**
   iroh-docs replica (ephemeral across reloads, interoperable with native's persistent replica).
-- The bounded friend **trail** serves both offline recovery and an explicitly selected
-  48-hour history view. The map normally shows only the latest point; selecting a friend
-  connects a sampled set of retained fixes in that friend's chosen profile color. Amber
+- The complete friend **trail** serves both offline recovery and the history view. The map normally
+  shows only the latest point; selecting a friend connects a sampled set of retained fixes in that
+  friend's chosen profile color. Amber
   stays "YOU" only, and contact-green remains the legacy/default friend signal.
 
 > Android background execution still follows platform limits: force-stopping the app prevents

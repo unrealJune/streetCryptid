@@ -86,19 +86,16 @@ describe('trail store', () => {
     expect(await store.rangeFor(SELF_AUTHOR, 0)).toHaveLength(1);
   });
 
-  it('prune with default threshold uses now - windowMs', async () => {
+  it('retains old points indefinitely unless explicitly pruned', async () => {
     const storage = new InMemoryTrailStorage();
-    const store = createTrailStore({ storage, windowMs: 1000, now: () => 5000 });
-    await store.appendOwn(fix(3000), 1); // older than 5000-1000=4000 → removed
-    await store.appendOwn(fix(4500), 2); // kept
+    const store = createTrailStore({ storage, now: () => 5_000_000_000 });
+    await store.appendOwn(fix(1), 1);
+    await store.appendOwn(fix(2), 2);
 
-    const removed = await store.prune();
-    expect(removed).toBe(1);
-    const remaining = await store.rangeFor(SELF_AUTHOR, 0);
-    expect(remaining.map((p) => p.seq)).toEqual([2]);
+    expect((await store.rangeFor(SELF_AUTHOR, 0)).map((p) => p.seq)).toEqual([1, 2]);
   });
 
-  it('prune with explicit threshold overrides the window', async () => {
+  it('prune deletes points before an explicit threshold', async () => {
     const storage = new InMemoryTrailStorage();
     const store = createTrailStore({ storage, now: () => 0 });
     await store.appendOwn(fix(100), 1);

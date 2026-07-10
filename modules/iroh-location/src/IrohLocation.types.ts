@@ -293,12 +293,12 @@ export interface IrohLocationApi {
   /**
    * Kick off range-based set reconciliation to recover envelopes we missed while offline. Recovered
    * fixes we can decrypt arrive as `onFix` with `backfill: true`; progress via `onSync`. `sinceTs`
-   * bounds how far back to reconcile (0 = full window).
+   * bounds how far back to reconcile (0 = full history).
    */
   syncTrail(sinceTs: number): Promise<void>;
   /** Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >= sinceTs`. */
   readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]>;
-  /** Drop durable entries older than `olderThanTs` (rolling-window retention, ARCHITECTURE §5). */
+  /** Explicitly drop durable entries older than `olderThanTs`. */
   pruneTrail(olderThanTs: number): Promise<void>;
   /**
    * A shareable docs **read-ticket** granting replication of our trail namespace — the swarm-join

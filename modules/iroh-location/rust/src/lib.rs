@@ -734,7 +734,7 @@ impl LocationNode {
             .collect())
     }
 
-    /// Drop durable entries older than `older_than_ts` (rolling-window retention, ARCHITECTURE §5).
+    /// Explicitly drop durable entries older than `older_than_ts`.
     pub async fn prune_trail(&self, older_than_ts: u64) -> Result<(), LocationError> {
         let guard = self.inner.lock().await;
         let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
