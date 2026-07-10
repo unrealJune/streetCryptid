@@ -255,7 +255,6 @@ export function MapView({
       const points = selfHistory.map((location) =>
         worldToScreen(anchor, viewport, latLonToWorld(location))
       );
-      if (points.length === 0) return null;
       return buildTrail(points, `rgb(${theme.canvas.accent.join(', ')})`);
     }
     if (!selectedFriendId) return null;
@@ -264,7 +263,6 @@ export function MapView({
     const points = friend.history.map((location) =>
       worldToScreen(anchor, viewport, latLonToWorld(location))
     );
-    if (points.length === 0) return null;
     return buildTrail(points, friend.color);
   }, [anchor, friends, selectedFriendId, selfHistory, selfSelected, theme.canvas.accent, viewport]);
   useEffect(() => {
