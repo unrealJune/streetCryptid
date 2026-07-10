@@ -1,0 +1,39 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+group = 'com.unrealjune.irohlocation'
+version = '0.1.0'
+
+def expoModulesCorePlugin = new File(
+  project(":expo-modules-core").projectDir.absolutePath,
+  "ExpoModulesCorePlugin.gradle"
+)
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useExpoPublishing()
+
+android {
+  namespace "com.unrealjune.irohlocation"
+  compileSdk safeExtGet("compileSdkVersion", 35)
+
+  defaultConfig {
+    minSdk safeExtGet("minSdkVersion", 24)
+  }
+
+  // Per-ABI libiroh_location.so produced by `cargo ndk`. Drop them under
+  // src/main/jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/libiroh_location.so
+  sourceSets {
+    main {
+      jniLibs.srcDirs += ['src/main/jniLibs']
+    }
+  }
+}
+
+dependencies {
+  // JNA MUST be the @aar variant on Android — it bundles libjnidispatch.so per ABI.
+  // The plain jar (pulled transitively by UniFFI) crashes at runtime on device.
+  implementation "net.java.dev.jna:jna:5.14.0@aar"
+  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1"
+  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1"
+}

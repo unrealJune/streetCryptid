@@ -8,7 +8,14 @@ module.exports = defineConfig([
   // Turn off ESLint rules that conflict with Prettier formatting.
   eslintConfigPrettier,
   {
-    ignores: ['dist/*', 'node_modules/*', '.expo/*', 'expo-env.d.ts', 'docs/design/**'],
+    ignores: [
+      'dist/*',
+      'node_modules/*',
+      '.expo/*',
+      'expo-env.d.ts',
+      'docs/design/**',
+      'modules/iroh-location/web/*',
+    ],
   },
   // The map core and tile logic are pure TypeScript: no React, React Native, or
   // Skia imports allowed, so they stay runnable (and testable) outside the app.

@@ -1,0 +1,15 @@
+Vendored Android runtime sources from:
+https://github.com/mcginty/blew/tree/blew-v0.3.0
+
+Files:
+- BleCentralManager.kt
+- BlePeripheralManager.kt
+- GattOperationQueue.kt
+- L2capSocketManager.kt
+- AndroidManifest.xml
+
+License: AGPL-3.0-or-later (see LICENSE in this directory).
+
+The files are copied into the IrohLocation Expo module because the Rust `blew`
+backend requires Android Kotlin managers and JNI callbacks in the application
+classloader. No functional modifications were made when vendored in July 2026.

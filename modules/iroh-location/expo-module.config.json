@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["IrohLocationModule"]
+  },
+  "android": {
+    "modules": ["com.unrealjune.irohlocation.IrohLocationModule"]
+  }
+}

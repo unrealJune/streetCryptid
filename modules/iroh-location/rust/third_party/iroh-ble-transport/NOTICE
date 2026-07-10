@@ -1,0 +1,63 @@
+iroh-ble-transport — vendored, modified copy
+============================================
+
+This directory contains a vendored copy of `iroh-ble-transport`, an
+experimental Bluetooth Low Energy (BLE) transport for the iroh peer-to-peer
+networking stack.
+
+Upstream project : https://github.com/mcginty/iroh-ble-transport
+Upstream version : v0.3.1 (git tag `iroh-ble-transport-v0.3.1`)
+Original author  : Jake McGinty <me@jakebot.org>
+License          : GNU Affero General Public License v3.0 or later
+                   (AGPL-3.0-or-later) — see the `LICENSE` file in this
+                   directory for the full license text.
+
+This modified copy remains licensed under AGPL-3.0-or-later, the same license
+as the upstream project.
+
+
+Modifications by the streetCryptid project
+------------------------------------------
+
+In accordance with section 5 of the GNU AGPL, the changes made to the upstream
+v0.3.1 source after it was vendored into this repository are dated and
+described below.
+
+2026-07 — Ported from iroh 0.98.2 to iroh 1.0.2, and made buildable as a
+standalone / path dependency:
+
+  * Cargo.toml
+      - Bumped dependencies to the versions used by this app's iroh 1.0 stack:
+        `iroh` 0.98.2 -> 1.0.2 (feature `unstable-custom-transports`),
+        `iroh-base` 0.98 -> 1.0.2, `n0-watcher` 0.6 -> 1, `noq-udp` 0.10 -> 1,
+        `noq-proto` 0.17 -> 1.
+      - Removed workspace inheritance (`rust-version.workspace = true` ->
+        `rust-version = "1.95"`) so the crate builds outside the upstream
+        workspace; added `publish = false`.
+      - Added this vendoring/modification header and updated the description.
+
+  * src/transport/hook.rs — updated to the iroh 1.0 `EndpointHooks` API:
+      - `after_handshake` now receives `&iroh::endpoint::Connection` instead of
+        the removed `&ConnectionInfo`.
+      - Dropped the `!path.is_closed()` filter: `Connection::paths()` in 1.0
+        only returns currently-open paths and `Path::is_closed` no longer
+        exists.
+      - Switched the connection-close watcher from a cloned `Connection` to a
+        `WeakConnectionHandle` (`conn.weak_handle().closed().await`), which the
+        1.0 hook documentation requires so the hook does not keep the
+        connection alive / disable close-on-drop.
+
+  * src/transport/transport.rs — updated to the iroh 1.0
+    `CustomEndpoint` / `CustomSender` traits:
+      - `poll_recv` now fills a `&mut [RecvInfo]` slice, constructing entries
+        with `RecvInfo::new(custom_addr, None)`, instead of writing
+        `Addr::Custom(..)` into a `&mut [Addr]` slice.
+      - `poll_send` gained the new `src: Option<&CustomAddr>` argument (unused
+        by this single-homed transport).
+      - Updated the corresponding imports and a unit test call site, plus a
+        stale doc comment referencing the iroh version.
+
+The upstream `examples/` directory was intentionally not vendored; it
+demonstrates endpoint wiring that this checkpoint does not yet use.
+
+No other source files were modified.

@@ -49,6 +49,7 @@ example
 /android
 
 # local Expo module build outputs
+modules/iroh-location/web/
 modules/iroh-location/android/.gradle/
 modules/iroh-location/android/build/
 modules/iroh-location/android/src/main/jniLibs/

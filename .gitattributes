@@ -1,0 +1,3 @@
+# UniFFI generators emit trailing spaces; preserve their output verbatim.
+modules/iroh-location/android/src/main/java/uniffi/** -whitespace
+modules/iroh-location/ios/generated/** -whitespace

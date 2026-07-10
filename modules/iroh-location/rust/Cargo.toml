@@ -1,0 +1,90 @@
+[package]
+name = "iroh-location"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "streetCryptid decentralized, E2E-encrypted friend location sharing (iroh + gossip + per-recipient crypto)"
+
+# cdylib  -> the .so / .dylib loaded by the Swift/Kotlin bindings on device
+# staticlib -> the .a linked into the iOS XCFramework
+# lib     -> lets `cargo test` and uniffi-bindgen use the crate as a normal lib
+[lib]
+name = "iroh_location"
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[features]
+# Enables the uniffi-bindgen CLI (clap etc.); only needed to generate bindings, so it's
+# kept off the default mobile cdylib build.
+cli = ["uniffi/cli"]
+
+[dependencies]
+# --- iroh transport + live gossip (see docs/social/ARCHITECTURE.md §2) ---
+# NOTE: iroh-ffi 1.0 does NOT expose gossip/docs, which is exactly why this crate exists.
+iroh = "1"
+iroh-gossip = "0.101"
+iroh-tickets = "1"
+# Same-wifi / LAN fast path: mDNS (swarm-discovery) address lookup for iroh 1.0. This lives in
+# a SEPARATE crate (iroh 1.0 core only ships dns/pkarr/memory address lookups). Added ALONGSIDE
+# the N0 preset's relay + DNS discovery in `LocationNode::start` — never replacing it — so two
+# devices on one LAN can resolve + dial each other directly while the internet path keeps working.
+iroh-mdns-address-lookup = "0.4"
+
+# --- durable trail: iroh-docs (range-based set reconciliation) + iroh-blobs content store
+# (see docs/social/ARCHITECTURE.md §2, §5-6). Default features pull in `fs-store` (persistent
+# redb replica + blobs store on disk) and `rpc`, both required for a persistent `Docs` replica.
+iroh-docs = "0.101"
+iroh-blobs = "0.103"
+
+# --- async runtime bridged to Swift/Kotlin by uniffi's `tokio` feature ---
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+n0-future = "0.2"
+uniffi = { version = "0.31", features = ["tokio"] }
+
+# --- app-layer crypto: encrypt once, wrap per recipient, sign (see §4) ---
+chacha20poly1305 = "0.10" # XChaCha20-Poly1305 AEAD for the payload
+hpke = { version = "0.12", features = ["x25519"] } # per-recipient key wrap (RFC 9180)
+ed25519-dalek = { version = "2", features = ["rand_core"] } # envelope signatures
+blake3 = "1" # topic derivation + recipient key ids
+rand = "0.8" # OsRng (rand_core 0.6, matches dalek 2 / hpke 0.12)
+
+# --- wire encoding for the envelope (internal to this crate) ---
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+thiserror = "2"
+anyhow = "1" # error plumbing for the iroh-docs/iroh-blobs durable-trail glue
+tracing = "0.1" # mobile BLE transport diagnostics
+
+# Android needs getrandom's std backend; harmless elsewhere.
+[target.'cfg(target_os = "android")'.dependencies]
+getrandom = { version = "0.2", features = ["std"] }
+blew = "0.3"
+jni = "0.22"
+
+# Vendored experimental BLE transport for iroh (AGPL-3.0-or-later — see
+# third_party/iroh-ble-transport/ and the repo-root THIRD_PARTY_NOTICES.md).
+# Gated to the platforms its `blew` BLE backend supports *and* that this module
+# ships natively (Android + Apple). Keeping it off the host target lets
+# `cargo test` / the `uniffi-bindgen` CLI still build on Windows/Linux, where
+# `blew` refuses to compile. Vendored + ported to iroh 1.0.2 and wired into the
+# endpoint by `LocationNode::start` via `src/ble.rs` (dedup hook + custom
+# transport + address lookup, alongside the N0 IP/relay transports).
+[target.'cfg(any(target_os = "android", target_vendor = "apple"))'.dependencies]
+iroh-ble-transport = { path = "third_party/iroh-ble-transport" }
+# Only needed on the BLE-capable targets: `src/ble.rs` uses it to declare the stable
+# streetCryptid identity GATT service/characteristic UUIDs (the invite-less stranger
+# bootstrap). Resolves to the same uuid 1.x the vendored transport / blew already use.
+uuid = "1"
+
+[dev-dependencies]
+uniffi = { version = "0.31", features = ["tokio", "bindgen-tests"] }
+
+# The uniffi-bindgen CLI used to generate Swift/Kotlin bindings after building.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

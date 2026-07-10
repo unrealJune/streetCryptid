@@ -1,0 +1,7 @@
+{
+  "name": "iroh-location",
+  "version": "0.1.0",
+  "description": "streetCryptid decentralized E2E-encrypted location core (iroh + gossip + per-recipient crypto)",
+  "main": "index.ts",
+  "private": true
+}

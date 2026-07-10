@@ -11,9 +11,18 @@ package-lock.json
 yarn.lock
 pnpm-lock.yaml
 assets/
+.env.example
 
 # design archive (mockups + generated OSM data + renders) — reference only, not app code
 docs/design/
 
 # generated map tile fixtures (binary/base64 blobs)
 src/features/map/tiles/__fixtures__/
+
+# wasm-pack generated glue and binary
+modules/iroh-location/web/
+
+# vendored/generated native sources use their own formatters
+modules/iroh-location/rust/third_party/
+modules/iroh-location/ios/generated/
+modules/iroh-location/android/src/main/java/uniffi/

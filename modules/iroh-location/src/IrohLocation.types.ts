@@ -1,0 +1,340 @@
+/**
+ * JS-facing type contract for the native `IrohLocation` Expo module. These types must
+ * match what the Swift/Kotlin `IrohLocationModule` exposes (see the ios/ + android/
+ * sources). Keys cross the bridge as lowercase hex strings.
+ */
+
+/** A raw location fix as it crosses the native bridge. */
+export interface NativeLocationFix {
+  lat: number;
+  lon: number;
+  accuracyM: number;
+  headingDeg: number;
+  /** ms since epoch */
+  ts: number;
+}
+
+/** Key material returned by `createNode`; persist the secrets in the OS secure store. */
+export interface NodeKeys {
+  /** ed25519 EndpointId (also the envelope `author`). */
+  endpointId: string;
+  /** ed25519 identity secret — persist securely. */
+  identitySecret: string;
+  /** X25519 receiving secret — persist securely. */
+  recvSecret: string;
+  /** X25519 receiving public key — share with friends so they can wrap fixes for you. */
+  recvPublic: string;
+}
+
+export interface OnFixEvent {
+  author: string;
+  seq: number;
+  fix: NativeLocationFix;
+  /**
+   * True when this fix arrived via durable range-reconciliation (iroh-docs catch-up) rather than
+   * the live gossip path — lets the app distinguish backfill from live updates. Absent ⇒ live.
+   */
+  backfill?: boolean;
+}
+
+export interface OnOpaqueEvent {
+  author: string;
+  seq: number;
+}
+
+export interface OnStatusEvent {
+  subscriptionId: string;
+  status: string;
+}
+
+/** Emitted when a durable-trail sync (range reconciliation) starts/completes for an author. */
+export interface OnSyncEvent {
+  author: string;
+  /** e.g. `started` | `completed` | `error`. */
+  status: string;
+  /** How many missed envelopes were pulled (on completion). */
+  recovered?: number;
+}
+
+/** A decrypted fix read back from the local durable replica (see {@link IrohLocationApi.readTrail}). */
+export interface NativeIncomingFix {
+  author: string;
+  seq: number;
+  fix: NativeLocationFix;
+}
+
+// ── Profiles (docs/social/ARCHITECTURE.md §3) ───────────────────────────────────────────────
+
+/**
+ * A verified cryptid profile as surfaced to the app. Already signature- and endpoint-verified
+ * by the native layer, so it can be rendered directly. Byte fields cross the bridge as lowercase
+ * hex strings; `epoch`/`ts` are ms-since-epoch numbers.
+ */
+export interface ProfileView {
+  /** ed25519 EndpointId (hex) of the profile owner. */
+  endpointId: string;
+  /** Monotonic, wall-clock-anchored publish epoch (ms). */
+  epoch: number;
+  handle: string;
+  cryptidName: string;
+  sigil: string;
+  color: string;
+  /** X25519 receiving public key (hex) — used to wrap fixes for this cryptid. */
+  recvPub: string;
+  /** Publish timestamp (ms since epoch). */
+  ts: number;
+}
+
+// ── Bilateral pairing (`streetcryptid/pair/1`) — ARCHITECTURE.md §4 ──────────────────────────
+
+/**
+ * An out-of-band pairing invite carrying only immutable bootstrap material. Byte fields are
+ * lowercase hex; `expiresAtMs` is ms since epoch. Share via {@link PairInviteWithToken.token}.
+ */
+export interface PairInvite {
+  /** Invite wire-format version. */
+  version: number;
+  /** Random invite id (hex, 16 bytes). */
+  inviteId: string;
+  /** Invite secret (hex, 16 bytes). */
+  secret: string;
+  /** Inviter ed25519 EndpointId (hex). */
+  endpointId: string;
+  /** Inviter endpoint ticket (dial hint). */
+  endpointTicket: string;
+  /** Invite expiry (ms since epoch). */
+  expiresAtMs: number;
+}
+
+/** A freshly minted invite plus its opaque, shareable `scpair1:<hex>` token (QR / deep link). */
+export interface PairInviteWithToken extends PairInvite {
+  /** Opaque encoded token (`scpair1:<hex>`) for QR codes / links. */
+  token: string;
+}
+
+/** Coarse pairing session phase (UI-facing). */
+export type PairStateValue =
+  'handshaking' | 'pending' | 'localAccepted' | 'peerAccepted' | 'complete' | 'rejected' | 'failed';
+
+/** A snapshot of a pairing session's state. Byte fields are lowercase hex. */
+export interface PairStateRecord {
+  sessionId: string;
+  peerEndpointId: string;
+  state: PairStateValue;
+  localAccepted: boolean;
+  peerAccepted: boolean;
+  initiator: boolean;
+  /**
+   * Whether this session is an invite-less nearby pair (vs invite-based). Fixed at session
+   * creation and unaffected by later accept/reject decisions.
+   */
+  nearby: boolean;
+}
+
+/** The kind of a polled pairing event. */
+export type PairEventKind =
+  /** A peer wants to pair (or our outbound Hello landed) — prompt the user. */
+  | 'pendingRequest'
+  /** The peer sent their accept/reject. */
+  | 'peerResponded'
+  /** Both sides accepted — call `pairResult`. */
+  | 'ready'
+  /** The session was rejected by either side. */
+  | 'rejected'
+  /** The session failed. */
+  | 'failed';
+
+/** A polled pairing event (node-level queue; see {@link IrohLocationApi.pollPairEvents}). */
+export interface PairEvent {
+  kind: PairEventKind;
+  sessionId: string;
+  peerEndpointId: string;
+  /**
+   * Whether this session is an invite-less nearby pair (vs invite-based). Fixed at session
+   * creation and unaffected by later accept/reject decisions.
+   */
+  nearby: boolean;
+}
+
+/**
+ * The result of a completed (bilaterally-accepted) pair — everything needed to treat the peer as
+ * a friend. Byte fields are lowercase hex; `peerProfile` is `null` until the peer's profile has
+ * replicated.
+ */
+export interface PairResult {
+  sessionId: string;
+  peerEndpointId: string;
+  peerRecvPub: string;
+  peerEndpointTicket: string;
+  peerProfileTicket: string;
+  peerTrailTicket: string;
+  peerProfile: ProfileView | null;
+}
+
+// ── BLE status (Android/Apple only; honest stub elsewhere) — ARCHITECTURE.md §2 ─────────────
+
+/** Honest BLE capability report combined with the app-level pairing-ready gate. */
+export interface BleCapabilities {
+  /** A BLE transport is wired into this node's endpoint on this platform. */
+  available: boolean;
+  /** The transport exposes an active scan on/off toggle. (Always false — not exposed.) */
+  activeScanToggle: boolean;
+  /** The transport surfaces per-peer RSSI / proximity. (Always false — not exposed.) */
+  rssi: boolean;
+  /** The transport exposes an explicit discovery-refresh trigger. (Always false — not exposed.) */
+  discoveryRefresh: boolean;
+  /** App-level acceptance gate for invite-less nearby pairing. */
+  pairingReady: boolean;
+}
+
+/** A nearby BLE peer surfaced by the transport snapshot (no RSSI — the crate discards it). */
+export interface BlePeer {
+  deviceId: string;
+  phase: string;
+  /** Verified ed25519 EndpointId (hex), or `null` before verification. */
+  verifiedEndpointId: string | null;
+  /**
+   * UNTRUSTED dial hint: the peer's full 32-byte EndpointId (hex) read from its identity
+   * characteristic, or `null` until a probe succeeds. Sufficient only to *attempt*
+   * `Endpoint.connect` — iroh TLS and the signed pair protocol still verify the real identity, so
+   * this must never be treated as verified. Distinct from {@link verifiedEndpointId}.
+   */
+  endpointHint: string | null;
+  consecutiveFailures: number;
+  /** How the peer was reached (e.g. `ble` / `ip`), or `null` if unknown. */
+  connectPath: string | null;
+}
+
+/** Event map for the native module's EventEmitter. */
+export type IrohLocationEvents = {
+  onFix: (event: OnFixEvent) => void;
+  onOpaque: (event: OnOpaqueEvent) => void;
+  onStatus: (event: OnStatusEvent) => void;
+  onSync: (event: OnSyncEvent) => void;
+};
+
+/** The callable surface of the native module. */
+export interface IrohLocationApi {
+  /**
+   * Create (or restore) the device node. Pass `null` to generate fresh keys; then
+   * persist the returned secrets. Returns the stable ids + key material.
+   */
+  createNode(identitySecretHex: string | null, recvSecretHex: string | null): Promise<NodeKeys>;
+  /** Bind the iroh endpoint + spawn the gossip router. Idempotent. */
+  start(): Promise<void>;
+  /** Drop subscriptions and release the native endpoint/router. */
+  shutdown(): Promise<void>;
+  /** A shareable endpoint ticket (dialing info) for the contact card / bootstrap. */
+  ticket(): Promise<string>;
+  /** Derive the gossip topic (hex) for a given author's location stream. */
+  deriveTopic(authorEndpointIdHex: string): Promise<string>;
+  /** Join a topic; returns a subscription id. Inbound fixes arrive via `onFix`. */
+  subscribe(topicHex: string, bootstrapTickets: string[]): Promise<string>;
+  /** Seal `fix` for `recipientsHex` (X25519 pubkeys) and broadcast on the topic. */
+  publish(
+    subscriptionId: string,
+    seq: number,
+    epoch: number,
+    fix: NativeLocationFix,
+    recipientsHex: string[]
+  ): Promise<void>;
+  /** Leave a topic. */
+  unsubscribe(subscriptionId: string): Promise<void>;
+
+  // ── Durable trail (iroh-docs) — see docs/social/ARCHITECTURE.md §5–6, §9 ────────────────────
+  /**
+   * Seal `fix` for `recipientsHex` and write it to OUR docs namespace under `author/seq`, mirroring
+   * the gossip broadcast. Same sealed bytes as {@link publish}, so per-recipient revocation carries
+   * over (a dropped recipient replicates ciphertext it can't open). Typically called alongside
+   * `publish` for every fix. `subscriptionId` ties the write to our own topic/namespace.
+   */
+  docsWrite(
+    subscriptionId: string,
+    seq: number,
+    epoch: number,
+    fix: NativeLocationFix,
+    recipientsHex: string[]
+  ): Promise<void>;
+  /**
+   * Kick off range-based set reconciliation to recover envelopes we missed while offline. Recovered
+   * fixes we can decrypt arrive as `onFix` with `backfill: true`; progress via `onSync`. `sinceTs`
+   * bounds how far back to reconcile (0 = full window).
+   */
+  syncTrail(sinceTs: number): Promise<void>;
+  /** Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >= sinceTs`. */
+  readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]>;
+  /** Drop durable entries older than `olderThanTs` (rolling-window retention, ARCHITECTURE §5). */
+  pruneTrail(olderThanTs: number): Promise<void>;
+  /**
+   * A shareable docs **read-ticket** granting replication of our trail namespace — the swarm-join
+   * half of a grant (the decrypt half is registering the friend's recvPub). Goes in the contact card.
+   */
+  docTicket(): Promise<string>;
+  /**
+   * Import a friend's docs read-ticket (their card's `docTicket`) so we replicate their trail
+   * namespace and can recover their missed fixes via {@link syncTrail}. Grants replication only;
+   * reading still needs our per-recipient wrap in each envelope. See ARCHITECTURE §6.
+   */
+  importDocTicket(ticket: string): Promise<void>;
+
+  // ── Profiles — see docs/social/ARCHITECTURE.md §3 ──────────────────────────────────────────
+  /**
+   * Sign + publish our profile to the dedicated profile namespace. Returns the new monotonic,
+   * wall-clock-anchored epoch (ms).
+   */
+  publishProfile(
+    handle: string,
+    cryptidName: string,
+    sigil: string,
+    color: string
+  ): Promise<number>;
+  /** A shareable **read**-ticket for our profile namespace (also exchanged inside a pairing Accept). */
+  profileTicket(): Promise<string>;
+  /** Import a friend's profile read-ticket and begin replicating + live-syncing their profile. */
+  importProfileTicket(ticket: string): Promise<void>;
+  /** Read the newest verified profile for `endpointIdHex` (self or friend), or `null` if absent. */
+  readProfile(endpointIdHex: string): Promise<ProfileView | null>;
+  /** Drain profile-update events surfaced by docs live-sync since the last poll. */
+  pollProfileEvents(): Promise<ProfileView[]>;
+
+  // ── Bilateral pairing (`streetcryptid/pair/1`) — ARCHITECTURE.md §4 ─────────────────────────
+  /** Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. */
+  setPairingReady(ready: boolean): Promise<void>;
+  /** Whether invite-less nearby pairing is currently accepted. */
+  pairingReady(): Promise<boolean>;
+  /**
+   * Mint a one-shot, time-limited invite carrying only immutable bootstrap material. Returns the
+   * invite fields plus the opaque `scpair1:<hex>` {@link PairInviteWithToken.token} for QR / links.
+   */
+  createPairInvite(ttlSecs: number): Promise<PairInviteWithToken>;
+  /** Begin an invite-based pair from a decoded {@link PairInvite}. Returns the session id (hex). */
+  initiatePair(invite: PairInvite): Promise<string>;
+  /** Begin an invite-based pair from an opaque `scpair1:<hex>` token. Returns the session id (hex). */
+  initiatePairByToken(token: string): Promise<string>;
+  /** Begin an invite-less **nearby** pair with a BLE-discovered peer. Returns the session id (hex). */
+  initiatePairNearby(peerEndpointIdHex: string): Promise<string>;
+  /** Accept or reject a pending pairing session. A result is emitted only after BOTH sides accept. */
+  respondPair(sessionIdHex: string, accept: boolean): Promise<void>;
+  /** Drain pairing events (pending requests, peer responses, ready, rejects) since the last poll. */
+  pollPairEvents(): Promise<PairEvent[]>;
+  /** Inspect a single session's current state, or `null` if unknown. */
+  pairState(sessionIdHex: string): Promise<PairStateRecord | null>;
+  /** List all known pairing sessions. */
+  listPairSessions(): Promise<PairStateRecord[]>;
+  /** The completed-pair result for a session (enriched with the peer's profile), or `null`. */
+  pairResult(sessionIdHex: string): Promise<PairResult | null>;
+  /** Encode a {@link PairInvite} into an opaque `scpair1:<hex>` token for QR / links. */
+  encodePairInvite(invite: PairInvite): Promise<string>;
+  /** Decode an opaque `scpair1:<hex>` token back into a {@link PairInvite}. */
+  decodePairInvite(token: string): Promise<PairInvite>;
+
+  // ── BLE status (Android/Apple only; honest stub elsewhere) — ARCHITECTURE.md §2 ────────────
+  /** Whether a BLE transport is wired into this node's endpoint on this platform. */
+  bleAvailable(): Promise<boolean>;
+  /** Honest BLE capability report combined with the app-level pairing-ready gate. */
+  bleCapabilities(): Promise<BleCapabilities>;
+  /** Snapshot of nearby BLE peers surfaced by the transport (empty on host / when unavailable). */
+  nearbyBlePeers(): Promise<BlePeer[]>;
+  /** Passive proximity hint: has this peer's BLE advertisement been seen this session? */
+  bleHasScanHint(endpointIdHex: string): Promise<boolean>;
+}
