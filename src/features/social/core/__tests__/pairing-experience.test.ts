@@ -97,6 +97,25 @@ describe('pairing experience', () => {
     ).toBe('discovered');
   });
 
+  it('stops a nearby pairing experience when its motion window ends', () => {
+    expect(
+      derivePairingExperienceStage({
+        gestureActive: false,
+        nearbyPeers: [peer],
+        sessions: [session('handshaking')],
+        discoveredFriend: null,
+      })
+    ).toBe('idle');
+    expect(
+      derivePairingExperienceStage({
+        gestureActive: false,
+        nearbyPeers: [peer],
+        sessions: [session('verifying')],
+        discoveredFriend: null,
+      })
+    ).toBe('idle');
+  });
+
   it('accelerates haptic cadence as pairing advances', () => {
     const seeking = pairingHapticCadence('seeking');
     const handshake = pairingHapticCadence('handshaking');

@@ -21,10 +21,12 @@ export function derivePairingExperienceStage(
   input: PairingExperienceInput
 ): PairingExperienceStage {
   if (input.discoveredFriend) return 'discovered';
+  const verificationSessions = input.sessions.filter((session) =>
+    ['verifying', 'localAccepted', 'peerAccepted'].includes(session.state)
+  );
   if (
-    input.sessions.some((session) =>
-      ['verifying', 'localAccepted', 'peerAccepted'].includes(session.state)
-    )
+    verificationSessions.some((session) => !session.nearby) ||
+    (input.gestureActive && verificationSessions.length > 0)
   ) {
     return 'verifying';
   }
@@ -33,6 +35,7 @@ export function derivePairingExperienceStage(
     (session) => session.nearby && !['rejected', 'failed'].includes(session.state)
   );
   if (activeNearby) {
+    if (!input.gestureActive) return 'idle';
     return activeNearby.state === 'complete' ? 'joining' : 'handshaking';
   }
 
