@@ -560,6 +560,7 @@ const styles = StyleSheet.create({
 });
 
 function buildTrail(points: readonly ScreenPoint[], color: string) {
+  if (points.length === 0) return null;
   const path = Skia.Path.Make();
   path.moveTo(points[0][0], points[0][1]);
   for (const point of points.slice(1)) path.lineTo(point[0], point[1]);
