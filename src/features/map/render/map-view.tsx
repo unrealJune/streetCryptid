@@ -266,15 +266,7 @@ export function MapView({
     );
     if (points.length === 0) return null;
     return buildTrail(points, friend.color);
-  }, [
-    anchor,
-    friends,
-    selectedFriendId,
-    selfHistory,
-    selfSelected,
-    theme.canvas.accent,
-    viewport,
-  ]);
+  }, [anchor, friends, selectedFriendId, selfHistory, selfSelected, theme.canvas.accent, viewport]);
   useEffect(() => {
     const path = selectedTrail?.path;
     return () => path?.dispose();

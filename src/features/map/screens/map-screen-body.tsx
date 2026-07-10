@@ -115,8 +115,7 @@ export default function MapScreenBody() {
       latestTs: selfFix.ts,
     };
   }, [profile, selfFix, selfHistory, theme.canvas.accent]);
-  const selectedHistory =
-    selectedEndpoint === SELF_AUTHOR ? selfMapLocation : selectedFriend;
+  const selectedHistory = selectedEndpoint === SELF_AUTHOR ? selfMapLocation : selectedFriend;
 
   const closeHistory = useCallback(() => {
     setSelection((current) => ({ ...current, selectedId: null }));
