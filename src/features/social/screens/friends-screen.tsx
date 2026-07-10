@@ -276,10 +276,9 @@ export default function FriendsScreen() {
             initialProfile={profile}
             mode="edit"
             notice={account.error}
-            onCancel={() => setEditingIdentity(false)}
+            onDone={() => setEditingIdentity(false)}
             onSave={async (nextProfile) => {
               await account.saveProfile(nextProfile);
-              setEditingIdentity(false);
             }}
           />
         ) : null}
