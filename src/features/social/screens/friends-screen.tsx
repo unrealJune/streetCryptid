@@ -1,6 +1,8 @@
-import { useFocusEffect, useIsFocused, useLocalSearchParams, useRouter } from 'expo-router';
+import { useIsFocused, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AppState,
+  type AppStateStatus,
   Linking,
   Modal,
   Pressable,
@@ -36,6 +38,8 @@ export default function FriendsScreen() {
   const account = useCryptidProfile();
   const { profile } = account;
   const isFocused = useIsFocused();
+  const [appState, setAppState] = useState<AppStateStatus>(AppState.currentState);
+  const isInteractive = isFocused && appState === 'active';
   const router = useRouter();
   const params = useLocalSearchParams<{ token?: string | string[] }>();
   const handledPairToken = useRef<string | null>(null);
@@ -65,25 +69,32 @@ export default function FriendsScreen() {
     rejectDiscoveredFriend,
   } = useLocationSharing();
 
-  useFocusEffect(
-    useCallback(() => {
-      if (!snapshot?.ready) return;
-      void setPairingReady(true);
-      void refreshPairing();
-      return () => {
-        void setPairingReady(false);
-      };
-    }, [refreshPairing, setPairingReady, snapshot?.ready])
-  );
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', setAppState);
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    if (!snapshot?.ready) return;
+    if (!isInteractive) {
+      void setPairingReady(false);
+      return;
+    }
+    void setPairingReady(true);
+    void refreshPairing();
+    return () => {
+      void setPairingReady(false);
+    };
+  }, [isInteractive, refreshPairing, setPairingReady, snapshot?.ready]);
 
   const onRub = useCallback(async () => {
     await beginNearbyGesture();
   }, [beginNearbyGesture]);
   const rub = useRubToPair(
-    isFocused && Boolean(pairing?.available) && !pairing?.discoveredFriend,
+    isInteractive && Boolean(pairing?.available) && !pairing?.discoveredFriend,
     onRub
   );
-  usePairingHaptics(pairing, isFocused);
+  usePairingHaptics(pairing, isInteractive);
 
   useEffect(() => {
     const token = Array.isArray(params.token) ? params.token[0] : params.token;
