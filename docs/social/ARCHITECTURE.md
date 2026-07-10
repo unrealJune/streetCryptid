@@ -210,15 +210,27 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
 Friendship is established over a dedicated authenticated iroh protocol:
 
 ```
-ALPN: streetcryptid/pair/1
+ALPN: streetcryptid/pair/2 (wire v2)
 
 invite / BLE discovery
         │
         ▼
-signed Hello (EndpointId + recvPub)
+signed Hello (EndpointId + recvPub + nonce commitment)
         │
-        ├── local Accept / Reject
-        └── peer Accept / Reject
+        ▼
+signed Reveal (fresh nonce)
+        │
+        ▼
+verify commitment + derive transcript-bound visual SAS
+        │
+        ├── one phone displays the target ASCII figure
+        └── the other chooses it from four shuffled figures
+                 │
+                 ▼
+picker chooses correctly + displayer confirms the person matched
+                 │
+                 ▼
+each human action latches that side's signed Accept
                  │
                  ▼
           both accepted only
@@ -231,9 +243,26 @@ signed Hello (EndpointId + recvPub)
   ed25519 key behind the sender's `EndpointId`.
 - The asserted endpoint is also pinned to the authenticated iroh connection, permanently binding
   the separately generated X25519 receiving key to that endpoint.
-- Pairing is bilateral and idempotent. A friend enters the local pool only after both devices
-  accept, and the completed friendship enables reciprocal location sharing by default. Either
-  person can pause their outbound grant from the friend's profile.
+- After a session is established, every reveal and decision is additionally pinned to that
+  session's peer endpoint; knowing a session id cannot be used to inject a reject or substitute
+  capability tickets from another authenticated endpoint.
+- Pairing protocol v2 adds a mandatory visual Short Authentication String (SAS). Each side commits
+  to a fresh 32-byte nonce before either nonce is revealed, preventing a responder from choosing
+  its nonce after seeing the peer's value. The symmetric BLAKE3 transcript includes the protocol
+  version, session id, and both canonically ordered endpoint ids, receiving keys, and nonces.
+- The transcript deterministically assigns complementary roles and selects one of 256 stable ASCII
+  figures. The picker receives four distinct, shuffled options; the displayer sees the target.
+  The correct choice never crosses the wire.
+- The automatic commit/reveal exchange must reach the visual gate within 60 seconds. Once it does,
+  both people have 60 seconds to act: the picker chooses the matching figure and the displayer
+  confirms that the other person chose it. A wrong choice, negative confirmation, cancellation,
+  timeout, or invalid reveal is terminal; retrying requires a fresh session.
+- Pairing is bilateral and idempotent. A friend enters the local pool only after both human-gated
+  `Accept` decisions, and only then does the app create reciprocal location grants. Either person
+  can later pause their outbound grant from the friend's profile.
+- Protocol v1 peers are intentionally incompatible and fail closed instead of bypassing the SAS
+  gate. The 256-entry UI catalog in `pairing-figures.ts` is part of protocol v2 and must remain
+  index-stable.
 - New pair links contain only a random invite id/secret, endpoint id, endpoint ticket, version, and
   expiry. Mutable profile data and docs capabilities travel over the authenticated iroh channel.
 - Legacy `streetcryptid://contact?…` cards remain importable as one-way contacts.
@@ -266,14 +295,16 @@ The Friends tab is the pairing surface; there is no separate pairing mode.
 - While Friends is focused, the app enables invite-less nearby pairing and listens to the
   accelerometer. A short repeated circling/rub gesture opens a nine-second local consent window.
   Pairing starts automatically when exactly one verified BLE endpoint is visible.
-- Nearby consent is mutual and buttonless. An inbound invite-less request is auto-accepted only
-  while this phone's rub window is active; invite/code requests never inherit gesture consent.
-  Multiple visible peers remain ambiguous and do not auto-pair.
-- Haptics accelerate from soft search ticks through contact and key exchange. Completion produces
-  a heavy success "pop" followed by a full-screen `CRYPTID DISCOVERED` ASCII-art dance. The reveal
-  stays open until the user explicitly acknowledges the new friend or rejects them; rejection
-  revokes sharing and removes the friend. An acknowledged friend appears on the map as soon as
-  their first encrypted fix arrives.
+- Nearby initiation is mutual and buttonless. An inbound invite-less request advances only while
+  this phone's rub window is active; invite/code requests never inherit gesture consent. Multiple
+  visible peers remain ambiguous and do not start pairing.
+- Transport discovery never grants friendship. After key exchange, the inline visual check
+  requires the picker and displayer actions described in §9a before either side accepts.
+- Haptics accelerate from soft search ticks through contact and key exchange, then settle while
+  both people compare the figure. Verified completion produces a heavy success "pop" followed by a
+  full-screen `CRYPTID DISCOVERED` ASCII-art dance. The reveal stays open until the user explicitly
+  acknowledges the new friend or rejects them; rejection revokes sharing and removes the friend.
+  An acknowledged friend appears on the map as soon as their first encrypted fix arrives.
 - The current transport exposes neither RSSI nor an active scan toggle. BLE scans continuously
   while the native endpoint is alive, so motion is a consent/selection gesture rather than a radio
   security boundary.
@@ -284,6 +315,9 @@ The Friends tab is the pairing surface; there is no separate pairing mode.
 
 - A shareable `streetcryptid://social?token=scpair1:…` link opens the existing Friends route and
   carries the opaque native invite directly. Legacy `/pair` links remain decodable.
+- Remote pairing still requires both people to compare the ASCII challenge over a trusted voice or
+  video call. Possession of a link/code starts the authenticated transport exchange; it does not
+  replace the human identity check.
 - A typed code is an 80-bit Crockford Base32 secret displayed as
   `XXXX-XXXX-XXXX-XXXX`. On-device code derivation produces:
   - a 32-hex-character mailbox lookup id; and
@@ -315,7 +349,12 @@ The Friends tab is the pairing surface; there is no separate pairing mode.
 - **Mailbox operator:** sees random lookup ids, ciphertext sizes and request timing, but cannot
   decrypt an invite. Codes are one-time, rate-limited, and short-lived.
 - **Nearby attacker:** BLE proximity and motion are not trusted. Pairing messages remain bound to
-  authenticated iroh endpoint identities and bilateral consent.
+  authenticated iroh endpoint identities, and friendship remains blocked on the mandatory mutual
+  visual SAS check.
+- **Active relay / wrong person:** the commit/reveal transcript prevents adaptive SAS grinding, and
+  both roles require a human action. Security depends on the people comparing the actual screens
+  in person or over a trusted voice/video channel; blindly approving a relayed figure defeats that
+  human check.
 - **Compromised device:** exposes that device's keys + already-decrypted trail; out of
   scope to mitigate beyond OS secure-store storage. Multi-device revocation is future
   work.

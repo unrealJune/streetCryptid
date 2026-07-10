@@ -41,7 +41,7 @@ use ble::BleHandle;
 use docs::{TrailDocs, TrailFix, TrailSink};
 use pairing::{
     InviteData, PairCore, PairNotice, PairPhase, PairProtocol, PairResultData, PairSignal,
-    PairStateData,
+    PairStateData, SasChallengeData, SasRole,
 };
 use profile::{ProfileDocs, ProfileFields, ProfileRecord, ProfileSink};
 
@@ -198,6 +198,9 @@ pub struct PairInvite {
 pub enum PairState {
     Handshaking,
     Pending,
+    /// The SAS nonces are revealed + verified; both humans must clear the visual gate. No
+    /// `PairResult` is reachable from here.
+    Verifying,
     LocalAccepted,
     PeerAccepted,
     Complete,
@@ -217,6 +220,31 @@ pub struct PairStateRecord {
     /// Whether this session is an invite-less nearby pair (vs invite-based). Fixed at session
     /// creation and unaffected by later accept/reject decisions.
     pub nearby: bool,
+    /// Whether the peer's SAS reveal verified (the visual gate is ready/underway).
+    pub sas_verified: bool,
+    /// Whether this side's human cleared the SAS gate (required before any local accept).
+    pub local_sas_confirmed: bool,
+}
+
+/// The deterministic SAS role for this side, derived from the pairing transcript.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum SasRoleKind {
+    /// Show the target figure and confirm the other human matched it.
+    Displayer,
+    /// Choose the matching figure among the options.
+    Picker,
+}
+
+/// The per-session Short Authentication String challenge shown while a pair is `Verifying`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct SasChallenge {
+    pub role: SasRoleKind,
+    /// Correct figure index (displayer shows it; picker must match it). Never sent on the wire.
+    pub target_index: u32,
+    /// The picker's shuffled figure indices (includes the target). Empty is never produced.
+    pub option_indices: Vec<u32>,
+    /// Absolute wall-clock deadline (ms since epoch). Actions after this are terminal.
+    pub deadline_ms: u64,
 }
 
 /// The kind of a polled pairing event.
@@ -224,13 +252,15 @@ pub struct PairStateRecord {
 pub enum PairEventKind {
     /// A peer wants to pair (or our outbound Hello landed) — prompt the user.
     PendingRequest,
+    /// The SAS visual gate is ready — fetch `pair_sas_challenge` and show it.
+    Verifying,
     /// The peer sent their accept/reject.
     PeerResponded,
     /// Both sides accepted — call `pair_result`.
     Ready,
     /// The session was rejected by either side.
     Rejected,
-    /// The session failed.
+    /// The session failed (SAS mismatch/cancel/timeout or a protocol error).
     Failed,
 }
 
@@ -899,8 +929,12 @@ impl LocationNode {
         Ok(sid.to_vec())
     }
 
-    /// Accept or reject a pending pairing session. A friendship result is emitted only after
-    /// BOTH sides accept — poll for a `Ready` event, then call [`pair_result`](Self::pair_result).
+    /// Accept or reject a pending pairing session. `accept == true` **requires the local SAS
+    /// visual check to be confirmed first** (via [`submit_pair_choice`](Self::submit_pair_choice)
+    /// or [`confirm_pair_display`](Self::confirm_pair_display)); otherwise it errors, which closes
+    /// the door on legacy/premature acceptance. `accept == false` is a cancel/reject path. A
+    /// friendship result is emitted only after BOTH sides accept — poll for a `Ready` event, then
+    /// call [`pair_result`](Self::pair_result).
     pub async fn respond_pair(
         &self,
         session_id: Vec<u8>,
@@ -909,6 +943,61 @@ impl LocationNode {
         let sid = session_id_arr(&session_id)?;
         self.pair
             .respond(&sid, accept)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// The active SAS visual challenge for a session, or `None` if the gate isn't live (not yet
+    /// verified, complete/terminal, or expired). It remains available after an on-time local
+    /// confirmation so the UI can show that this phone is waiting for its peer.
+    pub async fn pair_sas_challenge(
+        &self,
+        session_id: Vec<u8>,
+    ) -> Result<Option<SasChallenge>, LocationError> {
+        let sid = session_id_arr(&session_id)?;
+        Ok(self
+            .pair
+            .sas_challenge(&sid)
+            .await
+            .as_ref()
+            .map(sas_challenge))
+    }
+
+    /// Picker action: submit the chosen figure index. A correct choice latches the local SAS and
+    /// sends `Accept`; a wrong / late choice is terminal (no retry in the same session).
+    pub async fn submit_pair_choice(
+        &self,
+        session_id: Vec<u8>,
+        chosen_index: u32,
+    ) -> Result<(), LocationError> {
+        let sid = session_id_arr(&session_id)?;
+        let choice = u16::try_from(chosen_index)
+            .map_err(|_| LocationError::Decode("chosen index out of range".into()))?;
+        self.pair
+            .submit_sas_choice(&sid, choice)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// Displayer action: confirm whether the other human matched the shown figure. `true` latches
+    /// the local SAS and sends `Accept`; `false` (or a late action) is terminal.
+    pub async fn confirm_pair_display(
+        &self,
+        session_id: Vec<u8>,
+        matched: bool,
+    ) -> Result<(), LocationError> {
+        let sid = session_id_arr(&session_id)?;
+        self.pair
+            .confirm_sas_display(&sid, matched)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
+    pub async fn cancel_pair(&self, session_id: Vec<u8>) -> Result<(), LocationError> {
+        let sid = session_id_arr(&session_id)?;
+        self.pair
+            .cancel_sas(&sid)
             .await
             .map_err(|e| LocationError::Network(e.to_string()))
     }
@@ -1073,6 +1162,7 @@ fn phase_to_state(p: PairPhase) -> PairState {
     match p {
         PairPhase::Handshaking => PairState::Handshaking,
         PairPhase::Pending => PairState::Pending,
+        PairPhase::Verifying => PairState::Verifying,
         PairPhase::LocalAccepted => PairState::LocalAccepted,
         PairPhase::PeerAccepted => PairState::PeerAccepted,
         PairPhase::Complete => PairState::Complete,
@@ -1084,6 +1174,7 @@ fn phase_to_state(p: PairPhase) -> PairState {
 fn signal_to_kind(s: PairSignal) -> PairEventKind {
     match s {
         PairSignal::PendingRequest => PairEventKind::PendingRequest,
+        PairSignal::Verifying => PairEventKind::Verifying,
         PairSignal::PeerResponded => PairEventKind::PeerResponded,
         PairSignal::Ready => PairEventKind::Ready,
         PairSignal::Rejected => PairEventKind::Rejected,
@@ -1100,6 +1191,20 @@ fn state_record(d: &PairStateData) -> PairStateRecord {
         peer_accepted: d.peer_accepted,
         initiator: d.initiator,
         nearby: d.nearby,
+        sas_verified: d.sas_verified,
+        local_sas_confirmed: d.local_sas_confirmed,
+    }
+}
+
+fn sas_challenge(c: &SasChallengeData) -> SasChallenge {
+    SasChallenge {
+        role: match c.role {
+            SasRole::Displayer => SasRoleKind::Displayer,
+            SasRole::Picker => SasRoleKind::Picker,
+        },
+        target_index: c.target_index as u32,
+        option_indices: c.option_indices.iter().map(|i| *i as u32).collect(),
+        deadline_ms: c.deadline_ms,
     }
 }
 

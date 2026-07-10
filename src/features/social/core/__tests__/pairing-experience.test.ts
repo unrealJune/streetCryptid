@@ -21,6 +21,8 @@ function session(state: PairStateRecord['state']): PairStateRecord {
     peerAccepted: state === 'peerAccepted',
     initiator: true,
     nearby: true,
+    sasVerified: ['verifying', 'localAccepted', 'peerAccepted', 'complete'].includes(state),
+    localSasConfirmed: ['localAccepted', 'complete'].includes(state),
   };
 }
 
@@ -33,7 +35,7 @@ const friend: Friend = {
 };
 
 describe('pairing experience', () => {
-  it('progresses from seeking to contact to handshake to joining', () => {
+  it('stays calm through mutual verification, then joins', () => {
     expect(
       derivePairingExperienceStage({
         gestureActive: true,
@@ -62,7 +64,23 @@ describe('pairing experience', () => {
       derivePairingExperienceStage({
         gestureActive: true,
         nearbyPeers: [peer],
+        sessions: [session('verifying')],
+        discoveredFriend: null,
+      })
+    ).toBe('verifying');
+    expect(
+      derivePairingExperienceStage({
+        gestureActive: true,
+        nearbyPeers: [peer],
         sessions: [session('peerAccepted')],
+        discoveredFriend: null,
+      })
+    ).toBe('verifying');
+    expect(
+      derivePairingExperienceStage({
+        gestureActive: true,
+        nearbyPeers: [peer],
+        sessions: [session('complete')],
         discoveredFriend: null,
       })
     ).toBe('joining');
@@ -82,8 +100,10 @@ describe('pairing experience', () => {
   it('accelerates haptic cadence as pairing advances', () => {
     const seeking = pairingHapticCadence('seeking');
     const handshake = pairingHapticCadence('handshaking');
+    const verifying = pairingHapticCadence('verifying');
     const joining = pairingHapticCadence('joining');
     expect(seeking?.delayMs).toBeGreaterThan(handshake?.delayMs ?? 0);
+    expect(verifying?.delayMs).toBeGreaterThan(handshake?.delayMs ?? 0);
     expect(handshake?.delayMs).toBeGreaterThan(joining?.delayMs ?? 0);
     expect(pairingHapticCadence('idle')).toBeNull();
   });

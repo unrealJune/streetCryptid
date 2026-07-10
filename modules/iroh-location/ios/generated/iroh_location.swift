@@ -955,6 +955,17 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func bleHasScanHint(endpointId: Data) async  -> Bool
     
     /**
+     * Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
+     */
+    func cancelPair(sessionId: Data) async throws 
+    
+    /**
+     * Displayer action: confirm whether the other human matched the shown figure. `true` latches
+     * the local SAS and sends `Accept`; `false` (or a late action) is terminal.
+     */
+    func confirmPairDisplay(sessionId: Data, matched: Bool) async throws 
+    
+    /**
      * Mint a one-shot, time-limited invite carrying only immutable bootstrap material.
      */
     func createInvite(ttlSecs: UInt64) async throws  -> PairInvite
@@ -1035,6 +1046,12 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func pairResult(sessionId: Data) async throws  -> PairResult?
     
     /**
+     * The active SAS visual challenge for a session, or `None` if the gate isn't live (not yet
+     * `Verifying`, already decided/terminal, or expired).
+     */
+    func pairSasChallenge(sessionId: Data) async throws  -> SasChallenge?
+    
+    /**
      * Inspect a single session's current state, or `None` if unknown.
      */
     func pairState(sessionId: Data) async throws  -> PairStateRecord?
@@ -1097,8 +1114,12 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func recvSecret()  -> Data
     
     /**
-     * Accept or reject a pending pairing session. A friendship result is emitted only after
-     * BOTH sides accept — poll for a `Ready` event, then call [`pair_result`](Self::pair_result).
+     * Accept or reject a pending pairing session. `accept == true` **requires the local SAS
+     * visual check to be confirmed first** (via [`submit_pair_choice`](Self::submit_pair_choice)
+     * or [`confirm_pair_display`](Self::confirm_pair_display)); otherwise it errors, which closes
+     * the door on legacy/premature acceptance. `accept == false` is a cancel/reject path. A
+     * friendship result is emitted only after BOTH sides accept — poll for a `Ready` event, then
+     * call [`pair_result`](Self::pair_result).
      */
     func respondPair(sessionId: Data, accept: Bool) async throws 
     
@@ -1117,6 +1138,12 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * Bind the iroh endpoint + spawn the gossip router. Idempotent.
      */
     func start(relayUrls: [String], relayAuthToken: String) async throws 
+    
+    /**
+     * Picker action: submit the chosen figure index. A correct choice latches the local SAS and
+     * sends `Accept`; a wrong / late choice is terminal (no retry in the same session).
+     */
+    func submitPairChoice(sessionId: Data, chosenIndex: UInt32) async throws 
     
     /**
      * Subscribe to a topic and start forwarding decrypted fixes to `listener`.
@@ -1273,6 +1300,47 @@ open func bleHasScanHint(endpointId: Data)async  -> Bool  {
             liftFunc: FfiConverterBool.lift,
             errorHandler: nil
             
+        )
+}
+    
+    /**
+     * Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
+     */
+open func cancelPair(sessionId: Data)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_cancel_pair(
+                    self.uniffiCloneHandle(),
+                    FfiConverterData.lower(sessionId)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Displayer action: confirm whether the other human matched the shown figure. `true` latches
+     * the local SAS and sends `Accept`; `false` (or a late action) is terminal.
+     */
+open func confirmPairDisplay(sessionId: Data, matched: Bool)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_confirm_pair_display(
+                    self.uniffiCloneHandle(),
+                    FfiConverterData.lower(sessionId),FfiConverterBool.lower(matched)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
         )
 }
     
@@ -1536,6 +1604,27 @@ open func pairResult(sessionId: Data)async throws  -> PairResult?  {
 }
     
     /**
+     * The active SAS visual challenge for a session, or `None` if the gate isn't live (not yet
+     * `Verifying`, already decided/terminal, or expired).
+     */
+open func pairSasChallenge(sessionId: Data)async throws  -> SasChallenge?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_pair_sas_challenge(
+                    self.uniffiCloneHandle(),
+                    FfiConverterData.lower(sessionId)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeSasChallenge.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Inspect a single session's current state, or `None` if unknown.
      */
 open func pairState(sessionId: Data)async throws  -> PairStateRecord?  {
@@ -1738,8 +1827,12 @@ open func recvSecret() -> Data  {
 }
     
     /**
-     * Accept or reject a pending pairing session. A friendship result is emitted only after
-     * BOTH sides accept — poll for a `Ready` event, then call [`pair_result`](Self::pair_result).
+     * Accept or reject a pending pairing session. `accept == true` **requires the local SAS
+     * visual check to be confirmed first** (via [`submit_pair_choice`](Self::submit_pair_choice)
+     * or [`confirm_pair_display`](Self::confirm_pair_display)); otherwise it errors, which closes
+     * the door on legacy/premature acceptance. `accept == false` is a cancel/reject path. A
+     * friendship result is emitted only after BOTH sides accept — poll for a `Ready` event, then
+     * call [`pair_result`](Self::pair_result).
      */
 open func respondPair(sessionId: Data, accept: Bool)async throws   {
     return
@@ -1800,6 +1893,27 @@ open func start(relayUrls: [String], relayAuthToken: String)async throws   {
                 uniffi_iroh_location_fn_method_locationnode_start(
                     self.uniffiCloneHandle(),
                     FfiConverterSequenceString.lower(relayUrls),FfiConverterString.lower(relayAuthToken)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Picker action: submit the chosen figure index. A correct choice latches the local SAS and
+     * sends `Accept`; a wrong / late choice is terminal (no retry in the same session).
+     */
+open func submitPairChoice(sessionId: Data, chosenIndex: UInt32)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_submit_pair_choice(
+                    self.uniffiCloneHandle(),
+                    FfiConverterData.lower(sessionId),FfiConverterUInt32.lower(chosenIndex)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -2590,6 +2704,14 @@ public struct PairStateRecord: Equatable, Hashable {
      * creation and unaffected by later accept/reject decisions.
      */
     public var nearby: Bool
+    /**
+     * Whether the peer's SAS reveal verified (the visual gate is ready/underway).
+     */
+    public var sasVerified: Bool
+    /**
+     * Whether this side's human cleared the SAS gate (required before any local accept).
+     */
+    public var localSasConfirmed: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2597,7 +2719,13 @@ public struct PairStateRecord: Equatable, Hashable {
         /**
          * Whether this session is an invite-less nearby pair (vs invite-based). Fixed at session
          * creation and unaffected by later accept/reject decisions.
-         */nearby: Bool) {
+         */nearby: Bool, 
+        /**
+         * Whether the peer's SAS reveal verified (the visual gate is ready/underway).
+         */sasVerified: Bool, 
+        /**
+         * Whether this side's human cleared the SAS gate (required before any local accept).
+         */localSasConfirmed: Bool) {
         self.sessionId = sessionId
         self.peerEndpointId = peerEndpointId
         self.state = state
@@ -2605,6 +2733,8 @@ public struct PairStateRecord: Equatable, Hashable {
         self.peerAccepted = peerAccepted
         self.initiator = initiator
         self.nearby = nearby
+        self.sasVerified = sasVerified
+        self.localSasConfirmed = localSasConfirmed
     }
 
     
@@ -2629,7 +2759,9 @@ public struct FfiConverterTypePairStateRecord: FfiConverterRustBuffer {
                 localAccepted: FfiConverterBool.read(from: &buf), 
                 peerAccepted: FfiConverterBool.read(from: &buf), 
                 initiator: FfiConverterBool.read(from: &buf), 
-                nearby: FfiConverterBool.read(from: &buf)
+                nearby: FfiConverterBool.read(from: &buf), 
+                sasVerified: FfiConverterBool.read(from: &buf), 
+                localSasConfirmed: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -2641,6 +2773,8 @@ public struct FfiConverterTypePairStateRecord: FfiConverterRustBuffer {
         FfiConverterBool.write(value.peerAccepted, into: &buf)
         FfiConverterBool.write(value.initiator, into: &buf)
         FfiConverterBool.write(value.nearby, into: &buf)
+        FfiConverterBool.write(value.sasVerified, into: &buf)
+        FfiConverterBool.write(value.localSasConfirmed, into: &buf)
     }
 }
 
@@ -2739,6 +2873,89 @@ public func FfiConverterTypeProfileView_lift(_ buf: RustBuffer) throws -> Profil
 #endif
 public func FfiConverterTypeProfileView_lower(_ value: ProfileView) -> RustBuffer {
     return FfiConverterTypeProfileView.lower(value)
+}
+
+
+/**
+ * The per-session Short Authentication String challenge shown while a pair is `Verifying`.
+ */
+public struct SasChallenge: Equatable, Hashable {
+    public var role: SasRoleKind
+    /**
+     * Correct figure index (displayer shows it; picker must match it). Never sent on the wire.
+     */
+    public var targetIndex: UInt32
+    /**
+     * The picker's shuffled figure indices (includes the target). Empty is never produced.
+     */
+    public var optionIndices: [UInt32]
+    /**
+     * Absolute wall-clock deadline (ms since epoch). Actions after this are terminal.
+     */
+    public var deadlineMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(role: SasRoleKind, 
+        /**
+         * Correct figure index (displayer shows it; picker must match it). Never sent on the wire.
+         */targetIndex: UInt32, 
+        /**
+         * The picker's shuffled figure indices (includes the target). Empty is never produced.
+         */optionIndices: [UInt32], 
+        /**
+         * Absolute wall-clock deadline (ms since epoch). Actions after this are terminal.
+         */deadlineMs: UInt64) {
+        self.role = role
+        self.targetIndex = targetIndex
+        self.optionIndices = optionIndices
+        self.deadlineMs = deadlineMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SasChallenge: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSasChallenge: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SasChallenge {
+        return
+            try SasChallenge(
+                role: FfiConverterTypeSasRoleKind.read(from: &buf), 
+                targetIndex: FfiConverterUInt32.read(from: &buf), 
+                optionIndices: FfiConverterSequenceUInt32.read(from: &buf), 
+                deadlineMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SasChallenge, into buf: inout [UInt8]) {
+        FfiConverterTypeSasRoleKind.write(value.role, into: &buf)
+        FfiConverterUInt32.write(value.targetIndex, into: &buf)
+        FfiConverterSequenceUInt32.write(value.optionIndices, into: &buf)
+        FfiConverterUInt64.write(value.deadlineMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSasChallenge_lift(_ buf: RustBuffer) throws -> SasChallenge {
+    return try FfiConverterTypeSasChallenge.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSasChallenge_lower(_ value: SasChallenge) -> RustBuffer {
+    return FfiConverterTypeSasChallenge.lower(value)
 }
 
 
@@ -2854,6 +3071,10 @@ public enum PairEventKind: Equatable, Hashable {
      */
     case pendingRequest
     /**
+     * The SAS visual gate is ready — fetch `pair_sas_challenge` and show it.
+     */
+    case verifying
+    /**
      * The peer sent their accept/reject.
      */
     case peerResponded
@@ -2866,7 +3087,7 @@ public enum PairEventKind: Equatable, Hashable {
      */
     case rejected
     /**
-     * The session failed.
+     * The session failed (SAS mismatch/cancel/timeout or a protocol error).
      */
     case failed
 
@@ -2892,13 +3113,15 @@ public struct FfiConverterTypePairEventKind: FfiConverterRustBuffer {
         
         case 1: return .pendingRequest
         
-        case 2: return .peerResponded
+        case 2: return .verifying
         
-        case 3: return .ready
+        case 3: return .peerResponded
         
-        case 4: return .rejected
+        case 4: return .ready
         
-        case 5: return .failed
+        case 5: return .rejected
+        
+        case 6: return .failed
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2912,20 +3135,24 @@ public struct FfiConverterTypePairEventKind: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         
         
-        case .peerResponded:
+        case .verifying:
             writeInt(&buf, Int32(2))
         
         
-        case .ready:
+        case .peerResponded:
             writeInt(&buf, Int32(3))
         
         
-        case .rejected:
+        case .ready:
             writeInt(&buf, Int32(4))
         
         
-        case .failed:
+        case .rejected:
             writeInt(&buf, Int32(5))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(6))
         
         }
     }
@@ -2957,6 +3184,11 @@ public enum PairState: Equatable, Hashable {
     
     case handshaking
     case pending
+    /**
+     * The SAS nonces are revealed + verified; both humans must clear the visual gate. No
+     * `PairResult` is reachable from here.
+     */
+    case verifying
     case localAccepted
     case peerAccepted
     case complete
@@ -2987,15 +3219,17 @@ public struct FfiConverterTypePairState: FfiConverterRustBuffer {
         
         case 2: return .pending
         
-        case 3: return .localAccepted
+        case 3: return .verifying
         
-        case 4: return .peerAccepted
+        case 4: return .localAccepted
         
-        case 5: return .complete
+        case 5: return .peerAccepted
         
-        case 6: return .rejected
+        case 6: return .complete
         
-        case 7: return .failed
+        case 7: return .rejected
+        
+        case 8: return .failed
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -3013,24 +3247,28 @@ public struct FfiConverterTypePairState: FfiConverterRustBuffer {
             writeInt(&buf, Int32(2))
         
         
-        case .localAccepted:
+        case .verifying:
             writeInt(&buf, Int32(3))
         
         
-        case .peerAccepted:
+        case .localAccepted:
             writeInt(&buf, Int32(4))
         
         
-        case .complete:
+        case .peerAccepted:
             writeInt(&buf, Int32(5))
         
         
-        case .rejected:
+        case .complete:
             writeInt(&buf, Int32(6))
         
         
-        case .failed:
+        case .rejected:
             writeInt(&buf, Int32(7))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(8))
         
         }
     }
@@ -3049,6 +3287,82 @@ public func FfiConverterTypePairState_lift(_ buf: RustBuffer) throws -> PairStat
 #endif
 public func FfiConverterTypePairState_lower(_ value: PairState) -> RustBuffer {
     return FfiConverterTypePairState.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * The deterministic SAS role for this side, derived from the pairing transcript.
+ */
+
+public enum SasRoleKind: Equatable, Hashable {
+    
+    /**
+     * Show the target figure and confirm the other human matched it.
+     */
+    case displayer
+    /**
+     * Choose the matching figure among the options.
+     */
+    case picker
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SasRoleKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSasRoleKind: FfiConverterRustBuffer {
+    typealias SwiftType = SasRoleKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SasRoleKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .displayer
+        
+        case 2: return .picker
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SasRoleKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .displayer:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .picker:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSasRoleKind_lift(_ buf: RustBuffer) throws -> SasRoleKind {
+    return try FfiConverterTypeSasRoleKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSasRoleKind_lower(_ value: SasRoleKind) -> RustBuffer {
+    return FfiConverterTypeSasRoleKind.lower(value)
 }
 
 
@@ -3193,6 +3507,55 @@ fileprivate struct FfiConverterOptionTypeProfileView: FfiConverterRustBuffer {
         case 1: return try FfiConverterTypeProfileView.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeSasChallenge: FfiConverterRustBuffer {
+    typealias SwiftType = SasChallenge?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSasChallenge.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSasChallenge.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = [UInt32]
+
+    public static func write(_ value: [UInt32], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterUInt32.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UInt32] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UInt32]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterUInt32.read(from: &buf))
+        }
+        return seq
     }
 }
 
@@ -3506,6 +3869,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_ble_has_scan_hint() != 33560) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 49013) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_confirm_pair_display() != 2067) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_create_invite() != 6482) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3545,6 +3914,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_pair_result() != 26021) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_pair_sas_challenge() != 36557) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_pair_state() != 24242) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3578,7 +3950,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_recv_secret() != 13424) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_respond_pair() != 37615) {
+    if (uniffi_iroh_location_checksum_method_locationnode_respond_pair() != 4487) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
@@ -3588,6 +3960,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_start() != 54155) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_submit_pair_choice() != 8652) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_subscribe() != 37204) {

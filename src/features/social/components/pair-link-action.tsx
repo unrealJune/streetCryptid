@@ -10,15 +10,10 @@ interface PairLinkActionProps {
   pairing: PairingSnapshot;
   accent: string;
   onCreateInvite(): Promise<string | undefined>;
-  onRespond(sessionId: string, accept: boolean): Promise<void>;
+  onReject(sessionId: string): Promise<void>;
 }
 
-export function PairLinkAction({
-  pairing,
-  accent,
-  onCreateInvite,
-  onRespond,
-}: PairLinkActionProps) {
+export function PairLinkAction({ pairing, accent, onCreateInvite, onReject }: PairLinkActionProps) {
   const theme = useTheme();
   const [working, setWorking] = useState(false);
   const remoteRequests = pairing.pendingRequests.filter((request) => !request.nearby);
@@ -47,39 +42,24 @@ export function PairLinkAction({
           style={[styles.request, { borderBottomColor: theme.backgroundSelected }]}
         >
           <View style={styles.requestCopy}>
-            <ThemedText type="smallBold">Pair request</ThemedText>
+            <ThemedText type="smallBold">Preparing a visual check</ThemedText>
             <ThemedText type="small" themeColor="textSecondary">
-              A shared link was opened on another phone.
+              Keep both phones open. Pairing cannot finish until you compare an ASCII figure.
             </ThemedText>
           </View>
-          <View style={styles.requestActions}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Decline pair request"
-              onPress={() => void onRespond(request.sessionId, false)}
-              style={({ pressed }) => [
-                styles.smallButton,
-                { borderColor: theme.backgroundSelected, opacity: pressed ? 0.55 : 1 },
-              ]}
-            >
-              <ThemedText type="code" themeColor="textSecondary">
-                DECLINE
-              </ThemedText>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Accept pair request"
-              onPress={() => void onRespond(request.sessionId, true)}
-              style={({ pressed }) => [
-                styles.smallButton,
-                { backgroundColor: accent, opacity: pressed ? 0.72 : 1 },
-              ]}
-            >
-              <ThemedText type="code" style={styles.onAccent}>
-                ACCEPT
-              </ThemedText>
-            </Pressable>
-          </View>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Cancel pair request"
+            onPress={() => void onReject(request.sessionId)}
+            style={({ pressed }) => [
+              styles.smallButton,
+              { borderColor: theme.backgroundSelected, opacity: pressed ? 0.55 : 1 },
+            ]}
+          >
+            <ThemedText type="code" themeColor="textSecondary">
+              CANCEL
+            </ThemedText>
+          </Pressable>
         </View>
       ))}
 
@@ -98,7 +78,7 @@ export function PairLinkAction({
         <View style={styles.shareCopy}>
           <ThemedText type="smallBold">Share a pairing link</ThemedText>
           <ThemedText type="small" themeColor="textSecondary">
-            One-time link for a friend who is not nearby
+            Compare its ASCII figure over a trusted call
           </ThemedText>
         </View>
         <ThemedText type="code" style={{ color: accent }}>
@@ -122,22 +102,13 @@ const styles = StyleSheet.create({
   requestCopy: {
     gap: Spacing.one,
   },
-  requestActions: {
-    flexDirection: 'row',
-    gap: Spacing.two,
-  },
   smallButton: {
     alignItems: 'center',
     borderRadius: Spacing.two,
     borderWidth: StyleSheet.hairlineWidth,
-    flex: 1,
     minHeight: 44,
     justifyContent: 'center',
     paddingHorizontal: Spacing.two,
-  },
-  onAccent: {
-    color: '#07131f',
-    fontWeight: '700',
   },
   shareRow: {
     alignItems: 'center',

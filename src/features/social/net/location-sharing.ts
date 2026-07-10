@@ -14,6 +14,8 @@ import {
   type PairResult,
   type PairStateRecord,
   type ProfileView,
+  type SasChallenge,
+  type SasRole,
 } from 'iroh-location';
 
 import { encodeContactCard } from '../core/contact-card';
@@ -26,6 +28,7 @@ import {
   sealPairToken,
   secretFromPairingCode,
 } from '../core/pairing-code';
+import { isPairingFigureIndex } from '../core/pairing-figures';
 import * as pool from '../core/pool';
 import { mergeProfileIntoFriend } from '../core/profile';
 import type {
@@ -60,6 +63,33 @@ import {
 import { loadKeys, saveKeys } from './secure-keys';
 import { loadSeq, saveSeq } from './state-store';
 
+/**
+ * A single live SAS verification the UI must resolve before a pair can complete. One entry per
+ * concurrent pairing session in the `verifying` phase — kept as an array so multiple simultaneous
+ * sessions are never silently collapsed. Reconciled from both `verifying` events and
+ * `listPairSessions()` state, so an event missed while suspended is recovered on the next poll.
+ */
+export interface PairingVerification {
+  /** The pairing session id (hex). */
+  sessionId: string;
+  /** The peer's ed25519 EndpointId (hex). */
+  peerEndpointId: string;
+  /** Whether this is an invite-less nearby pair (vs invite-based). */
+  nearby: boolean;
+  /** This side's SAS role: `displayer` shows the target figure, `picker` chooses it. */
+  role: SasRole;
+  /** Correct figure index — the displayer shows it; the picker must match it. */
+  targetIndex: number;
+  /** The picker's shuffled figure indices (includes the target). */
+  optionIndices: number[];
+  /** Absolute wall-clock deadline (ms since epoch) — native timeout is authoritative. */
+  deadlineMs: number;
+  /** Whether this side's human already cleared the SAS gate (submitted a choice / confirmed). */
+  localConfirmed: boolean;
+  /** Whether the peer's SAS reveal verified (the gate is live). */
+  peerVerified: boolean;
+}
+
 /** An immutable view of the bilateral-pairing state for the UI. See ARCHITECTURE.md §2, §4. */
 export interface PairingSnapshot {
   /** Whether bilateral pairing is usable here at all (native dev client; false on web/Expo Go). */
@@ -74,6 +104,11 @@ export interface PairingSnapshot {
   sessions: PairStateRecord[];
   /** Incoming pair requests awaiting the user's accept/reject. */
   pendingRequests: PairEvent[];
+  /**
+   * Live SAS verifications the user must resolve (one per concurrent `verifying` session). The
+   * mandatory visual gate before any pair completes — pick or confirm the figure to advance.
+   */
+  verifications: PairingVerification[];
   /** True during the short mutual-consent window opened by a rub gesture. */
   gestureActive: boolean;
   /** When the active rub-consent window expires, or null while idle. */
@@ -191,6 +226,7 @@ export class LocationSharingService implements FixPublisher {
   private nearbyPeers: BlePeer[] = [];
   private pairSessions: PairStateRecord[] = [];
   private pendingPairRequests: PairEvent[] = [];
+  private verifications: PairingVerification[] = [];
   private nearbyGestureUntil = 0;
   private nearbyGestureTimer: ReturnType<typeof setInterval> | null = null;
   private readonly nearbyPairAttempts = new Set<string>();
@@ -199,8 +235,10 @@ export class LocationSharingService implements FixPublisher {
   private inviteCode: string | null = null;
   private readonly mailbox: PairingMailbox;
   private pairingActivity = '';
-  /** Sessions WE initiated, keyed by session id → the route (for auto-accept + method tagging). */
+  /** Sessions we initiated, keyed by session id to preserve the pairing method through completion. */
   private readonly initiatedRoutes = new Map<string, PairingMethod>();
+  /** Complete sessions already materialized locally, including discoveries the user dismissed. */
+  private readonly handledPairSessions = new Set<string>();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private pollInFlight: Promise<void> | null = null;
   /** Last poll-error message surfaced, so we don't spam listeners with identical errors. */
@@ -406,7 +444,7 @@ export class LocationSharingService implements FixPublisher {
     this.removingFriends.delete(endpointId);
   }
 
-  // ── Bilateral pairing (`streetcryptid/pair/1`) — ARCHITECTURE.md §4 ─────────────────────────
+  // ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ─────────────────────────
 
   /** Toggle whether we accept invite-less nearby (BLE) pairing Hellos. */
   async setPairingReady(ready: boolean): Promise<void> {
@@ -417,9 +455,11 @@ export class LocationSharingService implements FixPublisher {
   }
 
   /**
-   * Opens a short local consent window for buttonless nearby pairing. Two phones pair
-   * automatically only when both detect the gesture: an outbound nearby session auto-accepts our
-   * side, while an inbound nearby request auto-accepts only while this window is active.
+   * Opens a short local consent window for buttonless nearby pairing. Two phones begin a handshake
+   * only when both detect the gesture: an outbound nearby session is initiated for the single
+   * verified peer, and an inbound nearby request is picked up while this window is active. Neither
+   * side auto-accepts — the handshake proceeds to the SAS `verifying` gate, which both humans must
+   * clear (see {@link submitPairChoice} / {@link confirmPairDisplay}) before the pair completes.
    */
   async beginNearbyGesture(windowMs = NEARBY_GESTURE_WINDOW_MS): Promise<void> {
     if (!this.mod || this.discoveredFriend) return;
@@ -428,7 +468,7 @@ export class LocationSharingService implements FixPublisher {
     this.startNearbyGesturePolling();
 
     for (const request of this.pendingPairRequests.filter((event) => event.nearby)) {
-      await this.acceptNearbyRequest(request);
+      this.trackNearbyRequest(request);
     }
     await this.pollPairingOnce();
   }
@@ -498,11 +538,12 @@ export class LocationSharingService implements FixPublisher {
 
   /**
    * Begin an invite-based pair from a short mailbox pairing code, an app pair link
-   * (`streetcryptid://social?token=…`), or a raw `scpair1:` token, auto-accepting OUR (initiating)
-   * side. The peer's side stays pending until they accept. Returns the session id. Tags the
-   * eventual friend `code` (short code or raw token) or `invite` (app link). A short code is
-   * recognized *before* pair-link parsing; its mailbox GET is one-time, so a failed or already-
-   * redeemed code surfaces its precise error rather than falling back to anything else.
+   * (`streetcryptid://social?token=…`), or a raw `scpair1:` token. The handshake proceeds to the
+   * SAS `verifying` gate; neither side is auto-accepted — both humans clear the visual check to
+   * complete the pair. Returns the session id. Tags the eventual friend `code` (short code or raw
+   * token) or `invite` (app link). A short code is recognized *before* pair-link parsing; its
+   * mailbox GET is one-time, so a failed or already-redeemed code surfaces its precise error rather
+   * than falling back to anything else.
    */
   async pairFromInput(input: string): Promise<string> {
     if (!this.mod) throw new Error('pairFromInput: native module not bound');
@@ -516,7 +557,6 @@ export class LocationSharingService implements FixPublisher {
       isPairLink(trimmed) && !trimmed.startsWith(PAIR_TOKEN_PREFIX) ? 'invite' : 'code';
     const sessionId = await this.mod.initiatePairByToken(token);
     this.initiatedRoutes.set(sessionId, method);
-    await this.mod.respondPair(sessionId, true);
     this.setPairingActivity('pairing…');
     await this.refreshPairing();
     return sessionId;
@@ -524,9 +564,9 @@ export class LocationSharingService implements FixPublisher {
 
   /**
    * Redeem a short mailbox pairing code: derive the lookup id from the code's secret, one-time GET
-   * the sealed capsule, decrypt it locally into the opaque invite token, then initiate + auto-
-   * accept our side exactly like {@link pairFromInput}. Never falls back silently — mailbox and
-   * decryption failures propagate as-is.
+   * the sealed capsule, decrypt it locally into the opaque invite token, then initiate the pair
+   * exactly like {@link pairFromInput}. The handshake advances to the SAS `verifying` gate; no side
+   * is auto-accepted. Never falls back silently — mailbox and decryption failures propagate as-is.
    */
   private async pairFromCode(normalizedCode: string): Promise<string> {
     if (!this.mod) throw new Error('pairFromInput: native module not bound');
@@ -539,15 +579,15 @@ export class LocationSharingService implements FixPublisher {
     const token = await openPairCapsule(capsule, secret);
     const sessionId = await this.mod.initiatePairByToken(token);
     this.initiatedRoutes.set(sessionId, 'code');
-    await this.mod.respondPair(sessionId, true);
     this.setPairingActivity('pairing…');
     await this.refreshPairing();
     return sessionId;
   }
 
   /**
-   * Begin an invite-less nearby pair with a BLE-discovered peer, auto-accepting OUR side. The peer's
-   * side stays pending until they accept. Returns the session id; tags the eventual friend `nearby`.
+   * Begin an invite-less nearby pair with a BLE-discovered peer. The handshake proceeds to the SAS
+   * `verifying` gate — neither side is auto-accepted. Returns the session id; tags the eventual
+   * friend `nearby`.
    */
   async pairNearby(endpointId: string): Promise<string> {
     const sessionId = await this.initiateNearbyPair(endpointId);
@@ -555,12 +595,74 @@ export class LocationSharingService implements FixPublisher {
     return sessionId;
   }
 
-  /** Accept or reject a pending incoming pair request. */
+  /**
+   * Reject/cancel a pending incoming pair request. Only `accept === false` is supported here:
+   * accepting a pair now requires clearing the SAS visual gate (see {@link submitPairChoice} /
+   * {@link confirmPairDisplay}), so `accept === true` fails explicitly rather than bypassing SAS.
+   */
   async respondPair(sessionId: string, accept: boolean): Promise<void> {
     if (!this.mod) return;
-    await this.mod.respondPair(sessionId, accept);
+    if (accept) {
+      throw new Error(
+        'respondPair(accept=true) is no longer supported: clearing the SAS visual check via ' +
+          'submitPairChoice / confirmPairDisplay is required to accept a pair.'
+      );
+    }
+    await this.mod.respondPair(sessionId, false);
     this.pendingPairRequests = this.pendingPairRequests.filter((e) => e.sessionId !== sessionId);
-    this.setPairingActivity(accept ? 'accepted request' : 'rejected request');
+    this.verifications = this.verifications.filter((v) => v.sessionId !== sessionId);
+    this.initiatedRoutes.delete(sessionId);
+    this.setPairingActivity('rejected request');
+    await this.refreshPairing();
+  }
+
+  /**
+   * Picker SAS action: submit the chosen figure index for a live `verifying` session. A correct
+   * choice latches the local SAS and sends `Accept` natively; a wrong/late choice is terminal.
+   * Role/action mismatches are rejected natively; a known local role mismatch fails fast here.
+   */
+  async submitPairChoice(sessionId: string, chosenIndex: number): Promise<void> {
+    if (!this.mod) throw new Error('submitPairChoice: native module not bound');
+    if (!isPairingFigureIndex(chosenIndex)) {
+      throw new RangeError('submitPairChoice: pairing figure index must be between 0 and 255');
+    }
+    const verification = this.verifications.find((v) => v.sessionId === sessionId);
+    if (verification && verification.role !== 'picker') {
+      throw new Error(
+        'submitPairChoice: this session is awaiting a display confirmation, not a pick'
+      );
+    }
+    await this.mod.submitPairChoice(sessionId, chosenIndex);
+    this.setPairingActivity('verifying…');
+    await this.refreshPairing();
+  }
+
+  /**
+   * Displayer SAS action: confirm whether the other human matched the shown figure for a live
+   * `verifying` session. `matched === true` latches the local SAS and sends `Accept` natively;
+   * `false` (or a late action) is terminal. Role/action mismatches are rejected natively.
+   */
+  async confirmPairDisplay(sessionId: string, matched: boolean): Promise<void> {
+    if (!this.mod) throw new Error('confirmPairDisplay: native module not bound');
+    const verification = this.verifications.find((v) => v.sessionId === sessionId);
+    if (verification && verification.role !== 'displayer') {
+      throw new Error(
+        'confirmPairDisplay: this session is awaiting a pick, not a display confirmation'
+      );
+    }
+    await this.mod.confirmPairDisplay(sessionId, matched);
+    this.setPairingActivity(matched ? 'verifying…' : 'pair canceled');
+    await this.refreshPairing();
+  }
+
+  /** Cancel a pairing under SAS verification — terminal (a fresh attempt is required). */
+  async cancelPair(sessionId: string): Promise<void> {
+    if (!this.mod) throw new Error('cancelPair: native module not bound');
+    await this.mod.cancelPair(sessionId);
+    this.verifications = this.verifications.filter((v) => v.sessionId !== sessionId);
+    this.pendingPairRequests = this.pendingPairRequests.filter((e) => e.sessionId !== sessionId);
+    this.initiatedRoutes.delete(sessionId);
+    this.setPairingActivity('pair canceled');
     await this.refreshPairing();
   }
 
@@ -1026,6 +1128,7 @@ export class LocationSharingService implements FixPublisher {
       nearbyPeers: [...this.nearbyPeers],
       sessions: [...this.pairSessions],
       pendingRequests: [...this.pendingPairRequests],
+      verifications: [...this.verifications],
       gestureActive: this.isNearbyGestureActive(),
       gestureExpiresAt: this.isNearbyGestureActive() ? this.nearbyGestureUntil : null,
       discoveredFriend: this.discoveredFriend,
@@ -1164,6 +1267,14 @@ export class LocationSharingService implements FixPublisher {
       this.pairingReadyFlag = caps.pairingReady;
       for (const profile of profileEvents) this.applyProfile(profile);
       for (const event of pairEvents) await this.handlePairEvent(event);
+      // Ready is a drained, one-shot native event. A transient bridge/result failure must not lose
+      // the completed friendship forever, so recover any unhandled Complete session snapshots too.
+      await this.reconcileCompletedPairs(sessions);
+      // Reconcile the SAS verification model AFTER handling events, from BOTH the polled session
+      // list and this poll's events: `listPairSessions()` is fetched in parallel with the event
+      // queue, so a just-emitted `verifying` transition may not appear in `sessions` yet. Merging
+      // the two recovers it (and any transition missed while suspended) without a lost/late gate.
+      await this.reconcileVerifications(sessions, pairEvents);
       await this.maybeInitiateNearbyPair();
       if (this.lastPollErrorSig !== null) {
         // A prior poll surfaced an error (typically transient — e.g. the native node was still
@@ -1181,10 +1292,11 @@ export class LocationSharingService implements FixPublisher {
   private async handlePairEvent(event: PairEvent): Promise<void> {
     switch (event.kind) {
       case 'pendingRequest': {
-        // Our own initiated sessions were already auto-accepted; only surface peer-initiated ones.
+        // Sessions we initiated (or nearby ones we've picked up) advance to the SAS gate on their
+        // own; only surface unsolicited peer-initiated requests as a pending prompt.
         if (this.initiatedRoutes.has(event.sessionId)) return;
         if (event.nearby && this.isNearbyGestureActive()) {
-          await this.acceptNearbyRequest(event);
+          this.trackNearbyRequest(event);
           return;
         }
         if (!this.pendingPairRequests.some((e) => e.sessionId === event.sessionId)) {
@@ -1193,6 +1305,14 @@ export class LocationSharingService implements FixPublisher {
         }
         return;
       }
+      case 'verifying':
+        // The SAS visual gate is live. It's no longer a plain pending request — reconciliation
+        // (run after this loop) fetches the challenge and upserts it into `verifications`.
+        this.pendingPairRequests = this.pendingPairRequests.filter(
+          (e) => e.sessionId !== event.sessionId
+        );
+        this.setPairingActivity(event.nearby ? 'signals are locking' : 'verify to connect');
+        return;
       case 'peerResponded':
         this.setPairingActivity(event.nearby ? 'signals are locking' : 'peer responded');
         return;
@@ -1204,6 +1324,7 @@ export class LocationSharingService implements FixPublisher {
         this.pendingPairRequests = this.pendingPairRequests.filter(
           (e) => e.sessionId !== event.sessionId
         );
+        this.verifications = this.verifications.filter((v) => v.sessionId !== event.sessionId);
         this.initiatedRoutes.delete(event.sessionId);
         if (event.nearby) this.stopNearbyGesturePolling();
         this.setPairingActivity(event.kind === 'rejected' ? 'pair rejected' : 'pair failed');
@@ -1211,14 +1332,110 @@ export class LocationSharingService implements FixPublisher {
     }
   }
 
-  private async acceptNearbyRequest(event: PairEvent): Promise<void> {
-    if (!this.mod) return;
+  private async reconcileCompletedPairs(sessions: PairStateRecord[]): Promise<void> {
+    for (const session of sessions) {
+      if (session.state !== 'complete' || this.handledPairSessions.has(session.sessionId)) continue;
+      await this.onPairReady({
+        kind: 'ready',
+        sessionId: session.sessionId,
+        peerEndpointId: session.peerEndpointId,
+        nearby: session.nearby,
+      });
+    }
+  }
+
+  /**
+   * Note an inbound nearby request seen during a rub window: tag its route so the eventual friend
+   * is `nearby`, and drop it from the pending list. It is NOT auto-accepted — the handshake
+   * advances to the SAS `verifying` gate, which the user then clears.
+   */
+  private trackNearbyRequest(event: PairEvent): void {
     this.initiatedRoutes.set(event.sessionId, 'nearby');
     this.pendingPairRequests = this.pendingPairRequests.filter(
       (request) => request.sessionId !== event.sessionId
     );
-    await this.mod.respondPair(event.sessionId, true);
-    this.setPairingActivity('contact confirmed');
+    this.setPairingActivity('signals are locking');
+  }
+
+  /**
+   * Rebuild the live SAS verification list from BOTH the polled session records and this poll's
+   * events. Candidates are sessions in any live SAS phase (`verifying`, `localAccepted`, or
+   * `peerAccepted`) plus any freshly emitted `verifying` events not yet reflected in that list.
+   * Keeping the accepted phases is essential: the person who acts second must retain their
+   * controls, while the person who acts first sees the waiting state. Sessions that reached a
+   * terminal state this poll are excluded. The native challenge is fetched only for live
+   * candidates and is authoritative: a missing/expired challenge clears the entry (we never fall
+   * back to pairing without one). Challenge-fetch errors are NOT swallowed — they propagate to the
+   * poll's error path so a broken gate is surfaced rather than hidden.
+   */
+  private async reconcileVerifications(
+    sessions: PairStateRecord[],
+    events: PairEvent[]
+  ): Promise<void> {
+    const mod = this.mod;
+    if (!mod) return;
+
+    const terminalStates = ['complete', 'rejected', 'failed'];
+    const activeSasStates = new Set(['verifying', 'localAccepted', 'peerAccepted']);
+    const terminal = new Set<string>(
+      sessions.filter((s) => terminalStates.includes(s.state)).map((s) => s.sessionId)
+    );
+    for (const e of events) {
+      if (e.kind === 'ready' || e.kind === 'rejected' || e.kind === 'failed') {
+        terminal.add(e.sessionId);
+      }
+    }
+
+    // Deterministic insertion order: session-list candidates first, then event-only recoveries.
+    const candidates = new Map<string, PairStateRecord>();
+    for (const s of sessions) {
+      if (activeSasStates.has(s.state) && !terminal.has(s.sessionId)) {
+        candidates.set(s.sessionId, s);
+      }
+    }
+    for (const e of events) {
+      if (e.kind !== 'verifying' || terminal.has(e.sessionId) || candidates.has(e.sessionId)) {
+        continue;
+      }
+      const known = sessions.find((s) => s.sessionId === e.sessionId);
+      candidates.set(e.sessionId, {
+        sessionId: e.sessionId,
+        peerEndpointId: e.peerEndpointId,
+        state: 'verifying',
+        localAccepted: known?.localAccepted ?? false,
+        peerAccepted: known?.peerAccepted ?? false,
+        initiator: known?.initiator ?? this.initiatedRoutes.has(e.sessionId),
+        nearby: e.nearby,
+        sasVerified: known?.sasVerified ?? true,
+        localSasConfirmed: known?.localSasConfirmed ?? false,
+      });
+    }
+
+    const next = new Map<string, PairingVerification>();
+    for (const session of candidates.values()) {
+      const challenge: SasChallenge | null = await mod.pairSasChallenge(session.sessionId);
+      // A live `verifying` session with no challenge means the gate expired or was decided — drop
+      // it rather than silently falling back to a challenge-less pairing.
+      if (!challenge) continue;
+      next.set(session.sessionId, {
+        sessionId: session.sessionId,
+        peerEndpointId: session.peerEndpointId,
+        nearby: session.nearby,
+        role: challenge.role,
+        targetIndex: challenge.targetIndex,
+        optionIndices: [...challenge.optionIndices],
+        deadlineMs: challenge.deadlineMs,
+        localConfirmed: session.localSasConfirmed ?? false,
+        peerVerified: session.sasVerified ?? false,
+      });
+    }
+    this.verifications = [...next.values()];
+
+    // A session that is now verifying or terminal is no longer a plain pending request.
+    const resolved = new Set<string>([...next.keys(), ...terminal]);
+    if (resolved.size) {
+      this.pendingPairRequests = this.pendingPairRequests.filter((r) => !resolved.has(r.sessionId));
+    }
   }
 
   private async maybeInitiateNearbyPair(): Promise<void> {
@@ -1255,7 +1472,6 @@ export class LocationSharingService implements FixPublisher {
     if (!this.mod) throw new Error('pairNearby: native module not bound');
     const sessionId = await this.mod.initiatePairNearby(endpointId);
     this.initiatedRoutes.set(sessionId, 'nearby');
-    await this.mod.respondPair(sessionId, true);
     this.setPairingActivity('signal found');
     return sessionId;
   }
@@ -1267,14 +1483,19 @@ export class LocationSharingService implements FixPublisher {
    * otherwise a safe placeholder that a later profile event replaces.
    */
   private async onPairReady(event: PairEvent): Promise<void> {
-    if (!this.mod) return;
-    const result = await this.mod.pairResult(event.sessionId).catch(() => null);
+    if (!this.mod || this.handledPairSessions.has(event.sessionId)) return;
+    const result = await this.mod.pairResult(event.sessionId);
     if (!result) return;
+    if (result.peerEndpointId !== event.peerEndpointId) {
+      throw new Error('Completed pairing result does not match the authenticated peer.');
+    }
     if (this.removingFriends.has(result.peerEndpointId)) {
       this.pendingPairRequests = this.pendingPairRequests.filter(
         (request) => request.sessionId !== event.sessionId
       );
+      this.verifications = this.verifications.filter((v) => v.sessionId !== event.sessionId);
       this.initiatedRoutes.delete(event.sessionId);
+      this.handledPairSessions.add(event.sessionId);
       return;
     }
 
@@ -1297,12 +1518,14 @@ export class LocationSharingService implements FixPublisher {
     this.pendingPairRequests = this.pendingPairRequests.filter(
       (e) => e.sessionId !== event.sessionId
     );
+    this.verifications = this.verifications.filter((v) => v.sessionId !== event.sessionId);
     this.initiatedRoutes.delete(event.sessionId);
     this.discoveredFriend = friend;
     this.stopNearbyGesturePolling();
     this.persistPool();
     void this.syncTrail(0);
     this.setPairingActivity('cryptid discovered');
+    this.handledPairSessions.add(event.sessionId);
   }
 
   /** Build a Friend from a pair result with a safe placeholder identity (no verified profile yet). */

@@ -23,6 +23,8 @@ import uniffi.iroh_location.PairResult
 import uniffi.iroh_location.PairState
 import uniffi.iroh_location.PairStateRecord
 import uniffi.iroh_location.ProfileView
+import uniffi.iroh_location.SasChallenge
+import uniffi.iroh_location.SasRoleKind
 import uniffi.iroh_location.Subscription
 import uniffi.iroh_location.decodePairInvite
 import uniffi.iroh_location.deriveTopic
@@ -80,6 +82,7 @@ private fun pairStateName(s: PairState): String =
   when (s) {
     PairState.HANDSHAKING -> "handshaking"
     PairState.PENDING -> "pending"
+    PairState.VERIFYING -> "verifying"
     PairState.LOCAL_ACCEPTED -> "localAccepted"
     PairState.PEER_ACCEPTED -> "peerAccepted"
     PairState.COMPLETE -> "complete"
@@ -90,11 +93,33 @@ private fun pairStateName(s: PairState): String =
 private fun pairEventKindName(k: PairEventKind): String =
   when (k) {
     PairEventKind.PENDING_REQUEST -> "pendingRequest"
+    PairEventKind.VERIFYING -> "verifying"
     PairEventKind.PEER_RESPONDED -> "peerResponded"
     PairEventKind.READY -> "ready"
     PairEventKind.REJECTED -> "rejected"
     PairEventKind.FAILED -> "failed"
   }
+
+private fun sasRoleName(r: SasRoleKind): String =
+  when (r) {
+    SasRoleKind.DISPLAYER -> "displayer"
+    SasRoleKind.PICKER -> "picker"
+  }
+
+private fun sasChallengeMap(c: SasChallenge): Map<String, Any> =
+  mapOf(
+    "role" to sasRoleName(c.role),
+    "targetIndex" to c.targetIndex.toLong(),
+    "optionIndices" to c.optionIndices.map { it.toLong() },
+    "deadlineMs" to c.deadlineMs.toLong(),
+  )
+
+private fun pairingFigureIndex(value: Double): UInt {
+  require(value.isFinite() && value % 1.0 == 0.0 && value >= 0.0 && value < 256.0) {
+    "pairing figure index must be an integer between 0 and 255"
+  }
+  return value.toUInt()
+}
 
 private fun pairStateRecordMap(r: PairStateRecord): Map<String, Any> =
   mapOf(
@@ -105,6 +130,8 @@ private fun pairStateRecordMap(r: PairStateRecord): Map<String, Any> =
     "peerAccepted" to r.peerAccepted,
     "initiator" to r.initiator,
     "nearby" to r.nearby,
+    "sasVerified" to r.sasVerified,
+    "localSasConfirmed" to r.localSasConfirmed,
   )
 
 private fun pairEventMap(e: PairEvent): Map<String, Any> =
@@ -394,7 +421,7 @@ class IrohLocationModule : Module() {
         n.pollProfileEvents().map { profileViewMap(it) }
       }
 
-    // ── Bilateral pairing (`streetcryptid/pair/1`) — ARCHITECTURE.md §4 ─────────────────────
+    // ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ─────────────────────
 
     AsyncFunction("setPairingReady") Coroutine
       { ready: Boolean ->
@@ -437,6 +464,30 @@ class IrohLocationModule : Module() {
       { sessionIdHex: String, accept: Boolean ->
         val n = node ?: throw IllegalStateException("call createNode first")
         n.respondPair(sessionIdHex.hexToBytes(), accept)
+      }
+
+    AsyncFunction("pairSasChallenge") Coroutine
+      { sessionIdHex: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.pairSasChallenge(sessionIdHex.hexToBytes())?.let { sasChallengeMap(it) }
+      }
+
+    AsyncFunction("submitPairChoice") Coroutine
+      { sessionIdHex: String, chosenIndex: Double ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.submitPairChoice(sessionIdHex.hexToBytes(), pairingFigureIndex(chosenIndex))
+      }
+
+    AsyncFunction("confirmPairDisplay") Coroutine
+      { sessionIdHex: String, matched: Boolean ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.confirmPairDisplay(sessionIdHex.hexToBytes(), matched)
+      }
+
+    AsyncFunction("cancelPair") Coroutine
+      { sessionIdHex: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.cancelPair(sessionIdHex.hexToBytes())
       }
 
     AsyncFunction("pollPairEvents") Coroutine

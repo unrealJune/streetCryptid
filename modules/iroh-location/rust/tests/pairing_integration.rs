@@ -3,14 +3,18 @@
 //! required**). This is the end-to-end companion to the pure unit tests in `pairing.rs` /
 //! `profile.rs`.
 //!
-//! It exercises the bilateral-consent happy path: invite → dial → `Hello` exchange → both sides
-//! `Accept` → `Ready` on both → a verified [`PairResult`] binding each peer's endpoint id + recv
-//! key, then initial profile sync and profile-**update** propagation over the dedicated profile
-//! docs namespace.
+//! It exercises the bilateral-consent happy path: invite → dial → `Hello`/`Reveal` (SAS
+//! commit-then-reveal) exchange → both sides clear the **mandatory visual SAS gate** (the
+//! displayer confirms the match; the picker selects the target figure) → both sides `Accept` →
+//! `Ready` on both → a verified [`PairResult`] binding each peer's endpoint id + recv key, then
+//! initial profile sync and profile-**update** propagation over the dedicated profile docs
+//! namespace. It also covers the negative paths that the SAS gate must enforce: no `PairResult`
+//! before SAS confirmation (premature `respond_pair(true)` is rejected), and an SAS mismatch or
+//! cancel never completes.
 
 use std::sync::Arc;
 
-use iroh_location::{LocationNode, PairEventKind, PairState};
+use iroh_location::{LocationNode, PairEventKind, PairState, SasRoleKind};
 
 const SIGIL: &str = "/\\_/\\\n(o.o)";
 
@@ -36,6 +40,33 @@ macro_rules! poll_until {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }};
+}
+
+/// Wait until `node`'s session reaches the `Verifying` SAS phase (peer reveal verified), then
+/// return its SAS challenge.
+async fn await_challenge(node: &Arc<LocationNode>, sid: &[u8]) -> iroh_location::SasChallenge {
+    poll_until!(20, {
+        node.pair_sas_challenge(sid.to_vec())
+            .await
+            .expect("pair_sas_challenge")
+    })
+}
+
+/// Clear the SAS visual gate for one side by performing the correct human action for its role:
+/// the displayer confirms the match, the picker selects the target figure. Both actions latch the
+/// local SAS and send `Accept`.
+async fn clear_sas_gate(node: &Arc<LocationNode>, sid: &[u8]) {
+    let ch = await_challenge(node, sid).await;
+    match ch.role {
+        SasRoleKind::Displayer => node
+            .confirm_pair_display(sid.to_vec(), true)
+            .await
+            .expect("displayer confirm match"),
+        SasRoleKind::Picker => node
+            .submit_pair_choice(sid.to_vec(), ch.target_index)
+            .await
+            .expect("picker submit target"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -79,10 +110,25 @@ async fn two_node_pair_and_profile_sync() {
         "A's pending request is from B"
     );
 
-    // Both sides consent. A accepts first (records local decision + notifies B); then B accepts,
-    // which drives both sessions to completion.
-    a.respond_pair(sid.clone(), true).await.expect("A accept");
-    b.respond_pair(sid.clone(), true).await.expect("B accept");
+    // Premature acceptance must be impossible: before either side clears the SAS gate, an accept
+    // is rejected outright and no `PairResult` is produced.
+    assert!(
+        a.respond_pair(sid.clone(), true).await.is_err(),
+        "A cannot accept before its SAS visual check is confirmed"
+    );
+    assert!(
+        a.pair_result(sid.clone())
+            .await
+            .expect("A pair_result")
+            .is_none(),
+        "no PairResult before SAS"
+    );
+
+    // Both sides clear the mandatory visual SAS gate. Each performs the correct action for its
+    // transcript-derived role (displayer confirms; picker selects the target), which latches the
+    // local SAS and sends `Accept`, driving both sessions to completion.
+    clear_sas_gate(&a, &sid).await;
+    clear_sas_gate(&b, &sid).await;
 
     // Both sides reach Complete and emit a `Ready` event.
     for (label, node) in [("A", &a), ("B", &b)] {
@@ -170,5 +216,129 @@ async fn two_node_pair_and_profile_sync() {
     assert!(
         b_sees_update.epoch > first_epoch,
         "epoch advanced on update"
+    );
+}
+
+/// Bring two fresh nodes to an invite-based pair that has cleared the SAS commit-then-reveal
+/// handshake (both sides in `Verifying` with a live challenge). Returns `(initiator, responder,
+/// session_id)` where `b` initiated against `a`'s invite.
+async fn pair_to_verifying() -> (Arc<LocationNode>, Arc<LocationNode>, Vec<u8>) {
+    let a = start_node().await;
+    let b = start_node().await;
+
+    let invite = a.create_invite(300).await.expect("A create invite");
+    let sid = b.initiate_pair(invite).await.expect("B initiate pair");
+
+    // Drive A's inbound queue so it processes the Hello/Reveal handshake.
+    let _ = poll_until!(20, {
+        a.poll_pair_events()
+            .await
+            .into_iter()
+            .find(|e| matches!(e.kind, PairEventKind::PendingRequest) && e.session_id == sid)
+    });
+
+    // Both sides must reach the SAS gate before any human action is possible.
+    await_challenge(&a, &sid).await;
+    await_challenge(&b, &sid).await;
+    (a, b, sid)
+}
+
+/// An SAS mismatch (the picker selects a wrong figure) is terminal: the session fails and no
+/// `PairResult` is ever produced on either side.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sas_mismatch_never_completes() {
+    let (a, b, sid) = pair_to_verifying().await;
+
+    // Find whichever side is the picker and feed it a wrong (but in-catalog) option.
+    let mut acted = false;
+    for node in [&a, &b] {
+        let ch = node
+            .pair_sas_challenge(sid.clone())
+            .await
+            .expect("challenge")
+            .expect("live challenge");
+        if matches!(ch.role, SasRoleKind::Picker) {
+            let wrong = ch
+                .option_indices
+                .iter()
+                .copied()
+                .find(|&i| i != ch.target_index)
+                .expect("a non-target option exists");
+            node.submit_pair_choice(sid.clone(), wrong)
+                .await
+                .expect("submit wrong choice (call succeeds, gate fails)");
+            acted = true;
+            break;
+        }
+    }
+    assert!(acted, "one side was the picker");
+
+    // The picker's own session is terminally Failed and exposes no result.
+    poll_until!(10, {
+        match a.pair_state(sid.clone()).await.expect("A state") {
+            Some(st) if matches!(st.state, PairState::Failed | PairState::Rejected) => Some(()),
+            _ => match b.pair_state(sid.clone()).await.expect("B state") {
+                Some(st) if matches!(st.state, PairState::Failed | PairState::Rejected) => Some(()),
+                _ => None,
+            },
+        }
+    });
+
+    // Give the reject a moment to propagate, then assert neither side ever completes.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(
+        a.pair_result(sid.clone())
+            .await
+            .expect("A result")
+            .is_none(),
+        "A must not have a PairResult after SAS mismatch"
+    );
+    assert!(
+        b.pair_result(sid.clone())
+            .await
+            .expect("B result")
+            .is_none(),
+        "B must not have a PairResult after SAS mismatch"
+    );
+    for node in [&a, &b] {
+        assert!(
+            !matches!(
+                node.pair_state(sid.clone()).await.expect("state"),
+                Some(st) if matches!(st.state, PairState::Complete)
+            ),
+            "no side reaches Complete after SAS mismatch"
+        );
+    }
+}
+
+/// Cancelling under verification is terminal: no `PairResult` is produced on either side.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sas_cancel_never_completes() {
+    let (a, b, sid) = pair_to_verifying().await;
+
+    // A cancels while both sides are still at the SAS gate.
+    a.cancel_pair(sid.clone()).await.expect("A cancel");
+
+    poll_until!(10, {
+        match a.pair_state(sid.clone()).await.expect("A state") {
+            Some(st) if matches!(st.state, PairState::Failed | PairState::Rejected) => Some(()),
+            _ => None,
+        }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(
+        a.pair_result(sid.clone())
+            .await
+            .expect("A result")
+            .is_none(),
+        "A must not have a PairResult after cancel"
+    );
+    assert!(
+        b.pair_result(sid.clone())
+            .await
+            .expect("B result")
+            .is_none(),
+        "B must not have a PairResult after cancel"
     );
 }

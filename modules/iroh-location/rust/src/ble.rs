@@ -224,7 +224,8 @@ mod imp {
     fn identity_service(endpoint_id: EndpointId) -> GattService {
         GattService {
             uuid: IDENTITY_SERVICE_UUID,
-            primary: false,
+            // Android only exposes unreferenced services during discovery when they are primary.
+            primary: true,
             characteristics: vec![GattCharacteristic {
                 uuid: IDENTITY_CHAR_UUID,
                 properties: CharacteristicProperties::READ,

@@ -15,6 +15,7 @@ import type {
   PairResult,
   PairStateRecord,
   ProfileView,
+  SasChallenge,
 } from './IrohLocation.types';
 
 /**
@@ -73,6 +74,10 @@ export declare class IrohLocationNativeModule
   initiatePairByToken(token: string): Promise<string>;
   initiatePairNearby(peerEndpointIdHex: string): Promise<string>;
   respondPair(sessionIdHex: string, accept: boolean): Promise<void>;
+  pairSasChallenge(sessionIdHex: string): Promise<SasChallenge | null>;
+  submitPairChoice(sessionIdHex: string, chosenIndex: number): Promise<void>;
+  confirmPairDisplay(sessionIdHex: string, matched: boolean): Promise<void>;
+  cancelPair(sessionIdHex: string): Promise<void>;
   pollPairEvents(): Promise<PairEvent[]>;
   pairState(sessionIdHex: string): Promise<PairStateRecord | null>;
   listPairSessions(): Promise<PairStateRecord[]>;

@@ -705,6 +705,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_ble_has_scan_hint(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_cancel_pair(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_confirm_pair_display(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_create_invite(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_doc_ticket(
@@ -730,6 +734,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_iroh_location_checksum_method_locationnode_nearby_ble_peers(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_pair_result(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_pair_sas_challenge(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_pair_state(
     ): Int
@@ -760,6 +766,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_iroh_location_checksum_method_locationnode_shutdown(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_start(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_submit_pair_choice(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_subscribe(
     ): Int
@@ -816,6 +824,10 @@ external fun uniffi_iroh_location_fn_method_locationnode_ble_capabilities(`ptr`:
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_ble_has_scan_hint(`ptr`: Long,`endpointId`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_cancel_pair(`ptr`: Long,`sessionId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_confirm_pair_display(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`matched`: Byte,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_create_invite(`ptr`: Long,`ttlSecs`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_doc_ticket(`ptr`: Long,
@@ -841,6 +853,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_list_pair_sessions(`ptr
 external fun uniffi_iroh_location_fn_method_locationnode_nearby_ble_peers(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_pair_result(`ptr`: Long,`sessionId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_pair_sas_challenge(`ptr`: Long,`sessionId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_pair_state(`ptr`: Long,`sessionId`: RustBuffer.ByValue,
 ): Long
@@ -871,6 +885,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_set_pairing_ready(`ptr`
 external fun uniffi_iroh_location_fn_method_locationnode_shutdown(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_start(`ptr`: Long,`relayUrls`: RustBuffer.ByValue,`relayAuthToken`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_submit_pair_choice(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`chosenIndex`: Int,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_subscribe(`ptr`: Long,`topic`: RustBuffer.ByValue,`bootstrap`: RustBuffer.ByValue,`listener`: Long,
 ): Long
@@ -1044,6 +1060,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ble_has_scan_hint() != 33560) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 49013) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_confirm_pair_display() != 2067) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_create_invite() != 6482) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1083,6 +1105,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_pair_result() != 26021) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_pair_sas_challenge() != 36557) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_pair_state() != 24242) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1116,7 +1141,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_recv_secret() != 13424) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_respond_pair() != 37615) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_respond_pair() != 4487) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
@@ -1126,6 +1151,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_start() != 54155) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_submit_pair_choice() != 8652) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_subscribe() != 37204) {
@@ -2115,6 +2143,17 @@ public interface LocationNodeInterface {
     suspend fun `bleHasScanHint`(`endpointId`: kotlin.ByteArray): kotlin.Boolean
     
     /**
+     * Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
+     */
+    suspend fun `cancelPair`(`sessionId`: kotlin.ByteArray)
+    
+    /**
+     * Displayer action: confirm whether the other human matched the shown figure. `true` latches
+     * the local SAS and sends `Accept`; `false` (or a late action) is terminal.
+     */
+    suspend fun `confirmPairDisplay`(`sessionId`: kotlin.ByteArray, `matched`: kotlin.Boolean)
+    
+    /**
      * Mint a one-shot, time-limited invite carrying only immutable bootstrap material.
      */
     suspend fun `createInvite`(`ttlSecs`: kotlin.ULong): PairInvite
@@ -2195,6 +2234,12 @@ public interface LocationNodeInterface {
     suspend fun `pairResult`(`sessionId`: kotlin.ByteArray): PairResult?
     
     /**
+     * The active SAS visual challenge for a session, or `None` if the gate isn't live (not yet
+     * `Verifying`, already decided/terminal, or expired).
+     */
+    suspend fun `pairSasChallenge`(`sessionId`: kotlin.ByteArray): SasChallenge?
+    
+    /**
      * Inspect a single session's current state, or `None` if unknown.
      */
     suspend fun `pairState`(`sessionId`: kotlin.ByteArray): PairStateRecord?
@@ -2257,8 +2302,12 @@ public interface LocationNodeInterface {
     fun `recvSecret`(): kotlin.ByteArray
     
     /**
-     * Accept or reject a pending pairing session. A friendship result is emitted only after
-     * BOTH sides accept — poll for a `Ready` event, then call [`pair_result`](Self::pair_result).
+     * Accept or reject a pending pairing session. `accept == true` **requires the local SAS
+     * visual check to be confirmed first** (via [`submit_pair_choice`](Self::submit_pair_choice)
+     * or [`confirm_pair_display`](Self::confirm_pair_display)); otherwise it errors, which closes
+     * the door on legacy/premature acceptance. `accept == false` is a cancel/reject path. A
+     * friendship result is emitted only after BOTH sides accept — poll for a `Ready` event, then
+     * call [`pair_result`](Self::pair_result).
      */
     suspend fun `respondPair`(`sessionId`: kotlin.ByteArray, `accept`: kotlin.Boolean)
     
@@ -2277,6 +2326,12 @@ public interface LocationNodeInterface {
      * Bind the iroh endpoint + spawn the gossip router. Idempotent.
      */
     suspend fun `start`(`relayUrls`: List<kotlin.String>, `relayAuthToken`: kotlin.String)
+    
+    /**
+     * Picker action: submit the chosen figure index. A correct choice latches the local SAS and
+     * sends `Accept`; a wrong / late choice is terminal (no retry in the same session).
+     */
+    suspend fun `submitPairChoice`(`sessionId`: kotlin.ByteArray, `chosenIndex`: kotlin.UInt)
     
     /**
      * Subscribe to a topic and start forwarding decrypted fixes to `listener`.
@@ -2483,6 +2538,57 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `cancelPair`(`sessionId`: kotlin.ByteArray) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_cancel_pair(
+                uniffiHandle,
+                FfiConverterByteArray.lower(`sessionId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Displayer action: confirm whether the other human matched the shown figure. `true` latches
+     * the local SAS and sends `Accept`; `false` (or a late action) is terminal.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `confirmPairDisplay`(`sessionId`: kotlin.ByteArray, `matched`: kotlin.Boolean) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_confirm_pair_display(
+                uniffiHandle,
+                FfiConverterByteArray.lower(`sessionId`),FfiConverterBoolean.lower(`matched`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
     )
     }
 
@@ -2800,6 +2906,31 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * The active SAS visual challenge for a session, or `None` if the gate isn't live (not yet
+     * `Verifying`, already decided/terminal, or expired).
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `pairSasChallenge`(`sessionId`: kotlin.ByteArray) : SasChallenge? {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_pair_sas_challenge(
+                uniffiHandle,
+                FfiConverterByteArray.lower(`sessionId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeSasChallenge.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Inspect a single session's current state, or `None` if unknown.
      */
     @Throws(LocationException::class)
@@ -3046,8 +3177,12 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Accept or reject a pending pairing session. A friendship result is emitted only after
-     * BOTH sides accept — poll for a `Ready` event, then call [`pair_result`](Self::pair_result).
+     * Accept or reject a pending pairing session. `accept == true` **requires the local SAS
+     * visual check to be confirmed first** (via [`submit_pair_choice`](Self::submit_pair_choice)
+     * or [`confirm_pair_display`](Self::confirm_pair_display)); otherwise it errors, which closes
+     * the door on legacy/premature acceptance. `accept == false` is a cancel/reject path. A
+     * friendship result is emitted only after BOTH sides accept — poll for a `Ready` event, then
+     * call [`pair_result`](Self::pair_result).
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -3123,6 +3258,32 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_start(
                 uniffiHandle,
                 FfiConverterSequenceString.lower(`relayUrls`),FfiConverterString.lower(`relayAuthToken`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Picker action: submit the chosen figure index. A correct choice latches the local SAS and
+     * sends `Accept`; a wrong / late choice is terminal (no retry in the same session).
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `submitPairChoice`(`sessionId`: kotlin.ByteArray, `chosenIndex`: kotlin.UInt) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_submit_pair_choice(
+                uniffiHandle,
+                FfiConverterByteArray.lower(`sessionId`),FfiConverterUInt.lower(`chosenIndex`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
@@ -3962,6 +4123,16 @@ data class PairStateRecord (
      * creation and unaffected by later accept/reject decisions.
      */
     var `nearby`: kotlin.Boolean
+    , 
+    /**
+     * Whether the peer's SAS reveal verified (the visual gate is ready/underway).
+     */
+    var `sasVerified`: kotlin.Boolean
+    , 
+    /**
+     * Whether this side's human cleared the SAS gate (required before any local accept).
+     */
+    var `localSasConfirmed`: kotlin.Boolean
     
 ){
     
@@ -3985,6 +4156,8 @@ public object FfiConverterTypePairStateRecord: FfiConverterRustBuffer<PairStateR
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -3995,7 +4168,9 @@ public object FfiConverterTypePairStateRecord: FfiConverterRustBuffer<PairStateR
             FfiConverterBoolean.allocationSize(value.`localAccepted`) +
             FfiConverterBoolean.allocationSize(value.`peerAccepted`) +
             FfiConverterBoolean.allocationSize(value.`initiator`) +
-            FfiConverterBoolean.allocationSize(value.`nearby`)
+            FfiConverterBoolean.allocationSize(value.`nearby`) +
+            FfiConverterBoolean.allocationSize(value.`sasVerified`) +
+            FfiConverterBoolean.allocationSize(value.`localSasConfirmed`)
     )
 
     override fun write(value: PairStateRecord, buf: ByteBuffer) {
@@ -4006,6 +4181,8 @@ public object FfiConverterTypePairStateRecord: FfiConverterRustBuffer<PairStateR
             FfiConverterBoolean.write(value.`peerAccepted`, buf)
             FfiConverterBoolean.write(value.`initiator`, buf)
             FfiConverterBoolean.write(value.`nearby`, buf)
+            FfiConverterBoolean.write(value.`sasVerified`, buf)
+            FfiConverterBoolean.write(value.`localSasConfirmed`, buf)
     }
 }
 
@@ -4078,6 +4255,66 @@ public object FfiConverterTypeProfileView: FfiConverterRustBuffer<ProfileView> {
             FfiConverterString.write(value.`color`, buf)
             FfiConverterByteArray.write(value.`recvPub`, buf)
             FfiConverterULong.write(value.`ts`, buf)
+    }
+}
+
+
+
+/**
+ * The per-session Short Authentication String challenge shown while a pair is `Verifying`.
+ */
+data class SasChallenge (
+    var `role`: SasRoleKind
+    , 
+    /**
+     * Correct figure index (displayer shows it; picker must match it). Never sent on the wire.
+     */
+    var `targetIndex`: kotlin.UInt
+    , 
+    /**
+     * The picker's shuffled figure indices (includes the target). Empty is never produced.
+     */
+    var `optionIndices`: List<kotlin.UInt>
+    , 
+    /**
+     * Absolute wall-clock deadline (ms since epoch). Actions after this are terminal.
+     */
+    var `deadlineMs`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSasChallenge: FfiConverterRustBuffer<SasChallenge> {
+    override fun read(buf: ByteBuffer): SasChallenge {
+        return SasChallenge(
+            FfiConverterTypeSasRoleKind.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterSequenceUInt.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: SasChallenge) = (
+            FfiConverterTypeSasRoleKind.allocationSize(value.`role`) +
+            FfiConverterUInt.allocationSize(value.`targetIndex`) +
+            FfiConverterSequenceUInt.allocationSize(value.`optionIndices`) +
+            FfiConverterULong.allocationSize(value.`deadlineMs`)
+    )
+
+    override fun write(value: SasChallenge, buf: ByteBuffer) {
+            FfiConverterTypeSasRoleKind.write(value.`role`, buf)
+            FfiConverterUInt.write(value.`targetIndex`, buf)
+            FfiConverterSequenceUInt.write(value.`optionIndices`, buf)
+            FfiConverterULong.write(value.`deadlineMs`, buf)
     }
 }
 
@@ -4213,6 +4450,10 @@ enum class PairEventKind {
      */
     PENDING_REQUEST,
     /**
+     * The SAS visual gate is ready — fetch `pair_sas_challenge` and show it.
+     */
+    VERIFYING,
+    /**
      * The peer sent their accept/reject.
      */
     PEER_RESPONDED,
@@ -4225,7 +4466,7 @@ enum class PairEventKind {
      */
     REJECTED,
     /**
-     * The session failed.
+     * The session failed (SAS mismatch/cancel/timeout or a protocol error).
      */
     FAILED;
 
@@ -4265,6 +4506,11 @@ enum class PairState {
     
     HANDSHAKING,
     PENDING,
+    /**
+     * The SAS nonces are revealed + verified; both humans must clear the visual gate. No
+     * `PairResult` is reachable from here.
+     */
+    VERIFYING,
     LOCAL_ACCEPTED,
     PEER_ACCEPTED,
     COMPLETE,
@@ -4291,6 +4537,49 @@ public object FfiConverterTypePairState: FfiConverterRustBuffer<PairState> {
     override fun allocationSize(value: PairState) = 4UL
 
     override fun write(value: PairState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * The deterministic SAS role for this side, derived from the pairing transcript.
+ */
+
+enum class SasRoleKind {
+    
+    /**
+     * Show the target figure and confirm the other human matched it.
+     */
+    DISPLAYER,
+    /**
+     * Choose the matching figure among the options.
+     */
+    PICKER;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSasRoleKind: FfiConverterRustBuffer<SasRoleKind> {
+    override fun read(buf: ByteBuffer) = try {
+        SasRoleKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: SasRoleKind) = 4UL
+
+    override fun write(value: SasRoleKind, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -4485,6 +4774,66 @@ public object FfiConverterOptionalTypeProfileView: FfiConverterRustBuffer<Profil
         } else {
             buf.put(1)
             FfiConverterTypeProfileView.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeSasChallenge: FfiConverterRustBuffer<SasChallenge?> {
+    override fun read(buf: ByteBuffer): SasChallenge? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeSasChallenge.read(buf)
+    }
+
+    override fun allocationSize(value: SasChallenge?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeSasChallenge.allocationSize(value)
+        }
+    }
+
+    override fun write(value: SasChallenge?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeSasChallenge.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceUInt: FfiConverterRustBuffer<List<kotlin.UInt>> {
+    override fun read(buf: ByteBuffer): List<kotlin.UInt> {
+        val len = buf.getInt()
+        return List<kotlin.UInt>(len) {
+            FfiConverterUInt.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.UInt>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterUInt.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.UInt>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterUInt.write(it, buf)
         }
     }
 }
