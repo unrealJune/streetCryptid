@@ -1,8 +1,8 @@
 import { useCallback, useMemo, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Platform, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { BottomTabInset, Spacing } from '@/constants/theme';
+import { Spacing } from '@/constants/theme';
 import {
   CoverageIsland,
   MapView,
@@ -63,6 +63,8 @@ export default function MapScreenBody() {
         ? 'Your current location is shown.'
         : 'Finding your location.'
       : 'Your location is not available.';
+  // Native tabs already apply Android's bottom inset to their screen content.
+  const islandBottomPadding = Platform.OS === 'android' ? Spacing.two : insets.bottom + Spacing.two;
 
   return (
     <View style={[styles.container, { backgroundColor: theme.chrome.bg }]}>
@@ -89,10 +91,7 @@ export default function MapScreenBody() {
       </View>
       <View
         pointerEvents="box-none"
-        style={[
-          styles.islandLayer,
-          { paddingBottom: insets.bottom + BottomTabInset + Spacing.two },
-        ]}
+        style={[styles.islandLayer, { paddingBottom: islandBottomPadding }]}
       >
         <CoverageIsland theme={theme} placeName={readout.placeName} coverage={readout.coverage} />
       </View>

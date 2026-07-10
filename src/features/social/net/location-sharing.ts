@@ -73,7 +73,7 @@ export interface PairingSnapshot {
   gestureActive: boolean;
   /** When the active rub-consent window expires, or null while idle. */
   gestureExpiresAt: number | null;
-  /** The friend most recently completed through pairing, until the reveal dismisses it. */
+  /** The friend most recently completed through pairing, until the reveal is acknowledged/rejected. */
   discoveredFriend: Friend | null;
   /** The most recently minted invite link (`streetcryptid://social?token=…`), if any. */
   inviteLink: string | null;
@@ -417,9 +417,8 @@ export class LocationSharingService implements FixPublisher {
    * side, while an inbound nearby request auto-accepts only while this window is active.
    */
   async beginNearbyGesture(windowMs = NEARBY_GESTURE_WINDOW_MS): Promise<void> {
-    if (!this.mod) return;
+    if (!this.mod || this.discoveredFriend) return;
     this.nearbyGestureUntil = Date.now() + Math.max(2000, windowMs);
-    this.discoveredFriend = null;
     this.setPairingActivity('feeling for a signal');
     this.startNearbyGesturePolling();
 
@@ -429,11 +428,31 @@ export class LocationSharingService implements FixPublisher {
     await this.pollPairingOnce();
   }
 
-  /** Dismiss the one-shot "cryptid discovered" reveal. */
-  clearPairingCelebration(): void {
+  /** Acknowledge the one-shot "cryptid discovered" reveal and keep the new friend. */
+  acknowledgeDiscoveredFriend(): void {
     if (!this.discoveredFriend) return;
     this.discoveredFriend = null;
     this.emit();
+  }
+
+  /** Reject the discovered friend, revoke sharing, and leave their live location topic. */
+  async rejectDiscoveredFriend(): Promise<void> {
+    const friend = this.discoveredFriend;
+    if (!friend) return;
+
+    this.discoveredFriend = null;
+    this.state = pool.removeFriend(this.state, friend.endpointId);
+    this.persistPool();
+    this.setPairingActivity('cryptid rejected');
+
+    const mod = this.mod;
+    const friendSubId = this.friendSubs.get(friend.endpointId);
+    const unsubscribeFromFriend = async (): Promise<void> => {
+      if (!mod || !friendSubId) return;
+      await mod.unsubscribe(friendSubId);
+      this.friendSubs.delete(friend.endpointId);
+    };
+    await Promise.all([unsubscribeFromFriend(), this.ensureMySubscription()]);
   }
 
   /**

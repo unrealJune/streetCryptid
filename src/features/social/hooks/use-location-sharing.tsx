@@ -45,7 +45,8 @@ interface LocationSharingContextValue {
   toggleShare(endpointId: string, on: boolean): Promise<void>;
   removeFriend(endpointId: string): Promise<void>;
   retryLocation(): Promise<void>;
-  clearPairingCelebration(): void;
+  acknowledgeDiscoveredFriend(): void;
+  rejectDiscoveredFriend(): Promise<void>;
 }
 
 const LocationSharingContext = createContext<LocationSharingContextValue | null>(null);
@@ -296,9 +297,13 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       throw removeError;
     }
   }, []);
-  const clearPairingCelebration = useCallback(() => {
-    serviceRef.current?.clearPairingCelebration();
+  const acknowledgeDiscoveredFriend = useCallback(() => {
+    serviceRef.current?.acknowledgeDiscoveredFriend();
   }, []);
+  const rejectDiscoveredFriend = useCallback(() => {
+    setServiceError(null);
+    return run((service) => service.rejectDiscoveredFriend());
+  }, [run]);
 
   const friends = useMemo(
     () =>
@@ -330,7 +335,8 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       toggleShare,
       removeFriend,
       retryLocation,
-      clearPairingCelebration,
+      acknowledgeDiscoveredFriend,
+      rejectDiscoveredFriend,
     }),
     [
       snapshot,
@@ -349,7 +355,8 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       toggleShare,
       removeFriend,
       retryLocation,
-      clearPairingCelebration,
+      acknowledgeDiscoveredFriend,
+      rejectDiscoveredFriend,
     ]
   );
 
