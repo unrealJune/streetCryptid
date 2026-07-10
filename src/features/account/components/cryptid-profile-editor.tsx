@@ -32,7 +32,9 @@ import {
   type CryptidProfile,
   type CryptidProfileDraft,
 } from '../core/profile';
+import type { GeneratedCryptid } from '../core/cryptid-generator';
 import { CryptidAvatar } from './cryptid-avatar';
+import { CryptidGeneratorDialog } from './cryptid-generator-dialog';
 import { SignalColorPicker } from './signal-color-picker';
 
 const AUTOSAVE_DELAY_MS = 450;
@@ -95,6 +97,7 @@ export function CryptidProfileEditor({
   const [saveStatus, setSaveStatus] = useState<SaveStatus>(initialProfile ? 'saved' : 'idle');
   const [saveError, setSaveError] = useState<string | null>(null);
   const [finishing, setFinishing] = useState(false);
+  const [generatorOpen, setGeneratorOpen] = useState(false);
 
   const selectedPreset = findCryptidPreset(selectedPresetId);
   const cryptidName = selectedPreset?.name ?? customName;
@@ -270,6 +273,18 @@ export function CryptidProfileEditor({
     }
   };
 
+  const useGeneratedCryptid = (generated: GeneratedCryptid): void => {
+    setSaveError(null);
+    setSaveStatus('idle');
+    setSelectedPresetId(null);
+    setCustomName(generated.name);
+    setCustomArt(generated.sigil);
+    setCustomNameTouched(false);
+    setCustomArtTouched(false);
+    setActiveEditor('icon');
+    setGeneratorOpen(false);
+  };
+
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -433,7 +448,7 @@ export function CryptidProfileEditor({
             {activeEditor === 'icon' ? (
               <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
                 <ThemedText style={styles.fieldLabel}>Choose an icon</ThemedText>
-                <View accessibilityRole="radiogroup" style={styles.presetGrid}>
+                <View accessibilityLabel="Profile icon choices" style={styles.presetGrid}>
                   {CRYPTID_PRESETS.map((preset) => {
                     const selected = selectedPresetId === preset.id;
                     return (
@@ -456,6 +471,25 @@ export function CryptidProfileEditor({
                       </Pressable>
                     );
                   })}
+                  <Pressable
+                    accessibilityLabel="Generate a profile icon"
+                    accessibilityRole="button"
+                    onPress={() => setGeneratorOpen(true)}
+                    style={({ pressed }) => [
+                      styles.presetButton,
+                      styles.customButton,
+                      {
+                        backgroundColor: theme.backgroundElement,
+                        borderColor: theme.backgroundSelected,
+                        opacity: pressed ? 0.62 : 1,
+                      },
+                    ]}
+                  >
+                    <ThemedText style={[styles.generatorGlyph, { color }]}>{'{*}'}</ThemedText>
+                    <ThemedText type="small" style={styles.customLabel}>
+                      Generate
+                    </ThemedText>
+                  </Pressable>
                   <Pressable
                     accessibilityLabel="Custom profile icon"
                     accessibilityRole="radio"
@@ -653,6 +687,12 @@ export function CryptidProfileEditor({
           ) : null}
         </View>
       </ScrollView>
+      <CryptidGeneratorDialog
+        color={color}
+        onClose={() => setGeneratorOpen(false)}
+        onUse={useGeneratedCryptid}
+        visible={generatorOpen}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -872,6 +912,12 @@ const styles = StyleSheet.create({
   customGlyph: {
     fontSize: 30,
     fontWeight: '400',
+    lineHeight: 34,
+  },
+  generatorGlyph: {
+    fontFamily: Fonts.mono,
+    fontSize: 24,
+    fontWeight: '600',
     lineHeight: 34,
   },
   customLabel: {

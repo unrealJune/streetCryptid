@@ -72,7 +72,15 @@
           "androidForegroundServiceIcon": "./assets/images/android-icon-monochrome.png"
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 26
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
