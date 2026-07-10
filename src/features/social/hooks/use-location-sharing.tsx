@@ -63,6 +63,24 @@ function profileSignature(
   return `${profile.handle}\u0000${profile.cryptidName}\u0000${profile.sigil}\u0000${profile.color}`;
 }
 
+/**
+ * The native `IrohLocation` module is a process-wide singleton that owns a single node, and the
+ * background location service is meant to outlive any single mount of this provider. So the service
+ * (and its native node) is held as a module-level singleton: remounts — including React StrictMode's
+ * dev double-invoke — reuse it and re-attach listeners, rather than create a second service that
+ * would race the shared native node. That race surfaced as `IrohLocation.setPairingReady` rejecting
+ * with "call createNode first" when a stale unmount tore the node down under a freshly-mounted,
+ * already-"ready" instance. Initialised exactly once; a failed attempt clears the latch so a later
+ * mount can retry instead of inheriting a rejected promise.
+ */
+let sharedService: LocationSharingService | null = null;
+let sharedServiceInit: Promise<void> | null = null;
+
+function getSharedService(): LocationSharingService {
+  if (!sharedService) sharedService = new LocationSharingService();
+  return sharedService;
+}
+
 export function LocationSharingProvider({ children }: PropsWithChildren) {
   const { profile } = useCryptidProfile();
   const [initialProfile] = useState(profile);
@@ -127,7 +145,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     if (!initialProfile) return;
 
-    const service = new LocationSharingService();
+    const service = getSharedService();
     serviceRef.current = service;
     let active = true;
 
@@ -145,7 +163,8 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       if (active) void refreshTrail(service);
     });
     const offError = service.onError((message) => {
-      if (active) setServiceError(message);
+      // An empty message is the service's "recovered" signal — clear the banner rather than pin it.
+      if (active) setServiceError(message || null);
     });
 
     void (async () => {
@@ -157,14 +176,24 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
         return;
       }
       try {
-        await ensureLocalNetworkPermission();
-        bluetoothPermissionGranted.current = await ensurePairingPermissions();
-        await service.init(
-          initialProfile.handle,
-          initialProfile.sigil,
-          initialProfile.cryptidName,
-          initialProfile.color
-        );
+        // Initialise the shared native node exactly once across all mounts. A failed attempt
+        // clears the latch (below) so a later mount retries rather than awaiting a rejected promise.
+        if (!sharedServiceInit) {
+          sharedServiceInit = (async () => {
+            await ensureLocalNetworkPermission();
+            bluetoothPermissionGranted.current = await ensurePairingPermissions();
+            await service.init(
+              initialProfile.handle,
+              initialProfile.sigil,
+              initialProfile.cryptidName,
+              initialProfile.color
+            );
+          })().catch((error: unknown) => {
+            sharedServiceInit = null;
+            throw error;
+          });
+        }
+        await sharedServiceInit;
         publishedProfileSignature.current = profileSignature(initialProfile);
         if (!active) return;
         await refreshTrail(service);
@@ -178,6 +207,10 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     })();
 
     return () => {
+      // Detach this mount's listeners only. The shared service, its native node, and the background
+      // location service are process-lifetime singletons and are intentionally NOT shut down here,
+      // so a remount (or StrictMode's dev double-invoke) can't tear the node down under another
+      // still-live, already-"ready" instance.
       active = false;
       trailRefreshId.current += 1;
       offSnapshot();
@@ -185,8 +218,6 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       offTrail();
       offFix();
       offError();
-      service.shutdown();
-      if (serviceRef.current === service) serviceRef.current = null;
     };
   }, [initialProfile, refreshTrail, startLocation]);
 

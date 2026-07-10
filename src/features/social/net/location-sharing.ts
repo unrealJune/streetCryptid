@@ -1084,7 +1084,13 @@ export class LocationSharingService implements FixPublisher {
       for (const profile of profileEvents) this.applyProfile(profile);
       for (const event of pairEvents) await this.handlePairEvent(event);
       await this.maybeInitiateNearbyPair();
-      this.lastPollErrorSig = null;
+      if (this.lastPollErrorSig !== null) {
+        // A prior poll surfaced an error (typically transient — e.g. the native node was still
+        // coming up). Now that polling recovered, clear the surfaced error so the UI's sticky
+        // "needs attention" banner dismisses itself instead of lingering after we've healed.
+        this.lastPollErrorSig = null;
+        this.errorListeners.forEach((listener) => listener(''));
+      }
       this.emitIfPairingChanged();
     } catch (err) {
       this.reportPollError(err);
