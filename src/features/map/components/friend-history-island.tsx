@@ -8,14 +8,21 @@ import type { MapFriendLocation } from '../render/map-view';
 
 interface FriendHistoryIslandProps {
   readonly friend: MapFriendLocation;
+  readonly self?: boolean;
   readonly theme: CryptidTheme;
   onClose(): void;
 }
 
-/** Selected-friend readout shown while their retained breadcrumb is on the map. */
-export function FriendHistoryIsland({ friend, theme, onClose }: FriendHistoryIslandProps) {
+/** Selected-location readout shown while a retained breadcrumb is on the map. */
+export function FriendHistoryIsland({
+  friend,
+  self = false,
+  theme,
+  onClose,
+}: FriendHistoryIslandProps) {
   const { chrome } = theme;
   const signalLabel = `${friend.historyCount} signal${friend.historyCount === 1 ? '' : 's'}`;
+  const ownerLabel = self ? 'Your' : friend.handle;
 
   return (
     <View
@@ -37,7 +44,7 @@ export function FriendHistoryIsland({ friend, theme, onClose }: FriendHistoryIsl
       <View
         accessible
         accessibilityRole="summary"
-        accessibilityLabel={`${friend.handle}. ${signalLabel} in the retained 48 hour location history. The latest retained location is shown.`}
+        accessibilityLabel={`${ownerLabel} location history. ${signalLabel} retained over 48 hours. The latest retained location is shown.`}
         style={styles.copy}
       >
         <Text numberOfLines={1} style={[styles.handle, { color: friend.color }]}>
@@ -59,7 +66,7 @@ export function FriendHistoryIsland({ friend, theme, onClose }: FriendHistoryIsl
         </View>
       </View>
       <Pressable
-        accessibilityLabel={`Close ${friend.handle}'s location history`}
+        accessibilityLabel={`Close ${self ? 'your' : `${friend.handle}'s`} location history`}
         accessibilityRole="button"
         hitSlop={6}
         onPress={onClose}

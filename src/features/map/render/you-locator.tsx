@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, {
   cancelAnimation,
   Easing,
@@ -21,6 +21,8 @@ interface YouLocatorProps {
   readonly translateY: SharedValue<number>;
   readonly accent: Rgb;
   readonly panelColor: string;
+  readonly selected?: boolean;
+  onPress(): void;
 }
 
 /** The amber YOU locator stays legible at every map zoom. */
@@ -32,6 +34,8 @@ export function YouLocator({
   translateY,
   accent,
   panelColor,
+  selected = false,
+  onPress,
 }: YouLocatorProps) {
   const reducedMotion = useReducedMotion();
   const pulse = useSharedValue(0);
@@ -65,12 +69,24 @@ export function YouLocator({
   }, [pulse, reducedMotion]);
 
   return (
-    <Animated.View pointerEvents="none" style={[styles.anchor, positionStyle]}>
-      <View style={styles.marker}>
+    <Animated.View pointerEvents="box-none" style={[styles.anchor, positionStyle]}>
+      <Pressable
+        accessibilityHint="Shows your retained location trail"
+        accessibilityLabel="Open your location history"
+        accessibilityRole="button"
+        accessibilityState={{ selected }}
+        onPress={onPress}
+        style={({ pressed }) => [styles.marker, { opacity: pressed ? 0.72 : 1 }]}
+      >
         {!reducedMotion ? (
           <Animated.View style={[styles.pulse, { borderColor: color }, pulseStyle]} />
         ) : null}
-        <View style={[styles.outerRing, { borderColor: rgba(0.4) }]} />
+        <View
+          style={[
+            styles.outerRing,
+            { borderColor: selected ? color : rgba(0.4), borderWidth: selected ? 2 : 1.2 },
+          ]}
+        />
         <View style={[styles.innerRing, { borderColor: rgba(0.72) }]} />
         <View style={[styles.core, { backgroundColor: color }]}>
           <View style={[styles.coreDot, { backgroundColor: panelColor }]} />
@@ -80,7 +96,7 @@ export function YouLocator({
             YOU
           </Text>
         </View>
-      </View>
+      </Pressable>
     </Animated.View>
   );
 }
@@ -110,7 +126,6 @@ const styles = StyleSheet.create({
   },
   outerRing: {
     borderRadius: 22,
-    borderWidth: 1.2,
     height: 44,
     left: 8,
     position: 'absolute',
