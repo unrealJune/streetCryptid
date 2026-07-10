@@ -53,7 +53,8 @@ export default function FriendsScreen() {
     refreshPairing,
     toggleShare,
     retryLocation,
-    clearPairingCelebration,
+    acknowledgeDiscoveredFriend,
+    rejectDiscoveredFriend,
   } = useLocationSharing();
 
   useFocusEffect(
@@ -70,7 +71,10 @@ export default function FriendsScreen() {
   const onRub = useCallback(async () => {
     await beginNearbyGesture();
   }, [beginNearbyGesture]);
-  const rub = useRubToPair(isFocused && Boolean(pairing?.available), onRub);
+  const rub = useRubToPair(
+    isFocused && Boolean(pairing?.available) && !pairing?.discoveredFriend,
+    onRub
+  );
   usePairingHaptics(pairing, isFocused);
 
   useEffect(() => {
@@ -283,7 +287,8 @@ export default function FriendsScreen() {
 
       <CryptidDiscoveryCelebration
         friend={pairing?.discoveredFriend ?? null}
-        onDone={clearPairingCelebration}
+        onAcknowledge={acknowledgeDiscoveredFriend}
+        onReject={rejectDiscoveredFriend}
       />
     </>
   );
