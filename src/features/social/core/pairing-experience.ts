@@ -24,10 +24,7 @@ export function derivePairingExperienceStage(
   const verificationSessions = input.sessions.filter((session) =>
     ['verifying', 'localAccepted', 'peerAccepted'].includes(session.state)
   );
-  if (
-    verificationSessions.some((session) => !session.nearby) ||
-    (input.gestureActive && verificationSessions.length > 0)
-  ) {
+  if (verificationSessions.some((session) => !session.nearby || input.gestureActive)) {
     return 'verifying';
   }
 
@@ -35,6 +32,7 @@ export function derivePairingExperienceStage(
     (session) => session.nearby && !['rejected', 'failed'].includes(session.state)
   );
   if (activeNearby) {
+    // Nearby feedback is bounded by the motion-consent window, even if native state is stale.
     if (!input.gestureActive) return 'idle';
     return activeNearby.state === 'complete' ? 'joining' : 'handshaking';
   }

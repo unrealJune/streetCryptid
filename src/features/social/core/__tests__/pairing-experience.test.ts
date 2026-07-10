@@ -116,6 +116,17 @@ describe('pairing experience', () => {
     ).toBe('idle');
   });
 
+  it('keeps invite verification independent of the motion window', () => {
+    expect(
+      derivePairingExperienceStage({
+        gestureActive: false,
+        nearbyPeers: [],
+        sessions: [{ ...session('verifying'), nearby: false }],
+        discoveredFriend: null,
+      })
+    ).toBe('verifying');
+  });
+
   it('accelerates haptic cadence as pairing advances', () => {
     const seeking = pairingHapticCadence('seeking');
     const handshake = pairingHapticCadence('handshaking');
