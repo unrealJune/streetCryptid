@@ -52,6 +52,7 @@ export default function FriendsScreen() {
     respondPair,
     refreshPairing,
     toggleShare,
+    removeFriend,
     retryLocation,
     acknowledgeDiscoveredFriend,
     rejectDiscoveredFriend,
@@ -262,6 +263,10 @@ export default function FriendsScreen() {
         onViewMap={() => {
           setSelectedEndpoint(null);
           router.navigate('/');
+        }}
+        onRemove={async () => {
+          if (!selected) return;
+          await removeFriend(selected.friend.endpointId);
         }}
       />
 

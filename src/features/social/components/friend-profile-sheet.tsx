@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, useColorScheme, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -14,6 +15,7 @@ interface FriendProfileSheetProps {
   onClose(): void;
   onToggleShare(on: boolean): Promise<void>;
   onViewMap(): void;
+  onRemove(): Promise<void>;
 }
 
 function pairingLabel(method: FriendPresence['friend']['pairingMethod']): string {
@@ -37,20 +39,55 @@ export function FriendProfileSheet({
   onClose,
   onToggleShare,
   onViewMap,
+  onRemove,
 }: FriendProfileSheetProps) {
   const theme = useTheme();
   const scheme = useColorScheme();
   const insets = useSafeAreaInsets();
+  const [confirmingEndpoint, setConfirmingEndpoint] = useState<string | null>(null);
+  const [removingEndpoint, setRemovingEndpoint] = useState<string | null>(null);
+  const [removeFailure, setRemoveFailure] = useState<{
+    endpointId: string;
+    message: string;
+  } | null>(null);
   const green = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome.green;
+
   if (!presence) return null;
 
+  const endpointId = presence.friend.endpointId;
+  const confirmingRemove = confirmingEndpoint === endpointId;
+  const removing = removingEndpoint === endpointId;
+  const removeError = removeFailure?.endpointId === endpointId ? removeFailure.message : null;
   const distance = formatDistance(presence.distanceM);
   const locationLine = distance ?? (presence.fix ? 'Location received' : 'Waiting for location');
+
+  function closeSheet(): void {
+    setConfirmingEndpoint(null);
+    setRemovingEndpoint(null);
+    setRemoveFailure(null);
+    onClose();
+  }
+
+  async function handleRemove(): Promise<void> {
+    setRemovingEndpoint(endpointId);
+    setRemoveFailure(null);
+    try {
+      await onRemove();
+      closeSheet();
+    } catch {
+      setRemoveFailure({
+        endpointId,
+        message: 'Could not remove this friend. Try again.',
+      });
+    } finally {
+      setRemovingEndpoint(null);
+    }
+  }
 
   return (
     <Modal
       animationType="slide"
-      onRequestClose={onClose}
+      onRequestClose={closeSheet}
       presentationStyle="pageSheet"
       visible={visible}
     >
@@ -69,7 +106,7 @@ export function FriendProfileSheet({
             accessibilityRole="button"
             accessibilityLabel="Close friend profile"
             hitSlop={10}
-            onPress={onClose}
+            onPress={closeSheet}
             style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
           >
             <ThemedText type="code" style={{ color: green }}>
@@ -129,6 +166,68 @@ export function FriendProfileSheet({
             {sharing ? 'Pause sharing my location' : 'Share my location'}
           </ThemedText>
         </Pressable>
+
+        <View style={[styles.removeSection, { borderTopColor: theme.backgroundSelected }]}>
+          {confirmingRemove ? (
+            <View accessibilityLiveRegion="polite" style={styles.removeConfirm}>
+              <ThemedText type="smallBold">Remove {presence.friend.handle}?</ThemedText>
+              <ThemedText type="small" themeColor="textSecondary">
+                This removes them from this device and stops sharing your location with them. You
+                can pair again later.
+              </ThemedText>
+              {removeError ? (
+                <ThemedText type="small" accessibilityRole="alert">
+                  {removeError}
+                </ThemedText>
+              ) : null}
+              <View style={styles.removeActions}>
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={removing}
+                  onPress={() => {
+                    setConfirmingEndpoint(null);
+                    setRemoveFailure(null);
+                  }}
+                  style={({ pressed }) => [
+                    styles.removeChoice,
+                    {
+                      borderColor: theme.backgroundSelected,
+                      opacity: removing ? 0.45 : pressed ? 0.58 : 1,
+                    },
+                  ]}
+                >
+                  <ThemedText type="smallBold">Keep friend</ThemedText>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ busy: removing, disabled: removing }}
+                  disabled={removing}
+                  onPress={() => void handleRemove()}
+                  style={({ pressed }) => [
+                    styles.removeChoice,
+                    {
+                      borderColor: theme.text,
+                      opacity: removing ? 0.45 : pressed ? 0.58 : 1,
+                    },
+                  ]}
+                >
+                  <ThemedText type="smallBold">{removing ? 'Removing…' : 'Remove'}</ThemedText>
+                </Pressable>
+              </View>
+            </View>
+          ) : (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityHint="Stops sharing and removes this friend from your atlas"
+              onPress={() => setConfirmingEndpoint(endpointId)}
+              style={({ pressed }) => [styles.removeAction, { opacity: pressed ? 0.58 : 1 }]}
+            >
+              <ThemedText type="smallBold" themeColor="textSecondary">
+                Remove friend
+              </ThemedText>
+            </Pressable>
+          )}
+        </View>
       </ScrollView>
     </Modal>
   );
@@ -204,5 +303,32 @@ const styles = StyleSheet.create({
   },
   onGreen: {
     color: '#ffffff',
+  },
+  removeSection: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    marginTop: Spacing.four,
+    paddingTop: Spacing.three,
+  },
+  removeAction: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 48,
+  },
+  removeConfirm: {
+    gap: Spacing.two,
+  },
+  removeActions: {
+    flexDirection: 'row',
+    gap: Spacing.two,
+    marginTop: Spacing.one,
+  },
+  removeChoice: {
+    alignItems: 'center',
+    borderRadius: Spacing.two,
+    borderWidth: StyleSheet.hairlineWidth,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 48,
+    paddingHorizontal: Spacing.two,
   },
 });
