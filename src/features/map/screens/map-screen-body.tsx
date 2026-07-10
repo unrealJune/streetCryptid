@@ -17,7 +17,7 @@ import {
 } from '@/features/map';
 import { sampleTrailForMap, selectFriendTrail } from '@/features/social/core/history';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
-import { SELF_AUTHOR } from '@/features/social/net/background/trail-store';
+import { SELF_AUTHOR, type TrailPoint } from '@/features/social/net/background/trail-store';
 
 /**
  * The map IS the product: full-bleed dot field with a single floating bottom
@@ -77,10 +77,7 @@ export default function MapScreenBody() {
             cryptidName: presence.friend.cryptidName,
             color: resolveSignalColor(presence.friend.color, theme.chrome.green),
             location: { lat: presence.fix.lat, lon: presence.fix.lon },
-            history: sampled.map((point) => ({
-              lat: point.fix.lat,
-              lon: point.fix.lon,
-            })),
+            history: trailLocations(sampled),
             historyCount: history.length,
             latestTs: presence.fix.ts,
             stale: presence.freshness === 'stale',
@@ -98,7 +95,7 @@ export default function MapScreenBody() {
     const sampled = sampleTrailForMap(history);
     return {
       history,
-      sampled: sampled.map((point) => ({ lat: point.fix.lat, lon: point.fix.lon })),
+      sampled: trailLocations(sampled),
     };
   }, [trail]);
   const selfMapLocation = useMemo<MapFriendLocation | null>(() => {
@@ -248,6 +245,10 @@ function MapSession({
       selfSelected={selfSelected}
     />
   );
+}
+
+function trailLocations(points: readonly TrailPoint[]): MapFriendLocation['location'][] {
+  return points.map((point) => ({ lat: point.fix.lat, lon: point.fix.lon }));
 }
 
 const styles = StyleSheet.create({

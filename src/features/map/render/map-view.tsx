@@ -249,13 +249,17 @@ export function MapView({
       ),
     [friendAnchors, selectedFriendId]
   );
+  const selfTrailPoints = useMemo(
+    () =>
+      viewport
+        ? selfHistory.map((location) => worldToScreen(anchor, viewport, latLonToWorld(location)))
+        : [],
+    [anchor, selfHistory, viewport]
+  );
   const selectedTrail = useMemo(() => {
     if (!viewport) return null;
     if (selfSelected) {
-      const points = selfHistory.map((location) =>
-        worldToScreen(anchor, viewport, latLonToWorld(location))
-      );
-      return buildTrail(points, `rgb(${theme.canvas.accent.join(', ')})`);
+      return buildTrail(selfTrailPoints, `rgb(${theme.canvas.accent.join(', ')})`);
     }
     if (!selectedFriendId) return null;
     const friend = friends.find((candidate) => candidate.id === selectedFriendId);
@@ -264,7 +268,15 @@ export function MapView({
       worldToScreen(anchor, viewport, latLonToWorld(location))
     );
     return buildTrail(points, friend.color);
-  }, [anchor, friends, selectedFriendId, selfHistory, selfSelected, theme.canvas.accent, viewport]);
+  }, [
+    anchor,
+    friends,
+    selectedFriendId,
+    selfSelected,
+    selfTrailPoints,
+    theme.canvas.accent,
+    viewport,
+  ]);
   useEffect(() => {
     const path = selectedTrail?.path;
     return () => path?.dispose();

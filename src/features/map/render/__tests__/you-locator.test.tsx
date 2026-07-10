@@ -54,4 +54,26 @@ describe('YouLocator', () => {
     act(() => button.props.onPress());
     expect(onPress).toHaveBeenCalledTimes(1);
   });
+
+  it('exposes the default unselected state', () => {
+    const sharedValue = { value: 0 } as SharedValue<number>;
+
+    act(() => {
+      renderer = create(
+        <YouLocator
+          accent={[255, 184, 77]}
+          onPress={jest.fn()}
+          panelColor="#00111f"
+          scale={sharedValue}
+          translateX={sharedValue}
+          translateY={sharedValue}
+          x={0}
+          y={0}
+        />
+      );
+    });
+
+    const button = renderer.root.findByProps({ accessibilityLabel: 'Open your location history' });
+    expect(button.props.accessibilityState).toEqual({ selected: false });
+  });
 });
