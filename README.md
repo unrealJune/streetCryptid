@@ -1,9 +1,9 @@
 # streetCryptid
 
-A slick, cross-platform (iOS · Android · Web) app for people who want to **walk
-every street** — track where you've been and watch your map fill in as you
-explore. This repo currently holds the app scaffold and tooling; the tracking
-features come next.
+A cross-platform (iOS · Android · Web) fog-of-war city atlas for people who want
+to **walk every street**. The native app records explored sectors, broadcasts
+encrypted location updates directly to paired friends, discovers nearby phones
+over BLE, and renders current friend presence on the map.
 
 ## Tech stack
 
@@ -35,8 +35,9 @@ bun install      # or: just install
 just start       # start the Metro dev server
 ```
 
-Then press `a` (Android), `i` (iOS, macOS only), or `w` (web) in the terminal,
-or scan the QR code with Expo Go.
+Then press `a` (Android), `i` (iOS, macOS only), or `w` (web) in the terminal.
+The decentralized friend layer and BLE pairing require a custom development
+client; Expo Go does not include the local `iroh-location` native module.
 
 > First run of `just start` also generates the Expo type files
 > (`expo-env.d.ts`, `.expo/types/`). These are git-ignored, so run the dev server
@@ -51,7 +52,7 @@ just start           # dev server (a/i/w to open a platform)
 just android         # open on Android device / emulator
 just web             # open in the browser
 
-just check           # typecheck + lint + format-check (the local gate)
+just check           # typecheck + lint + format-check + tests (the local gate)
 just typecheck       # tsc --noEmit
 just lint            # eslint
 just lint-fix        # eslint --fix
@@ -72,10 +73,12 @@ just update "message"      # publish an OTA update
 
 ```
 src/
-  app/            # expo-router routes (file-based): index.tsx, explore.tsx, _layout.tsx
+  app/            # expo-router routes (map, explore, friends)
+  features/map/   # dot-field map engine, rendering, and tests
+  features/social/ # P2P pairing, encrypted location sync, profiles, and UI
+  features/account/ # local cryptid identity and ASCII profile editor
   components/     # shared UI components (themed text/view, tabs, icons, ...)
   constants/      # theme tokens
-  hooks/          # color scheme / theme hooks
 assets/           # icons, splash, images
 app.json          # Expo app config (name, scheme, bundle ids, plugins)
 eas.json          # EAS build/submit profiles (development / preview / production)
@@ -101,4 +104,7 @@ Build profiles live in `eas.json`: `development` (dev client), `preview`
 
 ## License
 
-See [LICENSE](./LICENSE).
+The app is MIT-licensed; see [LICENSE](./LICENSE). The vendored experimental
+iroh BLE transport is AGPL-3.0-or-later. See
+[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) before distributing native
+builds.

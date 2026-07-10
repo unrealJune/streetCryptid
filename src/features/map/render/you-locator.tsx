@@ -1,4 +1,4 @@
-import { Circle, Group } from '@shopify/react-native-skia';
+import { Circle, Group, type SkFont } from '@shopify/react-native-skia';
 import { useEffect } from 'react';
 import {
   Easing,
@@ -11,11 +11,14 @@ import {
 } from 'react-native-reanimated';
 
 import type { Rgb } from '../core/types';
+import { LocatorLabel } from './locator-label';
 
 interface YouLocatorProps {
   readonly x: number;
   readonly y: number;
   readonly accent: Rgb;
+  readonly panelColor: string;
+  readonly font: SkFont | null;
 }
 
 /**
@@ -23,7 +26,7 @@ interface YouLocatorProps {
  * mock's locator), with a gentle ease-out breath on the outer ring. Honors
  * reduced-motion by rendering the static rings only.
  */
-export function YouLocator({ x, y, accent }: YouLocatorProps) {
+export function YouLocator({ x, y, accent, panelColor, font }: YouLocatorProps) {
   const reducedMotion = useReducedMotion();
 
   const rgb = `rgb(${accent[0]}, ${accent[1]}, ${accent[2]})`;
@@ -36,6 +39,7 @@ export function YouLocator({ x, y, accent }: YouLocatorProps) {
       <Circle r={12} color={rgba(0.4)} style="stroke" strokeWidth={1.4} />
       <Circle r={6} color={rgb} />
       <Circle r={2.3} color="rgba(255, 251, 244, 1)" />
+      <LocatorLabel label="YOU" color={rgb} panelColor={panelColor} font={font} />
     </Group>
   );
 }

@@ -8,20 +8,16 @@ import {
   CAMERA_MIN_ZOOM,
   HEX_RADIUS_WORLD,
   createMapDataset,
+  type MapDataset,
 } from '../config';
-import {
-  applyViewTransform,
-  clampCamera,
-  scaleFor,
-  worldToScreen,
-  type ViewTransform,
-} from '../core/camera';
+import { applyViewTransform, clampCamera, scaleFor, type ViewTransform } from '../core/camera';
 import { demoExploration } from '../core/exploration';
 import { makeViewLimits, type ViewLimits } from '../core/gesture';
 import { createHexGrid } from '../core/hex';
 import { coverageInView, nearestPlaceName } from '../core/readout';
 import { coversView, shouldPrefetchRegion } from '../core/region';
-import type { CameraState, ScreenPoint, Viewport, WorldPoint } from '../core/types';
+import type { CameraState, LatLon, Viewport, WorldPoint } from '../core/types';
+import { latLonToWorld } from '../core/mercator';
 import { MapEngine, type MapRegion } from '../engine/map-engine';
 import { useMapTheme } from './use-map-theme';
 
@@ -41,10 +37,6 @@ export interface MapEngineState {
   readonly limits: ViewLimits | null;
   /** Hex circumradius in world units — a uniform for the dot-field shader. */
   readonly hexRadius: number;
-  /** YOU locator position in screen px (committed camera), or null when off-screen. */
-  readonly you: ScreenPoint | null;
-  /** YOU's world position (demo home for now) — for anchor-space placement. */
-  readonly home: WorldPoint;
   /** Discovered fraction of the hex sectors in view, 0–1. */
   readonly coverage: number;
   /** Nearest prominent place name to the camera center, for the island. */
@@ -70,10 +62,22 @@ export interface MapEngineState {
  * UI thread — so nothing here (build latency, region swaps, re-renders) can
  * ever move the map under the user's finger.
  */
-export function useMapEngine(viewport: Viewport | null): MapEngineState {
+export function useMapEngine(
+  viewport: Viewport | null,
+  initialCenter: LatLon | null = null
+): MapEngineState {
   const theme = useMapTheme();
 
   const dataset = useMemo(() => createMapDataset(), []);
+  const requestedHome = useMemo(
+    () => (initialCenter ? latLonToWorld(initialCenter) : null),
+    [initialCenter]
+  );
+  const home = useMemo(
+    () =>
+      requestedHome && pointInside(requestedHome, dataset.bounds) ? requestedHome : dataset.home,
+    [dataset, requestedHome]
+  );
   const grid = useMemo(() => createHexGrid(HEX_RADIUS_WORLD), []);
   const exploration = useMemo(() => demoExploration(grid, dataset.home), [grid, dataset]);
   const engine = useMemo(
@@ -91,10 +95,7 @@ export function useMapEngine(viewport: Viewport | null): MapEngineState {
     [dataset, grid]
   );
 
-  const anchor = useMemo<CameraState>(
-    () => ({ center: dataset.home, zoom: CAMERA_INITIAL_ZOOM }),
-    [dataset]
-  );
+  const anchor = useMemo<CameraState>(() => ({ center: home, zoom: CAMERA_INITIAL_ZOOM }), [home]);
   const constraints = useMemo(
     () => ({ bounds: dataset.bounds, minZoom: CAMERA_MIN_ZOOM, maxZoom: CAMERA_MAX_ZOOM }),
     [dataset]
@@ -173,14 +174,6 @@ export function useMapEngine(viewport: Viewport | null): MapEngineState {
     [viewport, anchor, constraints, engine, exploration]
   );
 
-  const you = useMemo<ScreenPoint | null>(() => {
-    if (!viewport) return null;
-    const s = worldToScreen(camera, viewport, dataset.home);
-    const visible =
-      s[0] >= -24 && s[0] <= viewport.width + 24 && s[1] >= -24 && s[1] <= viewport.height + 24;
-    return visible ? s : null;
-  }, [camera, viewport, dataset]);
-
   const coverage = useMemo(
     () => (viewport ? coverageInView(exploration, grid, camera, viewport) : 0),
     [exploration, grid, camera, viewport]
@@ -198,13 +191,20 @@ export function useMapEngine(viewport: Viewport | null): MapEngineState {
     anchor,
     limits,
     hexRadius: grid.radius,
-    you,
-    home: dataset.home,
     coverage,
     placeName,
     commit,
     prefetchAt,
   };
+}
+
+function pointInside(point: WorldPoint, bounds: MapDataset['bounds']): boolean {
+  return (
+    point[0] >= bounds.minX &&
+    point[0] <= bounds.maxX &&
+    point[1] >= bounds.minY &&
+    point[1] <= bounds.maxY
+  );
 }
 
 /** Same view to within half a screen pixel and a hair of zoom. */

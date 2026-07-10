@@ -1,8 +1,9 @@
 'use no memo'; // react-compiler: keep it away from Skia/Reanimated JSI objects
 
-import { Canvas, Group, Image as SkiaImage } from '@shopify/react-native-skia';
+import { Rajdhani_700Bold } from '@expo-google-fonts/rajdhani';
+import { Canvas, Group, Image as SkiaImage, useFont } from '@shopify/react-native-skia';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Platform, StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
+import { Platform, StyleSheet, View, type LayoutChangeEvent } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import {
   cancelAnimation,
@@ -30,9 +31,11 @@ import {
   transformDistanceSq,
   translationRange,
 } from '../core/gesture';
-import type { CameraState, MapReadout, Viewport, WorldRect } from '../core/types';
+import type { CameraState, LatLon, MapReadout, Viewport, WorldRect } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
 import { useMapEngine } from '../hooks/use-map-engine';
+import { latLonToWorld } from '../core/mercator';
+import { FriendLocator } from './friend-locator';
 import { makeHexImage, makeLutImage, makeMaskImage, renderRegionImage } from './region-shader';
 import { YouLocator } from './you-locator';
 
@@ -58,6 +61,13 @@ interface ScreenRect {
   y: number;
   width: number;
   height: number;
+}
+
+export interface MapFriendLocation {
+  id: string;
+  handle: string;
+  location: LatLon;
+  stale?: boolean;
 }
 
 /**
@@ -89,25 +99,21 @@ function anchorRect(rect: WorldRect, anchor: CameraState, viewport: Viewport): S
  */
 export function MapView({
   onReadout,
+  initialCenter = null,
+  selfLocation = null,
+  friends = [],
 }: {
   /** Surfaces the coverage/place readout to the surrounding chrome. */
   onReadout?: (readout: MapReadout) => void;
+  initialCenter?: LatLon | null;
+  selfLocation?: LatLon | null;
+  friends?: readonly MapFriendLocation[];
 }) {
   const [viewport, setViewport] = useState<Viewport | null>(null);
   const reducedMotion = useReducedMotion();
-  const {
-    theme,
-    region,
-    anchor,
-    limits,
-    hexRadius,
-    you,
-    home,
-    coverage,
-    placeName,
-    commit,
-    prefetchAt,
-  } = useMapEngine(viewport);
+  const locatorFont = useFont(Rajdhani_700Bold, 13);
+  const { theme, region, anchor, limits, hexRadius, coverage, placeName, commit, prefetchAt } =
+    useMapEngine(viewport, initialCenter);
 
   // ── The one live view transform (anchor space → screen), UI-thread-owned ──
   const k = useSharedValue(1);
@@ -190,9 +196,22 @@ export function MapView({
     () => (track.prev && viewport ? anchorRect(track.prev.spec.rect, anchor, viewport) : null),
     [track.prev, anchor, viewport]
   );
-  const youAnchor = useMemo(
-    () => (viewport ? worldToScreen(anchor, viewport, home) : null),
-    [anchor, viewport, home]
+  const selfAnchor = useMemo(
+    () =>
+      viewport && selfLocation
+        ? worldToScreen(anchor, viewport, latLonToWorld(selfLocation))
+        : null,
+    [anchor, viewport, selfLocation]
+  );
+  const friendAnchors = useMemo(
+    () =>
+      viewport
+        ? friends.map((friend) => ({
+            ...friend,
+            anchor: worldToScreen(anchor, viewport, latLonToWorld(friend.location)),
+          }))
+        : [],
+    [anchor, friends, viewport]
   );
 
   useEffect(() => {
@@ -407,22 +426,29 @@ export function MapView({
                   opacity={curOpacityValue}
                 />
               )}
-              {you && youAnchor && (
-                <YouLocator x={youAnchor[0]} y={youAnchor[1]} accent={theme.canvas.accent} />
+              {friendAnchors.map((friend) => (
+                <FriendLocator
+                  key={friend.id}
+                  x={friend.anchor[0]}
+                  y={friend.anchor[1]}
+                  handle={friend.handle}
+                  color={theme.chrome.green}
+                  panelColor={theme.chrome.island}
+                  font={locatorFont}
+                  stale={friend.stale}
+                />
+              ))}
+              {selfAnchor && (
+                <YouLocator
+                  x={selfAnchor[0]}
+                  y={selfAnchor[1]}
+                  accent={theme.canvas.accent}
+                  panelColor={theme.chrome.island}
+                  font={locatorFont}
+                />
               )}
             </Group>
           </Canvas>
-        )}
-        {you && (
-          <View
-            pointerEvents="none"
-            style={[
-              styles.youChip,
-              { left: you[0] + 16, top: you[1] - 10, backgroundColor: theme.chrome.island },
-            ]}
-          >
-            <Text style={[styles.youText, { color: theme.chrome.amber }]}>YOU</Text>
-          </View>
         )}
       </View>
     </GestureDetector>
@@ -431,15 +457,4 @@ export function MapView({
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
-  youChip: {
-    position: 'absolute',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  youText: {
-    fontFamily: 'Rajdhani_700Bold',
-    fontSize: 13,
-    letterSpacing: 0.5,
-  },
 });

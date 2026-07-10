@@ -1,3 +1,5 @@
+import '@/features/social/net/background/register-task';
+
 import {
   IBMPlexMono_400Regular,
   IBMPlexMono_500Medium,
@@ -16,6 +18,9 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import AppTabs from '@/components/app-tabs';
+import { CryptidAccountGate } from '@/features/account/components/cryptid-account-gate';
+import { CryptidProfileProvider } from '@/features/account/hooks/use-cryptid-profile';
+import { LocationSharingProvider } from '@/features/social/hooks/use-location-sharing';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -37,8 +42,14 @@ export default function TabLayout() {
   return (
     <GestureHandlerRootView style={StyleSheet.absoluteFill}>
       <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-        <AnimatedSplashOverlay />
-        <AppTabs />
+        <CryptidProfileProvider>
+          <AnimatedSplashOverlay />
+          <CryptidAccountGate>
+            <LocationSharingProvider>
+              <AppTabs />
+            </LocationSharingProvider>
+          </CryptidAccountGate>
+        </CryptidProfileProvider>
       </ThemeProvider>
     </GestureHandlerRootView>
   );
