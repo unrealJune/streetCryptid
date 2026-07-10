@@ -11,8 +11,8 @@
 //! * [`TrailDocs`] — wraps the persistent `Docs` replica store (own namespace + imported
 //!   friend namespaces) and the iroh-blobs content store the entries point at.
 //! * A set of **pure** helpers ([`encode_key`], [`decode_key`], [`author_prefix`],
-//!   [`keys_to_prune`], [`is_within_since`]) that hold the key-encoding, prune-threshold and
-//!   retention-window logic. These are `#[cfg(test)]`-covered without a live iroh node.
+//!   [`keys_to_prune`], [`is_within_since`]) that hold the key-encoding, explicit-pruning and
+//!   range-filtering logic. These are `#[cfg(test)]`-covered without a live iroh node.
 //!
 //! ## Build status
 //! The live-node methods target iroh-docs `0.101` / iroh-blobs `0.103`; the exact wiring of
@@ -109,14 +109,14 @@ pub fn decode_key(key: &[u8]) -> Option<(Vec<u8>, u64)> {
     Some((author, seq))
 }
 
-/// Retention-window test: a fix at `fix_ts` is surfaced iff `fix_ts >= since_ts`
-/// (`since_ts == 0` ⇒ "everything in the window").
+/// Range test: a fix at `fix_ts` is surfaced iff `fix_ts >= since_ts`
+/// (`since_ts == 0` ⇒ full history).
 pub fn is_within_since(fix_ts: u64, since_ts: u64) -> bool {
     fix_ts >= since_ts
 }
 
-/// Rolling-retention selection (ARCHITECTURE §5): given `(key, entry_ts)` pairs, return the
-/// keys whose entry is **strictly older** than `older_than_ts` and should be pruned.
+/// Explicit-pruning selection: given `(key, entry_ts)` pairs, return the keys whose entry is
+/// **strictly older** than `older_than_ts` and should be pruned.
 pub fn keys_to_prune(entries: &[(Vec<u8>, u64)], older_than_ts: u64) -> Vec<Vec<u8>> {
     entries
         .iter()
@@ -285,7 +285,7 @@ impl TrailDocs {
     }
 
     /// Trigger range-based set reconciliation for `ns` and surface backfilled, decryptable fixes
-    /// to `sink`. `since_ts` bounds which reconciled fixes we emit (0 = full window).
+    /// to `sink`. `since_ts` bounds which reconciled fixes we emit (0 = full history).
     ///
     /// NOTE: iroh-docs reconciles the whole namespace; `since_ts` is applied when surfacing
     /// entries, not to bound the wire protocol. Peers are the already-connected swarm members.
@@ -337,7 +337,7 @@ impl TrailDocs {
         Ok(recovered)
     }
 
-    /// Prune entries in `ns` older than `older_than_ts` (rolling window, ARCHITECTURE §5). Only
+    /// Explicitly prune entries in `ns` older than `older_than_ts`. Only
     /// entries we authored can be deleted; returns the number removed.
     ///
     /// TODO(units): iroh-docs `Entry::timestamp()` is the record write time; callers pass a

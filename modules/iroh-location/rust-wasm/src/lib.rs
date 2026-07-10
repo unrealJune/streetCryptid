@@ -424,7 +424,7 @@ impl WasmLocationNode {
         serde_wasm_bindgen::to_value(&incoming).map_err(JsError::from)
     }
 
-    /// Drop durable entries older than `older_than_ts` (rolling-window retention).
+    /// Explicitly drop durable entries older than `older_than_ts`.
     pub async fn prune_trail(&self, older_than_ts: f64) -> Result<(), JsError> {
         let guard = self.started.lock().await;
         let started = guard

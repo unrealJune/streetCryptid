@@ -1,9 +1,9 @@
 import type { IncomingFix, LocationFix } from '../../core/types';
 
 /**
- * Local, bounded rolling buffer of location fixes — the app-side mirror of the durable iroh-docs
+ * Local history of location fixes — the app-side mirror of the durable iroh-docs
  * trail. Holds our own trail (what we published) plus friends' trails (live + backfilled from
- * docs range-reconciliation). The same bounded history powers a selected friend's map breadcrumb
+ * docs range-reconciliation). The same complete history powers a selected friend's map breadcrumb
  * and profile timeline while still letting a rejoining peer recover what it missed.
  * See docs/social/ARCHITECTURE.md §5–6, §9.
  */
@@ -77,29 +77,24 @@ export interface TrailStore {
   appendOwn(fix: LocationFix, seq: number): Promise<void>;
   /** Record a decrypted fix received from a friend (live or backfill). */
   appendFriend(incoming: IncomingFix): Promise<void>;
-  /** Ascending-by-seq points for an author within the rolling window. */
+  /** Ascending-by-seq points for an author at or after `sinceTs`. */
   rangeFor(author: string, sinceTs: number): Promise<TrailPoint[]>;
   /** Latest point per author. */
   latestPerAuthor(): Promise<TrailPoint[]>;
   /** Remove every cached point for one author. */
   removeAuthor(author: string): Promise<number>;
-  /** Enforce the rolling window now; returns points removed. */
-  prune(olderThanTs?: number): Promise<number>;
+  /** Explicitly delete points older than `olderThanTs`; returns points removed. */
+  prune(olderThanTs: number): Promise<number>;
 }
 
 export interface TrailStoreOptions {
   storage: TrailStorage;
-  /** Rolling retention window. Default 48h (ARCHITECTURE §5). */
-  windowMs?: number;
   /** Injectable clock. Default `Date.now`. */
   now?: () => number;
 }
 
-const DEFAULT_WINDOW_MS = 48 * 60 * 60 * 1000;
-
 export function createTrailStore(opts: TrailStoreOptions): TrailStore {
   const { storage } = opts;
-  const windowMs = opts.windowMs ?? DEFAULT_WINDOW_MS;
   const now = opts.now ?? Date.now;
 
   return {
@@ -123,9 +118,8 @@ export function createTrailStore(opts: TrailStoreOptions): TrailStore {
     async removeAuthor(author: string): Promise<number> {
       return storage.removeAuthor(author);
     },
-    async prune(olderThanTs?: number): Promise<number> {
-      const threshold = olderThanTs ?? now() - windowMs;
-      return storage.prune(threshold);
+    async prune(olderThanTs: number): Promise<number> {
+      return storage.prune(olderThanTs);
     },
   };
 }
