@@ -12,7 +12,8 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
-import { CryptidThemes, Spacing } from '@/constants/theme';
+import { resolveSignalColor } from '@/constants/signal-colors';
+import { CryptidThemes, Spacing, TopTabInset } from '@/constants/theme';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import { CryptidProfileEditor } from '@/features/account/components/cryptid-profile-editor';
 import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
@@ -20,6 +21,7 @@ import { useTheme } from '@/hooks/use-theme';
 import { CryptidDiscoveryCelebration } from '../components/cryptid-discovery-celebration';
 import { FriendProfileSheet } from '../components/friend-profile-sheet';
 import { PairLinkAction } from '../components/pair-link-action';
+import { selectFriendTrail } from '../core/history';
 import { formatDistance, formatPresenceAge } from '../core/presence';
 import { useLocationSharing } from '../hooks/use-location-sharing';
 import { usePairingHaptics } from '../hooks/use-pairing-haptics';
@@ -42,6 +44,7 @@ export default function FriendsScreen() {
   const {
     snapshot,
     pairing,
+    trail,
     friends,
     locationStatus,
     error,
@@ -52,8 +55,10 @@ export default function FriendsScreen() {
     respondPair,
     refreshPairing,
     toggleShare,
+    removeFriend,
     retryLocation,
-    clearPairingCelebration,
+    acknowledgeDiscoveredFriend,
+    rejectDiscoveredFriend,
   } = useLocationSharing();
 
   useFocusEffect(
@@ -70,7 +75,10 @@ export default function FriendsScreen() {
   const onRub = useCallback(async () => {
     await beginNearbyGesture();
   }, [beginNearbyGesture]);
-  const rub = useRubToPair(isFocused && Boolean(pairing?.available), onRub);
+  const rub = useRubToPair(
+    isFocused && Boolean(pairing?.available) && !pairing?.discoveredFriend,
+    onRub
+  );
   usePairingHaptics(pairing, isFocused);
 
   useEffect(() => {
@@ -86,6 +94,10 @@ export default function FriendsScreen() {
     () => friends.find((presence) => presence.friend.endpointId === selectedEndpoint) ?? null,
     [friends, selectedEndpoint]
   );
+  const selectedHistory = useMemo(
+    () => (selected ? selectFriendTrail(trail, selected.friend.endpointId) : []),
+    [selected, trail]
+  );
   const sharingWith = snapshot?.sharingWith ?? [];
   const nearbyLabel = pairing?.gestureActive
     ? 'Matching a nearby signal'
@@ -100,7 +112,7 @@ export default function FriendsScreen() {
         contentContainerStyle={[
           styles.content,
           {
-            paddingTop: insets.top + Spacing.four,
+            paddingTop: insets.top + TopTabInset + Spacing.four,
             paddingBottom: insets.bottom + Spacing.six,
           },
         ]}
@@ -185,7 +197,8 @@ export default function FriendsScreen() {
           <View style={styles.empty}>
             <ThemedText style={styles.emptyTitle}>No cryptids nearby yet</ThemedText>
             <ThemedText type="small" themeColor="textSecondary" style={styles.emptyCopy}>
-              Keep Friends open on both phones and make the same small circular motion.
+              Keep Friends open on both phones and make the same small back-and-forth or circular
+              motion.
             </ThemedText>
           </View>
         ) : (
@@ -195,6 +208,7 @@ export default function FriendsScreen() {
               const meta = [distance, formatPresenceAge(presence.ageMs)]
                 .filter(Boolean)
                 .join(' · ');
+              const signalColor = resolveSignalColor(presence.friend.color, chrome.green);
               return (
                 <Pressable
                   key={presence.friend.endpointId}
@@ -213,15 +227,13 @@ export default function FriendsScreen() {
                 >
                   <CryptidAvatar
                     art={presence.friend.sigil || 'unknown'}
-                    color={chrome.green}
+                    color={signalColor}
                     name={presence.friend.cryptidName ?? 'Unknown form'}
                     muted={presence.freshness === 'stale'}
                     style={styles.friendAvatar}
                   />
                   <View style={styles.friendCopy}>
-                    <ThemedText type="smallBold" style={{ color: chrome.green }}>
-                      {presence.friend.handle}
-                    </ThemedText>
+                    <ThemedText type="smallBold">{presence.friend.handle}</ThemedText>
                     <ThemedText type="small" themeColor="textSecondary" numberOfLines={1}>
                       {meta}
                     </ThemedText>
@@ -246,6 +258,7 @@ export default function FriendsScreen() {
       </ScrollView>
 
       <FriendProfileSheet
+        history={selectedHistory}
         presence={selected}
         visible={selected !== null}
         sharing={selected ? sharingWith.includes(selected.friend.endpointId) : false}
@@ -255,8 +268,16 @@ export default function FriendsScreen() {
           await toggleShare(selected.friend.endpointId, on);
         }}
         onViewMap={() => {
+          if (!selected) return;
           setSelectedEndpoint(null);
-          router.navigate('/');
+          router.navigate({
+            pathname: '/',
+            params: { friend: selected.friend.endpointId },
+          });
+        }}
+        onRemove={async () => {
+          if (!selected) return;
+          await removeFriend(selected.friend.endpointId);
         }}
       />
 
@@ -271,10 +292,9 @@ export default function FriendsScreen() {
             initialProfile={profile}
             mode="edit"
             notice={account.error}
-            onCancel={() => setEditingIdentity(false)}
+            onDone={() => setEditingIdentity(false)}
             onSave={async (nextProfile) => {
               await account.saveProfile(nextProfile);
-              setEditingIdentity(false);
             }}
           />
         ) : null}
@@ -282,7 +302,8 @@ export default function FriendsScreen() {
 
       <CryptidDiscoveryCelebration
         friend={pairing?.discoveredFriend ?? null}
-        onDone={clearPairingCelebration}
+        onAcknowledge={acknowledgeDiscoveredFriend}
+        onReject={rejectDiscoveredFriend}
       />
     </>
   );

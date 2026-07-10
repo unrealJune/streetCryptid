@@ -1,4 +1,4 @@
-import type { PropsWithChildren } from 'react';
+import { useState, type PropsWithChildren } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { useTheme } from '@/hooks/use-theme';
@@ -8,11 +8,19 @@ import { AccountOnboardingScreen } from '../screens/account-onboarding-screen';
 export function CryptidAccountGate({ children }: PropsWithChildren) {
   const theme = useTheme();
   const { status, profile } = useCryptidProfile();
+  const [onboardingActive, setOnboardingActive] = useState(false);
 
   if (status === 'loading') {
     return <View style={[styles.loading, { backgroundColor: theme.background }]} />;
   }
-  if (!profile) return <AccountOnboardingScreen />;
+  if (onboardingActive || !profile) {
+    return (
+      <AccountOnboardingScreen
+        onAutosaveStart={() => setOnboardingActive(true)}
+        onComplete={() => setOnboardingActive(false)}
+      />
+    );
+  }
   return children;
 }
 

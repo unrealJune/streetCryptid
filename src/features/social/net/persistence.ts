@@ -183,6 +183,17 @@ class SqliteTrailStorage implements TrailStorage {
     }
   }
 
+  async removeAuthor(author: string): Promise<number> {
+    const db = await getDb();
+    if (!db) return this.fallback.removeAuthor(author);
+    try {
+      const res = await db.runAsync('DELETE FROM trail WHERE author = ?', author);
+      return res.changes;
+    } catch {
+      return this.fallback.removeAuthor(author);
+    }
+  }
+
   async prune(olderThanTs: number): Promise<number> {
     const db = await getDb();
     if (!db) return this.fallback.prune(olderThanTs);

@@ -74,6 +74,18 @@ describe('trail store', () => {
     expect(byAuthor.get('f')?.fix.ts).toBe(200);
   });
 
+  it('removes every cached point for one author', async () => {
+    const storage = new InMemoryTrailStorage();
+    const store = createTrailStore({ storage });
+    await store.appendOwn(fix(100), 1);
+    await store.appendFriend({ author: 'f', seq: 1, fix: fix(200), receivedAt: 0 });
+    await store.appendFriend({ author: 'f', seq: 2, fix: fix(300), receivedAt: 0 });
+
+    expect(await store.removeAuthor('f')).toBe(2);
+    expect(await store.rangeFor('f', 0)).toEqual([]);
+    expect(await store.rangeFor(SELF_AUTHOR, 0)).toHaveLength(1);
+  });
+
   it('prune with default threshold uses now - windowMs', async () => {
     const storage = new InMemoryTrailStorage();
     const store = createTrailStore({ storage, windowMs: 1000, now: () => 5000 });

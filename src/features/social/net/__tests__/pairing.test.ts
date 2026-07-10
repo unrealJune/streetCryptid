@@ -398,8 +398,49 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     ).toBe(true);
     expect(mockHolder.mod.calls.importProfileTicket).toContain('peer-profile');
 
-    svc.clearPairingCelebration();
+    await svc.beginNearbyGesture();
+    expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('peer-ready');
+    expect(snap.current?.pairing.gestureActive).toBe(false);
+
+    svc.acknowledgeDiscoveredFriend();
     expect(snap.current?.pairing.discoveredFriend).toBeNull();
+    expect(snap.current?.friends.some((f) => f.endpointId === 'peer-ready')).toBe(true);
+    expect(snap.current?.sharingWith).toEqual(['peer-ready']);
+  });
+
+  it('removes a discovered friend and revokes sharing when rejected', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+
+    mockHolder.mod.pairResults.set(
+      'sess-rejected',
+      pairResult({
+        sessionId: 'sess-rejected',
+        peerEndpointId: 'peer-rejected',
+        peerProfile: profileView({ endpointId: 'peer-rejected', handle: '@nope' }),
+      })
+    );
+    mockHolder.mod.pairEvents = [
+      {
+        kind: 'ready',
+        sessionId: 'sess-rejected',
+        peerEndpointId: 'peer-rejected',
+        nearby: true,
+      },
+    ];
+    await svc.refreshPairing();
+
+    await svc.rejectDiscoveredFriend();
+
+    expect(snap.current?.pairing.discoveredFriend).toBeNull();
+    expect(snap.current?.friends.some((f) => f.endpointId === 'peer-rejected')).toBe(false);
+    expect(snap.current?.sharingWith).toEqual([]);
+    expect(mockHolder.mod.calls.unsubscribe).toContain('sub-topic-peer-rejected');
+    expect(mockHolder.mod.calls.subscribe).toContainEqual({
+      topic: 'topic-aa11',
+      bootstrap: [],
+    });
   });
 
   it('adds a placeholder friend when the pair has no verified profile yet', async () => {

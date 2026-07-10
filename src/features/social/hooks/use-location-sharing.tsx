@@ -43,8 +43,10 @@ interface LocationSharingContextValue {
   respondPair(sessionId: string, accept: boolean): Promise<void>;
   refreshPairing(): Promise<void>;
   toggleShare(endpointId: string, on: boolean): Promise<void>;
+  removeFriend(endpointId: string): Promise<void>;
   retryLocation(): Promise<void>;
-  clearPairingCelebration(): void;
+  acknowledgeDiscoveredFriend(): void;
+  rejectDiscoveredFriend(): Promise<void>;
 }
 
 const LocationSharingContext = createContext<LocationSharingContextValue | null>(null);
@@ -98,10 +100,16 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
 
   const refreshTrail = useCallback(async (service: LocationSharingService): Promise<void> => {
     const requestId = ++trailRefreshId.current;
-    const latest = await service.trailLatest();
+    const latest = await service.trailAll();
     if (requestId !== trailRefreshId.current) return;
     setTrail(latest);
-    const persistedSelf = latest.find((point) => point.author === SELF_AUTHOR)?.fix;
+    const persistedSelf = latest.reduce<LocationFix | null>(
+      (current, point) =>
+        point.author === SELF_AUTHOR && (!current || point.fix.ts > current.ts)
+          ? point.fix
+          : current,
+      null
+    );
     if (persistedSelf) {
       setPersistedSelfFix((current) =>
         !current || persistedSelf.ts > current.ts ? persistedSelf : current
@@ -311,9 +319,28 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     },
     [run]
   );
-  const clearPairingCelebration = useCallback(() => {
-    serviceRef.current?.clearPairingCelebration();
+  const removeFriend = useCallback(async (endpointId: string) => {
+    setServiceError(null);
+    const service = serviceRef.current;
+    if (!service) {
+      const message = 'Friend sync is not ready. Try again.';
+      setServiceError(message);
+      throw new Error(message);
+    }
+    try {
+      await service.removeFriend(endpointId);
+    } catch (removeError: unknown) {
+      setServiceError(errorMessage(removeError));
+      throw removeError;
+    }
   }, []);
+  const acknowledgeDiscoveredFriend = useCallback(() => {
+    serviceRef.current?.acknowledgeDiscoveredFriend();
+  }, []);
+  const rejectDiscoveredFriend = useCallback(() => {
+    setServiceError(null);
+    return run((service) => service.rejectDiscoveredFriend());
+  }, [run]);
 
   const friends = useMemo(
     () =>
@@ -343,8 +370,10 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       respondPair,
       refreshPairing,
       toggleShare,
+      removeFriend,
       retryLocation,
-      clearPairingCelebration,
+      acknowledgeDiscoveredFriend,
+      rejectDiscoveredFriend,
     }),
     [
       snapshot,
@@ -361,8 +390,10 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       respondPair,
       refreshPairing,
       toggleShare,
+      removeFriend,
       retryLocation,
-      clearPairingCelebration,
+      acknowledgeDiscoveredFriend,
+      rejectDiscoveredFriend,
     ]
   );
 

@@ -32,6 +32,7 @@ uniform float3 uAccent;       // frontier rim rgb (0..1)
 uniform float3 uStreetLabel;  // ghost lattice ink rgb (0..1)
 uniform float  uReveal;       // load reveal 0..1 (1 = fully shown); hex-by-hex wipe
 uniform float  uLod;          // zoom LOD 0 (street detail) .. 1 (city): simplify terrain
+uniform float  uExploration;  // 1 = explored/unexplored treatment, 0 = unmasked city
 
 uniform shader maskTex;
 uniform shader hexTex;
@@ -102,7 +103,8 @@ float4 dotAt(float ix, float iy, float2 frag) {
   if (dist > 2.5) return float4(0.0);                 // no dot reaches this far
 
   float2 w = toWorld(center);
-  float e = hexFlags(axialRound(axialFrac(w))).r > 0.5 ? 1.0 : 0.0;
+  float explored = hexFlags(axialRound(axialFrac(w))).r > 0.5 ? 1.0 : 0.0;
+  float e = mix(1.0, explored, uExploration);
   if (e < 0.5 && (mod(ix, 2.0) > 0.5 || mod(iy, 2.0) > 0.5)) return float4(0.0);
   float coarse = e < 0.5 ? 1.0 : 0.0;
 
@@ -182,9 +184,10 @@ half4 main(float2 fragCoord) {
                 abs(dot(offPx, float2(-0.8660254, 0.5)))));
   float dEdge = apothemPx - md;
   float2 flags = hexFlags(ra);
-  if (flags.r < 0.5)
+  if (uExploration > 0.5 && flags.r < 0.5)
     col = mix(col, uStreetLabel, clamp(1.0 - dEdge, 0.0, 1.0) * 0.09 * (1.0 - uLod * 0.7));
-  if (flags.g > 0.5) col = mix(col, uAccent, clamp(1.25 - dEdge, 0.0, 1.0) * 0.42);
+  if (uExploration > 0.5 && flags.g > 0.5)
+    col = mix(col, uAccent, clamp(1.25 - dEdge, 0.0, 1.0) * 0.42);
 
   // Hex-by-hex load reveal: cells reveal center-out (with a little per-hex jitter)
   // so a fresh region grows in hexagon by hexagon over the previous one — its

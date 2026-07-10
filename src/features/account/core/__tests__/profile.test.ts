@@ -4,6 +4,7 @@ import {
   defaultCryptidProfileDraft,
   parseCryptidProfile,
   validateCryptidProfile,
+  validateCryptidProfileFields,
 } from '../profile';
 
 describe('cryptid profile', () => {
@@ -43,7 +44,27 @@ describe('cryptid profile', () => {
         presetId: null,
         sigil: '  /\\\n (👁)',
       })
-    ).toContain('The custom form must use ASCII characters, spaces, tabs, and line breaks only.');
+    ).toContain('Use ASCII characters, spaces, tabs, and line breaks only.');
+  });
+
+  it('groups validation messages beside the field that needs attention', () => {
+    const issues = validateCryptidProfileFields({
+      ...defaultCryptidProfileDraft(),
+      handle: '?',
+      cryptidName: '',
+      presetId: null,
+      sigil: '👁',
+      color: 'green',
+    });
+
+    expect(issues.handle).toEqual([
+      'Use 2-20 lowercase letters, numbers, underscores, or dashes for the username.',
+    ]);
+    expect(issues.cryptidName).toEqual([
+      'Give the profile icon a name between 1 and 24 characters.',
+    ]);
+    expect(issues.sigil).toContain('Use ASCII characters, spaces, tabs, and line breaks only.');
+    expect(issues.color).toEqual(['Choose a valid six-digit profile color.']);
   });
 
   it('round-trips a versioned saved profile', () => {

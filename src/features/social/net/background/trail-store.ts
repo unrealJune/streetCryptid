@@ -3,9 +3,9 @@ import type { IncomingFix, LocationFix } from '../../core/types';
 /**
  * Local, bounded rolling buffer of location fixes — the app-side mirror of the durable iroh-docs
  * trail. Holds our own trail (what we published) plus friends' trails (live + backfilled from
- * docs range-reconciliation). This is a **recovery buffer**, not a rendered breadcrumb: the map
- * shows only the latest point per author (DESIGN's "no path trace" principle), but the buffer
- * lets a rejoining peer recover what it missed. See docs/social/ARCHITECTURE.md §5–6, §9.
+ * docs range-reconciliation). The same bounded history powers a selected friend's map breadcrumb
+ * and profile timeline while still letting a rejoining peer recover what it missed.
+ * See docs/social/ARCHITECTURE.md §5–6, §9.
  */
 
 /** Sentinel author id for our own trail points. */
@@ -28,6 +28,8 @@ export interface TrailStorage {
   range(author: string, sinceTs: number): Promise<TrailPoint[]>;
   /** The most recent point per author (by fix.ts). */
   latest(): Promise<TrailPoint[]>;
+  /** Delete every cached point for one author; returns the count removed. */
+  removeAuthor(author: string): Promise<number>;
   /** Delete points with `fix.ts < olderThanTs`; returns the count removed. */
   prune(olderThanTs: number): Promise<number>;
 }
@@ -54,6 +56,13 @@ export class InMemoryTrailStorage implements TrailStorage {
     }
     return [...byAuthor.values()];
   }
+  async removeAuthor(author: string): Promise<number> {
+    const before = this.points.length;
+    for (let i = this.points.length - 1; i >= 0; i--) {
+      if (this.points[i].author === author) this.points.splice(i, 1);
+    }
+    return before - this.points.length;
+  }
   async prune(olderThanTs: number): Promise<number> {
     const before = this.points.length;
     for (let i = this.points.length - 1; i >= 0; i--) {
@@ -70,8 +79,10 @@ export interface TrailStore {
   appendFriend(incoming: IncomingFix): Promise<void>;
   /** Ascending-by-seq points for an author within the rolling window. */
   rangeFor(author: string, sinceTs: number): Promise<TrailPoint[]>;
-  /** Latest point per author — what the map renders. */
+  /** Latest point per author. */
   latestPerAuthor(): Promise<TrailPoint[]>;
+  /** Remove every cached point for one author. */
+  removeAuthor(author: string): Promise<number>;
   /** Enforce the rolling window now; returns points removed. */
   prune(olderThanTs?: number): Promise<number>;
 }
@@ -108,6 +119,9 @@ export function createTrailStore(opts: TrailStoreOptions): TrailStore {
     },
     async latestPerAuthor(): Promise<TrailPoint[]> {
       return storage.latest();
+    },
+    async removeAuthor(author: string): Promise<number> {
+      return storage.removeAuthor(author);
     },
     async prune(olderThanTs?: number): Promise<number> {
       const threshold = olderThanTs ?? now() - windowMs;

@@ -196,9 +196,10 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   (`app.json` / expo-location config plugin).
 - **web**: relay-only iroh WASM implements the same interface, including an **in-memory**
   iroh-docs replica (ephemeral across reloads, interoperable with native's persistent replica).
-- The friend **trail** is a **recovery buffer**, not a rendered breadcrumb (preserves the
-  product's "no path trace" principle; the map shows only the latest point per author — amber
-  stays "YOU" only, friends are contact-green).
+- The bounded friend **trail** serves both offline recovery and an explicitly selected
+  48-hour history view. The map normally shows only the latest point; selecting a friend
+  connects a sampled set of retained fixes in that friend's chosen profile color. Amber
+  stays "YOU" only, and contact-green remains the legacy/default friend signal.
 
 > Android background execution still follows platform limits: force-stopping the app prevents
 > delivery until the user launches it again. Normal backgrounding uses Expo Location's foreground
@@ -269,8 +270,10 @@ The Friends tab is the pairing surface; there is no separate pairing mode.
   while this phone's rub window is active; invite/code requests never inherit gesture consent.
   Multiple visible peers remain ambiguous and do not auto-pair.
 - Haptics accelerate from soft search ticks through contact and key exchange. Completion produces
-  a heavy success "pop" followed by a full-screen `CRYPTID DISCOVERED` ASCII-art dance; the new
-  friend then appears on the map as soon as their first encrypted fix arrives.
+  a heavy success "pop" followed by a full-screen `CRYPTID DISCOVERED` ASCII-art dance. The reveal
+  stays open until the user explicitly acknowledges the new friend or rejects them; rejection
+  revokes sharing and removes the friend. An acknowledged friend appears on the map as soon as
+  their first encrypted fix arrives.
 - The current transport exposes neither RSSI nor an active scan toggle. BLE scans continuously
   while the native endpoint is alive, so motion is a consent/selection gesture rather than a radio
   security boundary.

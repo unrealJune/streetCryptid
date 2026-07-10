@@ -22,8 +22,9 @@ auto-switch with the OS color scheme.
 
 ## Color
 
-One accent per role. **Amber = you. Contact-green = friends. Teal ramp = the city.**
-Nothing else competes.
+One accent per role. **Amber = you. A chosen profile signal = that friend. Teal ramp =
+the city.** Contact-green remains the default friend signal and the nearby-pairing
+system color; the app never assigns decorative colors.
 
 ### Daybreak (default, light)
 
@@ -35,7 +36,7 @@ Nothing else competes.
 | steel / steel-dark (muted, AA-tuned)        | `#4D6675` / `#5B7480`                          |
 | hairline                                    | `#D6DEE4`                                      |
 | **amber (you)** / amber-dark for small text | `#C6791A` / `#9A5C10`                          |
-| **contact-green (friends)**                 | `#2F9E6A` (canvas `[38,150,100]`)              |
+| **default friend / pairing signal**         | `#2F9E6A` (canvas `[38,150,100]`)              |
 | street ramp (unexplored→explored)           | light `[176,190,200]` → dark navy `[20,44,64]` |
 | water (shallow→deep)                        | `[150,192,224]` → `[30,104,170]`               |
 | park (faded→lush)                           | `[158,200,168]` → `[34,128,80]`                |
@@ -46,12 +47,12 @@ drains toward the paper.
 ### Deep sea (dark alt)
 
 void `#060C14` · navy `#0A1420` · ink `#DCEBF0` · steel `#8AA6B2` · **amber `#EDA23C`**
-(small `#B9761E`) · **contact-green `#6FD08A`** (`[111,208,138]`) · street ramp
+(small `#B9761E`) · **default friend green `#6FD08A`** (`[111,208,138]`) · street ramp
 `#22424A`→`#D4ECEA` · water `#1A4A80`→`#56A8E8`.
 
 ### Nocturne (dark alt)
 
-Indigo/cyan field · **coral accent `#F0657F`** · **contact-green `#63D0B0`**.
+Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0B0`**.
 
 ## Typography
 
@@ -76,8 +77,10 @@ Indigo/cyan field · **coral accent `#F0657F`** · **contact-green `#63D0B0`**.
   with an **amber frontier rim** on the boundary of acquired territory. Water and parkland
   are capped so basins always read even when unexplored. Alt reveal modes exist for
   experimentation only (`?fog=soft|grid`).
-- **No path trace.** The low ping rate can't track granular routes, so there are no walked
-  centerlines. Amber is reserved for the frontier rim and the single **YOU** locator.
+- **No personal path trace.** The low ping rate cannot support granular walked centerlines;
+  your own movement remains sector reveal. Selecting a friend may connect their retained
+  48-hour sharing fixes as a temporary, low-resolution breadcrumb in that friend's signal
+  color. Amber remains reserved for the frontier rim and the single **YOU** locator.
 - **Zoom-aware (`?zoom=street|hood|city|region`).** Coverage _decreases_ outward
   (58 → 34 → 12 → 3 %). street = magnified neighborhood; hood = neighborhood; city =
   arterials + water + coastline; region = state silhouette + city nodes.
@@ -95,17 +98,18 @@ Indigo/cyan field · **coral accent `#F0657F`** · **contact-green `#63D0B0`**.
 
 ## Social layer
 
-- Friends are a **second signal** in contact-green, distinct from amber YOU. On the map:
-  presence ring + core dot + `@handle` chip (online friends only; drawn beneath YOU).
+- Friends are a **second signal**, distinct from amber YOU. Each friend's chosen profile
+  color drives their screen-stable presence ring, core dot, `@handle` chip, ASCII form, and
+  selected breadcrumb; contact-green is the fallback for legacy profiles.
 - **Identity = an ASCII "cryptid" sigil** per friend (mothman / jackalope / black shuck…),
-  mono and contact-green — terminal-native, not a mascot.
+  mono and rendered in their chosen signal — terminal-native, not a mascot.
 - **Roster sheet:** cryptid avatar + `@handle` + location + a **"shared ground"** bar
   (% of streets you've _both_ walked). Hairline dividers, **not** cards; offline rows
   dimmed.
-- **Friend profile:** big cryptid hero, shared-ground %, "N shared streets · M sectors
-  they've explored that you haven't," and a **"View their map"** CTA.
-- Social metric is **shared ground (overlap)**, never a leaderboard, never per-friend
-  rainbow colors.
+- **Friend profile:** big cryptid hero, sharing state, retained 48-hour location timeline,
+  and a **"View trail on map"** CTA.
+- Social metric is **shared ground (overlap)**, never a leaderboard. Friend colors are
+  chosen identity signals, never an app-assigned rainbow.
 
 ## Motion (for the RN build)
 
@@ -118,8 +122,9 @@ element — never one uniform entrance on everything.
 
 - **Do:** flip-dot dots, hex sectors, single accents, real OSM geometry, calm restraint,
   light-first.
-- **Don't:** gradients / glow / glass, path traces, map legends, mascots, hero-metric
-  cards, duplicate status text, per-friend rainbow colors, military jargon.
+- **Don't:** gradients / glow / glass, permanent personal path traces, map legends,
+  mascots, hero-metric cards, duplicate status text, app-assigned rainbow colors,
+  military jargon.
 
 ## Reference implementation
 

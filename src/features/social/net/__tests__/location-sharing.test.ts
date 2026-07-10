@@ -15,8 +15,10 @@ class FakeNativeModule {
     syncTrail: [] as number[],
     importDocTicket: [] as string[],
     subscribe: [] as { topic: string; bootstrap: string[] }[],
+    unsubscribe: [] as string[],
   };
   private handlers: Record<string, (e: unknown) => void> = {};
+  readonly unsubscribeFailures = new Set<string>();
 
   async createNode() {
     return { endpointId: 'aa11', identitySecret: 'ii', recvSecret: 'rr', recvPublic: 'rp' };
@@ -39,7 +41,12 @@ class FakeNativeModule {
     this.calls.subscribe.push({ topic, bootstrap });
     return `sub-${topic}`;
   }
-  async unsubscribe() {}
+  async unsubscribe(subscriptionId: string) {
+    this.calls.unsubscribe.push(subscriptionId);
+    if (this.unsubscribeFailures.has(subscriptionId)) {
+      throw new Error(`unsubscribe failed: ${subscriptionId}`);
+    }
+  }
   async publish(...args: unknown[]) {
     this.calls.publish.push(args);
   }
@@ -85,7 +92,7 @@ jest.mock('expo-secure-store', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { LocationSharingService } from '../location-sharing';
+import { LocationSharingService, type SharingSnapshot } from '../location-sharing';
 
 const friend: ContactCard = {
   endpointId: 'bb22',
@@ -109,6 +116,56 @@ describe('LocationSharingService — durable trail wiring', () => {
     await svc.addFriend(friend);
     expect(mockHolder.mod.calls.importDocTicket).toContain('doc-b');
     expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-bb22')).toBe(true);
+  });
+
+  it('removes a friend, revokes sharing, and tears down their subscription', async () => {
+    const svc = new LocationSharingService();
+    const snapshots: SharingSnapshot[] = [];
+    svc.onChange((snapshot) => snapshots.push(snapshot));
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+    await svc.shareWith(friend.endpointId);
+    mockHolder.mod.emit('onFix', {
+      author: friend.endpointId,
+      seq: 1,
+      fix: { lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 100 },
+    });
+    await flush();
+
+    await svc.removeFriend(friend.endpointId);
+
+    const latest = snapshots.at(-1);
+    expect(latest?.friends).toEqual([]);
+    expect(latest?.sharingWith).toEqual([]);
+    expect(mockHolder.mod.calls.unsubscribe).toContain('sub-topic-bb22');
+    expect((await svc.trailLatest()).some((point) => point.author === friend.endpointId)).toBe(
+      false
+    );
+
+    mockHolder.mod.emit('onFix', {
+      author: friend.endpointId,
+      seq: 2,
+      fix: { lat: 3, lon: 4, accuracyM: 3, headingDeg: 0, ts: 200 },
+    });
+    await flush();
+    expect((await svc.trailLatest()).some((point) => point.author === friend.endpointId)).toBe(
+      false
+    );
+  });
+
+  it('can re-add a friend after their old subscription fails to close', async () => {
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+    mockHolder.mod.unsubscribeFailures.add('sub-topic-bb22');
+
+    await svc.removeFriend(friend.endpointId);
+    await svc.addFriend(friend);
+
+    const friendSubscriptions = mockHolder.mod.calls.subscribe.filter(
+      ({ topic }) => topic === 'topic-bb22'
+    );
+    expect(friendSubscriptions).toHaveLength(2);
   });
 
   it('publishes the configured cryptid metadata in its contact card', async () => {
@@ -167,6 +224,7 @@ describe('LocationSharingService — durable trail wiring', () => {
     const received: IncomingFix[] = [];
     svc.onFix((f) => received.push(f));
     await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
 
     mockHolder.mod.emit('onFix', {
       author: 'bb22',
@@ -180,6 +238,31 @@ describe('LocationSharingService — durable trail wiring', () => {
     expect(received[0].backfill).toBe(true);
     const latest = await svc.trailLatest();
     expect(latest.some((p) => p.author === 'bb22' && p.seq === 5)).toBe(true);
+  });
+
+  it('exposes the full retained trail for known friends', async () => {
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+
+    mockHolder.mod.emit('onFix', {
+      author: 'bb22',
+      seq: 51,
+      fix: { lat: 10, lon: 20, accuracyM: 3, headingDeg: 0, ts: 1001 },
+      backfill: false,
+    });
+    mockHolder.mod.emit('onFix', {
+      author: 'bb22',
+      seq: 52,
+      fix: { lat: 11, lon: 21, accuracyM: 3, headingDeg: 0, ts: 1002 },
+      backfill: false,
+    });
+    await flush();
+
+    const full = await svc.trailAll();
+    expect(
+      full.filter((point) => point.author === 'bb22' && point.seq >= 51).map((point) => point.seq)
+    ).toEqual([51, 52]);
   });
 
   it('surfaces the recovered count from onSync into the snapshot', async () => {

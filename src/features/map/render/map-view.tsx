@@ -1,7 +1,6 @@
 'use no memo'; // react-compiler: keep it away from Skia/Reanimated JSI objects
 
-import { Rajdhani_700Bold } from '@expo-google-fonts/rajdhani';
-import { Canvas, Group, Image as SkiaImage, useFont } from '@shopify/react-native-skia';
+import { Canvas, Circle, Group, Image as SkiaImage, Path, Skia } from '@shopify/react-native-skia';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, StyleSheet, View, type LayoutChangeEvent } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
@@ -66,7 +65,13 @@ interface ScreenRect {
 export interface MapFriendLocation {
   id: string;
   handle: string;
+  sigil: string;
+  cryptidName?: string;
+  color: string;
   location: LatLon;
+  history: readonly LatLon[];
+  historyCount: number;
+  latestTs: number;
   stale?: boolean;
 }
 
@@ -102,16 +107,23 @@ export function MapView({
   initialCenter = null,
   selfLocation = null,
   friends = [],
+  selectedFriendId = null,
+  explorationEnabled = true,
+  accessibilityLabel,
+  onSelectFriend,
 }: {
   /** Surfaces the coverage/place readout to the surrounding chrome. */
   onReadout?: (readout: MapReadout) => void;
   initialCenter?: LatLon | null;
   selfLocation?: LatLon | null;
   friends?: readonly MapFriendLocation[];
+  selectedFriendId?: string | null;
+  explorationEnabled?: boolean;
+  accessibilityLabel?: string;
+  onSelectFriend?: (friendId: string) => void;
 }) {
   const [viewport, setViewport] = useState<Viewport | null>(null);
   const reducedMotion = useReducedMotion();
-  const locatorFont = useFont(Rajdhani_700Bold, 13);
   const { theme, region, anchor, limits, hexRadius, coverage, placeName, commit, prefetchAt } =
     useMapEngine(viewport, initialCenter);
 
@@ -123,6 +135,8 @@ export function MapView({
   const decaysLeft = useSharedValue(0);
   /** Transform at the last prefetch check, to gate by movement. */
   const lastPrefetch = useSharedValue<ViewTransform>({ k: 1, tx: 0, ty: 0 });
+  const trailStrokeWidth = useDerivedValue(() => 2.5 / Math.max(0.001, k.value));
+  const trailDotRadius = useDerivedValue(() => 2.8 / Math.max(0.001, k.value));
 
   // Mask/hex textures per region; LUT per theme. Kept for both the current region
   // and the outgoing one so each can be (re)rendered independently.
@@ -173,8 +187,9 @@ export function MapView({
       maskImage,
       hexImage,
       lutImage,
+      explorationEnabled,
     });
-  }, [track.cur, theme, hexRadius, maskImage, hexImage, lutImage]);
+  }, [track.cur, theme, hexRadius, maskImage, hexImage, lutImage, explorationEnabled]);
 
   const prevImage = useMemo(() => {
     if (!track.prev || !prevMask || !prevHex || !lutImage) return null;
@@ -185,8 +200,9 @@ export function MapView({
       maskImage: prevMask,
       hexImage: prevHex,
       lutImage,
+      explorationEnabled,
     });
-  }, [track.prev, theme, hexRadius, prevMask, prevHex, lutImage]);
+  }, [track.prev, theme, hexRadius, prevMask, prevHex, lutImage, explorationEnabled]);
 
   const curRect = useMemo(
     () => (track.cur && viewport ? anchorRect(track.cur.spec.rect, anchor, viewport) : null),
@@ -213,6 +229,31 @@ export function MapView({
         : [],
     [anchor, friends, viewport]
   );
+  const orderedFriendAnchors = useMemo(
+    () =>
+      [...friendAnchors].sort(
+        (a, b) => Number(a.id === selectedFriendId) - Number(b.id === selectedFriendId)
+      ),
+    [friendAnchors, selectedFriendId]
+  );
+  const selectedTrail = useMemo(() => {
+    if (!viewport || !selectedFriendId) return null;
+    const friend = friends.find((candidate) => candidate.id === selectedFriendId);
+    if (!friend) return null;
+    const points = friend.history.map((location) =>
+      worldToScreen(anchor, viewport, latLonToWorld(location))
+    );
+    if (points.length === 0) return null;
+
+    const path = Skia.Path.Make();
+    path.moveTo(points[0][0], points[0][1]);
+    for (const point of points.slice(1)) path.lineTo(point[0], point[1]);
+    return { color: friend.color, path, points };
+  }, [anchor, friends, selectedFriendId, viewport]);
+  useEffect(() => {
+    const path = selectedTrail?.path;
+    return () => path?.dispose();
+  }, [selectedTrail]);
 
   useEffect(() => {
     onReadout?.({ coverage, placeName });
@@ -395,63 +436,103 @@ export function MapView({
   };
 
   return (
-    <GestureDetector gesture={composedGesture}>
-      <View
-        ref={containerRef}
-        style={[styles.fill, { backgroundColor: theme.chrome.bg }]}
-        onLayout={onLayout}
-        testID="map-view"
-      >
-        {viewport && (
-          <Canvas style={styles.fill}>
-            <Group transform={transform}>
-              {prevImage && prevRect && (
-                <SkiaImage
-                  image={prevImage}
-                  x={prevRect.x}
-                  y={prevRect.y}
-                  width={prevRect.width}
-                  height={prevRect.height}
-                  fit="fill"
-                />
-              )}
-              {curImage && curRect && (
-                <SkiaImage
-                  image={curImage}
-                  x={curRect.x}
-                  y={curRect.y}
-                  width={curRect.width}
-                  height={curRect.height}
-                  fit="fill"
-                  opacity={curOpacityValue}
-                />
-              )}
-              {friendAnchors.map((friend) => (
-                <FriendLocator
-                  key={friend.id}
-                  x={friend.anchor[0]}
-                  y={friend.anchor[1]}
-                  handle={friend.handle}
-                  color={theme.chrome.green}
-                  panelColor={theme.chrome.island}
-                  font={locatorFont}
-                  stale={friend.stale}
-                />
-              ))}
-              {selfAnchor && (
-                <YouLocator
-                  x={selfAnchor[0]}
-                  y={selfAnchor[1]}
-                  accent={theme.canvas.accent}
-                  panelColor={theme.chrome.island}
-                  font={locatorFont}
-                />
-              )}
-            </Group>
-          </Canvas>
-        )}
-      </View>
-    </GestureDetector>
+    <View
+      ref={containerRef}
+      style={[styles.fill, { backgroundColor: theme.chrome.bg }]}
+      onLayout={onLayout}
+      testID="map-view"
+    >
+      <GestureDetector gesture={composedGesture}>
+        <View
+          accessible={Boolean(accessibilityLabel)}
+          accessibilityLabel={accessibilityLabel}
+          accessibilityRole="image"
+          style={styles.fill}
+        >
+          {viewport && (
+            <Canvas style={styles.fill}>
+              <Group transform={transform}>
+                {prevImage && prevRect && (
+                  <SkiaImage
+                    image={prevImage}
+                    x={prevRect.x}
+                    y={prevRect.y}
+                    width={prevRect.width}
+                    height={prevRect.height}
+                    fit="fill"
+                  />
+                )}
+                {curImage && curRect && (
+                  <SkiaImage
+                    image={curImage}
+                    x={curRect.x}
+                    y={curRect.y}
+                    width={curRect.width}
+                    height={curRect.height}
+                    fit="fill"
+                    opacity={curOpacityValue}
+                  />
+                )}
+                {selectedTrail ? (
+                  <>
+                    <Path
+                      color={selectedTrail.color}
+                      opacity={0.72}
+                      path={selectedTrail.path}
+                      strokeCap="round"
+                      strokeJoin="round"
+                      strokeWidth={trailStrokeWidth}
+                      style="stroke"
+                    />
+                    {selectedTrail.points.map((point, index) => (
+                      <Circle
+                        color={selectedTrail.color}
+                        cx={point[0]}
+                        cy={point[1]}
+                        key={`${point[0]}:${point[1]}:${index}`}
+                        opacity={0.34 + (0.5 * (index + 1)) / selectedTrail.points.length}
+                        r={trailDotRadius}
+                      />
+                    ))}
+                  </>
+                ) : null}
+              </Group>
+            </Canvas>
+          )}
+        </View>
+      </GestureDetector>
+
+      {viewport
+        ? orderedFriendAnchors.map((friend) => (
+            <FriendLocator
+              color={friend.color}
+              handle={friend.handle}
+              key={friend.id}
+              onPress={() => onSelectFriend?.(friend.id)}
+              panelColor={theme.chrome.island}
+              scale={k}
+              selected={friend.id === selectedFriendId}
+              sigil={friend.sigil}
+              stale={friend.stale}
+              translateX={tx}
+              translateY={ty}
+              x={friend.anchor[0]}
+              y={friend.anchor[1]}
+            />
+          ))
+        : null}
+      {selfAnchor ? (
+        <YouLocator
+          accent={theme.canvas.accent}
+          panelColor={theme.chrome.island}
+          scale={k}
+          translateX={tx}
+          translateY={ty}
+          x={selfAnchor[0]}
+          y={selfAnchor[1]}
+        />
+      ) : null}
+    </View>
   );
 }
 
