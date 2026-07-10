@@ -10,12 +10,15 @@ import type { Friend } from '../core/types';
 
 interface CryptidDiscoveryCelebrationProps {
   friend: Friend | null;
-  onDone(): void;
+  onAcknowledge(): void;
+  onReject(): Promise<void>;
 }
 
-const REVEAL_MS = 4300;
-
-export function CryptidDiscoveryCelebration({ friend, onDone }: CryptidDiscoveryCelebrationProps) {
+export function CryptidDiscoveryCelebration({
+  friend,
+  onAcknowledge,
+  onReject,
+}: CryptidDiscoveryCelebrationProps) {
   const scheme = useColorScheme();
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
   const reducedMotion = useReducedMotion();
@@ -28,10 +31,9 @@ export function CryptidDiscoveryCelebration({ friend, onDone }: CryptidDiscovery
     dance.setValue(0);
     if (reducedMotion) {
       entrance.setValue(1);
-      const timer = setTimeout(onDone, REVEAL_MS);
-      return () => clearTimeout(timer);
+      return;
     }
-    Animated.parallel([
+    const animation = Animated.parallel([
       Animated.timing(entrance, {
         toValue: 1,
         duration: 260,
@@ -65,10 +67,10 @@ export function CryptidDiscoveryCelebration({ friend, onDone }: CryptidDiscovery
           useNativeDriver: true,
         }),
       ]),
-    ]).start();
-    const timer = setTimeout(onDone, REVEAL_MS);
-    return () => clearTimeout(timer);
-  }, [dance, entrance, friend, onDone, reducedMotion]);
+    ]);
+    animation.start();
+    return () => animation.stop();
+  }, [dance, entrance, friend, reducedMotion]);
 
   if (!friend) return null;
   const color = resolveSignalColor(friend.color, chrome.green);
@@ -82,11 +84,9 @@ export function CryptidDiscoveryCelebration({ friend, onDone }: CryptidDiscovery
   });
 
   return (
-    <Modal animationType="fade" onRequestClose={onDone} transparent visible>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`Cryptid discovered: ${friend.handle}`}
-        onPress={onDone}
+    <Modal animationType="fade" onRequestClose={() => undefined} transparent visible>
+      <View
+        accessibilityViewIsModal
         style={[styles.scrim, { backgroundColor: `${chrome.void}F5` }]}
       >
         <Animated.View
@@ -119,7 +119,9 @@ export function CryptidDiscoveryCelebration({ friend, onDone }: CryptidDiscovery
           <ThemedText type="code" style={[styles.eyebrow, { color }]}>
             FRIEND FOUND
           </ThemedText>
-          <ThemedText style={styles.title}>CRYPTID DISCOVERED</ThemedText>
+          <ThemedText accessibilityRole="header" style={styles.title}>
+            CRYPTID DISCOVERED
+          </ThemedText>
           <Animated.View
             style={{
               transform: [{ translateY: hop }, { rotate }, { scale: entrance }],
@@ -137,14 +139,43 @@ export function CryptidDiscoveryCelebration({ friend, onDone }: CryptidDiscovery
           <ThemedText type="code" themeColor="textSecondary" style={styles.caption}>
             {friend.cryptidName?.toUpperCase() ?? 'UNKNOWN FORM'} · LOCATION SHARING ACTIVE
           </ThemedText>
-          <View style={styles.dismiss}>
-            <View style={[styles.dismissDot, { backgroundColor: color }]} />
-            <ThemedText type="code" themeColor="textSecondary">
-              TAP TO CONTINUE
-            </ThemedText>
+          <View style={styles.actions}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Reject ${friend.handle} and stop sharing`}
+              onPress={() => void onReject()}
+              style={({ pressed }) => [
+                styles.action,
+                styles.rejectAction,
+                {
+                  borderColor: chrome.steel,
+                  opacity: pressed ? 0.55 : 1,
+                },
+              ]}
+            >
+              <ThemedText type="code" themeColor="textSecondary" style={styles.actionLabel}>
+                REJECT
+              </ThemedText>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Acknowledge ${friend.handle} as a friend`}
+              onPress={onAcknowledge}
+              style={({ pressed }) => [
+                styles.action,
+                {
+                  backgroundColor: color,
+                  opacity: pressed ? 0.72 : 1,
+                },
+              ]}
+            >
+              <ThemedText type="code" style={[styles.actionLabel, styles.onGreen]}>
+                ACKNOWLEDGE
+              </ThemedText>
+            </Pressable>
           </View>
         </Animated.View>
-      </Pressable>
+      </View>
     </Modal>
   );
 }
@@ -199,15 +230,28 @@ const styles = StyleSheet.create({
     letterSpacing: 1.3,
     textAlign: 'center',
   },
-  dismiss: {
-    alignItems: 'center',
+  actions: {
     flexDirection: 'row',
     gap: Spacing.two,
     marginTop: Spacing.two,
+    width: '100%',
   },
-  dismissDot: {
-    borderRadius: 4,
-    height: 8,
-    width: 8,
+  action: {
+    alignItems: 'center',
+    borderRadius: Spacing.two,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 48,
+    paddingHorizontal: Spacing.two,
+  },
+  rejectAction: {
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  actionLabel: {
+    fontWeight: '700',
+    letterSpacing: 0.8,
+  },
+  onGreen: {
+    color: '#07131f',
   },
 });

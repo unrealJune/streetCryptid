@@ -50,6 +50,13 @@ export interface CryptidProfile extends CryptidProfileDraft {
   version: typeof CRYPTID_PROFILE_VERSION;
 }
 
+export interface CryptidProfileFieldIssues {
+  readonly handle: readonly string[];
+  readonly cryptidName: readonly string[];
+  readonly sigil: readonly string[];
+  readonly color: readonly string[];
+}
+
 export class CryptidProfileValidationError extends Error {
   constructor(readonly issues: readonly string[]) {
     super(issues[0] ?? 'Cryptid profile is invalid.');
@@ -109,8 +116,13 @@ export function sigilMeasurements(value: string): { lines: number; columns: numb
   };
 }
 
-export function validateCryptidProfile(draft: CryptidProfileDraft): string[] {
-  const issues: string[] = [];
+export function validateCryptidProfileFields(
+  draft: CryptidProfileDraft
+): CryptidProfileFieldIssues {
+  const handleIssues: string[] = [];
+  const cryptidNameIssues: string[] = [];
+  const sigilIssues: string[] = [];
+  const colorIssues: string[] = [];
   const handle = normalizeHandle(draft.handle).slice(1);
   const cryptidName = draft.cryptidName.trim();
   const sigil = normalizeAsciiArt(draft.sigil);
@@ -118,31 +130,43 @@ export function validateCryptidProfile(draft: CryptidProfileDraft): string[] {
   const measurements = sigilMeasurements(sigil);
 
   if (!/^[a-z0-9][a-z0-9_-]{1,19}$/.test(handle)) {
-    issues.push('Use 2-20 lowercase letters, numbers, underscores, or dashes for the name.');
+    handleIssues.push(
+      'Use 2-20 lowercase letters, numbers, underscores, or dashes for the username.'
+    );
   }
   if (cryptidName.length < 1 || cryptidName.length > 24) {
-    issues.push('Give the ASCII form a name between 1 and 24 characters.');
+    cryptidNameIssues.push('Give the profile icon a name between 1 and 24 characters.');
   }
   if (sigil.trim().length === 0) {
-    issues.push('Choose a cryptid form or paste your own ASCII art.');
+    sigilIssues.push('Choose a profile icon or enter custom ASCII art.');
   }
   if (sigil.length > MAX_SIGIL_CHARS) {
-    issues.push(`Keep ASCII art under ${MAX_SIGIL_CHARS} characters.`);
+    sigilIssues.push(`Keep ASCII art under ${MAX_SIGIL_CHARS} characters.`);
   }
   if (measurements.lines > MAX_SIGIL_LINES) {
-    issues.push(`Keep ASCII art to ${MAX_SIGIL_LINES} lines or fewer.`);
+    sigilIssues.push(`Keep ASCII art to ${MAX_SIGIL_LINES} lines or fewer.`);
   }
   if (measurements.columns > MAX_SIGIL_COLUMNS) {
-    issues.push(`Keep each ASCII art line to ${MAX_SIGIL_COLUMNS} columns or fewer.`);
+    sigilIssues.push(`Keep each ASCII art line to ${MAX_SIGIL_COLUMNS} columns or fewer.`);
   }
   if (!/^[\t\n\x20-\x7e]*$/.test(sigil)) {
-    issues.push('The custom form must use ASCII characters, spaces, tabs, and line breaks only.');
+    sigilIssues.push('Use ASCII characters, spaces, tabs, and line breaks only.');
   }
   if (!isSignalColor(color)) {
-    issues.push('Choose a valid six-digit signal color.');
+    colorIssues.push('Choose a valid six-digit profile color.');
   }
 
-  return issues;
+  return {
+    handle: handleIssues,
+    cryptidName: cryptidNameIssues,
+    sigil: sigilIssues,
+    color: colorIssues,
+  };
+}
+
+export function validateCryptidProfile(draft: CryptidProfileDraft): string[] {
+  const issues = validateCryptidProfileFields(draft);
+  return [...issues.handle, ...issues.cryptidName, ...issues.sigil, ...issues.color];
 }
 
 export function createCryptidProfile(draft: CryptidProfileDraft): CryptidProfile {

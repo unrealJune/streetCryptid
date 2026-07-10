@@ -78,7 +78,7 @@ export interface PairingSnapshot {
   gestureActive: boolean;
   /** When the active rub-consent window expires, or null while idle. */
   gestureExpiresAt: number | null;
-  /** The friend most recently completed through pairing, until the reveal dismisses it. */
+  /** The friend most recently completed through pairing, until the reveal is acknowledged/rejected. */
   discoveredFriend: Friend | null;
   /** The most recently minted invite link (`streetcryptid://social?token=…`), if any. */
   inviteLink: string | null;
@@ -174,6 +174,7 @@ export class LocationSharingService implements FixPublisher {
   private mySubId: string | null = null;
   private mySubRecipients = '';
   private readonly friendSubs = new Map<string, string>();
+  private readonly removingFriends = new Set<string>();
   private seq = 0;
 
   private readonly snapshotListeners = new Set<SnapshotListener>();
@@ -341,6 +342,7 @@ export class LocationSharingService implements FixPublisher {
   }
 
   async addFriend(card: ContactCard): Promise<void> {
+    if (this.removingFriends.has(card.endpointId)) return;
     this.state = pool.addFriend(this.state, card);
     await this.subscribeToFriend(card);
     this.persistPool();
@@ -361,6 +363,49 @@ export class LocationSharingService implements FixPublisher {
     this.emit();
   }
 
+  /** Remove a friend locally, revoke future fixes, and tear down their live subscription. */
+  async removeFriend(endpointId: string): Promise<void> {
+    if (!this.state.friends[endpointId] || this.removingFriends.has(endpointId)) return;
+
+    const wasSharing = pool.isSharingWith(this.state, endpointId);
+    const friendSubId = this.friendSubs.get(endpointId);
+    const mod = this.mod;
+    const previousState = this.state;
+
+    this.removingFriends.add(endpointId);
+    this.friendSubs.delete(endpointId);
+    this.state = pool.removeFriend(this.state, endpointId);
+    try {
+      await savePool(this.kv, this.state);
+    } catch (error) {
+      this.state = previousState;
+      if (friendSubId) this.friendSubs.set(endpointId, friendSubId);
+      this.removingFriends.delete(endpointId);
+      throw error;
+    }
+
+    if (this.discoveredFriend?.endpointId === endpointId) this.discoveredFriend = null;
+    if (this.isNearbyGestureActive()) this.nearbyPairAttempts.add(endpointId);
+    this.emit();
+
+    const cleanup: Promise<void>[] = [];
+    if (mod && friendSubId) {
+      cleanup.push(mod.unsubscribe(friendSubId));
+    }
+    if (wasSharing) cleanup.push(this.ensureMySubscription());
+    cleanup.push(
+      this.trail.removeAuthor(endpointId).then(() => {
+        this.notifyTrailChanged();
+      })
+    );
+
+    const results = await Promise.allSettled(cleanup);
+    if (results.some((result) => result.status === 'rejected')) {
+      this.reportError(new Error('Friend removed, but some cleanup could not finish.'));
+    }
+    this.removingFriends.delete(endpointId);
+  }
+
   // ── Bilateral pairing (`streetcryptid/pair/1`) — ARCHITECTURE.md §4 ─────────────────────────
 
   /** Toggle whether we accept invite-less nearby (BLE) pairing Hellos. */
@@ -377,9 +422,8 @@ export class LocationSharingService implements FixPublisher {
    * side, while an inbound nearby request auto-accepts only while this window is active.
    */
   async beginNearbyGesture(windowMs = NEARBY_GESTURE_WINDOW_MS): Promise<void> {
-    if (!this.mod) return;
+    if (!this.mod || this.discoveredFriend) return;
     this.nearbyGestureUntil = Date.now() + Math.max(2000, windowMs);
-    this.discoveredFriend = null;
     this.setPairingActivity('feeling for a signal');
     this.startNearbyGesturePolling();
 
@@ -389,11 +433,31 @@ export class LocationSharingService implements FixPublisher {
     await this.pollPairingOnce();
   }
 
-  /** Dismiss the one-shot "cryptid discovered" reveal. */
-  clearPairingCelebration(): void {
+  /** Acknowledge the one-shot "cryptid discovered" reveal and keep the new friend. */
+  acknowledgeDiscoveredFriend(): void {
     if (!this.discoveredFriend) return;
     this.discoveredFriend = null;
     this.emit();
+  }
+
+  /** Reject the discovered friend, revoke sharing, and leave their live location topic. */
+  async rejectDiscoveredFriend(): Promise<void> {
+    const friend = this.discoveredFriend;
+    if (!friend) return;
+
+    this.discoveredFriend = null;
+    this.state = pool.removeFriend(this.state, friend.endpointId);
+    this.persistPool();
+    this.setPairingActivity('cryptid rejected');
+
+    const mod = this.mod;
+    const friendSubId = this.friendSubs.get(friend.endpointId);
+    const unsubscribeFromFriend = async (): Promise<void> => {
+      if (!mod || !friendSubId) return;
+      await mod.unsubscribe(friendSubId);
+      this.friendSubs.delete(friend.endpointId);
+    };
+    await Promise.all([unsubscribeFromFriend(), this.ensureMySubscription()]);
   }
 
   /**
@@ -880,6 +944,8 @@ export class LocationSharingService implements FixPublisher {
   }
 
   private handleFix(event: OnFixEvent): void {
+    if (!this.state.friends[event.author] || this.removingFriends.has(event.author)) return;
+
     const fix: IncomingFix = {
       author: event.author,
       seq: event.seq,
@@ -1198,6 +1264,13 @@ export class LocationSharingService implements FixPublisher {
     if (!this.mod) return;
     const result = await this.mod.pairResult(event.sessionId).catch(() => null);
     if (!result) return;
+    if (this.removingFriends.has(result.peerEndpointId)) {
+      this.pendingPairRequests = this.pendingPairRequests.filter(
+        (request) => request.sessionId !== event.sessionId
+      );
+      this.initiatedRoutes.delete(event.sessionId);
+      return;
+    }
 
     const method = this.initiatedRoutes.get(event.sessionId);
     let friend = this.placeholderFriend(result, method);

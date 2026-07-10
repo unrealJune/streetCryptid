@@ -55,8 +55,10 @@ export default function FriendsScreen() {
     respondPair,
     refreshPairing,
     toggleShare,
+    removeFriend,
     retryLocation,
-    clearPairingCelebration,
+    acknowledgeDiscoveredFriend,
+    rejectDiscoveredFriend,
   } = useLocationSharing();
 
   useFocusEffect(
@@ -73,7 +75,10 @@ export default function FriendsScreen() {
   const onRub = useCallback(async () => {
     await beginNearbyGesture();
   }, [beginNearbyGesture]);
-  const rub = useRubToPair(isFocused && Boolean(pairing?.available), onRub);
+  const rub = useRubToPair(
+    isFocused && Boolean(pairing?.available) && !pairing?.discoveredFriend,
+    onRub
+  );
   usePairingHaptics(pairing, isFocused);
 
   useEffect(() => {
@@ -192,7 +197,8 @@ export default function FriendsScreen() {
           <View style={styles.empty}>
             <ThemedText style={styles.emptyTitle}>No cryptids nearby yet</ThemedText>
             <ThemedText type="small" themeColor="textSecondary" style={styles.emptyCopy}>
-              Keep Friends open on both phones and make the same small circular motion.
+              Keep Friends open on both phones and make the same small back-and-forth or circular
+              motion.
             </ThemedText>
           </View>
         ) : (
@@ -269,6 +275,10 @@ export default function FriendsScreen() {
             params: { friend: selected.friend.endpointId },
           });
         }}
+        onRemove={async () => {
+          if (!selected) return;
+          await removeFriend(selected.friend.endpointId);
+        }}
       />
 
       <Modal
@@ -282,10 +292,9 @@ export default function FriendsScreen() {
             initialProfile={profile}
             mode="edit"
             notice={account.error}
-            onCancel={() => setEditingIdentity(false)}
+            onDone={() => setEditingIdentity(false)}
             onSave={async (nextProfile) => {
               await account.saveProfile(nextProfile);
-              setEditingIdentity(false);
             }}
           />
         ) : null}
@@ -293,7 +302,8 @@ export default function FriendsScreen() {
 
       <CryptidDiscoveryCelebration
         friend={pairing?.discoveredFriend ?? null}
-        onDone={clearPairingCelebration}
+        onAcknowledge={acknowledgeDiscoveredFriend}
+        onReject={rejectDiscoveredFriend}
       />
     </>
   );
