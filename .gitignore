@@ -11,6 +11,7 @@ expo-env.d.ts
 
 # Native
 .kotlin/
+target/
 *.orig.*
 *.jks
 *.p8
@@ -25,6 +26,7 @@ expo-env.d.ts
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+*.log
 
 # macOS
 .DS_Store
@@ -45,3 +47,10 @@ example
 # generated native folders
 /ios
 /android
+
+# local Expo module build outputs
+modules/iroh-location/android/.gradle/
+modules/iroh-location/android/build/
+modules/iroh-location/android/src/main/jniLibs/
+modules/iroh-location/ios/headers/
+modules/iroh-location/ios/IrohLocationFFI.xcframework/

@@ -63,12 +63,12 @@ Dark equivalents: `zoom-*-dark.png`, `social-*-dark.png`.
 
 ## Regenerate the OSM data
 
-The scripts hit the Overpass API and rewrite the baked `*.js` in place. Node lives at
-`Z:\nodejs\node.exe` (not always on PATH):
+The scripts hit the Overpass API and rewrite the baked `*.js` in place. Run them
+from this directory with Node on your `PATH`:
 
 ```powershell
-Z:\nodejs\node.exe build_sets.mjs .   # -> mapdata.js
-Z:\nodejs\node.exe build_zoom.mjs .   # -> zoomdata.js
+node build_sets.mjs .   # -> mapdata.js
+node build_zoom.mjs .   # -> zoomdata.js
 ```
 
 ## Re-render a PNG (headless Chrome)
