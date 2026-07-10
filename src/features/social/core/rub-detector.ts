@@ -47,25 +47,25 @@ interface CircularProgress {
   turnRadians: number;
 }
 
-const DEFAULT_JERK_THRESHOLD = 0.45;
-const DEFAULT_CIRCULAR_JERK_THRESHOLD = 0.08;
-const DEFAULT_STRIKE_WINDOW_MS = 1600;
-const DEFAULT_REQUIRED_STRIKES = 4;
-const DEFAULT_CIRCULAR_TURN_THRESHOLD_RADIANS = 5.2;
+const DEFAULT_JERK_THRESHOLD = 0.32;
+const DEFAULT_CIRCULAR_JERK_THRESHOLD = 0.06;
+const DEFAULT_STRIKE_WINDOW_MS = 1800;
+const DEFAULT_REQUIRED_STRIKES = 3;
+const DEFAULT_CIRCULAR_TURN_THRESHOLD_RADIANS = 4.2;
 const DEFAULT_COOLDOWN_MS = 2500;
 
-const MIN_STROKE_GAP_MS = 80;
-const MAX_STROKE_GAP_MS = 520;
+const MIN_STROKE_GAP_MS = 60;
+const MAX_STROKE_GAP_MS = 700;
 const SAME_DIRECTION_DOT = 0.55;
-const REVERSAL_DOT = -0.65;
-const AXIS_ALIGNMENT_DOT = 0.75;
+const REVERSAL_DOT = -0.35;
+const AXIS_ALIGNMENT_DOT = 0.45;
 
-const MAX_CIRCULAR_GAP_MS = 320;
-const MIN_CIRCULAR_TURN_RADIANS = 0.12;
+const MAX_CIRCULAR_GAP_MS = 420;
+const MIN_CIRCULAR_TURN_RADIANS = 0.08;
 const MAX_CIRCULAR_TURN_RADIANS = 1.25;
-const CIRCULAR_NORMAL_ALIGNMENT_DOT = 0.55;
-const CIRCULAR_CLOSURE_DOT = 0.42;
-const MIN_CIRCULAR_TURNS = 8;
+const CIRCULAR_NORMAL_ALIGNMENT_DOT = 0.25;
+const CIRCULAR_CLOSURE_DOT = -0.4;
+const MIN_CIRCULAR_TURNS = 6;
 
 function magnitude(vector: Vector3): number {
   return Math.sqrt(vector.x * vector.x + vector.y * vector.y + vector.z * vector.z);
@@ -96,7 +96,7 @@ function clampUnit(value: number): number {
 }
 
 /**
- * Detects either sustained back-and-forth acceleration or a near-complete circular turn.
+ * Detects either a short back-and-forth acceleration pattern or a mostly complete circular turn.
  * The gesture is only a local UX signal; iroh still authenticates the peer connection.
  */
 export function createRubDetector(options: RubDetectorOptions = {}): RubDetector {
