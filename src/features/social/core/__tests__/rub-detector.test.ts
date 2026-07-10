@@ -22,6 +22,25 @@ function backAndForthSamples(startAt: number): MotionSample[] {
   return [0, 1.1, 0, -1.1, 0, 1.1, 0, -1.1, 0].map((x, index) => sample(startAt + index * 100, x));
 }
 
+function motionFromChanges(
+  startAt: number,
+  changes: readonly Pick<MotionSample, 'x' | 'y' | 'z'>[]
+): MotionSample[] {
+  const samples = [sample(startAt, 0)];
+  let current = samples[0];
+
+  for (const [index, change] of changes.entries()) {
+    current = sample(
+      startAt + (index + 1) * 140,
+      current.x + change.x,
+      current.y + change.y,
+      current.z + change.z
+    );
+    samples.push(current);
+  }
+  return samples;
+}
+
 function circularSamples(startAt: number, sweepRadians = Math.PI * 2): MotionSample[] {
   const steps = Math.ceil((sweepRadians / (Math.PI * 2)) * 18);
   return Array.from({ length: steps + 1 }, (_, index) => {
@@ -31,23 +50,35 @@ function circularSamples(startAt: number, sweepRadians = Math.PI * 2): MotionSam
 }
 
 describe('rub detector', () => {
-  it('detects sustained back-and-forth motion', () => {
+  it('detects one small back-and-forth motion', () => {
     const detector = createRubDetector();
+    const oneRub = [0, 0.5, 0, -0.5, 0].map((x, index) => sample(index * 110, x));
 
-    expect(pushSamples(detector, backAndForthSamples(0))).not.toBeNull();
+    expect(pushSamples(detector, oneRub)).not.toBeNull();
   });
 
-  it('detects a near-complete circular motion', () => {
+  it('allows a gentler gesture to drift across axes', () => {
     const detector = createRubDetector();
+    const imperfectRub = motionFromChanges(0, [
+      { x: 0.38, y: 0.04, z: 0.02 },
+      { x: -0.24, y: 0.32, z: -0.03 },
+      { x: 0.3, y: -0.28, z: 0.04 },
+    ]);
 
-    expect(pushSamples(detector, circularSamples(0))).not.toBeNull();
+    expect(pushSamples(detector, imperfectRub)).not.toBeNull();
   });
 
-  it('ignores one vigorous wave', () => {
+  it('detects a three-quarter circular motion', () => {
     const detector = createRubDetector();
-    const oneWave = [0, 1.1, 0, -1.1, 0].map((x, index) => sample(index * 100, x));
 
-    expect(pushSamples(detector, oneWave)).toBeNull();
+    expect(pushSamples(detector, circularSamples(0, Math.PI * 1.5))).not.toBeNull();
+  });
+
+  it('ignores one sharp reversal', () => {
+    const detector = createRubDetector();
+    const oneReversal = [0, 0.7, 0].map((x, index) => sample(index * 100, x));
+
+    expect(pushSamples(detector, oneReversal)).toBeNull();
   });
 
   it('ignores a partial circular arc', () => {
@@ -69,12 +100,11 @@ describe('rub detector', () => {
 
   it('requires directional changes to remain continuous', () => {
     const detector = createRubDetector();
+    const shortBurst = (startAt: number) =>
+      [0, 1.1, 0, -1.1].map((x, index) => sample(startAt + index * 100, x));
 
-    const firstHalf = backAndForthSamples(0).slice(0, 4);
-    const secondHalf = backAndForthSamples(2200).slice(4);
-
-    expect(pushSamples(detector, firstHalf)).toBeNull();
-    expect(pushSamples(detector, secondHalf)).toBeNull();
+    expect(pushSamples(detector, shortBurst(0))).toBeNull();
+    expect(pushSamples(detector, shortBurst(2200))).toBeNull();
   });
 
   it('applies a cooldown after detection', () => {
