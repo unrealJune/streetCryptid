@@ -1,0 +1,27 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+group = 'com.unrealjune.cryptidgenerator'
+version = '0.1.0'
+
+def expoModulesCorePlugin = new File(
+  project(":expo-modules-core").projectDir.absolutePath,
+  "ExpoModulesCorePlugin.gradle"
+)
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useExpoPublishing()
+
+android {
+  namespace "com.unrealjune.cryptidgenerator"
+  compileSdk safeExtGet("compileSdkVersion", 36)
+
+  defaultConfig {
+    minSdk safeExtGet("minSdkVersion", 26)
+  }
+}
+
+dependencies {
+  implementation "com.google.mlkit:genai-prompt:1.0.0-beta2"
+}

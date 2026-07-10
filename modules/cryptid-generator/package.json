@@ -1,0 +1,7 @@
+{
+  "name": "cryptid-generator",
+  "version": "0.1.0",
+  "description": "streetCryptid on-device ASCII persona generator",
+  "main": "index.ts",
+  "private": true
+}

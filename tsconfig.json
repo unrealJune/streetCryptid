@@ -6,6 +6,7 @@
     "paths": {
       "@/*": ["./src/*"],
       "@/assets/*": ["./assets/*"],
+      "cryptid-generator": ["./modules/cryptid-generator/index.ts"],
       "iroh-location": ["./modules/iroh-location/index.ts"]
     }
   },
