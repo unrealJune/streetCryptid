@@ -21,6 +21,7 @@ import { useTheme } from '@/hooks/use-theme';
 import { CryptidDiscoveryCelebration } from '../components/cryptid-discovery-celebration';
 import { FriendProfileSheet } from '../components/friend-profile-sheet';
 import { PairLinkAction } from '../components/pair-link-action';
+import { PairingVerificationPanel } from '../components/pairing-verification-panel';
 import { selectFriendTrail } from '../core/history';
 import { formatDistance, formatPresenceAge } from '../core/presence';
 import { useLocationSharing } from '../hooks/use-location-sharing';
@@ -53,6 +54,9 @@ export default function FriendsScreen() {
     createPairInvite,
     pairFromInput,
     respondPair,
+    submitPairChoice,
+    confirmPairDisplay,
+    cancelPair,
     refreshPairing,
     toggleShare,
     removeFriend,
@@ -99,11 +103,15 @@ export default function FriendsScreen() {
     [selected, trail]
   );
   const sharingWith = snapshot?.sharingWith ?? [];
-  const nearbyLabel = pairing?.gestureActive
-    ? 'Matching a nearby signal'
-    : pairing?.ready
-      ? 'Nearby pairing ready'
-      : 'Nearby pairing starting';
+  const nearbyLabel = pairing?.verifications.length
+    ? pairing.verifications.some((verification) => verification.localConfirmed)
+      ? 'Waiting for their confirmation'
+      : 'Visual check ready'
+    : pairing?.gestureActive
+      ? 'Matching a nearby signal'
+      : pairing?.ready
+        ? 'Nearby pairing ready'
+        : 'Nearby pairing starting';
 
   return (
     <>
@@ -147,6 +155,16 @@ export default function FriendsScreen() {
             </ThemedText>
           </Pressable>
         </View>
+
+        {pairing?.verifications.length ? (
+          <PairingVerificationPanel
+            accent={chrome.green}
+            verifications={pairing.verifications}
+            onChoose={submitPairChoice}
+            onConfirm={confirmPairDisplay}
+            onCancel={cancelPair}
+          />
+        ) : null}
 
         <View style={[styles.nearby, { borderColor: theme.backgroundSelected }]}>
           <View
@@ -193,12 +211,12 @@ export default function FriendsScreen() {
           </View>
         ) : null}
 
-        {friends.length === 0 ? (
+        {friends.length === 0 && !pairing?.verifications.length ? (
           <View style={styles.empty}>
             <ThemedText style={styles.emptyTitle}>No cryptids nearby yet</ThemedText>
             <ThemedText type="small" themeColor="textSecondary" style={styles.emptyCopy}>
               Keep Friends open on both phones and make the same small back-and-forth or circular
-              motion.
+              motion, then compare the ASCII figure shown on both screens.
             </ThemedText>
           </View>
         ) : (
@@ -252,7 +270,7 @@ export default function FriendsScreen() {
             accent={chrome.green}
             pairing={pairing}
             onCreateInvite={createPairInvite}
-            onRespond={respondPair}
+            onReject={(sessionId) => respondPair(sessionId, false)}
           />
         ) : null}
       </ScrollView>

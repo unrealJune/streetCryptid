@@ -34,9 +34,10 @@ and is mirrored by the app's service.
 
 ## What runs where
 
-- `cargo test` (in `rust/`) verifies the crypto envelope: multi-recipient round-trip,
-  non-recipient rejection, **revocation**, tamper + forged-author detection. **This is
-  fully portable and the security core is validated here.**
+- `cargo test` (in `rust/`) verifies the crypto envelope plus the pairing protocol: nonce
+  commit/reveal, transcript-derived visual SAS, session-peer binding, mutual confirmation,
+  mismatch/timeout handling, and simultaneous nearby initiation. **This is fully portable and the
+  security core is validated here.**
 - Everything below (cross-compile, dev client, on-device A→B) requires **macOS/Xcode**
   (iOS), **Android NDK**, and **physical devices**.
 
@@ -191,10 +192,12 @@ IndexedDB-backed store.
 
 1. Build the dev client on the iPhone (A) and the Android (B).
 2. Open the **Friends** tab on both; each shows its `streetcryptid://contact?…` link.
-3. Paste A's link into B and B's link into A (QR later).
-4. On A, tap **Share** next to B, nudge the point, tap **Broadcast** → B's Friends screen
+3. Open A's one-time pairing link on B. Compare the visual check over a trusted call: one phone
+   shows an ASCII figure, the other chooses it from four, then the displaying phone confirms.
+4. Verify neither friend nor sharing grant appears until both people complete that check.
+5. On A, tap **Share** next to B, nudge the point, tap **Broadcast** → B's Friends screen
    lists the decrypted fix under "Incoming fixes".
-5. Revoke: on A tap **Sharing** to turn it off → B stops receiving new (decryptable)
+6. Revoke: on A tap **Sharing** to turn it off → B stops receiving new (decryptable)
    fixes, proving per-recipient revocation end-to-end.
 
 ## Status / next
@@ -207,7 +210,8 @@ IndexedDB-backed store.
   regenerated and the Expo wrappers expose `publishProfile`/`profileTicket`/`importProfileTicket`/
   `readProfile`/`pollProfileEvents`, `setPairingReady`/`pairingReady`/`createPairInvite`/
   `initiatePair`/`initiatePairByToken`/`initiatePairNearby`/`respondPair`/`pollPairEvents`/
-  `pairState`/`listPairSessions`/`pairResult`/`encodePairInvite`/`decodePairInvite`, and
+  `pairState`/`listPairSessions`/`pairSasChallenge`/`submitPairChoice`/
+  `confirmPairDisplay`/`cancelPair`/`pairResult`/`encodePairInvite`/`decodePairInvite`, and
   `bleAvailable`/`bleCapabilities`/`nearbyBlePeers`/`bleHasScanHint`. Byte fields cross the bridge
   as lowercase hex; enums as camelCase strings; U64 epochs/timestamps as JS numbers. The web
   (WASM) build reports these unavailable (empty/false/null) and throws only on explicit pairing

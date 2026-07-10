@@ -85,7 +85,7 @@ export interface ProfileView {
   ts: number;
 }
 
-// ── Bilateral pairing (`streetcryptid/pair/1`) — ARCHITECTURE.md §4 ──────────────────────────
+// ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ──────────────────────────
 
 /**
  * An out-of-band pairing invite carrying only immutable bootstrap material. Byte fields are
@@ -112,9 +112,38 @@ export interface PairInviteWithToken extends PairInvite {
   token: string;
 }
 
-/** Coarse pairing session phase (UI-facing). */
+/**
+ * Coarse pairing session phase (UI-facing). `verifying` means the SAS nonces are revealed and
+ * verified and BOTH humans must clear the visual gate before any accept — no {@link PairResult}
+ * is reachable from `verifying` without confirming the challenge first.
+ */
 export type PairStateValue =
-  'handshaking' | 'pending' | 'localAccepted' | 'peerAccepted' | 'complete' | 'rejected' | 'failed';
+  | 'handshaking'
+  | 'pending'
+  | 'verifying'
+  | 'localAccepted'
+  | 'peerAccepted'
+  | 'complete'
+  | 'rejected'
+  | 'failed';
+
+/** The deterministic SAS role for this side, derived from the pairing transcript. */
+export type SasRole = 'displayer' | 'picker';
+
+/**
+ * The per-session Short Authentication String challenge shown while a pair is `verifying`. The
+ * `displayer` shows the `targetIndex` figure and confirms the other human matched it; the `picker`
+ * must choose the matching figure among `optionIndices`. `targetIndex` never crosses the wire.
+ */
+export interface SasChallenge {
+  role: SasRole;
+  /** Correct figure index (displayer shows it; picker must match it). */
+  targetIndex: number;
+  /** The picker's shuffled figure indices (includes the target). Never empty. */
+  optionIndices: number[];
+  /** Absolute wall-clock deadline (ms since epoch). Actions after this are terminal. */
+  deadlineMs: number;
+}
 
 /** A snapshot of a pairing session's state. Byte fields are lowercase hex. */
 export interface PairStateRecord {
@@ -129,19 +158,25 @@ export interface PairStateRecord {
    * creation and unaffected by later accept/reject decisions.
    */
   nearby: boolean;
+  /** Whether the peer's SAS reveal verified (the visual gate is ready/underway). */
+  sasVerified: boolean;
+  /** Whether this side's human cleared the SAS gate (required before any local accept). */
+  localSasConfirmed: boolean;
 }
 
 /** The kind of a polled pairing event. */
 export type PairEventKind =
   /** A peer wants to pair (or our outbound Hello landed) — prompt the user. */
   | 'pendingRequest'
+  /** The SAS visual gate is ready — fetch {@link SasChallenge} via `pairSasChallenge` and show it. */
+  | 'verifying'
   /** The peer sent their accept/reject. */
   | 'peerResponded'
   /** Both sides accepted — call `pairResult`. */
   | 'ready'
   /** The session was rejected by either side. */
   | 'rejected'
-  /** The session failed. */
+  /** The session failed (SAS mismatch/cancel/timeout or a protocol error). */
   | 'failed';
 
 /** A polled pairing event (node-level queue; see {@link IrohLocationApi.pollPairEvents}). */
@@ -297,7 +332,7 @@ export interface IrohLocationApi {
   /** Drain profile-update events surfaced by docs live-sync since the last poll. */
   pollProfileEvents(): Promise<ProfileView[]>;
 
-  // ── Bilateral pairing (`streetcryptid/pair/1`) — ARCHITECTURE.md §4 ─────────────────────────
+  // ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ─────────────────────────
   /** Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. */
   setPairingReady(ready: boolean): Promise<void>;
   /** Whether invite-less nearby pairing is currently accepted. */
@@ -313,9 +348,32 @@ export interface IrohLocationApi {
   initiatePairByToken(token: string): Promise<string>;
   /** Begin an invite-less **nearby** pair with a BLE-discovered peer. Returns the session id (hex). */
   initiatePairNearby(peerEndpointIdHex: string): Promise<string>;
-  /** Accept or reject a pending pairing session. A result is emitted only after BOTH sides accept. */
+  /**
+   * Reject/cancel a pending pairing session (`accept === false`). `accept === true` is **rejected
+   * by the native layer** until the local SAS visual check is confirmed — use
+   * {@link submitPairChoice} / {@link confirmPairDisplay} to advance a pair instead. A result is
+   * emitted only after BOTH sides clear the SAS gate and accept.
+   */
   respondPair(sessionIdHex: string, accept: boolean): Promise<void>;
-  /** Drain pairing events (pending requests, peer responses, ready, rejects) since the last poll. */
+  /**
+   * The active SAS visual challenge for a session, or `null` if the gate isn't live (not yet
+   * verified, complete/terminal, or expired). It remains available after this phone confirms so
+   * the UI can preserve the waiting state.
+   */
+  pairSasChallenge(sessionIdHex: string): Promise<SasChallenge | null>;
+  /**
+   * Picker action: submit the chosen figure index. A correct choice latches the local SAS and
+   * sends `Accept`; a wrong / late choice is terminal (no retry in the same session).
+   */
+  submitPairChoice(sessionIdHex: string, chosenIndex: number): Promise<void>;
+  /**
+   * Displayer action: confirm whether the other human matched the shown figure. `true` latches the
+   * local SAS and sends `Accept`; `false` (or a late action) is terminal.
+   */
+  confirmPairDisplay(sessionIdHex: string, matched: boolean): Promise<void>;
+  /** Cancel a pairing under SAS verification — terminal (requires a fresh attempt). */
+  cancelPair(sessionIdHex: string): Promise<void>;
+  /** Drain pairing events (pending requests, SAS-verifying, peer responses, ready, rejects). */
   pollPairEvents(): Promise<PairEvent[]>;
   /** Inspect a single session's current state, or `null` if unknown. */
   pairState(sessionIdHex: string): Promise<PairStateRecord | null>;

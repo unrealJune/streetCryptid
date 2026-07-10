@@ -3,7 +3,7 @@ import type { BlePeer, PairStateRecord } from 'iroh-location';
 import type { Friend } from './types';
 
 export type PairingExperienceStage =
-  'idle' | 'seeking' | 'contact' | 'handshaking' | 'joining' | 'discovered';
+  'idle' | 'seeking' | 'contact' | 'handshaking' | 'verifying' | 'joining' | 'discovered';
 
 export interface PairingExperienceInput {
   gestureActive: boolean;
@@ -21,14 +21,19 @@ export function derivePairingExperienceStage(
   input: PairingExperienceInput
 ): PairingExperienceStage {
   if (input.discoveredFriend) return 'discovered';
+  if (
+    input.sessions.some((session) =>
+      ['verifying', 'localAccepted', 'peerAccepted'].includes(session.state)
+    )
+  ) {
+    return 'verifying';
+  }
 
   const activeNearby = input.sessions.find(
-    (session) => session.nearby && !['complete', 'rejected', 'failed'].includes(session.state)
+    (session) => session.nearby && !['rejected', 'failed'].includes(session.state)
   );
   if (activeNearby) {
-    return ['localAccepted', 'peerAccepted'].includes(activeNearby.state)
-      ? 'joining'
-      : 'handshaking';
+    return activeNearby.state === 'complete' ? 'joining' : 'handshaking';
   }
 
   if (!input.gestureActive) return 'idle';
@@ -46,6 +51,8 @@ export function pairingHapticCadence(stage: PairingExperienceStage): PairingHapt
       return { delayMs: 560, strength: 'medium' };
     case 'handshaking':
       return { delayMs: 390, strength: 'medium' };
+    case 'verifying':
+      return { delayMs: 1000, strength: 'light' };
     case 'joining':
       return { delayMs: 240, strength: 'rigid' };
     case 'idle':

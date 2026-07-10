@@ -71,6 +71,7 @@ private func pairStateName(_ s: PairState) -> String {
   switch s {
   case .handshaking: return "handshaking"
   case .pending: return "pending"
+  case .verifying: return "verifying"
   case .localAccepted: return "localAccepted"
   case .peerAccepted: return "peerAccepted"
   case .complete: return "complete"
@@ -82,11 +83,37 @@ private func pairStateName(_ s: PairState) -> String {
 private func pairEventKindName(_ k: PairEventKind) -> String {
   switch k {
   case .pendingRequest: return "pendingRequest"
+  case .verifying: return "verifying"
   case .peerResponded: return "peerResponded"
   case .ready: return "ready"
   case .rejected: return "rejected"
   case .failed: return "failed"
   }
+}
+
+private func sasRoleName(_ r: SasRoleKind) -> String {
+  switch r {
+  case .displayer: return "displayer"
+  case .picker: return "picker"
+  }
+}
+
+private func sasChallengeDict(_ c: SasChallenge) -> [String: Any] {
+  [
+    "role": sasRoleName(c.role),
+    "targetIndex": c.targetIndex,
+    "optionIndices": c.optionIndices,
+    "deadlineMs": c.deadlineMs,
+  ]
+}
+
+private func pairingFigureIndex(_ value: Double) throws -> UInt32 {
+  guard value.isFinite, value.rounded(.towardZero) == value, value >= 0, value < 256 else {
+    throw Exception(
+      name: "InvalidPairingFigure",
+      description: "pairing figure index must be an integer between 0 and 255")
+  }
+  return UInt32(value)
 }
 
 private func pairStateRecordDict(_ r: PairStateRecord) -> [String: Any] {
@@ -98,6 +125,8 @@ private func pairStateRecordDict(_ r: PairStateRecord) -> [String: Any] {
     "peerAccepted": r.peerAccepted,
     "initiator": r.initiator,
     "nearby": r.nearby,
+    "sasVerified": r.sasVerified,
+    "localSasConfirmed": r.localSasConfirmed,
   ]
 }
 
@@ -325,7 +354,7 @@ public final class IrohLocationModule: Module {
       return (await node.pollProfileEvents()).map { profileViewDict($0) }
     }
 
-    // ── Bilateral pairing (`streetcryptid/pair/1`) — ARCHITECTURE.md §4 ─────────────────────
+    // ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ─────────────────────
 
     AsyncFunction("setPairingReady") { (ready: Bool) throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
@@ -363,6 +392,27 @@ public final class IrohLocationModule: Module {
     AsyncFunction("respondPair") { (sessionIdHex: String, accept: Bool) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       try await node.respondPair(sessionId: hexToData(sessionIdHex), accept: accept)
+    }
+
+    AsyncFunction("pairSasChallenge") { (sessionIdHex: String) async throws -> [String: Any]? in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return (try await node.pairSasChallenge(sessionId: hexToData(sessionIdHex))).map { sasChallengeDict($0) }
+    }
+
+    AsyncFunction("submitPairChoice") { (sessionIdHex: String, chosenIndex: Double) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.submitPairChoice(
+        sessionId: hexToData(sessionIdHex), chosenIndex: try pairingFigureIndex(chosenIndex))
+    }
+
+    AsyncFunction("confirmPairDisplay") { (sessionIdHex: String, matched: Bool) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.confirmPairDisplay(sessionId: hexToData(sessionIdHex), matched: matched)
+    }
+
+    AsyncFunction("cancelPair") { (sessionIdHex: String) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.cancelPair(sessionId: hexToData(sessionIdHex))
     }
 
     AsyncFunction("pollPairEvents") { () async throws -> [[String: Any]] in

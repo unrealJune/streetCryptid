@@ -17,9 +17,11 @@ async function pulse(stage: PairingExperienceStage): Promise<void> {
           ? Haptics.AndroidHaptics.Segment_Frequent_Tick
           : stage === 'contact'
             ? Haptics.AndroidHaptics.Gesture_Start
-            : stage === 'joining'
-              ? Haptics.AndroidHaptics.Context_Click
-              : Haptics.AndroidHaptics.Segment_Tick;
+            : stage === 'verifying'
+              ? Haptics.AndroidHaptics.Segment_Frequent_Tick
+              : stage === 'joining'
+                ? Haptics.AndroidHaptics.Context_Click
+                : Haptics.AndroidHaptics.Segment_Tick;
       await Haptics.performAndroidHapticsAsync(type);
       return;
     }

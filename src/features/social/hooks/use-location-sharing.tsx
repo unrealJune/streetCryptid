@@ -41,6 +41,9 @@ interface LocationSharingContextValue {
   createPairInvite(ttlSecs?: number): Promise<string | undefined>;
   pairFromInput(input: string): Promise<void>;
   respondPair(sessionId: string, accept: boolean): Promise<void>;
+  submitPairChoice(sessionId: string, chosenIndex: number): Promise<void>;
+  confirmPairDisplay(sessionId: string, matched: boolean): Promise<void>;
+  cancelPair(sessionId: string): Promise<void>;
   refreshPairing(): Promise<void>;
   toggleShare(endpointId: string, on: boolean): Promise<void>;
   removeFriend(endpointId: string): Promise<void>;
@@ -311,6 +314,27 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     },
     [run]
   );
+  const submitPairChoice = useCallback(
+    (sessionId: string, chosenIndex: number) => {
+      setServiceError(null);
+      return run((service) => service.submitPairChoice(sessionId, chosenIndex));
+    },
+    [run]
+  );
+  const confirmPairDisplay = useCallback(
+    (sessionId: string, matched: boolean) => {
+      setServiceError(null);
+      return run((service) => service.confirmPairDisplay(sessionId, matched));
+    },
+    [run]
+  );
+  const cancelPair = useCallback(
+    (sessionId: string) => {
+      setServiceError(null);
+      return run((service) => service.cancelPair(sessionId));
+    },
+    [run]
+  );
   const refreshPairing = useCallback(() => run((service) => service.refreshPairing()), [run]);
   const toggleShare = useCallback(
     (endpointId: string, on: boolean) => {
@@ -368,6 +392,9 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       createPairInvite,
       pairFromInput,
       respondPair,
+      submitPairChoice,
+      confirmPairDisplay,
+      cancelPair,
       refreshPairing,
       toggleShare,
       removeFriend,
@@ -388,6 +415,9 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       createPairInvite,
       pairFromInput,
       respondPair,
+      submitPairChoice,
+      confirmPairDisplay,
+      cancelPair,
       refreshPairing,
       toggleShare,
       removeFriend,

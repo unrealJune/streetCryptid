@@ -21,6 +21,7 @@ import type {
   PairResult,
   PairStateRecord,
   ProfileView,
+  SasChallenge,
 } from './IrohLocation.types';
 
 const ID_KEY = 'sc.iroh.identitySecret';
@@ -258,6 +259,23 @@ export class IrohLocationNativeModule
 
   async respondPair(_sessionIdHex: string, _accept: boolean): Promise<void> {
     throw pairingUnsupported('respondPair');
+  }
+
+  async pairSasChallenge(_sessionIdHex: string): Promise<SasChallenge | null> {
+    // A read/poll call: degrade gracefully (no SAS gate on web) so service polling never throws.
+    return null;
+  }
+
+  async submitPairChoice(_sessionIdHex: string, _chosenIndex: number): Promise<void> {
+    throw pairingUnsupported('submitPairChoice');
+  }
+
+  async confirmPairDisplay(_sessionIdHex: string, _matched: boolean): Promise<void> {
+    throw pairingUnsupported('confirmPairDisplay');
+  }
+
+  async cancelPair(_sessionIdHex: string): Promise<void> {
+    throw pairingUnsupported('cancelPair');
   }
 
   async pollPairEvents(): Promise<PairEvent[]> {

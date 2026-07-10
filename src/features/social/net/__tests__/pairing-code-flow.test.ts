@@ -315,7 +315,7 @@ describe('LocationSharingService — encrypted short pairing-code path', () => {
     expect(ttlSeconds).toBe(300);
   });
 
-  it('redeems a pair code end-to-end: one-time downloads + decrypts the capsule, initiates, and auto-accepts', async () => {
+  it('redeems a pair code end-to-end: one-time downloads + decrypts the capsule and initiates', async () => {
     const mailbox = new FakeMailbox();
     const svc = newService(mailbox);
     await svc.init('@me', 'mothman');
@@ -325,10 +325,8 @@ describe('LocationSharingService — encrypted short pairing-code path', () => {
 
     expect(sessionId).toBe('sess-invite');
     expect(mockHolder.mod.calls.initiatePairByToken).toEqual(['scpair1:cafef00d']);
-    expect(mockHolder.mod.calls.respondPair).toContainEqual({
-      sessionId: 'sess-invite',
-      accept: true,
-    });
+    // SAS is mandatory: redeeming a code must NOT auto-accept the local side.
+    expect(mockHolder.mod.calls.respondPair).toHaveLength(0);
     // A one-time GET must have burned the entry.
     expect(mailbox.calls.take).toHaveLength(1);
     await expect(mailbox.take(mailbox.calls.take[0])).rejects.toThrow(PairingMailboxNotFoundError);
