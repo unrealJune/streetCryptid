@@ -185,7 +185,8 @@ export default function FriendsScreen() {
           <View style={styles.empty}>
             <ThemedText style={styles.emptyTitle}>No cryptids nearby yet</ThemedText>
             <ThemedText type="small" themeColor="textSecondary" style={styles.emptyCopy}>
-              Keep Friends open on both phones and make the same small circular motion.
+              Keep Friends open on both phones and make the same small back-and-forth or circular
+              motion.
             </ThemedText>
           </View>
         ) : (
