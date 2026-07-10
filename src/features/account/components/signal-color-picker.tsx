@@ -90,6 +90,7 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
           { name: 'increaseSaturation', label: 'More saturated' },
           { name: 'decreaseSaturation', label: 'Less saturated' },
         ]}
+        accessibilityHint="Swipe up or down to change hue. Use the custom actions to change saturation."
         accessibilityLabel="Signal color wheel"
         accessibilityRole="adjustable"
         accessibilityValue={{
@@ -146,7 +147,10 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
         </ThemedText>
       </View>
       <View
-        accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+        accessibilityActions={[
+          { name: 'increment', label: 'Increase brightness' },
+          { name: 'decrement', label: 'Decrease brightness' },
+        ]}
         accessibilityLabel="Signal color brightness"
         accessibilityRole="adjustable"
         accessibilityValue={{ min: 0, max: 100, now: Math.round(hsv.value * 100) }}
