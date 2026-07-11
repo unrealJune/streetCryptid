@@ -125,11 +125,12 @@ bindgen-android:
     cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../android/src/main/jniLibs build --release
     # 2. Generate Kotlin bindings from a HOST-built library. uniffi's --library mode reads metadata
     #    from a native binary; a cross-compiled Android .so silently yields nothing off-device, so we
-    #    build the host cdylib and point at it (.dll on Windows, .dylib on macOS, .so on Linux).
-    cargo build --release
-    LIB="$(ls target/release/iroh_location.dll target/release/libiroh_location.dylib target/release/libiroh_location.so 2>/dev/null | head -1)"
-    cargo run --release --bin uniffi-bindgen --features cli -- generate \
-      --library "$LIB" --language kotlin --no-format \
+    #    build an unstripped host cdylib and point at it (.dll on Windows, .dylib on macOS, .so on
+    #    Linux). The release profile strips UniFFI metadata on ELF hosts.
+    cargo build --features cli
+    LIB="$(ls target/debug/iroh_location.dll target/debug/libiroh_location.dylib target/debug/libiroh_location.so 2>/dev/null | head -1)"
+    cargo run --bin uniffi-bindgen --features cli -- generate \
+      --library "$LIB" --crate iroh_location --language kotlin --no-format \
       --out-dir ../android/src/main/java
 
 # Regenerate the iOS XCFramework + Swift UniFFI bindings. macOS + full Xcode only (see README §2).
@@ -137,9 +138,9 @@ bindgen-ios:
     #!/usr/bin/env sh
     set -eu
     cd modules/iroh-location/rust
-    cargo build --release
-    cargo run --release --bin uniffi-bindgen --features cli -- generate \
-      --library target/release/libiroh_location.dylib \
+    cargo build --features cli
+    cargo run --bin uniffi-bindgen --features cli -- generate \
+      --library target/debug/libiroh_location.dylib --crate iroh_location \
       --language swift --out-dir ../ios/generated
     cargo build --release --target aarch64-apple-ios
     cargo build --release --target aarch64-apple-ios-sim

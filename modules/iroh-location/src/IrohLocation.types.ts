@@ -293,9 +293,10 @@ export interface IrohLocationApi {
   /**
    * Kick off range-based set reconciliation to recover envelopes we missed while offline. Recovered
    * fixes we can decrypt arrive as `onFix` with `backfill: true`; progress via `onSync`. `sinceTs`
-   * bounds how far back to reconcile (0 = full history).
+   * bounds how far back to reconcile (0 = full history). `peerTicket` explicitly targets the trail
+   * stash; null retains peer-only reconciliation.
    */
-  syncTrail(sinceTs: number): Promise<void>;
+  syncTrail(sinceTs: number, peerTicket: string | null): Promise<void>;
   /** Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >= sinceTs`. */
   readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]>;
   /** Explicitly drop durable entries older than `olderThanTs`. */

@@ -290,9 +290,9 @@ public final class IrohLocationModule: Module {
         fix: locationFix(from: fix), recipients: recipients.map(hexToData))
     }
 
-    AsyncFunction("syncTrail") { (sinceTs: Double) async throws in
+    AsyncFunction("syncTrail") { (sinceTs: Double, peerTicket: String?) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      try await node.syncTrail(sinceTs: UInt64(sinceTs))
+      try await node.syncTrail(sinceTs: UInt64(sinceTs), peerTicket: peerTicket)
     }
 
     AsyncFunction("readTrail") { (author: String, sinceTs: Double) async throws -> [[String: Any]] in

@@ -1047,7 +1047,8 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     
     /**
      * The active SAS visual challenge for a session, or `None` if the gate isn't live (not yet
-     * `Verifying`, already decided/terminal, or expired).
+     * verified, complete/terminal, or expired). It remains available after an on-time local
+     * confirmation so the UI can show that this phone is waiting for its peer.
      */
     func pairSasChallenge(sessionId: Data) async throws  -> SasChallenge?
     
@@ -1078,7 +1079,7 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func profileTicket() async throws  -> String
     
     /**
-     * Drop durable entries older than `older_than_ts` (rolling-window retention, ARCHITECTURE §5).
+     * Explicitly drop durable entries older than `older_than_ts`.
      */
     func pruneTrail(olderThanTs: UInt64) async throws 
     
@@ -1155,10 +1156,12 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     
     /**
      * Kick off range-based set reconciliation across our own + imported friend namespaces to
-     * recover envelopes missed while offline. Recovered, decryptable fixes are surfaced via the
-     * attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via `on_sync`.
+     * recover envelopes missed while offline. When `peer_ticket` is present, every namespace
+     * explicitly syncs with that endpoint (the trail stash). Recovered, decryptable fixes are
+     * surfaced via the attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via
+     * `on_sync`.
      */
-    func syncTrail(sinceTs: UInt64) async throws 
+    func syncTrail(sinceTs: UInt64, peerTicket: String?) async throws 
     
     /**
      * A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
@@ -1605,7 +1608,8 @@ open func pairResult(sessionId: Data)async throws  -> PairResult?  {
     
     /**
      * The active SAS visual challenge for a session, or `None` if the gate isn't live (not yet
-     * `Verifying`, already decided/terminal, or expired).
+     * verified, complete/terminal, or expired). It remains available after an on-time local
+     * confirmation so the UI can show that this phone is waiting for its peer.
      */
 open func pairSasChallenge(sessionId: Data)async throws  -> SasChallenge?  {
     return
@@ -1719,7 +1723,7 @@ open func profileTicket()async throws  -> String  {
 }
     
     /**
-     * Drop durable entries older than `older_than_ts` (rolling-window retention, ARCHITECTURE §5).
+     * Explicitly drop durable entries older than `older_than_ts`.
      */
 open func pruneTrail(olderThanTs: UInt64)async throws   {
     return
@@ -1949,16 +1953,18 @@ open func subscribe(topic: Data, bootstrap: [String], listener: FixListener)asyn
     
     /**
      * Kick off range-based set reconciliation across our own + imported friend namespaces to
-     * recover envelopes missed while offline. Recovered, decryptable fixes are surfaced via the
-     * attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via `on_sync`.
+     * recover envelopes missed while offline. When `peer_ticket` is present, every namespace
+     * explicitly syncs with that endpoint (the trail stash). Recovered, decryptable fixes are
+     * surfaced via the attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via
+     * `on_sync`.
      */
-open func syncTrail(sinceTs: UInt64)async throws   {
+open func syncTrail(sinceTs: UInt64, peerTicket: String?)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_locationnode_sync_trail(
                     self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(sinceTs)
+                    FfiConverterUInt64.lower(sinceTs),FfiConverterOptionString.lower(peerTicket)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -3914,7 +3920,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_pair_result() != 26021) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_pair_sas_challenge() != 36557) {
+    if (uniffi_iroh_location_checksum_method_locationnode_pair_sas_challenge() != 51905) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_pair_state() != 24242) {
@@ -3932,7 +3938,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_profile_ticket() != 35099) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_prune_trail() != 9765) {
+    if (uniffi_iroh_location_checksum_method_locationnode_prune_trail() != 22166) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_publish_profile() != 57330) {
@@ -3968,7 +3974,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_subscribe() != 37204) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_sync_trail() != 46960) {
+    if (uniffi_iroh_location_checksum_method_locationnode_sync_trail() != 30653) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {

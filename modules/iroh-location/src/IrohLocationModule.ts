@@ -50,7 +50,7 @@ export declare class IrohLocationNativeModule
     fix: NativeLocationFix,
     recipientsHex: string[]
   ): Promise<void>;
-  syncTrail(sinceTs: number): Promise<void>;
+  syncTrail(sinceTs: number, peerTicket: string | null): Promise<void>;
   readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]>;
   pruneTrail(olderThanTs: number): Promise<void>;
   docTicket(): Promise<string>;

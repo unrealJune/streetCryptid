@@ -515,7 +515,7 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_subscribe(uint64_t ptr, Rus
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SYNC_TRAIL
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SYNC_TRAIL
-uint64_t uniffi_iroh_location_fn_method_locationnode_sync_trail(uint64_t ptr, uint64_t since_ts
+uint64_t uniffi_iroh_location_fn_method_locationnode_sync_trail(uint64_t ptr, uint64_t since_ts, RustBuffer peer_ticket
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_TICKET

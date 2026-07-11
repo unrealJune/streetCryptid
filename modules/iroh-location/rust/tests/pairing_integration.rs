@@ -17,6 +17,7 @@ use std::sync::Arc;
 use iroh_location::{LocationNode, PairEventKind, PairState, SasRoleKind};
 
 const SIGIL: &str = "/\\_/\\\n(o.o)";
+const SYNC_TIMEOUT_SECS: u64 = 10;
 
 async fn start_node() -> Arc<LocationNode> {
     let node = LocationNode::new(None, None).expect("construct node");
@@ -24,6 +25,84 @@ async fn start_node() -> Arc<LocationNode> {
         .await
         .expect("start node");
     node
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
+    let author = start_node().await;
+    let stash = start_node().await;
+    let phone = start_node().await;
+
+    let author_id = author.endpoint_id();
+    let fix = iroh_location::LocationFix {
+        lat: 47.6062,
+        lon: -122.3321,
+        accuracy_m: 4.0,
+        heading_deg: 90.0,
+        ts: 1234,
+    };
+    author
+        .docs_write("test".into(), 1, 0, fix, vec![phone.recv_public()])
+        .await
+        .expect("author writes encrypted trail fix");
+    let trail_ticket = author.doc_ticket().await.expect("author trail ticket");
+
+    stash
+        .import_doc_ticket(trail_ticket.clone())
+        .await
+        .expect("stash imports author trail");
+    stash
+        .sync_trail(
+            0,
+            Some(author.ticket().await.expect("author endpoint ticket")),
+        )
+        .await
+        .expect("stash explicitly reconciles with author");
+    assert!(
+        !stash
+            .read_trail(author_id.clone(), 0)
+            .await
+            .expect("stash reads opaque trail")
+            .iter()
+            .any(|entry| entry.seq == 1),
+        "stash must remain unable to decrypt the replicated fix"
+    );
+    author.shutdown().await.expect("author goes offline");
+
+    phone
+        .import_doc_ticket(trail_ticket)
+        .await
+        .expect("phone imports friend trail");
+    phone
+        .sync_trail(
+            0,
+            Some(stash.ticket().await.expect("stash endpoint ticket")),
+        )
+        .await
+        .expect("phone explicitly reconciles with stash");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(SYNC_TIMEOUT_SECS);
+    let recovered = loop {
+        let recovered = phone
+            .read_trail(author_id.clone(), 0)
+            .await
+            .expect("phone reads recovered friend trail");
+        if recovered.iter().any(|entry| entry.seq == 1) {
+            break recovered;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "phone did not recover the friend's fix before the deadline"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert!(
+        recovered.iter().any(|entry| entry.seq == 1),
+        "phone must recover the friend's fix from the stash while the author is offline"
+    );
+
+    phone.shutdown().await.expect("phone shutdown");
+    stash.shutdown().await.expect("stash shutdown");
 }
 
 /// Poll an `Option`-returning async expression until it is `Some`, or panic after `$secs`.

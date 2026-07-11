@@ -176,9 +176,9 @@ export class IrohLocationNativeModule
     await this.requireNode().docs_write(subscriptionId, seq, epoch, fix, recipientsHex);
   }
 
-  async syncTrail(sinceTs: number): Promise<void> {
+  async syncTrail(sinceTs: number, peerTicket: string | null): Promise<void> {
     await ensureWasm();
-    await this.requireNode().sync_trail(sinceTs);
+    await this.requireNode().sync_trail(sinceTs, peerTicket ?? undefined);
   }
 
   async readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]> {
