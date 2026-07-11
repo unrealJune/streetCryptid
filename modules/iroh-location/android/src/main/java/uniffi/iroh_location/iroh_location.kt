@@ -890,7 +890,7 @@ external fun uniffi_iroh_location_fn_method_locationnode_submit_pair_choice(`ptr
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_subscribe(`ptr`: Long,`topic`: RustBuffer.ByValue,`bootstrap`: RustBuffer.ByValue,`listener`: Long,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_sync_trail(`ptr`: Long,`sinceTs`: Long,
+external fun uniffi_iroh_location_fn_method_locationnode_sync_trail(`ptr`: Long,`sinceTs`: Long,`peerTicket`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_ticket(`ptr`: Long,
 ): Long
@@ -1105,7 +1105,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_pair_result() != 26021) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_pair_sas_challenge() != 36557) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_pair_sas_challenge() != 51905) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_pair_state() != 24242) {
@@ -1123,7 +1123,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_profile_ticket() != 35099) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_prune_trail() != 9765) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_prune_trail() != 22166) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_profile() != 57330) {
@@ -1159,7 +1159,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_subscribe() != 37204) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_sync_trail() != 46960) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_sync_trail() != 30653) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {
@@ -2235,7 +2235,8 @@ public interface LocationNodeInterface {
     
     /**
      * The active SAS visual challenge for a session, or `None` if the gate isn't live (not yet
-     * `Verifying`, already decided/terminal, or expired).
+     * verified, complete/terminal, or expired). It remains available after an on-time local
+     * confirmation so the UI can show that this phone is waiting for its peer.
      */
     suspend fun `pairSasChallenge`(`sessionId`: kotlin.ByteArray): SasChallenge?
     
@@ -2266,7 +2267,7 @@ public interface LocationNodeInterface {
     suspend fun `profileTicket`(): kotlin.String
     
     /**
-     * Drop durable entries older than `older_than_ts` (rolling-window retention, ARCHITECTURE §5).
+     * Explicitly drop durable entries older than `older_than_ts`.
      */
     suspend fun `pruneTrail`(`olderThanTs`: kotlin.ULong)
     
@@ -2343,10 +2344,12 @@ public interface LocationNodeInterface {
     
     /**
      * Kick off range-based set reconciliation across our own + imported friend namespaces to
-     * recover envelopes missed while offline. Recovered, decryptable fixes are surfaced via the
-     * attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via `on_sync`.
+     * recover envelopes missed while offline. When `peer_ticket` is present, every namespace
+     * explicitly syncs with that endpoint (the trail stash). Recovered, decryptable fixes are
+     * surfaced via the attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via
+     * `on_sync`.
      */
-    suspend fun `syncTrail`(`sinceTs`: kotlin.ULong)
+    suspend fun `syncTrail`(`sinceTs`: kotlin.ULong, `peerTicket`: kotlin.String?)
     
     /**
      * A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
@@ -2907,7 +2910,8 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     
     /**
      * The active SAS visual challenge for a session, or `None` if the gate isn't live (not yet
-     * `Verifying`, already decided/terminal, or expired).
+     * verified, complete/terminal, or expired). It remains available after an on-time local
+     * confirmation so the UI can show that this phone is waiting for its peer.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -3042,7 +3046,7 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Drop durable entries older than `older_than_ts` (rolling-window retention, ARCHITECTURE §5).
+     * Explicitly drop durable entries older than `older_than_ts`.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -3327,17 +3331,19 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     
     /**
      * Kick off range-based set reconciliation across our own + imported friend namespaces to
-     * recover envelopes missed while offline. Recovered, decryptable fixes are surfaced via the
-     * attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via `on_sync`.
+     * recover envelopes missed while offline. When `peer_ticket` is present, every namespace
+     * explicitly syncs with that endpoint (the trail stash). Recovered, decryptable fixes are
+     * surfaced via the attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via
+     * `on_sync`.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `syncTrail`(`sinceTs`: kotlin.ULong) {
+    override suspend fun `syncTrail`(`sinceTs`: kotlin.ULong, `peerTicket`: kotlin.String?) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_sync_trail(
                 uniffiHandle,
-                FfiConverterULong.lower(`sinceTs`),
+                FfiConverterULong.lower(`sinceTs`),FfiConverterOptionalString.lower(`peerTicket`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },

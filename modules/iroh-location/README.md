@@ -76,10 +76,10 @@ per arch, generate the Swift bindings from any built lib, then assemble an XCFra
 cd modules/iroh-location/rust
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
 
-# Swift bindings (uses a host build; needs the `cli` feature):
-cargo build --release
-cargo run --release --bin uniffi-bindgen --features cli -- generate \
-  --library target/release/libiroh_location.dylib \
+# Swift bindings (uses an unstripped host build; needs the `cli` feature):
+cargo build --features cli
+cargo run --bin uniffi-bindgen --features cli -- generate \
+  --library target/debug/libiroh_location.dylib --crate iroh_location \
   --language swift --out-dir ../ios/generated
 # -> ../ios/generated/{iroh_location.swift, iroh_locationFFI.h, iroh_locationFFI.modulemap}
 
@@ -107,8 +107,9 @@ only CLT). Podspec sets `OTHER_LDFLAGS = -framework Network` (required by iroh's
 cd modules/iroh-location/rust
 cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
   -o ../android/src/main/jniLibs build --release
-cargo run --bin uniffi-bindgen -- generate \
-  --library target/aarch64-linux-android/release/libiroh_location.so \
+cargo build --features cli
+cargo run --bin uniffi-bindgen --features cli -- generate \
+  --library target/debug/libiroh_location.so --crate iroh_location \
   --language kotlin --out-dir ../android/src/main/java
 ```
 
