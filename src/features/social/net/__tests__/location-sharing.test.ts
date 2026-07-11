@@ -12,7 +12,7 @@ class FakeNativeModule {
   calls = {
     publish: [] as unknown[][],
     docsWrite: [] as unknown[][],
-    syncTrail: [] as number[],
+    syncTrail: [] as { since: number; peerTicket: string | null }[],
     importDocTicket: [] as string[],
     subscribe: [] as { topic: string; bootstrap: string[] }[],
     unsubscribe: [] as string[],
@@ -53,8 +53,8 @@ class FakeNativeModule {
   async docsWrite(...args: unknown[]) {
     this.calls.docsWrite.push(args);
   }
-  async syncTrail(since: number) {
-    this.calls.syncTrail.push(since);
+  async syncTrail(since: number, peerTicket: string | null) {
+    this.calls.syncTrail.push({ since, peerTicket });
   }
   trailFixes: {
     author: string;
@@ -78,12 +78,15 @@ class FakeNativeModule {
   }
 }
 
-const mockHolder: { mod: FakeNativeModule } = { mod: new FakeNativeModule() };
+const mockHolder: {
+  mod: FakeNativeModule;
+  stashConfig: { baseUrl: string; ticket: string; psk: null } | null;
+} = { mod: new FakeNativeModule(), stashConfig: null };
 
 jest.mock('iroh-location', () => ({
   getIrohLocation: () => mockHolder.mod,
   tryGetIrohLocation: () => mockHolder.mod,
-  getStashConfig: () => null,
+  getStashConfig: () => mockHolder.stashConfig,
 }));
 
 // Keep persistence + key storage side-effect-free in the test (fall back to in-memory).
@@ -109,6 +112,7 @@ const flush = (): Promise<void> => new Promise((r) => setImmediate(r));
 describe('LocationSharingService — durable trail wiring', () => {
   beforeEach(() => {
     mockHolder.mod = new FakeNativeModule();
+    mockHolder.stashConfig = null;
   });
 
   it('imports a friend docs namespace (their docTicket) when added', async () => {
@@ -197,7 +201,34 @@ describe('LocationSharingService — durable trail wiring', () => {
     const svc = new LocationSharingService();
     await svc.init('@me', 'mothman');
     await svc.syncTrail(0);
-    expect(mockHolder.mod.calls.syncTrail).toEqual([0]);
+    expect(mockHolder.mod.calls.syncTrail).toEqual([{ since: 0, peerTicket: null }]);
+  });
+
+  it('syncTrail explicitly targets the configured stash when opted in', async () => {
+    mockHolder.stashConfig = {
+      baseUrl: 'https://stash.example.com',
+      ticket: 'ticket-stash',
+      psk: null,
+    };
+    const stash = {
+      configured: true,
+      registerNamespace: async () => {},
+      unsubscribe: async () => {},
+    };
+    const pushTokens = {
+      acquire: async () => null,
+      registerBackgroundSync: () => {},
+    };
+    const svc = new LocationSharingService({ stash, pushTokens });
+    await svc.init('@me', 'mothman');
+    await svc.setStashOptIn(true);
+
+    await svc.syncTrail(123);
+
+    expect(mockHolder.mod.calls.syncTrail).toContainEqual({
+      since: 123,
+      peerTicket: 'ticket-stash',
+    });
   });
 
   it('syncTrail reads the durable replica into the trail (silent reconciliation)', async () => {

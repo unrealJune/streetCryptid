@@ -696,19 +696,33 @@ impl LocationNode {
     }
 
     /// Kick off range-based set reconciliation across our own + imported friend namespaces to
-    /// recover envelopes missed while offline. Recovered, decryptable fixes are surfaced via the
-    /// attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via `on_sync`.
-    pub async fn sync_trail(&self, since_ts: u64) -> Result<(), LocationError> {
+    /// recover envelopes missed while offline. When `peer_ticket` is present, every namespace
+    /// explicitly syncs with that endpoint (the trail stash). Recovered, decryptable fixes are
+    /// surfaced via the attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via
+    /// `on_sync`.
+    pub async fn sync_trail(
+        &self,
+        since_ts: u64,
+        peer_ticket: Option<String>,
+    ) -> Result<(), LocationError> {
         let guard = self.inner.lock().await;
         let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
         let trail = started.trail.clone();
         drop(guard);
 
+        let peers = peer_ticket
+            .map(|ticket| {
+                ticket
+                    .parse::<EndpointTicket>()
+                    .map(|ticket| vec![ticket.endpoint_addr().clone()])
+                    .map_err(|_| LocationError::Decode("bad sync peer endpoint ticket".into()))
+            })
+            .transpose()?
+            .unwrap_or_default();
         let listener = self.listener.lock().await.clone();
         let sink = ListenerSink { listener };
         trail
-            // Peers default to the already-connected swarm; explicit bootstrap can be added later.
-            .sync_all(since_ts, Vec::new(), &sink, &self.recv_secret)
+            .sync_all(since_ts, peers, &sink, &self.recv_secret)
             .await
             .map_err(|e| LocationError::Network(e.to_string()))?;
         Ok(())

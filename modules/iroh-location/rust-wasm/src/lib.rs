@@ -384,9 +384,14 @@ impl WasmLocationNode {
     }
 
     /// Kick off range-based set reconciliation across our own + imported friend namespaces to
-    /// recover envelopes missed while offline. Recovered, decryptable fixes are surfaced through
-    /// the current subscription's event stream as `Fix { backfill: true }`; progress as `Sync`.
-    pub async fn sync_trail(&self, since_ts: f64) -> Result<(), JsError> {
+    /// recover envelopes missed while offline. When `peer_ticket` is present, every namespace
+    /// explicitly syncs with that endpoint. Recovered, decryptable fixes are surfaced through the
+    /// current subscription's event stream as `Fix { backfill: true }`; progress as `Sync`.
+    pub async fn sync_trail(
+        &self,
+        since_ts: f64,
+        peer_ticket: Option<String>,
+    ) -> Result<(), JsError> {
         let trail = {
             let guard = self.started.lock().await;
             let started = guard
@@ -394,11 +399,19 @@ impl WasmLocationNode {
                 .ok_or_else(|| JsError::new("node not started"))?;
             started.trail.clone()
         };
+        let peers = peer_ticket
+            .map(|ticket| {
+                ticket
+                    .parse::<EndpointTicket>()
+                    .map(|ticket| vec![ticket.endpoint_addr().clone()])
+                    .map_err(|_| JsError::new("bad sync peer endpoint ticket"))
+            })
+            .transpose()?
+            .unwrap_or_default();
         let tx = self.docs_events.lock().await.clone();
         let sink = ChannelSink { tx };
         trail
-            // Peers default to the already-connected relay-reachable swarm.
-            .sync_all(since_ts as u64, Vec::new(), &sink, &self.recv_secret)
+            .sync_all(since_ts as u64, peers, &sink, &self.recv_secret)
             .await
             .map_err(to_js_err)?;
         Ok(())

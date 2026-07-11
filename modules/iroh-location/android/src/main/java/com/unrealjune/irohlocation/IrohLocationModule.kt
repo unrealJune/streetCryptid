@@ -347,9 +347,9 @@ class IrohLocationModule : Module() {
       }
 
     AsyncFunction("syncTrail") Coroutine
-      { sinceTs: Double ->
+      { sinceTs: Double, peerTicket: String? ->
         val n = node ?: throw IllegalStateException("call createNode first")
-        n.syncTrail(sinceTs.toLong().toULong())
+        n.syncTrail(sinceTs.toLong().toULong(), peerTicket)
       }
 
     AsyncFunction("readTrail") Coroutine

@@ -842,7 +842,7 @@ export class LocationSharingService implements FixPublisher {
   async syncTrail(sinceTs = 0): Promise<void> {
     if (!this.mod) return;
     try {
-      await this.mod.syncTrail(sinceTs);
+      await this.mod.syncTrail(sinceTs, this.stashEnabled() ? this.stashTicket : null);
     } catch {
       // Best effort — the durable path may be unavailable (e.g. web without docs).
     }
