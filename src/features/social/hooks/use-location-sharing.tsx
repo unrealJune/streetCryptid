@@ -48,6 +48,8 @@ interface LocationSharingContextValue {
   toggleShare(endpointId: string, on: boolean): Promise<void>;
   removeFriend(endpointId: string): Promise<void>;
   retryLocation(): Promise<void>;
+  /** Opt in/out of offline delivery via the trail stash. */
+  setStashOptIn(optedIn: boolean): Promise<void>;
   acknowledgeDiscoveredFriend(): void;
   rejectDiscoveredFriend(): Promise<void>;
 }
@@ -336,6 +338,13 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     [run]
   );
   const refreshPairing = useCallback(() => run((service) => service.refreshPairing()), [run]);
+  const setStashOptIn = useCallback(
+    (optedIn: boolean) => {
+      setServiceError(null);
+      return run((service) => service.setStashOptIn(optedIn));
+    },
+    [run]
+  );
   const toggleShare = useCallback(
     (endpointId: string, on: boolean) => {
       setServiceError(null);
@@ -399,6 +408,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       toggleShare,
       removeFriend,
       retryLocation,
+      setStashOptIn,
       acknowledgeDiscoveredFriend,
       rejectDiscoveredFriend,
     }),
@@ -422,6 +432,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       toggleShare,
       removeFriend,
       retryLocation,
+      setStashOptIn,
       acknowledgeDiscoveredFriend,
       rejectDiscoveredFriend,
     ]

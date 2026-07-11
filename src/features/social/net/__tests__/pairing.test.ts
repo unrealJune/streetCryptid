@@ -199,6 +199,7 @@ const mockHolder: { mod: FakeNativeModule } = { mod: new FakeNativeModule() };
 jest.mock('iroh-location', () => ({
   getIrohLocation: () => mockHolder.mod,
   tryGetIrohLocation: () => mockHolder.mod,
+  getStashConfig: () => null,
 }));
 
 jest.mock('expo-secure-store', () => ({

@@ -83,6 +83,7 @@ const mockHolder: { mod: FakeNativeModule } = { mod: new FakeNativeModule() };
 jest.mock('iroh-location', () => ({
   getIrohLocation: () => mockHolder.mod,
   tryGetIrohLocation: () => mockHolder.mod,
+  getStashConfig: () => null,
 }));
 
 // Keep persistence + key storage side-effect-free in the test (fall back to in-memory).
