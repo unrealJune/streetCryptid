@@ -2,6 +2,7 @@ import { Platform } from 'react-native';
 
 import {
   getIrohLocation,
+  getStashConfig,
   tryGetIrohLocation,
   type BleCapabilities,
   type BlePeer,
@@ -58,8 +59,16 @@ import {
   createPersistentKV,
   createPersistentTrailStorage,
   loadPool,
+  loadStashOptIn,
   savePool,
+  saveStashOptIn,
 } from './persistence';
+import { createDefaultStashClient, type StashClient } from './stash-client';
+import {
+  createDefaultPushTokenProvider,
+  type DevicePushToken,
+  type PushTokenProvider,
+} from './push-token-provider';
 import { loadKeys, saveKeys } from './secure-keys';
 import { loadSeq, saveSeq } from './state-store';
 
@@ -147,6 +156,8 @@ export interface SharingSnapshot {
   backgroundAccess: BackgroundAccess;
   /** Fixes recovered by the last durable sync, or null if none yet. */
   lastSyncRecovered: number | null;
+  /** Offline-delivery stash: whether a stash is deployed and whether the user opted in. */
+  stash: { available: boolean; optedIn: boolean };
   /** Bilateral-pairing / nearby-discovery state. */
   pairing: PairingSnapshot;
 }
@@ -234,6 +245,18 @@ export class LocationSharingService implements FixPublisher {
   private inviteLink: string | null = null;
   private inviteCode: string | null = null;
   private readonly mailbox: PairingMailbox;
+  /** Optional offline-delivery stash (see infra/trail-stash). No-op client when not deployed. */
+  private readonly stash: StashClient;
+  /** The stash's dial ticket for reconciliation bootstrap, or null when not configured. */
+  private readonly stashTicket: string | null = getStashConfig()?.ticket ?? null;
+  /** Per-user opt-in (persisted). Defaults false — the stash is never used unless turned on. */
+  private stashOptIn = false;
+  /** Native push-token source for stash wake-ups. */
+  private readonly pushTokens: PushTokenProvider;
+  /** Cached device push token (undefined = not yet attempted; null = unavailable/denied). */
+  private cachedPushToken: DevicePushToken | null | undefined;
+  /** Whether the stash background-sync handler has been registered (once). */
+  private stashBackgroundSyncRegistered = false;
   private pairingActivity = '';
   /** Sessions we initiated, keyed by session id to preserve the pairing method through completion. */
   private readonly initiatedRoutes = new Map<string, PairingMethod>();
@@ -270,8 +293,93 @@ export class LocationSharingService implements FixPublisher {
    *   {@link createPairCode} / {@link pairFromInput}). Defaults to the HTTP client built from
    *   `EXPO_PUBLIC_PAIR_MAILBOX_URL`; tests can inject a fake.
    */
-  constructor(deps: { mailbox?: PairingMailbox } = {}) {
+  constructor(
+    deps: { mailbox?: PairingMailbox; stash?: StashClient; pushTokens?: PushTokenProvider } = {}
+  ) {
     this.mailbox = deps.mailbox ?? createDefaultPairingMailbox();
+    this.stash = deps.stash ?? createDefaultStashClient();
+    this.pushTokens = deps.pushTokens ?? createDefaultPushTokenProvider();
+  }
+
+  /** Whether offline delivery via the stash is both configured (deployed) and opted into. */
+  private stashEnabled(): boolean {
+    return this.stashOptIn && this.stash.configured && this.stashTicket !== null;
+  }
+
+  /** The stash dial ticket to fold into subscribe() bootstrap sets, or [] when disabled. */
+  private stashBootstrap(): string[] {
+    return this.stashEnabled() && this.stashTicket ? [this.stashTicket] : [];
+  }
+
+  /** Current opt-in state for the UI: whether a stash exists and whether it's turned on. */
+  stashState(): { available: boolean; optedIn: boolean } {
+    return { available: this.stash.configured, optedIn: this.stashOptIn };
+  }
+
+  /**
+   * Opt in/out of offline delivery via the stash. Persists the choice; on opt-in, grants the stash
+   * replication of our own + friends' trail namespaces and folds its ticket into our subscription.
+   */
+  async setStashOptIn(optedIn: boolean): Promise<void> {
+    this.stashOptIn = optedIn;
+    await saveStashOptIn(this.kv, optedIn);
+    if (optedIn) {
+      this.registerStashBackgroundSync();
+      await this.syncStashGrants();
+      await this.ensureMySubscription();
+    }
+    this.emit();
+  }
+
+  /** Lazily acquire (once) this device's native push token for stash wake-ups. */
+  private async ensurePushToken(): Promise<DevicePushToken | null> {
+    if (this.cachedPushToken !== undefined) return this.cachedPushToken;
+    try {
+      this.cachedPushToken = await this.pushTokens.acquire();
+    } catch {
+      this.cachedPushToken = null;
+    }
+    return this.cachedPushToken;
+  }
+
+  /** Register (once) the handler that runs a trail sync when a `trail-sync` push arrives. */
+  private registerStashBackgroundSync(): void {
+    if (this.stashBackgroundSyncRegistered) return;
+    this.stashBackgroundSyncRegistered = true;
+    this.pushTokens.registerBackgroundSync(() => {
+      void this.syncTrail(0);
+    });
+  }
+
+  /**
+   * Grant the stash replication of our own + every friend's trail namespace (best-effort). The
+   * stash is ciphertext-blind, so this only lets it hold + reconcile sealed envelopes, never read
+   * them. We subscribe our push token to *friends'* namespaces (so the stash wakes us when they
+   * post), but not our own (waking ourselves is pointless). A failure just degrades offline
+   * delivery to peer-only reconciliation.
+   */
+  private async syncStashGrants(): Promise<void> {
+    if (!this.stashEnabled()) return;
+    const push = await this.ensurePushToken();
+    const tasks: Promise<void>[] = [];
+    const swallow = () => {
+      /* best-effort */
+    };
+    if (this.docTicketStr) {
+      tasks.push(this.stash.registerNamespace({ readTicket: this.docTicketStr }).catch(swallow));
+    }
+    const friendTickets = new Set<string>();
+    for (const friend of Object.values(this.state.friends)) {
+      if (friend.docTicket) friendTickets.add(friend.docTicket);
+    }
+    for (const readTicket of friendTickets) {
+      tasks.push(
+        this.stash
+          .registerNamespace({ readTicket, pushToken: push?.token, platform: push?.platform })
+          .catch(swallow)
+      );
+    }
+    await Promise.all(tasks);
   }
 
   /** Whether the native module exists at all (false on web / in Expo Go). */
@@ -314,8 +422,11 @@ export class LocationSharingService implements FixPublisher {
     }
 
     await this.restorePool(interactive);
+    this.stashOptIn = await loadStashOptIn(this.kv);
     if (interactive) {
       await this.importFriendProfiles();
+      if (this.stashEnabled()) this.registerStashBackgroundSync();
+      await this.syncStashGrants();
       this.startPairingPolling();
       await this.pollPairingOnce();
     }
@@ -1009,7 +1120,7 @@ export class LocationSharingService implements FixPublisher {
   private async subscribeToFriend(card: Friend): Promise<void> {
     if (!this.mod || this.friendSubs.has(card.endpointId)) return;
     const topic = await this.mod.deriveTopic(card.endpointId);
-    const subId = await this.mod.subscribe(topic, [card.ticket]);
+    const subId = await this.mod.subscribe(topic, [card.ticket, ...this.stashBootstrap()]);
     this.friendSubs.set(card.endpointId, subId);
     // Replicate their durable trail namespace so syncTrail can recover fixes we missed (§6).
     if (card.docTicket) {
@@ -1017,6 +1128,20 @@ export class LocationSharingService implements FixPublisher {
         await this.mod.importDocTicket(card.docTicket);
       } catch {
         // Non-fatal: live gossip still works; only offline recovery of their trail is affected.
+      }
+      // Also grant the stash replication of their trail so we can catch up while both are offline,
+      // and subscribe our push token so it wakes us when this friend posts.
+      if (this.stashEnabled()) {
+        const push = await this.ensurePushToken();
+        void this.stash
+          .registerNamespace({
+            readTicket: card.docTicket,
+            pushToken: push?.token,
+            platform: push?.platform,
+          })
+          .catch(() => {
+            /* best-effort */
+          });
       }
     }
     // Replicate + live-sync their profile namespace so identity updates land automatically (§3).
@@ -1032,7 +1157,10 @@ export class LocationSharingService implements FixPublisher {
   /** (Re)subscribe our own topic so the swarm includes everyone we share with. */
   private async ensureMySubscription(): Promise<void> {
     if (!this.mod || !this.keys) return;
-    const bootstrap = pool.recipients(this.state).map((f) => f.ticket);
+    const bootstrap = [
+      ...pool.recipients(this.state).map((f) => f.ticket),
+      ...this.stashBootstrap(),
+    ];
     const signature = bootstrap.slice().sort().join('|');
     if (this.mySubId && signature === this.mySubRecipients) return;
 
@@ -1116,6 +1244,7 @@ export class LocationSharingService implements FixPublisher {
       backgroundSharing: this.backgroundSharing,
       backgroundAccess: this.backgroundAccess,
       lastSyncRecovered: this.lastSyncRecovered,
+      stash: this.stashState(),
       pairing: this.pairingSnapshot(),
     };
   }

@@ -22,6 +22,7 @@ import { CryptidDiscoveryCelebration } from '../components/cryptid-discovery-cel
 import { FriendProfileSheet } from '../components/friend-profile-sheet';
 import { PairLinkAction } from '../components/pair-link-action';
 import { PairingVerificationPanel } from '../components/pairing-verification-panel';
+import { StashSettingRow } from '../components/stash-setting-row';
 import { selectFriendTrail } from '../core/history';
 import { formatDistance, formatPresenceAge } from '../core/presence';
 import { useLocationSharing } from '../hooks/use-location-sharing';
@@ -61,6 +62,7 @@ export default function FriendsScreen() {
     toggleShare,
     removeFriend,
     retryLocation,
+    setStashOptIn,
     acknowledgeDiscoveredFriend,
     rejectDiscoveredFriend,
   } = useLocationSharing();
@@ -264,6 +266,14 @@ export default function FriendsScreen() {
             })}
           </View>
         )}
+
+        {snapshot?.stash.available ? (
+          <StashSettingRow
+            accent={chrome.green}
+            optedIn={snapshot.stash.optedIn}
+            onToggle={(optedIn) => void setStashOptIn(optedIn)}
+          />
+        ) : null}
 
         {pairing ? (
           <PairLinkAction

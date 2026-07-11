@@ -235,3 +235,15 @@ export async function savePool(kv: PersistentKV, state: PoolState): Promise<void
     JSON.stringify({ friends: state.friends, sharingWith: state.sharingWith })
   );
 }
+
+const STASH_OPTIN_KEY = 'sc.social.stashOptIn';
+
+/** Whether the user has opted in to the trail stash (offline delivery). Defaults to false (opt-in). */
+export async function loadStashOptIn(kv: PersistentKV): Promise<boolean> {
+  return (await kv.get(STASH_OPTIN_KEY)) === '1';
+}
+
+/** Persist the trail-stash opt-in choice. */
+export async function saveStashOptIn(kv: PersistentKV, optedIn: boolean): Promise<void> {
+  await kv.set(STASH_OPTIN_KEY, optedIn ? '1' : '0');
+}

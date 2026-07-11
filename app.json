@@ -15,7 +15,7 @@
         "NSBluetoothAlwaysUsageDescription": "streetCryptid uses Bluetooth while the Friends tab is open to find a phone you tap against and establish an encrypted iroh pairing.",
         "NSLocalNetworkUsageDescription": "streetCryptid finds friends' phones on the same Wi-Fi so it can share your location directly, without routing through a relay.",
         "NSBonjourServices": ["_irohv1._udp"],
-        "UIBackgroundModes": ["location"]
+        "UIBackgroundModes": ["location", "remote-notification"]
       },
       "entitlements": {
         "com.apple.developer.networking.multicast": true
@@ -73,6 +73,7 @@
         }
       ],
       "expo-sqlite",
+      "expo-notifications",
       [
         "expo-build-properties",
         {
