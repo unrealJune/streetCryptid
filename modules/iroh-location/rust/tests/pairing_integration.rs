@@ -17,6 +17,7 @@ use std::sync::Arc;
 use iroh_location::{LocationNode, PairEventKind, PairState, SasRoleKind};
 
 const SIGIL: &str = "/\\_/\\\n(o.o)";
+const SYNC_TIMEOUT_SECS: u64 = 10;
 
 async fn start_node() -> Arc<LocationNode> {
     let node = LocationNode::new(None, None).expect("construct node");
@@ -80,7 +81,7 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
         .await
         .expect("phone explicitly reconciles with stash");
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(SYNC_TIMEOUT_SECS);
     let recovered = loop {
         let recovered = phone
             .read_trail(author_id.clone(), 0)

@@ -76,7 +76,8 @@ per arch, generate the Swift bindings from any built lib, then assemble an XCFra
 cd modules/iroh-location/rust
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
 
-# Swift bindings (uses an unstripped host build; needs the `cli` feature):
+# Swift bindings (uses an unstripped host build because release stripping can remove UniFFI
+# metadata on ELF hosts; needs the `cli` feature):
 cargo build --features cli
 cargo run --bin uniffi-bindgen --features cli -- generate \
   --library target/debug/libiroh_location.dylib --crate iroh_location \
