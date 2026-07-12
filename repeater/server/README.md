@@ -107,7 +107,7 @@ end-to-end (no two-node integration test of import → reconcile → wake):
 cd infra\trail-stash\rust
 $env:TRAIL_STASH_SECRET_KEY = (openssl rand -hex 32)
 cargo run --features live
-# prints: EXPO_PUBLIC_TRAIL_STASH_TICKET=<ticket>   → copy into the app's .env
+# then copy EXPO_PUBLIC_TRAIL_STASH_TICKET from /tmp/trail-stash-ticket into the app's .env
 ```
 
 ## Deploy

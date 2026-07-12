@@ -34,7 +34,9 @@ use trail_stash::waker::{EnvCredentials, HttpPushWaker, NoopWaker, PushConfig, W
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .event_format(RedactingFormat(Format::default()))
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let config = StashConfig::from_env(|k| std::env::var(k).ok());
@@ -76,46 +78,48 @@ async fn main() -> Result<()> {
         res = serve => {
             res.context("control api task")?.context("control api")?;
         }
-
-        struct RedactingFormat(Format);
-
-        impl<S, N> FormatEvent<S, N> for RedactingFormat
-        where
-            S: Subscriber + for<'lookup> LookupSpan<'lookup>,
-            N: for<'writer> FormatFields<'writer> + 'static,
-        {
-            fn format_event(
-                &self,
-                ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
-                mut writer: Writer<'_>,
-                event: &Event<'_>,
-            ) -> fmt::Result {
-                let mut formatted = String::new();
-                self.0
-                    .format_event(ctx, Writer::new(&mut formatted), event)?;
-                writer.write_str(&redact_log_line(&formatted))
-            }
-        }
-
-        fn ticket_path() -> PathBuf {
-            std::env::var_os("TRAIL_STASH_TICKET_PATH")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::temp_dir().join("trail-stash-ticket"))
-        }
-
-        fn write_node_ticket(path: &Path, ticket: &str) -> Result<()> {
-            let mut options = OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(path)?;
-            writeln!(file, "EXPO_PUBLIC_TRAIL_STASH_TICKET={ticket}")?;
-            Ok(())
-        }
     }
+    Ok(())
+}
+
+struct RedactingFormat(Format);
+
+impl<S, N> FormatEvent<S, N> for RedactingFormat
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let mut formatted = String::new();
+        self.0
+            .format_event(ctx, Writer::new(&mut formatted), event)?;
+        writer.write_str(&redact_log_line(&formatted))
+    }
+}
+
+fn ticket_path() -> PathBuf {
+    std::env::var_os("TRAIL_STASH_TICKET_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("trail-stash-ticket"))
+}
+
+fn write_node_ticket(path: &Path, ticket: &str) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    writeln!(file, "EXPO_PUBLIC_TRAIL_STASH_TICKET={ticket}")?;
     Ok(())
 }
 
@@ -123,10 +127,16 @@ async fn main() -> Result<()> {
 /// (project id) routing is configured, otherwise a no-op. Credentials come from `APNS_BEARER` /
 /// `FCM_BEARER` via [`EnvCredentials`] (the placeholder until real JWT/OAuth minting lands).
 fn build_waker() -> Arc<dyn Waker> {
-    let bundle_id = std::env::var("APNS_BUNDLE_ID").ok().filter(|s| !s.is_empty());
-    let fcm_project_id = std::env::var("FCM_PROJECT_ID").ok().filter(|s| !s.is_empty());
+    let bundle_id = std::env::var("APNS_BUNDLE_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let fcm_project_id = std::env::var("FCM_PROJECT_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
     if bundle_id.is_none() && fcm_project_id.is_none() {
-        tracing::info!("push not configured (no APNS_BUNDLE_ID / FCM_PROJECT_ID) — waker is a no-op");
+        tracing::info!(
+            "push not configured (no APNS_BUNDLE_ID / FCM_PROJECT_ID) — waker is a no-op"
+        );
         return Arc::new(NoopWaker);
     }
     let config = PushConfig {
