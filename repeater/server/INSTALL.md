@@ -55,6 +55,7 @@ there.
 | Env var | Required | Default | Purpose |
 | --- | --- | --- | --- |
 | `TRAIL_STASH_SECRET_KEY` | **yes** | — | 64-hex node identity seed (Step 1). |
+| `TRAIL_STASH_TICKET_PATH` | no | OS temp directory + `trail-stash-ticket` | Restricted runtime file for the node ticket; never logged. |
 | `TRAIL_STASH_PSK` | recommended | — | Control-API bearer; unset ⇒ open API (warned at startup). |
 | `PORT` | no | `8787` | Control-API port. |
 | `TRAIL_STASH_RETENTION_HOURS` | no | `48` | Prune window (clamped 1–336). Lower ⇒ less data at rest. |
@@ -96,10 +97,10 @@ helm install trail-stash oci://ghcr.io/<owner>/charts/trail-stash \
 > the same key fight over one iroh identity. The chart pins `replicas: 1` with a `Recreate` strategy
 > — do not scale it up.
 
-Fetch the ticket from the pod logs (same value as Step 4):
+Fetch the ticket from the pod's restricted runtime file (same value as Step 4):
 
 ```bash
-kubectl -n trail-stash logs deploy/trail-stash | grep EXPO_PUBLIC_TRAIL_STASH_TICKET
+kubectl -n trail-stash exec deploy/trail-stash -- cat /tmp/trail-stash-ticket
 ```
 
 Expose the control API over TLS with your own ingress/reverse proxy pointing at
@@ -108,14 +109,10 @@ image/chart yourself rather than consuming someone else's, see `PUBLISHING.md`.
 
 ## Step 4 — capture the dial ticket
 
-On startup the stash prints exactly one line to stdout:
-
-```
-EXPO_PUBLIC_TRAIL_STASH_TICKET=<opaque endpoint ticket>
-```
+On startup the stash writes the ticket to a mode-`0600` runtime file instead of logs.
 
 ```bash
-docker logs trail-stash | grep EXPO_PUBLIC_TRAIL_STASH_TICKET
+docker exec trail-stash cat /tmp/trail-stash-ticket
 ```
 
 Save that value — it goes into the app in Step 6. It's stable as long as `TRAIL_STASH_SECRET_KEY`

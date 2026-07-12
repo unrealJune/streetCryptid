@@ -13,18 +13,27 @@
 //! * `TRAIL_STASH_RELAY_URLS`           — comma-separated custom iroh relay URLs.
 //! * `TRAIL_STASH_RELAY_TOKEN`          — optional bearer token for the custom relays.
 
+use std::fmt;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use iroh::SecretKey;
+use tracing::{Event, Subscriber};
+use tracing_subscriber::fmt::format::{Format, FormatEvent, FormatFields, Writer};
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
 use trail_stash::config::StashConfig;
+use trail_stash::log_redaction::redact_log_line;
 use trail_stash::node::{default_delivery, StashNode};
 use trail_stash::waker::{EnvCredentials, HttpPushWaker, NoopWaker, PushConfig, Waker};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        .event_format(RedactingFormat(Format::default()))
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
@@ -48,12 +57,13 @@ async fn main() -> Result<()> {
     .await
     .context("spawn stash node")?;
 
-    // The one thing an operator needs to copy into the app's env.
-    println!("EXPO_PUBLIC_TRAIL_STASH_TICKET={}", node.node_ticket());
+    let ticket_path = ticket_path();
+    write_node_ticket(&ticket_path, &node.node_ticket()).context("write node ticket")?;
     tracing::info!(
-        "stash up — retention {}h, prune every {}m",
+        "stash up — retention {}h, prune every {}m; node ticket written to {}",
         config.retention.retention_ms() / trail_stash::retention::MS_PER_HOUR,
         config.prune_interval_min,
+        ticket_path.display(),
     );
 
     tokio::spawn(Arc::clone(&node).run_prune_loop(config.prune_interval_min));
@@ -65,6 +75,45 @@ async fn main() -> Result<()> {
         _ = shutdown_signal() => tracing::info!("stash: shutdown signal received"),
         res = serve => {
             res.context("control api task")?.context("control api")?;
+        }
+
+        struct RedactingFormat(Format);
+
+        impl<S, N> FormatEvent<S, N> for RedactingFormat
+        where
+            S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+            N: for<'writer> FormatFields<'writer> + 'static,
+        {
+            fn format_event(
+                &self,
+                ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+                mut writer: Writer<'_>,
+                event: &Event<'_>,
+            ) -> fmt::Result {
+                let mut formatted = String::new();
+                self.0
+                    .format_event(ctx, Writer::new(&mut formatted), event)?;
+                writer.write_str(&redact_log_line(&formatted))
+            }
+        }
+
+        fn ticket_path() -> PathBuf {
+            std::env::var_os("TRAIL_STASH_TICKET_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join("trail-stash-ticket"))
+        }
+
+        fn write_node_ticket(path: &Path, ticket: &str) -> Result<()> {
+            let mut options = OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(path)?;
+            writeln!(file, "EXPO_PUBLIC_TRAIL_STASH_TICKET={ticket}")?;
+            Ok(())
         }
     }
     Ok(())

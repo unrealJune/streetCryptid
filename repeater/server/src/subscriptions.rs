@@ -38,11 +38,9 @@ pub struct PushSubscription {
 }
 
 impl PushSubscription {
-    /// A log-safe rendering: platform + a short suffix of the token, never the whole thing.
+    /// A log-safe rendering that cannot correlate a device across events.
     pub fn redacted(&self) -> String {
-        let n = self.token.len();
-        let tail = if n >= 4 { &self.token[n - 4..] } else { "" };
-        format!("{}:…{}", self.platform.as_str(), tail)
+        format!("{}:[REDACTED]", self.platform.as_str())
     }
 }
 
@@ -173,8 +171,9 @@ mod tests {
     fn redacted_never_reveals_full_token() {
         let s = sub("supersecrettoken1234");
         let r = s.redacted();
-        assert_eq!(r, "apns:…1234");
+        assert_eq!(r, "apns:[REDACTED]");
         assert!(!r.contains("supersecret"));
+        assert!(!r.contains("1234"));
     }
 
     #[test]

@@ -1,8 +1,8 @@
 trail-stash is deploying as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
 
-1. Grab the dial ticket the app needs (printed once on boot):
+1. Grab the dial ticket the app needs (kept out of logs):
 
-   kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "trail-stash.fullname" . }} | grep EXPO_PUBLIC_TRAIL_STASH_TICKET
+   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "trail-stash.fullname" . }} -- cat /tmp/trail-stash-ticket
 
    Copy that value into the streetCryptid app as EXPO_PUBLIC_TRAIL_STASH_TICKET. It is stable as
    long as TRAIL_STASH_SECRET_KEY does not change.

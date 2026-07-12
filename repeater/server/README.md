@@ -25,7 +25,8 @@ shipped in this standalone repo.)
   opted-in sync. Nothing user-derived is ever at rest here.
 - **Opt-in.** Nothing is replicated until a device presents a read-ticket. No
   grant → no data.
-- Push tokens are **never logged in full** — only a redacted platform + suffix.
+- All tracing output centrally redacts IP addresses and identity-like values. Push
+  tokens are logged only as their platform plus `[REDACTED]`, with no correlatable suffix.
 
 The stash provides no confidentiality on its own; envelopes are already E2E
 encrypted per-recipient on-device before they ever reach it.
@@ -71,6 +72,7 @@ Opt-in and wake registration. Presenting a read-ticket **is** the grant. When
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TRAIL_STASH_SECRET_KEY` | — | **Required.** 64 hex chars (32-byte ed25519 seed) giving the stash a stable dialable identity so its ticket survives restarts. A key, not user data — inject from a secret manager. Generate: `openssl rand -hex 32`. |
+| `TRAIL_STASH_TICKET_PATH` | OS temp directory + `trail-stash-ticket` | Restricted runtime file receiving the node ticket. The ticket is never printed to logs. |
 | `PORT` | `8787` | Control-API port. |
 | `TRAIL_STASH_RETENTION_HOURS` | `48` | Prune entries older than this (clamped 1–336). Lower toward ~1h to minimize data-at-rest; match the app's 24–48h window for full catch-up. |
 | `TRAIL_STASH_PRUNE_INTERVAL_MIN` | `15` | How often the prune sweep runs (clamped 1–1440). |
@@ -139,8 +141,8 @@ helm install trail-stash oci://ghcr.io/<owner>/charts/trail-stash \
   --set secret.existingSecret=trail-stash \
   --set image.tag=<sha-or-semver>
 
-# then grab the dial ticket the app needs:
-kubectl -n trail-stash logs deploy/trail-stash | grep EXPO_PUBLIC_TRAIL_STASH_TICKET
+# then read the dial ticket from its restricted runtime file:
+kubectl -n trail-stash exec deploy/trail-stash -- cat /tmp/trail-stash-ticket
 ```
 
 It runs as a single, stateless, in-memory pod (identity is pinned by the secret, so
