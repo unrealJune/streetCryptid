@@ -1,11 +1,7 @@
 trail-stash is deploying as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
 
-1. Grab the dial ticket the app needs (printed once on boot):
-
-   kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "trail-stash.fullname" . }} | grep EXPO_PUBLIC_TRAIL_STASH_TICKET
-
-   Copy that value into the streetCryptid app as EXPO_PUBLIC_TRAIL_STASH_TICKET. It is stable as
-   long as TRAIL_STASH_SECRET_KEY does not change.
+1. Provision the dial ticket to the app out of band as EXPO_PUBLIC_TRAIL_STASH_TICKET. The pod
+   does not emit or persist it.
 
 2. Check health:
 

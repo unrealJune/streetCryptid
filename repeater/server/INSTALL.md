@@ -96,30 +96,15 @@ helm install trail-stash oci://ghcr.io/<owner>/charts/trail-stash \
 > the same key fight over one iroh identity. The chart pins `replicas: 1` with a `Recreate` strategy
 > — do not scale it up.
 
-Fetch the ticket from the pod logs (same value as Step 4):
-
-```bash
-kubectl -n trail-stash logs deploy/trail-stash | grep EXPO_PUBLIC_TRAIL_STASH_TICKET
-```
-
 Expose the control API over TLS with your own ingress/reverse proxy pointing at
 `svc/trail-stash:8787` (or set `ingress.enabled=true`). Then continue at **Step 6**. To publish the
 image/chart yourself rather than consuming someone else's, see `PUBLISHING.md`.
 
-## Step 4 — capture the dial ticket
+## Step 4 — provision the dial ticket
 
-On startup the stash prints exactly one line to stdout:
-
-```
-EXPO_PUBLIC_TRAIL_STASH_TICKET=<opaque endpoint ticket>
-```
-
-```bash
-docker logs trail-stash | grep EXPO_PUBLIC_TRAIL_STASH_TICKET
-```
-
-Save that value — it goes into the app in Step 6. It's stable as long as `TRAIL_STASH_SECRET_KEY`
-doesn't change.
+The stash does not emit or persist its dial ticket. Provision
+`EXPO_PUBLIC_TRAIL_STASH_TICKET` to the app out of band. It remains stable as long as
+`TRAIL_STASH_SECRET_KEY` does not change.
 
 ## Step 5 — expose the control API over TLS
 

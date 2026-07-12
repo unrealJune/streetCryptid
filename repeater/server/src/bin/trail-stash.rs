@@ -13,19 +13,27 @@
 //! * `TRAIL_STASH_RELAY_URLS`           — comma-separated custom iroh relay URLs.
 //! * `TRAIL_STASH_RELAY_TOKEN`          — optional bearer token for the custom relays.
 
+use std::fmt;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use iroh::SecretKey;
+use tracing::{Event, Subscriber};
+use tracing_subscriber::fmt::format::{Format, FormatEvent, FormatFields, Writer};
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
 use trail_stash::config::StashConfig;
+use trail_stash::log_redaction::redact_log_line;
 use trail_stash::node::{default_delivery, StashNode};
 use trail_stash::waker::{EnvCredentials, HttpPushWaker, NoopWaker, PushConfig, Waker};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .event_format(RedactingFormat(Format::default()))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let config = StashConfig::from_env(|k| std::env::var(k).ok());
@@ -48,8 +56,6 @@ async fn main() -> Result<()> {
     .await
     .context("spawn stash node")?;
 
-    // The one thing an operator needs to copy into the app's env.
-    println!("EXPO_PUBLIC_TRAIL_STASH_TICKET={}", node.node_ticket());
     tracing::info!(
         "stash up — retention {}h, prune every {}m",
         config.retention.retention_ms() / trail_stash::retention::MS_PER_HOUR,
@@ -70,14 +76,40 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+struct RedactingFormat(Format);
+
+impl<S, N> FormatEvent<S, N> for RedactingFormat
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let mut formatted = String::new();
+        self.0
+            .format_event(ctx, Writer::new(&mut formatted), event)?;
+        writer.write_str(&redact_log_line(&formatted))
+    }
+}
+
 /// Build the waker from the push environment. Uses [`HttpPushWaker`] when APNs (bundle id) or FCM
 /// (project id) routing is configured, otherwise a no-op. Credentials come from `APNS_BEARER` /
 /// `FCM_BEARER` via [`EnvCredentials`] (the placeholder until real JWT/OAuth minting lands).
 fn build_waker() -> Arc<dyn Waker> {
-    let bundle_id = std::env::var("APNS_BUNDLE_ID").ok().filter(|s| !s.is_empty());
-    let fcm_project_id = std::env::var("FCM_PROJECT_ID").ok().filter(|s| !s.is_empty());
+    let bundle_id = std::env::var("APNS_BUNDLE_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let fcm_project_id = std::env::var("FCM_PROJECT_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
     if bundle_id.is_none() && fcm_project_id.is_none() {
-        tracing::info!("push not configured (no APNS_BUNDLE_ID / FCM_PROJECT_ID) — waker is a no-op");
+        tracing::info!(
+            "push not configured (no APNS_BUNDLE_ID / FCM_PROJECT_ID) — waker is a no-op"
+        );
         return Arc::new(NoopWaker);
     }
     let config = PushConfig {

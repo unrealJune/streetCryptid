@@ -25,7 +25,8 @@ shipped in this standalone repo.)
   opted-in sync. Nothing user-derived is ever at rest here.
 - **Opt-in.** Nothing is replicated until a device presents a read-ticket. No
   grant → no data.
-- Push tokens are **never logged in full** — only a redacted platform + suffix.
+- All tracing output centrally redacts IP addresses and identity-like values. Push
+  tokens are logged only as their platform plus `[REDACTED]`, with no correlatable suffix.
 
 The stash provides no confidentiality on its own; envelopes are already E2E
 encrypted per-recipient on-device before they ever reach it.
@@ -105,7 +106,6 @@ end-to-end (no two-node integration test of import → reconcile → wake):
 cd infra\trail-stash\rust
 $env:TRAIL_STASH_SECRET_KEY = (openssl rand -hex 32)
 cargo run --features live
-# prints: EXPO_PUBLIC_TRAIL_STASH_TICKET=<ticket>   → copy into the app's .env
 ```
 
 ## Deploy
@@ -139,13 +139,14 @@ helm install trail-stash oci://ghcr.io/<owner>/charts/trail-stash \
   --set secret.existingSecret=trail-stash \
   --set image.tag=<sha-or-semver>
 
-# then grab the dial ticket the app needs:
-kubectl -n trail-stash logs deploy/trail-stash | grep EXPO_PUBLIC_TRAIL_STASH_TICKET
 ```
 
 It runs as a single, stateless, in-memory pod (identity is pinned by the secret, so
 `replicas` stays 1). Front the control API with your own TLS proxy — see `INSTALL.md`
 for the full runbook and `charts/trail-stash/README.md` for every value.
+
+The service does not emit or persist its dial ticket. Provision
+`EXPO_PUBLIC_TRAIL_STASH_TICKET` to clients out of band.
 
 ## Crate layout
 

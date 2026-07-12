@@ -41,8 +41,8 @@
   tradeoff as `pairing-mailbox` (in-memory, restart-clears) and is a security
   property: nothing user-derived is ever at rest on the stash.
 - **Ciphertext-blind & secure.** The stash is never a recipient, never wrapped
-  for (§4), holds no keys, performs no crypto, and never logs push tokens (only a
-  redacted suffix). It sees relay-grade metadata only (§10).
+  for (§4), holds no keys, performs no crypto, and logs no correlatable push-token
+  content. It sees relay-grade metadata only (§10).
 - **MLS seam now, MLS later.** In MLS (RFC 9420) terms the stash is an untrusted
   **Delivery Service**. We add the interface (`DeliveryService`) and a
   **passthrough stub** (`PassthroughDelivery`, admits every envelope as opaque
