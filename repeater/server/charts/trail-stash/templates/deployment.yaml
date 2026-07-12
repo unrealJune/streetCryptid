@@ -1,0 +1,136 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "trail-stash.fullname" . }}
+  labels:
+    {{- include "trail-stash.labels" . | nindent 4 }}
+spec:
+  # Single-identity service: never run more than one pod (see values.yaml).
+  replicas: 1
+  # Recreate — the old pod must be gone before the new one claims the shared iroh identity.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "trail-stash.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pod when the chart-managed Secret changes (no-op with existingSecret).
+        {{- if not .Values.secret.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "trail-stash.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "trail-stash.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: trail-stash
+          image: {{ include "trail-stash.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.config.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.config.port | quote }}
+            - name: TRAIL_STASH_RETENTION_HOURS
+              value: {{ .Values.config.retentionHours | quote }}
+            - name: TRAIL_STASH_PRUNE_INTERVAL_MIN
+              value: {{ .Values.config.pruneIntervalMin | quote }}
+            - name: RUST_LOG
+              value: {{ .Values.config.logLevel | quote }}
+            {{- if .Values.config.push.apnsBundleId }}
+            - name: APNS_BUNDLE_ID
+              value: {{ .Values.config.push.apnsBundleId | quote }}
+            - name: APNS_HOST
+              value: {{ .Values.config.push.apnsHost | quote }}
+            {{- end }}
+            {{- if .Values.config.push.fcmProjectId }}
+            - name: FCM_PROJECT_ID
+              value: {{ .Values.config.push.fcmProjectId | quote }}
+            {{- end }}
+            # --- secret material ---
+            - name: TRAIL_STASH_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "trail-stash.secretName" . }}
+                  key: {{ .Values.secret.keys.secretKey }}
+            - name: TRAIL_STASH_PSK
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "trail-stash.secretName" . }}
+                  key: {{ .Values.secret.keys.psk }}
+                  optional: true
+            {{- if .Values.config.push.apnsBundleId }}
+            - name: APNS_BEARER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "trail-stash.secretName" . }}
+                  key: {{ .Values.secret.keys.apnsBearer }}
+                  optional: true
+            {{- end }}
+            {{- if .Values.config.push.fcmProjectId }}
+            - name: FCM_BEARER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "trail-stash.secretName" . }}
+                  key: {{ .Values.secret.keys.fcmBearer }}
+                  optional: true
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # readOnlyRootFilesystem is on; give the runtime a writable /tmp just in case.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

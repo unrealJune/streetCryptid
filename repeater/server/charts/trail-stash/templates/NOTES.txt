@@ -1,0 +1,31 @@
+trail-stash is deploying as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+1. Grab the dial ticket the app needs (printed once on boot):
+
+   kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "trail-stash.fullname" . }} | grep EXPO_PUBLIC_TRAIL_STASH_TICKET
+
+   Copy that value into the streetCryptid app as EXPO_PUBLIC_TRAIL_STASH_TICKET. It is stable as
+   long as TRAIL_STASH_SECRET_KEY does not change.
+
+2. Check health:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "trail-stash.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+   curl -sf http://127.0.0.1:{{ .Values.service.port }}/healthz && echo OK
+
+   Or run the bundled test:  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+{{- if not .Values.secret.existingSecret }}
+
+⚠  This release created its own Secret from inline values, so TRAIL_STASH_SECRET_KEY now lives in
+   Helm release history. For anything beyond dev, create the Secret out of band and set
+   `secret.existingSecret` instead — see charts/trail-stash/README.md.
+{{- end }}
+{{- if not .Values.secret.psk }}
+
+⚠  TRAIL_STASH_PSK is not set — the control API is OPEN. Set `secret.psk` (or add the key to your
+   existingSecret) and match it with EXPO_PUBLIC_TRAIL_STASH_PSK in the app.
+{{- end }}
+
+3. Expose the control API to phones over TLS via your own reverse proxy (Caddy/nginx/Traefik)
+   pointing at svc/{{ include "trail-stash.fullname" . }}:{{ .Values.service.port }}, or set `ingress.enabled=true`.
+   iroh QUIC traffic rides the relay — no inbound UDP required.

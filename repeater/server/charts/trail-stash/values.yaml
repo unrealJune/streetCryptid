@@ -1,0 +1,156 @@
+# Default values for trail-stash.
+# See charts/trail-stash/README.md for the full reference.
+
+# -- IMPORTANT: trail-stash is a single-identity, stateless-in-memory service.
+# Its dial ticket is derived from `secret.secretKey`. Running two pods with the
+# SAME key means two nodes claiming ONE iroh identity, which breaks dialing.
+# So replicaCount MUST stay 1 and the update strategy is Recreate (never two at
+# once). Horizontal scaling is not supported without app-side changes.
+replicaCount: 1
+
+image:
+  # CI publishes to ghcr.io/<owner>/trail-stash. Override with your own registry/owner.
+  repository: ghcr.io/unrealjune/trail-stash
+  # Pin to an immutable tag (a git sha, e.g. sha-abc1234, or a semver) in production.
+  # Defaults to the chart's appVersion when left empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Secrets for pulling a private GHCR image, e.g. [{ name: ghcr-creds }].
+# Not needed if you make the GHCR package public (see PUBLISHING.md).
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# Secret material. TRAIL_STASH_SECRET_KEY gives the stash a STABLE identity so
+# its ticket survives restarts — treat it like a private key, keep it OUT of
+# Helm release history. Two ways to provide it:
+#
+#   1. (Recommended) Reference a Secret you created out of band:
+#        secret.existingSecret: trail-stash
+#      That Secret must contain the keys named in secret.keys below.
+#
+#   2. Let the chart create the Secret from inline values (fine for dev, but the
+#      values land in Helm history / your values file):
+#        secret.existingSecret: ""     # leave empty
+#        secret.secretKey: "<64 hex chars: openssl rand -hex 32>"
+#        secret.psk: "<control-API bearer>"
+#
+# The chart NEVER auto-generates secretKey — a random key each upgrade would
+# rotate the ticket and silently break every client.
+# ---------------------------------------------------------------------------
+secret:
+  # Name of a pre-existing Secret to consume. When set, inline values below are ignored
+  # and the chart creates no Secret of its own.
+  existingSecret: ""
+
+  # Inline values (used only when existingSecret is empty). secretKey is REQUIRED in that case.
+  secretKey: ""   # TRAIL_STASH_SECRET_KEY — 64 lowercase hex chars. openssl rand -hex 32
+  psk: ""         # TRAIL_STASH_PSK — control-API bearer. Strongly recommended; unset ⇒ open API.
+  apnsBearer: ""  # APNS_BEARER — placeholder static push credential (optional).
+  fcmBearer: ""   # FCM_BEARER  — placeholder static push credential (optional).
+
+  # Keys read from whichever Secret is used (existing or chart-created). Change these to
+  # match the key names in your existingSecret if they differ.
+  keys:
+    secretKey: TRAIL_STASH_SECRET_KEY
+    psk: TRAIL_STASH_PSK
+    apnsBearer: APNS_BEARER
+    fcmBearer: FCM_BEARER
+
+# ---------------------------------------------------------------------------
+# Non-secret runtime config → environment variables.
+# ---------------------------------------------------------------------------
+config:
+  port: 8787
+  retentionHours: 48       # prune entries older than this (clamped 1–336 by the app)
+  pruneIntervalMin: 15      # prune sweep cadence (clamped 1–1440)
+  logLevel: info            # RUST_LOG / tracing env-filter (e.g. info, trail_stash=debug)
+
+  # Push wake (optional). Leave IDs empty to keep the waker a no-op; offline catch-up
+  # still works via reconciliation. Bearers come from the Secret (secret.apnsBearer / fcmBearer).
+  push:
+    apnsBundleId: ""        # e.g. com.unrealjune.streetcryptid — enables the APNs route
+    apnsHost: api.push.apple.com
+    fcmProjectId: ""        # enables the FCM route
+
+service:
+  type: ClusterIP
+  port: 8787
+
+# The stash only needs its HTTP control API reachable, typically behind YOUR TLS
+# reverse proxy (Caddy/nginx/Traefik). iroh QUIC traffic rides the relay — no inbound
+# UDP required. Ingress is OFF by default; enable it if you want the chart to front it.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: stash.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: stash-tls
+  #    hosts: [stash.example.com]
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    # No CPU limit by default (avoids throttling the async runtime). Memory grows with
+    # retained ciphertext + subscriber count; raise for large pools.
+    memory: 512Mi
+
+# Pod-level hardening. The service writes nothing to disk, so the root FS is read-only.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532        # distroless "nonroot"
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Liveness/readiness both hit GET /healthz (always-open, returns 200).
+probes:
+  liveness:
+    initialDelaySeconds: 10
+    periodSeconds: 20
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# Grace period for SIGTERM shutdown (all state is in RAM, nothing to flush).
+terminationGracePeriodSeconds: 15
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Extra environment variables, appended verbatim. Each item is a core-v1 EnvVar.
+extraEnv: []
+#  - name: RUST_BACKTRACE
+#    value: "1"

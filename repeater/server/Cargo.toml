@@ -1,0 +1,59 @@
+[package]
+name = "trail-stash"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+description = "streetCryptid always-on, ciphertext-blind, stateless iroh-docs replica + push-to-sync waker (offline trail delivery)"
+
+[lib]
+name = "trail_stash"
+
+[features]
+# Default build is the PURE core only: config, retention, subscription registry, the MLS
+# delivery-service seam, the waker seam, and control-API validation. It has no iroh/tokio deps
+# so `cargo test` is fast and runs on any host (mirrors how docs.rs keeps pure helpers testable
+# without a live node).
+default = []
+# `live` pulls in the iroh stack + async runtime + HTTP server to actually run the in-memory
+# replica and control API. Off by default; required to build the `trail-stash` binary.
+live = [
+    "dep:iroh",
+    "dep:iroh-docs",
+    "dep:iroh-blobs",
+    "dep:iroh-gossip",
+    "dep:iroh-tickets",
+    "dep:tokio",
+    "dep:n0-future",
+    "dep:anyhow",
+    "dep:axum",
+    "dep:reqwest",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
+
+[dependencies]
+# --- pure core (always compiled) ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1" # push-payload construction (pure, tested) + live JSON
+thiserror = "2"
+
+# --- live node only (see `live` feature). Versions match modules/iroh-location/rust so the
+# stash speaks the exact same docs/blobs/gossip protocols as the phones. ---
+iroh = { version = "1", optional = true }
+iroh-docs = { version = "0.101", optional = true }
+iroh-blobs = { version = "0.103", optional = true }
+iroh-gossip = { version = "0.101", optional = true }
+iroh-tickets = { version = "1", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"], optional = true }
+n0-future = { version = "0.2", optional = true }
+anyhow = { version = "1", optional = true }
+axum = { version = "0.7", optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+[[bin]]
+name = "trail-stash"
+path = "src/bin/trail-stash.rs"
+required-features = ["live"]

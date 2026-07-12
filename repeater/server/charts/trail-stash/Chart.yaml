@@ -1,0 +1,22 @@
+apiVersion: v2
+name: trail-stash
+description: >-
+  Always-on, ciphertext-blind, stateless-in-memory iroh-docs replica and
+  push-to-sync waker for offline encrypted-trail delivery (streetCryptid).
+type: application
+# Chart's own version. CI stamps this (and appVersion) from the git tag on release;
+# bump manually for chart-only changes.
+version: 0.1.0
+# Version of the trail-stash app this chart deploys by default (the image tag).
+appVersion: "0.1.0"
+keywords:
+  - iroh
+  - iroh-docs
+  - push
+  - e2e-encryption
+  - streetcryptid
+home: https://github.com/unrealJune/trail-stash
+sources:
+  - https://github.com/unrealJune/trail-stash
+maintainers:
+  - name: June Philip
