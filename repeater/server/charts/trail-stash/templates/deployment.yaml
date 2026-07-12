@@ -59,12 +59,14 @@ spec:
             {{- if .Values.config.relayUrls }}
             - name: TRAIL_STASH_RELAY_URLS
               value: {{ join "," .Values.config.relayUrls | quote }}
+            {{- if or .Values.secret.existingSecret .Values.secret.relayToken }}
             - name: TRAIL_STASH_RELAY_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "trail-stash.secretName" . }}
                   key: {{ .Values.secret.keys.relayToken }}
                   optional: true
+            {{- end }}
             {{- end }}
             {{- if .Values.config.push.apnsBundleId }}
             - name: APNS_BUNDLE_ID

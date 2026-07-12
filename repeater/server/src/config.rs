@@ -38,7 +38,7 @@ impl StashConfig {
     /// Resolve config from a getter over environment variables. Unset or unparseable values fall
     /// back to the defaults; out-of-range values are clamped rather than rejected.
     ///
-    /// Recognized keys: `PORT`, `TRAIL_STASH_RETENTION_HOURS`,
+    /// Keys represented by `StashConfig`: `PORT`, `TRAIL_STASH_RETENTION_HOURS`,
     /// `TRAIL_STASH_PRUNE_INTERVAL_MIN`, `TRAIL_STASH_PSK`, comma-separated
     /// `TRAIL_STASH_RELAY_URLS`, and optional `TRAIL_STASH_RELAY_TOKEN`.
     pub fn from_env(get: impl Fn(&str) -> Option<String>) -> Self {
