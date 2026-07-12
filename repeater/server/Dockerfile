@@ -3,7 +3,7 @@
 # --- build stage ---------------------------------------------------------
 # Builds the `trail-stash` binary with the `live` feature (the full iroh stack). The first build
 # is slow (iroh + deps); BuildKit cache mounts keep re-builds fast.
-FROM rust:1-slim AS build
+FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 
 # Native toolchain the iroh/rustls dependency tree needs to compile from source. If a build ever
