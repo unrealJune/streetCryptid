@@ -245,7 +245,10 @@ export class LocationSharingService implements FixPublisher {
   private inviteLink: string | null = null;
   private inviteCode: string | null = null;
   private readonly mailbox: PairingMailbox;
-  /** Optional offline-delivery stash (see infra/trail-stash). No-op client when not deployed. */
+  /**
+   * Optional offline-delivery stash (https://github.com/unrealJune/trail-stash). No-op client when
+   * not deployed.
+   */
   private readonly stash: StashClient;
   /** The stash's dial ticket for reconciliation bootstrap, or null when not configured. */
   private readonly stashTicket: string | null = getStashConfig()?.ticket ?? null;

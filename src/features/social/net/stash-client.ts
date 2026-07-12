@@ -1,8 +1,9 @@
 /**
- * Client for the trail stash control API (`infra/trail-stash`). Grants the stash opt-in
- * replication of a trail namespace by presenting its read-ticket, and (optionally) subscribes this
- * device's push token so the stash can wake it when a friend posts. The stash is ciphertext-blind:
- * presenting a read-ticket only grants *replication* of already-sealed envelopes, never decryption.
+ * Client for the trail stash control API (https://github.com/unrealJune/trail-stash). Grants the
+ * stash opt-in replication of a trail namespace by presenting its read-ticket, and (optionally)
+ * subscribes this device's push token so the stash can wake it when a friend posts. The stash is
+ * ciphertext-blind: presenting a read-ticket only grants *replication* of already-sealed envelopes,
+ * never decryption.
  *
  * All calls are best-effort — a failure only means offline delivery is degraded, never that the
  * live path or peer-only reconciliation breaks. Mirrors the pairing-mailbox client conventions.
@@ -30,7 +31,10 @@ export interface StashClient {
   /** Grant replication of a namespace (`POST /v1/namespaces`); idempotent server-side. */
   registerNamespace(reg: StashRegistration): Promise<void>;
   /** Drop this device's wake subscription for a namespace (`DELETE …/subscription`). */
-  unsubscribe(namespaceId: string, sub: { pushToken: string; platform: StashPlatform }): Promise<void>;
+  unsubscribe(
+    namespaceId: string,
+    sub: { pushToken: string; platform: StashPlatform }
+  ): Promise<void>;
 }
 
 function isAbortError(err: unknown): boolean {

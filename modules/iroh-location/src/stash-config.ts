@@ -1,10 +1,10 @@
 /**
  * Client-side config for the optional **trail stash** — an always-on, ciphertext-blind iroh-docs
  * replica that lets friends exchange trails even when they're never online at the same time
- * (see `infra/trail-stash/`). Unlike the relay config this is **optional**: if a deployment doesn't
- * provide a stash, {@link getStashConfig} returns `null` and the app runs exactly as before
- * (peer-only reconciliation). Being configured only means a stash is *available*; whether to use it
- * is a separate, per-user **opt-in** (persisted in the social feature).
+ * (see https://github.com/unrealJune/trail-stash). Unlike the relay config this is **optional**:
+ * if a deployment doesn't provide a stash, {@link getStashConfig} returns `null` and the app runs
+ * exactly as before (peer-only reconciliation). Being configured only means a stash is *available*;
+ * whether to use it is a separate, per-user **opt-in** (persisted in the social feature).
  */
 
 export interface StashConfig {
