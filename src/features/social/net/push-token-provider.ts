@@ -84,7 +84,8 @@ export class ExpoPushTokenProvider implements PushTokenProvider {
     try {
       // Foreground + delivered data pushes nudge a reconciliation. Waking a fully-suspended app
       // from a silent data push additionally needs a TaskManager background task registered at
-      // module load — tracked in infra/trail-stash/PLAN.md; this listener covers the common case.
+      // module load — tracked in https://github.com/unrealJune/trail-stash (PLAN.md); this
+      // listener covers the common case.
       mod.addNotificationReceivedListener((notification) => {
         if (isTrailSyncNotification(notification)) onSync();
       });
