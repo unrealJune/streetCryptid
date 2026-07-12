@@ -10,6 +10,8 @@
 //! * `PORT`                             — control-API port (default 8787).
 //! * `TRAIL_STASH_RETENTION_HOURS`      — retention window (default 48, clamped 1–336).
 //! * `TRAIL_STASH_PRUNE_INTERVAL_MIN`   — prune cadence (default 15).
+//! * `TRAIL_STASH_RELAY_URLS`           — comma-separated custom iroh relay URLs.
+//! * `TRAIL_STASH_RELAY_TOKEN`          — optional bearer token for the custom relays.
 
 use std::sync::Arc;
 
@@ -38,6 +40,8 @@ async fn main() -> Result<()> {
     let node = StashNode::spawn(
         secret,
         config.retention,
+        &config.relay_urls,
+        config.relay_token.as_deref(),
         default_delivery(), // MLS passthrough stub
         build_waker(),      // HttpPushWaker when push env is set, else no-op
     )

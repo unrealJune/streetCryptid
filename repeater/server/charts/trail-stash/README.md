@@ -52,6 +52,8 @@ helm install trail-stash oci://ghcr.io/<owner>/charts/trail-stash \
 | `secret.keys.*` | `TRAIL_STASH_*` etc. | Rename to match the keys in your `existingSecret`. |
 | `config.retentionHours` | `48` | Prune window (app clamps 1–336). |
 | `config.pruneIntervalMin` | `15` | Prune sweep cadence. |
+| `config.relayUrls` | `[]` | Custom iroh relay URLs; empty uses the built-in n0 relay map. |
+| `secret.relayToken` | `""` | Optional bearer token for every custom relay. Prefer an existing Secret. |
 | `config.push.apnsBundleId` / `fcmProjectId` | `""` | Set to enable a push route; bearer comes from the Secret. |
 | `service.type` / `service.port` | `ClusterIP` / `8787` | |
 | `ingress.enabled` | `false` | Off — front it with your own TLS proxy. |

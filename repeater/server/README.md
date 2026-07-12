@@ -74,6 +74,8 @@ Opt-in and wake registration. Presenting a read-ticket **is** the grant. When
 | `PORT` | `8787` | Control-API port. |
 | `TRAIL_STASH_RETENTION_HOURS` | `48` | Prune entries older than this (clamped 1–336). Lower toward ~1h to minimize data-at-rest; match the app's 24–48h window for full catch-up. |
 | `TRAIL_STASH_PRUNE_INTERVAL_MIN` | `15` | How often the prune sweep runs (clamped 1–1440). |
+| `TRAIL_STASH_RELAY_URLS` | — | Comma-separated custom iroh relay URLs. Unset uses the built-in n0 relay map. Use the same URLs as the app's `EXPO_PUBLIC_IROH_RELAY_URLS`. |
+| `TRAIL_STASH_RELAY_TOKEN` | — | Optional bearer token sent to every configured custom relay. |
 | `TRAIL_STASH_PSK` | — | Control-API pre-shared key. When set, `/v1/*` requires `Authorization: Bearer <psk>`. Must match the app's `EXPO_PUBLIC_TRAIL_STASH_PSK`. Unset ⇒ gate disabled (warned at startup). |
 | `APNS_BUNDLE_ID` / `APNS_HOST` | — / `api.push.apple.com` | Enables the APNs push route. |
 | `FCM_PROJECT_ID` | — | Enables the FCM push route. |
@@ -117,6 +119,7 @@ docker pull ghcr.io/<owner>/trail-stash:latest        # or a :sha-xxxx / :X.Y.Z 
 docker run -d --name trail-stash -p 8787:8787 \
   -e TRAIL_STASH_SECRET_KEY="$(openssl rand -hex 32)" \
   -e TRAIL_STASH_PSK="$(openssl rand -hex 32)" \
+  -e TRAIL_STASH_RELAY_URLS="https://relay.example.com" \
   ghcr.io/<owner>/trail-stash:latest
 ```
 
