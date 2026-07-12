@@ -26,12 +26,16 @@ function normalizeBaseUrl(url: string | undefined): string | null {
  * Resolve the stash config from the environment, or `null` when the feature isn't deployed. Both a
  * base URL (for grants) and a ticket (for reconciliation) are required — one without the other is
  * useless, so a partial config is treated as "not configured".
+ *
+ * `process.env.EXPO_PUBLIC_*` must be read as static member expressions (not aliased through a
+ * parameter) so `babel-preset-expo` inlines the literal at build time — a Hermes release bundle has
+ * no populated `process.env` to read at runtime. See `relay-config.ts` for the same convention.
  */
-export function getStashConfig(env: NodeJS.ProcessEnv = process.env): StashConfig | null {
-  const baseUrl = normalizeBaseUrl(env.EXPO_PUBLIC_TRAIL_STASH_URL);
-  const ticket = env.EXPO_PUBLIC_TRAIL_STASH_TICKET?.trim();
+export function getStashConfig(): StashConfig | null {
+  const baseUrl = normalizeBaseUrl(process.env.EXPO_PUBLIC_TRAIL_STASH_URL);
+  const ticket = process.env.EXPO_PUBLIC_TRAIL_STASH_TICKET?.trim();
   if (!baseUrl || !ticket) return null;
 
-  const psk = env.EXPO_PUBLIC_TRAIL_STASH_PSK?.trim();
+  const psk = process.env.EXPO_PUBLIC_TRAIL_STASH_PSK?.trim();
   return { baseUrl, ticket, psk: psk && psk.length > 0 ? psk : null };
 }
