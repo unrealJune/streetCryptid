@@ -19,8 +19,8 @@ helm install trail-stash oci://ghcr.io/<owner>/charts/trail-stash \
   --set image.tag=<sha-or-semver>
 ```
 
-Then follow the post-install notes to copy `EXPO_PUBLIC_TRAIL_STASH_TICKET` from the pod's
-restricted runtime file.
+Provision `EXPO_PUBLIC_TRAIL_STASH_TICKET` to clients out of band; the pod does not emit or
+persist it.
 
 For a quick dev run you can skip the pre-made secret and let the chart generate it inline (the key
 then lands in Helm history — do not do this in production):

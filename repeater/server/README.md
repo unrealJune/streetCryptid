@@ -72,7 +72,6 @@ Opt-in and wake registration. Presenting a read-ticket **is** the grant. When
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TRAIL_STASH_SECRET_KEY` | — | **Required.** 64 hex chars (32-byte ed25519 seed) giving the stash a stable dialable identity so its ticket survives restarts. A key, not user data — inject from a secret manager. Generate: `openssl rand -hex 32`. |
-| `TRAIL_STASH_TICKET_PATH` | OS temp directory + `trail-stash-ticket` | Restricted runtime file receiving the node ticket. The ticket is never printed to logs. |
 | `PORT` | `8787` | Control-API port. |
 | `TRAIL_STASH_RETENTION_HOURS` | `48` | Prune entries older than this (clamped 1–336). Lower toward ~1h to minimize data-at-rest; match the app's 24–48h window for full catch-up. |
 | `TRAIL_STASH_PRUNE_INTERVAL_MIN` | `15` | How often the prune sweep runs (clamped 1–1440). |
@@ -107,7 +106,6 @@ end-to-end (no two-node integration test of import → reconcile → wake):
 cd infra\trail-stash\rust
 $env:TRAIL_STASH_SECRET_KEY = (openssl rand -hex 32)
 cargo run --features live
-# then copy EXPO_PUBLIC_TRAIL_STASH_TICKET from /tmp/trail-stash-ticket into the app's .env
 ```
 
 ## Deploy
@@ -141,13 +139,14 @@ helm install trail-stash oci://ghcr.io/<owner>/charts/trail-stash \
   --set secret.existingSecret=trail-stash \
   --set image.tag=<sha-or-semver>
 
-# then read the dial ticket from its restricted runtime file:
-kubectl -n trail-stash exec deploy/trail-stash -- cat /tmp/trail-stash-ticket
 ```
 
 It runs as a single, stateless, in-memory pod (identity is pinned by the secret, so
 `replicas` stays 1). Front the control API with your own TLS proxy — see `INSTALL.md`
 for the full runbook and `charts/trail-stash/README.md` for every value.
+
+The service does not emit or persist its dial ticket. Provision
+`EXPO_PUBLIC_TRAIL_STASH_TICKET` to clients out of band.
 
 ## Crate layout
 

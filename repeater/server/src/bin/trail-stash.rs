@@ -14,9 +14,6 @@
 //! * `TRAIL_STASH_RELAY_TOKEN`          — optional bearer token for the custom relays.
 
 use std::fmt;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -59,13 +56,10 @@ async fn main() -> Result<()> {
     .await
     .context("spawn stash node")?;
 
-    let ticket_path = ticket_path();
-    write_node_ticket(&ticket_path, &node.node_ticket()).context("write node ticket")?;
     tracing::info!(
-        "stash up — retention {}h, prune every {}m; node ticket written to {}",
+        "stash up — retention {}h, prune every {}m",
         config.retention.retention_ms() / trail_stash::retention::MS_PER_HOUR,
         config.prune_interval_min,
-        ticket_path.display(),
     );
 
     tokio::spawn(Arc::clone(&node).run_prune_loop(config.prune_interval_min));
@@ -100,27 +94,6 @@ where
             .format_event(ctx, Writer::new(&mut formatted), event)?;
         writer.write_str(&redact_log_line(&formatted))
     }
-}
-
-fn ticket_path() -> PathBuf {
-    std::env::var_os("TRAIL_STASH_TICKET_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("trail-stash-ticket"))
-}
-
-fn write_node_ticket(path: &Path, ticket: &str) -> Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    #[cfg(unix)]
-    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-    writeln!(file, "EXPO_PUBLIC_TRAIL_STASH_TICKET={ticket}")?;
-    Ok(())
 }
 
 /// Build the waker from the push environment. Uses [`HttpPushWaker`] when APNs (bundle id) or FCM
