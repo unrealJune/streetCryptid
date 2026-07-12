@@ -104,6 +104,15 @@ Rust toolchain when needed, builds the App Store device slice, and creates the
 git-ignored XCFramework from the checked-in UniFFI headers. Local device + simulator
 builds still use `just bindgen-ios`.
 
+> **Temporary iOS App Store limitation (2026-07-12):** the
+> `com.apple.developer.networking.multicast` entitlement is intentionally omitted from
+> `app.json` while Apple reviews the managed-capability request for
+> `com.unrealjune.streetcryptid`. iOS remains functional through authenticated relay/DNS
+> discovery and BLE, but the direct same-Wi-Fi mDNS fast path may be unavailable. After
+> Apple approves the capability, restore the entitlement under `expo.ios.entitlements`,
+> regenerate the App Store provisioning profile with
+> `eas credentials:configure-build --platform ios --profile production`, and rebuild.
+
 ### 3. Android — jniLibs + Kotlin bindings
 
 ```bash
