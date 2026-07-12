@@ -1,3 +1,6 @@
 # UniFFI generators emit trailing spaces; preserve their output verbatim.
 modules/iroh-location/android/src/main/java/uniffi/** -whitespace
 modules/iroh-location/ios/generated/** -whitespace
+
+# EAS executes shell hooks on macOS; keep them free of Windows CRLF conversion.
+*.sh text eol=lf

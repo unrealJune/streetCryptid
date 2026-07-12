@@ -19,7 +19,7 @@ if ! command -v rustup >/dev/null 2>&1; then
     https://sh.rustup.rs | sh -s -- -y --profile minimal
 fi
 
-# rustup may have been installed by this hook and not yet be on PATH.
+# A rustup installed by this hook is not on the inherited PATH yet.
 export PATH="$HOME/.cargo/bin:$PATH"
 
 rustup toolchain install stable --profile minimal --no-self-update
