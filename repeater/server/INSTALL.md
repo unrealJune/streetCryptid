@@ -190,6 +190,8 @@ wake a backgrounded phone promptly:
   direct dialing you may publish a UDP port, but it isn't required.
 - **Relay:** the stash defaults to the n0 relays. For production, run/point it at your own
   authenticated relay (the same one in `EXPO_PUBLIC_IROH_RELAY_URLS`) to minimize metadata exposure.
+  Set `config.relayUrls` in Helm (or `TRAIL_STASH_RELAY_URLS` as a comma-separated list for Docker).
+  Put the optional bearer token in `secret.relayToken` or `TRAIL_STASH_RELAY_TOKEN`.
 
 ## Security checklist
 
