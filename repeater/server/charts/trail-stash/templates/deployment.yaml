@@ -56,6 +56,16 @@ spec:
               value: {{ .Values.config.pruneIntervalMin | quote }}
             - name: RUST_LOG
               value: {{ .Values.config.logLevel | quote }}
+            {{- if .Values.config.relayUrls }}
+            - name: TRAIL_STASH_RELAY_URLS
+              value: {{ join "," .Values.config.relayUrls | quote }}
+            - name: TRAIL_STASH_RELAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "trail-stash.secretName" . }}
+                  key: {{ .Values.secret.keys.relayToken }}
+                  optional: true
+            {{- end }}
             {{- if .Values.config.push.apnsBundleId }}
             - name: APNS_BUNDLE_ID
               value: {{ .Values.config.push.apnsBundleId | quote }}

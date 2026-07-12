@@ -51,6 +51,7 @@ secret:
   psk: ""         # TRAIL_STASH_PSK — control-API bearer. Strongly recommended; unset ⇒ open API.
   apnsBearer: ""  # APNS_BEARER — placeholder static push credential (optional).
   fcmBearer: ""   # FCM_BEARER  — placeholder static push credential (optional).
+  relayToken: "" # TRAIL_STASH_RELAY_TOKEN — bearer token for custom iroh relays (optional).
 
   # Keys read from whichever Secret is used (existing or chart-created). Change these to
   # match the key names in your existingSecret if they differ.
@@ -59,6 +60,7 @@ secret:
     psk: TRAIL_STASH_PSK
     apnsBearer: APNS_BEARER
     fcmBearer: FCM_BEARER
+    relayToken: TRAIL_STASH_RELAY_TOKEN
 
 # ---------------------------------------------------------------------------
 # Non-secret runtime config → environment variables.
@@ -68,6 +70,10 @@ config:
   retentionHours: 48       # prune entries older than this (clamped 1–336 by the app)
   pruneIntervalMin: 15      # prune sweep cadence (clamped 1–1440)
   logLevel: info            # RUST_LOG / tracing env-filter (e.g. info, trail_stash=debug)
+  # Custom iroh relay URLs. Empty uses the built-in n0 relay map. Configure the same
+  # relay set as the clients use in EXPO_PUBLIC_IROH_RELAY_URLS.
+  relayUrls: []
+  #  - https://relay.example.com
 
   # Push wake (optional). Leave IDs empty to keep the waker a no-op; offline catch-up
   # still works via reconciliation. Bearers come from the Secret (secret.apnsBearer / fcmBearer).

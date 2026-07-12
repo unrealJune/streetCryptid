@@ -24,7 +24,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router as AxumRouter,
 };
-use iroh::{protocol::Router, Endpoint, SecretKey};
+use iroh::{protocol::Router, Endpoint, RelayMap, RelayMode, SecretKey};
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
 use iroh_docs::{api::Doc, engine::LiveEvent, protocol::Docs, store::Query, AuthorId, DocTicket};
 use iroh_gossip::net::Gossip;
@@ -70,11 +70,23 @@ impl StashNode {
     pub async fn spawn(
         secret: SecretKey,
         retention: RetentionPolicy,
+        relay_urls: &[String],
+        relay_token: Option<&str>,
         delivery: Arc<dyn DeliveryService>,
         waker: Arc<dyn Waker>,
     ) -> Result<Arc<Self>> {
-        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
-            .secret_key(secret)
+        let mut endpoint_builder =
+            Endpoint::builder(iroh::endpoint::presets::N0).secret_key(secret);
+        if !relay_urls.is_empty() {
+            let relay_map = RelayMap::try_from_iter(relay_urls.iter().map(String::as_str))
+                .map_err(|e| anyhow!("invalid custom relay URL: {e}"))?;
+            let relay_map = match relay_token {
+                Some(token) => relay_map.with_auth_token(token),
+                None => relay_map,
+            };
+            endpoint_builder = endpoint_builder.relay_mode(RelayMode::Custom(relay_map));
+        }
+        let endpoint = endpoint_builder
             .bind()
             .await
             .map_err(|e| anyhow!("bind endpoint: {e}"))?;
@@ -472,6 +484,8 @@ mod live_tests {
         let stash = StashNode::spawn(
             SecretKey::from_bytes(&[7u8; 32]),
             RetentionPolicy::from_hours(48),
+            &[],
+            None,
             default_delivery(),
             waker.clone(),
         )

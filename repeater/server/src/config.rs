@@ -25,6 +25,10 @@ pub struct StashConfig {
     pub port: u16,
     pub retention: RetentionPolicy,
     pub prune_interval_min: u64,
+    /// Custom iroh relay URLs. Empty uses iroh's default n0 relay map.
+    pub relay_urls: Vec<String>,
+    /// Optional bearer token sent to every custom relay.
+    pub relay_token: Option<String>,
     /// Control-API pre-shared key (anti-abuse gate, like the relay auth token). `None` disables
     /// the gate. See [`crate::auth`].
     pub psk: Option<String>,
@@ -34,7 +38,8 @@ impl StashConfig {
     /// Resolve config from a getter over environment variables. Unset or unparseable values fall
     /// back to the defaults; out-of-range values are clamped rather than rejected.
     ///
-    /// Recognised keys: `PORT`, `TRAIL_STASH_RETENTION_HOURS`, `TRAIL_STASH_PRUNE_INTERVAL_MIN`.
+    /// Relay URLs are read from comma-separated `TRAIL_STASH_RELAY_URLS`; an optional bearer token
+    /// comes from `TRAIL_STASH_RELAY_TOKEN`.
     pub fn from_env(get: impl Fn(&str) -> Option<String>) -> Self {
         let port = get("PORT")
             .and_then(|v| v.trim().parse::<u16>().ok())
@@ -55,10 +60,26 @@ impl StashConfig {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
+        let relay_urls = get("TRAIL_STASH_RELAY_URLS")
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let relay_token = get("TRAIL_STASH_RELAY_TOKEN")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
         Self {
             port,
             retention: RetentionPolicy::from_hours(hours),
             prune_interval_min,
+            relay_urls,
+            relay_token,
             psk,
         }
     }
@@ -86,6 +107,8 @@ mod tests {
             RetentionPolicy::from_hours(DEFAULT_RETENTION_HOURS)
         );
         assert_eq!(cfg.prune_interval_min, DEFAULT_PRUNE_INTERVAL_MIN);
+        assert!(cfg.relay_urls.is_empty());
+        assert_eq!(cfg.relay_token, None);
     }
 
     #[test]
@@ -144,5 +167,24 @@ mod tests {
             StashConfig::from_env(getter(&[("TRAIL_STASH_PSK", "   ")])).psk,
             None
         );
+    }
+
+    #[test]
+    fn custom_relays_are_parsed_and_trimmed() {
+        let cfg = StashConfig::from_env(getter(&[
+            (
+                "TRAIL_STASH_RELAY_URLS",
+                " https://relay-one.example.com, ,https://relay-two.example.com ",
+            ),
+            ("TRAIL_STASH_RELAY_TOKEN", " relay-secret "),
+        ]));
+        assert_eq!(
+            cfg.relay_urls,
+            vec![
+                "https://relay-one.example.com",
+                "https://relay-two.example.com"
+            ]
+        );
+        assert_eq!(cfg.relay_token.as_deref(), Some("relay-secret"));
     }
 }
