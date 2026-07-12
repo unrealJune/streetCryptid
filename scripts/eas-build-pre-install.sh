@@ -21,6 +21,8 @@ fi
 
 # A rustup installed by this hook is not on the inherited PATH yet.
 export PATH="$HOME/.cargo/bin:$PATH"
+# Keep C/assembly dependencies built by Rust aligned with Expo SDK 57's iOS minimum.
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-16.4}"
 
 rustup toolchain install stable --profile minimal --no-self-update
 rustup target add --toolchain stable aarch64-apple-ios

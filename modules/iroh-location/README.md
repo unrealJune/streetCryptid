@@ -100,9 +100,11 @@ xcodebuild -create-xcframework \
 
 For EAS iOS builds, `eas-build-pre-install` runs
 `scripts/eas-build-pre-install.sh` before prebuild and CocoaPods. The hook installs the
-Rust toolchain when needed, builds the App Store device slice, and creates the
-git-ignored XCFramework from the checked-in UniFFI headers. Local device + simulator
-builds still use `just bindgen-ios`.
+Rust toolchain when needed, builds the App Store device slice with the iOS 16.4
+deployment target used by Expo SDK 57, and creates the git-ignored XCFramework from the
+checked-in UniFFI headers. The podspec propagates the Rust archive's `Network`,
+`CoreBluetooth`, and `SystemConfiguration` dependencies to the app linker. Local device
+and simulator builds still use `just bindgen-ios`.
 
 > **Temporary iOS App Store limitation (2026-07-12):** the
 > `com.apple.developer.networking.multicast` entitlement is intentionally omitted from

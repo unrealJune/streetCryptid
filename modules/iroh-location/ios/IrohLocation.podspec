@@ -24,9 +24,10 @@ Pod::Spec.new do |s|
   # `cargo make swift-xcframework`. Drop the built artifact next to this podspec.
   s.vendored_frameworks = 'IrohLocationFFI.xcframework'
 
-  # iroh's QUIC transport needs Network.framework; blew uses CoreBluetooth.
+  # Propagate the Rust static library's Apple framework dependencies to the app target.
+  s.frameworks = 'Network', 'CoreBluetooth', 'SystemConfiguration'
+
   s.pod_target_xcconfig = {
-    'OTHER_LDFLAGS' => '-framework Network -framework CoreBluetooth',
     'DEFINES_MODULE' => 'YES',
   }
 end
