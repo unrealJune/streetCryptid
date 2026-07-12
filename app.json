@@ -2,6 +2,7 @@
   "expo": {
     "name": "streetCryptid",
     "slug": "streetCryptid",
+    "owner": "unrealjune",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -11,6 +12,9 @@
       "icon": "./assets/expo.icon",
       "bundleIdentifier": "com.unrealjune.streetcryptid",
       "supportsTablet": true,
+      "config": {
+        "usesNonExemptEncryption": true
+      },
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "streetCryptid uses Bluetooth while the Friends tab is open to find a phone you tap against and establish an encrypted iroh pairing.",
         "NSLocalNetworkUsageDescription": "streetCryptid finds friends' phones on the same Wi-Fi so it can share your location directly, without routing through a relay.",
@@ -86,6 +90,11 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "fbcfc544-2532-4cb2-b69b-9403470d12e8"
+      }
     }
   }
 }

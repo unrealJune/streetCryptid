@@ -44,4 +44,36 @@ describe('background location registration', () => {
       api.startLocationUpdatesAsync.mock.invocationCallOrder[0]
     );
   });
+
+  it('defaults to auto-pause with the "other" activity when unspecified', async () => {
+    const api = makeApi(false);
+
+    await rearmBackgroundLocationTask(api, config);
+
+    expect(api.startLocationUpdatesAsync).toHaveBeenCalledWith(
+      BACKGROUND_LOCATION_TASK,
+      expect.objectContaining({ pausesUpdatesAutomatically: true })
+    );
+  });
+
+  it('passes the iOS activity hint, auto-pause, and Android notification color through', async () => {
+    const api = makeApi(false);
+
+    await rearmBackgroundLocationTask(api, {
+      ...config,
+      activityType: 'automotive',
+      pausesUpdatesAutomatically: false,
+      notificationColor: '#C6791A',
+    });
+
+    expect(api.startLocationUpdatesAsync).toHaveBeenCalledWith(
+      BACKGROUND_LOCATION_TASK,
+      expect.objectContaining({
+        pausesUpdatesAutomatically: false,
+        // expo-location ActivityType.AutomotiveNavigation === 2
+        activityType: 2,
+        foregroundService: expect.objectContaining({ notificationColor: '#C6791A' }),
+      })
+    );
+  });
 });

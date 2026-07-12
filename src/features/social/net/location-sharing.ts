@@ -286,6 +286,9 @@ export class LocationSharingService implements FixPublisher {
   private bgUnwatch: (() => void) | null = null;
   private bgTaskHandlerStop: (() => void) | null = null;
   private bgLifecycleStop: (() => void) | null = null;
+  private bgCadenceStop: (() => Promise<void>) | null = null;
+  /** Auto-revert timer for a bounded live-tracking window; null when ambient. */
+  private liveTrackingTimer: ReturnType<typeof setTimeout> | null = null;
   private backgroundSharing = false;
   private backgroundAccess: BackgroundAccess = 'unknown';
   private latestLocalFix: LocationFix | null = null;
@@ -935,20 +938,28 @@ export class LocationSharingService implements FixPublisher {
         { BackgroundLocationProvider: Provider },
         { createAppLifecycleController },
         { backgroundOutbox, registerActiveBackgroundFixHandler },
+        { createBatterySource },
+        { createCadenceController, cfgFromDecision },
       ] = await Promise.all([
         import('./background/location-engine'),
         import('./background/sampling-policy'),
         import('./background/background-provider'),
         import('./background/lifecycle'),
         import('./background/register-task'),
+        import('./background/battery-source'),
+        import('./background/cadence-controller'),
       ]);
 
+      const battery = createBatterySource();
       const policy = createSamplingPolicy();
       this.engine = createLocationEngine({
         publisher: this,
         outbox: backgroundOutbox,
         trail: this.trail,
         policy,
+        // Real device power (charge level, charging state, Low-Power Mode) drives the policy's
+        // battery-aware backoff — without this reader the engine assumes a perpetually full battery.
+        battery: () => battery.read(),
       });
       await this.engine.start();
       this.bgTaskHandlerStop = registerActiveBackgroundFixHandler(async (fix) => {
@@ -957,20 +968,34 @@ export class LocationSharingService implements FixPublisher {
       });
 
       this.bgProvider = new Provider();
-      const d = policy.decide({
-        motion: 'walking',
-        battery: { level: 1, charging: false, lowPower: false },
-      });
-      const permissions = await this.bgProvider.startBackground({
-        accuracy: d.accuracy,
-        timeIntervalMs: d.timeIntervalMs,
-        distanceIntervalM: d.distanceIntervalM,
-        deferredUpdatesIntervalMs: d.deferredUpdatesIntervalMs,
-        notificationTitle: 'streetCryptid',
-        notificationBody: "Keeping your friends' map current.",
+      const notification = {
+        title: 'streetCryptid',
+        body: "Keeping your friends' map current.",
+        color: '#C6791A',
+      };
+      // Arm the OS from a *real* battery read (motion is unknown until fixes flow), so a phone that
+      // launches in Low-Power Mode starts backed off rather than at full cadence.
+      const initialDecision = policy.decide({ motion: 'unknown', battery: await battery.read() });
+      const initialCfg = {
+        ...cfgFromDecision(initialDecision, 'unknown', notification),
         ...config,
-      });
+      };
+      const permissions = await this.bgProvider.startBackground(initialCfg);
       this.backgroundAccess = permissions.background ? 'full' : 'foreground';
+
+      // After the initial arm, the cadence controller re-programs the OS whenever the decision
+      // materially changes (motion class, battery, Low-Power Mode) and re-evaluates on power events —
+      // so sampling actually follows the policy instead of staying pinned at the first cadence.
+      this.bgCadenceStop = createCadenceController({
+        engine: this.engine,
+        provider: this.bgProvider,
+        battery,
+        notification,
+        overrides: config,
+        seed: initialCfg,
+        onError: (error) => console.warn('[background-location] cadence re-arm failed', error),
+      }).start();
+
       const firstFix = await this.bgProvider.getCurrent();
       this.recordLocalFix(firstFix);
       await this.engine.ingest(firstFix);
@@ -1002,12 +1027,23 @@ export class LocationSharingService implements FixPublisher {
 
   /** Stop the background location service (leaves queued fixes in the outbox). Idempotent. */
   async stopBackground(): Promise<void> {
+    if (this.liveTrackingTimer) {
+      clearTimeout(this.liveTrackingTimer);
+      this.liveTrackingTimer = null;
+    }
+    const stopCadence = this.bgCadenceStop;
+    this.bgCadenceStop = null;
     this.bgUnwatch?.();
     this.bgUnwatch = null;
     this.bgTaskHandlerStop?.();
     this.bgTaskHandlerStop = null;
     this.bgLifecycleStop?.();
     this.bgLifecycleStop = null;
+    try {
+      await stopCadence?.();
+    } catch {
+      // ignore
+    }
     try {
       await this.bgProvider?.stopBackground();
     } catch {
@@ -1025,6 +1061,30 @@ export class LocationSharingService implements FixPublisher {
     this.emit();
   }
 
+  /**
+   * Turn on real-time live tracking for a bounded window (default 2 min), after which it auto-reverts
+   * to the ambient cadence. The background service normally samples calmly to save battery; this is
+   * the on-demand escape hatch for the real-time case — e.g. a future "a friend is actively watching
+   * your location" signal — so the app never pays real-time GPS cost around the clock. `on: false`
+   * (or a fresh call) cancels any active window. No-op until the background service is running; the
+   * cadence controller picks up the engine's new decision and re-programs the OS.
+   */
+  async setLiveTracking(on: boolean, ttlMs = 120_000): Promise<void> {
+    if (this.liveTrackingTimer) {
+      clearTimeout(this.liveTrackingTimer);
+      this.liveTrackingTimer = null;
+    }
+    await this.engine?.setLiveMode(on);
+    if (on && ttlMs > 0) {
+      const timer = setTimeout(() => {
+        this.liveTrackingTimer = null;
+        void this.engine?.setLiveMode(false);
+      }, ttlMs);
+      (timer as unknown as { unref?: () => void }).unref?.();
+      this.liveTrackingTimer = timer;
+    }
+  }
+
   shutdown(): void {
     void this.shutdownAsync();
   }
@@ -1039,6 +1099,10 @@ export class LocationSharingService implements FixPublisher {
     // Stop callbacks synchronously before awaiting native teardown.
     this.stopPairingPolling();
     this.stopNearbyGesturePolling();
+    if (this.liveTrackingTimer) {
+      clearTimeout(this.liveTrackingTimer);
+      this.liveTrackingTimer = null;
+    }
     this.bgUnwatch?.();
     this.bgUnwatch = null;
     this.bgTaskHandlerStop?.();

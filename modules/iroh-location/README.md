@@ -98,9 +98,11 @@ xcodebuild -create-xcframework \
   -output ../ios/IrohLocationFFI.xcframework
 ```
 
-Status (2026-07-08): crate **compiles on macOS** and Swift bindings **generated** on the
-build Mac; the static-lib/XCFramework step is **blocked pending Xcode** (build host had
-only CLT). Podspec sets `OTHER_LDFLAGS = -framework Network` (required by iroh's QUIC).
+For EAS iOS builds, `eas-build-pre-install` runs
+`scripts/eas-build-pre-install.sh` before prebuild and CocoaPods. The hook installs the
+Rust toolchain when needed, builds the App Store device slice, and creates the
+git-ignored XCFramework from the checked-in UniFFI headers. Local device + simulator
+builds still use `just bindgen-ios`.
 
 ### 3. Android — jniLibs + Kotlin bindings
 
@@ -220,9 +222,8 @@ IndexedDB-backed store.
   actions — location sharing + durable trail keep working.
 - Background execution — **done** in the app layer (`src/features/social/net/background/`) over
   `expo-location` + `expo-task-manager`; see ARCHITECTURE.md §9.
-- **iOS XCFramework** is the one remaining native artifact that needs a build Mac: the Swift
-  _source_ bindings in `ios/generated/` are regenerated here from a host library, but the
-  `IrohLocationFFI.xcframework` (device + sim `.a` slices) must be assembled with `just bindgen-ios`
-  on macOS + Xcode (README §2) before an on-device iOS build.
+- **iOS XCFramework** is generated automatically for EAS device builds by the pre-install
+  hook. For local device + simulator builds, regenerate the Swift bindings and both
+  XCFramework slices with `just bindgen-ios` on macOS + Xcode (README §2).
 - Relay deployment configuration stays outside this public repository.
 - Pin `iroh-gossip`/`iroh-docs` versions carefully; they are pre-1.0 and move fast.

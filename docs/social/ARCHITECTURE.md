@@ -179,12 +179,31 @@ both the live (gossip) and durable (docs) paths. Design of the JS layer lives un
 GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ LocationSharingService.publishFix
    expo-location            │ SamplingPolicy   │ durable queue,   ├─▶ gossip.broadcast   (live)
    + TaskManager            │ (motion+battery) │ survives resume  └─▶ docs.write(a/seq)  (durable)
-   + Android FG service     ▼                  ▼                             │ range reconciliation
-                       TrailStore (local, indefinite history) ◀────── backfill onFix (docs sync)
+   + Android FG service     │        ▲                ▼                        │ range reconciliation
+   ▲                        │   BatterySource    TrailStore (local, history) ◀─ backfill onFix (sync)
+   └── CadenceController ◀──┘   (expo-battery)
+       re-arms OS on decision change
 ```
 
-- **Sampling** (`sampling-policy.ts`): battery/motion-aware cadence — back off when stationary
-  or low-battery, tighten when driving; suspend on critically low battery.
+- **Sampling** (`sampling-policy.ts`): battery/motion-aware cadence tuned as an _ambient_ sharer
+  (Life360 / Find-My class), not a navigator — ~45s walking at balanced (~100m) accuracy, ~18s +
+  high accuracy driving, stationary displacement-gated to near-zero, ×3 backoff under Low-Power
+  Mode / battery-saver (cancelled by charging), suspend on critically low battery. A bounded,
+  on-demand **live mode** (`SamplingInputs.live` → `LocationEngine.setLiveMode` →
+  `LocationSharingService.setLiveTracking`, default 2-min auto-revert) swaps in a real-time ~4s/high
+  cadence for the "a friend is actively watching" case, so the app never pays real-time GPS cost
+  around the clock. The network trigger for it is a future phase (§9c).
+- **Battery signal** (`battery-source.ts`): a native-free seam over `expo-battery` feeding the
+  policy real charge level, charging state, and OS **Low-Power Mode / battery-saver**; `subscribe()`
+  fires on power changes so cadence reacts immediately (web / Expo Go get a full-battery null source).
+- **Cadence control** (`cadence-controller.ts`): the OS location task is armed once at start and
+  would otherwise stay pinned at that cadence forever. The controller watches the engine's decisions
+  and **re-programs `startLocationUpdatesAsync` only on a material change** (accuracy, interval,
+  distance, deferred window, iOS activity/auto-pause), and asks the engine to re-evaluate on power
+  events. OS integration: iOS `activityType` tracks motion (fitness/automotive/other) and
+  `pausesUpdatesAutomatically` lets Core Location auto-suspend GPS when stationary; Android carries a
+  branded foreground-service notification color. Re-arms are serialized latest-wins so two
+  `startLocationUpdatesAsync` calls never race the same task.
 - **Outbox** (`fix-outbox.ts`): durable, serialized queue so captures survive the node being unbound
   (offline / process death). A mounted runtime publishes TaskManager batches immediately; a fresh
   headless context restores the persisted profile, keys, sharing pool, and minimal iroh publisher

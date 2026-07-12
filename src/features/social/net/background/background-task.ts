@@ -1,7 +1,7 @@
 import * as Location from 'expo-location';
 
 import type { LocationFix } from '../../core/types';
-import type { AccuracyTier } from './types';
+import type { AccuracyTier, ActivityKind } from './types';
 
 /**
  * Lazily resolve `expo-task-manager`. Its module eval calls `requireNativeModule('ExpoTaskManager')`,
@@ -70,8 +70,20 @@ export interface BackgroundStartConfig {
   /** Android foreground-service notification (required for FOREGROUND_SERVICE_LOCATION). */
   notificationTitle: string;
   notificationBody: string;
+  /** Android foreground-service notification accent color (#RRGGBB). */
+  notificationColor?: string;
   /** iOS deferred-updates batching window (ms); 0 disables. */
   deferredUpdatesIntervalMs?: number;
+  /**
+   * iOS activity hint. With {@link pausesUpdatesAutomatically} it lets Core Location auto-suspend
+   * GPS when the device is stationary and resume on motion. Ignored on Android. Default `other`.
+   */
+  activityType?: ActivityKind;
+  /**
+   * iOS: allow the system to pause updates for battery when it detects the device is stationary
+   * (resumes automatically on motion). Ignored on Android. Default `true` — the biggest iOS lever.
+   */
+  pausesUpdatesAutomatically?: boolean;
 }
 
 /**
@@ -143,11 +155,13 @@ export async function rearmBackgroundLocationTask(
     timeInterval: cfg.timeIntervalMs,
     distanceInterval: cfg.distanceIntervalM,
     deferredUpdatesInterval: cfg.deferredUpdatesIntervalMs ?? 0,
-    showsBackgroundLocationIndicator: false,
-    pausesUpdatesAutomatically: false,
+    activityType: mapActivity(cfg.activityType ?? 'other'),
+    showsBackgroundLocationIndicator: true,
+    pausesUpdatesAutomatically: cfg.pausesUpdatesAutomatically ?? true,
     foregroundService: {
       notificationTitle: cfg.notificationTitle,
       notificationBody: cfg.notificationBody,
+      ...(cfg.notificationColor ? { notificationColor: cfg.notificationColor } : {}),
     },
   });
 }
@@ -189,5 +203,18 @@ function mapAccuracy(tier: AccuracyTier): Location.Accuracy {
       return Location.Accuracy.High;
     case 'highest':
       return Location.Accuracy.Highest;
+  }
+}
+
+function mapActivity(kind: ActivityKind): Location.ActivityType {
+  switch (kind) {
+    case 'fitness':
+      return Location.ActivityType.Fitness;
+    case 'automotive':
+      return Location.ActivityType.AutomotiveNavigation;
+    case 'navigation':
+      return Location.ActivityType.OtherNavigation;
+    case 'other':
+      return Location.ActivityType.Other;
   }
 }

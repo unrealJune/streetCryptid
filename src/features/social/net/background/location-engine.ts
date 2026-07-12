@@ -2,7 +2,7 @@ import type { LocationFix } from '../../core/types';
 import type { FixOutbox } from './fix-outbox';
 import { deriveMotion, type SamplingPolicy } from './sampling-policy';
 import type { TrailStore } from './trail-store';
-import type { BatteryState, SamplingDecision } from './types';
+import type { BatteryState, MotionState, SamplingDecision } from './types';
 
 /**
  * The testable heart of the background service. It owns the loop:
@@ -40,6 +40,8 @@ export interface EngineState {
   lastFixAt: number | null;
   /** Last sampling decision applied (so the UI/provider can reflect cadence). */
   decision: SamplingDecision | null;
+  /** Motion class of the last decision (drives the iOS activity hint). */
+  motion: MotionState;
   /** Fixes waiting in the outbox. */
   pending: number;
   error: string | null;
@@ -67,6 +69,19 @@ export interface LocationEngine {
    * re-program the OS location cadence.
    */
   ingest(fix: LocationFix): Promise<SamplingDecision>;
+  /**
+   * Recompute the sampling decision from the last known motion and a *fresh* battery read, without
+   * ingesting a new fix. Call this on a power event (Low Power Mode toggled, charger un/plugged) so
+   * cadence backs off/tightens immediately instead of waiting for the next GPS fix. Emits state so a
+   * cadence controller can re-program the OS. No-op enqueue: it never publishes.
+   */
+  reevaluate(): Promise<SamplingDecision>;
+  /**
+   * Turn real-time live tracking on/off (a friend is actively watching). While on, the policy uses
+   * its real-time `live*` cadence regardless of motion. Recomputes + emits immediately so the
+   * cadence controller re-programs the OS; returns the new decision.
+   */
+  setLiveMode(on: boolean): Promise<SamplingDecision>;
   /** Drain the outbox through the publisher (call on resume / node-ready / connectivity regained). */
   flush(): Promise<number>;
   onState(cb: (s: EngineState) => void): () => void;
@@ -84,12 +99,15 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
     status: 'idle',
     lastFixAt: null,
     decision: null,
+    motion: 'unknown',
     pending: 0,
     error: null,
   };
 
   let lastFix: LocationFix | null = null;
   let lastFixAt: number | null = null;
+  let lastMotion: MotionState = 'unknown';
+  let live = false;
   const listeners = new Set<(s: EngineState) => void>();
 
   function emit(): void {
@@ -155,17 +173,18 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
     async ingest(fix: LocationFix): Promise<SamplingDecision> {
       const dtMs = lastFixAt === null ? 0 : now() - lastFixAt;
       const motion = deriveMotion(lastFix, fix, dtMs);
-      const decision = policy.decide({ motion, battery: await battery() });
+      const decision = policy.decide({ motion, battery: await battery(), live });
 
       lastFix = fix;
       lastFixAt = now();
+      lastMotion = motion;
 
       if (state.status !== 'running') {
-        setState({ decision, lastFixAt });
+        setState({ decision, motion, lastFixAt });
         return decision;
       }
 
-      setState({ decision, lastFixAt });
+      setState({ decision, motion, lastFixAt });
 
       try {
         if (decision.active) {
@@ -179,6 +198,19 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
         setState({ status: 'error', error: message });
       }
 
+      return decision;
+    },
+
+    async reevaluate(): Promise<SamplingDecision> {
+      const decision = policy.decide({ motion: lastMotion, battery: await battery(), live });
+      setState({ decision, motion: lastMotion });
+      return decision;
+    },
+
+    async setLiveMode(on: boolean): Promise<SamplingDecision> {
+      live = on;
+      const decision = policy.decide({ motion: lastMotion, battery: await battery(), live });
+      setState({ decision, motion: lastMotion });
       return decision;
     },
 

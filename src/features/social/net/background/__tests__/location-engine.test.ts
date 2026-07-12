@@ -180,6 +180,68 @@ describe('location engine', () => {
     expect(seen[seen.length - 1].status).toBe('running'); // no more updates after unsub
   });
 
+  it('tracks motion class in state and re-reads battery on reevaluate()', async () => {
+    const publisher = fakePublisher();
+    const outbox = fakeOutbox();
+    const trail = createTrailStore({ storage: new InMemoryTrailStorage() });
+    let batt: BatteryState = { level: 1, charging: false, lowPower: false };
+    let t = 0;
+    const engine = createLocationEngine({
+      publisher,
+      outbox,
+      trail,
+      policy: createSamplingPolicy(),
+      battery: async () => batt,
+      now: () => t,
+    });
+    await engine.start();
+
+    t = 0;
+    await engine.ingest(fix(0));
+    t = 20_000;
+    await engine.ingest(fix(20_000)); // same spot ⇒ stationary
+    expect(engine.getState().motion).toBe('stationary');
+    // stationary, full battery: base 45s × stationaryMultiplier 4 = 180s.
+    expect(engine.getState().decision?.timeIntervalMs).toBe(180_000);
+
+    // Low Power Mode toggles on with no new fix — reevaluate must pick it up from a fresh read.
+    batt = { level: 1, charging: false, lowPower: true };
+    const decision = await engine.reevaluate();
+    expect(engine.getState().motion).toBe('stationary'); // motion unchanged
+    // stationary 180s × lowBatteryMultiplier 3 = 540s, clamped to maxIntervalMs 300s.
+    expect(decision.timeIntervalMs).toBe(300_000);
+    expect(decision.accuracy).toBe('balanced');
+  });
+
+  it('live mode overrides cadence and reverts when turned off', async () => {
+    const publisher = fakePublisher();
+    const outbox = fakeOutbox();
+    const trail = createTrailStore({ storage: new InMemoryTrailStorage() });
+    let t = 0;
+    const engine = createLocationEngine({
+      publisher,
+      outbox,
+      trail,
+      policy: createSamplingPolicy(),
+      battery: fullBattery(),
+      now: () => t,
+    });
+    await engine.start();
+
+    t = 0;
+    await engine.ingest(fix(0));
+    t = 20_000;
+    await engine.ingest(fix(20_000)); // stationary → 180s ambient cadence
+    expect(engine.getState().decision?.timeIntervalMs).toBe(180_000);
+
+    const live = await engine.setLiveMode(true);
+    expect(live.timeIntervalMs).toBe(4_000); // real-time, ignores stationary
+    expect(live.accuracy).toBe('high');
+
+    const reverted = await engine.setLiveMode(false);
+    expect(reverted.timeIntervalMs).toBe(180_000); // back to ambient for the same motion
+  });
+
   it('stop() prevents enqueue but still records the fix', async () => {
     const publisher = fakePublisher();
     publisher.setReady(true);

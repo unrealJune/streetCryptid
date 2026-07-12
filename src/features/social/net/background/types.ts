@@ -24,6 +24,13 @@ export interface BatteryState {
  */
 export type AccuracyTier = 'lowest' | 'low' | 'balanced' | 'high' | 'highest';
 
+/**
+ * iOS activity hint, mirroring expo-location's `ActivityType` without importing it. Lets Core
+ * Location tune power use (and, with `pausesUpdatesAutomatically`, auto-suspend GPS when the
+ * device is stationary). `background-task.ts` maps these to the real enum; ignored on Android.
+ */
+export type ActivityKind = 'other' | 'fitness' | 'automotive' | 'navigation';
+
 /** Tunables for {@link SamplingPolicy}; all durations in ms, distances in metres. */
 export interface SamplingConfig {
   /** Cadence when moving normally. */
@@ -40,12 +47,23 @@ export interface SamplingConfig {
   lowBatteryThreshold: number;
   /** Never sample slower than this. */
   maxIntervalMs: number;
-  /** Accuracy tier while moving. */
+  /** Accuracy tier while walking / moving normally. */
   movingAccuracy: AccuracyTier;
+  /** Accuracy tier while driving — kept high so a fast-moving trail stays road-accurate. */
+  drivingAccuracy: AccuracyTier;
   /** Accuracy tier while stationary / conserving. */
   restingAccuracy: AccuracyTier;
   /** Battery level (0..1) below which we stop sampling entirely when also stationary. */
   suspendBelowLevel: number;
+  /**
+   * Live-tracking cadence (ms). When live mode is on (a friend is actively watching), this
+   * real-time interval replaces the motion/battery-derived one — see {@link SamplingInputs.live}.
+   */
+  liveIntervalMs: number;
+  /** Minimum distance between fixes in live mode. */
+  liveDistanceM: number;
+  /** Accuracy tier in live mode. */
+  liveAccuracy: AccuracyTier;
 }
 
 /** The concrete sampling parameters the engine hands to the OS location subsystem. */

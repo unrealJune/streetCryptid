@@ -47,46 +47,49 @@ describe('createSamplingPolicy', () => {
     expect(policy.config.baseDistanceM).toBe(DEFAULT_SAMPLING_CONFIG.baseDistanceM);
   });
 
-  it('uses base cadence + moving accuracy while walking', () => {
+  it('uses base cadence + walking accuracy while walking', () => {
     const policy = createSamplingPolicy();
     const d = policy.decide({ motion: 'walking', battery: healthy });
-    expect(d.timeIntervalMs).toBe(15_000);
-    expect(d.accuracy).toBe('high');
-    expect(d.distanceIntervalM).toBe(25);
-    expect(d.deferredUpdatesIntervalMs).toBe(0);
+    expect(d.timeIntervalMs).toBe(45_000);
+    expect(d.accuracy).toBe('balanced');
+    expect(d.distanceIntervalM).toBe(40);
+    // balanced accuracy is batchable, so iOS defers/coalesces at the cadence interval.
+    expect(d.deferredUpdatesIntervalMs).toBe(45_000);
     expect(d.active).toBe(true);
   });
 
-  it('backs off cadence and drops accuracy while stationary', () => {
+  it('backs off cadence while stationary', () => {
     const policy = createSamplingPolicy();
     const d = policy.decide({ motion: 'stationary', battery: healthy });
-    expect(d.timeIntervalMs).toBe(60_000);
+    expect(d.timeIntervalMs).toBe(180_000);
     expect(d.accuracy).toBe('balanced');
-    expect(d.distanceIntervalM).toBe(50);
-    expect(d.deferredUpdatesIntervalMs).toBe(60_000);
+    expect(d.distanceIntervalM).toBe(80);
+    expect(d.deferredUpdatesIntervalMs).toBe(180_000);
   });
 
-  it('tightens cadence while driving', () => {
+  it('tightens cadence and keeps high accuracy while driving', () => {
     const policy = createSamplingPolicy();
     const d = policy.decide({ motion: 'driving', battery: healthy });
-    expect(d.timeIntervalMs).toBe(7_500);
+    expect(d.timeIntervalMs).toBe(18_000);
     expect(d.accuracy).toBe('high');
+    // high accuracy is not batchable — driving stays timely.
+    expect(d.deferredUpdatesIntervalMs).toBe(0);
   });
 
   it('applies low-battery backoff and resting accuracy', () => {
     const policy = createSamplingPolicy();
     const low: BatteryState = { level: 0.1, charging: false, lowPower: false };
     const d = policy.decide({ motion: 'walking', battery: low });
-    expect(d.timeIntervalMs).toBe(45_000);
+    expect(d.timeIntervalMs).toBe(135_000);
     expect(d.accuracy).toBe('balanced');
-    expect(d.deferredUpdatesIntervalMs).toBe(45_000);
+    expect(d.deferredUpdatesIntervalMs).toBe(135_000);
   });
 
   it('applies low-battery backoff for low-power mode', () => {
     const policy = createSamplingPolicy();
     const lp: BatteryState = { level: 0.9, charging: false, lowPower: true };
     const d = policy.decide({ motion: 'walking', battery: lp });
-    expect(d.timeIntervalMs).toBe(45_000);
+    expect(d.timeIntervalMs).toBe(135_000);
     expect(d.accuracy).toBe('balanced');
   });
 
@@ -94,8 +97,26 @@ describe('createSamplingPolicy', () => {
     const policy = createSamplingPolicy();
     const charging: BatteryState = { level: 0.1, charging: true, lowPower: true };
     const d = policy.decide({ motion: 'walking', battery: charging });
-    expect(d.timeIntervalMs).toBe(15_000);
+    expect(d.timeIntervalMs).toBe(45_000);
+    expect(d.accuracy).toBe('balanced');
+  });
+
+  it('live mode uses the real-time cadence regardless of motion or Low-Power Mode', () => {
+    const policy = createSamplingPolicy();
+    const lp: BatteryState = { level: 0.1, charging: false, lowPower: true };
+    const d = policy.decide({ motion: 'stationary', battery: lp, live: true });
+    expect(d.timeIntervalMs).toBe(4_000);
     expect(d.accuracy).toBe('high');
+    expect(d.distanceIntervalM).toBe(5);
+    expect(d.deferredUpdatesIntervalMs).toBe(0);
+    expect(d.active).toBe(true);
+  });
+
+  it('live mode still yields to a critically low, unplugged battery', () => {
+    const policy = createSamplingPolicy();
+    const critical: BatteryState = { level: 0.04, charging: false, lowPower: false };
+    const d = policy.decide({ motion: 'walking', battery: critical, live: true });
+    expect(d.active).toBe(false);
   });
 
   it('suspends when critically low + stationary + not charging', () => {

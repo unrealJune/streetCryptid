@@ -23,6 +23,12 @@ import type {
 export interface SamplingInputs {
   motion: MotionState;
   battery: BatteryState;
+  /**
+   * Live-tracking override: when true, use the real-time `live*` cadence regardless of motion, and
+   * bypass the stationary/low-battery backoff (only the critical-battery suspend still applies). Set
+   * on demand when a friend is actively watching; see `LocationSharingService.setLiveTracking`.
+   */
+  live?: boolean;
 }
 
 export interface SamplingPolicy {
@@ -30,18 +36,28 @@ export interface SamplingPolicy {
   readonly config: SamplingConfig;
 }
 
-/** Sensible defaults for a "live location + trails" phone service. */
+/**
+ * Defaults for an *ambient* "friends on a map" sharer (Life360 / Find-My class), not a turn-by-turn
+ * navigator. Moving cadence is deliberately calm — ~45s walking at balanced (~100m) accuracy, which
+ * a map dot reads fine — since the service runs indefinitely in the background. Driving tightens and
+ * keeps high accuracy; stationary is displacement-gated to near-zero. A short, on-demand live mode
+ * (see {@link SamplingInputs.live}) covers the real-time case without paying its battery cost 24/7.
+ */
 export const DEFAULT_SAMPLING_CONFIG: SamplingConfig = {
-  baseIntervalMs: 15_000,
-  baseDistanceM: 25,
+  baseIntervalMs: 45_000,
+  baseDistanceM: 40,
   stationaryMultiplier: 4,
-  drivingMultiplier: 0.5,
+  drivingMultiplier: 0.4,
   lowBatteryMultiplier: 3,
   lowBatteryThreshold: 0.2,
   maxIntervalMs: 5 * 60_000,
-  movingAccuracy: 'high',
+  movingAccuracy: 'balanced',
+  drivingAccuracy: 'high',
   restingAccuracy: 'balanced',
   suspendBelowLevel: 0.05,
+  liveIntervalMs: 4_000,
+  liveDistanceM: 5,
+  liveAccuracy: 'high',
 };
 
 /** Great-circle distance between two fixes in metres. Private. */
@@ -77,7 +93,21 @@ export function deriveMotion(
 export function createSamplingPolicy(config?: Partial<SamplingConfig>): SamplingPolicy {
   const merged: SamplingConfig = { ...DEFAULT_SAMPLING_CONFIG, ...config };
 
-  const decide = ({ motion, battery }: SamplingInputs): SamplingDecision => {
+  /** Critical-battery cutoff — the only backoff that still applies in live mode. */
+  const criticallyLow = (battery: BatteryState): boolean =>
+    battery.level < merged.suspendBelowLevel && !battery.charging;
+
+  const decide = ({ motion, battery, live }: SamplingInputs): SamplingDecision => {
+    if (live) {
+      return {
+        accuracy: merged.liveAccuracy,
+        timeIntervalMs: Math.min(merged.liveIntervalMs, merged.maxIntervalMs),
+        distanceIntervalM: merged.liveDistanceM,
+        deferredUpdatesIntervalMs: 0, // real-time: never batch/defer
+        active: !criticallyLow(battery),
+      };
+    }
+
     let interval = merged.baseIntervalMs;
     let accuracy: AccuracyTier = merged.movingAccuracy;
     let distanceIntervalM = merged.baseDistanceM;
@@ -88,7 +118,7 @@ export function createSamplingPolicy(config?: Partial<SamplingConfig>): Sampling
       distanceIntervalM = merged.baseDistanceM * 2;
     } else if (motion === 'driving') {
       interval *= merged.drivingMultiplier;
-      accuracy = merged.movingAccuracy;
+      accuracy = merged.drivingAccuracy;
     } else {
       accuracy = merged.movingAccuracy;
     }

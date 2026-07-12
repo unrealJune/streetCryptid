@@ -61,6 +61,16 @@ export class BackgroundLocationProvider implements LocationProvider {
     return permissions;
   }
 
+  /**
+   * Re-program the running OS location task with a new cadence/accuracy — no permission prompt,
+   * unlike {@link startBackground}. Called by the cadence controller when the sampling decision
+   * changes (motion class, battery, or Low-Power Mode), so the GPS hardware actually follows the
+   * policy instead of staying pinned at the cadence it was first armed with.
+   */
+  async reprogram(cfg: BackgroundStartConfig): Promise<void> {
+    await startBackgroundLocation(cfg);
+  }
+
   async stopBackground(): Promise<void> {
     await stopBackgroundLocation();
   }
