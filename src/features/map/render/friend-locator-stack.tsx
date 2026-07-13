@@ -168,7 +168,6 @@ const styles = StyleSheet.create({
   art: {
     fontFamily: 'IBMPlexMono_500Medium',
     includeFontPadding: false,
-    textAlign: 'left',
   },
   outerRing: {
     borderRadius: 15,
