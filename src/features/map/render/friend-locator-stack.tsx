@@ -45,7 +45,9 @@ export function FriendLocatorStack({
     friend,
     metrics: sigilMetrics(friend.sigil || '?'),
   }));
-  const artWidth = Math.max(...art.map(({ metrics }, index) => metrics.width + index * ART_OFFSET_X));
+  const artWidth = Math.max(
+    ...art.map(({ metrics }, index) => metrics.width + index * ART_OFFSET_X)
+  );
   const artHeight = Math.max(
     ...art.map(({ metrics }, index) => metrics.height + (art.length - index - 1) * ART_OFFSET_Y)
   );
