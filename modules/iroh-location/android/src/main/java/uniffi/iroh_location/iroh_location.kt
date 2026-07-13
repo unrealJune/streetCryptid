@@ -733,6 +733,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_nearby_ble_peers(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_network_changed(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_pair_result(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_pair_sas_challenge(
@@ -851,6 +853,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_initiate_pair_nearby(`p
 external fun uniffi_iroh_location_fn_method_locationnode_list_pair_sessions(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_nearby_ble_peers(`ptr`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_network_changed(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_pair_result(`ptr`: Long,`sessionId`: RustBuffer.ByValue,
 ): Long
@@ -1100,6 +1104,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_nearby_ble_peers() != 20491) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_network_changed() != 50592) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_pair_result() != 26021) {
@@ -2228,6 +2235,21 @@ public interface LocationNodeInterface {
     suspend fun `nearbyBlePeers`(): List<BlePeer>
     
     /**
+     * Notify iroh that the device's network may have changed (wifi↔cellular roam, interface
+     * up/down, IP reassignment).
+     *
+     * iroh's netmon auto-detects this on desktop, but Android's SELinux policy denies
+     * `untrusted_app` the netlink route socket + `/sys/class/net` reads it relies on (the recurring
+     * `avc: denied nlmsg_readpriv … netlink_route_socket` in logcat), so on Android iroh is blind to
+     * roaming: after the device leaves a network its sockets stay bound to the dead interface and the
+     * relay home is never re-derived, so cross-network sync silently dies. iroh exposes
+     * [`Endpoint::network_change`] precisely for this — the Android module observes
+     * `ConnectivityManager` and calls this on every default-network transition, prompting a socket
+     * rebind + relay re-check. No-op before `start()`; harmless to over-call.
+     */
+    suspend fun `networkChanged`()
+    
+    /**
      * The completed-pair result for a session, enriched with the peer's verified latest profile
      * (once replicated). `None` until both sides have accepted.
      */
@@ -2877,6 +2899,40 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceTypeBlePeer.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Notify iroh that the device's network may have changed (wifi↔cellular roam, interface
+     * up/down, IP reassignment).
+     *
+     * iroh's netmon auto-detects this on desktop, but Android's SELinux policy denies
+     * `untrusted_app` the netlink route socket + `/sys/class/net` reads it relies on (the recurring
+     * `avc: denied nlmsg_readpriv … netlink_route_socket` in logcat), so on Android iroh is blind to
+     * roaming: after the device leaves a network its sockets stay bound to the dead interface and the
+     * relay home is never re-derived, so cross-network sync silently dies. iroh exposes
+     * [`Endpoint::network_change`] precisely for this — the Android module observes
+     * `ConnectivityManager` and calls this on every default-network transition, prompting a socket
+     * rebind + relay re-check. No-op before `start()`; harmless to over-call.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `networkChanged`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_network_changed(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )

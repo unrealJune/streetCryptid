@@ -59,6 +59,12 @@ tracing = "0.1" # mobile BLE transport diagnostics
 getrandom = { version = "0.2", features = ["std"] }
 blew = "0.3"
 jni = "0.22"
+# Pipe iroh's internal `tracing` diagnostics (relay connection, net_report, magicsock socket
+# rebinds on network_change, gossip) to Android logcat — otherwise iroh emits NOTHING off-device,
+# which has repeatedly blocked diagnosing cross-network sync. Android-only; installed in
+# `LocationNode::new`. `tracing-subscriber` is already in the tree via iroh.
+paranoid-android = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Vendored experimental BLE transport for iroh (AGPL-3.0-or-later — see
 # third_party/iroh-ble-transport/ and the repo-root THIRD_PARTY_NOTICES.md).

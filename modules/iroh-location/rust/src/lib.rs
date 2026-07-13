@@ -350,6 +350,33 @@ struct Started {
     _router: Router,
 }
 
+/// Install a process-global `tracing` subscriber that pipes iroh's internal diagnostics — relay
+/// connection, `net_report`, magicsock socket rebinds (the `network_change` path we drive from
+/// `ConnectivityManager`), gossip — to Android logcat under the `streetcryptid` tag. Without this
+/// iroh emits NOTHING off-device, which has repeatedly blocked diagnosing cross-network sync.
+/// Idempotent (`try_init` no-ops once a global subscriber exists) so repeated `createNode` calls are
+/// safe. Filter via `RUST_LOG` at runtime, defaulting to a sync-focused level. Android-only —
+/// desktop/test builds stay silent exactly as before.
+#[cfg(target_os = "android")]
+fn init_android_tracing() {
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("warn,iroh=debug,iroh_relay=info,iroh_gossip=info,iroh_docs=info,iroh_location=debug")
+    });
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            fmt::layer()
+                .with_ansi(false)
+                .with_writer(paranoid_android::AndroidLogMakeWriter::new("streetcryptid".to_owned())),
+        )
+        .try_init();
+}
+
+#[cfg(not(target_os = "android"))]
+fn init_android_tracing() {}
+
 /// The device node: holds identity + receiving keys and, once started, the iroh
 /// endpoint + gossip router.
 #[derive(uniffi::Object)]
@@ -383,6 +410,7 @@ impl LocationNode {
         identity_secret: Option<Vec<u8>>,
         recv_secret: Option<Vec<u8>>,
     ) -> Result<Arc<Self>, LocationError> {
+        init_android_tracing();
         let secret = match identity_secret {
             Some(bytes) => SecretKey::from_bytes(
                 &bytes
@@ -544,6 +572,24 @@ impl LocationNode {
         }
         *self.listener.lock().await = None;
         Ok(())
+    }
+
+    /// Notify iroh that the device's network may have changed (wifi↔cellular roam, interface
+    /// up/down, IP reassignment).
+    ///
+    /// iroh's netmon auto-detects this on desktop, but Android's SELinux policy denies
+    /// `untrusted_app` the netlink route socket + `/sys/class/net` reads it relies on (the recurring
+    /// `avc: denied nlmsg_readpriv … netlink_route_socket` in logcat), so on Android iroh is blind to
+    /// roaming: after the device leaves a network its sockets stay bound to the dead interface and the
+    /// relay home is never re-derived, so cross-network sync silently dies. iroh exposes
+    /// [`Endpoint::network_change`] precisely for this — the Android module observes
+    /// `ConnectivityManager` and calls this on every default-network transition, prompting a socket
+    /// rebind + relay re-check. No-op before `start()`; harmless to over-call.
+    pub async fn network_changed(&self) {
+        let guard = self.inner.lock().await;
+        if let Some(started) = guard.as_ref() {
+            started.endpoint.network_change().await;
+        }
     }
 
     /// This device's EndpointId (== envelope `author`).

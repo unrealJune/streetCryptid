@@ -1,11 +1,17 @@
 package com.unrealjune.irohlocation
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.wifi.WifiManager
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 // UniFFI-generated bindings for the `iroh-location` crate (in src/main/java/uniffi/…),
 // backed by libiroh_location.so under src/main/jniLibs. Regenerate with `just bindgen-android`
@@ -177,6 +183,53 @@ class IrohLocationModule : Module() {
   private val subs = mutableMapOf<String, Subscription>()
   private var multicastLock: WifiManager.MulticastLock? = null
 
+  // Long-lived scope for firing the (suspend) network-change nudge from the ConnectivityManager
+  // callback, which is itself synchronous. SupervisorJob so one failed nudge never cancels the rest.
+  private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+  private var connectivityManager: ConnectivityManager? = null
+  private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+  // Android's SELinux policy denies untrusted apps the netlink route socket + /sys/class/net reads
+  // that iroh's netmon uses to auto-detect network changes, so iroh is blind to wifi↔cellular roaming
+  // and never re-homes its relay path — cross-network sync silently dies after the device leaves a
+  // network. We bridge that here: watch the OS default network and nudge iroh (LocationNode.network-
+  // Changed → Endpoint::network_change) on every transition so it rebinds sockets + rechecks the relay.
+  // We react to onAvailable/onLost only (the actual roam signals); onCapabilitiesChanged fires far too
+  // often (signal strength etc.) and forcing a rebind on each would thrash connectivity. Best-effort:
+  // if registration fails the node still works, just without proactive rebind on roam.
+  private fun registerNetworkCallback() {
+    if (networkCallback != null) return
+    val context =
+      appContext.reactContext?.applicationContext
+        ?: appContext.currentActivity?.applicationContext
+        ?: return
+    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+    val callback =
+      object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) = nudgeNetworkChanged()
+
+        override fun onLost(network: Network) = nudgeNetworkChanged()
+      }
+    runCatching {
+      cm.registerDefaultNetworkCallback(callback)
+      connectivityManager = cm
+      networkCallback = callback
+    }
+  }
+
+  private fun unregisterNetworkCallback() {
+    val cm = connectivityManager
+    val cb = networkCallback
+    if (cm != null && cb != null) runCatching { cm.unregisterNetworkCallback(cb) }
+    connectivityManager = null
+    networkCallback = null
+  }
+
+  private fun nudgeNetworkChanged() {
+    val n = node ?: return
+    scope.launch { runCatching { n.networkChanged() } }
+  }
+
   // mDNS local discovery (the Rust `MdnsAddressLookup`) needs to receive multicast, which Android
   // gates behind a held MulticastLock + the CHANGE_WIFI_MULTICAST_STATE permission. We hold it for
   // the node's lifetime and release it in clearRuntime. Best-effort: if the lock can't be acquired
@@ -203,6 +256,7 @@ class IrohLocationModule : Module() {
   private suspend fun clearRuntime() {
     subs.values.forEach { it.destroy() }
     subs.clear()
+    unregisterNetworkCallback()
     releaseMulticastLock()
     val current = node
     node = null
@@ -284,6 +338,7 @@ class IrohLocationModule : Module() {
       { relayUrls: List<String>, relayAuthToken: String ->
         acquireMulticastLock()
         node?.start(relayUrls, relayAuthToken)
+        registerNetworkCallback()
         Unit
       }
 
