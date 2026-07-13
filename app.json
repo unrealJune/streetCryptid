@@ -13,7 +13,7 @@
       "bundleIdentifier": "com.unrealjune.streetcryptid",
       "supportsTablet": true,
       "config": {
-        "usesNonExemptEncryption": true
+        "usesNonExemptEncryption": false
       },
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "streetCryptid uses Bluetooth while the Friends tab is open to find a phone you tap against and establish an encrypted iroh pairing.",
