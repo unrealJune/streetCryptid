@@ -76,7 +76,7 @@ Envelope (wire format, versioned) {
   seq:      u64                             // A's monotonic counter
   ts:       u64                             // ms since epoch
   epoch:    u32                             // key epoch (reserved for forced rotation)
-  nonce:    [u8; 24]                        // XChaCha20-Poly1305 nonce
+  nonce:    [u8; 12]                        // RFC 8439 ChaCha20-Poly1305 nonce
   ct:       bytes                           // AEAD(K, Payload)  — K = fresh random 32B
   wraps:    [ Wrap { kid: [u8;8], enc: bytes } ]   // one per ACTIVE recipient
   sig:      [u8; 64]                        // ed25519_sign(identity, header‖ct‖wraps)
@@ -87,6 +87,9 @@ Wrap.enc = HPKE-Seal(recipient.recvPub, K)  // DhkemX25519HkdfSha256 + ChaCha20P
 Wrap.kid = first 8 bytes of blake3(recipient.recvPub)  // which wrap is "mine"
 ```
 
+- **Wire version:** envelope v2 uses only RFC-defined payload encryption. It intentionally rejects
+  the pre-release v1 XChaCha20-Poly1305 format, so internal test installs must clear old app data and
+  pair again after upgrading.
 - **Confidentiality / per-recipient:** only a recipient whose `recvPub` was wrapped can
   recover `K` and decrypt `ct`. Relays, the swarm, and revoked peers see only ciphertext.
 - **Authenticity:** `sig` proves A produced the envelope and it wasn't tampered with.

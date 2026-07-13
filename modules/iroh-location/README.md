@@ -16,7 +16,7 @@ and UniFFI bindings.
 
 ```
 rust/                 cargo crate `iroh-location` (crypto is unit-tested; iroh glue in lib.rs)
-  src/crypto.rs       envelope: XChaCha20-Poly1305 + per-recipient HPKE wrap + ed25519 sign
+  src/crypto.rs       envelope: RFC 8439 ChaCha20-Poly1305 + HPKE wrap + ed25519 sign
   src/lib.rs          UniFFI domain API (LocationNode, Subscription, FixListener)
   src/bin/uniffi-bindgen.rs
 ios/                  IrohLocationModule.swift + IrohLocation.podspec (+ generated/ + xcframework)
@@ -181,7 +181,7 @@ EXPO_PUBLIC_IROH_RELAY_TOKEN=<limited-scope client token>
 Browsers cannot use UDP hole punching, so iroh runs relay-only there; native clients
 retain direct IP and BLE paths alongside the same relay map. Connections remain iroh
 E2E-encrypted, and the app-layer envelope is interoperable with native because the WASM
-crate reuses `rust/src/crypto.rs` (postcard + XChaCha20-Poly1305 + HPKE + ed25519).
+crate reuses `rust/src/crypto.rs` (postcard + RFC 8439 ChaCha20-Poly1305 + HPKE + ed25519).
 The token stays out of Git, but it is necessarily embedded in client builds because each
 client presents it to the relay.
 

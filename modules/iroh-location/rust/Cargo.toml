@@ -41,7 +41,7 @@ n0-future = "0.2"
 uniffi = { version = "0.31", features = ["tokio"] }
 
 # --- app-layer crypto: encrypt once, wrap per recipient, sign (see §4) ---
-chacha20poly1305 = "0.10" # XChaCha20-Poly1305 AEAD for the payload
+chacha20poly1305 = "0.10" # RFC 8439 ChaCha20-Poly1305 AEAD for the payload
 hpke = { version = "0.12", features = ["x25519"] } # per-recipient key wrap (RFC 9180)
 ed25519-dalek = { version = "2", features = ["rand_core"] } # envelope signatures
 blake3 = "1" # topic derivation + recipient key ids

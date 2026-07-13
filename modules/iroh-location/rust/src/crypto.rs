@@ -1,7 +1,7 @@
 //! App-layer end-to-end crypto for the location envelope.
 //!
 //! See `docs/social/ARCHITECTURE.md` §4. Per fix we:
-//!   1. encrypt the payload ONCE with XChaCha20-Poly1305 under a fresh random 32-byte
+//!   1. encrypt the payload ONCE with RFC 8439 ChaCha20-Poly1305 under a fresh random 32-byte
 //!      content key `K`,
 //!   2. WRAP `K` per recipient with HPKE (DhKemX25519HkdfSha256 + ChaCha20Poly1305),
 //!   3. SIGN the whole envelope with the author's ed25519 identity key.
@@ -10,7 +10,7 @@
 //! "no wrap ⇒ no key ⇒ ciphertext is useless" to a dropped recipient.
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload as AeadPayload};
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hpke::aead::ChaCha20Poly1305 as HpkeAead;
 use hpke::kdf::HkdfSha256 as HpkeKdf;
@@ -23,12 +23,12 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 /// Domain-separation string for HPKE key wrapping.
-const HPKE_INFO: &[u8] = b"streetcryptid/loc/v1/keywrap";
+const HPKE_INFO: &[u8] = b"streetcryptid/loc/v2/keywrap";
 /// Current envelope schema version.
-pub const ENVELOPE_V: u8 = 1;
+pub const ENVELOPE_V: u8 = 2;
 
 const CONTENT_KEY_LEN: usize = 32;
-const XNONCE_LEN: usize = 24;
+const NONCE_LEN: usize = 12;
 const PUBKEY_LEN: usize = 32;
 const AUTHOR_LEN: usize = 32;
 
@@ -40,6 +40,8 @@ pub enum CryptoError {
     Decode,
     #[error("wire encode failed")]
     Encode,
+    #[error("unsupported envelope version {0}")]
+    UnsupportedVersion(u8),
     #[error("signature verification failed")]
     BadSignature,
     #[error("this envelope was not encrypted for me")]
@@ -67,8 +69,8 @@ struct Envelope {
     seq: u64,
     ts: u64,
     epoch: u32,
-    nonce: Vec<u8>, // XChaCha20-Poly1305 nonce (24B)
-    ct: Vec<u8>,    // XChaCha20-Poly1305 ciphertext of the payload
+    nonce: Vec<u8>, // RFC 8439 ChaCha20-Poly1305 nonce (12B)
+    ct: Vec<u8>,    // ChaCha20-Poly1305 ciphertext of the payload
     wraps: Vec<Wrap>,
     sig: Vec<u8>, // ed25519 signature over the envelope with sig == []
 }
@@ -97,8 +99,9 @@ pub fn generate_recv_keypair() -> (Vec<u8>, Vec<u8>) {
 
 /// Bind the per-message context into both AEAD and HPKE as associated data so a wrap /
 /// ciphertext cannot be replayed under a different header.
-fn aad(author: &[u8], seq: u64, ts: u64, epoch: u32) -> Vec<u8> {
-    let mut a = Vec::with_capacity(author.len() + 20);
+fn aad(version: u8, author: &[u8], seq: u64, ts: u64, epoch: u32) -> Vec<u8> {
+    let mut a = Vec::with_capacity(author.len() + 21);
+    a.push(version);
     a.extend_from_slice(author);
     a.extend_from_slice(&seq.to_le_bytes());
     a.extend_from_slice(&ts.to_le_bytes());
@@ -141,16 +144,16 @@ pub fn seal(
     // Fresh random content key + nonce for this fix.
     let mut key = [0u8; CONTENT_KEY_LEN];
     OsRng.fill_bytes(&mut key);
-    let mut nonce = [0u8; XNONCE_LEN];
+    let mut nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
 
-    let ad = aad(author, seq, ts, epoch);
+    let ad = aad(ENVELOPE_V, author, seq, ts, epoch);
 
     // 1) encrypt the payload ONCE.
-    let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| CryptoError::KeyLength)?;
+    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| CryptoError::KeyLength)?;
     let ct = cipher
         .encrypt(
-            XNonce::from_slice(&nonce),
+            Nonce::from_slice(&nonce),
             AeadPayload {
                 msg: payload,
                 aad: &ad,
@@ -204,7 +207,10 @@ pub fn seal(
 /// wrap addressed to me is present and the author's signature checks out.
 pub fn open(my_recv_secret: &[u8], envelope_bytes: &[u8]) -> Result<Opened, CryptoError> {
     let env: Envelope = postcard::from_bytes(envelope_bytes).map_err(|_| CryptoError::Decode)?;
-    if env.author.len() != AUTHOR_LEN || env.nonce.len() != XNONCE_LEN {
+    if env.v != ENVELOPE_V {
+        return Err(CryptoError::UnsupportedVersion(env.v));
+    }
+    if env.author.len() != AUTHOR_LEN || env.nonce.len() != NONCE_LEN {
         return Err(CryptoError::Decode);
     }
 
@@ -230,7 +236,7 @@ pub fn open(my_recv_secret: &[u8], envelope_bytes: &[u8]) -> Result<Opened, Cryp
         .find(|w| w.kid == my_kid)
         .ok_or(CryptoError::NotARecipient)?;
 
-    let ad = aad(&env.author, env.seq, env.ts, env.epoch);
+    let ad = aad(env.v, &env.author, env.seq, env.ts, env.epoch);
 
     // unwrap the content key with HPKE.
     let encapped = <HpkeKem as hpke::Kem>::EncappedKey::from_bytes(&wrap.enc)
@@ -246,10 +252,10 @@ pub fn open(my_recv_secret: &[u8], envelope_bytes: &[u8]) -> Result<Opened, Cryp
     .map_err(|_| CryptoError::Cipher)?;
 
     // decrypt the payload.
-    let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| CryptoError::KeyLength)?;
+    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| CryptoError::KeyLength)?;
     let payload = cipher
         .decrypt(
-            XNonce::from_slice(&env.nonce),
+            Nonce::from_slice(&env.nonce),
             AeadPayload {
                 msg: &env.ct,
                 aad: &ad,
@@ -267,6 +273,13 @@ pub fn open(my_recv_secret: &[u8], envelope_bytes: &[u8]) -> Result<Opened, Cryp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode_hex(input: &str) -> Vec<u8> {
+        (0..input.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&input[i..i + 2], 16).unwrap())
+            .collect()
+    }
 
     fn identity() -> ([u8; 32], [u8; 32]) {
         let sk = SigningKey::generate(&mut OsRng);
@@ -297,6 +310,60 @@ mod tests {
         assert_eq!(oc.payload, payload);
         assert_eq!(ob.author, author);
         assert_eq!(ob.seq, 1);
+    }
+
+    #[test]
+    fn seals_rfc_8439_envelope_v2() {
+        let (seed, author) = identity();
+        let (_recv_sk, recv_pk) = generate_recv_keypair();
+        let bytes = seal(&seed, &author, 1, 1000, 0, b"payload", &[recv_pk]).unwrap();
+        let env: Envelope = postcard::from_bytes(&bytes).unwrap();
+
+        assert_eq!(env.v, 2);
+        assert_eq!(env.nonce.len(), 12);
+    }
+
+    #[test]
+    fn matches_rfc_8439_aead_test_vector() {
+        let key = decode_hex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f");
+        let nonce = decode_hex("070000004041424344454647");
+        let aad = decode_hex("50515253c0c1c2c3c4c5c6c7");
+        let plaintext = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+        let expected = decode_hex(concat!(
+            "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d",
+            "63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b",
+            "3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7",
+            "bc3ff4def08e4b7a9de576d26586cec64b61161ae10b594f09e26a7e902ecbd",
+            "0600691"
+        ));
+
+        let cipher = ChaCha20Poly1305::new_from_slice(&key).unwrap();
+        let ciphertext = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                AeadPayload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(ciphertext, expected);
+    }
+
+    #[test]
+    fn rejects_pre_release_v1_envelopes() {
+        let (seed, author) = identity();
+        let (recv_sk, recv_pk) = generate_recv_keypair();
+        let bytes = seal(&seed, &author, 1, 1000, 0, b"payload", &[recv_pk]).unwrap();
+        let mut env: Envelope = postcard::from_bytes(&bytes).unwrap();
+        env.v = 1;
+        let legacy = postcard::to_allocvec(&env).unwrap();
+
+        assert!(matches!(
+            open(&recv_sk, &legacy),
+            Err(CryptoError::UnsupportedVersion(1))
+        ));
     }
 
     #[test]
