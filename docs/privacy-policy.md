@@ -1,6 +1,6 @@
 # streetCryptid Privacy Policy
 
-**Effective date:** TODO-set-date (e.g. 2026-07-13)
+**Effective date:** 2026-07-13
 **Contact:** mail.junephilip@gmail.com
 
 ## The short version
