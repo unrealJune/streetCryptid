@@ -548,7 +548,7 @@ export function MapView({
               );
             }
 
-            const center = cluster.reduce(
+            const anchorSum = cluster.reduce(
               (sum, friend) => [sum[0] + friend.anchor[0], sum[1] + friend.anchor[1]],
               [0, 0]
             );
@@ -564,8 +564,8 @@ export function MapView({
                 scale={k}
                 translateX={tx}
                 translateY={ty}
-                x={center[0] / cluster.length}
-                y={center[1] / cluster.length}
+                x={anchorSum[0] / cluster.length}
+                y={anchorSum[1] / cluster.length}
               />
             );
           })
