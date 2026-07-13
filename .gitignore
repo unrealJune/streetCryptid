@@ -36,6 +36,9 @@ yarn-error.*
 .env*.local
 .env
 
+# EAS store metadata — contains the App Store review contact (phone/email); keep local
+store.config.json
+
 # self-hosted infra (private tile server, baked tilesets, etc.) — not part of the public app
 infra/
 
