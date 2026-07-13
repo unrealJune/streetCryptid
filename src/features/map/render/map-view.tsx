@@ -38,10 +38,12 @@ import type {
   Viewport,
   WorldRect,
 } from '../core/types';
+import { clusterMarkers } from '../core/marker-clusters';
 import type { MapRegion } from '../engine/map-engine';
 import { useMapEngine } from '../hooks/use-map-engine';
 import { latLonToWorld } from '../core/mercator';
 import { FriendLocator } from './friend-locator';
+import { FriendLocatorStack } from './friend-locator-stack';
 import { makeHexImage, makeLutImage, makeMaskImage, renderRegionImage } from './region-shader';
 import { YouLocator } from './you-locator';
 
@@ -242,13 +244,7 @@ export function MapView({
         : [],
     [anchor, friends, viewport]
   );
-  const orderedFriendAnchors = useMemo(
-    () =>
-      [...friendAnchors].sort(
-        (a, b) => Number(a.id === selectedFriendId) - Number(b.id === selectedFriendId)
-      ),
-    [friendAnchors, selectedFriendId]
-  );
+  const friendClusters = useMemo(() => clusterMarkers(friendAnchors), [friendAnchors]);
   const selfTrailPoints = useMemo(
     () =>
       viewport
@@ -530,23 +526,49 @@ export function MapView({
       </GestureDetector>
 
       {viewport
-        ? orderedFriendAnchors.map((friend) => (
-            <FriendLocator
-              color={friend.color}
-              handle={friend.handle}
-              key={friend.id}
-              onPress={() => onSelectFriend?.(friend.id)}
-              panelColor={theme.chrome.island}
-              scale={k}
-              selected={friend.id === selectedFriendId}
-              sigil={friend.sigil}
-              stale={friend.stale}
-              translateX={tx}
-              translateY={ty}
-              x={friend.anchor[0]}
-              y={friend.anchor[1]}
-            />
-          ))
+        ? friendClusters.map((cluster) => {
+            if (cluster.length === 1) {
+              const friend = cluster[0];
+              return (
+                <FriendLocator
+                  color={friend.color}
+                  handle={friend.handle}
+                  key={friend.id}
+                  onPress={() => onSelectFriend?.(friend.id)}
+                  panelColor={theme.chrome.island}
+                  scale={k}
+                  selected={friend.id === selectedFriendId}
+                  sigil={friend.sigil}
+                  stale={friend.stale}
+                  translateX={tx}
+                  translateY={ty}
+                  x={friend.anchor[0]}
+                  y={friend.anchor[1]}
+                />
+              );
+            }
+
+            const anchorSum = cluster.reduce(
+              (sum, friend) => [sum[0] + friend.anchor[0], sum[1] + friend.anchor[1]],
+              [0, 0]
+            );
+            return (
+              <FriendLocatorStack
+                friends={cluster.map((friend) => ({
+                  ...friend,
+                  selected: friend.id === selectedFriendId,
+                }))}
+                key={cluster.map((friend) => friend.id).join(':')}
+                onPress={(friendId) => onSelectFriend?.(friendId)}
+                panelColor={theme.chrome.island}
+                scale={k}
+                translateX={tx}
+                translateY={ty}
+                x={anchorSum[0] / cluster.length}
+                y={anchorSum[1] / cluster.length}
+              />
+            );
+          })
         : null}
       {selfAnchor ? (
         <YouLocator
