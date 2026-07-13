@@ -18,14 +18,14 @@ interface FriendLocatorProps {
   onPress(): void;
 }
 
-interface SigilMetrics {
+export interface SigilMetrics {
   fontSize: number;
   height: number;
   lineHeight: number;
   width: number;
 }
 
-function sigilMetrics(sigil: string): SigilMetrics {
+export function sigilMetrics(sigil: string): SigilMetrics {
   const lines = sigil.replace(/\r\n?/g, '\n').split('\n');
   const columns = Math.max(1, ...lines.map((line) => line.replace(/\t/g, '    ').length));
   const fontSize = Math.max(
