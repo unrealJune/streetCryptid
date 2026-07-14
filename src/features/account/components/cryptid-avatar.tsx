@@ -47,6 +47,7 @@ export function CryptidAvatar({
       accessibilityLabel={`${name} ASCII cryptid`}
       style={[styles.container, { gap: dimensions.gap }, style]}
     >
+      {/* Preserve the line count while shrinking wide art instead of wrapping it. */}
       <Text
         adjustsFontSizeToFit
         allowFontScaling={false}

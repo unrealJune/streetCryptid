@@ -269,7 +269,7 @@ export function CryptidProfileEditor({
     setSaveStatus('idle');
     setSelectedPresetId(presetId);
     if (presetId === null) {
-      setCustomName((current) => (current.trim() ? current : DEFAULT_CUSTOM_NAME));
+      setCustomName((current) => current.trim() || DEFAULT_CUSTOM_NAME);
       setCustomNameTouched(false);
       setCustomArtTouched(false);
     }

@@ -65,7 +65,7 @@ export class CryptidProfileValidationError extends Error {
 }
 
 export function normalizeAsciiArt(value: string): string {
-  // Phone clipboards can substitute Unicode whitespace, punctuation, and invisible format marks.
+  // Phone clipboards can introduce Unicode whitespace, punctuation, and invisible format marks.
   return value
     .replace(/\r\n?|[\u2028\u2029]/g, '\n')
     .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ')
