@@ -120,7 +120,6 @@ export function CryptidProfileEditor({
     ? SIGNAL_COLOR_OPTIONS
     : [{ name: 'Current', value: initialColor }, ...SIGNAL_COLOR_OPTIONS];
   const bareHandle = handle.trim().replace(/^@+/, '');
-  const displayHandle = bareHandle || 'username';
   const iconName = cryptidName.trim() || 'Custom icon';
   const colorName =
     colorOptions.find((option) => option.value.toLowerCase() === color.toLowerCase())?.name ??
@@ -306,11 +305,11 @@ export function CryptidProfileEditor({
           <View style={styles.headerRow}>
             <View style={styles.headerCopy}>
               <ThemedText style={styles.title}>
-                {mode === 'onboarding' ? 'Choose your name' : 'Profile'}
+                {mode === 'onboarding' ? 'Set up your profile' : 'Profile'}
               </ThemedText>
               <ThemedText type="small" themeColor="textSecondary" style={styles.intro}>
                 {mode === 'onboarding'
-                  ? 'This is how you will appear to friends. You can customize your profile later.'
+                  ? 'Choose how you appear to friends. You can change this later.'
                   : 'This is how you appear to friends.'}
               </ThemedText>
             </View>
@@ -367,47 +366,38 @@ export function CryptidProfileEditor({
               { backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected },
             ]}
           >
-            {mode === 'edit' ? (
-              <>
-                <View style={styles.preview}>
-                  <CryptidAvatar
-                    art={sigil || ' + '}
-                    name={iconName}
-                    color={color}
-                    size="large"
-                    style={styles.previewAvatar}
-                  />
-                  <ThemedText
-                    adjustsFontSizeToFit
-                    minimumFontScale={0.74}
-                    numberOfLines={1}
-                    style={[
-                      styles.handlePreview,
-                      { color: bareHandle ? color : theme.textSecondary },
-                    ]}
-                  >
-                    @{displayHandle}
-                  </ThemedText>
-                </View>
+            <View style={styles.preview}>
+              <CryptidAvatar
+                art={sigil || ' + '}
+                name={iconName}
+                color={color}
+                size="large"
+                style={styles.previewAvatar}
+              />
+              <ThemedText
+                adjustsFontSizeToFit
+                minimumFontScale={0.74}
+                numberOfLines={1}
+                style={[styles.handlePreview, { color: bareHandle ? color : theme.textSecondary }]}
+              >
+                {bareHandle ? `@${bareHandle}` : 'Not set'}
+              </ThemedText>
+            </View>
 
-                <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
+            <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
 
-                <SettingRow
-                  active={activeEditor === 'username'}
-                  label="Username"
-                  value={bareHandle ? `@${bareHandle}` : 'Not set'}
-                  onPress={() =>
-                    setActiveEditor((current) => (current === 'username' ? null : 'username'))
-                  }
-                />
-              </>
-            ) : null}
+            <SettingRow
+              active={activeEditor === 'username'}
+              label="Username"
+              value={bareHandle ? `@${bareHandle}` : 'Not set'}
+              onPress={() =>
+                setActiveEditor((current) => (current === 'username' ? null : 'username'))
+              }
+            />
 
-            {mode === 'onboarding' || activeEditor === 'username' ? (
+            {activeEditor === 'username' ? (
               <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
-                <ThemedText style={styles.fieldLabel}>
-                  {mode === 'onboarding' ? 'Name' : 'Username'}
-                </ThemedText>
+                <ThemedText style={styles.fieldLabel}>Username</ThemedText>
                 <View
                   style={[
                     styles.handleInputShell,
@@ -420,7 +410,7 @@ export function CryptidProfileEditor({
                 >
                   <ThemedText style={[styles.handlePrefix, { color }]}>@</ThemedText>
                   <TextInput
-                    accessibilityLabel={mode === 'onboarding' ? 'Name' : 'Username'}
+                    accessibilityLabel="Username"
                     autoCapitalize="none"
                     autoCorrect={false}
                     maxLength={20}
@@ -447,242 +437,236 @@ export function CryptidProfileEditor({
               </View>
             ) : null}
 
-            {mode === 'edit' ? (
-              <>
-                <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
+            <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
 
-                <SettingRow
-                  active={activeEditor === 'icon'}
-                  label="Profile icon"
-                  value={iconName}
-                  onPress={() => setActiveEditor((current) => (current === 'icon' ? null : 'icon'))}
-                />
+            <SettingRow
+              active={activeEditor === 'icon'}
+              label="Profile icon"
+              value={iconName}
+              onPress={() => setActiveEditor((current) => (current === 'icon' ? null : 'icon'))}
+            />
 
-                {activeEditor === 'icon' ? (
-                  <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
-                    <ThemedText style={styles.fieldLabel}>Choose an icon</ThemedText>
-                    <View accessibilityLabel="Profile icon choices" style={styles.presetGrid}>
-                      {CRYPTID_PRESETS.map((preset) => {
-                        const selected = selectedPresetId === preset.id;
-                        return (
-                          <Pressable
-                            accessibilityLabel={preset.name}
-                            accessibilityRole="radio"
-                            accessibilityState={{ checked: selected }}
-                            key={preset.id}
-                            onPress={() => choosePreset(preset.id)}
-                            style={({ pressed }) => [
-                              styles.presetButton,
-                              {
-                                backgroundColor: selected ? `${color}14` : theme.backgroundElement,
-                                borderColor: selected ? color : theme.backgroundSelected,
-                                opacity: pressed ? 0.62 : 1,
-                              },
-                            ]}
-                          >
-                            <CryptidAvatar art={preset.art} name={preset.name} color={color} />
-                          </Pressable>
-                        );
-                      })}
+            {activeEditor === 'icon' ? (
+              <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
+                <ThemedText style={styles.fieldLabel}>Choose an icon</ThemedText>
+                <View accessibilityLabel="Profile icon choices" style={styles.presetGrid}>
+                  {CRYPTID_PRESETS.map((preset) => {
+                    const selected = selectedPresetId === preset.id;
+                    return (
                       <Pressable
-                        accessibilityLabel="Generate a profile icon"
-                        accessibilityRole="button"
-                        onPress={() => setGeneratorOpen(true)}
-                        style={({ pressed }) => [
-                          styles.presetButton,
-                          styles.customButton,
-                          {
-                            backgroundColor: theme.backgroundElement,
-                            borderColor: theme.backgroundSelected,
-                            opacity: pressed ? 0.62 : 1,
-                          },
-                        ]}
-                      >
-                        <ThemedText style={[styles.generatorGlyph, { color }]}>{'{*}'}</ThemedText>
-                        <ThemedText type="small" style={styles.customLabel}>
-                          Generate
-                        </ThemedText>
-                      </Pressable>
-                      <Pressable
-                        accessibilityLabel="Custom profile icon"
+                        accessibilityLabel={preset.name}
                         accessibilityRole="radio"
-                        accessibilityState={{ checked: selectedPresetId === null }}
-                        onPress={() => choosePreset(null)}
+                        accessibilityState={{ checked: selected }}
+                        key={preset.id}
+                        onPress={() => choosePreset(preset.id)}
                         style={({ pressed }) => [
                           styles.presetButton,
-                          styles.customButton,
                           {
-                            backgroundColor:
-                              selectedPresetId === null ? `${color}14` : theme.backgroundElement,
-                            borderColor: selectedPresetId === null ? color : theme.backgroundSelected,
+                            backgroundColor: selected ? `${color}14` : theme.backgroundElement,
+                            borderColor: selected ? color : theme.backgroundSelected,
                             opacity: pressed ? 0.62 : 1,
                           },
                         ]}
                       >
-                        <ThemedText style={[styles.customGlyph, { color }]}>+</ThemedText>
-                        <ThemedText type="small" style={styles.customLabel}>
-                          Custom
-                        </ThemedText>
+                        <CryptidAvatar art={preset.art} name={preset.name} color={color} />
                       </Pressable>
-                    </View>
-    
-                    {selectedPresetId === null ? (
-                      <View style={styles.customFields}>
-                        <ThemedText style={styles.fieldLabel}>Icon name</ThemedText>
-                        <TextInput
-                          accessibilityLabel="Custom profile icon name"
-                          autoCapitalize="words"
-                          maxLength={24}
-                          onBlur={() => setCustomNameTouched(true)}
-                          onChangeText={(value) => {
-                            setSaveError(null);
-                            setSaveStatus('idle');
-                            setCustomNameTouched(true);
-                            setCustomName(value);
-                          }}
-                          placeholder="Icon name"
-                          placeholderTextColor={theme.textSecondary}
-                          selectionColor={color}
-                          style={[
-                            styles.textInput,
-                            {
-                              backgroundColor: theme.backgroundElement,
-                              borderColor:
-                                customNameErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
-                              color: theme.text,
-                            },
-                          ]}
-                          value={customName}
-                        />
-                        <FieldNote
-                          errorColor={chrome.amberDark}
-                          issues={customNameErrors}
-                          hint="Use 1-24 characters."
-                        />
-    
-                        <View style={styles.asciiLabelRow}>
-                          <ThemedText style={styles.fieldLabel}>ASCII art</ThemedText>
-                          <ThemedText type="code" themeColor="textSecondary">
-                            {measurements.lines}/{MAX_SIGIL_LINES} lines · {measurements.columns}/
-                            {MAX_SIGIL_COLUMNS} columns
-                          </ThemedText>
-                        </View>
-                        <TextInput
-                          accessibilityLabel="Custom ASCII profile icon"
-                          allowFontScaling={false}
-                          autoCapitalize="none"
-                          autoCorrect={false}
-                          multiline
-                          onBlur={() => setCustomArtTouched(true)}
-                          onChangeText={(value) => {
-                            setSaveError(null);
-                            setSaveStatus('idle');
-                            setCustomArtTouched(true);
-                            setCustomArt(normalizeAsciiArt(value));
-                          }}
-                          placeholder={'Enter ASCII art.\nSpaces and line breaks are preserved.'}
-                          placeholderTextColor={theme.textSecondary}
-                          selectionColor={color}
-                          smartDashesType="no"
-                          smartQuotesType="no"
-                          spellCheck={false}
-                          style={[
-                            styles.asciiInput,
-                            {
-                              backgroundColor: theme.backgroundElement,
-                              borderColor:
-                                customArtErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
-                              color,
-                            },
-                          ]}
-                          textAlignVertical="top"
-                          value={customArt}
-                        />
-                        <FieldNote
-                          errorColor={chrome.amberDark}
-                          issues={customArtErrors}
-                          hint="ASCII characters only. Spacing and line breaks are preserved."
-                        />
-                      </View>
-                    ) : null}
-                  </View>
-                ) : null}
-
-                <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
-
-                <SettingRow
-                  active={activeEditor === 'signal'}
-                  label="Signal color"
-                  value={colorName}
-                  onPress={() =>
-                    setActiveEditor((current) => (current === 'signal' ? null : 'signal'))
-                  }
-                />
-
-                {activeEditor === 'signal' ? (
-                  <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
-                    <ThemedText style={styles.fieldLabel}>Choose a signal color</ThemedText>
-                    <ThemedText type="small" themeColor="textSecondary">
-                      This marks your profile icon, map pin, and shared trail on friends&apos; maps.
+                    );
+                  })}
+                  <Pressable
+                    accessibilityLabel="Generate a profile icon"
+                    accessibilityRole="button"
+                    onPress={() => setGeneratorOpen(true)}
+                    style={({ pressed }) => [
+                      styles.presetButton,
+                      styles.customButton,
+                      {
+                        backgroundColor: theme.backgroundElement,
+                        borderColor: theme.backgroundSelected,
+                        opacity: pressed ? 0.62 : 1,
+                      },
+                    ]}
+                  >
+                    <ThemedText style={[styles.generatorGlyph, { color }]}>{'{*}'}</ThemedText>
+                    <ThemedText type="small" style={styles.customLabel}>
+                      Generate
                     </ThemedText>
-                    <SignalColorPicker
-                      color={color}
-                      onChange={(value) => {
+                  </Pressable>
+                  <Pressable
+                    accessibilityLabel="Custom profile icon"
+                    accessibilityRole="radio"
+                    accessibilityState={{ checked: selectedPresetId === null }}
+                    onPress={() => choosePreset(null)}
+                    style={({ pressed }) => [
+                      styles.presetButton,
+                      styles.customButton,
+                      {
+                        backgroundColor:
+                          selectedPresetId === null ? `${color}14` : theme.backgroundElement,
+                        borderColor: selectedPresetId === null ? color : theme.backgroundSelected,
+                        opacity: pressed ? 0.62 : 1,
+                      },
+                    ]}
+                  >
+                    <ThemedText style={[styles.customGlyph, { color }]}>+</ThemedText>
+                    <ThemedText type="small" style={styles.customLabel}>
+                      Custom
+                    </ThemedText>
+                  </Pressable>
+                </View>
+
+                {selectedPresetId === null ? (
+                  <View style={styles.customFields}>
+                    <ThemedText style={styles.fieldLabel}>Icon name</ThemedText>
+                    <TextInput
+                      accessibilityLabel="Custom profile icon name"
+                      autoCapitalize="words"
+                      maxLength={24}
+                      onBlur={() => setCustomNameTouched(true)}
+                      onChangeText={(value) => {
                         setSaveError(null);
                         setSaveStatus('idle');
-                        setColor(value);
+                        setCustomNameTouched(true);
+                        setCustomName(value);
                       }}
+                      placeholder="Icon name"
+                      placeholderTextColor={theme.textSecondary}
+                      selectionColor={color}
+                      style={[
+                        styles.textInput,
+                        {
+                          backgroundColor: theme.backgroundElement,
+                          borderColor:
+                            customNameErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
+                          color: theme.text,
+                        },
+                      ]}
+                      value={customName}
                     />
-                    <ThemedText style={styles.fieldLabel}>Quick colors</ThemedText>
-                    <View
-                      accessibilityLabel="Signal color"
-                      accessibilityRole="radiogroup"
-                      style={styles.colorOptions}
-                    >
-                      {colorOptions.map((option) => {
-                        const selected = option.value.toLowerCase() === color.toLowerCase();
-                        return (
-                          <Pressable
-                            accessibilityLabel={`${option.name} signal color`}
-                            accessibilityRole="radio"
-                            accessibilityState={{ checked: selected }}
-                            key={option.value}
-                            onPress={() => {
-                              setSaveError(null);
-                              setSaveStatus('idle');
-                              setColor(option.value);
-                            }}
-                            style={({ pressed }) => [
-                              styles.colorOption,
-                              {
-                                backgroundColor: selected
-                                  ? `${option.value}14`
-                                  : theme.backgroundElement,
-                                borderColor: selected ? option.value : theme.backgroundSelected,
-                                opacity: pressed ? 0.58 : 1,
-                              },
-                            ]}
-                          >
-                            <View style={[styles.colorSwatch, { backgroundColor: option.value }]}>
-                              {selected ? (
-                                <View
-                                  style={[
-                                    styles.colorSelected,
-                                    { backgroundColor: signalColorInk(option.value) },
-                                  ]}
-                                />
-                              ) : null}
-                            </View>
-                            <ThemedText type="small" style={styles.colorName}>
-                              {option.name}
-                            </ThemedText>
-                          </Pressable>
-                        );
-                      })}
+                    <FieldNote
+                      errorColor={chrome.amberDark}
+                      issues={customNameErrors}
+                      hint="Use 1-24 characters."
+                    />
+
+                    <View style={styles.asciiLabelRow}>
+                      <ThemedText style={styles.fieldLabel}>ASCII art</ThemedText>
+                      <ThemedText type="code" themeColor="textSecondary">
+                        {measurements.lines}/{MAX_SIGIL_LINES} lines · {measurements.columns}/
+                        {MAX_SIGIL_COLUMNS} columns
+                      </ThemedText>
                     </View>
+                    <TextInput
+                      accessibilityLabel="Custom ASCII profile icon"
+                      allowFontScaling={false}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      multiline
+                      onBlur={() => setCustomArtTouched(true)}
+                      onChangeText={(value) => {
+                        setSaveError(null);
+                        setSaveStatus('idle');
+                        setCustomArtTouched(true);
+                        setCustomArt(normalizeAsciiArt(value));
+                      }}
+                      placeholder={'Enter ASCII art.\nSpaces and line breaks are preserved.'}
+                      placeholderTextColor={theme.textSecondary}
+                      selectionColor={color}
+                      smartDashesType="no"
+                      smartQuotesType="no"
+                      spellCheck={false}
+                      style={[
+                        styles.asciiInput,
+                        {
+                          backgroundColor: theme.backgroundElement,
+                          borderColor:
+                            customArtErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
+                          color,
+                        },
+                      ]}
+                      textAlignVertical="top"
+                      value={customArt}
+                    />
+                    <FieldNote
+                      errorColor={chrome.amberDark}
+                      issues={customArtErrors}
+                      hint="ASCII characters only. Spacing and line breaks are preserved."
+                    />
                   </View>
                 ) : null}
-              </>
+              </View>
+            ) : null}
+
+            <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
+
+            <SettingRow
+              active={activeEditor === 'signal'}
+              label="Signal color"
+              value={colorName}
+              onPress={() => setActiveEditor((current) => (current === 'signal' ? null : 'signal'))}
+            />
+
+            {activeEditor === 'signal' ? (
+              <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
+                <ThemedText style={styles.fieldLabel}>Choose a signal color</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary">
+                  This marks your profile icon, map pin, and shared trail on friends&apos; maps.
+                </ThemedText>
+                <SignalColorPicker
+                  color={color}
+                  onChange={(value) => {
+                    setSaveError(null);
+                    setSaveStatus('idle');
+                    setColor(value);
+                  }}
+                />
+                <ThemedText style={styles.fieldLabel}>Quick colors</ThemedText>
+                <View
+                  accessibilityLabel="Signal color"
+                  accessibilityRole="radiogroup"
+                  style={styles.colorOptions}
+                >
+                  {colorOptions.map((option) => {
+                    const selected = option.value.toLowerCase() === color.toLowerCase();
+                    return (
+                      <Pressable
+                        accessibilityLabel={`${option.name} signal color`}
+                        accessibilityRole="radio"
+                        accessibilityState={{ checked: selected }}
+                        key={option.value}
+                        onPress={() => {
+                          setSaveError(null);
+                          setSaveStatus('idle');
+                          setColor(option.value);
+                        }}
+                        style={({ pressed }) => [
+                          styles.colorOption,
+                          {
+                            backgroundColor: selected
+                              ? `${option.value}14`
+                              : theme.backgroundElement,
+                            borderColor: selected ? option.value : theme.backgroundSelected,
+                            opacity: pressed ? 0.58 : 1,
+                          },
+                        ]}
+                      >
+                        <View style={[styles.colorSwatch, { backgroundColor: option.value }]}>
+                          {selected ? (
+                            <View
+                              style={[
+                                styles.colorSelected,
+                                { backgroundColor: signalColorInk(option.value) },
+                              ]}
+                            />
+                          ) : null}
+                        </View>
+                        <ThemedText type="small" style={styles.colorName}>
+                          {option.name}
+                        </ThemedText>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
             ) : null}
           </View>
 
