@@ -30,6 +30,9 @@ export default function AppTabs() {
           <TabTrigger name="social" href="/social" asChild>
             <TabButton>Friends</TabButton>
           </TabTrigger>
+          <TabTrigger name="settings" href="/settings" asChild>
+            <TabButton>Settings</TabButton>
+          </TabTrigger>
         </CustomTabList>
       </TabList>
     </Tabs>

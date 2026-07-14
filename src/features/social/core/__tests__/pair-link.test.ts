@@ -11,8 +11,12 @@ const TOKEN = `${PAIR_TOKEN_PREFIX}deadbeefcafe`;
 describe('pair-link codec', () => {
   it('encodes a token directly onto the Friends route', () => {
     const link = encodePairLink(TOKEN);
-    expect(link.startsWith('streetcryptid://social?token=')).toBe(true);
+    expect(link.startsWith('streetcryptid:///social?token=')).toBe(true);
     expect(decodePairLink(link)).toBe(TOKEN);
+  });
+
+  it('continues decoding legacy double-slash social links', () => {
+    expect(decodePairLink(`streetcryptid://social?token=${encodeURIComponent(TOKEN)}`)).toBe(TOKEN);
   });
 
   it('continues decoding legacy /pair links', () => {

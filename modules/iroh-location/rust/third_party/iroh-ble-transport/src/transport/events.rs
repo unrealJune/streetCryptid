@@ -1,18 +1,33 @@
 //! Translates `blew` events into `PeerCommand`s on the registry inbox.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::time::Instant;
 
 use blew::central::CentralEvent;
 use blew::peripheral::{PeripheralRequest, PeripheralStateEvent};
-use blew::{Central, Peripheral};
+use blew::{Central, DeviceId, Peripheral};
 use bytes::Bytes;
+use parking_lot::Mutex;
 
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::transport::peer::{KEY_PREFIX_LEN, KeyPrefix, PeerCommand};
 use crate::transport::routing::{Routing, ScanHintUpdate};
+
+pub type ProbeDisconnects = Arc<Mutex<HashMap<DeviceId, Instant>>>;
+
+fn take_expected_probe_disconnect(
+    expected: &ProbeDisconnects,
+    device_id: &DeviceId,
+    now: Instant,
+) -> bool {
+    let mut guard = expected.lock();
+    guard.retain(|_, deadline| *deadline >= now);
+    guard.remove(device_id).is_some()
+}
 
 /// Extract the 12-byte key prefix from a list of advertised service UUIDs.
 ///
@@ -38,6 +53,7 @@ pub async fn run_central_events(
     central: Arc<Central>,
     routing: Arc<Routing>,
     inbox: mpsc::Sender<PeerCommand>,
+    probe_disconnects: ProbeDisconnects,
 ) {
     use tokio_stream::StreamExt as _;
     let mut events = central.events();
@@ -101,6 +117,10 @@ pub async fn run_central_events(
                 PeerCommand::CentralConnected { device_id }
             }
             CentralEvent::DeviceDisconnected { device_id, cause } => {
+                if take_expected_probe_disconnect(&probe_disconnects, &device_id, Instant::now()) {
+                    tracing::debug!(device = %device_id, "ignoring expected identity-probe disconnect");
+                    continue;
+                }
                 tracing::debug!(device = %device_id, ?cause, "central DeviceDisconnected");
                 PeerCommand::CentralDisconnected { device_id, cause }
             }
@@ -295,5 +315,25 @@ mod tests {
     #[test]
     fn extract_prefix_empty() {
         assert!(extract_prefix_from_services(&[]).is_none());
+    }
+
+    #[test]
+    fn expected_probe_disconnect_is_consumed_even_if_pairing_phase_moves_on() {
+        let expected: ProbeDisconnects = Arc::new(Mutex::new(HashMap::new()));
+        let device = DeviceId::from("probe-device");
+        expected
+            .lock()
+            .insert(device.clone(), Instant::now() + std::time::Duration::from_secs(5));
+
+        assert!(take_expected_probe_disconnect(
+            &expected,
+            &device,
+            Instant::now()
+        ));
+        assert!(!take_expected_probe_disconnect(
+            &expected,
+            &device,
+            Instant::now()
+        ));
     }
 }

@@ -313,18 +313,25 @@ period.
 
 The Friends tab is the pairing surface; there is no separate pairing mode.
 
-### Nearby: iroh over BLE
+### Nearby: Bump over iroh BLE
 
 - `iroh-ble-transport` is attached to the same endpoint as normal IP/relay transports. It acts as
   central and peripheral and routes authenticated iroh QUIC over GATT/L2CAP when a peer is nearby.
 - The transport is experimental and AGPL-3.0-or-later; source and modification notices live under
   `modules/iroh-location/rust/third_party/iroh-ble-transport/`.
-- While Friends is focused, the app enables invite-less nearby pairing and listens to the
-  accelerometer. A short repeated circling/rub gesture opens a nine-second local consent window.
-  Pairing starts automatically when exactly one verified BLE endpoint is visible.
-- Nearby initiation is mutual and buttonless. An inbound invite-less request advances only while
-  this phone's rub window is active; invite/code requests never inherit gesture consent. Multiple
-  visible peers remain ambiguous and do not start pairing.
+- BLE uses one shared central/peripheral pair for transport and Bump discovery. The transport's
+  primary GATT service exposes a static, read-only full EndpointId characteristic; the advertised
+  key UUID still carries its 12-byte prefix. This identity service survives GATT-server rebuilds.
+- Nearby pairing is explicit. Both people tap **ARM BUMP**, then tap the phones together. One clear
+  accelerometer impact commits the attempt; the same visible button remains a fallback if the
+  sensor misses. The acceptance gate is active only during the short armed window.
+- On commit, the shared scanner is restarted in low-latency mode. Fresh streetCryptid
+  advertisements are ranked by RSSI, equally close candidates fail as ambiguous, and the strongest
+  peer is connected long enough to read its full EndpointId. The read must match the advertised
+  prefix; Android GATT cache recovery and bounded retries run before the attempt fails.
+- Both phones may initiate the deterministic nearby session at once. The pairing core deduplicates
+  that into one session with complementary SAS roles. Invite/code requests never inherit Bump
+  consent.
 - Transport discovery never grants friendship. After key exchange, the inline visual check
   requires the picker and displayer actions described in §9a before either side accepts.
 - Haptics accelerate from soft search ticks through contact and key exchange, then settle while
@@ -332,16 +339,18 @@ The Friends tab is the pairing surface; there is no separate pairing mode.
   full-screen `CRYPTID DISCOVERED` ASCII-art dance. The reveal stays open until the user explicitly
   acknowledges the new friend or rejects them; rejection revokes sharing and removes the friend.
   An acknowledged friend appears on the map as soon as their first encrypted fix arrives.
-- The current transport exposes neither RSSI nor an active scan toggle. BLE scans continuously
-  while the native endpoint is alive, so motion is a consent/selection gesture rather than a radio
-  security boundary.
+- BLE permission is checked before node creation without prompting. If Android permission is first
+  granted from Bump, the node is rebuilt so the BLE transport actually attaches; queued location
+  fixes remain durable during the short rebind.
 - If BLE permission/radio initialization fails, the node logs that failure and continues over
   normal IP/relay transports.
 
 ### Remote: link or blind short code
 
-- A shareable `streetcryptid://social?token=scpair1:…` link opens the existing Friends route and
-  carries the opaque native invite directly. Legacy `/pair` links remain decodable.
+- A shareable `streetcryptid:///social?token=scpair1:…` link opens the existing Friends route and
+  carries the opaque native invite directly. Android native intents normalize both this canonical
+  form and legacy `streetcryptid://social` / `/pair` links.
+- Friends also provides a visible input for a full sharing link, raw token, or short code.
 - Remote pairing still requires both people to compare the ASCII challenge over a trusted voice or
   video call. Possession of a link/code starts the authenticated transport exchange; it does not
   replace the human identity check.

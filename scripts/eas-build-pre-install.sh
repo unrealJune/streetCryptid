@@ -2,17 +2,14 @@
 
 set -euo pipefail
 
-if [[ "${EAS_BUILD_PLATFORM:-}" != "ios" ]]; then
-  echo "Skipping iroh iOS XCFramework build for ${EAS_BUILD_PLATFORM:-local}."
+platform="${EAS_BUILD_PLATFORM:-local}"
+if [[ "$platform" != "ios" && "$platform" != "android" ]]; then
+  echo "Skipping iroh native build for $platform."
   exit 0
 fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 crate_dir="$repo_root/modules/iroh-location/rust"
-ios_dir="$repo_root/modules/iroh-location/ios"
-headers_dir="$ios_dir/headers"
-framework_path="$ios_dir/IrohLocationFFI.xcframework"
-library_path="$crate_dir/target/aarch64-apple-ios/release/libiroh_location.a"
 
 if ! command -v rustup >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
@@ -25,6 +22,34 @@ export PATH="$HOME/.cargo/bin:$PATH"
 export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-16.4}"
 
 rustup toolchain install stable --profile minimal --no-self-update
+
+if [[ "$platform" == "android" ]]; then
+  rustup target add --toolchain stable \
+    aarch64-linux-android \
+    armv7-linux-androideabi \
+    x86_64-linux-android
+  if ! command -v cargo-ndk >/dev/null 2>&1; then
+    cargo +stable install cargo-ndk --version 4.1.2 --locked
+  fi
+  (
+    cd "$crate_dir"
+    cargo +stable ndk \
+      -t arm64-v8a \
+      -t armeabi-v7a \
+      -t x86_64 \
+      -o "$repo_root/modules/iroh-location/android/src/main/jniLibs" \
+      build \
+      --locked \
+      --release
+  )
+  exit 0
+fi
+
+ios_dir="$repo_root/modules/iroh-location/ios"
+headers_dir="$ios_dir/headers"
+framework_path="$ios_dir/IrohLocationFFI.xcframework"
+library_path="$crate_dir/target/aarch64-apple-ios/release/libiroh_location.a"
+
 rustup target add --toolchain stable aarch64-apple-ios
 cargo +stable build \
   --locked \

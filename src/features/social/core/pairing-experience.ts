@@ -1,4 +1,4 @@
-import type { BlePeer, PairStateRecord } from 'iroh-location';
+import type { PairStateRecord } from 'iroh-location';
 
 import type { Friend } from './types';
 
@@ -6,8 +6,7 @@ export type PairingExperienceStage =
   'idle' | 'seeking' | 'contact' | 'handshaking' | 'verifying' | 'joining' | 'discovered';
 
 export interface PairingExperienceInput {
-  gestureActive: boolean;
-  nearbyPeers: readonly BlePeer[];
+  bumpStage: 'idle' | 'armed' | 'searching' | 'contact' | 'failed';
   sessions: readonly PairStateRecord[];
   discoveredFriend: Friend | null;
 }
@@ -24,24 +23,16 @@ export function derivePairingExperienceStage(
   const verificationSessions = input.sessions.filter((session) =>
     ['verifying', 'localAccepted', 'peerAccepted'].includes(session.state)
   );
-  if (verificationSessions.some((session) => !session.nearby || input.gestureActive)) {
-    return 'verifying';
-  }
+  if (verificationSessions.length > 0) return 'verifying';
 
   const activeNearby = input.sessions.find(
-    (session) => session.nearby && !['rejected', 'failed'].includes(session.state)
+    (session) => session.nearby && !['complete', 'rejected', 'failed'].includes(session.state)
   );
-  if (activeNearby) {
-    // Nearby feedback is bounded by the motion-consent window, even if native state is stale.
-    if (!input.gestureActive) return 'idle';
-    return activeNearby.state === 'complete' ? 'joining' : 'handshaking';
-  }
+  if (activeNearby) return 'handshaking';
 
-  if (!input.gestureActive) return 'idle';
-  const dialablePeers = input.nearbyPeers.filter(
-    (peer) => (peer.verifiedEndpointId ?? peer.endpointHint) !== null
-  );
-  return dialablePeers.length === 1 ? 'contact' : 'seeking';
+  if (input.bumpStage === 'contact') return 'contact';
+  if (input.bumpStage === 'searching') return 'seeking';
+  return 'idle';
 }
 
 export function pairingHapticCadence(stage: PairingExperienceStage): PairingHapticCadence | null {

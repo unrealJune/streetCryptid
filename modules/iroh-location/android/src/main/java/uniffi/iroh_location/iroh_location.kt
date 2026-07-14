@@ -761,6 +761,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_recv_secret(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_resolve_bump_peer(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_respond_pair(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready(
@@ -882,6 +884,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_recv_public(`ptr`: Long
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_method_locationnode_recv_secret(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_locationnode_resolve_bump_peer(`ptr`: Long,`timeoutMs`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_respond_pair(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`accept`: Byte,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_set_pairing_ready(`ptr`: Long,`ready`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -1058,7 +1062,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ble_available() != 5831) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_ble_capabilities() != 12087) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_ble_capabilities() != 44655) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ble_has_scan_hint() != 33560) {
@@ -1146,6 +1150,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_recv_secret() != 13424) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_resolve_bump_peer() != 55036) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_respond_pair() != 4487) {
@@ -1430,6 +1437,29 @@ public object FfiConverterUByte: FfiConverter<UByte, Byte> {
 
     override fun write(value: UByte, buf: ByteBuffer) {
         buf.put(value.toByte())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterShort: FfiConverter<Short, Short> {
+    override fun lift(value: Short): Short {
+        return value
+    }
+
+    override fun read(buf: ByteBuffer): Short {
+        return buf.getShort()
+    }
+
+    override fun lower(value: Short): Short {
+        return value
+    }
+
+    override fun allocationSize(value: Short) = 2UL
+
+    override fun write(value: Short, buf: ByteBuffer) {
+        buf.putShort(value)
     }
 }
 
@@ -2137,8 +2167,7 @@ public interface LocationNodeInterface {
     suspend fun `bleAvailable`(): kotlin.Boolean
     
     /**
-     * Honest BLE capability report combined with the app-level pairing-ready gate. The transport
-     * exposes no active scan toggle / RSSI / discovery-refresh, so those are always `false`.
+     * Honest BLE capability report combined with the app-level pairing-ready gate.
      */
     suspend fun `bleCapabilities`(): BleCapabilities
     
@@ -2323,6 +2352,15 @@ public interface LocationNodeInterface {
      * The X25519 receiving secret — persist in the OS secure store.
      */
     fun `recvSecret`(): kotlin.ByteArray
+    
+    /**
+     * Perform one foreground Bump rendezvous attempt using the same scanner/advertiser as the
+     * iroh BLE transport. The scan is refreshed, fresh peers are ranked by RSSI, ambiguous crowds
+     * fail closed, and the strongest peer's full identity is read + checked against its advertised
+     * prefix. No friendship is granted here; the returned endpoint still enters the authenticated
+     * nearby pairing + mandatory SAS flow.
+     */
+    suspend fun `resolveBumpPeer`(`timeoutMs`: kotlin.ULong): BumpResolution
     
     /**
      * Accept or reject a pending pairing session. `accept == true` **requires the local SAS
@@ -2519,8 +2557,7 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Honest BLE capability report combined with the app-level pairing-ready gate. The transport
-     * exposes no active scan toggle / RSSI / discovery-refresh, so those are always `false`.
+     * Honest BLE capability report combined with the app-level pairing-ready gate.
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `bleCapabilities`() : BleCapabilities {
@@ -3237,6 +3274,33 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Perform one foreground Bump rendezvous attempt using the same scanner/advertiser as the
+     * iroh BLE transport. The scan is refreshed, fresh peers are ranked by RSSI, ambiguous crowds
+     * fail closed, and the strongest peer's full identity is read + checked against its advertised
+     * prefix. No friendship is granted here; the returned endpoint still enters the authenticated
+     * nearby pairing + mandatory SAS flow.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `resolveBumpPeer`(`timeoutMs`: kotlin.ULong) : BumpResolution {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_resolve_bump_peer(
+                uniffiHandle,
+                FfiConverterULong.lower(`timeoutMs`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeBumpResolution.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
      * Accept or reject a pending pairing session. `accept == true` **requires the local SAS
      * visual check to be confirmed first** (via [`submit_pair_choice`](Self::submit_pair_choice)
      * or [`confirm_pair_display`](Self::confirm_pair_display)); otherwise it errors, which closes
@@ -3873,6 +3937,79 @@ public object FfiConverterTypeBlePeer: FfiConverterRustBuffer<BlePeer> {
             FfiConverterOptionalByteArray.write(value.`endpointHint`, buf)
             FfiConverterUInt.write(value.`consecutiveFailures`, buf)
             FfiConverterOptionalString.write(value.`connectPath`, buf)
+    }
+}
+
+
+
+/**
+ * Result of one explicit Bump rendezvous attempt.
+ */
+data class BumpResolution (
+    /**
+     * `resolved` | `unavailable` | `noPeers` | `ambiguous` | `probeFailed`.
+     */
+    var `status`: kotlin.String
+    , 
+    /**
+     * Resolved peer EndpointId when `status == "resolved"`.
+     */
+    var `endpointId`: kotlin.ByteArray?
+    , 
+    var `deviceId`: kotlin.String?
+    , 
+    var `rssi`: kotlin.Short?
+    , 
+    /**
+     * Number of fresh iroh advertisements observed during this attempt.
+     */
+    var `peerCount`: kotlin.UInt
+    , 
+    /**
+     * Diagnostic detail suitable for logs and actionable UI copy.
+     */
+    var `detail`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBumpResolution: FfiConverterRustBuffer<BumpResolution> {
+    override fun read(buf: ByteBuffer): BumpResolution {
+        return BumpResolution(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalByteArray.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalShort.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: BumpResolution) = (
+            FfiConverterString.allocationSize(value.`status`) +
+            FfiConverterOptionalByteArray.allocationSize(value.`endpointId`) +
+            FfiConverterOptionalString.allocationSize(value.`deviceId`) +
+            FfiConverterOptionalShort.allocationSize(value.`rssi`) +
+            FfiConverterUInt.allocationSize(value.`peerCount`) +
+            FfiConverterString.allocationSize(value.`detail`)
+    )
+
+    override fun write(value: BumpResolution, buf: ByteBuffer) {
+            FfiConverterString.write(value.`status`, buf)
+            FfiConverterOptionalByteArray.write(value.`endpointId`, buf)
+            FfiConverterOptionalString.write(value.`deviceId`, buf)
+            FfiConverterOptionalShort.write(value.`rssi`, buf)
+            FfiConverterUInt.write(value.`peerCount`, buf)
+            FfiConverterString.write(value.`detail`, buf)
     }
 }
 
@@ -4647,6 +4784,38 @@ public object FfiConverterTypeSasRoleKind: FfiConverterRustBuffer<SasRoleKind> {
 }
 
 
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalShort: FfiConverterRustBuffer<kotlin.Short?> {
+    override fun read(buf: ByteBuffer): kotlin.Short? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterShort.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Short?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterShort.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Short?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterShort.write(value, buf)
+        }
+    }
+}
 
 
 

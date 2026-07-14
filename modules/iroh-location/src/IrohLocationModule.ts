@@ -6,6 +6,7 @@ import type {
   IrohLocationApi,
   BleCapabilities,
   BlePeer,
+  BumpResolution,
   NativeIncomingFix,
   NativeLocationFix,
   NodeKeys,
@@ -88,6 +89,7 @@ export declare class IrohLocationNativeModule
   bleAvailable(): Promise<boolean>;
   bleCapabilities(): Promise<BleCapabilities>;
   nearbyBlePeers(): Promise<BlePeer[]>;
+  resolveBumpPeer(timeoutMs: number): Promise<BumpResolution>;
   bleHasScanHint(endpointIdHex: string): Promise<boolean>;
 }
 

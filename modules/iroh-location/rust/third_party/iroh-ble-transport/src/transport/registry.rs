@@ -1027,6 +1027,12 @@ impl Registry {
         let Some(entry) = self.peers.get_mut(&device_id) else {
             return;
         };
+        // A foreground identity probe opens a short central connection while the transport peer is
+        // still only Discovered. Closing that probe is not a transport failure and must not poison
+        // the route by moving it through Draining -> Dead before iroh dials the resolved endpoint.
+        if matches!(entry.phase, PeerPhase::Discovered { .. }) {
+            return;
+        }
         let reason = crate::transport::peer::DisconnectReason::from(cause);
         // A DeviceDisconnected for a peer we were in the middle of
         // dialing IS the connect failure — there is no live pipe to
@@ -2789,6 +2795,30 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, PeerAction::CloseChannel { .. }))
         );
+    }
+
+    #[test]
+    fn identity_probe_disconnect_keeps_discovered_peer_dialable() {
+        let mut reg = Registry::new_for_test();
+        let device_id = blew::DeviceId::from("dev-bump-probe");
+        reg.peers.insert(device_id.clone(), {
+            let mut entry = PeerEntry::new(device_id.clone());
+            entry.phase = PeerPhase::Discovered {
+                since: std::time::Instant::now(),
+            };
+            entry
+        });
+
+        let actions = reg.handle(PeerCommand::CentralDisconnected {
+            device_id: device_id.clone(),
+            cause: blew::DisconnectCause::LocalClose,
+        });
+
+        assert!(actions.is_empty());
+        assert!(matches!(
+            reg.peer(&device_id).expect("peer").phase,
+            PeerPhase::Discovered { .. }
+        ));
     }
 
     #[test]

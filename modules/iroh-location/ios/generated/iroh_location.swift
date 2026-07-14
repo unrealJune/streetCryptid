@@ -441,6 +441,22 @@ fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt16: FfiConverterPrimitive {
+    typealias FfiType = Int16
+    typealias SwiftType = Int16
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int16, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -942,8 +958,7 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func bleAvailable() async  -> Bool
     
     /**
-     * Honest BLE capability report combined with the app-level pairing-ready gate. The transport
-     * exposes no active scan toggle / RSSI / discovery-refresh, so those are always `false`.
+     * Honest BLE capability report combined with the app-level pairing-ready gate.
      */
     func bleCapabilities() async  -> BleCapabilities
     
@@ -1040,6 +1055,21 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func nearbyBlePeers() async  -> [BlePeer]
     
     /**
+     * Notify iroh that the device's network may have changed (wifi↔cellular roam, interface
+     * up/down, IP reassignment).
+     *
+     * iroh's netmon auto-detects this on desktop, but Android's SELinux policy denies
+     * `untrusted_app` the netlink route socket + `/sys/class/net` reads it relies on (the recurring
+     * `avc: denied nlmsg_readpriv … netlink_route_socket` in logcat), so on Android iroh is blind to
+     * roaming: after the device leaves a network its sockets stay bound to the dead interface and the
+     * relay home is never re-derived, so cross-network sync silently dies. iroh exposes
+     * [`Endpoint::network_change`] precisely for this — the Android module observes
+     * `ConnectivityManager` and calls this on every default-network transition, prompting a socket
+     * rebind + relay re-check. No-op before `start()`; harmless to over-call.
+     */
+    func networkChanged() async 
+    
+    /**
      * The completed-pair result for a session, enriched with the peer's verified latest profile
      * (once replicated). `None` until both sides have accepted.
      */
@@ -1113,6 +1143,15 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * The X25519 receiving secret — persist in the OS secure store.
      */
     func recvSecret()  -> Data
+    
+    /**
+     * Perform one foreground Bump rendezvous attempt using the same scanner/advertiser as the
+     * iroh BLE transport. The scan is refreshed, fresh peers are ranked by RSSI, ambiguous crowds
+     * fail closed, and the strongest peer's full identity is read + checked against its advertised
+     * prefix. No friendship is granted here; the returned endpoint still enters the authenticated
+     * nearby pairing + mandatory SAS flow.
+     */
+    func resolveBumpPeer(timeoutMs: UInt64) async  -> BumpResolution
     
     /**
      * Accept or reject a pending pairing session. `accept == true` **requires the local SAS
@@ -1262,8 +1301,7 @@ open func bleAvailable()async  -> Bool  {
 }
     
     /**
-     * Honest BLE capability report combined with the app-level pairing-ready gate. The transport
-     * exposes no active scan toggle / RSSI / discovery-refresh, so those are always `false`.
+     * Honest BLE capability report combined with the app-level pairing-ready gate.
      */
 open func bleCapabilities()async  -> BleCapabilities  {
     return
@@ -1586,6 +1624,37 @@ open func nearbyBlePeers()async  -> [BlePeer]  {
 }
     
     /**
+     * Notify iroh that the device's network may have changed (wifi↔cellular roam, interface
+     * up/down, IP reassignment).
+     *
+     * iroh's netmon auto-detects this on desktop, but Android's SELinux policy denies
+     * `untrusted_app` the netlink route socket + `/sys/class/net` reads it relies on (the recurring
+     * `avc: denied nlmsg_readpriv … netlink_route_socket` in logcat), so on Android iroh is blind to
+     * roaming: after the device leaves a network its sockets stay bound to the dead interface and the
+     * relay home is never re-derived, so cross-network sync silently dies. iroh exposes
+     * [`Endpoint::network_change`] precisely for this — the Android module observes
+     * `ConnectivityManager` and calls this on every default-network transition, prompting a socket
+     * rebind + relay re-check. No-op before `start()`; harmless to over-call.
+     */
+open func networkChanged()async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_network_changed(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
+        )
+}
+    
+    /**
      * The completed-pair result for a session, enriched with the peer's verified latest profile
      * (once replicated). `None` until both sides have accepted.
      */
@@ -1828,6 +1897,31 @@ open func recvSecret() -> Data  {
             self.uniffiCloneHandle(),$0
     )
 })
+}
+    
+    /**
+     * Perform one foreground Bump rendezvous attempt using the same scanner/advertiser as the
+     * iroh BLE transport. The scan is refreshed, fresh peers are ranked by RSSI, ambiguous crowds
+     * fail closed, and the strongest peer's full identity is read + checked against its advertised
+     * prefix. No friendship is granted here; the returned endpoint still enters the authenticated
+     * nearby pairing + mandatory SAS flow.
+     */
+open func resolveBumpPeer(timeoutMs: UInt64)async  -> BumpResolution  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_resolve_bump_peer(
+                    self.uniffiCloneHandle(),
+                    FfiConverterUInt64.lower(timeoutMs)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeBumpResolution_lift,
+            errorHandler: nil
+            
+        )
 }
     
     /**
@@ -2337,6 +2431,103 @@ public func FfiConverterTypeBlePeer_lift(_ buf: RustBuffer) throws -> BlePeer {
 #endif
 public func FfiConverterTypeBlePeer_lower(_ value: BlePeer) -> RustBuffer {
     return FfiConverterTypeBlePeer.lower(value)
+}
+
+
+/**
+ * Result of one explicit Bump rendezvous attempt.
+ */
+public struct BumpResolution: Equatable, Hashable {
+    /**
+     * `resolved` | `unavailable` | `noPeers` | `ambiguous` | `probeFailed`.
+     */
+    public var status: String
+    /**
+     * Resolved peer EndpointId when `status == "resolved"`.
+     */
+    public var endpointId: Data?
+    public var deviceId: String?
+    public var rssi: Int16?
+    /**
+     * Number of fresh iroh advertisements observed during this attempt.
+     */
+    public var peerCount: UInt32
+    /**
+     * Diagnostic detail suitable for logs and actionable UI copy.
+     */
+    public var detail: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `resolved` | `unavailable` | `noPeers` | `ambiguous` | `probeFailed`.
+         */status: String, 
+        /**
+         * Resolved peer EndpointId when `status == "resolved"`.
+         */endpointId: Data?, deviceId: String?, rssi: Int16?, 
+        /**
+         * Number of fresh iroh advertisements observed during this attempt.
+         */peerCount: UInt32, 
+        /**
+         * Diagnostic detail suitable for logs and actionable UI copy.
+         */detail: String) {
+        self.status = status
+        self.endpointId = endpointId
+        self.deviceId = deviceId
+        self.rssi = rssi
+        self.peerCount = peerCount
+        self.detail = detail
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension BumpResolution: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBumpResolution: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BumpResolution {
+        return
+            try BumpResolution(
+                status: FfiConverterString.read(from: &buf), 
+                endpointId: FfiConverterOptionData.read(from: &buf), 
+                deviceId: FfiConverterOptionString.read(from: &buf), 
+                rssi: FfiConverterOptionInt16.read(from: &buf), 
+                peerCount: FfiConverterUInt32.read(from: &buf), 
+                detail: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: BumpResolution, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.status, into: &buf)
+        FfiConverterOptionData.write(value.endpointId, into: &buf)
+        FfiConverterOptionString.write(value.deviceId, into: &buf)
+        FfiConverterOptionInt16.write(value.rssi, into: &buf)
+        FfiConverterUInt32.write(value.peerCount, into: &buf)
+        FfiConverterString.write(value.detail, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBumpResolution_lift(_ buf: RustBuffer) throws -> BumpResolution {
+    return try FfiConverterTypeBumpResolution.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBumpResolution_lower(_ value: BumpResolution) -> RustBuffer {
+    return FfiConverterTypeBumpResolution.lower(value)
 }
 
 
@@ -3375,6 +3566,30 @@ public func FfiConverterTypeSasRoleKind_lower(_ value: SasRoleKind) -> RustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionInt16: FfiConverterRustBuffer {
+    typealias SwiftType = Int16?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterInt16.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterInt16.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
     typealias SwiftType = UInt64?
 
@@ -3869,7 +4084,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_ble_available() != 5831) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_ble_capabilities() != 12087) {
+    if (uniffi_iroh_location_checksum_method_locationnode_ble_capabilities() != 44655) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_ble_has_scan_hint() != 33560) {
@@ -3917,6 +4132,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_nearby_ble_peers() != 20491) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_network_changed() != 50592) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_pair_result() != 26021) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3954,6 +4172,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_recv_secret() != 13424) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_resolve_bump_peer() != 55036) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_respond_pair() != 4487) {

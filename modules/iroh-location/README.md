@@ -43,6 +43,10 @@ and is mirrored by the app's service.
 
 ## Build pipeline
 
+The generated Android `.so` files and iOS XCFramework are git-ignored. EAS runs
+`scripts/eas-build-pre-install.sh` to rebuild the correct platform artifact from the committed Rust
+source before each cloud build.
+
 ### 0. Toolchain
 
 ```bash

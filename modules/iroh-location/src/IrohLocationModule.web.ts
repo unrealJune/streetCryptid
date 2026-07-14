@@ -12,6 +12,7 @@ import type {
   IrohLocationEvents,
   BleCapabilities,
   BlePeer,
+  BumpResolution,
   NativeIncomingFix,
   NativeLocationFix,
   NodeKeys,
@@ -318,6 +319,17 @@ export class IrohLocationNativeModule
 
   async nearbyBlePeers(): Promise<BlePeer[]> {
     return [];
+  }
+
+  async resolveBumpPeer(_timeoutMs: number): Promise<BumpResolution> {
+    return {
+      status: 'unavailable',
+      endpointId: null,
+      deviceId: null,
+      rssi: null,
+      peerCount: 0,
+      detail: 'BLE Bump pairing is unavailable in the browser.',
+    };
   }
 
   async bleHasScanHint(_endpointIdHex: string): Promise<boolean> {

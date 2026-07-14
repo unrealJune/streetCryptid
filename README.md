@@ -24,7 +24,8 @@ over BLE, and renders current friend presence on the map.
 - **Node.js** — LTS (≥ 20) recommended. Anything ≥ 18.13 works.
 - **bun** ≥ 1.3 — `bun --version`
 - **just** — `just --version` (install: https://github.com/casey/just)
-- For local **Android** native builds: Android SDK + JDK 17+ (`ANDROID_HOME` set).
+- For local **Android** native builds: Android SDK + JDK 17+, Rust, and `cargo-ndk`
+  (`ANDROID_HOME` set).
 - For local **iOS** native builds: macOS + Xcode. On Windows/Linux, build iOS via
   EAS or run in [Expo Go](https://expo.dev/go).
 
@@ -61,6 +62,7 @@ just format          # prettier --write
 just doctor          # expo-doctor health check
 just deps-check      # verify deps match the Expo SDK
 just deps-fix        # align deps to the Expo SDK
+just bindgen-android # rebuild the Android Rust libraries + Kotlin bindings
 
 just build ios              # EAS build (defaults: android / preview)
 just build android production
@@ -68,6 +70,9 @@ just build-dev             # installable development client
 just submit ios            # submit latest build to the store
 just update "message"      # publish an OTA update
 ```
+
+EAS pre-install hooks rebuild the git-ignored Rust artifacts for both Android and iOS, so cloud
+builds always package the native code that matches the committed UniFFI bindings.
 
 ## Project structure
 

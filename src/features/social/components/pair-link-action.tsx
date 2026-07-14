@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Pressable, Share, StyleSheet, View } from 'react-native';
+import { Pressable, Share, StyleSheet, TextInput, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
@@ -9,18 +9,34 @@ import type { PairingSnapshot } from '../net/location-sharing';
 interface PairLinkActionProps {
   pairing: PairingSnapshot;
   accent: string;
+  errorAccent: string;
   onCreateInvite(): Promise<string | undefined>;
+  onPairInput(input: string): Promise<void>;
   onReject(sessionId: string): Promise<void>;
 }
 
-export function PairLinkAction({ pairing, accent, onCreateInvite, onReject }: PairLinkActionProps) {
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function PairLinkAction({
+  pairing,
+  accent,
+  errorAccent,
+  onCreateInvite,
+  onPairInput,
+  onReject,
+}: PairLinkActionProps) {
   const theme = useTheme();
-  const [working, setWorking] = useState(false);
+  const [sharing, setSharing] = useState(false);
+  const [pairingInput, setPairingInput] = useState('');
+  const [pairingInputError, setPairingInputError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const remoteRequests = pairing.pendingRequests.filter((request) => !request.nearby);
 
   const shareInvite = async (): Promise<void> => {
-    if (working) return;
-    setWorking(true);
+    if (sharing) return;
+    setSharing(true);
     try {
       const link = await onCreateInvite();
       if (link) {
@@ -30,7 +46,25 @@ export function PairLinkAction({ pairing, accent, onCreateInvite, onReject }: Pa
         });
       }
     } finally {
-      setWorking(false);
+      setSharing(false);
+    }
+  };
+
+  const submitPairInput = async (): Promise<void> => {
+    const value = pairingInput.trim();
+    if (!value) {
+      setPairingInputError('Paste a streetCryptid sharing link or enter a pairing code.');
+      return;
+    }
+    setSubmitting(true);
+    setPairingInputError(null);
+    try {
+      await onPairInput(value);
+      setPairingInput('');
+    } catch (error) {
+      setPairingInputError(errorMessage(error));
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -63,15 +97,70 @@ export function PairLinkAction({ pairing, accent, onCreateInvite, onReject }: Pa
         </View>
       ))}
 
+      <View style={[styles.inputSection, { borderBottomColor: theme.backgroundSelected }]}>
+        <View style={styles.inputCopy}>
+          <ThemedText type="smallBold">Pairing link or code</ThemedText>
+          <ThemedText type="small" themeColor="textSecondary">
+            Paste a shared link, raw token, or 16-character code.
+          </ThemedText>
+        </View>
+        <View style={styles.inputRow}>
+          <TextInput
+            accessibilityLabel="Pairing link or code"
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={pairing.available && !submitting}
+            onChangeText={(value) => {
+              setPairingInput(value);
+              if (pairingInputError) setPairingInputError(null);
+            }}
+            onSubmitEditing={() => void submitPairInput()}
+            placeholder="streetcryptid:///social?token=…"
+            placeholderTextColor={theme.textSecondary}
+            selectionColor={accent}
+            style={[
+              styles.input,
+              {
+                borderColor: pairingInputError ? errorAccent : theme.backgroundSelected,
+                color: theme.text,
+              },
+            ]}
+            value={pairingInput}
+          />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Pair using this link or code"
+            disabled={!pairing.available || submitting}
+            onPress={() => void submitPairInput()}
+            style={({ pressed }) => [
+              styles.inputButton,
+              {
+                borderColor: accent,
+                opacity: !pairing.available || submitting ? 0.38 : pressed ? 0.62 : 1,
+              },
+            ]}
+          >
+            <ThemedText type="code" style={{ color: accent }}>
+              {submitting ? 'PAIRING' : 'PAIR'}
+            </ThemedText>
+          </Pressable>
+        </View>
+        {pairingInputError ? (
+          <ThemedText accessibilityLiveRegion="polite" type="small" style={{ color: errorAccent }}>
+            {pairingInputError}
+          </ThemedText>
+        ) : null}
+      </View>
+
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Share a one-time pairing link"
-        disabled={!pairing.available || working}
+        disabled={!pairing.available || sharing}
         onPress={() => void shareInvite()}
         style={({ pressed }) => [
           styles.shareRow,
           {
-            opacity: !pairing.available || working ? 0.38 : pressed ? 0.62 : 1,
+            opacity: !pairing.available || sharing ? 0.38 : pressed ? 0.62 : 1,
           },
         ]}
       >
@@ -101,6 +190,38 @@ const styles = StyleSheet.create({
   },
   requestCopy: {
     gap: Spacing.one,
+  },
+  inputSection: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: Spacing.two,
+    paddingVertical: Spacing.three,
+  },
+  inputCopy: {
+    gap: Spacing.one,
+  },
+  inputRow: {
+    alignItems: 'stretch',
+    flexDirection: 'row',
+    gap: Spacing.two,
+  },
+  input: {
+    borderRadius: Spacing.two,
+    borderWidth: StyleSheet.hairlineWidth,
+    flex: 1,
+    fontFamily: 'IBMPlexMono_400Regular',
+    fontSize: 14,
+    minHeight: 48,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+  },
+  inputButton: {
+    alignItems: 'center',
+    borderRadius: Spacing.two,
+    borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 48,
+    minWidth: 72,
+    paddingHorizontal: Spacing.three,
   },
   smallButton: {
     alignItems: 'center',

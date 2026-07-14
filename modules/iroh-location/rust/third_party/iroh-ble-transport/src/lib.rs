@@ -13,5 +13,6 @@ pub use error::{BleError, BleResult};
 pub use transport::hook::BleDedupHook;
 pub use transport::{
     BlePeerInfo, BlePeerPhase, BleTransport, BleTransportBuilder, ConnectPath, InMemoryPeerStore,
-    IncomingPacket, KEY_PREFIX_LEN, KeyPrefix, L2capPolicy, PeerSnapshot, PeerStore,
+    IROH_IDENTITY_CHAR_UUID, IncomingPacket, KEY_PREFIX_LEN, KeyPrefix, L2capPolicy, PeerSnapshot,
+    PeerStore, is_iroh_key_uuid, key_uuid_matches_endpoint,
 };

@@ -1,5 +1,5 @@
 /**
- * Pair-link codec. A bilateral-pairing invite is shared as a `streetcryptid://social?token=<token>`
+ * Pair-link codec. A bilateral-pairing invite is shared as a `streetcryptid:///social?token=<token>`
  * deep link (QR / tappable link) that wraps an opaque native `scpair1:` invite token. This is
  * deliberately a *separate* scheme+path from the legacy `streetcryptid://contact?…` card: a contact
  * link seeds a one-way friend add, whereas a pair link bootstraps the two-way pairing handshake.
@@ -14,8 +14,16 @@ export const PAIR_PATH = 'social';
 /** Prefix of the opaque native invite token (`scpair1:<hex>`). */
 export const PAIR_TOKEN_PREFIX = 'scpair1:';
 
-const PAIR_LINK_PREFIX = `${PAIR_SCHEME}://${PAIR_PATH}`;
+const PAIR_LINK_PREFIX = `${PAIR_SCHEME}:///${PAIR_PATH}`;
+const LEGACY_SOCIAL_LINK_PREFIX = `${PAIR_SCHEME}://${PAIR_PATH}`;
 const LEGACY_PAIR_LINK_PREFIX = `${PAIR_SCHEME}://pair`;
+const LEGACY_TRIPLE_PAIR_LINK_PREFIX = `${PAIR_SCHEME}:///pair`;
+const ACCEPTED_LINK_PREFIXES = [
+  PAIR_LINK_PREFIX,
+  LEGACY_SOCIAL_LINK_PREFIX,
+  LEGACY_PAIR_LINK_PREFIX,
+  LEGACY_TRIPLE_PAIR_LINK_PREFIX,
+] as const;
 
 /** True when `s` is a raw opaque native invite token (`scpair1:<…>`). */
 export function isPairToken(s: string): boolean {
@@ -27,8 +35,7 @@ export function isPairLink(s: string): boolean {
   const trimmed = s.trim();
   return (
     isPairToken(trimmed) ||
-    trimmed.startsWith(`${PAIR_LINK_PREFIX}?`) ||
-    trimmed.startsWith(`${LEGACY_PAIR_LINK_PREFIX}?`)
+    ACCEPTED_LINK_PREFIXES.some((prefix) => trimmed.startsWith(`${prefix}?`))
   );
 }
 
@@ -63,7 +70,9 @@ function parseQuery(input: string): Map<string, string> {
 export function decodePairLink(input: string): string {
   const trimmed = input.trim();
   if (isPairToken(trimmed)) return trimmed;
-  if (!trimmed.startsWith(PAIR_LINK_PREFIX) && !trimmed.startsWith(LEGACY_PAIR_LINK_PREFIX)) {
+  if (
+    !ACCEPTED_LINK_PREFIXES.some((prefix) => trimmed === prefix || trimmed.startsWith(`${prefix}?`))
+  ) {
     throw new Error('pair link: not a streetcryptid pair link');
   }
   const token = parseQuery(trimmed).get('token') ?? '';

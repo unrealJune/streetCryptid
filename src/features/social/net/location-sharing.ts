@@ -59,8 +59,10 @@ import {
   createPersistentKV,
   createPersistentTrailStorage,
   loadPool,
+  loadRelayOnly,
   loadStashOptIn,
   savePool,
+  saveRelayOnly,
   saveStashOptIn,
 } from './persistence';
 import { createDefaultStashClient, type StashClient } from './stash-client';
@@ -99,6 +101,16 @@ export interface PairingVerification {
   peerVerified: boolean;
 }
 
+export type BumpStage = 'idle' | 'armed' | 'searching' | 'contact' | 'failed';
+
+export interface BumpSnapshot {
+  stage: BumpStage;
+  expiresAt: number | null;
+  rssi: number | null;
+  peerCount: number;
+  error: string | null;
+}
+
 /** An immutable view of the bilateral-pairing state for the UI. See ARCHITECTURE.md §2, §4. */
 export interface PairingSnapshot {
   /** Whether bilateral pairing is usable here at all (native dev client; false on web/Expo Go). */
@@ -118,13 +130,11 @@ export interface PairingSnapshot {
    * mandatory visual gate before any pair completes — pick or confirm the figure to advance.
    */
   verifications: PairingVerification[];
-  /** True during the short mutual-consent window opened by a rub gesture. */
-  gestureActive: boolean;
-  /** When the active rub-consent window expires, or null while idle. */
-  gestureExpiresAt: number | null;
+  /** Explicit foreground Bump rendezvous state. */
+  bump: BumpSnapshot;
   /** The friend most recently completed through pairing, until the reveal is acknowledged/rejected. */
   discoveredFriend: Friend | null;
-  /** The most recently minted invite link (`streetcryptid://social?token=…`), if any. */
+  /** The most recently minted invite link (`streetcryptid:///social?token=…`), if any. */
   inviteLink: string | null;
   /**
    * The most recently minted short pairing code (`XXXX-XXXX-XXXX-XXXX`), if any. Optional so that
@@ -158,6 +168,12 @@ export interface SharingSnapshot {
   lastSyncRecovered: number | null;
   /** Offline-delivery stash: whether a stash is deployed and whether the user opted in. */
   stash: { available: boolean; optedIn: boolean };
+  /**
+   * Transport preferences: whether the user forced relay-only, and whether that's actually
+   * enforced at the native endpoint yet (Phase 2). In Phase 1 `enforced` is always false — the
+   * flag is recorded and reflected in the diagnostic but does not yet re-bind the endpoint.
+   */
+  transports: { relayOnly: boolean; relayOnlyEnforced: boolean };
   /** Bilateral-pairing / nearby-discovery state. */
   pairing: PairingSnapshot;
 }
@@ -184,8 +200,9 @@ interface Removable {
 
 /** How often the pairing/discovery queues are drained once the node has started (ms). */
 const PAIRING_POLL_INTERVAL_MS = 4000;
-const NEARBY_GESTURE_POLL_INTERVAL_MS = 300;
-export const NEARBY_GESTURE_WINDOW_MS = 9000;
+const BUMP_POLL_INTERVAL_MS = 300;
+const BUMP_RESOLVE_TIMEOUT_MS = 12_000;
+export const BUMP_WINDOW_MS = 15_000;
 
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -238,9 +255,16 @@ export class LocationSharingService implements FixPublisher {
   private pairSessions: PairStateRecord[] = [];
   private pendingPairRequests: PairEvent[] = [];
   private verifications: PairingVerification[] = [];
-  private nearbyGestureUntil = 0;
-  private nearbyGestureTimer: ReturnType<typeof setInterval> | null = null;
-  private readonly nearbyPairAttempts = new Set<string>();
+  private bumpUntil = 0;
+  private bumpTimer: ReturnType<typeof setInterval> | null = null;
+  private bumpStage: BumpStage = 'idle';
+  private bumpRssi: number | null = null;
+  private bumpPeerCount = 0;
+  private bumpError: string | null = null;
+  private bumpResolveInFlight: Promise<void> | null = null;
+  private bumpGeneration = 0;
+  private pairingOperations = 0;
+  private rebindInFlight = false;
   private discoveredFriend: Friend | null = null;
   private inviteLink: string | null = null;
   private inviteCode: string | null = null;
@@ -254,6 +278,12 @@ export class LocationSharingService implements FixPublisher {
   private readonly stashTicket: string | null = getStashConfig()?.ticket ?? null;
   /** Per-user opt-in (persisted). Defaults false — the stash is never used unless turned on. */
   private stashOptIn = false;
+  /**
+   * User forced relay-only transport (persisted). Defaults false. Phase 1 records intent only;
+   * native enforcement (skip BLE/nearby/mDNS + relay-only mode) lands in Phase 2. Never enforced
+   * on web (no native endpoint to re-bind).
+   */
+  private relayOnly = false;
   /** Native push-token source for stash wake-ups. */
   private readonly pushTokens: PushTokenProvider;
   /** Cached device push token (undefined = not yet attempted; null = unavailable/denied). */
@@ -320,6 +350,24 @@ export class LocationSharingService implements FixPublisher {
   /** Current opt-in state for the UI: whether a stash exists and whether it's turned on. */
   stashState(): { available: boolean; optedIn: boolean } {
     return { available: this.stash.configured, optedIn: this.stashOptIn };
+  }
+
+  /** Current relay-only preference + whether it's enforced natively yet (Phase 2). */
+  relayOnlyState(): { relayOnly: boolean; relayOnlyEnforced: boolean } {
+    // Phase 1: never enforced (no native re-bind wired yet).
+    return { relayOnly: this.relayOnly, relayOnlyEnforced: false };
+  }
+
+  /**
+   * Force (or unforce) relay-only transport. Phase 1 persists the choice and reflects it in the
+   * diagnostic; the native endpoint is not yet re-bound, so BLE/nearby/direct/LAN keep running
+   * until Phase 2 wires enforcement (a node restart). Idempotent.
+   */
+  async setRelayOnly(relayOnly: boolean): Promise<void> {
+    if (this.relayOnly === relayOnly) return;
+    this.relayOnly = relayOnly;
+    await saveRelayOnly(this.kv, relayOnly);
+    this.emit();
   }
 
   /**
@@ -429,6 +477,7 @@ export class LocationSharingService implements FixPublisher {
 
     await this.restorePool(interactive);
     this.stashOptIn = await loadStashOptIn(this.kv);
+    this.relayOnly = await loadRelayOnly(this.kv);
     if (interactive) {
       await this.importFriendProfiles();
       if (this.stashEnabled()) this.registerStashBackgroundSync();
@@ -540,7 +589,6 @@ export class LocationSharingService implements FixPublisher {
     }
 
     if (this.discoveredFriend?.endpointId === endpointId) this.discoveredFriend = null;
-    if (this.isNearbyGestureActive()) this.nearbyPairAttempts.add(endpointId);
     this.emit();
 
     const cleanup: Promise<void>[] = [];
@@ -568,26 +616,190 @@ export class LocationSharingService implements FixPublisher {
     if (!this.isReady() || !this.mod) return;
     await this.mod.setPairingReady(ready);
     this.pairingReadyFlag = ready;
-    this.setPairingActivity(ready ? 'nearby pairing on' : 'nearby pairing off');
+    this.emit();
   }
 
-  /**
-   * Opens a short local consent window for buttonless nearby pairing. Two phones begin a handshake
-   * only when both detect the gesture: an outbound nearby session is initiated for the single
-   * verified peer, and an inbound nearby request is picked up while this window is active. Neither
-   * side auto-accepts — the handshake proceeds to the SAS `verifying` gate, which both humans must
-   * clear (see {@link submitPairChoice} / {@link confirmPairDisplay}) before the pair completes.
-   */
-  async beginNearbyGesture(windowMs = NEARBY_GESTURE_WINDOW_MS): Promise<void> {
+  /** Rebuild the native node after Bluetooth permission changes so BLE is actually attached. */
+  async ensureBleReady(): Promise<void> {
+    if (!this.mod || !this.isReady()) throw new Error('Friend sync is not ready yet.');
+    if (this.rebindInFlight || this.pairingOperations > 0) {
+      throw new Error('Another pairing action is already in progress.');
+    }
+    if (this.hasActivePairingSession()) {
+      throw new Error('Finish or cancel the current pairing before starting Bump.');
+    }
+    this.rebindInFlight = true;
+    try {
+      if (await this.mod.bleAvailable()) return;
+      await this.rebindNode();
+      if (!(await this.mod.bleAvailable())) {
+        throw new Error(
+          'Bluetooth could not start. Confirm Bluetooth is on, then close and reopen streetCryptid.'
+        );
+      }
+    } finally {
+      this.rebindInFlight = false;
+    }
+  }
+
+  /** Arm a short, explicit Bump window. No sensor or nearby acceptance runs while idle. */
+  async armBump(windowMs = BUMP_WINDOW_MS): Promise<void> {
     if (!this.mod || this.discoveredFriend) return;
-    this.nearbyGestureUntil = Date.now() + Math.max(2000, windowMs);
-    this.setPairingActivity('feeling for a signal');
-    this.startNearbyGesturePolling();
+    if (this.rebindInFlight || this.pairingOperations > 0) {
+      throw new Error('Another pairing action is already in progress.');
+    }
+    if (this.hasActivePairingSession()) {
+      throw new Error('Finish or cancel the current pairing before starting Bump.');
+    }
+    if (this.bumpResolveInFlight) await this.bumpResolveInFlight;
+    this.bumpGeneration += 1;
+    await this.setPairingReady(true);
+    this.bumpUntil = Date.now() + Math.max(8000, windowMs);
+    this.bumpStage = 'armed';
+    this.bumpRssi = null;
+    this.bumpPeerCount = 0;
+    this.bumpError = null;
+    this.setPairingActivity('ready to bump');
+    this.startBumpPolling();
 
     for (const request of this.pendingPairRequests.filter((event) => event.nearby)) {
       this.trackNearbyRequest(request);
     }
     await this.pollPairingOnce();
+  }
+
+  /** Commit a physical or visible fallback Bump and resolve the strongest fresh BLE signal. */
+  async commitBump(): Promise<void> {
+    if (!this.mod || !this.isBumpActive() || this.bumpResolveInFlight) return;
+    const generation = this.bumpGeneration;
+    this.bumpStage = 'searching';
+    this.bumpError = null;
+    this.setPairingActivity('finding the bumped phone');
+
+    const run = this.runPairingOperation(async () => {
+      const result = await this.mod!.resolveBumpPeer(BUMP_RESOLVE_TIMEOUT_MS);
+      if (generation !== this.bumpGeneration || !this.isBumpActive()) return;
+      this.bumpPeerCount = result.peerCount;
+      this.bumpRssi = result.rssi;
+      if (result.status === 'resolved' && result.endpointId) {
+        if (this.state.friends[result.endpointId]) {
+          this.bumpStage = 'failed';
+          this.bumpError = 'That cryptid is already in your atlas.';
+          this.setPairingActivity('already paired');
+          return;
+        }
+        this.bumpStage = 'contact';
+        this.setPairingActivity('signal found');
+        let sessionId: string;
+        try {
+          sessionId = await this.initiateNearbyPair(result.endpointId);
+        } catch (error) {
+          if (generation === this.bumpGeneration && this.isBumpActive()) {
+            this.bumpStage = 'failed';
+            this.bumpError =
+              'The phones found each other, but the encrypted handshake did not start. Try again.';
+            this.setPairingActivity('handshake failed');
+          }
+          throw error;
+        }
+        if (generation !== this.bumpGeneration) {
+          this.initiatedRoutes.delete(sessionId);
+          await this.mod!.cancelPair(sessionId);
+          return;
+        }
+        await this.pollPairingOnce();
+        return;
+      }
+
+      this.bumpStage = 'failed';
+      this.bumpError =
+        result.status === 'ambiguous'
+          ? 'More than one phone is equally close. Move the two phones apart and try again.'
+          : result.status === 'noPeers'
+            ? 'No other streetCryptid phone answered. Keep Friends open on both phones and retry.'
+            : result.status === 'unavailable'
+              ? 'Bluetooth is not available on this device or build.'
+              : 'The nearby phone was found, but its identity could not be read. Try Bump again.';
+      this.setPairingActivity('bump needs another try');
+    }).finally(() => {
+      this.bumpResolveInFlight = null;
+      this.emit();
+    });
+    this.bumpResolveInFlight = run;
+    await run;
+  }
+
+  async cancelBump(): Promise<void> {
+    this.stopBumpPolling();
+    if (this.mod && this.pairingReadyFlag) await this.setPairingReady(false);
+  }
+
+  private hasActivePairingSession(): boolean {
+    return (
+      this.verifications.length > 0 ||
+      this.pendingPairRequests.length > 0 ||
+      this.pairSessions.some(
+        (session) => !['complete', 'rejected', 'failed'].includes(session.state)
+      )
+    );
+  }
+
+  private async runPairingOperation<T>(action: () => Promise<T>): Promise<T> {
+    if (this.rebindInFlight) throw new Error('Bluetooth is restarting. Try again in a moment.');
+    this.pairingOperations += 1;
+    try {
+      return await action();
+    } finally {
+      this.pairingOperations -= 1;
+    }
+  }
+
+  private async rebindNode(): Promise<void> {
+    const mod = this.mod;
+    const keys = this.keys;
+    if (!mod || !keys) throw new Error('Friend sync is not ready yet.');
+
+    const restorePairingReady = this.pairingReadyFlag;
+    this.stopPairingPolling();
+    this.fixSub?.remove();
+    this.fixSub = null;
+    this.syncSub?.remove();
+    this.syncSub = null;
+
+    const subscriptionIds = [...(this.mySubId ? [this.mySubId] : []), ...this.friendSubs.values()];
+    await Promise.allSettled(
+      subscriptionIds.map((subscriptionId) => mod.unsubscribe(subscriptionId))
+    );
+    this.friendSubs.clear();
+    this.mySubId = null;
+    this.mySubRecipients = '';
+    this.pairSessions = [];
+    this.pendingPairRequests = [];
+    this.verifications = [];
+    this.nearbyPeers = [];
+    this.bleCaps = null;
+    this.pairingReadyFlag = false;
+
+    await mod.shutdown();
+    this.keys = await mod.createNode(keys.identitySecret, keys.recvSecret);
+    await mod.start();
+    this.ticketStr = await mod.ticket();
+    this.docTicketStr = await this.safeDocTicket();
+    this.profileEpoch = await this.safePublishProfile();
+    this.profileTicketStr = await this.safeProfileTicket();
+    this.fixSub = mod.addListener('onFix', (event: OnFixEvent) => this.handleFix(event));
+    this.syncSub = mod.addListener('onSync', (event: OnSyncEvent) => this.handleSync(event));
+
+    await this.importFriendProfiles();
+    for (const friend of pool.friendList(this.state)) await this.subscribeToFriend(friend);
+    await this.ensureMySubscription();
+    if (restorePairingReady) {
+      await mod.setPairingReady(true);
+      this.pairingReadyFlag = true;
+    }
+    this.startPairingPolling();
+    await this.pollPairingOnce();
+    void this.syncTrail(0);
   }
 
   /** Acknowledge the one-shot "cryptid discovered" reveal and keep the new friend. */
@@ -618,15 +830,17 @@ export class LocationSharingService implements FixPublisher {
   }
 
   /**
-   * Mint a one-shot invite and return its shareable `streetcryptid://social?token=…` link.
+   * Mint a one-shot invite and return its shareable `streetcryptid:///social?token=…` link.
    * The link is also retained in the pairing snapshot as the current invite.
    */
   async createPairInvite(ttlSecs: number): Promise<string> {
-    if (!this.mod) throw new Error('createPairInvite: native module not bound');
-    const invite = await this.mod.createPairInvite(ttlSecs);
-    this.inviteLink = encodePairLink(invite.token);
-    this.setPairingActivity('invite created');
-    return this.inviteLink;
+    return this.runPairingOperation(async () => {
+      if (!this.mod) throw new Error('createPairInvite: native module not bound');
+      const invite = await this.mod.createPairInvite(ttlSecs);
+      this.inviteLink = encodePairLink(invite.token);
+      this.setPairingActivity('invite created');
+      return this.inviteLink;
+    });
   }
 
   /**
@@ -638,24 +852,26 @@ export class LocationSharingService implements FixPublisher {
    * the code, the secret, the key, or the plaintext invite token.
    */
   async createPairCode(ttlSecs = 600): Promise<string> {
-    if (!this.mod) throw new Error('createPairCode: native module not bound');
-    if (!this.mailbox.configured) {
-      throw new Error('createPairCode: pairing mailbox is not configured');
-    }
-    const ttl = clampMailboxTtlSeconds(ttlSecs);
-    const invite = await this.mod.createPairInvite(ttl);
-    const minted = await mintPairingCode();
-    const lookupId = await deriveLookupId(minted.secret);
-    const capsule = await sealPairToken(invite.token, minted.secret);
-    await this.mailbox.put(lookupId, capsule, ttl);
-    this.inviteCode = minted.display;
-    this.setPairingActivity('pair code created');
-    return this.inviteCode;
+    return this.runPairingOperation(async () => {
+      if (!this.mod) throw new Error('createPairCode: native module not bound');
+      if (!this.mailbox.configured) {
+        throw new Error('createPairCode: pairing mailbox is not configured');
+      }
+      const ttl = clampMailboxTtlSeconds(ttlSecs);
+      const invite = await this.mod.createPairInvite(ttl);
+      const minted = await mintPairingCode();
+      const lookupId = await deriveLookupId(minted.secret);
+      const capsule = await sealPairToken(invite.token, minted.secret);
+      await this.mailbox.put(lookupId, capsule, ttl);
+      this.inviteCode = minted.display;
+      this.setPairingActivity('pair code created');
+      return this.inviteCode;
+    });
   }
 
   /**
    * Begin an invite-based pair from a short mailbox pairing code, an app pair link
-   * (`streetcryptid://social?token=…`), or a raw `scpair1:` token. The handshake proceeds to the
+   * (`streetcryptid:///social?token=…`), or a raw `scpair1:` token. The handshake proceeds to the
    * SAS `verifying` gate; neither side is auto-accepted — both humans clear the visual check to
    * complete the pair. Returns the session id. Tags the eventual friend `code` (short code or raw
    * token) or `invite` (app link). A short code is recognized *before* pair-link parsing; its
@@ -663,7 +879,12 @@ export class LocationSharingService implements FixPublisher {
    * than falling back to anything else.
    */
   async pairFromInput(input: string): Promise<string> {
+    return this.runPairingOperation(() => this.pairFromInputUnlocked(input));
+  }
+
+  private async pairFromInputUnlocked(input: string): Promise<string> {
     if (!this.mod) throw new Error('pairFromInput: native module not bound');
+    if (this.isBumpActive()) throw new Error('Cancel Bump before using a pairing link or code.');
     const trimmed = input.trim();
     if (isPairingCode(trimmed)) {
       return this.pairFromCode(trimmed);
@@ -707,9 +928,11 @@ export class LocationSharingService implements FixPublisher {
    * friend `nearby`.
    */
   async pairNearby(endpointId: string): Promise<string> {
-    const sessionId = await this.initiateNearbyPair(endpointId);
-    await this.refreshPairing();
-    return sessionId;
+    return this.runPairingOperation(async () => {
+      const sessionId = await this.initiateNearbyPair(endpointId);
+      await this.refreshPairing();
+      return sessionId;
+    });
   }
 
   /**
@@ -1098,7 +1321,7 @@ export class LocationSharingService implements FixPublisher {
   private async performShutdown(): Promise<void> {
     // Stop callbacks synchronously before awaiting native teardown.
     this.stopPairingPolling();
-    this.stopNearbyGesturePolling();
+    this.stopBumpPolling();
     if (this.liveTrackingTimer) {
       clearTimeout(this.liveTrackingTimer);
       this.liveTrackingTimer = null;
@@ -1312,6 +1535,7 @@ export class LocationSharingService implements FixPublisher {
       backgroundAccess: this.backgroundAccess,
       lastSyncRecovered: this.lastSyncRecovered,
       stash: this.stashState(),
+      transports: this.relayOnlyState(),
       pairing: this.pairingSnapshot(),
     };
   }
@@ -1325,8 +1549,13 @@ export class LocationSharingService implements FixPublisher {
       sessions: [...this.pairSessions],
       pendingRequests: [...this.pendingPairRequests],
       verifications: [...this.verifications],
-      gestureActive: this.isNearbyGestureActive(),
-      gestureExpiresAt: this.isNearbyGestureActive() ? this.nearbyGestureUntil : null,
+      bump: {
+        stage: this.isBumpActive() ? this.bumpStage : 'idle',
+        expiresAt: this.isBumpActive() ? this.bumpUntil : null,
+        rssi: this.bumpRssi,
+        peerCount: this.bumpPeerCount,
+        error: this.bumpError,
+      },
       discoveredFriend: this.discoveredFriend,
       inviteLink: this.inviteLink,
       inviteCode: this.inviteCode,
@@ -1405,31 +1634,37 @@ export class LocationSharingService implements FixPublisher {
     }
   }
 
-  private startNearbyGesturePolling(): void {
-    if (this.nearbyGestureTimer) return;
+  private startBumpPolling(): void {
+    if (this.bumpTimer) return;
     const timer = setInterval(() => {
-      if (!this.isNearbyGestureActive()) {
-        this.stopNearbyGesturePolling();
-        if (!this.discoveredFriend) this.setPairingActivity('listening');
+      if (!this.isBumpActive()) {
+        this.stopBumpPolling(false);
+        if (this.pairingReadyFlag) void this.setPairingReady(false);
+        if (!this.discoveredFriend) this.setPairingActivity('bump idle');
         return;
       }
       void this.pollPairingOnce();
-    }, NEARBY_GESTURE_POLL_INTERVAL_MS);
-    this.nearbyGestureTimer = timer;
+    }, BUMP_POLL_INTERVAL_MS);
+    this.bumpTimer = timer;
     (timer as unknown as { unref?: () => void }).unref?.();
   }
 
-  private stopNearbyGesturePolling(): void {
-    if (this.nearbyGestureTimer) {
-      clearInterval(this.nearbyGestureTimer);
-      this.nearbyGestureTimer = null;
+  private stopBumpPolling(invalidateAttempt = true): void {
+    if (invalidateAttempt) this.bumpGeneration += 1;
+    if (this.bumpTimer) {
+      clearInterval(this.bumpTimer);
+      this.bumpTimer = null;
     }
-    this.nearbyGestureUntil = 0;
-    this.nearbyPairAttempts.clear();
+    this.bumpUntil = 0;
+    this.bumpStage = 'idle';
+    this.bumpRssi = null;
+    this.bumpPeerCount = 0;
+    this.bumpError = null;
+    this.emit();
   }
 
-  private isNearbyGestureActive(): boolean {
-    return this.nearbyGestureUntil > Date.now();
+  private isBumpActive(): boolean {
+    return this.bumpUntil > Date.now();
   }
 
   /**
@@ -1471,7 +1706,15 @@ export class LocationSharingService implements FixPublisher {
       // queue, so a just-emitted `verifying` transition may not appear in `sessions` yet. Merging
       // the two recovers it (and any transition missed while suspended) without a lost/late gate.
       await this.reconcileVerifications(sessions, pairEvents);
-      await this.maybeInitiateNearbyPair();
+      const liveSessions = new Set(sessions.map((session) => session.sessionId));
+      const justRequested = new Set(
+        pairEvents
+          .filter((event) => event.kind === 'pendingRequest')
+          .map((event) => event.sessionId)
+      );
+      this.pendingPairRequests = this.pendingPairRequests.filter(
+        (request) => liveSessions.has(request.sessionId) || justRequested.has(request.sessionId)
+      );
       if (this.lastPollErrorSig !== null) {
         // A prior poll surfaced an error (typically transient — e.g. the native node was still
         // coming up). Now that polling recovered, clear the surfaced error so the UI's sticky
@@ -1491,7 +1734,7 @@ export class LocationSharingService implements FixPublisher {
         // Sessions we initiated (or nearby ones we've picked up) advance to the SAS gate on their
         // own; only surface unsolicited peer-initiated requests as a pending prompt.
         if (this.initiatedRoutes.has(event.sessionId)) return;
-        if (event.nearby && this.isNearbyGestureActive()) {
+        if (event.nearby && this.isBumpActive()) {
           this.trackNearbyRequest(event);
           return;
         }
@@ -1507,6 +1750,10 @@ export class LocationSharingService implements FixPublisher {
         this.pendingPairRequests = this.pendingPairRequests.filter(
           (e) => e.sessionId !== event.sessionId
         );
+        if (event.nearby) {
+          this.stopBumpPolling(false);
+          if (this.pairingReadyFlag) void this.setPairingReady(false);
+        }
         this.setPairingActivity(event.nearby ? 'signals are locking' : 'verify to connect');
         return;
       case 'peerResponded':
@@ -1522,7 +1769,10 @@ export class LocationSharingService implements FixPublisher {
         );
         this.verifications = this.verifications.filter((v) => v.sessionId !== event.sessionId);
         this.initiatedRoutes.delete(event.sessionId);
-        if (event.nearby) this.stopNearbyGesturePolling();
+        if (event.nearby) {
+          this.stopBumpPolling(false);
+          if (this.pairingReadyFlag) void this.setPairingReady(false);
+        }
         this.setPairingActivity(event.kind === 'rejected' ? 'pair rejected' : 'pair failed');
         return;
     }
@@ -1541,7 +1791,7 @@ export class LocationSharingService implements FixPublisher {
   }
 
   /**
-   * Note an inbound nearby request seen during a rub window: tag its route so the eventual friend
+   * Note an inbound nearby request seen during an armed Bump window: tag its route so the eventual friend
    * is `nearby`, and drop it from the pending list. It is NOT auto-accepted — the handshake
    * advances to the SAS `verifying` gate, which the user then clears.
    */
@@ -1634,36 +1884,6 @@ export class LocationSharingService implements FixPublisher {
     }
   }
 
-  private async maybeInitiateNearbyPair(): Promise<void> {
-    if (!this.mod || !this.isNearbyGestureActive()) return;
-    const activeNearby = this.pairSessions.some(
-      (session) => session.nearby && !['complete', 'rejected', 'failed'].includes(session.state)
-    );
-    if (activeNearby) return;
-
-    const candidates = this.nearbyPeers
-      .map((peer) => ({ peer, endpointId: peer.verifiedEndpointId ?? peer.endpointHint }))
-      .filter(
-        (candidate): candidate is { peer: BlePeer; endpointId: string } =>
-          candidate.endpointId !== null &&
-          this.state.friends[candidate.endpointId] === undefined &&
-          !this.nearbyPairAttempts.has(candidate.endpointId)
-      );
-    if (candidates.length !== 1) {
-      if (candidates.length > 1) this.setPairingActivity('multiple signals nearby');
-      return;
-    }
-
-    const endpointId = candidates[0].endpointId;
-    this.nearbyPairAttempts.add(endpointId);
-    try {
-      await this.initiateNearbyPair(endpointId);
-    } catch (error) {
-      this.nearbyPairAttempts.delete(endpointId);
-      throw error;
-    }
-  }
-
   private async initiateNearbyPair(endpointId: string): Promise<string> {
     if (!this.mod) throw new Error('pairNearby: native module not bound');
     const sessionId = await this.mod.initiatePairNearby(endpointId);
@@ -1717,7 +1937,8 @@ export class LocationSharingService implements FixPublisher {
     this.verifications = this.verifications.filter((v) => v.sessionId !== event.sessionId);
     this.initiatedRoutes.delete(event.sessionId);
     this.discoveredFriend = friend;
-    this.stopNearbyGesturePolling();
+    this.stopBumpPolling(false);
+    if (this.pairingReadyFlag) void this.setPairingReady(false);
     this.persistPool();
     void this.syncTrail(0);
     this.setPairingActivity('cryptid discovered');

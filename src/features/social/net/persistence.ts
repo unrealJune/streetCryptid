@@ -247,3 +247,18 @@ export async function loadStashOptIn(kv: PersistentKV): Promise<boolean> {
 export async function saveStashOptIn(kv: PersistentKV, optedIn: boolean): Promise<void> {
   await kv.set(STASH_OPTIN_KEY, optedIn ? '1' : '0');
 }
+
+const RELAY_ONLY_KEY = 'sc.social.relayOnly';
+
+/**
+ * Whether the user forced relay-only transport (no BLE / Wi-Fi Aware / direct / LAN). Defaults to
+ * false: the full transport stack is used unless the user explicitly opts into relay-only.
+ */
+export async function loadRelayOnly(kv: PersistentKV): Promise<boolean> {
+  return (await kv.get(RELAY_ONLY_KEY)) === '1';
+}
+
+/** Persist the force-relay-only choice. */
+export async function saveRelayOnly(kv: PersistentKV, relayOnly: boolean): Promise<void> {
+  await kv.set(RELAY_ONLY_KEY, relayOnly ? '1' : '0');
+}

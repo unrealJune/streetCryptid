@@ -172,6 +172,17 @@ private func blePeerDict(_ p: BlePeer) -> [String: Any] {
   ]
 }
 
+private func bumpResolutionDict(_ resolution: BumpResolution) -> [String: Any] {
+  [
+    "status": resolution.status,
+    "endpointId": resolution.endpointId.map { dataToHex($0) } ?? NSNull(),
+    "deviceId": resolution.deviceId ?? NSNull(),
+    "rssi": resolution.rssi.map { Int($0) as Any } ?? NSNull(),
+    "peerCount": resolution.peerCount,
+    "detail": resolution.detail,
+  ]
+}
+
 /// Bridges inbound Rust gossip events to the JS EventEmitter.
 private final class EventBridge: FixListener {
   weak var module: IrohLocationModule?
@@ -458,6 +469,11 @@ public final class IrohLocationModule: Module {
     AsyncFunction("nearbyBlePeers") { () async -> [[String: Any]] in
       guard let node = self.node else { return [] }
       return (await node.nearbyBlePeers()).map { blePeerDict($0) }
+    }
+
+    AsyncFunction("resolveBumpPeer") { (timeoutMs: Double) async throws -> [String: Any] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return bumpResolutionDict(await node.resolveBumpPeer(timeoutMs: UInt64(timeoutMs)))
     }
 
     AsyncFunction("bleHasScanHint") { (endpointIdHex: String) async -> Bool in

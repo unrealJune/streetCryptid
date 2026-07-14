@@ -57,7 +57,13 @@ async function pop(): Promise<void> {
 
 export function usePairingHaptics(pairing: PairingSnapshot | null, enabled: boolean): void {
   const poppedDiscoveryRef = useRef<string | null>(null);
-  const stage = pairing ? derivePairingExperienceStage(pairing) : 'idle';
+  const stage = pairing
+    ? derivePairingExperienceStage({
+        bumpStage: pairing.bump.stage,
+        sessions: pairing.sessions,
+        discoveredFriend: pairing.discoveredFriend,
+      })
+    : 'idle';
 
   useEffect(() => {
     if (!enabled || stage === 'idle' || stage === 'discovered') return;

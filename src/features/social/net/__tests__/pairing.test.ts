@@ -1,6 +1,7 @@
 import type {
   BleCapabilities,
   BlePeer,
+  BumpResolution,
   PairEvent,
   PairInviteWithToken,
   PairResult,
@@ -48,6 +49,8 @@ class FakeNativeModule {
     pairResult: [] as string[],
     nearbyBlePeers: 0,
     bleCapabilities: 0,
+    createNode: 0,
+    start: 0,
   };
 
   // Drained-on-poll queues the test drives.
@@ -65,13 +68,32 @@ class FakeNativeModule {
   };
   pairResults = new Map<string, PairResult>();
   profiles = new Map<string, ProfileView>();
+  bumpResolution: BumpResolution = {
+    status: 'noPeers',
+    endpointId: null,
+    deviceId: null,
+    rssi: null,
+    peerCount: 0,
+    detail: 'none',
+  };
+  bumpResolutionPromise: Promise<BumpResolution> | null = null;
+  initiateNearbyPromise: Promise<string> | null = null;
+  initiateNearbyError: Error | null = null;
+  initiateByTokenPromise: Promise<string> | null = null;
+  bleAvailableAfterRestart = false;
 
   private handlers: Record<string, (e: unknown) => void> = {};
 
   async createNode() {
+    this.calls.createNode += 1;
+    if (this.calls.createNode > 1 && this.bleAvailableAfterRestart) {
+      this.caps = { ...this.caps, available: true };
+    }
     return { endpointId: 'aa11', identitySecret: 'ii', recvSecret: 'rr', recvPublic: 'rp' };
   }
-  async start() {}
+  async start() {
+    this.calls.start += 1;
+  }
   async shutdown() {
     this.calls.shutdown += 1;
   }
@@ -130,11 +152,12 @@ class FakeNativeModule {
   }
   async initiatePairByToken(token: string) {
     this.calls.initiatePairByToken.push(token);
-    return 'sess-invite';
+    return this.initiateByTokenPromise ?? 'sess-invite';
   }
   async initiatePairNearby(peer: string) {
     this.calls.initiatePairNearby.push(peer);
-    return 'sess-nearby';
+    if (this.initiateNearbyError) throw this.initiateNearbyError;
+    return this.initiateNearbyPromise ?? 'sess-nearby';
   }
   async respondPair(sessionId: string, accept: boolean) {
     this.calls.respondPair.push({ sessionId, accept });
@@ -182,6 +205,12 @@ class FakeNativeModule {
   async bleCapabilities() {
     this.calls.bleCapabilities += 1;
     return this.caps;
+  }
+  async bleAvailable() {
+    return this.caps.available;
+  }
+  async resolveBumpPeer() {
+    return this.bumpResolutionPromise ?? this.bumpResolution;
   }
 
   addListener(name: string, cb: (e: unknown) => void) {
@@ -339,7 +368,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
     const link = await svc.createPairInvite(300);
-    expect(link).toMatch(/^streetcryptid:\/\/social\?token=/);
+    expect(link).toMatch(/^streetcryptid:\/\/\/social\?token=/);
 
     await svc.pairFromInput(link);
     expect(mockHolder.mod.calls.initiatePairByToken).toEqual(['scpair1:cafef00d']);
@@ -638,32 +667,203 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(snap.current?.sharingWith).toEqual([]);
   });
 
-  it('automatically initiates the only verified nearby peer during a rub window without auto-accepting', async () => {
+  it('initiates the peer resolved by an explicit Bump without auto-accepting', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
-    mockHolder.mod.peers = [
-      {
-        deviceId: 'ble-one',
-        phase: 'discovered',
-        verifiedEndpointId: null,
-        endpointHint: 'peer-nearby',
-        consecutiveFailures: 0,
-        connectPath: 'Gatt',
-      },
-    ];
+    mockHolder.mod.bumpResolution = {
+      status: 'resolved',
+      endpointId: 'peer-nearby',
+      deviceId: 'ble-one',
+      rssi: -38,
+      peerCount: 1,
+      detail: 'resolved',
+    };
 
-    await svc.beginNearbyGesture();
+    await svc.armBump();
+    await svc.commitBump();
 
     expect(mockHolder.mod.calls.initiatePairNearby).toEqual(['peer-nearby']);
-    // Nearby is buttonless to START, but SAS is still mandatory — no side auto-accepts.
+    // Bump starts discovery, but SAS is still mandatory — no side auto-accepts.
     expect(mockHolder.mod.calls.respondPair).toHaveLength(0);
   });
 
-  it('tracks an inbound nearby request inside the rub window without auto-accepting', async () => {
+  it('fails closed when multiple Bump signals are equally close', async () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.beginNearbyGesture();
+    mockHolder.mod.bumpResolution = {
+      status: 'ambiguous',
+      endpointId: null,
+      deviceId: null,
+      rssi: null,
+      peerCount: 2,
+      detail: 'ambiguous',
+    };
+
+    await svc.armBump();
+    await svc.commitBump();
+
+    expect(mockHolder.mod.calls.initiatePairNearby).toHaveLength(0);
+    expect(snap.current?.pairing.bump.stage).toBe('failed');
+    expect(snap.current?.pairing.bump.peerCount).toBe(2);
+    expect(snap.current?.pairing.bump.error).toMatch(/more than one phone/i);
+  });
+
+  it('does not pair from a Bump result that arrives after cancellation', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    let resolveBump!: (result: BumpResolution) => void;
+    mockHolder.mod.bumpResolutionPromise = new Promise((resolve) => {
+      resolveBump = resolve;
+    });
+
+    await svc.armBump();
+    const committing = svc.commitBump();
+    await Promise.resolve();
+    await svc.cancelBump();
+    resolveBump({
+      status: 'resolved',
+      endpointId: 'too-late',
+      deviceId: 'ble-late',
+      rssi: -30,
+      peerCount: 1,
+      detail: 'late',
+    });
+    await committing;
+
+    expect(mockHolder.mod.calls.initiatePairNearby).toHaveLength(0);
+    expect(snap.current?.pairing.bump.stage).toBe('idle');
+  });
+
+  it('cancels a nearby session created after the user cancels during contact', async () => {
+    const svc = newService();
+    await svc.init('@me', 'mothman');
+    mockHolder.mod.bumpResolution = {
+      status: 'resolved',
+      endpointId: 'peer-slow',
+      deviceId: 'ble-slow',
+      rssi: -32,
+      peerCount: 1,
+      detail: 'resolved',
+    };
+    let resolveSession!: (sessionId: string) => void;
+    mockHolder.mod.initiateNearbyPromise = new Promise((resolve) => {
+      resolveSession = resolve;
+    });
+
+    await svc.armBump();
+    const committing = svc.commitBump();
+    await Promise.resolve();
+    await Promise.resolve();
+    await svc.cancelBump();
+    resolveSession('sess-too-late');
+    await committing;
+
+    expect(mockHolder.mod.calls.cancelPair).toContain('sess-too-late');
+  });
+
+  it('does not cancel a simultaneous nearby session that reaches verification before initiation returns', async () => {
+    const svc = newService();
+    await svc.init('@me', 'mothman');
+    mockHolder.mod.bumpResolution = {
+      status: 'resolved',
+      endpointId: 'peer-simultaneous',
+      deviceId: 'ble-simultaneous',
+      rssi: -31,
+      peerCount: 1,
+      detail: 'resolved',
+    };
+    let resolveSession!: (sessionId: string) => void;
+    mockHolder.mod.initiateNearbyPromise = new Promise((resolve) => {
+      resolveSession = resolve;
+    });
+
+    await svc.armBump();
+    const committing = svc.commitBump();
+    await Promise.resolve();
+    await Promise.resolve();
+    mockHolder.mod.sessions = [
+      verifyingSession({
+        sessionId: 'sess-simultaneous',
+        peerEndpointId: 'peer-simultaneous',
+        nearby: true,
+      }),
+    ];
+    mockHolder.mod.challenges.set('sess-simultaneous', sasChallenge());
+    mockHolder.mod.pairEvents = [
+      {
+        kind: 'verifying',
+        sessionId: 'sess-simultaneous',
+        peerEndpointId: 'peer-simultaneous',
+        nearby: true,
+      },
+    ];
+    await svc.refreshPairing();
+    resolveSession('sess-simultaneous');
+    await committing;
+
+    expect(mockHolder.mod.calls.cancelPair).not.toContain('sess-simultaneous');
+  });
+
+  it('lets an already-started handshake finish after the Bump discovery window expires', async () => {
+    jest.useFakeTimers();
+    try {
+      const svc = newService();
+      await svc.init('@me', 'mothman');
+      mockHolder.mod.bumpResolution = {
+        status: 'resolved',
+        endpointId: 'peer-after-window',
+        deviceId: 'ble-after-window',
+        rssi: -33,
+        peerCount: 1,
+        detail: 'resolved',
+      };
+      let resolveSession!: (sessionId: string) => void;
+      mockHolder.mod.initiateNearbyPromise = new Promise((resolve) => {
+        resolveSession = resolve;
+      });
+
+      await svc.armBump(8000);
+      const committing = svc.commitBump();
+      await Promise.resolve();
+      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(8100);
+      resolveSession('sess-after-window');
+      await committing;
+
+      expect(mockHolder.mod.calls.cancelPair).not.toContain('sess-after-window');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('returns Bump to a retryable failure when native initiation errors', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    mockHolder.mod.bumpResolution = {
+      status: 'resolved',
+      endpointId: 'peer-fail-start',
+      deviceId: 'ble-fail-start',
+      rssi: -35,
+      peerCount: 1,
+      detail: 'resolved',
+    };
+    mockHolder.mod.initiateNearbyError = new Error('dial rejected');
+
+    await svc.armBump();
+    await expect(svc.commitBump()).rejects.toThrow(/dial rejected/);
+
+    expect(snap.current?.pairing.bump.stage).toBe('failed');
+    expect(snap.current?.pairing.bump.error).toMatch(/handshake did not start/i);
+  });
+
+  it('tracks an inbound nearby request inside the Bump window without auto-accepting', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await svc.armBump();
     mockHolder.mod.pairEvents = [
       {
         kind: 'pendingRequest',
@@ -714,9 +914,9 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     ).toBe(true);
     expect(mockHolder.mod.calls.importProfileTicket).toContain('peer-profile');
 
-    await svc.beginNearbyGesture();
+    await svc.armBump();
     expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('peer-ready');
-    expect(snap.current?.pairing.gestureActive).toBe(false);
+    expect(snap.current?.pairing.bump.stage).toBe('idle');
 
     svc.acknowledgeDiscoveredFriend();
     expect(snap.current?.pairing.discoveredFriend).toBeNull();
@@ -900,6 +1100,52 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(snap.current?.pairing.ready).toBe(true);
     expect(mockHolder.mod.calls.setPairingReady).toEqual([true]);
     expect(snap.current?.pairing.capabilities?.available).toBe(true);
+  });
+
+  it('rebuilds a node that started before Bluetooth permission was granted', async () => {
+    const svc = newService();
+    mockHolder.mod.caps = { ...mockHolder.mod.caps, available: false };
+    mockHolder.mod.bleAvailableAfterRestart = true;
+    await svc.init('@me', 'mothman');
+
+    await svc.ensureBleReady();
+
+    expect(mockHolder.mod.calls.shutdown).toBe(1);
+    expect(mockHolder.mod.calls.createNode).toBe(2);
+    expect(mockHolder.mod.calls.start).toBe(2);
+    expect(await mockHolder.mod.bleAvailable()).toBe(true);
+  });
+
+  it('does not rebuild BLE while another pairing session is active', async () => {
+    const svc = newService();
+    mockHolder.mod.caps = { ...mockHolder.mod.caps, available: false };
+    mockHolder.mod.bleAvailableAfterRestart = true;
+    await svc.init('@me', 'mothman');
+    mockHolder.mod.sessions = [verifyingSession({ sessionId: 'active-session' })];
+    await svc.refreshPairing();
+
+    await expect(svc.ensureBleReady()).rejects.toThrow(/current pairing/i);
+    expect(mockHolder.mod.calls.shutdown).toBe(0);
+    expect(mockHolder.mod.calls.createNode).toBe(1);
+  });
+
+  it('does not rebind BLE while native pair initiation is in flight', async () => {
+    const svc = newService();
+    mockHolder.mod.caps = { ...mockHolder.mod.caps, available: false };
+    mockHolder.mod.bleAvailableAfterRestart = true;
+    await svc.init('@me', 'mothman');
+    let resolveSession!: (sessionId: string) => void;
+    mockHolder.mod.initiateByTokenPromise = new Promise((resolve) => {
+      resolveSession = resolve;
+    });
+
+    const pairing = svc.pairFromInput('scpair1:slow');
+    await Promise.resolve();
+    await expect(svc.ensureBleReady()).rejects.toThrow(/pairing action/i);
+    expect(mockHolder.mod.calls.shutdown).toBe(0);
+
+    resolveSession('sess-slow');
+    await pairing;
   });
 
   it('stops polling after shutdown', async () => {

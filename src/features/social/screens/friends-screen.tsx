@@ -20,16 +20,16 @@ import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import { CryptidProfileEditor } from '@/features/account/components/cryptid-profile-editor';
 import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
 import { useTheme } from '@/hooks/use-theme';
+import { BumpPairingPanel } from '../components/bump-pairing-panel';
 import { CryptidDiscoveryCelebration } from '../components/cryptid-discovery-celebration';
 import { FriendProfileSheet } from '../components/friend-profile-sheet';
 import { PairLinkAction } from '../components/pair-link-action';
 import { PairingVerificationPanel } from '../components/pairing-verification-panel';
-import { StashSettingRow } from '../components/stash-setting-row';
 import { selectFriendTrail } from '../core/history';
 import { formatDistance, formatPresenceAge } from '../core/presence';
+import { useBumpToPair } from '../hooks/use-bump-to-pair';
 import { useLocationSharing } from '../hooks/use-location-sharing';
 import { usePairingHaptics } from '../hooks/use-pairing-haptics';
-import { useRubToPair } from '../hooks/use-rub-to-pair';
 
 export default function FriendsScreen() {
   const theme = useTheme();
@@ -54,22 +54,22 @@ export default function FriendsScreen() {
     friends,
     locationStatus,
     error,
-    setPairingReady,
-    beginNearbyGesture,
+    armBump,
+    commitBump,
+    cancelBump,
     createPairInvite,
     pairFromInput,
     respondPair,
     submitPairChoice,
     confirmPairDisplay,
     cancelPair,
-    refreshPairing,
     toggleShare,
     removeFriend,
     retryLocation,
-    setStashOptIn,
     acknowledgeDiscoveredFriend,
     rejectDiscoveredFriend,
   } = useLocationSharing();
+  const bumpStage = pairing?.bump.stage;
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', setAppState);
@@ -77,24 +77,16 @@ export default function FriendsScreen() {
   }, []);
 
   useEffect(() => {
-    if (!snapshot?.ready) return;
-    if (!isInteractive) {
-      void setPairingReady(false);
-      return;
-    }
-    void setPairingReady(true);
-    void refreshPairing();
-    return () => {
-      void setPairingReady(false);
-    };
-  }, [isInteractive, refreshPairing, setPairingReady, snapshot?.ready]);
+    if (isInteractive || bumpStage === undefined || bumpStage === 'idle') return;
+    void cancelBump();
+  }, [bumpStage, cancelBump, isInteractive]);
 
-  const onRub = useCallback(async () => {
-    await beginNearbyGesture();
-  }, [beginNearbyGesture]);
-  const rub = useRubToPair(
-    isInteractive && Boolean(pairing?.available) && !pairing?.discoveredFriend,
-    onRub
+  const onBump = useCallback(async () => {
+    await commitBump();
+  }, [commitBump]);
+  const bumpSensor = useBumpToPair(
+    isInteractive && pairing?.bump.stage === 'armed' && !pairing.discoveredFriend,
+    onBump
   );
   usePairingHaptics(pairing, isInteractive);
 
@@ -102,9 +94,13 @@ export default function FriendsScreen() {
     const token = Array.isArray(params.token) ? params.token[0] : params.token;
     if (!snapshot?.ready || !token || handledPairToken.current === token) return;
     handledPairToken.current = token;
-    void pairFromInput(token).finally(() => {
-      router.replace('/social');
-    });
+    void pairFromInput(token)
+      .catch(() => {
+        // The provider surfaces the actionable error; consume the rejection from the route effect.
+      })
+      .finally(() => {
+        router.replace('/social');
+      });
   }, [pairFromInput, params.token, router, snapshot?.ready]);
 
   const selected = useMemo(
@@ -116,16 +112,6 @@ export default function FriendsScreen() {
     [selected, trail]
   );
   const sharingWith = snapshot?.sharingWith ?? [];
-  const nearbyLabel = pairing?.verifications.length
-    ? pairing.verifications.some((verification) => verification.localConfirmed)
-      ? 'Waiting for their confirmation'
-      : 'Visual check ready'
-    : pairing?.gestureActive
-      ? 'Matching a nearby signal'
-      : pairing?.ready
-        ? 'Nearby pairing ready'
-        : 'Nearby pairing starting';
-
   return (
     <>
       <ScrollView
@@ -169,6 +155,15 @@ export default function FriendsScreen() {
           </Pressable>
         </View>
 
+        <BumpPairingPanel
+          accent={chrome.green}
+          pairing={pairing}
+          sensor={bumpSensor}
+          onArm={armBump}
+          onCommit={commitBump}
+          onCancel={cancelBump}
+        />
+
         {pairing?.verifications.length ? (
           <PairingVerificationPanel
             accent={chrome.green}
@@ -178,21 +173,6 @@ export default function FriendsScreen() {
             onCancel={cancelPair}
           />
         ) : null}
-
-        <View style={[styles.nearby, { borderColor: theme.backgroundSelected }]}>
-          <View
-            style={[
-              styles.nearbyDot,
-              { backgroundColor: pairing?.ready ? chrome.green : theme.textSecondary },
-            ]}
-          />
-          <ThemedText type="smallBold">{nearbyLabel}</ThemedText>
-          {rub.lastDetectedAt ? (
-            <ThemedText type="code" style={[styles.nearbyMotion, { color: chrome.green }]}>
-              MOTION FOUND
-            </ThemedText>
-          ) : null}
-        </View>
 
         {error ? (
           <View style={[styles.notice, { borderColor: chrome.amber }]}>
@@ -228,8 +208,8 @@ export default function FriendsScreen() {
           <View style={styles.empty}>
             <ThemedText style={styles.emptyTitle}>No cryptids nearby yet</ThemedText>
             <ThemedText type="small" themeColor="textSecondary" style={styles.emptyCopy}>
-              Keep Friends open on both phones and make the same small back-and-forth or circular
-              motion, then compare the ASCII figure shown on both screens.
+              Arm Bump on both phones, tap their top edges together, then compare the ASCII figure
+              shown on both screens.
             </ThemedText>
           </View>
         ) : (
@@ -278,19 +258,13 @@ export default function FriendsScreen() {
           </View>
         )}
 
-        {snapshot?.stash.available ? (
-          <StashSettingRow
-            accent={chrome.green}
-            optedIn={snapshot.stash.optedIn}
-            onToggle={(optedIn) => void setStashOptIn(optedIn)}
-          />
-        ) : null}
-
         {pairing ? (
           <PairLinkAction
             accent={chrome.green}
+            errorAccent={chrome.amber}
             pairing={pairing}
             onCreateInvite={createPairInvite}
+            onPairInput={pairFromInput}
             onReject={(sessionId) => respondPair(sessionId, false)}
           />
         ) : null}
@@ -375,22 +349,6 @@ const styles = StyleSheet.create({
   selfAvatar: {
     maxHeight: 42,
     overflow: 'hidden',
-  },
-  nearby: {
-    alignItems: 'center',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    flexDirection: 'row',
-    gap: Spacing.two,
-    minHeight: 48,
-  },
-  nearbyDot: {
-    borderRadius: 4,
-    height: 8,
-    width: 8,
-  },
-  nearbyMotion: {
-    marginLeft: 'auto',
   },
   notice: {
     alignItems: 'center',

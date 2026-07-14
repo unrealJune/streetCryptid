@@ -212,11 +212,11 @@ export interface PairResult {
 export interface BleCapabilities {
   /** A BLE transport is wired into this node's endpoint on this platform. */
   available: boolean;
-  /** The transport exposes an active scan on/off toggle. (Always false — not exposed.) */
+  /** The app can explicitly refresh the shared scan for foreground Bump resolution. */
   activeScanToggle: boolean;
-  /** The transport surfaces per-peer RSSI / proximity. (Always false — not exposed.) */
+  /** Fresh Bump advertisements include RSSI. */
   rssi: boolean;
-  /** The transport exposes an explicit discovery-refresh trigger. (Always false — not exposed.) */
+  /** The shared scanner can be restarted for a fresh Bump pass. */
   discoveryRefresh: boolean;
   /** App-level acceptance gate for invite-less nearby pairing. */
   pairingReady: boolean;
@@ -238,6 +238,19 @@ export interface BlePeer {
   consecutiveFailures: number;
   /** How the peer was reached (e.g. `ble` / `ip`), or `null` if unknown. */
   connectPath: string | null;
+}
+
+export type BumpResolutionStatus =
+  'resolved' | 'unavailable' | 'noPeers' | 'ambiguous' | 'probeFailed';
+
+/** Result of one explicit, foreground Bump discovery attempt. */
+export interface BumpResolution {
+  status: BumpResolutionStatus;
+  endpointId: string | null;
+  deviceId: string | null;
+  rssi: number | null;
+  peerCount: number;
+  detail: string;
 }
 
 /** Event map for the native module's EventEmitter. */
@@ -394,6 +407,8 @@ export interface IrohLocationApi {
   bleCapabilities(): Promise<BleCapabilities>;
   /** Snapshot of nearby BLE peers surfaced by the transport (empty on host / when unavailable). */
   nearbyBlePeers(): Promise<BlePeer[]>;
+  /** Refresh BLE discovery and resolve the strongest unambiguous nearby streetCryptid signal. */
+  resolveBumpPeer(timeoutMs: number): Promise<BumpResolution>;
   /** Passive proximity hint: has this peer's BLE advertisement been seen this session? */
   bleHasScanHint(endpointIdHex: string): Promise<boolean>;
 }

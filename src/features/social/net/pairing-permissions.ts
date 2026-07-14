@@ -50,3 +50,22 @@ export async function ensurePairingPermissions(): Promise<boolean> {
   );
   return result === PermissionsAndroid.RESULTS.GRANTED;
 }
+
+/** Check the BLE permission set without prompting; used before the process-lifetime node starts. */
+export async function hasPairingPermissions(): Promise<boolean> {
+  if (Platform.OS !== 'android') return true;
+
+  if (Number(Platform.Version) >= 31) {
+    const permissions = [
+      PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+      PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
+      PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+    ];
+    const results = await Promise.all(
+      permissions.map((permission) => PermissionsAndroid.check(permission))
+    );
+    return results.every(Boolean);
+  }
+
+  return PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
+}

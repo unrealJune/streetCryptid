@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 // after changing the Rust UniFFI surface (see README §3).
 import uniffi.iroh_location.BleCapabilities
 import uniffi.iroh_location.BlePeer
+import uniffi.iroh_location.BumpResolution
 import uniffi.iroh_location.FixListener
 import uniffi.iroh_location.IncomingFix
 import uniffi.iroh_location.LocationFix
@@ -176,6 +177,16 @@ private fun blePeerMap(p: BlePeer): Map<String, Any?> =
     "endpointHint" to p.endpointHint?.toHex(),
     "consecutiveFailures" to p.consecutiveFailures.toLong(),
     "connectPath" to p.connectPath,
+  )
+
+private fun bumpResolutionMap(r: BumpResolution): Map<String, Any?> =
+  mapOf(
+    "status" to r.status,
+    "endpointId" to r.endpointId?.toHex(),
+    "deviceId" to r.deviceId,
+    "rssi" to r.rssi?.toInt(),
+    "peerCount" to r.peerCount.toLong(),
+    "detail" to r.detail,
   )
 
 class IrohLocationModule : Module() {
@@ -588,6 +599,12 @@ class IrohLocationModule : Module() {
 
     AsyncFunction("nearbyBlePeers") Coroutine
       { -> node?.nearbyBlePeers()?.map { blePeerMap(it) } ?: emptyList() }
+
+    AsyncFunction("resolveBumpPeer") Coroutine
+      { timeoutMs: Double ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        bumpResolutionMap(n.resolveBumpPeer(timeoutMs.toLong().toULong()))
+      }
 
     AsyncFunction("bleHasScanHint") Coroutine
       { endpointIdHex: String -> node?.bleHasScanHint(endpointIdHex.hexToBytes()) ?: false }

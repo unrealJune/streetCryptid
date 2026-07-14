@@ -861,6 +861,17 @@ impl PairSession {
             || self.peer_decision == Some(false)
     }
 
+    fn is_untouched_handshake(&self) -> bool {
+        self.peer_recv_pub.is_none()
+            && self.peer_sas_commit.is_none()
+            && self.peer_sas_nonce.is_none()
+            && self.local_decision.is_none()
+            && self.peer_decision.is_none()
+            && !self.sas_verified
+            && !self.local_sas_confirmed
+            && !self.result_emitted
+    }
+
     /// Bind every message after session creation to the authenticated endpoint that established it.
     fn ensure_peer(&self, remote: &[u8; ENDPOINT_LEN]) -> Result<()> {
         if &self.peer_endpoint != remote {
@@ -1496,26 +1507,55 @@ impl PairCore {
         ticket: Option<String>,
         nearby: bool,
     ) -> Result<()> {
-        let endpoint = self.runtime_endpoint().await?;
+        let outcome = async {
+            let endpoint = self.runtime_endpoint().await?;
 
-        // Round 1 — Hello / commitment exchange.
-        let hello = self
-            .build_msg(Decision::Hello, session_id, invite_secret)
-            .await?;
-        let addr = self.peer_addr(peer_endpoint, ticket.as_deref())?;
-        let resp = dial_exchange(&endpoint, addr, &hello).await?;
-        self.fold_peer_msg(&session_id, &peer_endpoint, resp, nearby)
-            .await?;
+            // Round 1 — Hello / commitment exchange.
+            let hello = self
+                .build_msg(Decision::Hello, session_id, invite_secret)
+                .await?;
+            let addr = self.peer_addr(peer_endpoint, ticket.as_deref())?;
+            let resp = dial_exchange(&endpoint, addr, &hello).await?;
+            self.fold_peer_msg(&session_id, &peer_endpoint, resp, nearby)
+                .await?;
 
-        // Round 2 — Reveal / nonce exchange + commitment verification.
-        let reveal = self
-            .build_msg(Decision::Reveal, session_id, Vec::new())
-            .await?;
-        let addr = self.peer_addr(peer_endpoint, ticket.as_deref())?;
-        let resp = dial_exchange(&endpoint, addr, &reveal).await?;
-        self.fold_peer_msg(&session_id, &peer_endpoint, resp, nearby)
-            .await?;
+            // Round 2 — Reveal / nonce exchange + commitment verification.
+            let reveal = self
+                .build_msg(Decision::Reveal, session_id, Vec::new())
+                .await?;
+            let addr = self.peer_addr(peer_endpoint, ticket.as_deref())?;
+            let resp = dial_exchange(&endpoint, addr, &reveal).await?;
+            self.fold_peer_msg(&session_id, &peer_endpoint, resp, nearby)
+                .await?;
+            Ok(())
+        }
+        .await;
+
+        if let Err(error) = outcome {
+            self.discard_untouched_handshake(&session_id).await;
+            return Err(error);
+        }
         Ok(())
+    }
+
+    async fn discard_untouched_handshake(&self, session_id: &[u8; SESSION_ID_LEN]) -> bool {
+        let mut sessions = self.sessions.lock().await;
+        let removed = if sessions
+            .get(session_id)
+            .is_some_and(PairSession::is_untouched_handshake)
+        {
+            sessions.remove(session_id);
+            true
+        } else {
+            false
+        };
+        drop(sessions);
+        if removed {
+            self.notices.lock().await.retain(|notice| {
+                notice.session_id != *session_id || notice.signal != PairSignal::PendingRequest
+            });
+        }
+        removed
     }
 
     /// Respond to a pending session. `accept` requires the local SAS latch to be set first (the
@@ -2752,6 +2792,33 @@ mod tests {
         OsRng.fill_bytes(&mut recv);
         let core = PairCore::new(sk.to_bytes(), endpoint, recv.to_vec());
         (core, endpoint, recv)
+    }
+
+    #[tokio::test]
+    async fn failed_untouched_initiator_handshake_is_removed_for_retry() {
+        let (core, endpoint, _) = test_core();
+        let peer = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
+        let session_id = derive_nearby_id(&endpoint, &peer);
+
+        assert!(core.initiate_nearby(peer).await.is_err());
+        assert!(core.session_state(&session_id).await.is_none());
+        assert!(core.poll_notices().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn outbound_failure_cleanup_preserves_peer_advanced_session() {
+        let (core, endpoint, _) = test_core();
+        let peer = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
+        let session_id = derive_nearby_id(&endpoint, &peer);
+        let mut session = core
+            .new_session(session_id, true, true, peer, now_ms())
+            .unwrap();
+        session.peer_recv_pub = Some([9u8; RECV_PUB_LEN]);
+        session.peer_sas_commit = Some([8u8; SAS_COMMIT_LEN]);
+        core.sessions.lock().await.insert(session_id, session);
+
+        assert!(!core.discard_untouched_handshake(&session_id).await);
+        assert!(core.session_state(&session_id).await.is_some());
     }
 
     /// A signed nearby `Hello` from a peer, carrying its SAS commitment.

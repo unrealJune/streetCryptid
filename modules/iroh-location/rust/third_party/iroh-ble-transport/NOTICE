@@ -57,7 +57,29 @@ standalone / path dependency:
       - Updated the corresponding imports and a unit test call site, plus a
         stale doc comment referencing the iroh version.
 
+2026-07 — Hardened streetCryptid's foreground nearby-pairing bootstrap:
+
+  * src/transport/transport.rs
+      - Added a static, read-only full EndpointId characteristic to the transport's own primary
+         GATT service so identity resolution survives adapter/GATT-server rebuilds.
+      - Exported helpers that validate a resolved full EndpointId against the 12-byte prefix in its
+         advertised key UUID.
+
+  * src/transport/mod.rs and src/lib.rs
+      - Re-exported the identity characteristic UUID and prefix-validation helpers for the app's
+         explicit RSSI-ranked Bump resolver.
+
+  * src/transport/registry.rs
+      - Treats the local close of an identity-probe connection while a peer is still `Discovered`
+         as informational, preserving the immediately subsequent iroh dial instead of poisoning the
+         route through `Draining` / `Dead`.
+
+  * src/transport/events.rs and src/transport/transport.rs
+      - Added a short-lived, per-device marker for app-owned identity-probe disconnects. This
+         suppresses CoreBluetooth callbacks that arrive after the real pairing dial has already
+         advanced the peer beyond `Discovered`.
+
 The upstream `examples/` directory was intentionally not vendored; it
 demonstrates endpoint wiring that this checkpoint does not yet use.
 
-No other source files were modified.
+No other upstream source files were modified.

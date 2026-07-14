@@ -1,11 +1,13 @@
 //! `BleTransport` — iroh `CustomTransport` implementation driven by the
 //! registry actor and a `BlewDriver`.
 
+use std::collections::HashMap;
 use std::io;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use blew::gatt::props::{AttributePermissions, CharacteristicProperties};
@@ -25,7 +27,8 @@ use uuid::{Uuid, uuid};
 use crate::error::{BleError, BleResult};
 use crate::transport::driver::{BlewDriver, Driver, IncomingPacket};
 use crate::transport::events::{
-    run_central_events, run_l2cap_accept, run_peripheral_requests, run_peripheral_state_events,
+    ProbeDisconnects, run_central_events, run_l2cap_accept, run_peripheral_requests,
+    run_peripheral_state_events,
 };
 use crate::transport::hook::{BleDedupHook, HookEvent};
 use crate::transport::peer::{ConnectPath, KEY_PREFIX_LEN, PeerCommand};
@@ -42,6 +45,7 @@ const IROH_C2P_CHAR_UUID: Uuid = uuid!("69726f02-8e45-4c2c-b3a5-331f3098b5c2");
 const IROH_P2C_CHAR_UUID: Uuid = uuid!("69726f03-8e45-4c2c-b3a5-331f3098b5c2");
 pub(crate) const IROH_PSM_CHAR_UUID: Uuid = uuid!("69726f04-8e45-4c2c-b3a5-331f3098b5c2");
 pub(crate) const IROH_VERSION_CHAR_UUID: Uuid = uuid!("69726f05-8e45-4c2c-b3a5-331f3098b5c2");
+pub const IROH_IDENTITY_CHAR_UUID: Uuid = uuid!("69726f06-8e45-4c2c-b3a5-331f3098b5c2");
 
 /// On-wire protocol version served by the peripheral on the VERSION
 /// characteristic and verified by the central immediately after connect.
@@ -169,7 +173,16 @@ fn iroh_key_uuid(endpoint_id: &EndpointId) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-fn build_gatt_services(key_uuid: Uuid) -> Vec<GattService> {
+pub fn is_iroh_key_uuid(uuid: &Uuid) -> bool {
+    uuid.as_bytes()[..KEY_UUID_PREFIX.len()] == KEY_UUID_PREFIX
+}
+
+pub fn key_uuid_matches_endpoint(uuid: &Uuid, endpoint_id: &EndpointId) -> bool {
+    is_iroh_key_uuid(uuid)
+        && uuid.as_bytes()[KEY_UUID_PREFIX.len()..] == endpoint_id.as_bytes()[..KEY_PREFIX_LEN]
+}
+
+fn build_gatt_services(key_uuid: Uuid, endpoint_id: &EndpointId) -> Vec<GattService> {
     let characteristics = vec![
         GattCharacteristic {
             uuid: IROH_C2P_CHAR_UUID,
@@ -199,6 +212,13 @@ fn build_gatt_services(key_uuid: Uuid) -> Vec<GattService> {
             properties: CharacteristicProperties::READ,
             permissions: AttributePermissions::READ,
             value: vec![],
+            descriptors: vec![],
+        },
+        GattCharacteristic {
+            uuid: IROH_IDENTITY_CHAR_UUID,
+            properties: CharacteristicProperties::READ,
+            permissions: AttributePermissions::READ,
+            value: endpoint_id.as_bytes().to_vec(),
             descriptors: vec![],
         },
     ];
@@ -265,6 +285,7 @@ pub struct BleTransport {
     /// `AtomicWaker` (which would clobber prior registrations and leak wakeups).
     inbox_capacity_wakers: Arc<Mutex<Vec<Waker>>>,
     store: Arc<dyn PeerStore>,
+    probe_disconnects: ProbeDisconnects,
 }
 
 impl std::fmt::Debug for BleTransport {
@@ -349,7 +370,7 @@ impl BleTransport {
             })?;
 
         let key_uuid = iroh_key_uuid(&local_id);
-        let services = build_gatt_services(key_uuid);
+        let services = build_gatt_services(key_uuid, &local_id);
         register_gatt_services(&peripheral, &services).await?;
         let advertising_config = AdvertisingConfig {
             local_name: "iroh".to_string(),
@@ -381,6 +402,7 @@ impl BleTransport {
         let inbox_capacity_wakers: Arc<Mutex<Vec<Waker>>> = Arc::new(Mutex::new(Vec::new()));
 
         let psm_atomic = Arc::new(AtomicU16::new(0));
+        let probe_disconnects: ProbeDisconnects = Arc::new(Mutex::new(HashMap::new()));
         let iface = Arc::new(BlewDriver::new(
             Arc::clone(&central),
             Arc::clone(&peripheral),
@@ -452,6 +474,7 @@ impl BleTransport {
             Arc::clone(&central),
             Arc::clone(&routing),
             inbox_tx.clone(),
+            Arc::clone(&probe_disconnects),
         ));
         tokio::spawn(run_peripheral_state_events(
             Arc::clone(&peripheral),
@@ -481,7 +504,18 @@ impl BleTransport {
             empty_frames,
             inbox_capacity_wakers,
             store,
+            probe_disconnects,
         }))
+    }
+
+    /// Mark the next central disconnect for `device_id` as cleanup from an app-owned identity
+    /// probe. CoreBluetooth may deliver this callback after the real iroh dial has already moved
+    /// the peer into Connecting/Handshaking, so suppression must not depend on registry phase.
+    pub fn expect_probe_disconnect(&self, device_id: blew::DeviceId) {
+        let now = Instant::now();
+        let mut expected = self.probe_disconnects.lock();
+        expected.retain(|_, deadline| *deadline >= now);
+        expected.insert(device_id, now + Duration::from_secs(5));
     }
 
     /// Coerce to the trait object iroh's `Endpoint::builder()` consumes:
@@ -1081,6 +1115,22 @@ mod tests {
 
     fn dev(s: &str) -> blew::DeviceId {
         blew::DeviceId::from(s)
+    }
+
+    #[test]
+    fn gatt_service_exposes_full_identity_and_matches_advertised_prefix() {
+        let endpoint_id = endpoint_id_with_first_byte(7);
+        let key_uuid = iroh_key_uuid(&endpoint_id);
+        let services = build_gatt_services(key_uuid, &endpoint_id);
+        let identity = services
+            .iter()
+            .flat_map(|service| &service.characteristics)
+            .find(|characteristic| characteristic.uuid == IROH_IDENTITY_CHAR_UUID)
+            .expect("identity characteristic");
+
+        assert_eq!(identity.value, endpoint_id.as_bytes());
+        assert!(is_iroh_key_uuid(&key_uuid));
+        assert!(key_uuid_matches_endpoint(&key_uuid, &endpoint_id));
     }
 
     fn extract_token(

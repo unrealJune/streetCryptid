@@ -16,7 +16,7 @@
         "usesNonExemptEncryption": false
       },
       "infoPlist": {
-        "NSBluetoothAlwaysUsageDescription": "streetCryptid uses Bluetooth while the Friends tab is open to find a phone you tap against and establish an encrypted iroh pairing.",
+        "NSBluetoothAlwaysUsageDescription": "streetCryptid uses Bluetooth while you arm Bump to find the phone you tap and start an encrypted pairing.",
         "NSLocalNetworkUsageDescription": "streetCryptid finds friends' phones on the same Wi-Fi so it can share your location directly, without routing through a relay.",
         "NSBonjourServices": ["_irohv1._udp"],
         "UIBackgroundModes": ["location", "remote-notification"]
@@ -31,6 +31,22 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "category": ["BROWSABLE", "DEFAULT"],
+          "data": [
+            {
+              "scheme": "streetcryptid",
+              "host": "social"
+            },
+            {
+              "scheme": "streetcryptid",
+              "host": "pair"
+            }
+          ]
+        }
+      ],
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
@@ -40,9 +56,6 @@
         "POST_NOTIFICATIONS",
         "RECEIVE_BOOT_COMPLETED",
         "WAKE_LOCK",
-        "BLUETOOTH_SCAN",
-        "BLUETOOTH_ADVERTISE",
-        "BLUETOOTH_CONNECT",
         "ACCESS_LOCAL_NETWORK",
         "ACCESS_NETWORK_STATE",
         "NEARBY_WIFI_DEVICES",

@@ -76,6 +76,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # transport + address lookup, alongside the N0 IP/relay transports).
 [target.'cfg(any(target_os = "android", target_vendor = "apple"))'.dependencies]
 iroh-ble-transport = { path = "third_party/iroh-ble-transport" }
+tokio-stream = "0.1"
 # Only needed on the BLE-capable targets: `src/ble.rs` uses it to declare the stable
 # streetCryptid identity GATT service/characteristic UUIDs (the invite-less stranger
 # bootstrap). Resolves to the same uuid 1.x the vendored transport / blew already use.

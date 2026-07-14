@@ -1,12 +1,12 @@
 import { Accelerometer } from 'expo-sensors';
 import { useEffect, useRef, useState } from 'react';
 
-import { createRubDetector } from '../core/rub-detector';
+import { createBumpDetector } from '../core/bump-detector';
 
-export type RubSensorStatus = 'off' | 'checking' | 'ready' | 'unavailable' | 'denied' | 'error';
+export type BumpSensorStatus = 'off' | 'checking' | 'ready' | 'unavailable' | 'denied' | 'error';
 
-export interface RubToPairState {
-  status: RubSensorStatus;
+export interface BumpSensorState {
+  status: BumpSensorStatus;
   lastDetectedAt: number | null;
   lastIntensity: number;
   error: string | null;
@@ -16,12 +16,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function useRubToPair(
+export function useBumpToPair(
   enabled: boolean,
-  onRub: (intensity: number) => void | Promise<void>
-): RubToPairState {
-  const callbackRef = useRef(onRub);
-  const [state, setState] = useState<RubToPairState>({
+  onBump: (intensity: number) => void | Promise<void>
+): BumpSensorState {
+  const callbackRef = useRef(onBump);
+  const [state, setState] = useState<BumpSensorState>({
     status: enabled ? 'checking' : 'off',
     lastDetectedAt: null,
     lastIntensity: 0,
@@ -29,15 +29,15 @@ export function useRubToPair(
   });
 
   useEffect(() => {
-    callbackRef.current = onRub;
-  }, [onRub]);
+    callbackRef.current = onBump;
+  }, [onBump]);
 
   useEffect(() => {
     if (!enabled) return;
 
     let active = true;
     let subscription: { remove(): void } | null = null;
-    const detector = createRubDetector();
+    const detector = createBumpDetector();
 
     const start = async (): Promise<void> => {
       setState((current) => ({ ...current, status: 'checking', error: null }));
@@ -56,7 +56,7 @@ export function useRubToPair(
       }
       if (!active) return;
 
-      Accelerometer.setUpdateInterval(40);
+      Accelerometer.setUpdateInterval(20);
       subscription = Accelerometer.addListener((measurement) => {
         if (!active) return;
         const result = detector.push({

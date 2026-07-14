@@ -1,16 +1,7 @@
-import type { BlePeer, PairStateRecord } from 'iroh-location';
+import type { PairStateRecord } from 'iroh-location';
 
 import { derivePairingExperienceStage, pairingHapticCadence } from '../pairing-experience';
 import type { Friend } from '../types';
-
-const peer: BlePeer = {
-  deviceId: 'ble-1',
-  phase: 'discovered',
-  verifiedEndpointId: null,
-  endpointHint: 'peer',
-  consecutiveFailures: 0,
-  connectPath: 'Gatt',
-};
 
 function session(state: PairStateRecord['state']): PairStateRecord {
   return {
@@ -38,89 +29,86 @@ describe('pairing experience', () => {
   it('stays calm through mutual verification, then joins', () => {
     expect(
       derivePairingExperienceStage({
-        gestureActive: true,
-        nearbyPeers: [],
+        bumpStage: 'armed',
+        sessions: [],
+        discoveredFriend: null,
+      })
+    ).toBe('idle');
+    expect(
+      derivePairingExperienceStage({
+        bumpStage: 'searching',
         sessions: [],
         discoveredFriend: null,
       })
     ).toBe('seeking');
     expect(
       derivePairingExperienceStage({
-        gestureActive: true,
-        nearbyPeers: [peer],
+        bumpStage: 'contact',
         sessions: [],
         discoveredFriend: null,
       })
     ).toBe('contact');
     expect(
       derivePairingExperienceStage({
-        gestureActive: true,
-        nearbyPeers: [peer],
+        bumpStage: 'contact',
         sessions: [session('handshaking')],
         discoveredFriend: null,
       })
     ).toBe('handshaking');
     expect(
       derivePairingExperienceStage({
-        gestureActive: true,
-        nearbyPeers: [peer],
+        bumpStage: 'contact',
         sessions: [session('verifying')],
         discoveredFriend: null,
       })
     ).toBe('verifying');
     expect(
       derivePairingExperienceStage({
-        gestureActive: true,
-        nearbyPeers: [peer],
+        bumpStage: 'contact',
         sessions: [session('peerAccepted')],
         discoveredFriend: null,
       })
     ).toBe('verifying');
     expect(
       derivePairingExperienceStage({
-        gestureActive: true,
-        nearbyPeers: [peer],
+        bumpStage: 'contact',
         sessions: [session('complete')],
         discoveredFriend: null,
       })
-    ).toBe('joining');
+    ).toBe('contact');
   });
 
   it('prioritizes the completed discovery reveal', () => {
     expect(
       derivePairingExperienceStage({
-        gestureActive: false,
-        nearbyPeers: [],
+        bumpStage: 'idle',
         sessions: [],
         discoveredFriend: friend,
       })
     ).toBe('discovered');
   });
 
-  it('stops a nearby pairing experience when its motion window ends', () => {
+  it('keeps an authenticated nearby session visible after the Bump window ends', () => {
     expect(
       derivePairingExperienceStage({
-        gestureActive: false,
-        nearbyPeers: [peer],
+        bumpStage: 'idle',
         sessions: [session('handshaking')],
         discoveredFriend: null,
       })
-    ).toBe('idle');
+    ).toBe('handshaking');
     expect(
       derivePairingExperienceStage({
-        gestureActive: false,
-        nearbyPeers: [peer],
+        bumpStage: 'idle',
         sessions: [session('verifying')],
         discoveredFriend: null,
       })
-    ).toBe('idle');
+    ).toBe('verifying');
   });
 
   it('keeps invite verification independent of the motion window', () => {
     expect(
       derivePairingExperienceStage({
-        gestureActive: false,
-        nearbyPeers: [],
+        bumpStage: 'idle',
         sessions: [{ ...session('verifying'), nearby: false }],
         discoveredFriend: null,
       })

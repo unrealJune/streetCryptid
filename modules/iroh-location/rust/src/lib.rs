@@ -316,6 +316,21 @@ pub struct BlePeer {
     pub connect_path: Option<String>,
 }
 
+/// Result of one explicit Bump rendezvous attempt.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BumpResolution {
+    /// `resolved` | `unavailable` | `noPeers` | `ambiguous` | `probeFailed`.
+    pub status: String,
+    /// Resolved peer EndpointId when `status == "resolved"`.
+    pub endpoint_id: Option<Vec<u8>>,
+    pub device_id: Option<String>,
+    pub rssi: Option<i16>,
+    /// Number of fresh iroh advertisements observed during this attempt.
+    pub peer_count: u32,
+    /// Diagnostic detail suitable for logs and actionable UI copy.
+    pub detail: String,
+}
+
 /// Node-level queue of verified profile updates surfaced by docs live-sync. Uses a std mutex
 /// because [`ProfileSink::on_profile_update`] is a synchronous callback.
 #[derive(Clone, Default)]
@@ -362,15 +377,15 @@ fn init_android_tracing() {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("warn,iroh=debug,iroh_relay=info,iroh_gossip=info,iroh_docs=info,iroh_location=debug")
+        EnvFilter::new(
+            "warn,iroh=debug,iroh_relay=info,iroh_gossip=info,iroh_docs=info,iroh_location=debug",
+        )
     });
     let _ = tracing_subscriber::registry()
         .with(filter)
-        .with(
-            fmt::layer()
-                .with_ansi(false)
-                .with_writer(paranoid_android::AndroidLogMakeWriter::new("streetcryptid".to_owned())),
-        )
+        .with(fmt::layer().with_ansi(false).with_writer(
+            paranoid_android::AndroidLogMakeWriter::new("streetcryptid".to_owned()),
+        ))
         .try_init();
 }
 
@@ -1129,8 +1144,7 @@ impl LocationNode {
         guard.as_ref().map(|s| s.ble.available()).unwrap_or(false)
     }
 
-    /// Honest BLE capability report combined with the app-level pairing-ready gate. The transport
-    /// exposes no active scan toggle / RSSI / discovery-refresh, so those are always `false`.
+    /// Honest BLE capability report combined with the app-level pairing-ready gate.
     pub async fn ble_capabilities(&self) -> BleCapabilities {
         let guard = self.inner.lock().await;
         let caps = guard.as_ref().map(|s| s.ble.capabilities());
@@ -1168,6 +1182,73 @@ impl LocationNode {
             }
         };
         handle.nearby_peers().await.iter().map(ble_peer).collect()
+    }
+
+    /// Perform one foreground Bump rendezvous attempt using the same scanner/advertiser as the
+    /// iroh BLE transport. The scan is refreshed, fresh peers are ranked by RSSI, ambiguous crowds
+    /// fail closed, and the strongest peer's full identity is read + checked against its advertised
+    /// prefix. No friendship is granted here; the returned endpoint still enters the authenticated
+    /// nearby pairing + mandatory SAS flow.
+    pub async fn resolve_bump_peer(&self, timeout_ms: u64) -> BumpResolution {
+        let handle = {
+            let guard = self.inner.lock().await;
+            match guard.as_ref() {
+                Some(started) => started.ble.clone(),
+                None => {
+                    return BumpResolution {
+                        status: "unavailable".into(),
+                        endpoint_id: None,
+                        device_id: None,
+                        rssi: None,
+                        peer_count: 0,
+                        detail: "BLE node is not started.".into(),
+                    };
+                }
+            }
+        };
+        let timeout = std::time::Duration::from_millis(timeout_ms.clamp(2_000, 12_000));
+        match handle.resolve_bump_peer(timeout).await {
+            Ok(peer) => BumpResolution {
+                status: "resolved".into(),
+                endpoint_id: Some(peer.endpoint_id),
+                device_id: Some(peer.device_id),
+                rssi: peer.rssi,
+                peer_count: peer.peer_count,
+                detail: "Nearby phone resolved.".into(),
+            },
+            Err(ble::BumpResolveError::Unavailable) => BumpResolution {
+                status: "unavailable".into(),
+                endpoint_id: None,
+                device_id: None,
+                rssi: None,
+                peer_count: 0,
+                detail: "BLE is unavailable in this build or on this device.".into(),
+            },
+            Err(ble::BumpResolveError::NoPeers) => BumpResolution {
+                status: "noPeers".into(),
+                endpoint_id: None,
+                device_id: None,
+                rssi: None,
+                peer_count: 0,
+                detail: "No fresh streetCryptid signal was found.".into(),
+            },
+            Err(ble::BumpResolveError::Ambiguous { peer_count }) => BumpResolution {
+                status: "ambiguous".into(),
+                endpoint_id: None,
+                device_id: None,
+                rssi: None,
+                peer_count,
+                detail: "More than one equally close signal was found.".into(),
+            },
+            Err(ble::BumpResolveError::ProbeFailed { peer_count, detail }) => BumpResolution {
+                status: "probeFailed".into(),
+                endpoint_id: None,
+                device_id: None,
+                rssi: None,
+                peer_count,
+                detail,
+            },
+        }
     }
 
     /// Passive proximity hint: has this peer's BLE advertisement been seen this session? This is

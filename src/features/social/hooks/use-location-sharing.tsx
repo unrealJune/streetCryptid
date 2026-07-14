@@ -8,7 +8,7 @@ import {
   useState,
   type PropsWithChildren,
 } from 'react';
-import { AppState } from 'react-native';
+import { AppState, Platform } from 'react-native';
 
 import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
 import { buildFriendPresence, type FriendPresence } from '@/features/social/core/presence';
@@ -19,9 +19,11 @@ import {
   type PairingSnapshot,
   type SharingSnapshot,
 } from '@/features/social/net/location-sharing';
+import { buildTransportReport, type TransportReport } from '@/features/social/net/transports';
 import {
   ensureLocalNetworkPermission,
   ensurePairingPermissions,
+  hasPairingPermissions,
 } from '@/features/social/net/pairing-permissions';
 
 export type LocationRuntimeStatus =
@@ -36,8 +38,9 @@ interface LocationSharingContextValue {
   friends: FriendPresence[];
   locationStatus: LocationRuntimeStatus;
   error: string | null;
-  setPairingReady(ready: boolean): Promise<void>;
-  beginNearbyGesture(): Promise<void>;
+  armBump(): Promise<void>;
+  commitBump(): Promise<void>;
+  cancelBump(): Promise<void>;
   createPairInvite(ttlSecs?: number): Promise<string | undefined>;
   pairFromInput(input: string): Promise<void>;
   respondPair(sessionId: string, accept: boolean): Promise<void>;
@@ -50,9 +53,23 @@ interface LocationSharingContextValue {
   retryLocation(): Promise<void>;
   /** Opt in/out of offline delivery via the trail stash. */
   setStashOptIn(optedIn: boolean): Promise<void>;
+  /** Force (or unforce) relay-only transport. */
+  setRelayOnly(relayOnly: boolean): Promise<void>;
+  /** Honest, live diagnostic of every transport (for the Settings tab). */
+  transportReport: TransportReport;
   acknowledgeDiscoveredFriend(): void;
   rejectDiscoveredFriend(): Promise<void>;
 }
+
+/**
+ * Configured relay URLs, read statically at module scope so Hermes release builds inline the value
+ * (a dynamic `process.env.EXPO_PUBLIC_*` read silently yields undefined in release — see the
+ * `expo-public-env-static-access` memory).
+ */
+const RELAY_URLS = (process.env.EXPO_PUBLIC_IROH_RELAY_URLS ?? '')
+  .split(',')
+  .map((url) => url.trim())
+  .filter((url) => url.length > 0);
 
 const LocationSharingContext = createContext<LocationSharingContextValue | null>(null);
 
@@ -194,7 +211,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
         if (!sharedServiceInit) {
           sharedServiceInit = (async () => {
             await ensureLocalNetworkPermission();
-            bluetoothPermissionGranted.current = await ensurePairingPermissions();
+            bluetoothPermissionGranted.current = await hasPairingPermissions();
             await service.init(
               initialProfile.handle,
               initialProfile.sigil,
@@ -260,21 +277,29 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     }
   }, []);
 
-  const setPairingReady = useCallback(
-    async (ready: boolean) => {
-      if (ready && !bluetoothPermissionGranted.current) {
+  const armBump = useCallback(async () => {
+    const service = serviceRef.current;
+    if (!service) {
+      const message = 'Friend sync is not ready. Try again.';
+      setServiceError(message);
+      throw new Error(message);
+    }
+    try {
+      if (!bluetoothPermissionGranted.current) {
         const granted = await ensurePairingPermissions();
         if (!granted) {
-          setServiceError('Bluetooth access is needed to discover a nearby friend.');
-          return;
+          throw new Error('Bluetooth access is needed to Bump with a nearby friend.');
         }
         bluetoothPermissionGranted.current = true;
       }
       setServiceError(null);
-      await run((service) => service.setPairingReady(ready));
-    },
-    [run]
-  );
+      await service.ensureBleReady();
+      await service.armBump();
+    } catch (bumpError: unknown) {
+      setServiceError(errorMessage(bumpError));
+      throw bumpError;
+    }
+  }, []);
 
   const createPairInvite = useCallback(async (ttlSecs = 300) => {
     const service = serviceRef.current;
@@ -298,17 +323,29 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
 
   const hasLiveSelfFix = liveSelfFix !== null;
   const selfFix = liveSelfFix ?? persistedSelfFix;
-  const beginNearbyGesture = useCallback(() => {
+  const commitBump = useCallback(() => {
     setServiceError(null);
-    return run((service) => service.beginNearbyGesture());
+    return run((service) => service.commitBump());
   }, [run]);
-  const pairFromInput = useCallback(
-    (input: string) => {
-      setServiceError(null);
-      return run((service) => service.pairFromInput(input).then(() => undefined));
-    },
-    [run]
-  );
+  const cancelBump = useCallback(() => {
+    setServiceError(null);
+    return run((service) => service.cancelBump());
+  }, [run]);
+  const pairFromInput = useCallback(async (input: string) => {
+    const service = serviceRef.current;
+    if (!service) {
+      const message = 'Friend sync is not ready. Try again.';
+      setServiceError(message);
+      throw new Error(message);
+    }
+    setServiceError(null);
+    try {
+      await service.pairFromInput(input);
+    } catch (pairError: unknown) {
+      setServiceError(errorMessage(pairError));
+      throw pairError;
+    }
+  }, []);
   const respondPair = useCallback(
     (sessionId: string, accept: boolean) => {
       setServiceError(null);
@@ -342,6 +379,13 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     (optedIn: boolean) => {
       setServiceError(null);
       return run((service) => service.setStashOptIn(optedIn));
+    },
+    [run]
+  );
+  const setRelayOnly = useCallback(
+    (relayOnly: boolean) => {
+      setServiceError(null);
+      return run((service) => service.setRelayOnly(relayOnly));
     },
     [run]
   );
@@ -386,6 +430,27 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   );
   const error = locationError ?? serviceError;
 
+  const transportReport = useMemo<TransportReport>(
+    () =>
+      buildTransportReport({
+        nativeAvailable: LocationSharingService.isAvailable(),
+        platformOS: Platform.OS,
+        nodeReady: snapshot?.ready ?? false,
+        relayConfigured: RELAY_URLS.length > 0,
+        relayCount: RELAY_URLS.length,
+        ble: snapshot?.pairing.capabilities ?? null,
+        blePeerCount: snapshot?.pairing.nearbyPeers.length ?? 0,
+        // Wi-Fi Aware / Multipeer is Phase 3; null renders an honest "planned" row.
+        nearby: null,
+        stash: snapshot?.stash ?? { available: false, optedIn: false },
+        relayOnly: {
+          enabled: snapshot?.transports.relayOnly ?? false,
+          enforced: snapshot?.transports.relayOnlyEnforced ?? false,
+        },
+      }),
+    [snapshot]
+  );
+
   const value = useMemo<LocationSharingContextValue>(
     () => ({
       snapshot,
@@ -396,8 +461,9 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       friends,
       locationStatus,
       error,
-      setPairingReady,
-      beginNearbyGesture,
+      armBump,
+      commitBump,
+      cancelBump,
       createPairInvite,
       pairFromInput,
       respondPair,
@@ -409,6 +475,8 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       removeFriend,
       retryLocation,
       setStashOptIn,
+      setRelayOnly,
+      transportReport,
       acknowledgeDiscoveredFriend,
       rejectDiscoveredFriend,
     }),
@@ -420,8 +488,9 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       friends,
       locationStatus,
       error,
-      setPairingReady,
-      beginNearbyGesture,
+      armBump,
+      commitBump,
+      cancelBump,
       createPairInvite,
       pairFromInput,
       respondPair,
@@ -433,6 +502,8 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       removeFriend,
       retryLocation,
       setStashOptIn,
+      setRelayOnly,
+      transportReport,
       acknowledgeDiscoveredFriend,
       rejectDiscoveredFriend,
     ]
