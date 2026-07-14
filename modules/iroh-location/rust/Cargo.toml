@@ -84,7 +84,10 @@ opentelemetry-otlp = { version = "0.31", default-features = false, features = [
     "trace",
     "logs",
     "http-proto",
-    "reqwest-client",
+    # MUST be the BLOCKING reqwest client: the SDK's batch processors run on a plain dedicated
+    # thread with no tokio reactor, and the async client panics there ("there is no reactor
+    # running"), killing the export pipeline seconds after startup.
+    "reqwest-blocking-client",
     "reqwest-rustls",
 ], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
