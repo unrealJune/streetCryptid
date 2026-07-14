@@ -11,6 +11,7 @@ export interface FriendLocatorStackItem {
   readonly sigil: string;
   readonly color: string;
   readonly selected: boolean;
+  readonly self?: boolean;
   readonly stale?: boolean;
 }
 
@@ -23,6 +24,7 @@ interface FriendLocatorStackProps {
   readonly friends: readonly FriendLocatorStackItem[];
   readonly panelColor: string;
   onPress(friendId: string): void;
+  onPressSelf?(): void;
 }
 
 const ART_OFFSET_X = 7;
@@ -39,16 +41,23 @@ export function FriendLocatorStack({
   friends,
   panelColor,
   onPress,
+  onPressSelf,
 }: FriendLocatorStackProps) {
   const ordered = [...friends].sort((a, b) => Number(a.selected) - Number(b.selected));
-  const art = ordered.map((friend) => ({
-    friend,
-    metrics: sigilMetrics(friend.sigil || '?'),
-  }));
+  const includesSelf = ordered.some((item) => item.self);
+  const nonSelfCount = ordered.length - Number(includesSelf);
+  const art = ordered
+    .filter((friend) => !friend.self)
+    .map((friend) => ({
+      friend,
+      metrics: sigilMetrics(friend.sigil || '?'),
+    }));
   const artWidth = Math.max(
+    0,
     ...art.map(({ metrics }, index) => metrics.width + index * ART_OFFSET_X)
   );
   const artHeight = Math.max(
+    0,
     ...art.map(({ metrics }, index) => metrics.height + (art.length - index - 1) * ART_OFFSET_Y)
   );
   const handleWidth = Math.max(
@@ -72,7 +81,13 @@ export function FriendLocatorStack({
 
   return (
     <Animated.View
-      accessibilityLabel={`${ordered.length} friends in this area`}
+      accessibilityLabel={
+        includesSelf
+          ? nonSelfCount === 0
+            ? 'You are in this area'
+            : `${nonSelfCount} ${nonSelfCount === 1 ? 'friend' : 'friends'} and you in this area`
+          : `${ordered.length} friends in this area`
+      }
       pointerEvents="box-none"
       style={[styles.anchor, { height: markerHeight, width: markerWidth }, positionStyle]}
     >
@@ -119,13 +134,19 @@ export function FriendLocatorStack({
 
       {ordered.map((friend, index) => (
         <Pressable
-          accessibilityHint="Shows this friend's retained location trail"
-          accessibilityLabel={`Open ${friend.handle}'s location history`}
+          accessibilityHint={
+            friend.self
+              ? 'Shows your retained location trail'
+              : "Shows this friend's retained location trail"
+          }
+          accessibilityLabel={
+            friend.self ? 'Open your location history' : `Open ${friend.handle}'s location history`
+          }
           accessibilityRole="button"
           accessibilityState={{ selected: friend.selected }}
           hitSlop={4}
           key={friend.id}
-          onPress={() => onPress(friend.id)}
+          onPress={() => (friend.self ? onPressSelf?.() : onPress(friend.id))}
           style={({ pressed }) => [
             styles.handleChip,
             {

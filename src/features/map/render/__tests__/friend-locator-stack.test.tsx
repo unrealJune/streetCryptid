@@ -67,4 +67,85 @@ describe('FriendLocatorStack', () => {
     expect(onPress).toHaveBeenNthCalledWith(1, 'moth');
     expect(onPress).toHaveBeenNthCalledWith(2, 'frog');
   });
+
+  it('includes YOU as an independently selectable row in an overlapping stack', () => {
+    const onPress = jest.fn();
+    const onPressSelf = jest.fn();
+    const sharedValue = { value: 0 } as SharedValue<number>;
+
+    act(() => {
+      renderer = create(
+        <FriendLocatorStack
+          friends={[
+            {
+              id: 'moth',
+              handle: '@moth',
+              sigil: '/\\',
+              color: '#45d6bd',
+              selected: false,
+            },
+            {
+              id: 'self',
+              handle: 'YOU',
+              sigil: '',
+              color: '#f7b84b',
+              selected: true,
+              self: true,
+            },
+          ]}
+          onPress={onPress}
+          onPressSelf={onPressSelf}
+          panelColor="#00111f"
+          scale={sharedValue}
+          translateX={sharedValue}
+          translateY={sharedValue}
+          x={100}
+          y={200}
+        />
+      );
+    });
+
+    expect(
+      renderer.root.findByProps({ accessibilityLabel: '1 friend and you in this area' })
+    ).toBeDefined();
+    const you = renderer.root.findByProps({ accessibilityLabel: 'Open your location history' });
+    expect(you.props.accessibilityState).toEqual({ selected: true });
+
+    act(() => you.props.onPress());
+    expect(onPressSelf).toHaveBeenCalledTimes(1);
+    expect(onPress).not.toHaveBeenCalled();
+  });
+
+  it('labels a self-only stack without referring to zero friends', () => {
+    const sharedValue = { value: 0 } as SharedValue<number>;
+
+    act(() => {
+      renderer = create(
+        <FriendLocatorStack
+          friends={[
+            {
+              id: 'self',
+              handle: 'YOU',
+              sigil: '',
+              color: '#f7b84b',
+              selected: false,
+              self: true,
+            },
+          ]}
+          onPress={jest.fn()}
+          onPressSelf={jest.fn()}
+          panelColor="#00111f"
+          scale={sharedValue}
+          translateX={sharedValue}
+          translateY={sharedValue}
+          x={100}
+          y={200}
+        />
+      );
+    });
+
+    expect(
+      renderer.root.findByProps({ accessibilityLabel: 'You are in this area' })
+    ).toBeDefined();
+  });
 });

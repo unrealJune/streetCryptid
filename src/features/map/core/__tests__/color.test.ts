@@ -1,4 +1,4 @@
-import { applyFog, clamp, luminance, mix, packRgba, ramp, unpackRgba } from '../color';
+import { applyFog, clamp, luminance, mix, packRgba, ramp, rgbToHex, unpackRgba } from '../color';
 import { CryptidThemes } from '@/constants/cryptid-theme';
 
 const daybreakTerr = CryptidThemes.daybreak.canvas.terr;
@@ -43,6 +43,13 @@ describe('mix / luminance', () => {
   it('luminance uses Rec. 601 weights', () => {
     expect(luminance([255, 255, 255])).toBeCloseTo(255, 6);
     expect(luminance([100, 200, 50])).toBeCloseTo(0.299 * 100 + 0.587 * 200 + 0.114 * 50, 9);
+  });
+});
+
+describe('rgbToHex', () => {
+  it('rounds, clamps, and zero-pads channels', () => {
+    expect(rgbToHex([0, 15.6, 255])).toBe('#0010ff');
+    expect(rgbToHex([-1, 128, 300])).toBe('#0080ff');
   });
 });
 
