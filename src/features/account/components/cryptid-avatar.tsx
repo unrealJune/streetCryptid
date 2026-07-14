@@ -1,6 +1,7 @@
 import { StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
 
 import { Fonts } from '@/constants/theme';
+import { normalizeAsciiArt } from '../core/profile';
 
 type AvatarSize = 'compact' | 'large';
 
@@ -38,7 +39,8 @@ export function CryptidAvatar({
 }: CryptidAvatarProps) {
   const dimensions = sizes[size];
   const signalColor = muted ? `${color}70` : color;
-  const lineCount = art.split(/\r\n?|\n/).length;
+  const normalizedArt = normalizeAsciiArt(art);
+  const lineCount = normalizedArt.split('\n').length;
 
   return (
     <View
@@ -59,7 +61,7 @@ export function CryptidAvatar({
           },
         ]}
       >
-        {art}
+        {normalizedArt}
       </Text>
       <Text
         allowFontScaling={false}
