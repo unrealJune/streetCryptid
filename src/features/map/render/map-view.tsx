@@ -234,17 +234,26 @@ export function MapView({
         : null,
     [anchor, viewport, selfLocation]
   );
-  const friendAnchors = useMemo(
-    () =>
-      viewport
-        ? friends.map((friend) => ({
-            ...friend,
-            anchor: worldToScreen(anchor, viewport, latLonToWorld(friend.location)),
-          }))
-        : [],
-    [anchor, friends, viewport]
-  );
-  const friendClusters = useMemo(() => clusterMarkers(friendAnchors), [friendAnchors]);
+  const locatorAnchors = useMemo(() => {
+    if (!viewport) return [];
+    const anchoredFriends = friends.map((friend) => ({
+      ...friend,
+      kind: 'friend' as const,
+      anchor: worldToScreen(anchor, viewport, latLonToWorld(friend.location)),
+    }));
+    return selfAnchor
+      ? [
+          ...anchoredFriends,
+          {
+            id: 'self',
+            kind: 'self' as const,
+            anchor: selfAnchor,
+            color: rgbToHex(theme.canvas.accent),
+          },
+        ]
+      : anchoredFriends;
+  }, [anchor, friends, selfAnchor, theme.canvas.accent, viewport]);
+  const locatorClusters = useMemo(() => clusterMarkers(locatorAnchors), [locatorAnchors]);
   const selfTrailPoints = useMemo(
     () =>
       viewport
@@ -526,40 +535,67 @@ export function MapView({
       </GestureDetector>
 
       {viewport
-        ? friendClusters.map((cluster) => {
+        ? locatorClusters.map((cluster) => {
             if (cluster.length === 1) {
-              const friend = cluster[0];
+              const locator = cluster[0];
+              if (locator.kind === 'self') {
+                return (
+                  <YouLocator
+                    accent={theme.canvas.accent}
+                    key="self"
+                    onPress={() => onSelectSelf?.()}
+                    panelColor={theme.chrome.island}
+                    scale={k}
+                    selected={selfSelected}
+                    translateX={tx}
+                    translateY={ty}
+                    x={locator.anchor[0]}
+                    y={locator.anchor[1]}
+                  />
+                );
+              }
               return (
                 <FriendLocator
-                  color={friend.color}
-                  handle={friend.handle}
-                  key={friend.id}
-                  onPress={() => onSelectFriend?.(friend.id)}
+                  color={locator.color}
+                  handle={locator.handle}
+                  key={locator.id}
+                  onPress={() => onSelectFriend?.(locator.id)}
                   panelColor={theme.chrome.island}
                   scale={k}
-                  selected={friend.id === selectedFriendId}
-                  sigil={friend.sigil}
-                  stale={friend.stale}
+                  selected={locator.id === selectedFriendId}
+                  sigil={locator.sigil}
+                  stale={locator.stale}
                   translateX={tx}
                   translateY={ty}
-                  x={friend.anchor[0]}
-                  y={friend.anchor[1]}
+                  x={locator.anchor[0]}
+                  y={locator.anchor[1]}
                 />
               );
             }
 
             const anchorSum = cluster.reduce(
-              (sum, friend) => [sum[0] + friend.anchor[0], sum[1] + friend.anchor[1]],
+              (sum, locator) => [sum[0] + locator.anchor[0], sum[1] + locator.anchor[1]],
               [0, 0]
             );
             return (
               <FriendLocatorStack
-                friends={cluster.map((friend) => ({
-                  ...friend,
-                  selected: friend.id === selectedFriendId,
-                }))}
-                key={cluster.map((friend) => friend.id).join(':')}
+                friends={cluster.map((locator) =>
+                  locator.kind === 'self'
+                    ? {
+                        id: locator.id,
+                        handle: 'YOU',
+                        color: locator.color,
+                        selected: selfSelected,
+                        self: true,
+                      }
+                    : {
+                        ...locator,
+                        selected: locator.id === selectedFriendId,
+                      }
+                )}
+                key={cluster.map((locator) => `${locator.kind}:${locator.id}`).join(':')}
                 onPress={(friendId) => onSelectFriend?.(friendId)}
+                onPressSelf={() => onSelectSelf?.()}
                 panelColor={theme.chrome.island}
                 scale={k}
                 translateX={tx}
@@ -570,19 +606,6 @@ export function MapView({
             );
           })
         : null}
-      {selfAnchor ? (
-        <YouLocator
-          accent={theme.canvas.accent}
-          onPress={() => onSelectSelf?.()}
-          panelColor={theme.chrome.island}
-          scale={k}
-          selected={selfSelected}
-          translateX={tx}
-          translateY={ty}
-          x={selfAnchor[0]}
-          y={selfAnchor[1]}
-        />
-      ) : null}
     </View>
   );
 }
@@ -590,6 +613,10 @@ export function MapView({
 const styles = StyleSheet.create({
   fill: { flex: 1 },
 });
+
+function rgbToHex(color: readonly [number, number, number]): string {
+  return `#${color.map((channel) => Math.round(channel).toString(16).padStart(2, '0')).join('')}`;
+}
 
 function buildTrail(points: readonly ScreenPoint[], color: string) {
   if (points.length === 0) return null;
