@@ -38,6 +38,7 @@ export default function FriendsScreen() {
   const insets = useSafeAreaInsets();
   const account = useCryptidProfile();
   const { profile } = account;
+  const selfSignalColor = resolveSignalColor(profile?.color, chrome.amber);
   const isFocused = useIsFocused();
   const [appState, setAppState] = useState<AppStateStatus>(AppState.currentState);
   const isInteractive = isFocused && appState === 'active';
@@ -144,12 +145,12 @@ export default function FriendsScreen() {
           >
             <CryptidAvatar
               art={profile?.sigil ?? 'unknown'}
-              color={chrome.amber}
+              color={selfSignalColor}
               name={profile?.cryptidName ?? 'Your cryptid'}
               muted={false}
               style={styles.selfAvatar}
             />
-            <ThemedText type="code" style={{ color: chrome.amber }}>
+            <ThemedText type="code" style={{ color: selfSignalColor }}>
               {profile?.handle ?? '@you'}
             </ThemedText>
           </Pressable>
