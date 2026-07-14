@@ -22,6 +22,18 @@ describe('cryptid profile', () => {
     expect(profile.sigil).toBe('  /\\  \n (  ) \n/_  _\\  ');
   });
 
+  it('normalizes common phone paste characters without changing the art layout', () => {
+    const profile = createCryptidProfile({
+      ...defaultCryptidProfileDraft(),
+      handle: 'paste_test',
+      cryptidName: 'Phone Paste',
+      presetId: null,
+      sigil: '\ufeff\u201cowl\u201d\u00a0\u2014\u2028  \u2026\u200b',
+    });
+
+    expect(profile.sigil).toBe('"owl" -\n  ...');
+  });
+
   it('keeps every bundled preset within the contact-card bounds', () => {
     for (const preset of CRYPTID_PRESETS) {
       expect(

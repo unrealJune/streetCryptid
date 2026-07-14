@@ -39,6 +39,7 @@ import { SignalColorPicker } from './signal-color-picker';
 
 const AUTOSAVE_DELAY_MS = 450;
 const PROFILE_MAX_WIDTH = 640;
+const DEFAULT_CUSTOM_NAME = 'Custom Cryptid';
 
 type ActiveEditor = 'username' | 'icon' | 'signal' | null;
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
@@ -119,7 +120,6 @@ export function CryptidProfileEditor({
     ? SIGNAL_COLOR_OPTIONS
     : [{ name: 'Current', value: initialColor }, ...SIGNAL_COLOR_OPTIONS];
   const bareHandle = handle.trim().replace(/^@+/, '');
-  const displayHandle = bareHandle || 'username';
   const iconName = cryptidName.trim() || 'Custom icon';
   const colorName =
     colorOptions.find((option) => option.value.toLowerCase() === color.toLowerCase())?.name ??
@@ -268,6 +268,7 @@ export function CryptidProfileEditor({
     setSaveStatus('idle');
     setSelectedPresetId(presetId);
     if (presetId === null) {
+      setCustomName((current) => current.trim() || DEFAULT_CUSTOM_NAME);
       setCustomNameTouched(false);
       setCustomArtTouched(false);
     }
@@ -379,7 +380,7 @@ export function CryptidProfileEditor({
                 numberOfLines={1}
                 style={[styles.handlePreview, { color: bareHandle ? color : theme.textSecondary }]}
               >
-                @{displayHandle}
+                {bareHandle ? `@${bareHandle}` : 'Not set'}
               </ThemedText>
             </View>
 
@@ -570,6 +571,8 @@ export function CryptidProfileEditor({
                       placeholder={'Enter ASCII art.\nSpaces and line breaks are preserved.'}
                       placeholderTextColor={theme.textSecondary}
                       selectionColor={color}
+                      smartDashesType="no"
+                      smartQuotesType="no"
                       spellCheck={false}
                       style={[
                         styles.asciiInput,

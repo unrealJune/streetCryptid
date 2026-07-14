@@ -65,7 +65,15 @@ export class CryptidProfileValidationError extends Error {
 }
 
 export function normalizeAsciiArt(value: string): string {
-  return value.replace(/\r\n?/g, '\n');
+  // Map Unicode characters introduced by phone clipboards to layout-stable ASCII equivalents.
+  return value
+    .replace(/\r\n?|[\u2028\u2029]/g, '\n')
+    .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ')
+    .replace(/[\u200b\u200c\u200d\u2060\ufeff]/g, '')
+    .replace(/[\u2018\u2019\u201a\u201b]/g, "'")
+    .replace(/[\u201c\u201d\u201e\u201f]/g, '"')
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/\u2026/g, '...');
 }
 
 export function normalizeHandle(value: string): string {
