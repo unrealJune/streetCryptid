@@ -39,6 +39,7 @@ import { SignalColorPicker } from './signal-color-picker';
 
 const AUTOSAVE_DELAY_MS = 450;
 const PROFILE_MAX_WIDTH = 640;
+const DEFAULT_CUSTOM_NAME = 'Custom Cryptid';
 
 type ActiveEditor = 'username' | 'icon' | 'signal' | null;
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
@@ -268,6 +269,7 @@ export function CryptidProfileEditor({
     setSaveStatus('idle');
     setSelectedPresetId(presetId);
     if (presetId === null) {
+      setCustomName((current) => current || DEFAULT_CUSTOM_NAME);
       setCustomNameTouched(false);
       setCustomArtTouched(false);
     }
@@ -423,6 +425,8 @@ export function CryptidProfileEditor({
                     placeholder="username"
                     placeholderTextColor={theme.textSecondary}
                     selectionColor={color}
+                    smartDashesType="no"
+                    smartQuotesType="no"
                     spellCheck={false}
                     style={[styles.handleInput, { color: theme.text }]}
                     value={handle}

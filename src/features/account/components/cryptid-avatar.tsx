@@ -38,6 +38,7 @@ export function CryptidAvatar({
 }: CryptidAvatarProps) {
   const dimensions = sizes[size];
   const signalColor = muted ? `${color}70` : color;
+  const lineCount = art.split(/\r\n?|\n/).length;
 
   return (
     <View
@@ -45,7 +46,10 @@ export function CryptidAvatar({
       style={[styles.container, { gap: dimensions.gap }, style]}
     >
       <Text
+        adjustsFontSizeToFit
         allowFontScaling={false}
+        minimumFontScale={0.5}
+        numberOfLines={lineCount}
         style={[
           styles.art,
           {
@@ -71,11 +75,13 @@ const styles = StyleSheet.create({
   container: {
     alignItems: 'center',
     justifyContent: 'center',
+    maxWidth: '100%',
   },
   art: {
     alignSelf: 'center',
     fontFamily: Fonts.mono,
     includeFontPadding: false,
+    maxWidth: '100%',
     textAlign: 'left',
   },
   label: {
