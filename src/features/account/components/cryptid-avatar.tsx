@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
 
 import { Fonts } from '@/constants/theme';
@@ -14,7 +15,7 @@ interface CryptidAvatarProps {
   style?: StyleProp<ViewStyle>;
 }
 
-const MIN_ART_FONT_SCALE = 0.5;
+const ART_MEASUREMENT_WIDTH = 10000;
 
 const sizes = {
   compact: {
@@ -42,25 +43,45 @@ export function CryptidAvatar({
   const dimensions = sizes[size];
   const signalColor = muted ? `${color}70` : color;
   const normalizedArt = normalizeAsciiArt(art);
-  const lineCount = normalizedArt.split('\n').length;
+  const [availableWidth, setAvailableWidth] = useState(0);
+  const [naturalWidth, setNaturalWidth] = useState(0);
+  const scale =
+    availableWidth > 0 && naturalWidth > availableWidth ? availableWidth / naturalWidth : 1;
 
   return (
     <View
       accessibilityLabel={`${name} ASCII cryptid`}
+      onLayout={(event) => setAvailableWidth(event.nativeEvent.layout.width)}
       style={[styles.container, { gap: dimensions.gap }, style]}
     >
-      {/* Preserve the line count while shrinking wide art instead of wrapping it. */}
+      {/* Measure unwrapped lines so the visible art can scale to the available phone width. */}
       <Text
-        adjustsFontSizeToFit
+        accessible={false}
         allowFontScaling={false}
-        minimumFontScale={MIN_ART_FONT_SCALE}
-        numberOfLines={lineCount}
+        onTextLayout={(event) =>
+          setNaturalWidth(
+            event.nativeEvent.lines.reduce((width, line) => Math.max(width, line.width), 0)
+          )
+        }
+        style={[
+          styles.art,
+          styles.measurementArt,
+          {
+            fontSize: dimensions.artSize,
+            lineHeight: dimensions.artLineHeight,
+          },
+        ]}
+      >
+        {normalizedArt}
+      </Text>
+      <Text
+        allowFontScaling={false}
         style={[
           styles.art,
           {
             color: signalColor,
-            fontSize: dimensions.artSize,
-            lineHeight: dimensions.artLineHeight,
+            fontSize: dimensions.artSize * scale,
+            lineHeight: dimensions.artLineHeight * scale,
           },
         ]}
       >
@@ -88,6 +109,11 @@ const styles = StyleSheet.create({
     includeFontPadding: false,
     maxWidth: '100%',
     textAlign: 'left',
+  },
+  measurementArt: {
+    opacity: 0,
+    position: 'absolute',
+    width: ART_MEASUREMENT_WIDTH,
   },
   label: {
     fontFamily: Fonts.mono,
