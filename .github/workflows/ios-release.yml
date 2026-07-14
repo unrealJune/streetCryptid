@@ -27,7 +27,10 @@ permissions:
 
 jobs:
   build-and-submit:
-    runs-on: macos-14
+    # macos-15 ships Xcode 16 / iOS 18 SDK. Required: the iroh `netdev` crate references
+    # `nw_path_is_ultra_constrained` (Network.framework, iOS 18 SDK), which the older
+    # macos-14 iOS 17 SDK doesn't declare — the Rust link fails with an undefined symbol.
+    runs-on: macos-15
     env:
       EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
       CACHE_VERSION: v1 # bump to bust all caches without touching lockfiles
@@ -37,6 +40,11 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Select latest stable Xcode (iOS 18+ SDK)
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
 
       - name: Compute next version (Conventional Commits)
         id: semver

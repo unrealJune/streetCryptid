@@ -1,6 +1,6 @@
 # iOS Release workflow — one-time setup
 
-`ios-release.yml` builds the iOS app on a GitHub-hosted `macos-14` runner via
+`ios-release.yml` builds the iOS app on a GitHub-hosted `macos-15` runner via
 `eas build --local` and submits it to App Store Connect on every push to `main`.
 The compile happens on the runner (not Expo's cloud build queue); EAS still manages
 signing credentials. Complete the steps below once before the workflow can run green.
@@ -63,7 +63,7 @@ git push origin v1.0.0
 
 ## Notes / trade-offs
 
-- `macos-14` minutes bill at a **10× multiplier**; a full native RN + Rust build is
+- `macos-15` minutes bill at a **10× multiplier**; a full native RN + Rust build is
   ~15–30 min cold, roughly halved once caches (cargo/target, bun, pods) are warm.
 - Every push to `main` submits to App Store Connect. `paths-ignore` skips docs-only
   pushes. The default target is TestFlight (upload only) — promoting a build to a public
