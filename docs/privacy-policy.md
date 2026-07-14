@@ -18,12 +18,13 @@ on your device and can only be opened by the friends you share it with.
 - **No advertising, no tracking, no data brokers, no analytics SDKs.** We do not
   sell or share your data, and we do not build a profile of you.
 
-The app *does* collect and transmit your location — that is its core function.
+The app _does_ collect and transmit your location — that is its core function.
 This policy explains exactly how.
 
 ## What data the app handles
 
 ### Location
+
 When you enable sharing, the app reads your device location (including in the
 background, if you allow it) and shares it with the friends you have paired with.
 
@@ -39,11 +40,12 @@ background, if you allow it) and shares it with the friends you have paired with
 - If you opt in to offline delivery, encrypted updates may also be held by a
   **"stash" server** so friends can receive them even when you are both never
   online at the same time. Like the relay, the stash is a server **you
-  configure**, and it is *ciphertext-blind*: it stores and forwards only
+  configure**, and it is _ciphertext-blind_: it stores and forwards only
   already-encrypted data and can never decrypt it. Using a stash is optional and
   off unless you turn it on.
 
 ### Push notification token
+
 If you allow notifications, the app registers your device's push token
 (Apple APNs or Google FCM) with the stash server so it can send a silent
 "wake" signal when a friend has an update waiting. This token identifies a
@@ -51,11 +53,13 @@ device destination for notifications; it is not linked to your name or an
 account, and you can revoke it by disabling notifications or unsubscribing.
 
 ### Cryptographic identifiers
+
 Pairing and encryption use cryptographic node identifiers generated on your
 device. These are used to route encrypted data to the right peers. They are not
 tied to your real-world identity.
 
 ### What we do NOT collect
+
 We do not collect your name, email address, phone number, contacts, photos,
 advertising identifiers, or any analytics/usage telemetry.
 

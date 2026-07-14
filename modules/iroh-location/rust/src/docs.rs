@@ -320,6 +320,14 @@ impl TrailDocs {
                         if let Some((author_bytes, seq)) = decode_key(entry.key()) {
                             if fix_ts_at_least(&opened.payload, since_ts) {
                                 recovered += 1;
+                                // Same short content hash the sender's publish span and the
+                                // stash's entry.received span carry — the cross-device join key.
+                                tracing::info!(
+                                    sc.entry_hash = %crate::telemetry::short_hex(entry.content_hash().as_bytes()),
+                                    sc.author = %crate::telemetry::short_hex(&author_bytes),
+                                    sc.seq = seq,
+                                    "trail.backfill: recovered envelope via reconciliation"
+                                );
                                 sink.on_backfill(author_bytes, seq, opened.payload);
                             }
                         }

@@ -1,3 +1,4 @@
+import { getTelemetry } from '@/features/dev/telemetry';
 import type { LocationFix } from '../../core/types';
 import type { FixOutbox } from './fix-outbox';
 import { deriveMotion, type SamplingPolicy } from './sampling-policy';
@@ -173,32 +174,58 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
     async ingest(fix: LocationFix): Promise<SamplingDecision> {
       const dtMs = lastFixAt === null ? 0 : now() - lastFixAt;
       const motion = deriveMotion(lastFix, fix, dtMs);
-      const decision = policy.decide({ motion, battery: await battery(), live });
+      const batt = await battery();
+      const decision = policy.decide({ motion, battery: batt, live });
+
+      // The policy gate is the FIRST place a captured fix can die; the span says which knob
+      // (motion/battery/live) produced the decision and stamps a drop reason when it gated.
+      const span = getTelemetry().startSpan('engine.ingest', {
+        attributes: {
+          motion,
+          live,
+          'battery.level': Math.round(batt.level * 100) / 100,
+          'battery.charging': batt.charging,
+          'battery.low_power': batt.lowPower,
+          'decision.active': decision.active,
+          'decision.interval_ms': decision.timeIntervalMs,
+          'decision.accuracy': decision.accuracy,
+          'publisher.ready': publisher.isReady(),
+        },
+      });
 
       lastFix = fix;
       lastFixAt = now();
       lastMotion = motion;
 
-      if (state.status !== 'running') {
-        setState({ decision, motion, lastFixAt });
-        return decision;
-      }
-
-      setState({ decision, motion, lastFixAt });
-
       try {
-        if (decision.active) {
-          await outbox.enqueue(fix);
-          if (publisher.isReady()) await flush();
+        if (state.status !== 'running') {
+          span.setAttribute('sc.drop_reason', 'engine-not-running');
+          setState({ decision, motion, lastFixAt });
+          return decision;
         }
-        const pending = await outbox.pending();
-        setState({ pending });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        setState({ status: 'error', error: message });
-      }
 
-      return decision;
+        setState({ decision, motion, lastFixAt });
+
+        try {
+          if (decision.active) {
+            await outbox.enqueue(fix);
+            if (publisher.isReady()) await flush();
+          } else {
+            span.setAttribute('sc.drop_reason', 'sampling-suspended');
+          }
+          const pending = await outbox.pending();
+          span.setAttribute('pending', pending);
+          setState({ pending });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          span.recordError(err);
+          setState({ status: 'error', error: message });
+        }
+
+        return decision;
+      } finally {
+        span.end();
+      }
     },
 
     async reevaluate(): Promise<SamplingDecision> {

@@ -326,6 +326,17 @@ export interface IrohLocationApi {
    */
   importDocTicket(ticket: string): Promise<void>;
 
+  // ── Developer telemetry (dev/preview builds; see src/features/dev/telemetry in the app) ─────
+  /**
+   * Point the native core's OTLP exporter (traces + logs) at a collector, or disable with an
+   * empty endpoint. Returns whether export is active — `false` when the binary was built without
+   * the `otel` feature (store builds). OPTIONAL: absent on web and on iOS bindings generated
+   * before this API existed (Swift bindings only regenerate on macOS), so callers must guard.
+   */
+  configureTelemetry?(endpoint: string, instanceId: string): Promise<boolean>;
+  /** Flush buffered native telemetry. Headless contexts call this before the OS freezes them. */
+  flushTelemetry?(): Promise<void>;
+
   // ── Profiles — see docs/social/ARCHITECTURE.md §3 ──────────────────────────────────────────
   /**
    * Sign + publish our profile to the dedicated profile namespace. Returns the new monotonic,

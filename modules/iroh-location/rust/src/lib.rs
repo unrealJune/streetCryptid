@@ -21,6 +21,7 @@ mod docs;
 mod pairing;
 mod profile;
 mod relay;
+mod telemetry;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -365,32 +366,9 @@ struct Started {
     _router: Router,
 }
 
-/// Install a process-global `tracing` subscriber that pipes iroh's internal diagnostics — relay
-/// connection, `net_report`, magicsock socket rebinds (the `network_change` path we drive from
-/// `ConnectivityManager`), gossip — to Android logcat under the `streetcryptid` tag. Without this
-/// iroh emits NOTHING off-device, which has repeatedly blocked diagnosing cross-network sync.
-/// Idempotent (`try_init` no-ops once a global subscriber exists) so repeated `createNode` calls are
-/// safe. Filter via `RUST_LOG` at runtime, defaulting to a sync-focused level. Android-only —
-/// desktop/test builds stay silent exactly as before.
-#[cfg(target_os = "android")]
-fn init_android_tracing() {
-    use tracing_subscriber::prelude::*;
-    use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(
-            "warn,iroh=debug,iroh_relay=info,iroh_gossip=info,iroh_docs=info,iroh_location=debug",
-        )
-    });
-    let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_ansi(false).with_writer(
-            paranoid_android::AndroidLogMakeWriter::new("streetcryptid".to_owned()),
-        ))
-        .try_init();
-}
-
-#[cfg(not(target_os = "android"))]
-fn init_android_tracing() {}
+// The process-global `tracing` subscriber (Android logcat pipe + the optional OTLP developer
+// telemetry reload slot) lives in `telemetry.rs` — see the module docs there for the layering
+// and the `sc.*` correlation model.
 
 /// The device node: holds identity + receiving keys and, once started, the iroh
 /// endpoint + gossip router.
@@ -425,7 +403,7 @@ impl LocationNode {
         identity_secret: Option<Vec<u8>>,
         recv_secret: Option<Vec<u8>>,
     ) -> Result<Arc<Self>, LocationError> {
-        init_android_tracing();
+        telemetry::init_tracing();
         let secret = match identity_secret {
             Some(bytes) => SecretKey::from_bytes(
                 &bytes
@@ -463,6 +441,11 @@ impl LocationNode {
     }
 
     /// Bind the iroh endpoint + spawn the gossip router. Idempotent.
+    #[tracing::instrument(
+        name = "node.start",
+        skip_all,
+        fields(sc.author = %telemetry::short_hex(&self.author), relays = relay_urls.len())
+    )]
     pub async fn start(
         &self,
         relay_urls: Vec<String>,
@@ -603,6 +586,9 @@ impl LocationNode {
     pub async fn network_changed(&self) {
         let guard = self.inner.lock().await;
         if let Some(started) = guard.as_ref() {
+            // The rebind/relay re-check details show up as iroh's own magicsock/net_report
+            // events; this marker is the join point telling us WHY they fired.
+            tracing::info!("network_change: OS connectivity transition signaled");
             started.endpoint.network_change().await;
         }
     }
@@ -691,20 +677,53 @@ impl LocationNode {
             cb.on_status("subscribed".to_string());
             while let Some(event) = receiver.next().await {
                 match event {
-                    Ok(Event::Received(msg)) => match crypto::open(&recv_secret, &msg.content) {
-                        Ok(opened) => {
-                            if let Ok(fix) = postcard::from_bytes::<LocationFix>(&opened.payload) {
-                                cb.on_fix(opened.author.to_vec(), opened.seq, fix, false);
+                    Ok(Event::Received(msg)) => {
+                        // Short sync span per inbound envelope: `sc.entry_hash` (blake3 of the
+                        // sealed bytes) is what joins this receive to the sender's publish and
+                        // the stash's entry — `outcome` says why a ping stopped here (decrypt
+                        // failure / not addressed to us / decode failure).
+                        let span = tracing::info_span!(
+                            "gossip.receive",
+                            sc.entry_hash = %telemetry::envelope_hash(&msg.content),
+                            sc.author = tracing::field::Empty,
+                            sc.seq = tracing::field::Empty,
+                            outcome = tracing::field::Empty,
+                        );
+                        let _guard = span.enter();
+                        match crypto::open(&recv_secret, &msg.content) {
+                            Ok(opened) => {
+                                span.record(
+                                    "sc.author",
+                                    tracing::field::display(telemetry::short_hex(&opened.author)),
+                                );
+                                span.record("sc.seq", opened.seq);
+                                if let Ok(fix) =
+                                    postcard::from_bytes::<LocationFix>(&opened.payload)
+                                {
+                                    span.record("outcome", "delivered");
+                                    cb.on_fix(opened.author.to_vec(), opened.seq, fix, false);
+                                } else {
+                                    span.record("outcome", "payload-decode-failed");
+                                }
+                            }
+                            Err(crypto::CryptoError::NotARecipient) => {
+                                span.record("outcome", "opaque");
+                                // best-effort presence signal without content
+                                cb.on_opaque(Vec::new(), 0);
+                            }
+                            Err(_) => {
+                                span.record("outcome", "open-failed");
                             }
                         }
-                        Err(crypto::CryptoError::NotARecipient) => {
-                            // best-effort presence signal without content
-                            cb.on_opaque(Vec::new(), 0);
-                        }
-                        Err(_) => {}
-                    },
-                    Ok(Event::NeighborUp(_)) => cb.on_status("peer-up".to_string()),
-                    Ok(Event::NeighborDown(_)) => cb.on_status("peer-down".to_string()),
+                    }
+                    Ok(Event::NeighborUp(id)) => {
+                        tracing::info!(peer = %telemetry::short_hex(id.as_bytes()), "gossip neighbor up");
+                        cb.on_status("peer-up".to_string());
+                    }
+                    Ok(Event::NeighborDown(id)) => {
+                        tracing::info!(peer = %telemetry::short_hex(id.as_bytes()), "gossip neighbor down");
+                        cb.on_status("peer-down".to_string());
+                    }
                     Ok(_) => {}
                     Err(_) => break,
                 }
@@ -734,26 +753,44 @@ impl LocationNode {
         fix: LocationFix,
         recipients: Vec<Vec<u8>>,
     ) -> Result<(), LocationError> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
-        let payload =
-            postcard::to_allocvec(&fix).map_err(|_| LocationError::Decode("encode fix".into()))?;
-        let envelope = crypto::seal(
-            &self.identity_seed,
-            &self.author,
-            seq,
-            fix.ts,
-            epoch,
-            &payload,
-            &recipients,
-        )?;
-        let ns = started.trail.own_namespace();
-        started
-            .trail
-            .write(ns, &self.author, seq, envelope)
-            .await
-            .map_err(|e| LocationError::Network(e.to_string()))?;
-        Ok(())
+        use tracing::Instrument;
+        let span = tracing::info_span!(
+            "docs.write",
+            sc.author = %telemetry::short_hex(&self.author),
+            sc.seq = seq,
+            sc.entry_hash = tracing::field::Empty,
+        );
+        async move {
+            let guard = self.inner.lock().await;
+            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            let payload = postcard::to_allocvec(&fix)
+                .map_err(|_| LocationError::Decode("encode fix".into()))?;
+            let envelope = crypto::seal(
+                &self.identity_seed,
+                &self.author,
+                seq,
+                fix.ts,
+                epoch,
+                &payload,
+                &recipients,
+            )?;
+            tracing::Span::current().record(
+                "sc.entry_hash",
+                tracing::field::display(telemetry::envelope_hash(&envelope)),
+            );
+            let ns = started.trail.own_namespace();
+            started
+                .trail
+                .write(ns, &self.author, seq, envelope)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "durable docs write failed");
+                    LocationError::Network(e.to_string())
+                })?;
+            Ok(())
+        }
+        .instrument(span)
+        .await
     }
 
     /// Kick off range-based set reconciliation across our own + imported friend namespaces to
@@ -766,27 +803,43 @@ impl LocationNode {
         since_ts: u64,
         peer_ticket: Option<String>,
     ) -> Result<(), LocationError> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
-        let trail = started.trail.clone();
-        drop(guard);
+        use tracing::Instrument;
+        let span = tracing::info_span!(
+            "trail.sync",
+            sc.author = %telemetry::short_hex(&self.author),
+            since_ts,
+            explicit_peer = peer_ticket.is_some(),
+            recovered = tracing::field::Empty,
+        );
+        async move {
+            let guard = self.inner.lock().await;
+            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            let trail = started.trail.clone();
+            drop(guard);
 
-        let peers = peer_ticket
-            .map(|ticket| {
-                ticket
-                    .parse::<EndpointTicket>()
-                    .map(|ticket| vec![ticket.endpoint_addr().clone()])
-                    .map_err(|_| LocationError::Decode("bad sync peer endpoint ticket".into()))
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let listener = self.listener.lock().await.clone();
-        let sink = ListenerSink { listener };
-        trail
-            .sync_all(since_ts, peers, &sink, &self.recv_secret)
-            .await
-            .map_err(|e| LocationError::Network(e.to_string()))?;
-        Ok(())
+            let peers = peer_ticket
+                .map(|ticket| {
+                    ticket
+                        .parse::<EndpointTicket>()
+                        .map(|ticket| vec![ticket.endpoint_addr().clone()])
+                        .map_err(|_| LocationError::Decode("bad sync peer endpoint ticket".into()))
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let listener = self.listener.lock().await.clone();
+            let sink = ListenerSink { listener };
+            let recovered = trail
+                .sync_all(since_ts, peers, &sink, &self.recv_secret)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "trail sync failed");
+                    LocationError::Network(e.to_string())
+                })?;
+            tracing::Span::current().record("recovered", recovered);
+            Ok(())
+        }
+        .instrument(span)
+        .await
     }
 
     /// Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >=
@@ -1491,22 +1544,40 @@ impl Subscription {
         fix: LocationFix,
         recipients: Vec<Vec<u8>>,
     ) -> Result<(), LocationError> {
-        let payload =
-            postcard::to_allocvec(&fix).map_err(|_| LocationError::Decode("encode fix".into()))?;
-        let envelope = crypto::seal(
-            &self.node.identity_seed,
-            &self.node.author,
-            seq,
-            fix.ts,
-            epoch,
-            &payload,
-            &recipients,
-        )?;
-        let sender = self.sender.lock().await;
-        sender
-            .broadcast(envelope.into())
-            .await
-            .map_err(|e| LocationError::Network(e.to_string()))?;
-        Ok(())
+        use tracing::Instrument;
+        // `sc.entry_hash` is recorded post-seal: it is the blake3 of the sealed envelope, i.e.
+        // the same content hash the stash and receivers see — the cross-device join key.
+        let span = tracing::info_span!(
+            "gossip.publish",
+            sc.author = %telemetry::short_hex(&self.node.author),
+            sc.seq = seq,
+            sc.entry_hash = tracing::field::Empty,
+            recipients = recipients.len(),
+        );
+        async move {
+            let payload = postcard::to_allocvec(&fix)
+                .map_err(|_| LocationError::Decode("encode fix".into()))?;
+            let envelope = crypto::seal(
+                &self.node.identity_seed,
+                &self.node.author,
+                seq,
+                fix.ts,
+                epoch,
+                &payload,
+                &recipients,
+            )?;
+            tracing::Span::current().record(
+                "sc.entry_hash",
+                tracing::field::display(telemetry::envelope_hash(&envelope)),
+            );
+            let sender = self.sender.lock().await;
+            sender.broadcast(envelope.into()).await.map_err(|e| {
+                tracing::warn!(error = %e, "gossip broadcast failed");
+                LocationError::Network(e.to_string())
+            })?;
+            Ok(())
+        }
+        .instrument(span)
+        .await
     }
 }

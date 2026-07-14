@@ -1,3 +1,4 @@
+import { getTelemetry } from '@/features/dev/telemetry';
 import type { LocationFix } from '../../core/types';
 
 /**
@@ -118,40 +119,70 @@ export function createFixOutbox(opts: OutboxOptions): FixOutbox {
         const last = items[items.length - 1];
         const ts = now();
 
-        if (
+        const coalesced =
           coalesceDistanceM > 0 &&
           last !== undefined &&
           haversineMetres(last.fix, fix) <= coalesceDistanceM &&
-          ts - last.enqueuedAt <= coalesceWindowMs
-        ) {
+          ts - last.enqueuedAt <= coalesceWindowMs;
+        if (coalesced) {
           items[items.length - 1] = { fix, enqueuedAt: ts };
         } else {
           items.push({ fix, enqueuedAt: ts });
         }
 
+        let overflowDropped = 0;
         while (items.length > maxItems) {
           items.shift();
+          overflowDropped += 1;
         }
 
         await save(items);
+
+        // Both branches are legitimate "a captured fix will never hit the wire" outcomes — the
+        // exact thing a dropped-ping investigation needs to see (searchable via sc.drop_reason).
+        const telemetry = getTelemetry();
+        if (telemetry.enabled && (coalesced || overflowDropped > 0)) {
+          const span = telemetry.startSpan('outbox.enqueue', {
+            attributes: {
+              coalesced,
+              overflow_dropped: overflowDropped,
+              pending: items.length,
+              'sc.drop_reason': overflowDropped > 0 ? 'outbox-overflow' : 'coalesced',
+            },
+          });
+          span.end();
+        }
       });
     },
 
     drain(publish: (fix: LocationFix) => Promise<void>): Promise<number> {
       return exclusive(async () => {
         const items = await load();
+        if (items.length === 0) return 0;
+        const telemetry = getTelemetry();
+        const span = telemetry.startSpan('outbox.drain', {
+          attributes: { queued: items.length },
+        });
         let published = 0;
         while (items.length > 0) {
           const item = items[0];
           try {
             await publish(item.fix);
-          } catch {
+          } catch (err) {
+            // Not a drop — the fix is retained for the next drain — but it IS why nothing went
+            // out on this wake, so record the reason.
+            span.addEvent('publish.failed', {
+              reason: err instanceof Error ? err.message : String(err),
+            });
             break;
           }
           items.shift();
           published += 1;
           await save(items);
         }
+        span.setAttributes({ published, retained: items.length });
+        span.setStatus(published > 0 || items.length === 0 ? 'ok' : 'error');
+        span.end();
         return published;
       });
     },

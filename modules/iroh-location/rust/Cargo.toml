@@ -13,9 +13,26 @@ name = "iroh_location"
 crate-type = ["cdylib", "staticlib", "lib"]
 
 [features]
+# Developer telemetry is ON by default while the project is pre-launch: dev clients AND
+# TestFlight builds ship it (the EAS pre-install hook and `just bindgen-android` both build with
+# default features). It stays DORMANT unless the app calls `configure_telemetry` with an
+# endpoint, so a default build without a configured collector behaves exactly like a non-otel
+# build. Store builds compile it out entirely with `--no-default-features`.
+default = ["otel"]
 # Enables the uniffi-bindgen CLI (clap etc.); only needed to generate bindings, so it's
 # kept off the default mobile cdylib build.
 cli = ["uniffi/cli"]
+# OTLP export of `tracing` spans + events (traces AND logs) to a developer-configured collector
+# (see infra/otel/ at the repo root). This is how we see phone⇄stash⇄phone interactions: spans
+# carry `sc.author` / `sc.seq` / `sc.entry_hash` join attributes, and iroh's internal relay /
+# net_report / magicsock diagnostics ship as OTLP logs instead of dying in logcat.
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:opentelemetry-appender-tracing",
+]
 
 [dependencies]
 # --- iroh transport + live gossip (see docs/social/ARCHITECTURE.md §2) ---
@@ -54,6 +71,25 @@ thiserror = "2"
 anyhow = "1" # error plumbing for the iroh-docs/iroh-blobs durable-trail glue
 tracing = "0.1" # mobile BLE transport diagnostics
 
+# --- developer telemetry (the `otel` feature; see src/telemetry.rs) ---
+# tracing-subscriber moves to a normal dependency (it was already in the tree via iroh, and the
+# telemetry registry needs it on every target now, not just Android's logcat pipe). The OTEL
+# stack proper stays optional. opentelemetry-otlp uses HTTP/protobuf over reqwest+rustls: the
+# collector is a plain-HTTP LAN endpoint, and reqwest's default native-tls would drag OpenSSL
+# into the Android cross-build.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", optional = true }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = [
+    "trace",
+    "logs",
+    "http-proto",
+    "reqwest-client",
+    "reqwest-rustls",
+], optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
+opentelemetry-appender-tracing = { version = "0.31", optional = true }
+
 # Android needs getrandom's std backend; harmless elsewhere.
 [target.'cfg(target_os = "android")'.dependencies]
 getrandom = { version = "0.2", features = ["std"] }
@@ -62,9 +98,8 @@ jni = "0.22"
 # Pipe iroh's internal `tracing` diagnostics (relay connection, net_report, magicsock socket
 # rebinds on network_change, gossip) to Android logcat — otherwise iroh emits NOTHING off-device,
 # which has repeatedly blocked diagnosing cross-network sync. Android-only; installed in
-# `LocationNode::new`. `tracing-subscriber` is already in the tree via iroh.
+# `LocationNode::new` (tracing-subscriber itself is now a normal dependency; see telemetry note).
 paranoid-android = "0.2"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Vendored experimental BLE transport for iroh (AGPL-3.0-or-later — see
 # third_party/iroh-ble-transport/ and the repo-root THIRD_PARTY_NOTICES.md).

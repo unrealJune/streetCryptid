@@ -19,6 +19,7 @@ import {
   type SasRole,
 } from 'iroh-location';
 
+import { getOtelConfig, getTelemetry, parseTraceparent } from '@/features/dev/telemetry';
 import { encodeContactCard } from '../core/contact-card';
 import { decodePairLink, encodePairLink, isPairLink, PAIR_TOKEN_PREFIX } from '../core/pair-link';
 import {
@@ -70,6 +71,7 @@ import {
   createDefaultPushTokenProvider,
   type DevicePushToken,
   type PushTokenProvider,
+  type TrailSyncPush,
 } from './push-token-provider';
 import { loadKeys, saveKeys } from './secure-keys';
 import { loadSeq, saveSeq } from './state-store';
@@ -385,6 +387,38 @@ export class LocationSharingService implements FixPublisher {
     this.emit();
   }
 
+  /**
+   * Developer telemetry (dev/preview builds only — inert without `EXPO_PUBLIC_OTEL_ENDPOINT`):
+   * stamp the JS tracer with this node's identity and point the NATIVE core's OTLP exporter at
+   * the same collector, so JS + Rust spans from this phone share one `service.instance.id`.
+   * `configureTelemetry` is guarded: stale iOS bindings (regenerated only on macOS) won't have it.
+   */
+  private configureDevTelemetry(): void {
+    if (!this.keys) return;
+    const instanceId = this.keys.endpointId.slice(0, 10);
+    getTelemetry().setResourceAttributes({ 'service.instance.id': instanceId });
+    const config = getOtelConfig();
+    if (!config || !this.mod || typeof this.mod.configureTelemetry !== 'function') return;
+    try {
+      void this.mod.configureTelemetry(config.endpoint, instanceId);
+    } catch {
+      // Older binding without the export, or a build with otel compiled out — JS telemetry alone.
+    }
+  }
+
+  /**
+   * Flush buffered telemetry (JS + native exporters). Headless background contexts call this
+   * before they end — the OS may freeze the process immediately after.
+   */
+  async flushDevTelemetry(): Promise<void> {
+    try {
+      await this.mod?.flushTelemetry?.();
+    } catch {
+      // best-effort
+    }
+    await getTelemetry().flush();
+  }
+
   /** Lazily acquire (once) this device's native push token for stash wake-ups. */
   private async ensurePushToken(): Promise<DevicePushToken | null> {
     if (this.cachedPushToken !== undefined) return this.cachedPushToken;
@@ -400,8 +434,23 @@ export class LocationSharingService implements FixPublisher {
   private registerStashBackgroundSync(): void {
     if (this.stashBackgroundSyncRegistered) return;
     this.stashBackgroundSyncRegistered = true;
-    this.pushTokens.registerBackgroundSync(() => {
-      void this.syncTrail(0);
+    this.pushTokens.registerBackgroundSync((push?: TrailSyncPush) => {
+      // Dev telemetry: the push payload carries the stash's traceparent, so this wake span LINKS
+      // to the exact `stash.wake.push` that woke us — the stash→device half of a ping's journey.
+      const link = parseTraceparent(push?.traceparent);
+      const span = getTelemetry().startSpan('push.wake', {
+        links: link ? [link] : [],
+        attributes: { 'sc.namespace': push?.ns ? push.ns.slice(0, 10) : undefined },
+      });
+      void this.syncTrail(0)
+        .then(
+          () => {
+            span.setAttribute('recovered', this.lastSyncRecovered ?? undefined);
+            span.setStatus('ok');
+          },
+          (err: unknown) => span.recordError(err)
+        )
+        .finally(() => span.end());
     });
   }
 
@@ -462,6 +511,7 @@ export class LocationSharingService implements FixPublisher {
       identitySecret: this.keys.identitySecret,
       recvSecret: this.keys.recvSecret,
     });
+    this.configureDevTelemetry();
     // Restore the monotonic seq before anything can publish, so we never hand out a reused seq.
     this.seq = await loadSeq();
     await this.mod.start();
@@ -1038,28 +1088,46 @@ export class LocationSharingService implements FixPublisher {
    * Satisfies {@link FixPublisher} so the background {@link LocationEngine} can drive it.
    */
   async publishFix(fix: LocationFix): Promise<number> {
-    if (!this.mod) throw new Error('publishFix: native module not bound');
-    await this.ensureMySubscription();
-    if (!this.mySubId) throw new Error('publishFix: no active subscription');
-    const seq = await this.nextSeq();
-    const native: NativeLocationFix = {
-      lat: fix.lat,
-      lon: fix.lon,
-      accuracyM: fix.accuracyM,
-      headingDeg: fix.headingDeg,
-      ts: fix.ts,
-    };
-    const recipients = pool.recipientRecvKeys(this.state);
-    await this.mod.publish(this.mySubId, seq, 0, native, recipients);
+    // Spans below join the native `gossip.publish`/`docs.write` (same sc.author + sc.seq) and,
+    // via the envelope hash those record, the stash + receiving phones.
+    const span = getTelemetry().startSpan('publish.fix', {
+      attributes: { 'sc.author': this.keys ? this.keys.endpointId.slice(0, 10) : undefined },
+    });
     try {
-      // Durable mirror: same sealed bytes, so per-recipient revocation carries over (ARCHITECTURE §6).
-      await this.mod.docsWrite(this.mySubId, seq, 0, native, recipients);
-    } catch {
-      // Best effort; the live path already delivered. A later syncTrail can reconcile.
+      if (!this.mod) throw new Error('publishFix: native module not bound');
+      await this.ensureMySubscription();
+      if (!this.mySubId) throw new Error('publishFix: no active subscription');
+      const seq = await this.nextSeq();
+      span.setAttribute('sc.seq', seq);
+      const native: NativeLocationFix = {
+        lat: fix.lat,
+        lon: fix.lon,
+        accuracyM: fix.accuracyM,
+        headingDeg: fix.headingDeg,
+        ts: fix.ts,
+      };
+      const recipients = pool.recipientRecvKeys(this.state);
+      span.setAttribute('recipients', recipients.length);
+      await this.mod.publish(this.mySubId, seq, 0, native, recipients);
+      try {
+        // Durable mirror: same sealed bytes, so per-recipient revocation carries over (ARCHITECTURE §6).
+        await this.mod.docsWrite(this.mySubId, seq, 0, native, recipients);
+      } catch (err) {
+        // Best effort; the live path already delivered. A later syncTrail can reconcile.
+        span.addEvent('docs.write.failed', {
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+      await this.trail.appendOwn(fix, seq);
+      this.notifyTrailChanged();
+      span.setStatus('ok');
+      return seq;
+    } catch (err) {
+      span.recordError(err);
+      throw err;
+    } finally {
+      span.end();
     }
-    await this.trail.appendOwn(fix, seq);
-    this.notifyTrailChanged();
-    return seq;
   }
 
   /**
@@ -1070,12 +1138,20 @@ export class LocationSharingService implements FixPublisher {
    */
   async syncTrail(sinceTs = 0): Promise<void> {
     if (!this.mod) return;
+    const span = getTelemetry().startSpan('trail.sync.app', {
+      attributes: { since_ts: sinceTs, stash: this.stashEnabled() },
+    });
     try {
       await this.mod.syncTrail(sinceTs, this.stashEnabled() ? this.stashTicket : null);
-    } catch {
+    } catch (err) {
       // Best effort — the durable path may be unavailable (e.g. web without docs).
+      span.addEvent('native.sync.failed', {
+        reason: err instanceof Error ? err.message : String(err),
+      });
     }
     const recovered = await this.refreshTrailFromReplica(sinceTs);
+    span.setAttribute('recovered', recovered);
+    span.end();
     this.lastSyncRecovered = recovered;
     this.notifyTrailChanged();
     this.emit();
@@ -1464,6 +1540,22 @@ export class LocationSharingService implements FixPublisher {
   }
 
   private handleFix(event: OnFixEvent): void {
+    const telemetry = getTelemetry();
+    if (telemetry.enabled) {
+      // App-level delivery marker: the native `gossip.receive`/`trail.backfill` span says the
+      // envelope arrived and decrypted; this one says the app actually surfaced it (or that a
+      // non-friend/removing gate ate it — the last place a ping can silently die).
+      const known = !!this.state.friends[event.author] && !this.removingFriends.has(event.author);
+      const span = telemetry.startSpan('fix.received.app', {
+        attributes: {
+          'sc.author': event.author.slice(0, 10),
+          'sc.seq': event.seq,
+          backfill: !!event.backfill,
+          ...(known ? {} : { 'sc.drop_reason': 'unknown-or-removing-author' }),
+        },
+      });
+      span.end();
+    }
     if (!this.state.friends[event.author] || this.removingFriends.has(event.author)) return;
 
     const fix: IncomingFix = {

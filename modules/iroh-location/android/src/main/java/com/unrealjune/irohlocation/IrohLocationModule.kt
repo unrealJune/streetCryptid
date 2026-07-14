@@ -33,9 +33,11 @@ import uniffi.iroh_location.ProfileView
 import uniffi.iroh_location.SasChallenge
 import uniffi.iroh_location.SasRoleKind
 import uniffi.iroh_location.Subscription
+import uniffi.iroh_location.configureTelemetry
 import uniffi.iroh_location.decodePairInvite
 import uniffi.iroh_location.deriveTopic
 import uniffi.iroh_location.encodePairInvite
+import uniffi.iroh_location.flushTelemetry
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
@@ -441,6 +443,19 @@ class IrohLocationModule : Module() {
       { olderThanTs: Double ->
         val n = node ?: throw IllegalStateException("call createNode first")
         n.pruneTrail(olderThanTs.toLong().toULong())
+      }
+
+    // Developer telemetry (crate-level, not node-scoped — callable before createNode). Returns
+    // false when the Rust binary was built without the `otel` feature, so JS treats "disabled"
+    // and "unavailable" alike.
+    AsyncFunction("configureTelemetry") Coroutine
+      { endpoint: String, instanceId: String ->
+        configureTelemetry(endpoint, instanceId)
+      }
+
+    AsyncFunction("flushTelemetry") Coroutine
+      { ->
+        flushTelemetry()
       }
 
     AsyncFunction("docTicket") Coroutine

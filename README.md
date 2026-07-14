@@ -74,6 +74,14 @@ just update "message"      # publish an OTA update
 EAS pre-install hooks rebuild the git-ignored Rust artifacts for both Android and iOS, so cloud
 builds always package the native code that matches the committed UniFFI bindings.
 
+### Debugging dropped location pings (developer telemetry)
+
+Dev and preview builds can export OpenTelemetry traces + logs from every component (app JS,
+native iroh core, trail-stash server) to a self-hosted collector, correlated across devices by
+envelope hash. `docker compose up -d` in `infra/otel/`, set `EXPO_PUBLIC_OTEL_ENDPOINT` in
+`.env.local`, and see [infra/otel/README.md](infra/otel/README.md) for the
+"follow one ping" cookbook. Production builds contain no active telemetry.
+
 ## Project structure
 
 ```

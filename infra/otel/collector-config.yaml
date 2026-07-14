@@ -1,0 +1,42 @@
+# OTLP intake for every streetCryptid component. Phones POST OTLP/HTTP JSON (the app's mini
+# exporter) and OTLP/HTTP protobuf (the native Rust cores); the stash does the same server-side.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        # CORS only matters for the web build (native fetch ignores it); wide open is fine for a
+        # LAN-only dev collector.
+        cors:
+          allowed_origins: ['*']
+          allowed_headers: ['*']
+
+processors:
+  # memory_limiter first, batch last — the canonical ordering.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  batch: {}
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  # Loki ≥3.0 ingests OTLP natively at /otlp — no legacy loki exporter / label mapping needed.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/loki]

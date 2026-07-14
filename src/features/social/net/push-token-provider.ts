@@ -19,11 +19,20 @@ export interface DevicePushToken {
   platform: StashPlatform;
 }
 
+/**
+ * The interesting fields of a received `trail-sync` push: which namespace changed and, on dev
+ * telemetry builds, the stash's `traceparent` so the wake span links back to the exact push send.
+ */
+export interface TrailSyncPush {
+  ns?: string;
+  traceparent?: string;
+}
+
 export interface PushTokenProvider {
   /** Request permission + return this device's native push token, or null if unavailable/denied. */
   acquire(): Promise<DevicePushToken | null>;
   /** Run `onSync` whenever a `trail-sync` push is received. Best-effort; no-op when unavailable. */
-  registerBackgroundSync(onSync: () => void): void;
+  registerBackgroundSync(onSync: (push?: TrailSyncPush) => void): void;
 }
 
 /** Map an expo-notifications device-token `type` to our stash platform. Pure + tested. */
@@ -39,6 +48,17 @@ export function isTrailSyncNotification(notification: unknown): boolean {
     notification as { request?: { content?: { data?: Record<string, unknown> } } } | null
   )?.request?.content?.data;
   return !!data && data.type === 'trail-sync';
+}
+
+/** Extract the {@link TrailSyncPush} fields from a trail-sync notification. Pure + tested. */
+export function trailSyncPushData(notification: unknown): TrailSyncPush {
+  const data = (
+    notification as { request?: { content?: { data?: Record<string, unknown> } } } | null
+  )?.request?.content?.data;
+  return {
+    ...(typeof data?.ns === 'string' ? { ns: data.ns } : {}),
+    ...(typeof data?.traceparent === 'string' ? { traceparent: data.traceparent } : {}),
+  };
 }
 
 interface ExpoNotificationsModule {
@@ -78,7 +98,7 @@ export class ExpoPushTokenProvider implements PushTokenProvider {
     }
   }
 
-  registerBackgroundSync(onSync: () => void): void {
+  registerBackgroundSync(onSync: (push?: TrailSyncPush) => void): void {
     const mod = tryExpoNotifications();
     if (!mod) return;
     try {
@@ -87,7 +107,7 @@ export class ExpoPushTokenProvider implements PushTokenProvider {
       // module load — tracked in https://github.com/unrealJune/trail-stash (PLAN.md); this
       // listener covers the common case.
       mod.addNotificationReceivedListener((notification) => {
-        if (isTrailSyncNotification(notification)) onSync();
+        if (isTrailSyncNotification(notification)) onSync(trailSyncPushData(notification));
       });
     } catch {
       /* best-effort */
@@ -100,7 +120,7 @@ export class NoopPushTokenProvider implements PushTokenProvider {
   async acquire(): Promise<DevicePushToken | null> {
     return null;
   }
-  registerBackgroundSync(_onSync: () => void): void {}
+  registerBackgroundSync(_onSync: (push?: TrailSyncPush) => void): void {}
 }
 
 /** Build the default provider: native on device, no-op on web. */

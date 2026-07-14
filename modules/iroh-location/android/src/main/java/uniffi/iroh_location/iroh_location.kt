@@ -691,6 +691,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_func_generate_recv_keypair(
     ): Int
+    external fun uniffi_iroh_location_checksum_func_configure_telemetry(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_flush_telemetry(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_fixlistener_on_fix(
     ): Int
     external fun uniffi_iroh_location_checksum_method_fixlistener_on_opaque(
@@ -916,6 +920,10 @@ external fun uniffi_iroh_location_fn_func_encode_pair_invite(`invite`: RustBuffe
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_generate_recv_keypair(uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_configure_telemetry(`endpoint`: RustBuffer.ByValue,`instanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
+external fun uniffi_iroh_location_fn_func_flush_telemetry(
+): Long
 external fun ffi_iroh_location_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun ffi_iroh_location_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1045,6 +1053,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_generate_recv_keypair() != 62550) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 60711) {
@@ -5325,5 +5339,43 @@ public object FfiConverterSequenceTypeProfileView: FfiConverterRustBuffer<List<P
     )
     }
     
+
+        /**
+         * Point developer telemetry at an OTLP/HTTP collector (`http://<lan-ip>:4318`), or disable it by
+         * passing an empty endpoint. Returns whether export is active — always `false` when the crate was
+         * built without the `otel` feature (store builds), so the uniffi surface is identical either way
+         * and the app never needs to know how the binary was compiled. `instance_id` should be the short
+         * endpoint id so Rust-side spans join the app's under one `service.instance.id`.
+         */ fun `configureTelemetry`(`endpoint`: kotlin.String, `instanceId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_configure_telemetry(
+    
+        FfiConverterString.lower(`endpoint`),FfiConverterString.lower(`instanceId`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Flush buffered telemetry. Headless background tasks await this before returning — the OS may
+         * freeze the process the moment the task completes, taking unexported batches with it. Async
+         * (via a blocking task) because `force_flush` blocks until export or timeout, which must never
+         * stall the JS bridge thread.
+         */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `flushTelemetry`() {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_iroh_location_fn_func_flush_telemetry(),
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
 
 

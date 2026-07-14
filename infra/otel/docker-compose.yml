@@ -1,0 +1,60 @@
+# Developer observability stack for streetCryptid — traces + logs from every component:
+# the app on each phone (JS + native iroh-location core) and the trail-stash server.
+# LAN-only dev tooling; NOTHING here runs in production. See README.md for the correlation
+# model and the "follow one ping" cookbook.
+#
+#   docker compose up -d      → Grafana at http://localhost:3000 (anonymous admin)
+#   phones + stash export to  → http://<lan-ip>:4318 (OTLP/HTTP)
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    command: ['--config=/etc/otelcol/config.yaml']
+    volumes:
+      - ./collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      # Published on 0.0.0.0 so phones on the LAN can POST directly.
+      - '4317:4317' # OTLP gRPC
+      - '4318:4318' # OTLP HTTP (what the app + stash use)
+    depends_on:
+      - tempo
+      - loki
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ['-config.file=/etc/tempo/tempo.yaml']
+    volumes:
+      - ./tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.3.2
+    command: ['-config.file=/etc/loki/loki.yaml']
+    volumes:
+      - ./loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      # Anonymous admin: this stack lives on a trusted LAN and holds only dev telemetry.
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: 'true'
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - '3000:3000'
+    depends_on:
+      - tempo
+      - loki
+    restart: unless-stopped
+
+volumes:
+  tempo-data:
+  loki-data:
+  grafana-data:

@@ -44,6 +44,9 @@ async function doFlush(): Promise<number> {
       await service.publishFix(fix);
     });
   } finally {
+    // Drain telemetry before the node goes away — this short-lived context is exactly the one
+    // whose batches die unexported if we skip it.
+    await service.flushDevTelemetry();
     await service.shutdownAsync();
   }
 }

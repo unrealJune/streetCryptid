@@ -39,8 +39,10 @@ yarn-error.*
 # EAS store metadata — contains the App Store review contact (phone/email); keep local
 store.config.json
 
-# self-hosted infra (private tile server, baked tilesets, etc.) — not part of the public app
-infra/
+# self-hosted infra (private tile server, baked tilesets, etc.) — not part of the public app.
+# infra/* (not infra/) so the negation below can re-include the shareable otel dev stack.
+infra/*
+!infra/otel/
 
 # typescript
 *.tsbuildinfo

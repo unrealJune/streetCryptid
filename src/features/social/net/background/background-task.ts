@@ -1,5 +1,6 @@
 import * as Location from 'expo-location';
 
+import { getSystemSnapshot, getTelemetry } from '@/features/dev/telemetry';
 import type { LocationFix } from '../../core/types';
 import type { AccuracyTier, ActivityKind } from './types';
 
@@ -93,18 +94,33 @@ export interface BackgroundStartConfig {
  */
 export function defineBackgroundLocationTask(makeSink: () => BackgroundFixSink): void {
   taskManager().defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
+    const telemetry = getTelemetry();
     if (error) {
       console.warn('[background-location] task error', error);
+      telemetry.log('error', `background task error: ${error.message}`);
+      await telemetry.flush();
       return;
     }
     const locations = (data as { locations?: Location.LocationObject[] } | undefined)?.locations;
     if (!locations || locations.length === 0) {
       return;
     }
+    // One `bg.wake` span per OS delivery — THE anchor when debugging dropped pings: it says the
+    // phone woke, with how many fixes, and in what network/battery/app state. Deeper spans
+    // (outbox, publish, native gossip/docs) follow it in time under the same service.instance.id.
+    const span = telemetry.startSpan('bg.wake', { attributes: { fixes: locations.length } });
+    span.setAttributes(await getSystemSnapshot());
     try {
       await makeSink().onBackgroundFixes(locations.map(toFix));
+      span.setStatus('ok');
     } catch (err) {
       console.warn('[background-location] sink failed', err);
+      span.recordError(err);
+    } finally {
+      span.end();
+      // The OS may freeze this headless context the moment we return; unexported batches would
+      // die with it.
+      await telemetry.flush();
     }
   });
 }

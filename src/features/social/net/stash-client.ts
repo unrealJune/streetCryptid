@@ -11,6 +11,8 @@
 
 import { getStashConfig, type StashConfig } from 'iroh-location';
 
+import { getTelemetry, traceparentFor } from '@/features/dev/telemetry';
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 export type StashPlatform = 'apns' | 'fcm';
@@ -90,17 +92,29 @@ export class HttpStashClient implements StashClient {
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.config.psk) headers.Authorization = `Bearer ${this.config.psk}`;
+    // Dev telemetry: send our span as `traceparent` so the stash's http.request span parents on
+    // it and the whole control-API exchange reads as one trace in Tempo.
+    const telemetry = getTelemetry();
+    const span = telemetry.startSpan('stash.request', {
+      attributes: { 'http.request.method': method, 'url.path': path },
+    });
+    if (telemetry.enabled) headers.traceparent = traceparentFor(span.context);
     try {
-      return await fetch(`${this.config.baseUrl}${path}`, {
+      const res = await fetch(`${this.config.baseUrl}${path}`, {
         method,
         headers,
         body,
         signal: controller.signal,
       });
+      span.setAttribute('http.response.status_code', res.status);
+      span.setStatus(res.status < 400 ? 'ok' : 'error');
+      return res;
     } catch (err) {
+      span.recordError(err);
       if (isAbortError(err)) throw new StashClientError('trail stash: request timed out');
       throw new StashClientError(`trail stash: request failed (${errorMessage(err)})`);
     } finally {
+      span.end();
       clearTimeout(timer);
     }
   }

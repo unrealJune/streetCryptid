@@ -57,6 +57,10 @@ export declare class IrohLocationNativeModule
   docTicket(): Promise<string>;
   importDocTicket(ticket: string): Promise<void>;
 
+  // Optional: absent on iOS bindings generated before the telemetry API (macOS-only regen).
+  configureTelemetry?(endpoint: string, instanceId: string): Promise<boolean>;
+  flushTelemetry?(): Promise<void>;
+
   publishProfile(
     handle: string,
     cryptidName: string,

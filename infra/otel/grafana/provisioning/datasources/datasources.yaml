@@ -1,0 +1,27 @@
+# Provisioned datasources: Tempo (traces) + Loki (logs), with trace→logs correlation so a span's
+# service.instance.id jumps straight to that phone's/stash's logs around the span window.
+apiVersion: 1
+
+datasources:
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    isDefault: true
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: '-5m'
+        spanEndTimeShift: '5m'
+        filterByTraceID: false
+        filterBySpanID: false
+        tags:
+          - key: service.name
+            value: service_name
+
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
