@@ -86,7 +86,7 @@ envelope hash. `docker compose up -d` in `infra/otel/`, set `EXPO_PUBLIC_OTEL_EN
 
 ```
 src/
-  app/            # expo-router routes (map, explore, friends)
+  app/            # expo-router routes (map, friends, settings)
   features/map/   # dot-field map engine, rendering, and tests
   features/social/ # P2P pairing, encrypted location sync, profiles, and UI
   features/account/ # local cryptid identity and ASCII profile editor
