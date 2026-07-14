@@ -114,4 +114,36 @@ describe('FriendLocatorStack', () => {
     expect(onPressSelf).toHaveBeenCalledTimes(1);
     expect(onPress).not.toHaveBeenCalled();
   });
+
+  it('labels a self-only stack without referring to zero friends', () => {
+    const sharedValue = { value: 0 } as SharedValue<number>;
+
+    act(() => {
+      renderer = create(
+        <FriendLocatorStack
+          friends={[
+            {
+              id: 'self',
+              handle: 'YOU',
+              color: '#f7b84b',
+              selected: false,
+              self: true,
+            },
+          ]}
+          onPress={jest.fn()}
+          onPressSelf={jest.fn()}
+          panelColor="#00111f"
+          scale={sharedValue}
+          translateX={sharedValue}
+          translateY={sharedValue}
+          x={100}
+          y={200}
+        />
+      );
+    });
+
+    expect(
+      renderer.root.findByProps({ accessibilityLabel: 'You are in this area' })
+    ).toBeDefined();
+  });
 });

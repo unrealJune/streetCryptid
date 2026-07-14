@@ -31,6 +31,12 @@ export function luminance(c: Rgb): number {
   return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
 }
 
+export function rgbToHex(color: Rgb): string {
+  return `#${color
+    .map((channel) => clamp(Math.round(channel), 0, 255).toString(16).padStart(2, '0'))
+    .join('')}`;
+}
+
 /**
  * Fog-of-war color transform: explored (fog=0) keeps the true color; unexplored
  * drains 74% toward its own gray, then 24% toward the background. Area features

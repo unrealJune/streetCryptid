@@ -23,6 +23,7 @@ import {
   worldToScreen,
   type ViewTransform,
 } from '../core/camera';
+import { rgbToHex } from '../core/color';
 import {
   applyPan,
   applyPinch,
@@ -613,10 +614,6 @@ export function MapView({
 const styles = StyleSheet.create({
   fill: { flex: 1 },
 });
-
-function rgbToHex(color: readonly [number, number, number]): string {
-  return `#${color.map((channel) => Math.round(channel).toString(16).padStart(2, '0')).join('')}`;
-}
 
 function buildTrail(points: readonly ScreenPoint[], color: string) {
   if (points.length === 0) return null;
