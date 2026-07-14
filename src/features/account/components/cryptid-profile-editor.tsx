@@ -306,11 +306,11 @@ export function CryptidProfileEditor({
           <View style={styles.headerRow}>
             <View style={styles.headerCopy}>
               <ThemedText style={styles.title}>
-                {mode === 'onboarding' ? 'Set up your profile' : 'Profile'}
+                {mode === 'onboarding' ? 'Choose your name' : 'Profile'}
               </ThemedText>
               <ThemedText type="small" themeColor="textSecondary" style={styles.intro}>
                 {mode === 'onboarding'
-                  ? 'Choose how you appear to friends. You can change this later.'
+                  ? 'This is how you will appear to friends. You can customize your profile later.'
                   : 'This is how you appear to friends.'}
               </ThemedText>
             </View>
@@ -367,38 +367,47 @@ export function CryptidProfileEditor({
               { backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected },
             ]}
           >
-            <View style={styles.preview}>
-              <CryptidAvatar
-                art={sigil || ' + '}
-                name={iconName}
-                color={color}
-                size="large"
-                style={styles.previewAvatar}
-              />
-              <ThemedText
-                adjustsFontSizeToFit
-                minimumFontScale={0.74}
-                numberOfLines={1}
-                style={[styles.handlePreview, { color: bareHandle ? color : theme.textSecondary }]}
-              >
-                @{displayHandle}
-              </ThemedText>
-            </View>
+            {mode === 'edit' ? (
+              <>
+                <View style={styles.preview}>
+                  <CryptidAvatar
+                    art={sigil || ' + '}
+                    name={iconName}
+                    color={color}
+                    size="large"
+                    style={styles.previewAvatar}
+                  />
+                  <ThemedText
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.74}
+                    numberOfLines={1}
+                    style={[
+                      styles.handlePreview,
+                      { color: bareHandle ? color : theme.textSecondary },
+                    ]}
+                  >
+                    @{displayHandle}
+                  </ThemedText>
+                </View>
 
-            <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
+                <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
 
-            <SettingRow
-              active={activeEditor === 'username'}
-              label="Username"
-              value={bareHandle ? `@${bareHandle}` : 'Not set'}
-              onPress={() =>
-                setActiveEditor((current) => (current === 'username' ? null : 'username'))
-              }
-            />
+                <SettingRow
+                  active={activeEditor === 'username'}
+                  label="Username"
+                  value={bareHandle ? `@${bareHandle}` : 'Not set'}
+                  onPress={() =>
+                    setActiveEditor((current) => (current === 'username' ? null : 'username'))
+                  }
+                />
+              </>
+            ) : null}
 
-            {activeEditor === 'username' ? (
+            {mode === 'onboarding' || activeEditor === 'username' ? (
               <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
-                <ThemedText style={styles.fieldLabel}>Username</ThemedText>
+                <ThemedText style={styles.fieldLabel}>
+                  {mode === 'onboarding' ? 'Name' : 'Username'}
+                </ThemedText>
                 <View
                   style={[
                     styles.handleInputShell,
@@ -411,7 +420,7 @@ export function CryptidProfileEditor({
                 >
                   <ThemedText style={[styles.handlePrefix, { color }]}>@</ThemedText>
                   <TextInput
-                    accessibilityLabel="Username"
+                    accessibilityLabel={mode === 'onboarding' ? 'Name' : 'Username'}
                     autoCapitalize="none"
                     autoCorrect={false}
                     maxLength={20}
@@ -438,17 +447,19 @@ export function CryptidProfileEditor({
               </View>
             ) : null}
 
-            <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
+            {mode === 'edit' ? (
+              <>
+                <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
 
-            <SettingRow
-              active={activeEditor === 'icon'}
-              label="Profile icon"
-              value={iconName}
-              onPress={() => setActiveEditor((current) => (current === 'icon' ? null : 'icon'))}
-            />
+                <SettingRow
+                  active={activeEditor === 'icon'}
+                  label="Profile icon"
+                  value={iconName}
+                  onPress={() => setActiveEditor((current) => (current === 'icon' ? null : 'icon'))}
+                />
 
-            {activeEditor === 'icon' ? (
-              <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
+                {activeEditor === 'icon' ? (
+                  <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
                 <ThemedText style={styles.fieldLabel}>Choose an icon</ThemedText>
                 <View accessibilityLabel="Profile icon choices" style={styles.presetGrid}>
                   {CRYPTID_PRESETS.map((preset) => {
@@ -594,20 +605,22 @@ export function CryptidProfileEditor({
                     />
                   </View>
                 ) : null}
-              </View>
-            ) : null}
+                  </View>
+                ) : null}
 
-            <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
+                <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
 
-            <SettingRow
-              active={activeEditor === 'signal'}
-              label="Signal color"
-              value={colorName}
-              onPress={() => setActiveEditor((current) => (current === 'signal' ? null : 'signal'))}
-            />
+                <SettingRow
+                  active={activeEditor === 'signal'}
+                  label="Signal color"
+                  value={colorName}
+                  onPress={() =>
+                    setActiveEditor((current) => (current === 'signal' ? null : 'signal'))
+                  }
+                />
 
-            {activeEditor === 'signal' ? (
-              <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
+                {activeEditor === 'signal' ? (
+                  <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
                 <ThemedText style={styles.fieldLabel}>Choose a signal color</ThemedText>
                 <ThemedText type="small" themeColor="textSecondary">
                   This marks your profile icon, map pin, and shared trail on friends&apos; maps.
@@ -667,7 +680,9 @@ export function CryptidProfileEditor({
                     );
                   })}
                 </View>
-              </View>
+                  </View>
+                ) : null}
+              </>
             ) : null}
           </View>
 
