@@ -56,6 +56,8 @@ helm install trail-stash oci://ghcr.io/<owner>/charts/trail-stash \
 | `config.relayUrls` | `[]` | Custom iroh relay URLs; empty uses the built-in n0 relay map. |
 | `secret.relayToken` | `""` | Optional bearer token for every custom relay. Prefer an existing Secret. |
 | `config.push.apnsBundleId` / `fcmProjectId` | `""` | Set to enable a push route; bearer comes from the Secret. |
+| `config.otel.endpoint` | `""` | Developer telemetry: OTLP/HTTP collector base URL (traces + logs). Empty ⇒ dormant. Dev collectors only — see README "Environment". |
+| `config.otel.serviceName` | `""` | `OTEL_SERVICE_NAME` override (default `trail-stash`). |
 | `service.type` / `service.port` | `ClusterIP` / `8787` | |
 | `ingress.enabled` | `false` | Off — front it with your own TLS proxy. |
 | `resources.limits.memory` | `512Mi` | Grows with retained ciphertext + subscriber count. |

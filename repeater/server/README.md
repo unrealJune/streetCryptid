@@ -81,6 +81,8 @@ Opt-in and wake registration. Presenting a read-ticket **is** the grant. When
 | `APNS_BUNDLE_ID` / `APNS_HOST` | — / `api.push.apple.com` | Enables the APNs push route. |
 | `FCM_PROJECT_ID` | — | Enables the FCM push route. |
 | `APNS_BEARER` / `FCM_BEARER` | — | **Placeholder** static push credentials (`EnvCredentials`) until real APNs-JWT / FCM-OAuth minting lands. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Developer telemetry (`otel` builds, which the published image is): OTLP/HTTP collector base URL (e.g. `http://otel-collector:4318`; see the streetCryptid repo's `infra/otel/`). Unset ⇒ telemetry fully dormant. Exports traces + logs; log bodies pass the same redaction as console output, but span/log *attributes* from dependencies do not — point it only at a developer-controlled collector, never a hosted log store. |
+| `OTEL_SERVICE_NAME` | `trail-stash` | Telemetry service name. |
 
 The waker builds correct silent-push payloads (tested) and sends them when a push
 route is configured; the credential-minting is the remaining piece. With no push

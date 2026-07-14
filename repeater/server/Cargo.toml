@@ -31,6 +31,18 @@ live = [
     "dep:tracing",
     "dep:tracing-subscriber",
 ]
+# `otel` layers OTLP export (traces + logs) onto the `live` node — see src/telemetry.rs for the
+# layering and the redaction guarantees. Compiled into the shipped image (Dockerfile builds
+# `--features live,otel`) but DORMANT until `OTEL_EXPORTER_OTLP_ENDPOINT` is set, so operators
+# who never configure a collector run exactly the code they ran before.
+otel = [
+    "live",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:opentelemetry-appender-tracing",
+]
 
 [dependencies]
 # --- pure core (always compiled) ---
@@ -52,6 +64,21 @@ axum = { version = "0.7", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2"], optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+# --- developer telemetry (see the `otel` feature and src/telemetry.rs). Versions match
+# modules/iroh-location/rust so both ends of a trace speak the same OTLP vintage. HTTP/protobuf
+# over reqwest — the collector endpoint is plain HTTP inside the cluster/LAN. ---
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", optional = true }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = [
+    "trace",
+    "logs",
+    "http-proto",
+    "reqwest-client",
+    "reqwest-rustls",
+], optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
+opentelemetry-appender-tracing = { version = "0.31", optional = true }
 
 [[bin]]
 name = "trail-stash"

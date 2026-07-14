@@ -12,6 +12,9 @@
 //! * `TRAIL_STASH_PRUNE_INTERVAL_MIN`   — prune cadence (default 15).
 //! * `TRAIL_STASH_RELAY_URLS`           — comma-separated custom iroh relay URLs.
 //! * `TRAIL_STASH_RELAY_TOKEN`          — optional bearer token for the custom relays.
+//! * `OTEL_EXPORTER_OTLP_ENDPOINT`      — developer telemetry (`otel` builds only): OTLP/HTTP
+//!   base URL of a collector (e.g. `http://otel-collector:4318`). Unset ⇒ telemetry dormant.
+//! * `OTEL_SERVICE_NAME`                — telemetry service name (default `trail-stash`).
 
 use std::fmt;
 use std::sync::Arc;
@@ -29,15 +32,12 @@ use trail_stash::waker::{EnvCredentials, HttpPushWaker, NoopWaker, PushConfig, W
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .event_format(RedactingFormat(Format::default()))
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
+    // Secret first: the subscriber wants the public key as `service.instance.id`. A missing key
+    // therefore reports via anyhow/stderr instead of a log line — same visibility, earlier exit.
     let config = StashConfig::from_env(|k| std::env::var(k).ok());
     let secret = load_secret_key()?;
+
+    init_tracing(&secret);
 
     if config.psk.is_none() {
         tracing::warn!(
@@ -66,14 +66,41 @@ async fn main() -> Result<()> {
 
     let serve = tokio::spawn(Arc::clone(&node).serve_control_api(config.port, config.psk.clone()));
 
-    // Graceful shutdown on Ctrl-C / SIGTERM. Everything is in RAM, so there is nothing to flush.
+    // Graceful shutdown on Ctrl-C / SIGTERM. The replica is in RAM with nothing to flush; only
+    // buffered telemetry batches (otel builds) need a final drain.
     tokio::select! {
         _ = shutdown_signal() => tracing::info!("stash: shutdown signal received"),
         res = serve => {
             res.context("control api task")?.context("control api")?;
         }
     }
+    #[cfg(feature = "otel")]
+    trail_stash::telemetry::shutdown();
     Ok(())
+}
+
+/// Install the global subscriber: redacted console fmt (exactly the pre-telemetry behavior) plus,
+/// on `otel` builds with `OTEL_EXPORTER_OTLP_ENDPOINT` set, the OTLP trace + log layers from
+/// [`trail_stash::telemetry`]. `Option<Layer>`/`Vec<Layer>` are layers themselves, so the dormant
+/// case composes to a no-op without branching.
+fn init_tracing(secret: &SecretKey) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let fmt_layer =
+        tracing_subscriber::fmt::layer().event_format(RedactingFormat(Format::default()));
+
+    let registry = tracing_subscriber::registry().with(filter).with(fmt_layer);
+
+    #[cfg(feature = "otel")]
+    let registry = registry.with(trail_stash::telemetry::otel_layers(
+        &trail_stash::telemetry::instance_id(&secret.public()),
+    ));
+    #[cfg(not(feature = "otel"))]
+    let _ = &secret;
+
+    registry.init();
 }
 
 struct RedactingFormat(Format);

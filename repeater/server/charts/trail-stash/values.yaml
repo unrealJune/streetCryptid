@@ -82,6 +82,15 @@ config:
     apnsHost: api.push.apple.com
     fcmProjectId: ""        # enables the FCM route
 
+  # Developer telemetry (optional; the image is built with the `otel` feature). Point endpoint at
+  # an OTLP/HTTP collector (e.g. http://otel-collector:4318 — the streetCryptid infra/otel stack)
+  # to export traces + logs for debugging phone⇄stash⇄phone delivery. Empty ⇒ fully dormant.
+  # NOT for production log shipping: exported log bodies are redacted, but span/log attributes
+  # from dependencies are not — use only with a developer-controlled collector.
+  otel:
+    endpoint: ""            # OTEL_EXPORTER_OTLP_ENDPOINT
+    serviceName: ""         # OTEL_SERVICE_NAME (default: trail-stash)
+
 service:
   type: ClusterIP
   port: 8787

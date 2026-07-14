@@ -41,3 +41,7 @@ pub mod waker;
 
 #[cfg(feature = "live")]
 pub mod node;
+
+// `sc.*` join-key helpers always; the OTLP pipeline only with `otel` (see the module docs).
+#[cfg(feature = "live")]
+pub mod telemetry;

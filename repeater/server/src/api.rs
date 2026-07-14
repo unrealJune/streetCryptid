@@ -162,12 +162,18 @@ mod tests {
 
     #[test]
     fn rejects_junk_ticket() {
-        assert_eq!(validate_register(&req("short", None, None)), Err(ApiError::BadTicket));
+        assert_eq!(
+            validate_register(&req("short", None, None)),
+            Err(ApiError::BadTicket)
+        );
         assert_eq!(
             validate_register(&req("has spaces and!!!", None, None)),
             Err(ApiError::BadTicket)
         );
-        assert_eq!(validate_register(&req("", None, None)), Err(ApiError::BadTicket));
+        assert_eq!(
+            validate_register(&req("", None, None)),
+            Err(ApiError::BadTicket)
+        );
     }
 
     #[test]
@@ -212,10 +218,19 @@ mod tests {
 
     #[test]
     fn namespace_hex_rejects_bad_input() {
-        assert_eq!(parse_namespace_hex("abc").unwrap_err(), ApiError::BadNamespace);
+        assert_eq!(
+            parse_namespace_hex("abc").unwrap_err(),
+            ApiError::BadNamespace
+        );
         let upper = "A".repeat(64);
-        assert_eq!(parse_namespace_hex(&upper).unwrap_err(), ApiError::BadNamespace);
+        assert_eq!(
+            parse_namespace_hex(&upper).unwrap_err(),
+            ApiError::BadNamespace
+        );
         let non_hex = "g".repeat(64);
-        assert_eq!(parse_namespace_hex(&non_hex).unwrap_err(), ApiError::BadNamespace);
+        assert_eq!(
+            parse_namespace_hex(&non_hex).unwrap_err(),
+            ApiError::BadNamespace
+        );
     }
 }

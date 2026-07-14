@@ -89,7 +89,12 @@ mod live {
         fn build(&self, ns: &NamespaceId, sub: &PushSubscription) -> Option<(PushRequest, String)> {
             match sub.platform {
                 Platform::Apns => Some((
-                    apns_request(&self.config.apns_host, &self.config.bundle_id, &sub.token, ns),
+                    apns_request(
+                        &self.config.apns_host,
+                        &self.config.bundle_id,
+                        &sub.token,
+                        ns,
+                    ),
                     self.creds.apns_bearer()?,
                 )),
                 Platform::Fcm => Some((
@@ -103,23 +108,53 @@ mod live {
     impl Waker for HttpPushWaker {
         fn wake(&self, namespace: &NamespaceId, targets: &[PushSubscription]) {
             for sub in targets {
-                let Some((req, bearer)) = self.build(namespace, sub) else {
+                #[allow(unused_mut)] // only mutated by the otel traceparent embedding below
+                let Some((mut req, bearer)) = self.build(namespace, sub) else {
                     tracing::warn!("stash: no push credential for {}", sub.redacted());
                     continue;
                 };
+                // One span per push send. wake() runs inside the caller's `stash.entry.received`
+                // span, so this parents there — and its OWN context rides the payload as a
+                // `traceparent`, letting the woken phone link its wake back to this exact push.
+                let span = tracing::info_span!(
+                    "stash.wake.push",
+                    sc.namespace = %crate::telemetry::short_hex(namespace),
+                    platform = ?sub.platform,
+                    http.response.status_code = tracing::field::Empty,
+                );
+                #[cfg(feature = "otel")]
+                if let Some(tp) = crate::telemetry::traceparent_of(&span) {
+                    match sub.platform {
+                        // APNs: custom top-level key next to `type`/`ns` (never inside `aps`).
+                        Platform::Apns => {
+                            req.body["traceparent"] = tp.into();
+                        }
+                        // FCM: the data map is the only payload the app's handler receives.
+                        Platform::Fcm => {
+                            req.body["message"]["data"]["traceparent"] = tp.into();
+                        }
+                    }
+                }
                 let client = self.client.clone();
                 let redacted = sub.redacted();
-                tokio::spawn(async move {
+                let send = async move {
                     let mut rb = client.post(&req.url).bearer_auth(bearer).json(&req.body);
                     for (k, v) in &req.headers {
                         rb = rb.header(k.as_str(), v.as_str());
                     }
                     match rb.send().await {
-                        Ok(resp) if resp.status().is_success() => {}
-                        Ok(resp) => tracing::warn!("stash: push {redacted} -> {}", resp.status()),
+                        Ok(resp) => {
+                            tracing::Span::current()
+                                .record("http.response.status_code", resp.status().as_u16());
+                            if !resp.status().is_success() {
+                                tracing::warn!("stash: push {redacted} -> {}", resp.status());
+                            }
+                        }
                         Err(e) => tracing::warn!("stash: push {redacted} failed: {e}"),
                     }
-                });
+                };
+                use tracing::Instrument;
+                tokio::spawn(send.instrument(span));
             }
         }
     }

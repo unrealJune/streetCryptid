@@ -1,8 +1,10 @@
 # syntax=docker/dockerfile:1
 
 # --- build stage ---------------------------------------------------------
-# Builds the `trail-stash` binary with the `live` feature (the full iroh stack). The first build
-# is slow (iroh + deps); BuildKit cache mounts keep re-builds fast.
+# Builds the `trail-stash` binary with the `live` feature (the full iroh stack) plus `otel`
+# (developer telemetry — compiled in but dormant until OTEL_EXPORTER_OTLP_ENDPOINT is set; see
+# src/telemetry.rs). The first build is slow (iroh + deps); BuildKit cache mounts keep re-builds
+# fast.
 FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 
@@ -17,7 +19,7 @@ COPY src ./src
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --features live --bin trail-stash \
+    cargo build --release --features live,otel --bin trail-stash \
     && cp target/release/trail-stash /trail-stash
 
 # --- runtime stage -------------------------------------------------------

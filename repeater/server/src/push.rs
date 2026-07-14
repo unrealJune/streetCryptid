@@ -37,7 +37,12 @@ pub fn namespace_hex(ns: &NamespaceId) -> String {
 ///
 /// * `host` is `api.push.apple.com` (prod) or `api.sandbox.push.apple.com` (dev).
 /// * `bundle_id` is the app's bundle id, sent as `apns-topic`.
-pub fn apns_request(host: &str, bundle_id: &str, device_token: &str, ns: &NamespaceId) -> PushRequest {
+pub fn apns_request(
+    host: &str,
+    bundle_id: &str,
+    device_token: &str,
+    ns: &NamespaceId,
+) -> PushRequest {
     PushRequest {
         url: format!("https://{host}/3/device/{device_token}"),
         headers: vec![
@@ -89,7 +94,10 @@ mod tests {
     const NS: NamespaceId = [0xabu8; 32];
 
     fn header<'a>(r: &'a PushRequest, key: &str) -> Option<&'a str> {
-        r.headers.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        r.headers
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     #[test]
@@ -101,11 +109,19 @@ mod tests {
 
     #[test]
     fn apns_is_silent_background() {
-        let r = apns_request("api.push.apple.com", "com.unrealjune.streetcryptid", "TOKEN", &NS);
+        let r = apns_request(
+            "api.push.apple.com",
+            "com.unrealjune.streetcryptid",
+            "TOKEN",
+            &NS,
+        );
         assert_eq!(r.url, "https://api.push.apple.com/3/device/TOKEN");
         assert_eq!(header(&r, "apns-push-type"), Some("background"));
         assert_eq!(header(&r, "apns-priority"), Some("5"));
-        assert_eq!(header(&r, "apns-topic"), Some("com.unrealjune.streetcryptid"));
+        assert_eq!(
+            header(&r, "apns-topic"),
+            Some("com.unrealjune.streetcryptid")
+        );
         assert_eq!(r.body["aps"]["content-available"], json!(1));
         // silent: no alert/sound keys
         assert!(r.body["aps"].get("alert").is_none());

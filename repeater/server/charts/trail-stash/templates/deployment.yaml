@@ -78,6 +78,15 @@ spec:
             - name: FCM_PROJECT_ID
               value: {{ .Values.config.push.fcmProjectId | quote }}
             {{- end }}
+            {{- if .Values.config.otel.endpoint }}
+            # Developer telemetry — omitted entirely when no endpoint is configured.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.config.otel.endpoint | quote }}
+            {{- if .Values.config.otel.serviceName }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.config.otel.serviceName | quote }}
+            {{- end }}
+            {{- end }}
             # --- secret material ---
             - name: TRAIL_STASH_SECRET_KEY
               valueFrom:

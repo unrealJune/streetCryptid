@@ -133,6 +133,11 @@ impl StashNode {
 
     /// Handle a validated `POST /v1/namespaces`: import the read-ticket (idempotent), record the
     /// opt-in grant + optional wake subscription, and start watching the namespace once.
+    #[tracing::instrument(
+        name = "stash.namespace.import",
+        skip_all,
+        fields(sc.namespace = tracing::field::Empty, first_watch = tracing::field::Empty)
+    )]
     pub async fn register(
         self: &Arc<Self>,
         read_ticket: &str,
@@ -147,6 +152,10 @@ impl StashNode {
             .await
             .map_err(|e| anyhow!("import ticket: {e}"))?;
         let ns_bytes = doc.id().to_bytes();
+        tracing::Span::current().record(
+            "sc.namespace",
+            tracing::field::display(crate::telemetry::short_hex(&ns_bytes)),
+        );
 
         self.handles
             .lock()
@@ -155,6 +164,7 @@ impl StashNode {
             .or_insert_with(|| doc.clone());
 
         let first = self.registry.register(ns_bytes, subscription);
+        tracing::Span::current().record("first_watch", first);
         if first {
             self.clone().spawn_watch(ns_bytes, doc);
         }
@@ -191,34 +201,60 @@ impl StashNode {
             while let Some(ev) = events.next().await {
                 match ev {
                     Ok(LiveEvent::InsertRemote { entry, .. }) => {
-                        // The entry has arrived — that alone is reason to wake subscribers so they
-                        // sync. Fetch the opaque bytes best-effort (they may still be in flight);
-                        // the passthrough delivery service ignores them, and a future MLS-aware one
-                        // can re-fetch. Never skip the wake just because the blob isn't local yet.
-                        let bytes = self
-                            .blobs
-                            .blobs()
-                            .get_bytes(entry.content_hash())
-                            .await
-                            .unwrap_or_default();
-                        let (author, seq) = decode_author_seq(entry.key());
-                        let env = EnvelopeRef {
-                            namespace: &ns_bytes,
-                            author: &author,
-                            seq,
-                            bytes: &bytes,
-                        };
-                        match self.delivery.admit(&env) {
-                            Admission::Accept => {
-                                let targets = self.registry.wake_targets(&ns_bytes);
-                                if !targets.is_empty() {
-                                    self.waker.wake(&ns_bytes, &targets);
+                        use tracing::Instrument;
+                        // `sc.entry_hash` here is the iroh-blobs content hash — the same short
+                        // hash the sender stamped on its publish span and the receiver stamps on
+                        // its backfill, so one Tempo query joins all three hops of a ping.
+                        let span = tracing::info_span!(
+                            "stash.entry.received",
+                            sc.namespace = %crate::telemetry::short_hex(&ns_bytes),
+                            sc.entry_hash = %crate::telemetry::short_hex(entry.content_hash().as_bytes()),
+                            sc.author = tracing::field::Empty,
+                            sc.seq = tracing::field::Empty,
+                            wake_targets = tracing::field::Empty,
+                        );
+                        async {
+                            // The entry has arrived — that alone is reason to wake subscribers so
+                            // they sync. Fetch the opaque bytes best-effort (they may still be in
+                            // flight); the passthrough delivery service ignores them, and a future
+                            // MLS-aware one can re-fetch. Never skip the wake just because the
+                            // blob isn't local yet.
+                            let bytes = self
+                                .blobs
+                                .blobs()
+                                .get_bytes(entry.content_hash())
+                                .await
+                                .unwrap_or_default();
+                            let (author, seq) = decode_author_seq(entry.key());
+                            let current = tracing::Span::current();
+                            current.record(
+                                "sc.author",
+                                tracing::field::display(crate::telemetry::short_hex(&author)),
+                            );
+                            current.record("sc.seq", seq);
+                            let env = EnvelopeRef {
+                                namespace: &ns_bytes,
+                                author: &author,
+                                seq,
+                                bytes: &bytes,
+                            };
+                            match self.delivery.admit(&env) {
+                                Admission::Accept => {
+                                    let targets = self.registry.wake_targets(&ns_bytes);
+                                    current.record("wake_targets", targets.len());
+                                    if !targets.is_empty() {
+                                        // Called inside this span so the waker's push spans (and
+                                        // the traceparent embedded in the payload) parent here.
+                                        self.waker.wake(&ns_bytes, &targets);
+                                    }
+                                }
+                                Admission::Reject(reason) => {
+                                    tracing::info!("stash: delivery rejected entry: {reason}");
                                 }
                             }
-                            Admission::Reject(reason) => {
-                                tracing::info!("stash: delivery rejected entry: {reason}");
-                            }
                         }
+                        .instrument(span)
+                        .await;
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -240,6 +276,7 @@ impl StashNode {
     /// replica drops our local copy but does not (and need not) propagate a tombstone. The hard
     /// memory bound is the retention window × fix rate × granted namespaces, plus the fact that a
     /// restart clears everything.
+    #[tracing::instrument(name = "stash.prune", skip_all, fields(removed = tracing::field::Empty))]
     pub async fn prune_once(&self, now_ms: u64) -> Result<u64> {
         let cutoff = self.retention.cutoff(now_ms);
         let mut removed = 0u64;
@@ -262,13 +299,13 @@ impl StashNode {
                 }
             }
         }
+        tracing::Span::current().record("removed", removed);
         Ok(removed)
     }
 
     /// Periodic prune loop; runs until the process exits.
     pub async fn run_prune_loop(self: Arc<Self>, interval_min: u64) {
-        let mut ticker =
-            tokio::time::interval(tokio::time::Duration::from_secs(interval_min * 60));
+        let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(interval_min * 60));
         loop {
             ticker.tick().await;
             match self.prune_once(now_ms()).await {
@@ -285,11 +322,19 @@ impl StashNode {
         let psk = Arc::new(psk);
         let app = AxumRouter::new()
             .route("/v1/namespaces", post(register_handler))
-            .route("/v1/namespaces/:id/subscription", delete(unsubscribe_handler))
+            .route(
+                "/v1/namespaces/:id/subscription",
+                delete(unsubscribe_handler),
+            )
             // route_layer applies ONLY to the routes above, not to /healthz added after.
             .route_layer(middleware::from_fn_with_state(psk, psk_guard))
             .route("/healthz", get(healthz))
             .with_state(self);
+        // Outermost layer so the request span wraps the PSK guard too, and the phone's
+        // `traceparent` header parents the whole request. Dormant-telemetry builds still pay one
+        // cheap disabled span per request; non-otel builds have no layer at all.
+        #[cfg(feature = "otel")]
+        let app = app.layer(middleware::from_fn(crate::telemetry::http_request_span));
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
         tracing::info!("stash: control API listening on :{port}");
         axum::serve(listener, app).await?;
@@ -298,11 +343,7 @@ impl StashNode {
 }
 
 /// Anti-abuse gate: require a matching pre-shared key on protected routes (no-op when unset).
-async fn psk_guard(
-    State(psk): State<Arc<Option<String>>>,
-    req: Request,
-    next: Next,
-) -> Response {
+async fn psk_guard(State(psk): State<Arc<Option<String>>>, req: Request, next: Next) -> Response {
     let provided = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
@@ -310,7 +351,11 @@ async fn psk_guard(
     if authorize(psk.as_deref(), bearer_token(provided)).is_allowed() {
         next.run(req).await
     } else {
-        (StatusCode::UNAUTHORIZED, "missing or invalid pre-shared key").into_response()
+        (
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid pre-shared key",
+        )
+            .into_response()
     }
 }
 
@@ -510,7 +555,10 @@ mod live_tests {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(observed, "stash did not reconcile the writer's entry within 30s");
+        assert!(
+            observed,
+            "stash did not reconcile the writer's entry within 30s"
+        );
         Ok(())
     }
 }

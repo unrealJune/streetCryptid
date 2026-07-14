@@ -82,7 +82,10 @@ mod tests {
     fn denied_on_missing_or_wrong() {
         assert_eq!(authorize(Some("s3cret"), None), AuthOutcome::Denied);
         assert_eq!(authorize(Some("s3cret"), Some("nope")), AuthOutcome::Denied);
-        assert_eq!(authorize(Some("s3cret"), Some("s3cre")), AuthOutcome::Denied);
+        assert_eq!(
+            authorize(Some("s3cret"), Some("s3cre")),
+            AuthOutcome::Denied
+        );
         assert!(!authorize(Some("s3cret"), Some("nope")).is_allowed());
     }
 
