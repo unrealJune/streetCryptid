@@ -45,7 +45,7 @@ export function FriendLocatorStack({
 }: FriendLocatorStackProps) {
   const ordered = [...friends].sort((a, b) => Number(a.selected) - Number(b.selected));
   const includesSelf = ordered.some((item) => item.self);
-  const friendCount = ordered.length - Number(includesSelf);
+  const nonSelfCount = ordered.length - Number(includesSelf);
   const art = ordered
     .filter((friend) => !friend.self)
     .map((friend) => ({
@@ -83,9 +83,9 @@ export function FriendLocatorStack({
     <Animated.View
       accessibilityLabel={
         includesSelf
-          ? friendCount === 0
+          ? nonSelfCount === 0
             ? 'You are in this area'
-            : `${friendCount} ${friendCount === 1 ? 'friend' : 'friends'} and you in this area`
+            : `${nonSelfCount} ${nonSelfCount === 1 ? 'friend' : 'friends'} and you in this area`
           : `${ordered.length} friends in this area`
       }
       pointerEvents="box-none"
