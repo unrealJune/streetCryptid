@@ -87,6 +87,7 @@ describe('FriendLocatorStack', () => {
             {
               id: 'self',
               handle: 'YOU',
+              sigil: '',
               color: '#f7b84b',
               selected: true,
               self: true,
@@ -125,6 +126,7 @@ describe('FriendLocatorStack', () => {
             {
               id: 'self',
               handle: 'YOU',
+              sigil: '',
               color: '#f7b84b',
               selected: false,
               self: true,

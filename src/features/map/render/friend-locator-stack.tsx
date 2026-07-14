@@ -8,7 +8,7 @@ import { sigilMetrics } from './friend-locator';
 export interface FriendLocatorStackItem {
   readonly id: string;
   readonly handle: string;
-  readonly sigil?: string;
+  readonly sigil: string;
   readonly color: string;
   readonly selected: boolean;
   readonly self?: boolean;

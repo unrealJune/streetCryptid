@@ -585,6 +585,7 @@ export function MapView({
                     ? {
                         id: locator.id,
                         handle: 'YOU',
+                        sigil: '',
                         color: locator.color,
                         selected: selfSelected,
                         self: true,
