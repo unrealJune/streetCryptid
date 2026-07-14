@@ -31,7 +31,7 @@ describe('cryptid profile', () => {
       sigil: '\ufeff\u201cowl\u201d\u00a0\u2014\u2028  \u2026\u200b',
     });
 
-    expect(profile.sigil).toBe('"owl"  -\n  ...');
+    expect(profile.sigil).toBe('"owl" -\n  ...');
   });
 
   it('keeps every bundled preset within the contact-card bounds', () => {

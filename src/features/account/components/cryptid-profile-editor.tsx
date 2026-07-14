@@ -269,7 +269,7 @@ export function CryptidProfileEditor({
     setSaveStatus('idle');
     setSelectedPresetId(presetId);
     if (presetId === null) {
-      setCustomName((current) => current || DEFAULT_CUSTOM_NAME);
+      setCustomName((current) => (current.trim() ? current : DEFAULT_CUSTOM_NAME));
       setCustomNameTouched(false);
       setCustomArtTouched(false);
     }
@@ -425,8 +425,6 @@ export function CryptidProfileEditor({
                     placeholder="username"
                     placeholderTextColor={theme.textSecondary}
                     selectionColor={color}
-                    smartDashesType="no"
-                    smartQuotesType="no"
                     spellCheck={false}
                     style={[styles.handleInput, { color: theme.text }]}
                     value={handle}
@@ -574,6 +572,8 @@ export function CryptidProfileEditor({
                       placeholder={'Enter ASCII art.\nSpaces and line breaks are preserved.'}
                       placeholderTextColor={theme.textSecondary}
                       selectionColor={color}
+                      smartDashesType="no"
+                      smartQuotesType="no"
                       spellCheck={false}
                       style={[
                         styles.asciiInput,
