@@ -571,8 +571,6 @@ export function CryptidProfileEditor({
                       placeholder={'Enter ASCII art.\nSpaces and line breaks are preserved.'}
                       placeholderTextColor={theme.textSecondary}
                       selectionColor={color}
-                      smartDashesType="no"
-                      smartQuotesType="no"
                       spellCheck={false}
                       style={[
                         styles.asciiInput,

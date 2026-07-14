@@ -144,8 +144,6 @@ describe('FriendLocatorStack', () => {
       );
     });
 
-    expect(
-      renderer.root.findByProps({ accessibilityLabel: 'You are in this area' })
-    ).toBeDefined();
+    expect(renderer.root.findByProps({ accessibilityLabel: 'You are in this area' })).toBeDefined();
   });
 });
