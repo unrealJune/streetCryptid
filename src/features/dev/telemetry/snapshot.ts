@@ -13,10 +13,22 @@ type BatteryModule = typeof import('expo-battery');
 let networkMod: NetworkModule | null | undefined;
 let batteryMod: BatteryModule | null | undefined;
 
-function tryRequire<T>(name: string): T | null {
+// Static string literals (not a dynamic `require(name)`): Metro can only resolve
+// require() calls whose argument is a literal, so each optional native module gets
+// its own guarded loader. Still lazy and best-effort — a missing module returns null.
+function tryRequireNetwork(): NetworkModule | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports -- deliberate lazy, guarded load
-    return require(name) as T;
+    return require('expo-network') as NetworkModule;
+  } catch {
+    return null;
+  }
+}
+
+function tryRequireBattery(): BatteryModule | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- deliberate lazy, guarded load
+    return require('expo-battery') as BatteryModule;
   } catch {
     return null;
   }
@@ -25,7 +37,7 @@ function tryRequire<T>(name: string): T | null {
 export async function getSystemSnapshot(): Promise<Attributes> {
   const attrs: Attributes = {};
 
-  if (networkMod === undefined) networkMod = tryRequire<NetworkModule>('expo-network');
+  if (networkMod === undefined) networkMod = tryRequireNetwork();
   if (networkMod) {
     try {
       const state = await networkMod.getNetworkStateAsync();
@@ -39,7 +51,7 @@ export async function getSystemSnapshot(): Promise<Attributes> {
     }
   }
 
-  if (batteryMod === undefined) batteryMod = tryRequire<BatteryModule>('expo-battery');
+  if (batteryMod === undefined) batteryMod = tryRequireBattery();
   if (batteryMod) {
     try {
       const [level, state, lowPower] = await Promise.all([
