@@ -14,6 +14,8 @@ interface CryptidAvatarProps {
   style?: StyleProp<ViewStyle>;
 }
 
+const MIN_ART_FONT_SCALE = 0.5;
+
 const sizes = {
   compact: {
     artSize: 9,
@@ -51,7 +53,7 @@ export function CryptidAvatar({
       <Text
         adjustsFontSizeToFit
         allowFontScaling={false}
-        minimumFontScale={0.5}
+        minimumFontScale={MIN_ART_FONT_SCALE}
         numberOfLines={lineCount}
         style={[
           styles.art,
