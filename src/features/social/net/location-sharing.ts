@@ -317,6 +317,7 @@ export class LocationSharingService implements FixPublisher {
   private bgProvider: BackgroundLocationProvider | null = null;
   private bgUnwatch: (() => void) | null = null;
   private bgTaskHandlerStop: (() => void) | null = null;
+  private bgBackfillHandlerStop: (() => void) | null = null;
   private bgLifecycleStop: (() => void) | null = null;
   private bgCadenceStop: (() => Promise<void>) | null = null;
   /** Auto-revert timer for a bounded live-tracking window; null when ambient. */
@@ -1246,7 +1247,7 @@ export class LocationSharingService implements FixPublisher {
         { createSamplingPolicy },
         { BackgroundLocationProvider: Provider },
         { createAppLifecycleController },
-        { backgroundOutbox, registerActiveBackgroundFixHandler },
+        { backgroundOutbox, registerActiveBackgroundFixHandler, registerActiveBackfillHandler },
         { createBatterySource },
         { createCadenceController, cfgFromDecision },
       ] = await Promise.all([
@@ -1274,6 +1275,16 @@ export class LocationSharingService implements FixPublisher {
       this.bgTaskHandlerStop = registerActiveBackgroundFixHandler(async (fix) => {
         this.recordLocalFix(fix);
         await this.engine?.ingest(fix);
+      });
+
+      // Route the periodic RECEIVE-side backfill (WorkManager / BGTaskScheduler) to THIS live
+      // runtime rather than a headless node. On Android this runtime stays alive while backgrounded
+      // (the location foreground service), so the periodic task must reuse this node — spinning up a
+      // second one calls createNode → clearRuntime() and tears this node's subscriptions down,
+      // silently stopping send + live receive until relaunch.
+      this.bgBackfillHandlerStop = registerActiveBackfillHandler(async () => {
+        await this.syncTrail(0);
+        await this.engine?.flush();
       });
 
       this.bgProvider = new Provider();
@@ -1359,6 +1370,8 @@ export class LocationSharingService implements FixPublisher {
     this.bgUnwatch = null;
     this.bgTaskHandlerStop?.();
     this.bgTaskHandlerStop = null;
+    this.bgBackfillHandlerStop?.();
+    this.bgBackfillHandlerStop = null;
     this.bgLifecycleStop?.();
     this.bgLifecycleStop = null;
     try {
@@ -1435,6 +1448,8 @@ export class LocationSharingService implements FixPublisher {
     this.bgUnwatch = null;
     this.bgTaskHandlerStop?.();
     this.bgTaskHandlerStop = null;
+    this.bgBackfillHandlerStop?.();
+    this.bgBackfillHandlerStop = null;
     this.bgLifecycleStop?.();
     this.bgLifecycleStop = null;
     this.fixSub?.remove();

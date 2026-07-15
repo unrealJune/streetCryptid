@@ -48,6 +48,27 @@ export function registerActiveBackgroundFixHandler(
   return dispatcher.registerActiveHandler(handler);
 }
 
+// The mounted runtime's RECEIVE-side backfill (syncTrail + outbox drain), registered while
+// background sharing runs. The periodic backfill task routes here whenever a mounted runtime is
+// alive so it reuses the live native node. On Android the mounted runtime stays alive while
+// backgrounded (the location foreground service), so `AppState` is NOT 'active' and a headless
+// backfill would call `createNode → clearRuntime()` — tearing the live node's subscriptions down
+// and silently stopping outgoing publishes + live receive until the app is relaunched.
+let activeBackfillHandler: (() => Promise<void>) | null = null;
+
+/** Register the mounted runtime's backfill runner. Returns an unregister fn (last writer wins). */
+export function registerActiveBackfillHandler(handler: () => Promise<void>): () => void {
+  activeBackfillHandler = handler;
+  return () => {
+    if (activeBackfillHandler === handler) activeBackfillHandler = null;
+  };
+}
+
+/** The mounted runtime's backfill runner, or null on a fresh headless launch (no runtime alive). */
+export function getActiveBackfillHandler(): (() => Promise<void>) | null {
+  return activeBackfillHandler;
+}
+
 if (Platform.OS !== 'web' && isBackgroundLocationAvailable()) {
   ensureBackgroundTaskRegistered();
 }

@@ -3,6 +3,7 @@ import { AppState } from 'react-native';
 import { createCryptidProfileStore } from '@/features/account/storage/profile-store';
 import { LocationSharingService } from '../location-sharing';
 import { backgroundOutbox } from './background-outbox';
+import { getActiveBackfillHandler } from './register-task';
 
 // Serialize ALL headless node usage. expo-task-manager delivers each OS callback to a fresh,
 // short-lived JS context, and the native iroh runtime is a process-wide singleton (createNode →
@@ -77,6 +78,13 @@ export function flushBackgroundOutboxHeadless(): Promise<number> {
  * `backfill-task.ts`. No-op while the app is active (the foreground lifecycle already syncs).
  */
 export function runBackgroundBackfillHeadless(): Promise<void> {
+  // If a mounted runtime is alive it owns the process-wide native node. On Android that runtime
+  // stays alive while backgrounded (the location foreground service), so `AppState` is NOT 'active'
+  // and the `session()` guard alone would let us spin up a SECOND node here — whose `createNode`
+  // calls `clearRuntime()` and tears the live node's subscriptions down, silently killing outgoing
+  // publishes and live receive until relaunch. Route the backfill to the live runtime instead.
+  const runMounted = getActiveBackfillHandler();
+  if (runMounted) return runMounted();
   return runHeadless<void>({
     fallback: undefined,
     run: async (service) => {
