@@ -100,11 +100,12 @@ describe('cadence pure helpers', () => {
     expect(activityForMotion('unknown')).toBe('other');
   });
 
-  it('cfgFromDecision carries accuracy, cadence, activity, auto-pause and notification', () => {
+  it('cfgFromDecision carries accuracy, cadence, activity, disabled auto-pause and notification', () => {
     const cfg = cfgFor('walking');
     expect(cfg.accuracy).toBe('balanced');
     expect(cfg.activityType).toBe('fitness');
-    expect(cfg.pausesUpdatesAutomatically).toBe(true);
+    // Auto-pause is always OFF so iOS keeps delivering background fixes (does not reliably resume).
+    expect(cfg.pausesUpdatesAutomatically).toBe(false);
     expect(cfg.notificationTitle).toBe('streetCryptid');
     expect(cfg.notificationColor).toBe('#C6791A');
   });

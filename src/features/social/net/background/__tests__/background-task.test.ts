@@ -45,14 +45,14 @@ describe('background location registration', () => {
     );
   });
 
-  it('defaults to auto-pause with the "other" activity when unspecified', async () => {
+  it('defaults to NO auto-pause when unspecified (keep iOS background delivery alive)', async () => {
     const api = makeApi(false);
 
     await rearmBackgroundLocationTask(api, config);
 
     expect(api.startLocationUpdatesAsync).toHaveBeenCalledWith(
       BACKGROUND_LOCATION_TASK,
-      expect.objectContaining({ pausesUpdatesAutomatically: true })
+      expect.objectContaining({ pausesUpdatesAutomatically: false })
     );
   });
 

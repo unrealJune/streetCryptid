@@ -208,8 +208,9 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   would otherwise stay pinned at that cadence forever. The controller watches the engine's decisions
   and **re-programs `startLocationUpdatesAsync` only on a material change** (accuracy, interval,
   distance, deferred window, iOS activity/auto-pause), and asks the engine to re-evaluate on power
-  events. OS integration: iOS `activityType` tracks motion (fitness/automotive/other) and
-  `pausesUpdatesAutomatically` lets Core Location auto-suspend GPS when stationary; Android carries a
+  events. OS integration: iOS `activityType` tracks motion (fitness/automotive/other); we keep
+  `pausesUpdatesAutomatically` **off** so Core Location never auto-pauses background updates (it does
+  not reliably resume, which stops background sharing until the app is reopened); Android carries a
   branded foreground-service notification color. Re-arms are serialized latest-wins so two
   `startLocationUpdatesAsync` calls never race the same task.
 - **Outbox** (`fix-outbox.ts`): durable, serialized queue so captures survive the node being unbound
@@ -218,7 +219,12 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   before draining the queue.
 - **Reconnect-on-resume** (`lifecycle.ts`): on foreground → drain outbox + `syncTrail`;
   monotonic `seq` persisted (`state-store.ts`) so `author/seq` keys never collide across restarts.
-- **Config**: iOS `UIBackgroundModes: [location]` + `NSLocationAlwaysAndWhenInUse…`; Android
+- **Periodic backfill** (`backfill-task.ts` + `headless-runtime.ts`): the SEND task only fires on
+  movement and only publishes, so a backgrounded phone never pulls peers' fixes. An
+  `expo-background-task` (iOS `BGTaskScheduler` / Android `WorkManager`, ~15 min, OS-scheduled)
+  periodically wakes a short-lived headless node to `syncTrail` from the stash + drain any queued
+  outbox. Scheduled while background sharing is on; there is deliberately NO server push-wake.
+- **Config**: iOS `UIBackgroundModes: [location, processing]` + `NSLocationAlwaysAndWhenInUse…`; Android
   `ACCESS_BACKGROUND_LOCATION` + `FOREGROUND_SERVICE_LOCATION` + `POST_NOTIFICATIONS`
   (`app.json` / expo-location config plugin).
 - **web**: relay-only iroh WASM implements the same interface, including an **in-memory**

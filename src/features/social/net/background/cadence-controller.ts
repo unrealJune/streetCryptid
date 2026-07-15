@@ -82,7 +82,12 @@ export function cfgFromDecision(
     distanceIntervalM: decision.distanceIntervalM,
     deferredUpdatesIntervalMs: decision.deferredUpdatesIntervalMs,
     activityType: activityForMotion(motion),
-    pausesUpdatesAutomatically: true,
+    // Never let iOS Core Location auto-pause. It suspends background updates when it decides the
+    // device is stationary and does NOT reliably resume, silently stopping background location
+    // sharing until the app is next foregrounded (the "pings only arrive when the app is opened"
+    // bug). Continuous sharing needs a steady stream; battery is bounded by the time/distance
+    // cadence above, not by auto-pause.
+    pausesUpdatesAutomatically: false,
     notificationTitle: notification.title,
     notificationBody: notification.body,
     ...(notification.color ? { notificationColor: notification.color } : {}),
@@ -97,7 +102,7 @@ export function cadenceDiffers(a: BackgroundStartConfig, b: BackgroundStartConfi
     a.distanceIntervalM !== b.distanceIntervalM ||
     (a.deferredUpdatesIntervalMs ?? 0) !== (b.deferredUpdatesIntervalMs ?? 0) ||
     (a.activityType ?? 'other') !== (b.activityType ?? 'other') ||
-    (a.pausesUpdatesAutomatically ?? true) !== (b.pausesUpdatesAutomatically ?? true)
+    (a.pausesUpdatesAutomatically ?? false) !== (b.pausesUpdatesAutomatically ?? false)
   );
 }
 

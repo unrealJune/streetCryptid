@@ -1113,10 +1113,16 @@ export class LocationSharingService implements FixPublisher {
         // Durable mirror: same sealed bytes, so per-recipient revocation carries over (ARCHITECTURE §6).
         await this.mod.docsWrite(this.mySubId, seq, 0, native, recipients);
       } catch (err) {
-        // Best effort; the live path already delivered. A later syncTrail can reconcile.
-        span.addEvent('docs.write.failed', {
-          reason: err instanceof Error ? err.message : String(err),
-        });
+        // Best effort; the live path already delivered. A later syncTrail can reconcile — but the
+        // durable/stash mirror is what OFFLINE peers backfill from, so its failure is a real reason
+        // a friend never sees this fix. Log it (→ Loki) alongside the span event.
+        const reason = err instanceof Error ? err.message : String(err);
+        span.addEvent('docs.write.failed', { reason });
+        getTelemetry().log(
+          'warn',
+          `docs.write failed (durable mirror missed; offline peers won't backfill this fix): ${reason}`,
+          { 'sc.seq': seq }
+        );
       }
       await this.trail.appendOwn(fix, seq);
       this.notifyTrailChanged();
@@ -1144,9 +1150,13 @@ export class LocationSharingService implements FixPublisher {
     try {
       await this.mod.syncTrail(sinceTs, this.stashEnabled() ? this.stashTicket : null);
     } catch (err) {
-      // Best effort — the durable path may be unavailable (e.g. web without docs).
-      span.addEvent('native.sync.failed', {
-        reason: err instanceof Error ? err.message : String(err),
+      // Best effort — the durable path may be unavailable (e.g. web without docs) — but when it
+      // fails the user simply won't see friends' missed fixes, so surface it as a log too.
+      const reason = err instanceof Error ? err.message : String(err);
+      span.addEvent('native.sync.failed', { reason });
+      getTelemetry().log('warn', `trail sync failed (backfill from stash/peers): ${reason}`, {
+        since_ts: sinceTs,
+        stash: this.stashEnabled(),
       });
     }
     const recovered = await this.refreshTrailFromReplica(sinceTs);
@@ -1314,6 +1324,19 @@ export class LocationSharingService implements FixPublisher {
       }).start();
 
       this.backgroundSharing = true;
+
+      // Periodic RECEIVE-side backfill: an OS-scheduled task (~15 min) wakes a headless node to pull
+      // friends' fixes that arrived while we were backgrounded — the SEND task only fires on movement
+      // and never pulls. Best-effort and inert on builds without expo-background-task; scheduling it
+      // must never fail startBackground.
+      try {
+        const { isBackgroundBackfillAvailable, scheduleBackgroundBackfill } =
+          await import('./background/backfill-task');
+        if (isBackgroundBackfillAvailable()) await scheduleBackgroundBackfill();
+      } catch (error) {
+        console.warn('[background-backfill] schedule failed', error);
+      }
+
       this.emit();
       return this.backgroundAccess;
     } catch (err) {
@@ -1352,6 +1375,12 @@ export class LocationSharingService implements FixPublisher {
       await this.engine?.stop();
     } catch {
       // ignore
+    }
+    try {
+      const { cancelBackgroundBackfill } = await import('./background/backfill-task');
+      await cancelBackgroundBackfill();
+    } catch {
+      // ignore — cancellation is best-effort
     }
     this.bgProvider = null;
     this.engine = null;

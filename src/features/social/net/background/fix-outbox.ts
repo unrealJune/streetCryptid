@@ -151,6 +151,19 @@ export function createFixOutbox(opts: OutboxOptions): FixOutbox {
             },
           });
           span.end();
+          if (overflowDropped > 0) {
+            // A captured fix was evicted before it could publish — real, silent data loss. Surface
+            // it as a log (→ Loki) in addition to the span, searchable via sc.drop_reason.
+            telemetry.log(
+              'warn',
+              `outbox overflow: dropped ${overflowDropped} oldest fix(es) before publish`,
+              {
+                overflow_dropped: overflowDropped,
+                pending: items.length,
+                'sc.drop_reason': 'outbox-overflow',
+              }
+            );
+          }
         }
       });
     },
@@ -171,9 +184,16 @@ export function createFixOutbox(opts: OutboxOptions): FixOutbox {
           } catch (err) {
             // Not a drop — the fix is retained for the next drain — but it IS why nothing went
             // out on this wake, so record the reason.
-            span.addEvent('publish.failed', {
-              reason: err instanceof Error ? err.message : String(err),
-            });
+            const reason = err instanceof Error ? err.message : String(err);
+            span.addEvent('publish.failed', { reason });
+            telemetry.log(
+              'warn',
+              `outbox drain: publish failed, ${items.length} fix(es) retained`,
+              {
+                reason,
+                retained: items.length,
+              }
+            );
             break;
           }
           items.shift();

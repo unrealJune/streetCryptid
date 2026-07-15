@@ -81,8 +81,10 @@ export interface BackgroundStartConfig {
    */
   activityType?: ActivityKind;
   /**
-   * iOS: allow the system to pause updates for battery when it detects the device is stationary
-   * (resumes automatically on motion). Ignored on Android. Default `true` — the biggest iOS lever.
+   * iOS: allow the system to pause updates for battery when it detects the device is stationary.
+   * Ignored on Android. Default `false`: Core Location does not reliably RESUME after an auto-pause,
+   * so leaving it on silently stops background location sharing until the app is next foregrounded
+   * (the "pings only arrive when the app is opened" bug). Continuous sharing keeps this off.
    */
   pausesUpdatesAutomatically?: boolean;
 }
@@ -173,7 +175,7 @@ export async function rearmBackgroundLocationTask(
     deferredUpdatesInterval: cfg.deferredUpdatesIntervalMs ?? 0,
     activityType: mapActivity(cfg.activityType ?? 'other'),
     showsBackgroundLocationIndicator: true,
-    pausesUpdatesAutomatically: cfg.pausesUpdatesAutomatically ?? true,
+    pausesUpdatesAutomatically: cfg.pausesUpdatesAutomatically ?? false,
     foregroundService: {
       notificationTitle: cfg.notificationTitle,
       notificationBody: cfg.notificationBody,

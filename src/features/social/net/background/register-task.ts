@@ -2,6 +2,7 @@ import { Platform } from 'react-native';
 
 import { backgroundOutbox } from './background-outbox';
 import { defineBackgroundLocationTask, isBackgroundLocationAvailable } from './background-task';
+import { defineBackgroundBackfillTask, isBackgroundBackfillAvailable } from './backfill-task';
 import {
   createBackgroundFixDispatcher,
   type ActiveBackgroundFixHandler,
@@ -49,4 +50,14 @@ export function registerActiveBackgroundFixHandler(
 
 if (Platform.OS !== 'web' && isBackgroundLocationAvailable()) {
   ensureBackgroundTaskRegistered();
+}
+
+if (Platform.OS !== 'web' && isBackgroundBackfillAvailable()) {
+  // The periodic RECEIVE-side backfill task. Defined at module scope (like the location task) so a
+  // fresh headless launch can run it; scheduling on/off is driven by startBackground/stopBackground.
+  // The runner is lazily imported so this module's load stays light and headless-safe.
+  defineBackgroundBackfillTask(async () => {
+    const { runBackgroundBackfillHeadless } = await import('./headless-runtime');
+    await runBackgroundBackfillHeadless();
+  });
 }

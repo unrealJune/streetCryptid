@@ -1,6 +1,7 @@
 import { createOtlpExporter, type OtlpExporter, type OtlpTransport } from './exporter';
 import { newSpanId, newTraceId } from './ids';
 import { getOtelConfig } from './otel-config';
+import { getDeviceResource } from './resource';
 import type {
   Attributes,
   AttrValue,
@@ -175,7 +176,9 @@ let singleton: Telemetry | undefined;
 export function getTelemetry(): Telemetry {
   if (singleton === undefined) {
     const config = getOtelConfig();
-    singleton = config ? createTelemetry({ endpoint: config.endpoint }) : NOOP_TELEMETRY;
+    singleton = config
+      ? createTelemetry({ endpoint: config.endpoint, resource: getDeviceResource() })
+      : NOOP_TELEMETRY;
   }
   return singleton;
 }

@@ -16,4 +16,6 @@ export {
 } from './telemetry';
 export type { StartSpanOptions, Telemetry } from './telemetry';
 export { attachSystemSnapshot, getSystemSnapshot } from './snapshot';
+export { getDeviceResource } from './resource';
+export { installConsoleTelemetryBridge, uninstallConsoleTelemetryBridge } from './console-bridge';
 export type { Attributes, AttrValue, LogSeverity, Span, SpanContext, SpanStatus } from './types';
