@@ -311,5 +311,8 @@ mod tests {
         assert!(
             imp::parse_parent_for_test(&format!("00-{}-{span_id}-01", "0".repeat(32))).is_none()
         );
+        assert!(
+            imp::parse_parent_for_test(&format!("00-{trace_id}-{}-01", "0".repeat(16))).is_none()
+        );
     }
 }

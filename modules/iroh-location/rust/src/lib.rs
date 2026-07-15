@@ -747,13 +747,13 @@ impl LocationNode {
     /// accepted for API parity with the TS contract but not otherwise needed.
     pub async fn docs_write(
         &self,
-        _subscription_id: String,
+        subscription_id: String,
         seq: u64,
         epoch: u32,
         fix: LocationFix,
         recipients: Vec<Vec<u8>>,
     ) -> Result<(), LocationError> {
-        self.docs_write_inner(_subscription_id, seq, epoch, fix, recipients, None)
+        self.docs_write_inner(subscription_id, seq, epoch, fix, recipients, None)
             .await
     }
 

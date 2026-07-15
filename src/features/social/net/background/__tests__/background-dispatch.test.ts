@@ -40,8 +40,6 @@ function fakeOutbox(): FixOutbox & { items: LocationFix[] } {
 }
 
 describe('background fix dispatcher', () => {
-  const parent: SpanContext = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
-
   it('delivers an OS batch directly to the mounted runtime', async () => {
     const outbox = fakeOutbox();
     const flushHeadless = jest.fn(async () => {});
@@ -111,6 +109,7 @@ describe('background fix dispatcher', () => {
   });
 
   it('carries the wake context through active and headless dispatch', async () => {
+    const parent: SpanContext = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
     const activeOutbox = fakeOutbox();
     const activeHandler = jest.fn(async () => {});
     const active = createBackgroundFixDispatcher({
