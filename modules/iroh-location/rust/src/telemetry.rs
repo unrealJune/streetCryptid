@@ -44,9 +44,14 @@ mod imp {
     use std::sync::{Mutex, OnceLock};
 
     use opentelemetry::KeyValue;
+    use opentelemetry::{
+        trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState},
+        Context,
+    };
     use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
     use opentelemetry_otlp::WithExportConfig;
     use opentelemetry_sdk::{logs::SdkLoggerProvider, trace::SdkTracerProvider, Resource};
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
     use tracing_subscriber::layer::{Layered, SubscriberExt};
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{reload, EnvFilter, Layer, Registry};
@@ -177,6 +182,45 @@ mod imp {
             }
         }
     }
+
+    fn remote_parent(value: &str) -> Option<SpanContext> {
+        let mut parts = value.trim().split('-');
+        let (Some("00"), Some(trace_id), Some(span_id), Some(flags), None) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
+            return None;
+        };
+        let (Ok(trace_id), Ok(span_id), Ok(flags)) = (
+            TraceId::from_hex(trace_id),
+            SpanId::from_hex(span_id),
+            u8::from_str_radix(flags, 16),
+        ) else {
+            return None;
+        };
+        let parent = SpanContext::new(
+            trace_id,
+            span_id,
+            TraceFlags::new(flags),
+            true,
+            TraceState::default(),
+        );
+        parent.is_valid().then_some(parent)
+    }
+
+    pub(crate) fn set_parent(span: &tracing::Span, traceparent: Option<&str>) {
+        if let Some(parent) = traceparent.and_then(remote_parent) {
+            let _ = span.set_parent(Context::new().with_remote_span_context(parent));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parse_parent_for_test(value: &str) -> Option<SpanContext> {
+        remote_parent(value)
+    }
 }
 
 #[cfg(not(feature = "otel"))]
@@ -204,9 +248,12 @@ mod imp {
     }
 
     pub(crate) fn flush() {}
+
+    pub(crate) fn set_parent(_span: &tracing::Span, _traceparent: Option<&str>) {}
 }
 
 pub(crate) use imp::init_tracing;
+pub(crate) use imp::set_parent;
 
 /// Point developer telemetry at an OTLP/HTTP collector (`http://<lan-ip>:4318`), or disable it by
 /// passing an empty endpoint. Returns whether export is active — always `false` when the crate was
@@ -246,5 +293,23 @@ mod tests {
         assert_eq!(a.len(), 10);
         assert_eq!(a, envelope_hash(b"sealed bytes"));
         assert_ne!(a, envelope_hash(b"other bytes"));
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn parses_valid_w3c_parent_and_rejects_invalid_context() {
+        let trace_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let span_id = "bbbbbbbbbbbbbbbb";
+        let parent = imp::parse_parent_for_test(&format!("00-{trace_id}-{span_id}-01"))
+            .expect("valid traceparent");
+        assert_eq!(parent.trace_id().to_string(), trace_id);
+        assert_eq!(parent.span_id().to_string(), span_id);
+        assert!(parent.is_remote());
+        assert!(parent.is_sampled());
+
+        assert!(imp::parse_parent_for_test("not-a-traceparent").is_none());
+        assert!(
+            imp::parse_parent_for_test(&format!("00-{}-{span_id}-01", "0".repeat(32))).is_none()
+        );
     }
 }

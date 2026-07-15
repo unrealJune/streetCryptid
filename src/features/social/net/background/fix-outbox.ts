@@ -1,4 +1,4 @@
-import { getTelemetry } from '@/features/dev/telemetry';
+import { getTelemetry, type SpanContext } from '@/features/dev/telemetry';
 import type { LocationFix } from '../../core/types';
 
 /**
@@ -33,13 +33,16 @@ export class InMemoryKV implements PersistentKV {
 
 export interface FixOutbox {
   /** Append a captured fix. Enforces the bound (drops oldest) and coalescing. */
-  enqueue(fix: LocationFix): Promise<void>;
+  enqueue(fix: LocationFix, parent?: SpanContext): Promise<void>;
   /**
    * Publish queued fixes in capture order. Each successful `publish` removes that item; if
    * `publish` rejects, draining stops and the remaining items are kept for the next call.
    * Returns the number of fixes successfully published.
    */
-  drain(publish: (fix: LocationFix) => Promise<void>): Promise<number>;
+  drain(
+    publish: (fix: LocationFix, parent?: SpanContext) => Promise<void>,
+    parent?: SpanContext
+  ): Promise<number>;
   /** How many fixes are currently queued. */
   pending(): Promise<number>;
   /** Drop everything (e.g. on sign-out). */
@@ -113,7 +116,7 @@ export function createFixOutbox(opts: OutboxOptions): FixOutbox {
   }
 
   return {
-    enqueue(fix: LocationFix): Promise<void> {
+    enqueue(fix: LocationFix, parent?: SpanContext): Promise<void> {
       return exclusive(async () => {
         const items = await load();
         const last = items[items.length - 1];
@@ -143,6 +146,7 @@ export function createFixOutbox(opts: OutboxOptions): FixOutbox {
         const telemetry = getTelemetry();
         if (telemetry.enabled && (coalesced || overflowDropped > 0)) {
           const span = telemetry.startSpan('outbox.enqueue', {
+            parent,
             attributes: {
               coalesced,
               overflow_dropped: overflowDropped,
@@ -168,19 +172,23 @@ export function createFixOutbox(opts: OutboxOptions): FixOutbox {
       });
     },
 
-    drain(publish: (fix: LocationFix) => Promise<void>): Promise<number> {
+    drain(
+      publish: (fix: LocationFix, parent?: SpanContext) => Promise<void>,
+      parent?: SpanContext
+    ): Promise<number> {
       return exclusive(async () => {
         const items = await load();
         if (items.length === 0) return 0;
         const telemetry = getTelemetry();
         const span = telemetry.startSpan('outbox.drain', {
+          parent,
           attributes: { queued: items.length },
         });
         let published = 0;
         while (items.length > 0) {
           const item = items[0];
           try {
-            await publish(item.fix);
+            await publish(item.fix, span.context);
           } catch (err) {
             // Not a drop — the fix is retained for the next drain — but it IS why nothing went
             // out on this wake, so record the reason.

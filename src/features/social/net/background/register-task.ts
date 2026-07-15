@@ -23,9 +23,9 @@ export { backgroundOutbox } from './background-outbox';
 let registered = false;
 const dispatcher = createBackgroundFixDispatcher({
   outbox: backgroundOutbox,
-  flushHeadless: async () => {
+  flushHeadless: async (parent) => {
     const { flushBackgroundOutboxHeadless } = await import('./headless-runtime');
-    await flushBackgroundOutboxHeadless();
+    await flushBackgroundOutboxHeadless(parent);
   },
   onActiveError: (error) => {
     console.warn('[background-location] live publisher failed; fix queued for retry', error);
@@ -56,8 +56,8 @@ if (Platform.OS !== 'web' && isBackgroundBackfillAvailable()) {
   // The periodic RECEIVE-side backfill task. Defined at module scope (like the location task) so a
   // fresh headless launch can run it; scheduling on/off is driven by startBackground/stopBackground.
   // The runner is lazily imported so this module's load stays light and headless-safe.
-  defineBackgroundBackfillTask(async () => {
+  defineBackgroundBackfillTask(async (parent) => {
     const { runBackgroundBackfillHeadless } = await import('./headless-runtime');
-    await runBackgroundBackfillHeadless();
+    await runBackgroundBackfillHeadless(parent);
   });
 }
