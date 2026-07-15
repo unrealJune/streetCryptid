@@ -1,4 +1,9 @@
 import type { ContactCard, IncomingFix } from '../../core/types';
+import {
+  createTelemetry,
+  setTelemetryForTesting,
+  type SpanContext,
+} from '@/features/dev/telemetry';
 
 /**
  * Wiring tests for the durable-trail / sync path in {@link LocationSharingService}, using a fake
@@ -12,7 +17,7 @@ class FakeNativeModule {
   calls = {
     publish: [] as unknown[][],
     docsWrite: [] as unknown[][],
-    syncTrail: [] as { since: number; peerTicket: string | null }[],
+    syncTrail: [] as { since: number; peerTicket: string | null; traceparent?: string }[],
     importDocTicket: [] as string[],
     subscribe: [] as { topic: string; bootstrap: string[] }[],
     unsubscribe: [] as string[],
@@ -53,8 +58,12 @@ class FakeNativeModule {
   async docsWrite(...args: unknown[]) {
     this.calls.docsWrite.push(args);
   }
-  async syncTrail(since: number, peerTicket: string | null) {
-    this.calls.syncTrail.push({ since, peerTicket });
+  async syncTrail(since: number, peerTicket: string | null, traceparent?: string | null) {
+    this.calls.syncTrail.push({
+      since,
+      peerTicket,
+      ...(traceparent ? { traceparent } : {}),
+    });
   }
   trailFixes: {
     author: string;
@@ -113,6 +122,7 @@ describe('LocationSharingService — durable trail wiring', () => {
   beforeEach(() => {
     mockHolder.mod = new FakeNativeModule();
     mockHolder.stashConfig = null;
+    setTelemetryForTesting(undefined);
   });
 
   it('imports a friend docs namespace (their docTicket) when added', async () => {
@@ -195,6 +205,32 @@ describe('LocationSharingService — durable trail wiring', () => {
     expect(mockHolder.mod.calls.docsWrite).toHaveLength(1);
     expect(mockHolder.mod.calls.publish[0][1]).toBe(seq);
     expect(mockHolder.mod.calls.docsWrite[0][1]).toBe(seq);
+  });
+
+  it('passes the local publish trace context across the native boundary', async () => {
+    const parent: SpanContext = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
+    setTelemetryForTesting(
+      createTelemetry({
+        endpoint: 'http://collector.test',
+        transport: async () => {},
+      })
+    );
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+    await svc.shareWith(friend.endpointId);
+
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 }, parent);
+
+    const publishTraceparent = mockHolder.mod.calls.publish[0][5];
+    expect(publishTraceparent).toMatch(new RegExp(`^00-${parent.traceId}-[0-9a-f]{16}-01$`));
+    expect(mockHolder.mod.calls.docsWrite[0][5]).toBe(publishTraceparent);
+
+    await svc.syncTrail(0, parent);
+
+    expect(mockHolder.mod.calls.syncTrail.at(-1)?.traceparent).toMatch(
+      new RegExp(`^00-${parent.traceId}-[0-9a-f]{16}-01$`)
+    );
   });
 
   it('syncTrail triggers native range reconciliation', async () => {

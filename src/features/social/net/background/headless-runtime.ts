@@ -1,5 +1,6 @@
 import { AppState } from 'react-native';
 
+import type { SpanContext } from '@/features/dev/telemetry';
 import { createCryptidProfileStore } from '@/features/account/storage/profile-store';
 import { LocationSharingService } from '../location-sharing';
 import { backgroundOutbox } from './background-outbox';
@@ -60,14 +61,14 @@ function runHeadless<T>(opts: HeadlessSession<T>): Promise<T> {
  * killed. Called by the location TaskManager handler after it persists a batch. No-op while active
  * (the mounted runtime drains the outbox itself) or when nothing is queued.
  */
-export function flushBackgroundOutboxHeadless(): Promise<number> {
+export function flushBackgroundOutboxHeadless(parent?: SpanContext): Promise<number> {
   return runHeadless({
     precheck: async () => (await backgroundOutbox.pending()) > 0,
     fallback: 0,
     run: (service) =>
-      backgroundOutbox.drain(async (fix) => {
-        await service.publishFix(fix);
-      }),
+      backgroundOutbox.drain(async (fix, drainParent) => {
+        await service.publishFix(fix, drainParent);
+      }, parent),
   });
 }
 
@@ -76,15 +77,15 @@ export function flushBackgroundOutboxHeadless(): Promise<number> {
  * then publish anything still queued. Driven by the `expo-background-task` scheduler — see
  * `backfill-task.ts`. No-op while the app is active (the foreground lifecycle already syncs).
  */
-export function runBackgroundBackfillHeadless(): Promise<void> {
+export function runBackgroundBackfillHeadless(parent?: SpanContext): Promise<void> {
   return runHeadless<void>({
     fallback: undefined,
     run: async (service) => {
-      await service.syncTrail(0);
+      await service.syncTrail(0, parent);
       if ((await backgroundOutbox.pending()) > 0) {
-        await backgroundOutbox.drain(async (fix) => {
-          await service.publishFix(fix);
-        });
+        await backgroundOutbox.drain(async (fix, drainParent) => {
+          await service.publishFix(fix, drainParent);
+        }, parent);
       }
     },
   });

@@ -719,6 +719,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_docs_write(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_inner(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_traced(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_endpoint_id(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_identity_secret(
@@ -781,9 +785,17 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_sync_trail(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_sync_trail_inner(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_sync_trail_traced(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_ticket(
     ): Int
     external fun uniffi_iroh_location_checksum_method_subscription_publish(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_subscription_publish_inner(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_subscription_publish_traced(
     ): Int
     external fun uniffi_iroh_location_checksum_constructor_locationnode_new(
     ): Int
@@ -841,6 +853,10 @@ external fun uniffi_iroh_location_fn_method_locationnode_create_invite(`ptr`: Lo
 external fun uniffi_iroh_location_fn_method_locationnode_doc_ticket(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_docs_write(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_inner(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_traced(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_endpoint_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -904,6 +920,10 @@ external fun uniffi_iroh_location_fn_method_locationnode_subscribe(`ptr`: Long,`
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_sync_trail(`ptr`: Long,`sinceTs`: Long,`peerTicket`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_sync_trail_inner(`ptr`: Long,`sinceTs`: Long,`peerTicket`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_sync_trail_traced(`ptr`: Long,`sinceTs`: Long,`peerTicket`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_ticket(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_clone_subscription(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -911,6 +931,10 @@ external fun uniffi_iroh_location_fn_clone_subscription(`handle`: Long,uniffi_ou
 external fun uniffi_iroh_location_fn_free_subscription(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_iroh_location_fn_method_subscription_publish(`ptr`: Long,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_subscription_publish_inner(`ptr`: Long,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_subscription_publish_traced(`ptr`: Long,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_func_decode_pair_invite(`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1097,6 +1121,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write() != 45057) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_inner() != 3042) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_traced() != 40920) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_endpoint_id() != 34847) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1190,10 +1220,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_sync_trail() != 30653) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_sync_trail_inner() != 39894) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_sync_trail_traced() != 35925) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_subscription_publish() != 60528) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_inner() != 23224) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_traced() != 24737) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_constructor_locationnode_new() != 52316) {
@@ -2223,6 +2265,10 @@ public interface LocationNodeInterface {
      */
     suspend fun `docsWrite`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>)
     
+    suspend fun `docsWriteInner`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String?)
+    
+    suspend fun `docsWriteTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String)
+    
     /**
      * This device's EndpointId (== envelope `author`).
      */
@@ -2424,6 +2470,10 @@ public interface LocationNodeInterface {
      * `on_sync`.
      */
     suspend fun `syncTrail`(`sinceTs`: kotlin.ULong, `peerTicket`: kotlin.String?)
+    
+    suspend fun `syncTrailInner`(`sinceTs`: kotlin.ULong, `peerTicket`: kotlin.String?, `traceparent`: kotlin.String?)
+    
+    suspend fun `syncTrailTraced`(`sinceTs`: kotlin.ULong, `peerTicket`: kotlin.String?, `traceparent`: kotlin.String)
     
     /**
      * A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
@@ -2733,6 +2783,50 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write(
                 uniffiHandle,
                 FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`epoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `docsWriteInner`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_inner(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`epoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterOptionalString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `docsWriteTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_traced(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`epoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterString.lower(`traceparent`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
@@ -3492,6 +3586,50 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     }
 
     
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `syncTrailInner`(`sinceTs`: kotlin.ULong, `peerTicket`: kotlin.String?, `traceparent`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_sync_trail_inner(
+                uniffiHandle,
+                FfiConverterULong.lower(`sinceTs`),FfiConverterOptionalString.lower(`peerTicket`),FfiConverterOptionalString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `syncTrailTraced`(`sinceTs`: kotlin.ULong, `peerTicket`: kotlin.String?, `traceparent`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_sync_trail_traced(
+                uniffiHandle,
+                FfiConverterULong.lower(`sinceTs`),FfiConverterOptionalString.lower(`peerTicket`),FfiConverterString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
     /**
      * A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
      */
@@ -3661,6 +3799,10 @@ public interface SubscriptionInterface {
      */
     suspend fun `publish`(`seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>)
     
+    suspend fun `publishInner`(`seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String?)
+    
+    suspend fun `publishTraced`(`seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String)
+    
     companion object
 }
 
@@ -3777,6 +3919,50 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
             UniffiLib.uniffi_iroh_location_fn_method_subscription_publish(
                 uniffiHandle,
                 FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`epoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishInner`(`seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_subscription_publish_inner(
+                uniffiHandle,
+                FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`epoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterOptionalString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishTraced`(`seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_subscription_publish_traced(
+                uniffiHandle,
+                FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`epoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterString.lower(`traceparent`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },

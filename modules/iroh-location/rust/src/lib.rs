@@ -747,11 +747,44 @@ impl LocationNode {
     /// accepted for API parity with the TS contract but not otherwise needed.
     pub async fn docs_write(
         &self,
+        subscription_id: String,
+        seq: u64,
+        epoch: u32,
+        fix: LocationFix,
+        recipients: Vec<Vec<u8>>,
+    ) -> Result<(), LocationError> {
+        self.docs_write_inner(subscription_id, seq, epoch, fix, recipients, None)
+            .await
+    }
+
+    pub async fn docs_write_traced(
+        &self,
+        subscription_id: String,
+        seq: u64,
+        epoch: u32,
+        fix: LocationFix,
+        recipients: Vec<Vec<u8>>,
+        traceparent: String,
+    ) -> Result<(), LocationError> {
+        self.docs_write_inner(
+            subscription_id,
+            seq,
+            epoch,
+            fix,
+            recipients,
+            Some(traceparent),
+        )
+        .await
+    }
+
+    async fn docs_write_inner(
+        &self,
         _subscription_id: String,
         seq: u64,
         epoch: u32,
         fix: LocationFix,
         recipients: Vec<Vec<u8>>,
+        traceparent: Option<String>,
     ) -> Result<(), LocationError> {
         use tracing::Instrument;
         let span = tracing::info_span!(
@@ -760,6 +793,7 @@ impl LocationNode {
             sc.seq = seq,
             sc.entry_hash = tracing::field::Empty,
         );
+        telemetry::set_parent(&span, traceparent.as_deref());
         async move {
             let guard = self.inner.lock().await;
             let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
@@ -803,6 +837,25 @@ impl LocationNode {
         since_ts: u64,
         peer_ticket: Option<String>,
     ) -> Result<(), LocationError> {
+        self.sync_trail_inner(since_ts, peer_ticket, None).await
+    }
+
+    pub async fn sync_trail_traced(
+        &self,
+        since_ts: u64,
+        peer_ticket: Option<String>,
+        traceparent: String,
+    ) -> Result<(), LocationError> {
+        self.sync_trail_inner(since_ts, peer_ticket, Some(traceparent))
+            .await
+    }
+
+    async fn sync_trail_inner(
+        &self,
+        since_ts: u64,
+        peer_ticket: Option<String>,
+        traceparent: Option<String>,
+    ) -> Result<(), LocationError> {
         use tracing::Instrument;
         let span = tracing::info_span!(
             "trail.sync",
@@ -811,6 +864,7 @@ impl LocationNode {
             explicit_peer = peer_ticket.is_some(),
             recovered = tracing::field::Empty,
         );
+        telemetry::set_parent(&span, traceparent.as_deref());
         async move {
             let guard = self.inner.lock().await;
             let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
@@ -1544,6 +1598,29 @@ impl Subscription {
         fix: LocationFix,
         recipients: Vec<Vec<u8>>,
     ) -> Result<(), LocationError> {
+        self.publish_inner(seq, epoch, fix, recipients, None).await
+    }
+
+    pub async fn publish_traced(
+        &self,
+        seq: u64,
+        epoch: u32,
+        fix: LocationFix,
+        recipients: Vec<Vec<u8>>,
+        traceparent: String,
+    ) -> Result<(), LocationError> {
+        self.publish_inner(seq, epoch, fix, recipients, Some(traceparent))
+            .await
+    }
+
+    async fn publish_inner(
+        &self,
+        seq: u64,
+        epoch: u32,
+        fix: LocationFix,
+        recipients: Vec<Vec<u8>>,
+        traceparent: Option<String>,
+    ) -> Result<(), LocationError> {
         use tracing::Instrument;
         // `sc.entry_hash` is recorded post-seal: it is the blake3 of the sealed envelope, i.e.
         // the same content hash the stash and receivers see — the cross-device join key.
@@ -1554,6 +1631,7 @@ impl Subscription {
             sc.entry_hash = tracing::field::Empty,
             recipients = recipients.len(),
         );
+        telemetry::set_parent(&span, traceparent.as_deref());
         async move {
             let payload = postcard::to_allocvec(&fix)
                 .map_err(|_| LocationError::Decode("encode fix".into()))?;
