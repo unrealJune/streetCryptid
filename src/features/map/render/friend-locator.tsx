@@ -2,6 +2,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated';
 
 import { signalColorInk } from '@/constants/signal-colors';
+import { normalizeAsciiArt } from '@/features/account/core/profile';
 
 interface FriendLocatorProps {
   x: number;
@@ -56,7 +57,7 @@ export function FriendLocator({
   stale = false,
   onPress,
 }: FriendLocatorProps) {
-  const art = sigil || '?';
+  const art = normalizeAsciiArt(sigil || '?');
   const metrics = sigilMetrics(art);
   const handleWidth = Math.min(126, Math.max(58, handle.length * 7.2 + 18));
   const pinTop = metrics.height + 7;

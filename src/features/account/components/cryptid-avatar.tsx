@@ -111,6 +111,7 @@ const styles = StyleSheet.create({
     textAlign: 'left',
   },
   measurementArt: {
+    maxWidth: ART_MEASUREMENT_WIDTH,
     opacity: 0,
     position: 'absolute',
     width: ART_MEASUREMENT_WIDTH,

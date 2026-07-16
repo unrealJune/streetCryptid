@@ -2,6 +2,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated';
 
 import { signalColorInk } from '@/constants/signal-colors';
+import { normalizeAsciiArt } from '@/features/account/core/profile';
 
 import { sigilMetrics } from './friend-locator';
 
@@ -48,10 +49,10 @@ export function FriendLocatorStack({
   const nonSelfCount = ordered.length - Number(includesSelf);
   const art = ordered
     .filter((friend) => !friend.self)
-    .map((friend) => ({
-      friend,
-      metrics: sigilMetrics(friend.sigil || '?'),
-    }));
+    .map((friend) => {
+      const sigil = normalizeAsciiArt(friend.sigil || '?');
+      return { friend, sigil, metrics: sigilMetrics(sigil) };
+    });
   const artWidth = Math.max(
     0,
     ...art.map(({ metrics }, index) => metrics.width + index * ART_OFFSET_X)
@@ -91,7 +92,7 @@ export function FriendLocatorStack({
       pointerEvents="box-none"
       style={[styles.anchor, { height: markerHeight, width: markerWidth }, positionStyle]}
     >
-      {art.map(({ friend, metrics }, index) => (
+      {art.map(({ friend, sigil, metrics }, index) => (
         <View
           accessibilityElementsHidden
           importantForAccessibility="no-hide-descendants"
@@ -121,7 +122,7 @@ export function FriendLocatorStack({
               },
             ]}
           >
-            {friend.sigil || '?'}
+            {sigil}
           </Text>
         </View>
       ))}
