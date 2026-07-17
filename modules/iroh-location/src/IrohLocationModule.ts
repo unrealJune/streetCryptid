@@ -41,7 +41,8 @@ export declare class IrohLocationNativeModule
     seq: number,
     epoch: number,
     fix: NativeLocationFix,
-    recipientsHex: string[]
+    recipientsHex: string[],
+    traceparent?: string | null
   ): Promise<void>;
   unsubscribe(subscriptionId: string): Promise<void>;
   docsWrite(
@@ -49,9 +50,10 @@ export declare class IrohLocationNativeModule
     seq: number,
     epoch: number,
     fix: NativeLocationFix,
-    recipientsHex: string[]
+    recipientsHex: string[],
+    traceparent?: string | null
   ): Promise<void>;
-  syncTrail(sinceTs: number, peerTicket: string | null): Promise<void>;
+  syncTrail(sinceTs: number, peerTicket: string | null, traceparent?: string | null): Promise<void>;
   readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]>;
   pruneTrail(olderThanTs: number): Promise<void>;
   docTicket(): Promise<string>;

@@ -284,7 +284,8 @@ export interface IrohLocationApi {
     seq: number,
     epoch: number,
     fix: NativeLocationFix,
-    recipientsHex: string[]
+    recipientsHex: string[],
+    traceparent?: string | null
   ): Promise<void>;
   /** Leave a topic. */
   unsubscribe(subscriptionId: string): Promise<void>;
@@ -301,7 +302,8 @@ export interface IrohLocationApi {
     seq: number,
     epoch: number,
     fix: NativeLocationFix,
-    recipientsHex: string[]
+    recipientsHex: string[],
+    traceparent?: string | null
   ): Promise<void>;
   /**
    * Kick off range-based set reconciliation to recover envelopes we missed while offline. Recovered
@@ -309,7 +311,7 @@ export interface IrohLocationApi {
    * bounds how far back to reconcile (0 = full history). `peerTicket` explicitly targets the trail
    * stash; null retains peer-only reconciliation.
    */
-  syncTrail(sinceTs: number, peerTicket: string | null): Promise<void>;
+  syncTrail(sinceTs: number, peerTicket: string | null, traceparent?: string | null): Promise<void>;
   /** Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >= sinceTs`. */
   readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]>;
   /** Explicitly drop durable entries older than `olderThanTs`. */

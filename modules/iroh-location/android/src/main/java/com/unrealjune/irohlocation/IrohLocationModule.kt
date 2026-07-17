@@ -380,14 +380,26 @@ class IrohLocationModule : Module() {
         seq: Double,
         epoch: Double,
         fix: Map<String, Double>,
-        recipients: List<String> ->
+        recipients: List<String>,
+        traceparent: String? ->
         val sub = subs[subscriptionId] ?: return@Coroutine
-        sub.publish(
-          seq.toLong().toULong(),
-          epoch.toLong().toUInt(),
-          locationFixOf(fix),
-          recipients.map { it.hexToBytes() },
-        )
+        val recipientBytes = recipients.map { it.hexToBytes() }
+        if (traceparent != null) {
+          sub.publishTraced(
+            seq.toLong().toULong(),
+            epoch.toLong().toUInt(),
+            locationFixOf(fix),
+            recipientBytes,
+            traceparent,
+          )
+        } else {
+          sub.publish(
+            seq.toLong().toULong(),
+            epoch.toLong().toUInt(),
+            locationFixOf(fix),
+            recipientBytes,
+          )
+        }
       }
 
     AsyncFunction("unsubscribe") { subscriptionId: String ->
@@ -403,21 +415,38 @@ class IrohLocationModule : Module() {
         seq: Double,
         epoch: Double,
         fix: Map<String, Double>,
-        recipients: List<String> ->
+        recipients: List<String>,
+        traceparent: String? ->
         val n = node ?: throw IllegalStateException("call createNode first")
-        n.docsWrite(
-          subscriptionId,
-          seq.toLong().toULong(),
-          epoch.toLong().toUInt(),
-          locationFixOf(fix),
-          recipients.map { it.hexToBytes() },
-        )
+        val recipientBytes = recipients.map { it.hexToBytes() }
+        if (traceparent != null) {
+          n.docsWriteTraced(
+            subscriptionId,
+            seq.toLong().toULong(),
+            epoch.toLong().toUInt(),
+            locationFixOf(fix),
+            recipientBytes,
+            traceparent,
+          )
+        } else {
+          n.docsWrite(
+            subscriptionId,
+            seq.toLong().toULong(),
+            epoch.toLong().toUInt(),
+            locationFixOf(fix),
+            recipientBytes,
+          )
+        }
       }
 
     AsyncFunction("syncTrail") Coroutine
-      { sinceTs: Double, peerTicket: String? ->
+      { sinceTs: Double, peerTicket: String?, traceparent: String? ->
         val n = node ?: throw IllegalStateException("call createNode first")
-        n.syncTrail(sinceTs.toLong().toULong(), peerTicket)
+        if (traceparent != null) {
+          n.syncTrailTraced(sinceTs.toLong().toULong(), peerTicket, traceparent)
+        } else {
+          n.syncTrail(sinceTs.toLong().toULong(), peerTicket)
+        }
       }
 
     AsyncFunction("readTrail") Coroutine

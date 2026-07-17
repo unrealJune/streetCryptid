@@ -1,4 +1,4 @@
-import { getTelemetry } from '@/features/dev/telemetry';
+import { getTelemetry, type SpanContext } from '@/features/dev/telemetry';
 import type { LocationFix } from '../../core/types';
 import type { FixOutbox } from './fix-outbox';
 import { deriveMotion, type SamplingPolicy } from './sampling-policy';
@@ -28,7 +28,7 @@ export interface FixPublisher {
    * Must **throw** if it cannot publish (node not ready) rather than resolving a placeholder, so
    * `outbox.drain` stops and retains the fix instead of dropping it.
    */
-  publishFix(fix: LocationFix): Promise<number>;
+  publishFix(fix: LocationFix, parent?: SpanContext): Promise<number>;
   /** True once the node is bound and can publish. */
   isReady(): boolean;
 }
@@ -69,7 +69,7 @@ export interface LocationEngine {
    * publisher is ready) flushes. Returns the {@link SamplingDecision} used so the caller can
    * re-program the OS location cadence.
    */
-  ingest(fix: LocationFix): Promise<SamplingDecision>;
+  ingest(fix: LocationFix, parent?: SpanContext): Promise<SamplingDecision>;
   /**
    * Recompute the sampling decision from the last known motion and a *fresh* battery read, without
    * ingesting a new fix. Call this on a power event (Low Power Mode toggled, charger un/plugged) so
@@ -84,7 +84,7 @@ export interface LocationEngine {
    */
   setLiveMode(on: boolean): Promise<SamplingDecision>;
   /** Drain the outbox through the publisher (call on resume / node-ready / connectivity regained). */
-  flush(): Promise<number>;
+  flush(parent?: SpanContext): Promise<number>;
   onState(cb: (s: EngineState) => void): () => void;
   getState(): EngineState;
 }
@@ -130,21 +130,21 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
   // same fix (with different seqs), so coalesce overlapping calls onto one in-flight promise.
   let flushing: Promise<number> | null = null;
 
-  function flush(): Promise<number> {
+  function flush(parent?: SpanContext): Promise<number> {
     if (flushing) return flushing;
-    flushing = doFlush().finally(() => {
+    flushing = doFlush(parent).finally(() => {
       flushing = null;
     });
     return flushing;
   }
 
-  async function doFlush(): Promise<number> {
+  async function doFlush(parent?: SpanContext): Promise<number> {
     if (!publisher.isReady()) return 0;
     try {
-      const n = await outbox.drain(async (fix) => {
-        const seq = await publisher.publishFix(fix);
+      const n = await outbox.drain(async (fix, drainParent) => {
+        const seq = await publisher.publishFix(fix, drainParent);
         await trail.appendOwn(fix, seq);
-      });
+      }, parent);
       const pending = await outbox.pending();
       setState({ pending, error: null });
       return n;
@@ -171,7 +171,7 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
       setState({ status: 'idle' });
     },
 
-    async ingest(fix: LocationFix): Promise<SamplingDecision> {
+    async ingest(fix: LocationFix, parent?: SpanContext): Promise<SamplingDecision> {
       const dtMs = lastFixAt === null ? 0 : now() - lastFixAt;
       const motion = deriveMotion(lastFix, fix, dtMs);
       const batt = await battery();
@@ -180,6 +180,7 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
       // The policy gate is the FIRST place a captured fix can die; the span says which knob
       // (motion/battery/live) produced the decision and stamps a drop reason when it gated.
       const span = getTelemetry().startSpan('engine.ingest', {
+        parent,
         attributes: {
           motion,
           live,
@@ -208,8 +209,8 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
 
         try {
           if (decision.active) {
-            await outbox.enqueue(fix);
-            if (publisher.isReady()) await flush();
+            await outbox.enqueue(fix, span.context);
+            if (publisher.isReady()) await flush(span.context);
           } else {
             span.setAttribute('sc.drop_reason', 'sampling-suspended');
           }

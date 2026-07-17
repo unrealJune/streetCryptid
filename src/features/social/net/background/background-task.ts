@@ -1,6 +1,6 @@
 import * as Location from 'expo-location';
 
-import { getSystemSnapshot, getTelemetry } from '@/features/dev/telemetry';
+import { getSystemSnapshot, getTelemetry, type SpanContext } from '@/features/dev/telemetry';
 import type { LocationFix } from '../../core/types';
 import type { AccuracyTier, ActivityKind } from './types';
 
@@ -61,7 +61,7 @@ export const BACKGROUND_LOCATION_TASK = 'streetcryptid.background-location';
 
 /** Batch sink used by the globally registered TaskManager handler. */
 export interface BackgroundFixSink {
-  onBackgroundFixes(fixes: readonly LocationFix[]): Promise<void>;
+  onBackgroundFixes(fixes: readonly LocationFix[], parent?: SpanContext): Promise<void>;
 }
 
 export interface BackgroundStartConfig {
@@ -108,12 +108,12 @@ export function defineBackgroundLocationTask(makeSink: () => BackgroundFixSink):
       return;
     }
     // One `bg.wake` span per OS delivery — THE anchor when debugging dropped pings: it says the
-    // phone woke, with how many fixes, and in what network/battery/app state. Deeper spans
-    // (outbox, publish, native gossip/docs) follow it in time under the same service.instance.id.
+    // phone woke, with how many fixes, and in what network/battery/app state. Its context is passed
+    // explicitly so outbox/publish/native spans form one hierarchy without AsyncLocalStorage.
     const span = telemetry.startSpan('bg.wake', { attributes: { fixes: locations.length } });
     span.setAttributes(await getSystemSnapshot());
     try {
-      await makeSink().onBackgroundFixes(locations.map(toFix));
+      await makeSink().onBackgroundFixes(locations.map(toFix), span.context);
       span.setStatus('ok');
     } catch (err) {
       console.warn('[background-location] sink failed', err);
