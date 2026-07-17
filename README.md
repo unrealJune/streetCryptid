@@ -59,6 +59,15 @@ just run-ios
 After the development client is installed, use `just start` for JavaScript/TypeScript changes.
 Re-run `just bindgen-ios` and `just run-ios` after changing Rust or other native code.
 
+EAS builds automatically load the remote environment selected by their profile in `eas.json`.
+For a development client, Metro creates the JavaScript bundle locally, so pull the matching
+environment into the ignored `.env.local` file before starting Metro in a fresh worktree:
+
+```bash
+just env-pull development
+just start
+```
+
 ## Common tasks
 
 Run `just` (or `just --list`) to see everything. Highlights:
@@ -77,6 +86,7 @@ just format          # prettier --write
 just doctor          # expo-doctor health check
 just deps-check      # verify deps match the Expo SDK
 just deps-fix        # align deps to the Expo SDK
+just env-pull        # pull the EAS development environment into .env.local
 just bindgen-ios     # rebuild the iOS Rust XCFramework + Swift bindings
 just bindgen-android # rebuild the Android Rust libraries + Kotlin bindings
 

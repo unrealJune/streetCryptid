@@ -163,6 +163,10 @@ eas-login:
 eas-init:
     bunx eas-cli init
 
+# Pull an EAS environment into the ignored .env.local file used by Expo CLI and Metro.
+env-pull environment="development":
+    bunx eas-cli env:pull --environment "{{environment}}" --path .env.local --non-interactive
+
 # Build via EAS. Examples: `just build`, `just build ios`, `just build android production`.
 build platform="android" profile="preview":
     bunx eas-cli build --platform {{platform}} --profile {{profile}}
