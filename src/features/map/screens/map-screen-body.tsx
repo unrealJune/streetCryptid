@@ -16,6 +16,7 @@ import {
   type MapReadout,
 } from '@/features/map';
 import { sampleTrailForMap, selectFriendTrail } from '@/features/social/core/history';
+import type { LocationFix } from '@/features/social/core/types';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 import { SELF_AUTHOR, type TrailPoint } from '@/features/social/net/background/trail-store';
 
@@ -172,6 +173,7 @@ export default function MapScreenBody() {
           selfHistory={selfHistory.sampled}
           selfSelected={selectedEndpoint === SELF_AUTHOR}
           selfLocation={hasLiveSelfFix && selfFix ? { lat: selfFix.lat, lon: selfFix.lon } : null}
+          selfFix={hasLiveSelfFix ? selfFix : null}
         />
       </View>
       <View
@@ -207,6 +209,7 @@ function MapSession({
   accessibilityLabel,
   initialCenter,
   selfLocation,
+  selfFix,
   friends,
   selectedFriendId,
   explorationEnabled,
@@ -219,6 +222,7 @@ function MapSession({
   accessibilityLabel: string;
   initialCenter: MapFriendLocation['location'] | null;
   selfLocation: MapFriendLocation['location'] | null;
+  selfFix: LocationFix | null;
   friends: readonly MapFriendLocation[];
   selectedFriendId: string | null;
   explorationEnabled: boolean;
@@ -242,6 +246,7 @@ function MapSession({
       selectedFriendId={selectedFriendId}
       selfHistory={selfHistory}
       selfLocation={selfLocation}
+      selfFix={selfFix}
       selfSelected={selfSelected}
     />
   );

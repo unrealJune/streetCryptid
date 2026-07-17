@@ -33,6 +33,7 @@
     "expo-system-ui": "~57.0.0",
     "expo-task-manager": "~57.0.2",
     "expo-web-browser": "~57.0.0",
+    "h3-js": "4.5.0",
     "pbf": "^5.1.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -93,5 +94,8 @@
   "trustedDependencies": [
     "@shopify/react-native-skia",
     "unrs-resolver"
-  ]
+  ],
+  "patchedDependencies": {
+    "h3-js@4.5.0": "patches/h3-js@4.5.0.patch"
+  }
 }

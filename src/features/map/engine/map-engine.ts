@@ -1,22 +1,17 @@
-import type { ExplorationState } from '../core/exploration';
-import type { HexGrid } from '../core/hex';
-import {
-  axialOriginFor,
-  buildHexTable,
-  computeRegionSpec,
-  type HexTable,
-  type RegionSpec,
-} from '../core/region';
+import { buildCellField, type RegionCellField } from '../core/cell-field';
+import type { ExplorationIndex } from '../core/exploration-index';
+import type { H3Grid } from '../core/h3-grid';
+import { computeRegionSpec, type RegionSpec } from '../core/region';
 import type { CameraState, MapGeometry, Place, Viewport } from '../core/types';
 import type { GeometrySource } from '../tiles/geometry-source';
 import { mergeGeometry } from '../tiles/geometry-source';
-import { tilesCovering } from '../tiles/tile-math';
+import { tilesCovering, type DataZoomRange } from '../tiles/tile-math';
 
 /** Everything a region build depends on besides the engine's own wiring. */
 export interface RegionRequest {
   readonly camera: CameraState;
   readonly viewport: Viewport;
-  readonly exploration: ExplorationState;
+  readonly exploration: ExplorationIndex;
 }
 
 /**
@@ -32,9 +27,8 @@ export interface MapRegion {
    * region carries geometry rather than a packed pixel buffer.
    */
   readonly geometry: MapGeometry;
-  readonly hexTable: HexTable;
-  /** Fractional axial coords of the region origin minus the table anchor. */
-  readonly axialOrigin: readonly [number, number];
+  /** Exploration cells at the region's ladder rung, annotated for rendering. */
+  readonly cellField: RegionCellField;
   /** Named places inside the region (island headline lookup). */
   readonly places: readonly Place[];
 }
@@ -48,7 +42,9 @@ export interface RegionTiming {
 
 export interface MapEngineOptions {
   readonly source: GeometrySource;
-  readonly grid: HexGrid;
+  readonly grid: H3Grid;
+  /** The tileset's data zoom range. */
+  readonly dataZooms: DataZoomRange;
   /** Called after each completed build. */
   readonly onTiming?: (timing: RegionTiming) => void;
 }
@@ -65,7 +61,8 @@ export interface MapEngineOptions {
  */
 export class MapEngine {
   private readonly source: GeometrySource;
-  private readonly grid: HexGrid;
+  private readonly grid: H3Grid;
+  private readonly dataZooms: DataZoomRange;
   private readonly onTiming?: (timing: RegionTiming) => void;
 
   private busy = false;
@@ -79,6 +76,7 @@ export class MapEngine {
   constructor(options: MapEngineOptions) {
     this.source = options.source;
     this.grid = options.grid;
+    this.dataZooms = options.dataZooms;
     this.onTiming = options.onTiming;
   }
 
@@ -114,7 +112,9 @@ export class MapEngine {
   }
 
   private async buildNow(request: RegionRequest): Promise<MapRegion | null> {
-    const spec = computeRegionSpec(request.camera, request.viewport);
+    const spec = computeRegionSpec(request.camera, request.viewport, {
+      dataZooms: this.dataZooms,
+    });
     const tiles = tilesCovering(spec.rect, spec.tileZoom);
 
     const t0 = now();
@@ -128,13 +128,12 @@ export class MapEngine {
     }
     const t1 = now();
 
-    const hexTable = buildHexTable(this.grid, spec.rect, request.exploration);
+    const cellField = buildCellField(this.grid, spec.rect, spec.cellRes, request.exploration);
 
     const region: MapRegion = {
       spec,
       geometry,
-      hexTable,
-      axialOrigin: axialOriginFor(spec.rect, this.grid.radius, hexTable),
+      cellField,
       places: geometry.places,
     };
 

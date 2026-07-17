@@ -1,30 +1,30 @@
 import { CryptidThemes } from '@/constants/cryptid-theme';
 
 import { visibleWorldRect, worldToScreen } from '../camera';
-import { createHexGrid, hexKeyOf } from '../hex';
 import { buildFeatureMasks } from '../masks';
 import {
   LUT_WIDTH,
-  axialOriginFor,
-  buildHexTable,
   buildPaletteLut,
   computeRegionSpec,
   coversView,
   needsNewRegion,
   packMaskTexture,
+  padFor,
   PREFETCH_MARGIN,
   regionMaskCamera,
   shouldPrefetchRegion,
 } from '../region';
 import { ramp } from '../color';
+import { resForZoom } from '../cell-ladder';
 import type { CameraState, Viewport } from '../types';
 
 const viewport: Viewport = { width: 390, height: 780 };
 const camera: CameraState = { center: [0.1596, 0.3565], zoom: 15 };
+const dataZooms = { min: 12, max: 14 };
 
 describe('computeRegionSpec', () => {
   it('pads the visible rect symmetrically', () => {
-    const spec = computeRegionSpec(camera, viewport, { pad: 0.75 });
+    const spec = computeRegionSpec(camera, viewport, { dataZooms, pad: 0.75 });
     const view = visibleWorldRect(camera, viewport);
     const vw = view.maxX - view.minX;
     expect(spec.rect.maxX - spec.rect.minX).toBeCloseTo(vw * 2.5, 12);
@@ -33,11 +33,16 @@ describe('computeRegionSpec', () => {
   });
 
   it('sizes masks by viewport × factor, capped at maxDim', () => {
-    const spec = computeRegionSpec(camera, viewport, { pad: 0.75, maskScale: 1 });
+    const spec = computeRegionSpec(camera, viewport, { dataZooms, pad: 0.75, maskScale: 1 });
     expect(spec.maskWidth).toBe(Math.round(390 * 2.5));
     expect(spec.maskHeight).toBe(Math.round(780 * 2.5));
 
-    const capped = computeRegionSpec(camera, viewport, { pad: 0.75, maskScale: 4, maxDim: 2048 });
+    const capped = computeRegionSpec(camera, viewport, {
+      dataZooms,
+      pad: 0.75,
+      maskScale: 4,
+      maxDim: 2048,
+    });
     expect(Math.max(capped.maskWidth, capped.maskHeight)).toBeLessThanOrEqual(2048);
     // aspect preserved
     expect(capped.maskWidth / capped.maskHeight).toBeCloseTo(390 / 780, 2);
@@ -46,7 +51,7 @@ describe('computeRegionSpec', () => {
 
 describe('regionMaskCamera', () => {
   it('maps the region rect corners onto the mask raster corners', () => {
-    const spec = computeRegionSpec(camera, viewport);
+    const spec = computeRegionSpec(camera, viewport, { dataZooms });
     const { camera: maskCam, viewport: maskVp } = regionMaskCamera(spec);
     const [x0, y0] = worldToScreen(maskCam, maskVp, [spec.rect.minX, spec.rect.minY]);
     const [x1] = worldToScreen(maskCam, maskVp, [spec.rect.maxX, spec.rect.maxY]);
@@ -57,10 +62,10 @@ describe('regionMaskCamera', () => {
 });
 
 describe('needsNewRegion', () => {
-  const spec = computeRegionSpec(camera, viewport);
+  const spec = computeRegionSpec(camera, viewport, { dataZooms });
 
   it('is false for the camera it was built for', () => {
-    expect(needsNewRegion(spec, camera, viewport)).toBe(false);
+    expect(needsNewRegion(spec, camera, viewport, dataZooms)).toBe(false);
   });
 
   it('is false for small pans inside the padding', () => {
@@ -69,7 +74,7 @@ describe('needsNewRegion', () => {
       center: [camera.center[0] + (view.maxX - view.minX) * 0.3, camera.center[1]],
       zoom: camera.zoom,
     };
-    expect(needsNewRegion(spec, nudged, viewport)).toBe(false);
+    expect(needsNewRegion(spec, nudged, viewport, dataZooms)).toBe(false);
   });
 
   it('is true when the view exits the region', () => {
@@ -78,17 +83,17 @@ describe('needsNewRegion', () => {
       center: [camera.center[0] + (view.maxX - view.minX) * 2, camera.center[1]],
       zoom: camera.zoom,
     };
-    expect(needsNewRegion(spec, far, viewport)).toBe(true);
+    expect(needsNewRegion(spec, far, viewport, dataZooms)).toBe(true);
   });
 
   it('is true when zoom leaves the resolution band', () => {
-    expect(needsNewRegion(spec, { ...camera, zoom: 15.9 }, viewport)).toBe(true);
-    expect(needsNewRegion(spec, { ...camera, zoom: 15.3 }, viewport)).toBe(false);
+    expect(needsNewRegion(spec, { ...camera, zoom: 15.9 }, viewport, dataZooms)).toBe(true);
+    expect(needsNewRegion(spec, { ...camera, zoom: 15.3 }, viewport, dataZooms)).toBe(false);
   });
 });
 
 describe('coversView', () => {
-  const spec = computeRegionSpec(camera, viewport);
+  const spec = computeRegionSpec(camera, viewport, { dataZooms });
 
   it('is true for the build camera and small in-region pans', () => {
     expect(coversView(spec, camera, viewport)).toBe(true);
@@ -115,10 +120,10 @@ describe('coversView', () => {
 });
 
 describe('shouldPrefetchRegion', () => {
-  const spec = computeRegionSpec(camera, viewport);
+  const spec = computeRegionSpec(camera, viewport, { dataZooms });
 
   it('is false deep inside the region', () => {
-    expect(shouldPrefetchRegion(spec, camera, viewport)).toBe(false);
+    expect(shouldPrefetchRegion(spec, camera, viewport, dataZooms)).toBe(false);
   });
 
   it('fires before the edge, while the view is still covered (compute-ahead)', () => {
@@ -129,19 +134,19 @@ describe('shouldPrefetchRegion', () => {
       center: [camera.center[0] + (view.maxX - view.minX) * 0.75, camera.center[1]],
       zoom: camera.zoom,
     };
-    expect(shouldPrefetchRegion(spec, nearEdge, viewport)).toBe(true);
+    expect(shouldPrefetchRegion(spec, nearEdge, viewport, dataZooms)).toBe(true);
     expect(coversView(spec, nearEdge, viewport)).toBe(true);
   });
 
   it('fires on a zoom drift before the rebuild band (compute-ahead for zoom-out)', () => {
     // Below the 0.75 rebuild band but past PREFETCH_ZOOM_DELTA → prefetch, not rebuild.
     const drifted: CameraState = { ...camera, zoom: camera.zoom - 0.5 };
-    expect(needsNewRegion(spec, drifted, viewport)).toBe(false);
-    expect(shouldPrefetchRegion(spec, drifted, viewport)).toBe(true);
+    expect(needsNewRegion(spec, drifted, viewport, dataZooms)).toBe(false);
+    expect(shouldPrefetchRegion(spec, drifted, viewport, dataZooms)).toBe(true);
   });
 
   it('subsumes needsNewRegion (stale zoom band)', () => {
-    expect(shouldPrefetchRegion(spec, { ...camera, zoom: 15.9 }, viewport)).toBe(true);
+    expect(shouldPrefetchRegion(spec, { ...camera, zoom: 15.9 }, viewport, dataZooms)).toBe(true);
   });
 
   it('exposes a sane prefetch margin', () => {
@@ -161,7 +166,7 @@ describe('packMaskTexture', () => {
       parks: [],
       places: [],
     };
-    const spec = computeRegionSpec(camera, viewport, { pad: 0.25 });
+    const spec = computeRegionSpec(camera, viewport, { dataZooms, pad: 0.25 });
     const { camera: maskCam, viewport: maskVp } = regionMaskCamera(spec);
     const masks = buildFeatureMasks(geometry, maskCam, maskVp);
     const packed = packMaskTexture(masks);
@@ -181,82 +186,60 @@ describe('packMaskTexture', () => {
   });
 });
 
-describe('buildHexTable', () => {
-  const grid = createHexGrid(0.005);
-  const rect = { minX: 0, minY: 0, maxX: 0.1, maxY: 0.1 };
-
-  it('marks discovered and frontier cells at their axial index', () => {
-    const home = grid.keyAt([0.05, 0.05]);
-    const discovered = new Set([home, ...grid.neighbors(home)]);
-    const table = buildHexTable(grid, rect, discovered);
-
-    const at = (key: string) => {
-      const [q, r] = key.split(',').map(Number);
-      const o = ((r - table.r0) * table.cols + (q - table.q0)) * 4;
-      return [table.data[o], table.data[o + 1]];
-    };
-
-    // center: discovered, fully surrounded → not frontier
-    expect(at(home)).toEqual([255, 0]);
-    // ring: discovered with undiscovered outside neighbors → frontier
-    for (const n of grid.neighbors(home)) expect(at(n)).toEqual([255, 255]);
-    // far cell: undiscovered
-    expect(at(grid.keyAt([0.09, 0.09]))).toEqual([0, 0]);
-  });
-
-  it('covers every cell of the rect in its bounds', () => {
-    const table = buildHexTable(grid, rect, new Set());
-    for (const key of grid.cellsIn(rect)) {
-      const [q, r] = key.split(',').map(Number);
-      expect(q).toBeGreaterThanOrEqual(table.q0);
-      expect(q).toBeLessThan(table.q0 + table.cols);
-      expect(r).toBeGreaterThanOrEqual(table.r0);
-      expect(r).toBeLessThan(table.r0 + table.rows);
-    }
-  });
-});
-
 describe('buildPaletteLut', () => {
-  const palette = CryptidThemes.daybreak.canvas;
-
-  it('bakes each ramp into its row', () => {
+  it('bakes each ramp into its LUT row', () => {
+    const palette = CryptidThemes.daybreak.canvas;
     const lut = buildPaletteLut(palette);
     expect(lut.length).toBe(LUT_WIDTH * 3 * 4);
-    // terr row endpoints
-    expect([lut[0], lut[1], lut[2]]).toEqual([176, 190, 200]);
-    const lastTerr = (LUT_WIDTH - 1) * 4;
-    expect([lut[lastTerr], lut[lastTerr + 1], lut[lastTerr + 2]]).toEqual([20, 44, 64]);
-    // water row midpoint matches ramp()
-    const midWater = (LUT_WIDTH + Math.floor(LUT_WIDTH / 2)) * 4;
-    const expected = ramp(palette.water, Math.floor(LUT_WIDTH / 2) / (LUT_WIDTH - 1));
-    expect(lut[midWater]).toBeCloseTo(expected[0], -1);
+    // spot-check row 0 (terr) endpoints against the ramp directly
+    const [r0, g0, b0] = ramp(palette.terr, 0);
+    expect(lut[0]).toBe(Math.round(r0));
+    expect(lut[1]).toBe(Math.round(g0));
+    expect(lut[2]).toBe(Math.round(b0));
+    const o = (LUT_WIDTH - 1) * 4;
+    const [r1, g1, b1] = ramp(palette.terr, 1);
+    expect(lut[o]).toBe(Math.round(r1));
+    expect(lut[o + 1]).toBe(Math.round(g1));
+    expect(lut[o + 2]).toBe(Math.round(b1));
   });
 });
 
-describe('axialOriginFor', () => {
-  it('reconstructs absolute axial coords from local shader math', () => {
-    const grid = createHexGrid(0.005);
-    const rect = { minX: 0.02, minY: 0.03, maxX: 0.1, maxY: 0.1 };
-    const table = buildHexTable(grid, rect, new Set());
-    const [aq, ar] = axialOriginFor(rect, grid.radius, table);
+describe('data zooms + cell ladder in region specs', () => {
+  const planet = { min: 0, max: 14 };
 
-    // pick a world point, compute its cell the shader way (local axial + cube
-    // round + table anchor) and compare with the grid's own answer
-    const w: [number, number] = [0.055, 0.062];
-    const relX = w[0] - rect.minX;
-    const relY = w[1] - rect.minY;
-    const q = aq + ((2 / 3) * relX) / grid.radius;
-    const r = ar + ((-1 / 3) * relX + (Math.sqrt(3) / 3) * relY) / grid.radius;
-    const s = -q - r;
-    let rq = Math.round(q);
-    let rr = Math.round(r);
-    const rs = Math.round(s);
-    const dq = Math.abs(rq - q);
-    const dr = Math.abs(rr - r);
-    const ds = Math.abs(rs - s);
-    if (dq > dr && dq > ds) rq = -rr - rs;
-    else if (dr > ds) rr = -rq - rs;
+  it('stamps cellRes from the ladder and tileZoom from the range clamp', () => {
+    const spec = computeRegionSpec(camera, viewport, { dataZooms: planet });
+    expect(spec.cellRes).toBe(resForZoom(camera.zoom));
+    expect(spec.tileZoom).toBe(13); // z15 camera → z14 display − bias
 
-    expect(hexKeyOf(rq + table.q0, rr + table.r0)).toBe(grid.keyAt(w));
+    const globe = computeRegionSpec({ center: [0.6, 0.6], zoom: 3 }, viewport, {
+      dataZooms: planet,
+    });
+    expect(globe.cellRes).toBe(resForZoom(3));
+    expect(globe.tileZoom).toBe(2); // z3 → floor 3 − bias
+  });
+
+  it('needsNewRegion fires on a ladder-rung change even within the zoom band', () => {
+    // z12.6 → res 9; z12.4 → res 8. The 0.2 zoom delta is inside the 0.75
+    // mask band, so only the cellRes clause can trigger the rebuild.
+    const spec = computeRegionSpec({ ...camera, zoom: 12.6 }, viewport, { dataZooms });
+    expect(needsNewRegion(spec, { ...camera, zoom: 12.4 }, viewport, dataZooms)).toBe(true);
+    expect(needsNewRegion(spec, { ...camera, zoom: 12.55 }, viewport, dataZooms)).toBe(false);
+  });
+
+  it('needsNewRegion fires when the data zoom steps within the planet range', () => {
+    // z8.9 → data z7, z9.2 → data z8, same ladder rung (res 6), zoom delta
+    // 0.3 < 0.75 — only the tileZoom clause can trigger this rebuild.
+    const spec = computeRegionSpec({ ...camera, zoom: 8.9 }, viewport, { dataZooms: planet });
+    expect(needsNewRegion(spec, { ...camera, zoom: 9.2 }, viewport, planet)).toBe(true);
+  });
+});
+
+describe('padFor across the full zoom range', () => {
+  it('keeps the city taper and regrows headroom at globe zooms', () => {
+    expect(padFor(14)).toBeCloseTo(1.0, 12); // street: full headroom
+    expect(padFor(11)).toBeCloseTo(0.2, 12); // city: tile budget pinch
+    expect(padFor(7)).toBeCloseTo(0.8, 12); // coarse planet tiles: cheap, grow again
+    expect(padFor(3)).toBeCloseTo(1.0, 12); // globe: max headroom
   });
 });

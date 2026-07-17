@@ -7,7 +7,7 @@ import type { MapRegion } from '../engine/map-engine';
 export const DOT_STEP = 2.0;
 
 /** Total float count of the shader's numeric uniform block, in declaration order. */
-export const DOT_FIELD_UNIFORM_FLOATS = 24;
+export const DOT_FIELD_UNIFORM_FLOATS = 13;
 
 /** At/above this build zoom the field renders full street detail (LOD 0). */
 export const LOD_FULL_ZOOM = 14;
@@ -26,12 +26,10 @@ export function lodForZoom(zoom: number): number {
 export interface DotFieldUniformInput {
   readonly region: MapRegion;
   readonly palette: MapPalette;
-  /** Hex circumradius in world units (the grid's radius). */
-  readonly hexRadius: number;
   /** Render (device) pixels per region-logical pixel of the bitmap. */
   readonly pixelRatio: number;
   readonly step?: number;
-  /** Load reveal 0..1 (1 = fully shown). Drives the hex-by-hex wipe. */
+  /** Load reveal 0..1 (1 = fully shown). Drives the cell-by-cell wipe. */
   readonly reveal?: number;
   /** LOD 0..1 override; defaults to {@link lodForZoom}(region build zoom). */
   readonly lod?: number;
@@ -45,12 +43,12 @@ export interface DotFieldUniformInput {
  * `DOT_FIELD_UNIFORM_FLOATS`). Camera-independent by design: the bitmap covers
  * the whole region rect at its anchor zoom, so it is reused across in-region
  * pans/zooms. All map math is region-local (world − rect.min), float32-safe.
- * Pure — no Skia.
+ * Cell geometry lives entirely in the baked cell state texture now — the
+ * shader takes no hex/cell uniforms. Pure — no Skia.
  */
 export function packDotFieldUniforms({
   region,
   palette,
-  hexRadius,
   pixelRatio,
   step = DOT_STEP,
   reveal = 1,
@@ -70,14 +68,7 @@ export function packDotFieldUniforms({
     maskWidth,
     maskHeight, // uMaskSize
     step, // uStep
-    hexRadius, // uHexRadius
-    region.axialOrigin[0],
-    region.axialOrigin[1], // uAxialOrigin
-    region.hexTable.cols,
-    region.hexTable.rows, // uHexTableSize
     ...rgb(palette.bg), // uBg
-    ...rgb(palette.accent), // uAccent
-    ...rgb(palette.streetLabel), // uStreetLabel
     reveal, // uReveal
     lodValue, // uLod
     explorationEnabled ? 1 : 0, // uExploration

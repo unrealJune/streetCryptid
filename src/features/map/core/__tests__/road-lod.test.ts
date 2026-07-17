@@ -42,14 +42,19 @@ describe('roadWidthFor', () => {
     expect(roadWidthFor(1, 15)).toBeGreaterThan(0);
   });
 
-  it('always draws arterials (class 2..4) at every zoom, tapered but positive', () => {
-    for (const cls of [2, 3, 4]) {
-      for (const z of [1, 8, 11, 12.5, 14, 18]) {
-        const w = roadWidthFor(cls, z);
-        expect(w).not.toBeNull();
-        expect(w).toBeGreaterThan(0);
-      }
+  it('always draws motorways (class 4) at every zoom, tapered but positive', () => {
+    for (const z of [1, 8, 11, 12.5, 14, 18]) {
+      const w = roadWidthFor(4, z);
+      expect(w).not.toBeNull();
+      expect(w).toBeGreaterThan(0);
     }
+  });
+
+  it('bands the mid classes: 2 below z9 and 3 below z7 are omitted', () => {
+    expect(roadWidthFor(2, 8.9)).toBeNull();
+    expect(roadWidthFor(2, 9)).not.toBeNull();
+    expect(roadWidthFor(3, 6.9)).toBeNull();
+    expect(roadWidthFor(3, 7)).not.toBeNull();
   });
 
   it('equals ROAD_WIDTHS[class] * roadWidthScale(zoom) when not omitted', () => {
