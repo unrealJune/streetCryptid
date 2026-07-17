@@ -147,6 +147,7 @@ bindgen-ios:
     mkdir -p ../ios/headers
     cp ../ios/generated/iroh_locationFFI.h ../ios/headers/
     cp ../ios/generated/iroh_locationFFI.modulemap ../ios/headers/module.modulemap
+    rm -rf ../ios/IrohLocationFFI.xcframework
     xcodebuild -create-xcframework \
       -library target/aarch64-apple-ios/release/libiroh_location.a -headers ../ios/headers \
       -library target/aarch64-apple-ios-sim/release/libiroh_location.a -headers ../ios/headers \

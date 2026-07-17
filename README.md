@@ -44,6 +44,21 @@ client; Expo Go does not include the local `iroh-location` native module.
 > (`expo-env.d.ts`, `.expo/types/`). These are git-ignored, so run the dev server
 > once before `just typecheck` on a fresh clone.
 
+### Local iOS development
+
+The custom `iroh-location` module means iOS uses a development build rather than Expo Go. Install
+Xcode with a simulator runtime, CocoaPods, and current stable Rust, then build the UniFFI
+XCFramework before the first Expo build:
+
+```bash
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+just bindgen-ios
+just run-ios
+```
+
+After the development client is installed, use `just start` for JavaScript/TypeScript changes.
+Re-run `just bindgen-ios` and `just run-ios` after changing Rust or other native code.
+
 ## Common tasks
 
 Run `just` (or `just --list`) to see everything. Highlights:
@@ -62,6 +77,7 @@ just format          # prettier --write
 just doctor          # expo-doctor health check
 just deps-check      # verify deps match the Expo SDK
 just deps-fix        # align deps to the Expo SDK
+just bindgen-ios     # rebuild the iOS Rust XCFramework + Swift bindings
 just bindgen-android # rebuild the Android Rust libraries + Kotlin bindings
 
 just build ios              # EAS build (defaults: android / preview)
