@@ -279,7 +279,7 @@ public final class IrohLocationModule: Module {
     }
 
     AsyncFunction("publish") {
-      (subscriptionId: String, seq: Double, epoch: Double, fix: [String: Double], recipients: [String]) async throws in
+      (subscriptionId: String, seq: Double, epoch: Double, fix: [String: Double], recipients: [String], _traceparent: String?) async throws in
       guard let sub = self.subscriptions[subscriptionId] else { return }
       try await sub.publish(
         seq: UInt64(seq), epoch: UInt32(epoch), fix: locationFix(from: fix),
@@ -294,14 +294,14 @@ public final class IrohLocationModule: Module {
     // ── Durable trail (iroh-docs) — see docs/social/ARCHITECTURE.md §5–6 ──────────────────
 
     AsyncFunction("docsWrite") {
-      (subscriptionId: String, seq: Double, epoch: Double, fix: [String: Double], recipients: [String]) async throws in
+      (subscriptionId: String, seq: Double, epoch: Double, fix: [String: Double], recipients: [String], _traceparent: String?) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       try await node.docsWrite(
         subscriptionId: subscriptionId, seq: UInt64(seq), epoch: UInt32(epoch),
         fix: locationFix(from: fix), recipients: recipients.map(hexToData))
     }
 
-    AsyncFunction("syncTrail") { (sinceTs: Double, peerTicket: String?) async throws in
+    AsyncFunction("syncTrail") { (sinceTs: Double, peerTicket: String?, _traceparent: String?) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       try await node.syncTrail(sinceTs: UInt64(sinceTs), peerTicket: peerTicket)
     }

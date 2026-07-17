@@ -142,7 +142,8 @@ export class IrohLocationNativeModule
     seq: number,
     epoch: number,
     fix: NativeLocationFix,
-    recipientsHex: string[]
+    recipientsHex: string[],
+    _traceparent?: string | null
   ): Promise<void> {
     await ensureWasm();
     const sub = this.subscriptions.get(subscriptionId)?.sub;
@@ -171,13 +172,18 @@ export class IrohLocationNativeModule
     seq: number,
     epoch: number,
     fix: NativeLocationFix,
-    recipientsHex: string[]
+    recipientsHex: string[],
+    _traceparent?: string | null
   ): Promise<void> {
     await ensureWasm();
     await this.requireNode().docs_write(subscriptionId, seq, epoch, fix, recipientsHex);
   }
 
-  async syncTrail(sinceTs: number, peerTicket: string | null): Promise<void> {
+  async syncTrail(
+    sinceTs: number,
+    peerTicket: string | null,
+    _traceparent?: string | null
+  ): Promise<void> {
     await ensureWasm();
     await this.requireNode().sync_trail(sinceTs, peerTicket ?? undefined);
   }

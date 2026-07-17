@@ -1,4 +1,4 @@
-import { getTelemetry } from '@/features/dev/telemetry';
+import { getTelemetry, type SpanContext } from '@/features/dev/telemetry';
 
 /**
  * Periodic RECEIVE-side background task — the counterpart to the event-driven location SEND task in
@@ -56,7 +56,7 @@ export function isBackgroundBackfillAvailable(): boolean {
  * headless-safe (no closures over app state) and MUST flush telemetry before returning, or the OS
  * freezes the process with the batch unexported — so we flush here in `finally`.
  */
-export function defineBackgroundBackfillTask(run: () => Promise<void>): void {
+export function defineBackgroundBackfillTask(run: (parent?: SpanContext) => Promise<void>): void {
   const taskManager = tryTaskManager();
   const backgroundTask = tryBackgroundTask();
   if (!taskManager || !backgroundTask) return;
@@ -65,7 +65,7 @@ export function defineBackgroundBackfillTask(run: () => Promise<void>): void {
     // One span per OS-scheduled backfill — the receive-side counterpart of `bg.wake`.
     const span = telemetry.startSpan('bg.backfill');
     try {
-      await run();
+      await run(span.context);
       span.setStatus('ok');
       return backgroundTask.BackgroundTaskResult.Success;
     } catch (err) {

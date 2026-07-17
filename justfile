@@ -147,6 +147,7 @@ bindgen-ios:
     mkdir -p ../ios/headers
     cp ../ios/generated/iroh_locationFFI.h ../ios/headers/
     cp ../ios/generated/iroh_locationFFI.modulemap ../ios/headers/module.modulemap
+    rm -rf ../ios/IrohLocationFFI.xcframework
     xcodebuild -create-xcframework \
       -library target/aarch64-apple-ios/release/libiroh_location.a -headers ../ios/headers \
       -library target/aarch64-apple-ios-sim/release/libiroh_location.a -headers ../ios/headers \
@@ -161,6 +162,10 @@ eas-login:
 # Link this project to an EAS project (writes the projectId).
 eas-init:
     bunx eas-cli init
+
+# Pull an EAS environment into the ignored .env.local file used by Expo CLI and Metro.
+env-pull environment="development":
+    bunx eas-cli env:pull --environment "{{environment}}" --path .env.local --non-interactive
 
 # Build via EAS. Examples: `just build`, `just build ios`, `just build android production`.
 build platform="android" profile="preview":

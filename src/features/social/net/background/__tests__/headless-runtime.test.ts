@@ -61,10 +61,12 @@ describe('headless-runtime', () => {
       setAppState('background');
       const mountedBackfill = jest.fn(async () => {});
       unregister = registerActiveBackfillHandler(mountedBackfill);
+      const parent = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
 
-      await runBackgroundBackfillHeadless();
+      await runBackgroundBackfillHeadless(parent);
 
       expect(mountedBackfill).toHaveBeenCalledTimes(1);
+      expect(mountedBackfill).toHaveBeenCalledWith(parent);
       // The critical guarantee: no second native node was created (which would clearRuntime() the
       // live one), so send + live receive keep working.
       expect(mockServiceCtor).not.toHaveBeenCalled();
@@ -73,12 +75,13 @@ describe('headless-runtime', () => {
 
     it('falls back to a headless session when no mounted runtime is registered', async () => {
       setAppState('background');
+      const parent = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
 
-      await runBackgroundBackfillHeadless();
+      await runBackgroundBackfillHeadless(parent);
 
       expect(mockServiceCtor).toHaveBeenCalledTimes(1);
       expect(mockInit).toHaveBeenCalledTimes(1);
-      expect(mockSyncTrail).toHaveBeenCalledWith(0);
+      expect(mockSyncTrail).toHaveBeenCalledWith(0, parent);
       expect(mockShutdownAsync).toHaveBeenCalledTimes(1);
     });
 

@@ -8,9 +8,7 @@
       "developmentClient": true,
       "distribution": "internal",
       "channel": "development",
-      "env": {
-        "EXPO_PUBLIC_OTEL_ENDPOINT": "https://otlp.junephilip.com"
-      },
+      "environment": "development",
       "android": {
         "buildType": "apk"
       }
@@ -18,19 +16,15 @@
     "preview": {
       "distribution": "internal",
       "channel": "preview",
-      "env": {
-        "EXPO_PUBLIC_OTEL_ENDPOINT": "https://otlp.junephilip.com"
-      },
+      "environment": "preview",
       "android": {
         "buildType": "apk"
       }
     },
     "production": {
       "channel": "production",
-      "autoIncrement": true,
-      "env": {
-        "EXPO_PUBLIC_OTEL_ENDPOINT": "https://otlp.junephilip.com"
-      }
+      "environment": "production",
+      "autoIncrement": true
     }
   },
   "submit": {
