@@ -1,4 +1,5 @@
 import type { LocationFix } from '../../../core/types';
+import type { SpanContext } from '@/features/dev/telemetry';
 import {
   createBackgroundFixDispatcher,
   type ActiveBackgroundFixHandler,
@@ -105,5 +106,33 @@ describe('background fix dispatcher', () => {
 
     expect(handler).not.toHaveBeenCalled();
     expect(outbox.items.map((item) => item.ts)).toEqual([8]);
+  });
+
+  it('carries the wake context through active and headless dispatch', async () => {
+    const parent: SpanContext = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
+    const activeOutbox = fakeOutbox();
+    const activeHandler = jest.fn(async () => {});
+    const active = createBackgroundFixDispatcher({
+      outbox: activeOutbox,
+      flushHeadless: async () => {},
+    });
+    active.registerActiveHandler(activeHandler);
+
+    await active.dispatch([fix(9)], parent);
+
+    expect(activeHandler).toHaveBeenCalledWith(expect.objectContaining({ ts: 9 }), parent);
+
+    const headlessOutbox = fakeOutbox();
+    const enqueue = jest.spyOn(headlessOutbox, 'enqueue');
+    const flushHeadless = jest.fn(async () => {});
+    const headless = createBackgroundFixDispatcher({
+      outbox: headlessOutbox,
+      flushHeadless,
+    });
+
+    await headless.dispatch([fix(10)], parent);
+
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ ts: 10 }), parent);
+    expect(flushHeadless).toHaveBeenCalledWith(parent);
   });
 });

@@ -1,16 +1,17 @@
+import type { SpanContext } from '@/features/dev/telemetry';
 import type { LocationFix } from '../../core/types';
 import type { FixOutbox } from './fix-outbox';
 
-export type ActiveBackgroundFixHandler = (fix: LocationFix) => Promise<void>;
+export type ActiveBackgroundFixHandler = (fix: LocationFix, parent?: SpanContext) => Promise<void>;
 
 interface BackgroundFixDispatcherOptions {
   outbox: FixOutbox;
-  flushHeadless(): Promise<void>;
+  flushHeadless(parent?: SpanContext): Promise<void>;
   onActiveError?(error: unknown): void;
 }
 
 export interface BackgroundFixDispatcher {
-  dispatch(fixes: readonly LocationFix[]): Promise<void>;
+  dispatch(fixes: readonly LocationFix[], parent?: SpanContext): Promise<void>;
   registerActiveHandler(handler: ActiveBackgroundFixHandler): () => void;
 }
 
@@ -25,7 +26,7 @@ export function createBackgroundFixDispatcher(
   let activeHandler: ActiveBackgroundFixHandler | null = null;
 
   return {
-    async dispatch(fixes): Promise<void> {
+    async dispatch(fixes, parent): Promise<void> {
       const queued: LocationFix[] = [];
       const handler = activeHandler;
 
@@ -35,7 +36,7 @@ export function createBackgroundFixDispatcher(
           continue;
         }
         try {
-          await handler(fix);
+          await handler(fix, parent);
         } catch (error) {
           options.onActiveError?.(error);
           queued.push(fix);
@@ -44,12 +45,12 @@ export function createBackgroundFixDispatcher(
 
       if (queued.length === 0) return;
       for (const fix of queued) {
-        await options.outbox.enqueue(fix);
+        await options.outbox.enqueue(fix, parent);
       }
       // A mounted runtime owns the monotonic sequence counter. If it rejected
       // a fix, leave the durable item for its next flush rather than racing a
       // second restored service against the same author/seq space.
-      if (!handler) await options.flushHeadless();
+      if (!handler) await options.flushHeadless(parent);
     },
 
     registerActiveHandler(handler): () => void {

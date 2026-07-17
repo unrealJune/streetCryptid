@@ -19,7 +19,13 @@ import {
   type SasRole,
 } from 'iroh-location';
 
-import { getOtelConfig, getTelemetry, parseTraceparent } from '@/features/dev/telemetry';
+import {
+  getOtelConfig,
+  getTelemetry,
+  parseTraceparent,
+  traceparentFor,
+  type SpanContext,
+} from '@/features/dev/telemetry';
 import { encodeContactCard } from '../core/contact-card';
 import { decodePairLink, encodePairLink, isPairLink, PAIR_TOKEN_PREFIX } from '../core/pair-link';
 import {
@@ -443,7 +449,7 @@ export class LocationSharingService implements FixPublisher {
         links: link ? [link] : [],
         attributes: { 'sc.namespace': push?.ns ? push.ns.slice(0, 10) : undefined },
       });
-      void this.syncTrail(0)
+      void this.syncTrail(0, span.context)
         .then(
           () => {
             span.setAttribute('recovered', this.lastSyncRecovered ?? undefined);
@@ -1088,10 +1094,11 @@ export class LocationSharingService implements FixPublisher {
    * outbox drain retains the fix rather than dropping it — never returns a placeholder seq.
    * Satisfies {@link FixPublisher} so the background {@link LocationEngine} can drive it.
    */
-  async publishFix(fix: LocationFix): Promise<number> {
+  async publishFix(fix: LocationFix, parent?: SpanContext): Promise<number> {
     // Spans below join the native `gossip.publish`/`docs.write` (same sc.author + sc.seq) and,
     // via the envelope hash those record, the stash + receiving phones.
     const span = getTelemetry().startSpan('publish.fix', {
+      parent,
       attributes: { 'sc.author': this.keys ? this.keys.endpointId.slice(0, 10) : undefined },
     });
     try {
@@ -1109,10 +1116,11 @@ export class LocationSharingService implements FixPublisher {
       };
       const recipients = pool.recipientRecvKeys(this.state);
       span.setAttribute('recipients', recipients.length);
-      await this.mod.publish(this.mySubId, seq, 0, native, recipients);
+      const traceparent = getTelemetry().enabled ? traceparentFor(span.context) : null;
+      await this.mod.publish(this.mySubId, seq, 0, native, recipients, traceparent);
       try {
         // Durable mirror: same sealed bytes, so per-recipient revocation carries over (ARCHITECTURE §6).
-        await this.mod.docsWrite(this.mySubId, seq, 0, native, recipients);
+        await this.mod.docsWrite(this.mySubId, seq, 0, native, recipients, traceparent);
       } catch (err) {
         // Best effort; the live path already delivered. A later syncTrail can reconcile — but the
         // durable/stash mirror is what OFFLINE peers backfill from, so its failure is a real reason
@@ -1143,13 +1151,18 @@ export class LocationSharingService implements FixPublisher {
    * live sync) without firing backfill events, so reading the replica afterwards is what actually
    * surfaces recovered fixes to the UI.
    */
-  async syncTrail(sinceTs = 0): Promise<void> {
+  async syncTrail(sinceTs = 0, parent?: SpanContext): Promise<void> {
     if (!this.mod) return;
     const span = getTelemetry().startSpan('trail.sync.app', {
+      parent,
       attributes: { since_ts: sinceTs, stash: this.stashEnabled() },
     });
     try {
-      await this.mod.syncTrail(sinceTs, this.stashEnabled() ? this.stashTicket : null);
+      await this.mod.syncTrail(
+        sinceTs,
+        this.stashEnabled() ? this.stashTicket : null,
+        getTelemetry().enabled ? traceparentFor(span.context) : null
+      );
     } catch (err) {
       // Best effort — the durable path may be unavailable (e.g. web without docs) — but when it
       // fails the user simply won't see friends' missed fixes, so surface it as a log too.
@@ -1272,9 +1285,9 @@ export class LocationSharingService implements FixPublisher {
         battery: () => battery.read(),
       });
       await this.engine.start();
-      this.bgTaskHandlerStop = registerActiveBackgroundFixHandler(async (fix) => {
+      this.bgTaskHandlerStop = registerActiveBackgroundFixHandler(async (fix, parent) => {
         this.recordLocalFix(fix);
-        await this.engine?.ingest(fix);
+        await this.engine?.ingest(fix, parent);
       });
 
       // Route the periodic RECEIVE-side backfill (WorkManager / BGTaskScheduler) to THIS live
@@ -1282,9 +1295,9 @@ export class LocationSharingService implements FixPublisher {
       // (the location foreground service), so the periodic task must reuse this node — spinning up a
       // second one calls createNode → clearRuntime() and tears this node's subscriptions down,
       // silently stopping send + live receive until relaunch.
-      this.bgBackfillHandlerStop = registerActiveBackfillHandler(async () => {
-        await this.syncTrail(0);
-        await this.engine?.flush();
+      this.bgBackfillHandlerStop = registerActiveBackfillHandler(async (parent) => {
+        await this.syncTrail(0, parent);
+        await this.engine?.flush(parent);
       });
 
       this.bgProvider = new Provider();
