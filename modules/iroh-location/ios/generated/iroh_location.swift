@@ -4041,6 +4041,42 @@ public func generateRecvKeypair() -> [Data]  {
     )
 })
 }
+/**
+ * Point developer telemetry at an OTLP/HTTP collector (`http://<lan-ip>:4318`), or disable it by
+ * passing an empty endpoint. Returns whether export is active — always `false` when the crate was
+ * built without the `otel` feature (store builds), so the uniffi surface is identical either way
+ * and the app never needs to know how the binary was compiled. `instance_id` should be the short
+ * endpoint id so Rust-side spans join the app's under one `service.instance.id`.
+ */
+public func configureTelemetry(endpoint: String, instanceId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_iroh_location_fn_func_configure_telemetry(
+        FfiConverterString.lower(endpoint),
+        FfiConverterString.lower(instanceId),$0
+    )
+})
+}
+/**
+ * Flush buffered telemetry. Headless background tasks await this before returning — the OS may
+ * freeze the process the moment the task completes, taking unexported batches with it. Async
+ * (via a blocking task) because `force_flush` blocks until export or timeout, which must never
+ * stall the JS bridge thread.
+ */
+public func flushTelemetry()async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_func_flush_telemetry(
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
+        )
+}
 
 private enum InitializationResult {
     case ok
@@ -4067,6 +4103,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_generate_recv_keypair() != 62550) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 60711) {

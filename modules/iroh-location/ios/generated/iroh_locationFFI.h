@@ -569,6 +569,17 @@ RustBuffer uniffi_iroh_location_fn_func_generate_recv_keypair(RustCallStatus *_N
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_CONFIGURE_TELEMETRY
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_CONFIGURE_TELEMETRY
+int8_t uniffi_iroh_location_fn_func_configure_telemetry(RustBuffer endpoint, RustBuffer instance_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_FLUSH_TELEMETRY
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_FLUSH_TELEMETRY
+uint64_t uniffi_iroh_location_fn_func_flush_telemetry(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_IROH_LOCATION_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_IROH_LOCATION_RUSTBUFFER_ALLOC
 RustBuffer ffi_iroh_location_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -850,6 +861,18 @@ uint16_t uniffi_iroh_location_checksum_func_encode_pair_invite(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_GENERATE_RECV_KEYPAIR
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_GENERATE_RECV_KEYPAIR
 uint16_t uniffi_iroh_location_checksum_func_generate_recv_keypair(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_CONFIGURE_TELEMETRY
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_CONFIGURE_TELEMETRY
+uint16_t uniffi_iroh_location_checksum_func_configure_telemetry(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_FLUSH_TELEMETRY
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_FLUSH_TELEMETRY
+uint16_t uniffi_iroh_location_checksum_func_flush_telemetry(void
     
 );
 #endif
