@@ -50,6 +50,23 @@ headers_dir="$ios_dir/headers"
 framework_path="$ios_dir/IrohLocationFFI.xcframework"
 library_path="$crate_dir/target/aarch64-apple-ios/release/libiroh_location.a"
 
+# Keep the committed Swift source and C header synchronized with the Rust archive built below.
+# UniFFI validates every API checksum on first use and aborts when generated bindings are stale.
+(
+  cd "$crate_dir"
+  cargo +stable build --locked --features cli
+  cargo +stable run \
+    --locked \
+    --bin uniffi-bindgen \
+    --features cli \
+    -- \
+    generate \
+    --library target/debug/libiroh_location.dylib \
+    --crate iroh_location \
+    --language swift \
+    --out-dir "$ios_dir/generated"
+)
+
 rustup target add --toolchain stable aarch64-apple-ios
 cargo +stable build \
   --locked \
