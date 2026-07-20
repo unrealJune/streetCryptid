@@ -24,6 +24,9 @@
         "NSLocalNetworkUsageDescription": "streetCryptid finds friends' phones on the same Wi-Fi so it can share your location directly, without routing through a relay.",
         "NSBonjourServices": ["_irohv1._udp"],
         "UIBackgroundModes": ["location", "remote-notification", "processing"]
+      },
+      "entitlements": {
+        "com.apple.developer.networking.multicast": true
       }
     },
     "android": {
