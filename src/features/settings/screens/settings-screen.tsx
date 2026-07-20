@@ -1,4 +1,6 @@
+import { useCallback } from 'react';
 import { ScrollView, StyleSheet, View, useColorScheme } from 'react-native';
+import { useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
@@ -22,7 +24,23 @@ export default function SettingsScreen() {
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
   const insets = useSafeAreaInsets();
 
-  const { snapshot, transportReport, setStashOptIn, setRelayOnly } = useLocationSharing();
+  const {
+    snapshot,
+    transportReport,
+    refreshPairing,
+    refreshTransportDiagnostics,
+    setStashOptIn,
+    setRelayOnly,
+  } = useLocationSharing();
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshPairing();
+      void refreshTransportDiagnostics();
+      const timer = setInterval(() => void refreshTransportDiagnostics(), 1000);
+      return () => clearInterval(timer);
+    }, [refreshPairing, refreshTransportDiagnostics])
+  );
 
   const stash = snapshot?.stash ?? { available: false, optedIn: false };
   const transports = snapshot?.transports ?? { relayOnly: false, relayOnlyEnforced: false };

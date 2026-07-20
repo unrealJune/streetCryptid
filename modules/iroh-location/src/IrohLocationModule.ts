@@ -17,6 +17,7 @@ import type {
   PairStateRecord,
   ProfileView,
   SasChallenge,
+  TransportDiagnostics,
 } from './IrohLocation.types';
 
 /**
@@ -91,6 +92,7 @@ export declare class IrohLocationNativeModule
   pairResult(sessionIdHex: string): Promise<PairResult | null>;
   encodePairInvite(invite: PairInvite): Promise<string>;
   decodePairInvite(token: string): Promise<PairInvite>;
+  transportDiagnostics(peerEndpointIdsHex: string[]): Promise<TransportDiagnostics>;
 
   bleAvailable(): Promise<boolean>;
   bleCapabilities(): Promise<BleCapabilities>;

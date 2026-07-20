@@ -791,6 +791,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_ticket(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_subscription_publish(
     ): Int
     external fun uniffi_iroh_location_checksum_method_subscription_publish_inner(
@@ -925,6 +927,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_sync_trail_inner(`ptr`:
 external fun uniffi_iroh_location_fn_method_locationnode_sync_trail_traced(`ptr`: Long,`sinceTs`: Long,`peerTicket`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_ticket(`ptr`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_transport_diagnostics(`ptr`: Long,`peerEndpointIds`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_clone_subscription(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
@@ -1118,7 +1122,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_doc_ticket() != 34643) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write() != 45057) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write() != 8784) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_inner() != 3042) {
@@ -1227,6 +1231,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics() != 23251) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_subscription_publish() != 60528) {
@@ -2480,6 +2487,12 @@ public interface LocationNodeInterface {
      */
     suspend fun `ticket`(): kotlin.String
     
+    /**
+     * Snapshot the local endpoint's advertised addresses and iroh's retained path table for the
+     * requested peers. Remote path usage is point-in-time; callers should poll when displaying it.
+     */
+    suspend fun `transportDiagnostics`(`peerEndpointIds`: List<kotlin.ByteArray>): TransportDiagnostics
+    
     companion object
 }
 
@@ -3654,6 +3667,31 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     }
 
     
+    /**
+     * Snapshot the local endpoint's advertised addresses and iroh's retained path table for the
+     * requested peers. Remote path usage is point-in-time; callers should poll when displaying it.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `transportDiagnostics`(`peerEndpointIds`: List<kotlin.ByteArray>) : TransportDiagnostics {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_transport_diagnostics(
+                uniffiHandle,
+                FfiConverterSequenceByteArray.lower(`peerEndpointIds`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeTransportDiagnostics.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
 
     
 
@@ -4588,6 +4626,55 @@ public object FfiConverterTypePairStateRecord: FfiConverterRustBuffer<PairStateR
 
 
 /**
+ * Iroh's current address knowledge for one requested peer.
+ */
+data class PeerTransportDiagnostic (
+    var `endpointId`: kotlin.ByteArray
+    , 
+    /**
+     * False when iroh has no retained path information for this peer.
+     */
+    var `known`: kotlin.Boolean
+    , 
+    var `addresses`: List<TransportAddressDiagnostic>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePeerTransportDiagnostic: FfiConverterRustBuffer<PeerTransportDiagnostic> {
+    override fun read(buf: ByteBuffer): PeerTransportDiagnostic {
+        return PeerTransportDiagnostic(
+            FfiConverterByteArray.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterSequenceTypeTransportAddressDiagnostic.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PeerTransportDiagnostic) = (
+            FfiConverterByteArray.allocationSize(value.`endpointId`) +
+            FfiConverterBoolean.allocationSize(value.`known`) +
+            FfiConverterSequenceTypeTransportAddressDiagnostic.allocationSize(value.`addresses`)
+    )
+
+    override fun write(value: PeerTransportDiagnostic, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`endpointId`, buf)
+            FfiConverterBoolean.write(value.`known`, buf)
+            FfiConverterSequenceTypeTransportAddressDiagnostic.write(value.`addresses`, buf)
+    }
+}
+
+
+
+/**
  * A verified cryptid **profile** as surfaced to the app (§3). Returned already signature- and
  * endpoint-verified; the bridge can render it directly.
  */
@@ -4714,6 +4801,103 @@ public object FfiConverterTypeSasChallenge: FfiConverterRustBuffer<SasChallenge>
             FfiConverterUInt.write(value.`targetIndex`, buf)
             FfiConverterSequenceUInt.write(value.`optionIndices`, buf)
             FfiConverterULong.write(value.`deadlineMs`, buf)
+    }
+}
+
+
+
+/**
+ * One endpoint address as exposed by iroh's live path table.
+ */
+data class TransportAddressDiagnostic (
+    /**
+     * `relay` | `ip` | `custom`.
+     */
+    var `kind`: kotlin.String
+    , 
+    /**
+     * Full display form (`relay:https://…`, `ip:host:port`, or the custom transport address).
+     */
+    var `address`: kotlin.String
+    , 
+    /**
+     * Whether a remote path is actively carrying traffic. `None` for local advertised addresses,
+     * whose presence does not prove another endpoint is using them.
+     */
+    var `active`: kotlin.Boolean?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTransportAddressDiagnostic: FfiConverterRustBuffer<TransportAddressDiagnostic> {
+    override fun read(buf: ByteBuffer): TransportAddressDiagnostic {
+        return TransportAddressDiagnostic(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TransportAddressDiagnostic) = (
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterString.allocationSize(value.`address`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`active`)
+    )
+
+    override fun write(value: TransportAddressDiagnostic, buf: ByteBuffer) {
+            FfiConverterString.write(value.`kind`, buf)
+            FfiConverterString.write(value.`address`, buf)
+            FfiConverterOptionalBoolean.write(value.`active`, buf)
+    }
+}
+
+
+
+/**
+ * Live endpoint transport snapshot used by the in-app diagnostics.
+ */
+data class TransportDiagnostics (
+    var `localAddresses`: List<TransportAddressDiagnostic>
+    , 
+    var `peers`: List<PeerTransportDiagnostic>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTransportDiagnostics: FfiConverterRustBuffer<TransportDiagnostics> {
+    override fun read(buf: ByteBuffer): TransportDiagnostics {
+        return TransportDiagnostics(
+            FfiConverterSequenceTypeTransportAddressDiagnostic.read(buf),
+            FfiConverterSequenceTypePeerTransportDiagnostic.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TransportDiagnostics) = (
+            FfiConverterSequenceTypeTransportAddressDiagnostic.allocationSize(value.`localAddresses`) +
+            FfiConverterSequenceTypePeerTransportDiagnostic.allocationSize(value.`peers`)
+    )
+
+    override fun write(value: TransportDiagnostics, buf: ByteBuffer) {
+            FfiConverterSequenceTypeTransportAddressDiagnostic.write(value.`localAddresses`, buf)
+            FfiConverterSequenceTypePeerTransportDiagnostic.write(value.`peers`, buf)
     }
 }
 
@@ -5045,6 +5229,38 @@ public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
         } else {
             buf.put(1)
             FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalBoolean: FfiConverterRustBuffer<kotlin.Boolean?> {
+    override fun read(buf: ByteBuffer): kotlin.Boolean? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterBoolean.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Boolean?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterBoolean.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Boolean?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterBoolean.write(value, buf)
         }
     }
 }
@@ -5443,6 +5659,34 @@ public object FfiConverterSequenceTypePairStateRecord: FfiConverterRustBuffer<Li
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypePeerTransportDiagnostic: FfiConverterRustBuffer<List<PeerTransportDiagnostic>> {
+    override fun read(buf: ByteBuffer): List<PeerTransportDiagnostic> {
+        val len = buf.getInt()
+        return List<PeerTransportDiagnostic>(len) {
+            FfiConverterTypePeerTransportDiagnostic.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<PeerTransportDiagnostic>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypePeerTransportDiagnostic.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<PeerTransportDiagnostic>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypePeerTransportDiagnostic.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeProfileView: FfiConverterRustBuffer<List<ProfileView>> {
     override fun read(buf: ByteBuffer): List<ProfileView> {
         val len = buf.getInt()
@@ -5461,6 +5705,34 @@ public object FfiConverterSequenceTypeProfileView: FfiConverterRustBuffer<List<P
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeProfileView.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRustBuffer<List<TransportAddressDiagnostic>> {
+    override fun read(buf: ByteBuffer): List<TransportAddressDiagnostic> {
+        val len = buf.getInt()
+        return List<TransportAddressDiagnostic>(len) {
+            FfiConverterTypeTransportAddressDiagnostic.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<TransportAddressDiagnostic>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeTransportAddressDiagnostic.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<TransportAddressDiagnostic>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeTransportAddressDiagnostic.write(it, buf)
         }
     }
 }

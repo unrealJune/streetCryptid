@@ -23,6 +23,7 @@ import type {
   PairStateRecord,
   ProfileView,
   SasChallenge,
+  TransportDiagnostics,
 } from './IrohLocation.types';
 
 const ID_KEY = 'sc.iroh.identitySecret';
@@ -206,6 +207,10 @@ export class IrohLocationNativeModule
   async importDocTicket(ticket: string): Promise<void> {
     await ensureWasm();
     await this.requireNode().import_doc_ticket(ticket);
+  }
+
+  async transportDiagnostics(_peerEndpointIdsHex: string[]): Promise<TransportDiagnostics> {
+    return { localAddresses: [], peers: [] };
   }
 
   // ── Profiles / pairing / BLE: unsupported on the web (WASM) build ────────────────────────────
