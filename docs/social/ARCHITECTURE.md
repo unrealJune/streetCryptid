@@ -170,11 +170,10 @@ React Native JS  ──JSI TurboModule (auto via Expo Modules API)──▶
 - Gotchas: iOS `-framework Network` + network client/server entitlements; Android JNA
   **`@aar`** variant, **Kotlin 2.2+**, and mandatory
   `IrohAndroid.installAndroidContext(context)` before endpoint init.
-- **Temporary iOS release constraint (2026-07-12):** App Store builds omit
-  `com.apple.developer.networking.multicast` while Apple reviews the managed-capability request.
-  Relay/DNS discovery and BLE remain available; the direct same-Wi-Fi mDNS fast path may not.
-  Restore the entitlement in `app.json` and regenerate the production provisioning profile after
-  approval.
+- iOS declares the Apple-managed `com.apple.developer.networking.multicast` entitlement, approved
+  for `com.unrealjune.streetcryptid`, so custom iroh mDNS can use the direct same-Wi-Fi fast path.
+  Regenerate EAS provisioning profiles after entitlement changes; pre-approval profiles cannot
+  sign the app.
 - **Requires a custom dev client** (EAS Build / local prebuild) — **not Expo Go**.
 
 ## 9. Background execution & durable trails (implemented)

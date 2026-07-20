@@ -92,14 +92,11 @@ propagates the Rust archive's `Network`, `CoreBluetooth`, and `SystemConfigurati
 dependencies to the app linker. Local device and simulator builds still use
 `just bindgen-ios`.
 
-> **Temporary iOS App Store limitation (2026-07-12):** the
-> `com.apple.developer.networking.multicast` entitlement is intentionally omitted from
-> `app.json` while Apple reviews the managed-capability request for
-> `com.unrealjune.streetcryptid`. iOS remains functional through authenticated relay/DNS
-> discovery and BLE, but the direct same-Wi-Fi mDNS fast path may be unavailable. After
-> Apple approves the capability, restore the entitlement under `expo.ios.entitlements`,
-> regenerate the App Store provisioning profile with
-> `eas credentials:configure-build --platform ios --profile production`, and rebuild.
+The Apple-managed `com.apple.developer.networking.multicast` capability is approved for
+`com.unrealjune.streetcryptid` and declared under `expo.ios.entitlements`. After changing
+this entitlement, regenerate every affected EAS provisioning profile; profiles created
+before approval cannot sign the app. The signed app and its embedded profile should both
+contain the entitlement.
 
 ### 3. Android — jniLibs + Kotlin bindings
 
