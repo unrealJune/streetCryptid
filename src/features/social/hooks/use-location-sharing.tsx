@@ -48,6 +48,7 @@ interface LocationSharingContextValue {
   confirmPairDisplay(sessionId: string, matched: boolean): Promise<void>;
   cancelPair(sessionId: string): Promise<void>;
   refreshPairing(): Promise<void>;
+  refreshTransportDiagnostics(): Promise<void>;
   toggleShare(endpointId: string, on: boolean): Promise<void>;
   removeFriend(endpointId: string): Promise<void>;
   retryLocation(): Promise<void>;
@@ -375,6 +376,10 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     [run]
   );
   const refreshPairing = useCallback(() => run((service) => service.refreshPairing()), [run]);
+  const refreshTransportDiagnostics = useCallback(
+    () => run((service) => service.refreshTransportDiagnostics()),
+    [run]
+  );
   const setStashOptIn = useCallback(
     (optedIn: boolean) => {
       setServiceError(null);
@@ -435,17 +440,28 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       buildTransportReport({
         nativeAvailable: LocationSharingService.isAvailable(),
         platformOS: Platform.OS,
+        platformVersion: String(Platform.Version),
         nodeReady: snapshot?.ready ?? false,
-        relayConfigured: RELAY_URLS.length > 0,
-        relayCount: RELAY_URLS.length,
+        nodeStatus: snapshot?.status ?? 'Not started',
+        selfEndpointId: snapshot?.self?.endpointId ?? null,
+        relayUrls: RELAY_URLS,
+        diagnostics: snapshot?.transportDiagnostics.snapshot ?? null,
+        diagnosticsUpdatedAt: snapshot?.transportDiagnostics.updatedAt ?? null,
+        diagnosticsError: snapshot?.transportDiagnostics.error ?? null,
         ble: snapshot?.pairing.capabilities ?? null,
-        blePeerCount: snapshot?.pairing.nearbyPeers.length ?? 0,
+        blePeers: snapshot?.pairing.nearbyPeers ?? [],
+        pairingSessions: snapshot?.pairing.sessions ?? [],
         // Wi-Fi Aware / Multipeer is Phase 3; null renders an honest "planned" row.
         nearby: null,
         stash: snapshot?.stash ?? { available: false, optedIn: false },
         relayOnly: {
           enabled: snapshot?.transports.relayOnly ?? false,
           enforced: snapshot?.transports.relayOnlyEnforced ?? false,
+        },
+        friends: snapshot?.friends ?? [],
+        background: {
+          sharing: snapshot?.backgroundSharing ?? false,
+          access: snapshot?.backgroundAccess ?? 'unknown',
         },
       }),
     [snapshot]
@@ -471,6 +487,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       confirmPairDisplay,
       cancelPair,
       refreshPairing,
+      refreshTransportDiagnostics,
       toggleShare,
       removeFriend,
       retryLocation,
@@ -498,6 +515,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       confirmPairDisplay,
       cancelPair,
       refreshPairing,
+      refreshTransportDiagnostics,
       toggleShare,
       removeFriend,
       retryLocation,

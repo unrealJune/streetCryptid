@@ -33,6 +33,9 @@ import uniffi.iroh_location.ProfileView
 import uniffi.iroh_location.SasChallenge
 import uniffi.iroh_location.SasRoleKind
 import uniffi.iroh_location.Subscription
+import uniffi.iroh_location.PeerTransportDiagnostic
+import uniffi.iroh_location.TransportAddressDiagnostic
+import uniffi.iroh_location.TransportDiagnostics
 import uniffi.iroh_location.configureTelemetry
 import uniffi.iroh_location.decodePairInvite
 import uniffi.iroh_location.deriveTopic
@@ -179,6 +182,28 @@ private fun blePeerMap(p: BlePeer): Map<String, Any?> =
     "endpointHint" to p.endpointHint?.toHex(),
     "consecutiveFailures" to p.consecutiveFailures.toLong(),
     "connectPath" to p.connectPath,
+  )
+
+private fun transportAddressDiagnosticMap(
+  address: TransportAddressDiagnostic
+): Map<String, Any?> =
+  mapOf(
+    "kind" to address.kind,
+    "address" to address.address,
+    "active" to address.active,
+  )
+
+private fun peerTransportDiagnosticMap(peer: PeerTransportDiagnostic): Map<String, Any> =
+  mapOf(
+    "endpointId" to peer.endpointId.toHex(),
+    "known" to peer.known,
+    "addresses" to peer.addresses.map { transportAddressDiagnosticMap(it) },
+  )
+
+private fun transportDiagnosticsMap(diagnostics: TransportDiagnostics): Map<String, Any> =
+  mapOf(
+    "localAddresses" to diagnostics.localAddresses.map { transportAddressDiagnosticMap(it) },
+    "peers" to diagnostics.peers.map { peerTransportDiagnosticMap(it) },
   )
 
 private fun bumpResolutionMap(r: BumpResolution): Map<String, Any?> =
@@ -631,6 +656,12 @@ class IrohLocationModule : Module() {
 
     AsyncFunction("decodePairInvite") Coroutine
       { token: String -> pairInviteMap(decodePairInvite(token)) }
+
+    AsyncFunction("transportDiagnostics") Coroutine
+      { peerEndpointIdsHex: List<String> ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        transportDiagnosticsMap(n.transportDiagnostics(peerEndpointIdsHex.map { it.hexToBytes() }))
+      }
 
     // ── BLE status (honest stub off-device) — ARCHITECTURE.md §2 ───────────────────────────
 

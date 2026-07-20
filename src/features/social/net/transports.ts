@@ -1,109 +1,241 @@
-import type { BleCapabilities } from 'iroh-location';
+import type {
+  BleCapabilities,
+  BlePeer,
+  PairStateRecord,
+  PeerTransportDiagnostic,
+  TransportAddressDiagnostic,
+  TransportDiagnostics,
+} from 'iroh-location';
 
-/**
- * Honest transport-diagnostic model. The report is assembled by a pure function from signals we
- * can actually observe (native module present, BLE capability report, nearby-peer counts, stash
- * opt-in, relay config, relay-only mode) — it never fabricates a "connected" state we can't see.
- * All environment / platform reads happen at the call site and are injected here so the builder
- * stays trivially unit-testable. See docs/social/ARCHITECTURE.md §2.
- */
-
-/** Coarse, honest status for a single transport row. */
 export type TransportStatus =
-  /** Wired in and carrying (or actively able to carry) traffic right now. */
-  | 'active'
-  /** Wired in and usable, but nothing is flowing over it at the moment. */
-  | 'available'
-  /** Present but deliberately turned off (e.g. disabled by relay-only, or opt-in that's off). */
-  | 'inactive'
-  /** Not usable here (no radio, misconfigured, or wrong platform). */
-  | 'unavailable'
-  /** Not applicable on this platform (e.g. radios on web). */
-  | 'n/a'
-  /** Designed but not yet built into this build. */
-  | 'planned';
+  'active' | 'available' | 'inactive' | 'unavailable' | 'n/a' | 'planned';
 
-/** A single transport as surfaced in the Settings diagnostic. */
+export interface TransportDetailItem {
+  label: string;
+  value: string;
+  status?: TransportStatus;
+}
+
+export interface TransportDetailGroup {
+  label: string;
+  items: TransportDetailItem[];
+}
+
 export interface TransportRow {
-  /** Stable key for lists. */
   id: string;
-  /** Human label, e.g. "BLE mesh". */
   label: string;
   status: TransportStatus;
-  /** Short, honest one-liner about why it's in this state. */
   detail: string;
+  groups: TransportDetailGroup[];
 }
 
 export interface TransportReport {
   rows: TransportRow[];
+  updatedAt: number | null;
+  error: string | null;
 }
 
-/** Nearby (Wi-Fi Aware / Multipeer) capability report — mirrors the native `nearby_capabilities`. */
 export interface NearbyCapabilities {
   available: boolean;
   peerCount: number;
 }
 
-/** Everything the pure builder needs; all reads are done by the caller and injected. */
+export interface TransportFriend {
+  endpointId: string;
+  handle: string;
+  pairingMethod?: string;
+}
+
 export interface TransportInputs {
-  /** The native `IrohLocation` module is present (false on web / Expo Go). */
   nativeAvailable: boolean;
-  /** `Platform.OS`. */
   platformOS: string;
-  /** Whether the node has finished starting (transports only carry traffic once ready). */
+  platformVersion: string;
   nodeReady: boolean;
-  /** Whether at least one relay URL is configured. */
-  relayConfigured: boolean;
-  /** How many relay URLs are configured. */
-  relayCount: number;
-  /** BLE capability report from the snapshot, or null when not yet polled / unavailable. */
+  nodeStatus: string;
+  selfEndpointId: string | null;
+  relayUrls: string[];
+  diagnostics: TransportDiagnostics | null;
+  diagnosticsUpdatedAt: number | null;
+  diagnosticsError: string | null;
   ble: BleCapabilities | null;
-  /** Count of nearby BLE peers currently surfaced by the transport. */
-  blePeerCount: number;
-  /** Nearby (Wi-Fi Aware / Multipeer) capabilities, or null until Phase 3 lands. */
+  blePeers: BlePeer[];
+  pairingSessions: PairStateRecord[];
   nearby: NearbyCapabilities | null;
-  /** Offline-delivery trail stash: deployed + opted in. */
   stash: { available: boolean; optedIn: boolean };
-  /** User forced relay-only, and whether that's actually enforced natively yet. */
   relayOnly: { enabled: boolean; enforced: boolean };
+  friends: TransportFriend[];
+  background: { sharing: boolean; access: string };
 }
 
 const RADIO_OFF_BY_RELAY_ONLY = 'Disabled while relay-only is on.';
 
-/** Radio-transport status shared by BLE + nearby: unavailable / off-by-relay-only / active / available. */
+function yesNo(value: boolean): string {
+  return value ? 'Yes' : 'No';
+}
+
+function shortId(value: string | null): string {
+  if (!value) return 'Not available';
+  return value.length > 20 ? `${value.slice(0, 10)}…${value.slice(-8)}` : value;
+}
+
+function friendName(friend: TransportFriend | undefined, endpointId: string): string {
+  return friend?.handle || shortId(endpointId);
+}
+
+function addressWithoutKind(address: TransportAddressDiagnostic): string {
+  const prefix = `${address.kind}:`;
+  return address.address.startsWith(prefix)
+    ? address.address.slice(prefix.length)
+    : address.address;
+}
+
+function isLanIp(address: TransportAddressDiagnostic): boolean {
+  if (address.kind !== 'ip') return false;
+  const value = addressWithoutKind(address).toLowerCase();
+  const host = value.startsWith('[')
+    ? value.slice(1, value.indexOf(']'))
+    : value.slice(0, value.lastIndexOf(':'));
+  if (
+    host === '::1' ||
+    host.startsWith('fe80:') ||
+    host.startsWith('fc') ||
+    host.startsWith('fd') ||
+    host.startsWith('127.') ||
+    host.startsWith('10.') ||
+    host.startsWith('169.254.') ||
+    host.startsWith('192.168.')
+  ) {
+    return true;
+  }
+  const match = /^172\.(\d+)\./.exec(host);
+  return match ? Number(match[1]) >= 16 && Number(match[1]) <= 31 : false;
+}
+
+function pathStatus(address: TransportAddressDiagnostic): TransportStatus {
+  return address.active ? 'active' : 'available';
+}
+
+function matchingPaths(
+  peers: PeerTransportDiagnostic[],
+  predicate: (address: TransportAddressDiagnostic) => boolean
+): { peer: PeerTransportDiagnostic; address: TransportAddressDiagnostic }[] {
+  return peers.flatMap((peer) =>
+    peer.addresses.filter(predicate).map((address) => ({ peer, address }))
+  );
+}
+
+function pathItems(
+  paths: { peer: PeerTransportDiagnostic; address: TransportAddressDiagnostic }[],
+  friends: Map<string, TransportFriend>
+): TransportDetailItem[] {
+  return paths.map(({ peer, address }) => ({
+    label: friendName(friends.get(peer.endpointId), peer.endpointId),
+    value: `${peer.endpointId} · ${addressWithoutKind(address)} · ${
+      address.active ? 'active' : 'inactive'
+    }`,
+    status: pathStatus(address),
+  }));
+}
+
+function localAddressItems(
+  diagnostics: TransportDiagnostics | null,
+  predicate: (address: TransportAddressDiagnostic) => boolean
+): TransportDetailItem[] {
+  return (diagnostics?.localAddresses ?? []).filter(predicate).map((address, index) => ({
+    label: `Address ${index + 1}`,
+    value: addressWithoutKind(address),
+  }));
+}
+
+function nodeItems(input: TransportInputs): TransportDetailItem[] {
+  return [
+    { label: 'Runtime', value: input.nodeStatus, status: input.nodeReady ? 'active' : 'inactive' },
+    { label: 'Native module', value: input.nativeAvailable ? 'Loaded' : 'Unavailable' },
+    { label: 'Platform', value: `${input.platformOS} ${input.platformVersion}` },
+    { label: 'Endpoint', value: input.selfEndpointId ?? 'Not available' },
+    {
+      label: 'Background sharing',
+      value: `${input.background.sharing ? 'Running' : 'Stopped'} · ${input.background.access}`,
+    },
+    {
+      label: 'Relay-only preference',
+      value: input.relayOnly.enabled
+        ? input.relayOnly.enforced
+          ? 'Enabled and enforced'
+          : 'Enabled, not enforced by native endpoint'
+        : 'Off',
+    },
+  ];
+}
+
 function radioStatus(
   available: boolean,
-  peerCount: number,
+  active: boolean,
   relayOnly: boolean,
   nodeReady: boolean
 ): TransportStatus {
   if (!available) return 'unavailable';
   if (relayOnly) return 'inactive';
-  if (peerCount > 0) return 'active';
+  if (active) return 'active';
   return nodeReady ? 'available' : 'inactive';
 }
 
-/**
- * Build the transport diagnostic from observable signals. Pure: no env, Platform, or module reads.
- */
 export function buildTransportReport(input: TransportInputs): TransportReport {
   const web = input.platformOS === 'web';
   const native = input.nativeAvailable && !web;
-  const relayOnly = input.relayOnly.enabled;
+  const relayOnly = input.relayOnly.enabled && input.relayOnly.enforced;
+  const relayOnlyPending = input.relayOnly.enabled && !input.relayOnly.enforced;
+  const pendingRelayOnlySuffix = relayOnlyPending
+    ? ' Relay-only is requested but not enforced by the native endpoint.'
+    : '';
+  const peers = input.diagnostics?.peers ?? [];
+  const friends = new Map(input.friends.map((friend) => [friend.endpointId, friend]));
+
+  const relayPaths = matchingPaths(peers, (address) => address.kind === 'relay');
+  const directPaths = matchingPaths(peers, (address) => address.kind === 'ip' && !isLanIp(address));
+  const lanPaths = matchingPaths(peers, isLanIp);
+  const customPaths = matchingPaths(peers, (address) => address.kind === 'custom');
+  const relayActive = relayPaths.some(({ address }) => address.active);
+  const directActive = directPaths.some(({ address }) => address.active);
+  const lanActive = lanPaths.some(({ address }) => address.active);
+  const customActive = customPaths.some(({ address }) => address.active);
+  const connectedBlePeers = input.blePeers.filter((peer) => peer.phase === 'connected');
+  const bleActive = customActive || connectedBlePeers.length > 0;
 
   const rows: TransportRow[] = [];
-
-  // Relay — the authenticated always-on internet path. It's the one transport relay-only keeps.
+  const relayConfigured = input.relayUrls.length > 0;
   rows.push({
     id: 'relay',
     label: 'Relay',
-    status: input.relayConfigured ? (input.nodeReady ? 'active' : 'available') : 'unavailable',
-    detail: input.relayConfigured
-      ? `${input.relayCount} relay${input.relayCount === 1 ? '' : 's'} configured.`
-      : 'No relay URLs configured (EXPO_PUBLIC_IROH_RELAY_URLS).',
+    status: !relayConfigured
+      ? 'unavailable'
+      : relayActive
+        ? 'active'
+        : input.nodeReady
+          ? 'available'
+          : 'inactive',
+    detail: !relayConfigured
+      ? 'No authenticated relay is configured.'
+      : relayActive
+        ? `${relayPaths.filter(({ address }) => address.active).length} active peer relay path${relayPaths.filter(({ address }) => address.active).length === 1 ? '' : 's'}.`
+        : `${input.relayUrls.length} configured; no active peer relay path observed.`,
+    groups: [
+      { label: 'NODE', items: nodeItems(input) },
+      {
+        label: 'CONFIGURED RELAYS',
+        items: input.relayUrls.map((url, index) => ({ label: `Relay ${index + 1}`, value: url })),
+      },
+      {
+        label: 'LOCAL RELAY ADDRESSES',
+        items: localAddressItems(input.diagnostics, (address) => address.kind === 'relay'),
+      },
+      {
+        label: 'PEER PATHS',
+        items: pathItems(relayPaths, friends),
+      },
+    ],
   });
 
-  // Direct / IP — hole-punched peer-to-peer over the internet.
   rows.push({
     id: 'direct',
     label: 'Direct (IP)',
@@ -113,17 +245,40 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
         ? 'unavailable'
         : relayOnly
           ? 'inactive'
-          : input.nodeReady
-            ? 'available'
-            : 'inactive',
+          : directActive
+            ? 'active'
+            : input.nodeReady
+              ? 'available'
+              : 'inactive',
     detail: web
       ? 'Not available in the browser build.'
       : relayOnly
         ? RADIO_OFF_BY_RELAY_ONLY
-        : 'Hole-punched peer-to-peer over the internet.',
+        : directActive
+          ? `${directPaths.filter(({ address }) => address.active).length} active public IP path${directPaths.filter(({ address }) => address.active).length === 1 ? '' : 's'}.${pendingRelayOnlySuffix}`
+          : `Ready for hole-punched peer-to-peer traffic; no active public IP path observed.${pendingRelayOnlySuffix}`,
+    groups: [
+      { label: 'NODE', items: nodeItems(input) },
+      {
+        label: 'LOCAL PUBLIC ADDRESSES',
+        items: localAddressItems(
+          input.diagnostics,
+          (address) => address.kind === 'ip' && !isLanIp(address)
+        ),
+      },
+      { label: 'PEER PATHS', items: pathItems(directPaths, friends) },
+      {
+        label: 'KNOWN PEERS',
+        items: peers.map((peer) => ({
+          label: friendName(friends.get(peer.endpointId), peer.endpointId),
+          value: peer.known
+            ? `${peer.endpointId} · ${peer.addresses.length} known address(es)`
+            : `${peer.endpointId} · no retained path state`,
+        })),
+      },
+    ],
   });
 
-  // LAN (mDNS) — same-Wi-Fi direct discovery.
   rows.push({
     id: 'lan',
     label: 'LAN (mDNS)',
@@ -133,34 +288,103 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
         ? 'unavailable'
         : relayOnly
           ? 'inactive'
-          : input.nodeReady
-            ? 'available'
-            : 'inactive',
+          : lanActive
+            ? 'active'
+            : input.nodeReady
+              ? 'available'
+              : 'inactive',
     detail: web
       ? 'Not available in the browser build.'
       : relayOnly
         ? RADIO_OFF_BY_RELAY_ONLY
-        : 'Finds friends on the same Wi-Fi (best-effort; needs OS multicast).',
+        : lanActive
+          ? `${lanPaths.filter(({ address }) => address.active).length} active same-network path${lanPaths.filter(({ address }) => address.active).length === 1 ? '' : 's'}.${pendingRelayOnlySuffix}`
+          : `mDNS and ticket-seeded LAN dialing are ready; no active LAN path observed.${pendingRelayOnlySuffix}`,
+    groups: [
+      {
+        label: 'OS SUPPORT',
+        items: [
+          {
+            label: 'Local network access',
+            value:
+              input.platformOS === 'ios'
+                ? 'Usage prompt configured'
+                : 'Runtime permission requested before node start',
+          },
+          {
+            label: 'Multicast',
+            value:
+              input.platformOS === 'ios'
+                ? 'Managed entitlement declared; signed profile decides availability'
+                : 'CHANGE_WIFI_MULTICAST_STATE + process-lifetime MulticastLock',
+          },
+          { label: 'Discovery', value: 'Custom iroh mDNS address lookup' },
+        ],
+      },
+      { label: 'LOCAL LAN ADDRESSES', items: localAddressItems(input.diagnostics, isLanIp) },
+      { label: 'PEER PATHS', items: pathItems(lanPaths, friends) },
+    ],
   });
 
-  // BLE mesh — nearby, no internet.
   const bleAvailable = native && (input.ble?.available ?? false);
   rows.push({
     id: 'ble',
     label: 'BLE mesh',
-    status: web ? 'n/a' : radioStatus(bleAvailable, input.blePeerCount, relayOnly, input.nodeReady),
+    status: web ? 'n/a' : radioStatus(bleAvailable, bleActive, relayOnly, input.nodeReady),
     detail: web
       ? 'Not available in the browser build.'
       : !bleAvailable
-        ? 'No BLE transport on this device/build.'
+        ? 'No BLE transport is attached to this endpoint.'
         : relayOnly
           ? RADIO_OFF_BY_RELAY_ONLY
-          : input.blePeerCount > 0
-            ? `${input.blePeerCount} nearby peer${input.blePeerCount === 1 ? '' : 's'}.`
-            : 'Scanning for nearby cryptids over Bluetooth.',
+          : bleActive
+            ? `${Math.max(connectedBlePeers.length, customPaths.filter(({ address }) => address.active).length)} active BLE peer${Math.max(connectedBlePeers.length, customPaths.filter(({ address }) => address.active).length) === 1 ? '' : 's'}.${pendingRelayOnlySuffix}`
+            : `Scanning; ${input.blePeers.length} peer${input.blePeers.length === 1 ? '' : 's'} retained.${pendingRelayOnlySuffix}`,
+    groups: [
+      {
+        label: 'CAPABILITIES',
+        items: input.ble
+          ? [
+              { label: 'Transport attached', value: yesNo(input.ble.available) },
+              { label: 'Active scan toggle', value: yesNo(input.ble.activeScanToggle) },
+              { label: 'RSSI during Bump', value: yesNo(input.ble.rssi) },
+              { label: 'Discovery refresh', value: yesNo(input.ble.discoveryRefresh) },
+              { label: 'Invite-less pairing armed', value: yesNo(input.ble.pairingReady) },
+            ]
+          : [{ label: 'Native report', value: 'Not received yet' }],
+      },
+      {
+        label: 'BLE PEERS',
+        items: input.blePeers.flatMap((peer, index) => [
+          {
+            label: `Peer ${index + 1}`,
+            value: `${peer.deviceId} · ${peer.phase}`,
+            status: peer.phase === 'connected' ? 'active' : 'available',
+          },
+          { label: 'Verified endpoint', value: peer.verifiedEndpointId ?? 'Not available' },
+          { label: 'Endpoint hint', value: peer.endpointHint ?? 'Not available' },
+          { label: 'Connect path', value: peer.connectPath ?? 'Unknown' },
+          { label: 'Consecutive failures', value: String(peer.consecutiveFailures) },
+        ]),
+      },
+      {
+        label: 'LOCAL CUSTOM ADDRESSES',
+        items: localAddressItems(input.diagnostics, (address) => address.kind === 'custom'),
+      },
+      { label: 'IROH CUSTOM PATHS', items: pathItems(customPaths, friends) },
+      {
+        label: 'PAIRING SESSIONS',
+        items: input.pairingSessions.map((session, index) => ({
+          label: `Session ${index + 1}`,
+          value: `${session.peerEndpointId} · ${session.state} · ${
+            session.nearby ? 'nearby' : 'invite'
+          }`,
+          status: session.state === 'complete' ? 'active' : 'available',
+        })),
+      },
+    ],
   });
 
-  // Wi-Fi Aware / Multipeer — high-bandwidth nearby (Phase 3).
   const nearbyAvailable = native && (input.nearby?.available ?? false);
   rows.push({
     id: 'nearby',
@@ -169,31 +393,56 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
       ? 'n/a'
       : input.nearby === null
         ? 'planned'
-        : radioStatus(nearbyAvailable, input.nearby.peerCount, relayOnly, input.nodeReady),
+        : radioStatus(nearbyAvailable, input.nearby.peerCount > 0, relayOnly, input.nodeReady),
     detail: web
       ? 'Not available in the browser build.'
       : input.nearby === null
-        ? 'Coming soon: high-bandwidth local transport, no internet.'
-        : !nearbyAvailable
-          ? 'Not supported on this device/build.'
-          : relayOnly
-            ? RADIO_OFF_BY_RELAY_ONLY
-            : input.nearby.peerCount > 0
-              ? `${input.nearby.peerCount} nearby peer${input.nearby.peerCount === 1 ? '' : 's'}.`
-              : 'Discovering nearby cryptids over local Wi-Fi.',
+        ? 'High-bandwidth nearby transport is not implemented yet.'
+        : `${input.nearby.peerCount} nearby peer${input.nearby.peerCount === 1 ? '' : 's'}.`,
+    groups: [
+      {
+        label: 'IMPLEMENTATION',
+        items: [
+          { label: 'Android', value: 'Wi-Fi Aware planned' },
+          { label: 'iOS', value: 'Multipeer Connectivity planned' },
+          {
+            label: 'Native capability report',
+            value: input.nearby ? 'Present' : 'Not implemented',
+          },
+        ],
+      },
+    ],
   });
 
-  // Trail stash — ciphertext-blind offline delivery relay.
   rows.push({
     id: 'stash',
     label: 'Offline delivery (stash)',
     status: !input.stash.available ? 'unavailable' : input.stash.optedIn ? 'active' : 'inactive',
     detail: !input.stash.available
-      ? 'No trail stash deployed for this app.'
+      ? 'No trail stash is configured.'
       : input.stash.optedIn
-        ? 'A blind relay holds your sealed trail so offline friends still receive it.'
-        : 'Off — turn on Offline delivery to use it.',
+        ? 'Ciphertext-blind offline replication is enabled.'
+        : 'Configured but not opted in.',
+    groups: [
+      {
+        label: 'STATE',
+        items: [
+          { label: 'Deployment configured', value: yesNo(input.stash.available) },
+          { label: 'User opted in', value: yesNo(input.stash.optedIn) },
+          {
+            label: 'Last native path refresh',
+            value: input.diagnosticsUpdatedAt
+              ? new Date(input.diagnosticsUpdatedAt).toISOString()
+              : 'Never',
+          },
+        ],
+      },
+    ],
   });
 
-  return { rows };
+  return {
+    rows,
+    updatedAt: input.diagnosticsUpdatedAt,
+    error: input.diagnosticsError,
+  };
 }

@@ -172,6 +172,29 @@ private func blePeerDict(_ p: BlePeer) -> [String: Any] {
   ]
 }
 
+private func transportAddressDiagnosticDict(_ address: TransportAddressDiagnostic) -> [String: Any] {
+  [
+    "kind": address.kind,
+    "address": address.address,
+    "active": address.active.map { $0 as Any } ?? NSNull(),
+  ]
+}
+
+private func peerTransportDiagnosticDict(_ peer: PeerTransportDiagnostic) -> [String: Any] {
+  [
+    "endpointId": dataToHex(peer.endpointId),
+    "known": peer.known,
+    "addresses": peer.addresses.map { transportAddressDiagnosticDict($0) },
+  ]
+}
+
+private func transportDiagnosticsDict(_ diagnostics: TransportDiagnostics) -> [String: Any] {
+  [
+    "localAddresses": diagnostics.localAddresses.map { transportAddressDiagnosticDict($0) },
+    "peers": diagnostics.peers.map { peerTransportDiagnosticDict($0) },
+  ]
+}
+
 private func bumpResolutionDict(_ resolution: BumpResolution) -> [String: Any] {
   [
     "status": resolution.status,
@@ -470,6 +493,12 @@ public final class IrohLocationModule: Module {
     AsyncFunction("pairResult") { (sessionIdHex: String) async throws -> [String: Any]? in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return (try await node.pairResult(sessionId: hexToData(sessionIdHex))).map { pairResultDict($0) }
+    }
+
+    AsyncFunction("transportDiagnostics") { (peerEndpointIdsHex: [String]) async throws -> [String: Any] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      let peerEndpointIds = peerEndpointIdsHex.map { hexToData($0) }
+      return transportDiagnosticsDict(try await node.transportDiagnostics(peerEndpointIds: peerEndpointIds))
     }
 
     AsyncFunction("encodePairInvite") { (invite: [String: Any]) throws -> String in

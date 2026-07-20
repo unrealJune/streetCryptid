@@ -153,6 +153,9 @@ class FakeNativeModule {
     return [];
   }
   async pruneTrail() {}
+  async transportDiagnostics() {
+    return { localAddresses: [], peers: [] };
+  }
 
   async setPairingReady() {}
   async createPairInvite(_ttlSecs: number): Promise<PairInviteWithToken> {

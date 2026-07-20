@@ -1215,6 +1215,12 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      */
     func ticket() async throws  -> String
     
+    /**
+     * Snapshot the local endpoint's advertised addresses and iroh's retained path table for the
+     * requested peers. Remote path usage is point-in-time; callers should poll when displaying it.
+     */
+    func transportDiagnostics(peerEndpointIds: [Data]) async throws  -> TransportDiagnostics
+    
 }
 /**
  * The device node: holds identity + receiving keys and, once started, the iroh
@@ -2165,6 +2171,27 @@ open func ticket()async throws  -> String  {
         )
 }
     
+    /**
+     * Snapshot the local endpoint's advertised addresses and iroh's retained path table for the
+     * requested peers. Remote path usage is point-in-time; callers should poll when displaying it.
+     */
+open func transportDiagnostics(peerEndpointIds: [Data])async throws  -> TransportDiagnostics  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_transport_diagnostics(
+                    self.uniffiCloneHandle(),
+                    FfiConverterSequenceData.lower(peerEndpointIds)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeTransportDiagnostics_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
 
     
 }
@@ -3106,6 +3133,73 @@ public func FfiConverterTypePairStateRecord_lower(_ value: PairStateRecord) -> R
 
 
 /**
+ * Iroh's current address knowledge for one requested peer.
+ */
+public struct PeerTransportDiagnostic: Equatable, Hashable {
+    public var endpointId: Data
+    /**
+     * False when iroh has no retained path information for this peer.
+     */
+    public var known: Bool
+    public var addresses: [TransportAddressDiagnostic]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(endpointId: Data, 
+        /**
+         * False when iroh has no retained path information for this peer.
+         */known: Bool, addresses: [TransportAddressDiagnostic]) {
+        self.endpointId = endpointId
+        self.known = known
+        self.addresses = addresses
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PeerTransportDiagnostic: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePeerTransportDiagnostic: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PeerTransportDiagnostic {
+        return
+            try PeerTransportDiagnostic(
+                endpointId: FfiConverterData.read(from: &buf), 
+                known: FfiConverterBool.read(from: &buf), 
+                addresses: FfiConverterSequenceTypeTransportAddressDiagnostic.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PeerTransportDiagnostic, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.endpointId, into: &buf)
+        FfiConverterBool.write(value.known, into: &buf)
+        FfiConverterSequenceTypeTransportAddressDiagnostic.write(value.addresses, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePeerTransportDiagnostic_lift(_ buf: RustBuffer) throws -> PeerTransportDiagnostic {
+    return try FfiConverterTypePeerTransportDiagnostic.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePeerTransportDiagnostic_lower(_ value: PeerTransportDiagnostic) -> RustBuffer {
+    return FfiConverterTypePeerTransportDiagnostic.lower(value)
+}
+
+
+/**
  * A verified cryptid **profile** as surfaced to the app (§3). Returned already signature- and
  * endpoint-verified; the bridge can render it directly.
  */
@@ -3267,6 +3361,144 @@ public func FfiConverterTypeSasChallenge_lift(_ buf: RustBuffer) throws -> SasCh
 #endif
 public func FfiConverterTypeSasChallenge_lower(_ value: SasChallenge) -> RustBuffer {
     return FfiConverterTypeSasChallenge.lower(value)
+}
+
+
+/**
+ * One endpoint address as exposed by iroh's live path table.
+ */
+public struct TransportAddressDiagnostic: Equatable, Hashable {
+    /**
+     * `relay` | `ip` | `custom`.
+     */
+    public var kind: String
+    /**
+     * Full display form (`relay:https://…`, `ip:host:port`, or the custom transport address).
+     */
+    public var address: String
+    /**
+     * Whether a remote path is actively carrying traffic. `None` for local advertised addresses,
+     * whose presence does not prove another endpoint is using them.
+     */
+    public var active: Bool?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `relay` | `ip` | `custom`.
+         */kind: String, 
+        /**
+         * Full display form (`relay:https://…`, `ip:host:port`, or the custom transport address).
+         */address: String, 
+        /**
+         * Whether a remote path is actively carrying traffic. `None` for local advertised addresses,
+         * whose presence does not prove another endpoint is using them.
+         */active: Bool?) {
+        self.kind = kind
+        self.address = address
+        self.active = active
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TransportAddressDiagnostic: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTransportAddressDiagnostic: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TransportAddressDiagnostic {
+        return
+            try TransportAddressDiagnostic(
+                kind: FfiConverterString.read(from: &buf), 
+                address: FfiConverterString.read(from: &buf), 
+                active: FfiConverterOptionBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TransportAddressDiagnostic, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterString.write(value.address, into: &buf)
+        FfiConverterOptionBool.write(value.active, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransportAddressDiagnostic_lift(_ buf: RustBuffer) throws -> TransportAddressDiagnostic {
+    return try FfiConverterTypeTransportAddressDiagnostic.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransportAddressDiagnostic_lower(_ value: TransportAddressDiagnostic) -> RustBuffer {
+    return FfiConverterTypeTransportAddressDiagnostic.lower(value)
+}
+
+
+/**
+ * Live endpoint transport snapshot used by the in-app diagnostics.
+ */
+public struct TransportDiagnostics: Equatable, Hashable {
+    public var localAddresses: [TransportAddressDiagnostic]
+    public var peers: [PeerTransportDiagnostic]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(localAddresses: [TransportAddressDiagnostic], peers: [PeerTransportDiagnostic]) {
+        self.localAddresses = localAddresses
+        self.peers = peers
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TransportDiagnostics: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTransportDiagnostics: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TransportDiagnostics {
+        return
+            try TransportDiagnostics(
+                localAddresses: FfiConverterSequenceTypeTransportAddressDiagnostic.read(from: &buf), 
+                peers: FfiConverterSequenceTypePeerTransportDiagnostic.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TransportDiagnostics, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeTransportAddressDiagnostic.write(value.localAddresses, into: &buf)
+        FfiConverterSequenceTypePeerTransportDiagnostic.write(value.peers, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransportDiagnostics_lift(_ buf: RustBuffer) throws -> TransportDiagnostics {
+    return try FfiConverterTypeTransportDiagnostics.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransportDiagnostics_lower(_ value: TransportDiagnostics) -> RustBuffer {
+    return FfiConverterTypeTransportDiagnostics.lower(value)
 }
 
 
@@ -3728,6 +3960,30 @@ fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
+    typealias SwiftType = Bool?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterBool.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterBool.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -4047,6 +4303,31 @@ fileprivate struct FfiConverterSequenceTypePairStateRecord: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypePeerTransportDiagnostic: FfiConverterRustBuffer {
+    typealias SwiftType = [PeerTransportDiagnostic]
+
+    public static func write(_ value: [PeerTransportDiagnostic], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePeerTransportDiagnostic.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PeerTransportDiagnostic] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PeerTransportDiagnostic]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePeerTransportDiagnostic.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeProfileView: FfiConverterRustBuffer {
     typealias SwiftType = [ProfileView]
 
@@ -4064,6 +4345,31 @@ fileprivate struct FfiConverterSequenceTypeProfileView: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeProfileView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRustBuffer {
+    typealias SwiftType = [TransportAddressDiagnostic]
+
+    public static func write(_ value: [TransportAddressDiagnostic], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTransportAddressDiagnostic.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TransportAddressDiagnostic] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TransportAddressDiagnostic]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTransportAddressDiagnostic.read(from: &buf))
         }
         return seq
     }
@@ -4367,6 +4673,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics() != 23251) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_subscription_publish() != 60528) {
