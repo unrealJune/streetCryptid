@@ -48,11 +48,9 @@ Real parent/child trace context flows only where a real channel exists:
 - **within one app operation**: explicit context propagation groups a background location wake or
   backfill under one root span (Hermes has no reliable `AsyncLocalStorage`, so this is deliberately
   passed through each async boundary).
-- **app → native core**: Android passes `traceparent` over the Expo/UniFFI bridge, so
+- **app → native core**: Android and iOS pass `traceparent` over the Expo/UniFFI bridge, so
   `gossip.publish`, `docs.write`, and `trail.sync` remain in the app operation's trace while retaining
-  their own `streetcryptid-core` service identity. The checked-in iOS UniFFI bindings predate these
-  traced Rust methods; its Expo bridge accepts but ignores the context until `just bindgen-ios` is
-  run on macOS.
+  their own `streetcryptid-core` service identity.
 - **app → stash control API**: the app sends `traceparent`; the stash's `http.request` span
   parents on it (one trace covers register/unsubscribe round-trips).
 - **stash → woken phone**: the silent push payload carries the `stash.wake.push` span's
@@ -79,8 +77,7 @@ bg.wake            (fixes, net/battery/app state)
                                                                      └ fix.received.app (sc.seq, sc.drop_reason?)
 ```
 
-`*` Native spans are direct children of `publish.fix` on Android. They remain separate roots on iOS
-until the Swift UniFFI bindings are regenerated on macOS.
+`*` Native spans are direct children of `publish.fix` on Android and iOS.
 
 ## Follow-one-ping cookbook (TraceQL, in Grafana → Explore → Tempo)
 

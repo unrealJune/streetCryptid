@@ -1000,6 +1000,10 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      */
     func docsWrite(subscriptionId: String, seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data]) async throws 
     
+    func docsWriteInner(subscriptionId: String, seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String?) async throws 
+    
+    func docsWriteTraced(subscriptionId: String, seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String) async throws 
+    
     /**
      * This device's EndpointId (== envelope `author`).
      */
@@ -1201,6 +1205,10 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * `on_sync`.
      */
     func syncTrail(sinceTs: UInt64, peerTicket: String?) async throws 
+    
+    func syncTrailInner(sinceTs: UInt64, peerTicket: String?, traceparent: String?) async throws 
+    
+    func syncTrailTraced(sinceTs: UInt64, peerTicket: String?, traceparent: String) async throws 
     
     /**
      * A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
@@ -1440,6 +1448,40 @@ open func docsWrite(subscriptionId: String, seq: UInt64, epoch: UInt32, fix: Loc
                 uniffi_iroh_location_fn_method_locationnode_docs_write(
                     self.uniffiCloneHandle(),
                     FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt32.lower(epoch),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func docsWriteInner(subscriptionId: String, seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_inner(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt32.lower(epoch),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients),FfiConverterOptionString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func docsWriteTraced(subscriptionId: String, seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_traced(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt32.lower(epoch),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients),FfiConverterString.lower(traceparent)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -2069,6 +2111,40 @@ open func syncTrail(sinceTs: UInt64, peerTicket: String?)async throws   {
         )
 }
     
+open func syncTrailInner(sinceTs: UInt64, peerTicket: String?, traceparent: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_sync_trail_inner(
+                    self.uniffiCloneHandle(),
+                    FfiConverterUInt64.lower(sinceTs),FfiConverterOptionString.lower(peerTicket),FfiConverterOptionString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func syncTrailTraced(sinceTs: UInt64, peerTicket: String?, traceparent: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_sync_trail_traced(
+                    self.uniffiCloneHandle(),
+                    FfiConverterUInt64.lower(sinceTs),FfiConverterOptionString.lower(peerTicket),FfiConverterString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
     /**
      * A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
      */
@@ -2151,6 +2227,10 @@ public protocol SubscriptionProtocol: AnyObject, Sendable {
      */
     func publish(seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data]) async throws 
     
+    func publishInner(seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String?) async throws 
+    
+    func publishTraced(seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String) async throws 
+    
 }
 /**
  * A live topic subscription; publish fixes through it.
@@ -2220,6 +2300,40 @@ open func publish(seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Dat
                 uniffi_iroh_location_fn_method_subscription_publish(
                     self.uniffiCloneHandle(),
                     FfiConverterUInt64.lower(seq),FfiConverterUInt32.lower(epoch),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func publishInner(seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_subscription_publish_inner(
+                    self.uniffiCloneHandle(),
+                    FfiConverterUInt64.lower(seq),FfiConverterUInt32.lower(epoch),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients),FfiConverterOptionString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func publishTraced(seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_subscription_publish_traced(
+                    self.uniffiCloneHandle(),
+                    FfiConverterUInt64.lower(seq),FfiConverterUInt32.lower(epoch),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients),FfiConverterString.lower(traceparent)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -4144,7 +4258,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_doc_ticket() != 34643) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write() != 45057) {
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write() != 8784) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_inner() != 3042) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_traced() != 40920) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_endpoint_id() != 34847) {
@@ -4240,10 +4360,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_sync_trail() != 30653) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_sync_trail_inner() != 39894) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_sync_trail_traced() != 35925) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_subscription_publish() != 60528) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_subscription_publish_inner() != 23224) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_subscription_publish_traced() != 24737) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_constructor_locationnode_new() != 52316) {
