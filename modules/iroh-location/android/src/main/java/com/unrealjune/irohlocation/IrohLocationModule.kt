@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 
 // UniFFI-generated bindings for the `iroh-location` crate (in src/main/java/uniffi/…),
 // backed by libiroh_location.so under src/main/jniLibs. Regenerate with `just bindgen-android`
@@ -218,7 +219,9 @@ private fun bumpResolutionMap(r: BumpResolution): Map<String, Any?> =
 
 class IrohLocationModule : Module() {
   private var node: LocationNode? = null
+  private var runtimeId: String? = null
   private val subs = mutableMapOf<String, Subscription>()
+  private val runtimeLifecycleMutex = Mutex()
   private var multicastLock: WifiManager.MulticastLock? = null
 
   // Long-lived scope for firing the (suspend) network-change nudge from the ConnectivityManager
@@ -291,13 +294,23 @@ class IrohLocationModule : Module() {
     multicastLock = null
   }
 
-  private suspend fun clearRuntime() {
+  private suspend fun <T> withRuntimeLifecycle(operation: suspend () -> T): T {
+    runtimeLifecycleMutex.lock()
+    try {
+      return operation()
+    } finally {
+      runtimeLifecycleMutex.unlock()
+    }
+  }
+
+  private suspend fun clearRuntimeLocked() {
     subs.values.forEach { it.destroy() }
     subs.clear()
     unregisterNetworkCallback()
     releaseMulticastLock()
     val current = node
     node = null
+    runtimeId = null
     if (current != null) {
       try {
         current.shutdown()
@@ -363,15 +376,20 @@ class IrohLocationModule : Module() {
 
     AsyncFunction("createNode") Coroutine
       { identityHex: String?, recvHex: String? ->
-        clearRuntime()
-        val n = LocationNode(identityHex?.hexToBytes(), recvHex?.hexToBytes())
-        node = n
-        mapOf(
-          "endpointId" to n.endpointId().toHex(),
-          "identitySecret" to n.identitySecret().toHex(),
-          "recvSecret" to n.recvSecret().toHex(),
-          "recvPublic" to n.recvPublic().toHex(),
-        )
+        withRuntimeLifecycle {
+          clearRuntimeLocked()
+          val n = LocationNode(identityHex?.hexToBytes(), recvHex?.hexToBytes())
+          val newRuntimeId = UUID.randomUUID().toString()
+          node = n
+          runtimeId = newRuntimeId
+          mapOf(
+            "endpointId" to n.endpointId().toHex(),
+            "identitySecret" to n.identitySecret().toHex(),
+            "recvSecret" to n.recvSecret().toHex(),
+            "recvPublic" to n.recvPublic().toHex(),
+            "runtimeId" to newRuntimeId,
+          )
+        }
       }
 
     AsyncFunction("start") Coroutine
@@ -384,8 +402,22 @@ class IrohLocationModule : Module() {
 
     AsyncFunction("shutdown") Coroutine
       { ->
-        clearRuntime()
-        Unit
+        withRuntimeLifecycle {
+          clearRuntimeLocked()
+          Unit
+        }
+      }
+
+    AsyncFunction("shutdownIfOwned") Coroutine
+      { ownerRuntimeId: String ->
+        withRuntimeLifecycle {
+          if (runtimeId != ownerRuntimeId) {
+            false
+          } else {
+            clearRuntimeLocked()
+            true
+          }
+        }
       }
 
     AsyncFunction("ticket") Coroutine { -> node?.ticket() ?: "" }

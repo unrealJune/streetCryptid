@@ -80,28 +80,35 @@ export class IrohLocationNativeModule
   implements IrohLocationApi
 {
   private node: WasmLocationNode | null = null;
+  private runtimeId: string | null = null;
   private readonly subscriptions = new Map<string, StoredSubscription>();
   private nextSubscription = 1;
+  private nextRuntime = 1;
+  private lifecycle: Promise<void> = Promise.resolve();
 
   async createNode(
     identitySecretHex: string | null,
     recvSecretHex: string | null
   ): Promise<NodeKeys> {
     await ensureWasm();
-    await this.shutdown();
-    const identity = identitySecretHex ?? storageGet(ID_KEY);
-    const recv = recvSecretHex ?? storageGet(RECV_KEY);
-    this.node = new WasmLocationNode(identity, recv);
+    return this.withLifecycle(async () => {
+      await this.clearRuntime();
+      const identity = identitySecretHex ?? storageGet(ID_KEY);
+      const recv = recvSecretHex ?? storageGet(RECV_KEY);
+      this.node = new WasmLocationNode(identity, recv);
+      this.runtimeId = `web-${this.nextRuntime++}`;
 
-    const keys: NodeKeys = {
-      endpointId: this.node.endpoint_id(),
-      identitySecret: this.node.identity_secret(),
-      recvSecret: this.node.recv_secret(),
-      recvPublic: this.node.recv_public(),
-    };
-    storageSet(ID_KEY, keys.identitySecret);
-    storageSet(RECV_KEY, keys.recvSecret);
-    return keys;
+      const keys: NodeKeys = {
+        endpointId: this.node.endpoint_id(),
+        identitySecret: this.node.identity_secret(),
+        recvSecret: this.node.recv_secret(),
+        recvPublic: this.node.recv_public(),
+        runtimeId: this.runtimeId,
+      };
+      storageSet(ID_KEY, keys.identitySecret);
+      storageSet(RECV_KEY, keys.recvSecret);
+      return keys;
+    });
   }
 
   async start(): Promise<void> {
@@ -111,10 +118,32 @@ export class IrohLocationNativeModule
   }
 
   async shutdown(): Promise<void> {
+    await this.withLifecycle(() => this.clearRuntime());
+  }
+
+  async shutdownIfOwned(runtimeId: string): Promise<boolean> {
+    return this.withLifecycle(async () => {
+      if (this.runtimeId !== runtimeId) return false;
+      await this.clearRuntime();
+      return true;
+    });
+  }
+
+  private async clearRuntime(): Promise<void> {
     const subscriptionIds = [...this.subscriptions.keys()];
     await Promise.all(subscriptionIds.map((id) => this.unsubscribe(id)));
     this.node?.free();
     this.node = null;
+    this.runtimeId = null;
+  }
+
+  private withLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.lifecycle.then(operation, operation);
+    this.lifecycle = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
   }
 
   async ticket(): Promise<string> {

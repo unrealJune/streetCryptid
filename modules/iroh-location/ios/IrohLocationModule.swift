@@ -24,6 +24,27 @@ private func dataToHex(_ data: Data) -> String {
   data.map { String(format: "%02x", $0) }.joined()
 }
 
+private actor RuntimeLifecycleLock {
+  private var locked = false
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  func acquire() async {
+    if !locked {
+      locked = true
+      return
+    }
+    await withCheckedContinuation { waiters.append($0) }
+  }
+
+  func release() {
+    if waiters.isEmpty {
+      locked = false
+    } else {
+      waiters.removeFirst().resume()
+    }
+  }
+}
+
 /// Build the UniFFI `LocationFix` from the JS bridge dict.
 private func locationFix(from fix: [String: Double]) -> LocationFix {
   LocationFix(
@@ -245,14 +266,32 @@ private final class EventBridge: FixListener {
 
 public final class IrohLocationModule: Module {
   private var node: LocationNode?
+  private var runtimeId: String?
   private var subscriptions: [String: Subscription] = [:]
   private var bridges: [String: EventBridge] = [:]
+  private let runtimeLifecycleLock = RuntimeLifecycleLock()
 
-  private func clearRuntime() async throws {
+  private func withRuntimeLifecycle<T>(
+    _ operation: () async throws -> T
+  ) async throws -> T {
+    await runtimeLifecycleLock.acquire()
+    do {
+      let result = try await operation()
+      await runtimeLifecycleLock.release()
+      return result
+    } catch {
+      await runtimeLifecycleLock.release()
+      throw error
+    }
+  }
+
+  private func clearRuntimeLocked() async throws {
+    let current = node
+    node = nil
+    runtimeId = nil
     subscriptions.removeAll()
     bridges.removeAll()
-    try await node?.shutdown()
-    node = nil
+    try await current?.shutdown()
   }
 
   public func definition() -> ModuleDefinition {
@@ -260,17 +299,22 @@ public final class IrohLocationModule: Module {
     Events("onFix", "onOpaque", "onStatus", "onSync")
 
     AsyncFunction("createNode") { (identityHex: String?, recvHex: String?) async throws -> [String: String] in
-      try await self.clearRuntime()
-      let node = try LocationNode(
-        identitySecret: identityHex.map(hexToData),
-        recvSecret: recvHex.map(hexToData))
-      self.node = node
-      return [
-        "endpointId": dataToHex(node.endpointId()),
-        "identitySecret": dataToHex(node.identitySecret()),
-        "recvSecret": dataToHex(node.recvSecret()),
-        "recvPublic": dataToHex(node.recvPublic()),
-      ]
+      try await self.withRuntimeLifecycle {
+        try await self.clearRuntimeLocked()
+        let node = try LocationNode(
+          identitySecret: identityHex.map(hexToData),
+          recvSecret: recvHex.map(hexToData))
+        let runtimeId = UUID().uuidString
+        self.node = node
+        self.runtimeId = runtimeId
+        return [
+          "endpointId": dataToHex(node.endpointId()),
+          "identitySecret": dataToHex(node.identitySecret()),
+          "recvSecret": dataToHex(node.recvSecret()),
+          "recvPublic": dataToHex(node.recvPublic()),
+          "runtimeId": runtimeId,
+        ]
+      }
     }
 
     AsyncFunction("start") { (relayUrls: [String], relayAuthToken: String) async throws in
@@ -278,7 +322,17 @@ public final class IrohLocationModule: Module {
     }
 
     AsyncFunction("shutdown") { () async throws in
-      try await self.clearRuntime()
+      try await self.withRuntimeLifecycle {
+        try await self.clearRuntimeLocked()
+      }
+    }
+
+    AsyncFunction("shutdownIfOwned") { (ownerRuntimeId: String) async throws -> Bool in
+      try await self.withRuntimeLifecycle {
+        guard self.runtimeId == ownerRuntimeId else { return false }
+        try await self.clearRuntimeLocked()
+        return true
+      }
     }
 
     AsyncFunction("ticket") { () async throws -> String in

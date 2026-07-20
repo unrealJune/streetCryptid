@@ -238,6 +238,7 @@ function errorMessage(e: unknown): string {
 export class LocationSharingService implements FixPublisher {
   private mod: IrohLocationNativeModule | null = null;
   private keys: NodeKeys | null = null;
+  private runtimeId: string | null = null;
   private ticketStr: string | null = null;
   private docTicketStr: string | null = null;
   private profileTicketStr: string | null = null;
@@ -525,6 +526,7 @@ export class LocationSharingService implements FixPublisher {
     this.mod = getIrohLocation();
     const persisted = await loadKeys();
     this.keys = await this.mod.createNode(persisted.identitySecret, persisted.recvSecret);
+    this.runtimeId = this.keys.runtimeId ?? null;
     await saveKeys({
       identitySecret: this.keys.identitySecret,
       recvSecret: this.keys.recvSecret,
@@ -848,8 +850,11 @@ export class LocationSharingService implements FixPublisher {
     this.bleCaps = null;
     this.pairingReadyFlag = false;
 
-    await mod.shutdown();
+    const runtimeId = this.runtimeId;
+    this.runtimeId = null;
+    await this.shutdownNativeRuntime(mod, runtimeId);
     this.keys = await mod.createNode(keys.identitySecret, keys.recvSecret);
+    this.runtimeId = this.keys.runtimeId ?? null;
     await mod.start();
     this.ticketStr = await mod.ticket();
     this.docTicketStr = await this.safeDocTicket();
@@ -1487,8 +1492,10 @@ export class LocationSharingService implements FixPublisher {
     this.syncSub?.remove();
     this.syncSub = null;
     const mod = this.mod;
+    const runtimeId = this.runtimeId;
     const subscriptionIds = [...(this.mySubId ? [this.mySubId] : []), ...this.friendSubs.values()];
     this.mod = null;
+    this.runtimeId = null;
     this.status = 'stopped';
     this.friendSubs.clear();
     this.mySubId = null;
@@ -1505,11 +1512,22 @@ export class LocationSharingService implements FixPublisher {
           await Promise.allSettled(
             subscriptionIds.map((subscriptionId) => mod.unsubscribe(subscriptionId))
           );
-          await mod.shutdown();
+          await this.shutdownNativeRuntime(mod, runtimeId);
         })()
       );
     }
     await Promise.allSettled(work);
+  }
+
+  private async shutdownNativeRuntime(
+    mod: IrohLocationNativeModule,
+    runtimeId: string | null
+  ): Promise<void> {
+    if (runtimeId && typeof mod.shutdownIfOwned === 'function') {
+      await mod.shutdownIfOwned(runtimeId);
+      return;
+    }
+    await mod.shutdown();
   }
 
   /** Restore the persisted pool and re-establish subscriptions so sharing resumes after a reload. */

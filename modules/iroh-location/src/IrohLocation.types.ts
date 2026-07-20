@@ -24,6 +24,11 @@ export interface NodeKeys {
   recvSecret: string;
   /** X25519 receiving public key — share with friends so they can wrap fixes for you. */
   recvPublic: string;
+  /**
+   * Ownership token for this process-wide native runtime generation. Optional only for
+   * compatibility with installed native binaries built before generation-aware teardown.
+   */
+  runtimeId?: string;
 }
 
 export interface OnFixEvent {
@@ -295,6 +300,11 @@ export interface IrohLocationApi {
   start(): Promise<void>;
   /** Drop subscriptions and release the native endpoint/router. */
   shutdown(): Promise<void>;
+  /**
+   * Release the runtime only when `runtimeId` still identifies the current generation. Returns
+   * false without touching a newer runtime. Optional for compatibility with older native builds.
+   */
+  shutdownIfOwned?(runtimeId: string): Promise<boolean>;
   /** A shareable endpoint ticket (dialing info) for the contact card / bootstrap. */
   ticket(): Promise<string>;
   /** Derive the gossip topic (hex) for a given author's location stream. */

@@ -21,15 +21,35 @@ class FakeNativeModule {
     importDocTicket: [] as string[],
     subscribe: [] as { topic: string; bootstrap: string[] }[],
     unsubscribe: [] as string[],
+    shutdownIfOwned: [] as string[],
+    shutdown: 0,
   };
   private handlers: Record<string, (e: unknown) => void> = {};
   readonly unsubscribeFailures = new Set<string>();
+  private nextRuntime = 1;
+  currentRuntimeId: string | null = null;
 
   async createNode() {
-    return { endpointId: 'aa11', identitySecret: 'ii', recvSecret: 'rr', recvPublic: 'rp' };
+    this.currentRuntimeId = `runtime-${this.nextRuntime++}`;
+    return {
+      endpointId: 'aa11',
+      identitySecret: 'ii',
+      recvSecret: 'rr',
+      recvPublic: 'rp',
+      runtimeId: this.currentRuntimeId,
+    };
   }
   async start() {}
-  async shutdown() {}
+  async shutdown() {
+    this.calls.shutdown += 1;
+    this.currentRuntimeId = null;
+  }
+  async shutdownIfOwned(runtimeId: string) {
+    this.calls.shutdownIfOwned.push(runtimeId);
+    if (this.currentRuntimeId !== runtimeId) return false;
+    this.currentRuntimeId = null;
+    return true;
+  }
   async ticket() {
     return 'ticket-self';
   }
@@ -131,6 +151,36 @@ describe('LocationSharingService — durable trail wiring', () => {
     await svc.addFriend(friend);
     expect(mockHolder.mod.calls.importDocTicket).toContain('doc-b');
     expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-bb22')).toBe(true);
+  });
+
+  it('does not let stale service teardown clear a newer foreground runtime', async () => {
+    const staleHeadless = new LocationSharingService();
+    await staleHeadless.init('@me', 'mothman', '', '', { mode: 'headless' });
+    const staleRuntimeId = mockHolder.mod.currentRuntimeId;
+
+    const foreground = new LocationSharingService();
+    await foreground.init('@me', 'mothman');
+    const foregroundRuntimeId = mockHolder.mod.currentRuntimeId;
+    expect(foregroundRuntimeId).not.toBe(staleRuntimeId);
+
+    await staleHeadless.shutdownAsync();
+
+    expect(mockHolder.mod.calls.shutdownIfOwned).toContain(staleRuntimeId);
+    expect(mockHolder.mod.currentRuntimeId).toBe(foregroundRuntimeId);
+    await expect(foreground.syncTrail(0)).resolves.toBeUndefined();
+
+    await foreground.shutdownAsync();
+  });
+
+  it('uses legacy shutdown when the installed native binary has no ownership API', async () => {
+    Object.defineProperty(mockHolder.mod, 'shutdownIfOwned', { value: undefined });
+    const service = new LocationSharingService();
+    await service.init('@me', 'mothman', '', '', { mode: 'headless' });
+
+    await service.shutdownAsync();
+
+    expect(mockHolder.mod.calls.shutdown).toBe(1);
+    expect(mockHolder.mod.currentRuntimeId).toBeNull();
   });
 
   it('removes a friend, revokes sharing, and tears down their subscription', async () => {

@@ -34,6 +34,7 @@ export declare class IrohLocationNativeModule
   createNode(identitySecretHex: string | null, recvSecretHex: string | null): Promise<NodeKeys>;
   start(): Promise<void>;
   shutdown(): Promise<void>;
+  shutdownIfOwned?(runtimeId: string): Promise<boolean>;
   ticket(): Promise<string>;
   deriveTopic(authorEndpointIdHex: string): Promise<string>;
   subscribe(topicHex: string, bootstrapTickets: string[]): Promise<string>;
