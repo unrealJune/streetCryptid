@@ -327,10 +327,12 @@ class IrohLocationModule : Module() {
     Events("onFix", "onOpaque", "onStatus", "onSync")
 
     OnCreate {
-      val context =
+      val context = checkNotNull(
         appContext.reactContext?.applicationContext
           ?: appContext.currentActivity?.applicationContext
-          ?: return@OnCreate
+      ) {
+        "IrohLocation requires an Android application context during module initialization"
+      }
       IrohAndroidBootstrap.install(context)
     }
 

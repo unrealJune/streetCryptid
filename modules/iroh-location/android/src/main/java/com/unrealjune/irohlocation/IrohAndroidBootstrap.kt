@@ -3,6 +3,7 @@ package com.unrealjune.irohlocation
 import android.content.Context
 import org.jakebot.blew.BleCentralManager
 import org.jakebot.blew.BlePeripheralManager
+import uniffi.iroh_location.uniffiEnsureInitialized
 
 internal object IrohAndroidBootstrap {
   @Volatile private var installed = false
@@ -18,6 +19,7 @@ internal object IrohAndroidBootstrap {
     }
     BleCentralManager.init(context.applicationContext)
     BlePeripheralManager.init(context.applicationContext)
+    uniffiEnsureInitialized()
     installed = true
   }
 }

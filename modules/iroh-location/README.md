@@ -51,7 +51,7 @@ source before each cloud build.
 
 ```bash
 # Rust + mobile targets
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim \
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios \
   aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 cargo install cargo-ndk cargo-make
 # Android NDK installed; ANDROID_NDK_HOME set. Kotlin 2.2+.
@@ -73,33 +73,13 @@ cargo build          # compiles iroh + gossip glue against the pinned versions
 > `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` and
 > `sudo xcodebuild -license accept`.
 
-The validated manual pipeline (no `cargo make` needed). Build one iOS static-lib slice
-per arch, generate the Swift bindings from any built lib, then assemble an XCFramework:
+Run `just bindgen-ios` to regenerate the tracked Swift/C bindings and assemble the
+git-ignored XCFramework. The recipe fixes the deployment target at iOS 16.4, builds the
+device arm64 archive, combines arm64 and x86_64 simulator archives into one universal
+simulator slice, and packages both slices:
 
 ```bash
-cd modules/iroh-location/rust
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-
-# Swift bindings (uses an unstripped host build because release stripping can remove UniFFI
-# metadata on ELF hosts; needs the `cli` feature):
-cargo build --features cli
-cargo run --bin uniffi-bindgen --features cli -- generate \
-  --library target/debug/libiroh_location.dylib --crate iroh_location \
-  --language swift --out-dir ../ios/generated
-# -> ../ios/generated/{iroh_location.swift, iroh_locationFFI.h, iroh_locationFFI.modulemap}
-
-# Static libs (device = aarch64-apple-ios; simulator = aarch64-apple-ios-sim on Apple
-# Silicon, or x86_64-apple-ios on an Intel Mac):
-cargo build --release --target aarch64-apple-ios
-cargo build --release --target aarch64-apple-ios-sim   # or x86_64-apple-ios (Intel)
-
-# Assemble the XCFramework the podspec expects, wiring the modulemap as headers:
-mkdir -p ../ios/headers && cp ../ios/generated/iroh_locationFFI.h ../ios/headers/
-cp ../ios/generated/iroh_locationFFI.modulemap ../ios/headers/module.modulemap
-xcodebuild -create-xcframework \
-  -library target/aarch64-apple-ios/release/libiroh_location.a -headers ../ios/headers \
-  -library target/aarch64-apple-ios-sim/release/libiroh_location.a -headers ../ios/headers \
-  -output ../ios/IrohLocationFFI.xcframework
+just bindgen-ios
 ```
 
 For EAS iOS builds, `eas-build-pre-install` runs
@@ -124,13 +104,7 @@ dependencies to the app linker. Local device and simulator builds still use
 ### 3. Android — jniLibs + Kotlin bindings
 
 ```bash
-cd modules/iroh-location/rust
-cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
-  -o ../android/src/main/jniLibs build --release
-cargo build --features cli
-cargo run --bin uniffi-bindgen --features cli -- generate \
-  --library target/debug/libiroh_location.so --crate iroh_location \
-  --language kotlin --out-dir ../android/src/main/java
+just bindgen-android
 ```
 
 `build.gradle` pins the JNA **`@aar`** variant (bundles `libjnidispatch.so`) — the plain
@@ -138,7 +112,15 @@ jar crashes on device. Requires Kotlin 2.2+.
 
 `IrohAndroidBootstrap.install(...)` runs during module `OnCreate`: it loads the
 shared library, installs a process-lifetime application context for iroh's DNS
-resolver, and initializes the BLE managers before any endpoint is constructed.
+resolver, initializes the BLE managers, and then runs UniFFI's generated integrity
+checks before any endpoint is constructed.
+
+The EAS pre-install hook uses the same generator before cross-compiling the Android
+libraries, so bindings are refreshed before Gradle packages the ABI-specific `.so` files.
+
+`just check-bindings` regenerates Kotlin and Swift/C bindings into a temporary directory
+and compares them with the tracked files, so CI can detect Rust API drift without
+modifying the worktree. `just check-all` includes this check.
 
 The BLE transport also needs the vendored `blew` Android runtime under
 `android/src/main/java/org/jakebot/blew/`. The Expo module loads
