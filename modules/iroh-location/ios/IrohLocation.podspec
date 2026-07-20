@@ -9,7 +9,7 @@ Pod::Spec.new do |s|
   s.license        = 'MIT'
   s.author         = 'streetCryptid'
   s.homepage       = 'https://github.com/unrealJune/streetCryptid'
-  s.platforms      = { :ios => '15.1' }
+  s.platforms      = { :ios => '16.4' }
   s.swift_version  = '5.9'
   s.source         = { :git => '' }
   s.static_framework = true
@@ -21,7 +21,7 @@ Pod::Spec.new do |s|
   s.source_files = 'IrohLocationModule.swift', 'generated/**/*.swift', 'generated/**/*.h'
 
   # The Rust static library, packaged as an XCFramework (device + simulator slices) by
-  # `cargo make swift-xcframework`. Drop the built artifact next to this podspec.
+  # `just bindgen-ios`. Drop the built artifact next to this podspec.
   s.vendored_frameworks = 'IrohLocationFFI.xcframework'
 
   # Propagate the Rust static library's Apple framework dependencies to the app target.
