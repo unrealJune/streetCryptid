@@ -25,6 +25,22 @@
       "channel": "production",
       "environment": "production",
       "autoIncrement": true
+    },
+    "production-development-ios": {
+      "extends": "production",
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": {
+        "simulator": false
+      }
+    },
+    "production-development-android": {
+      "extends": "production",
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      }
     }
   },
   "submit": {
