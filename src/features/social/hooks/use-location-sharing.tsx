@@ -19,6 +19,11 @@ import {
   type PairingSnapshot,
   type SharingSnapshot,
 } from '@/features/social/net/location-sharing';
+import {
+  createPersistentKV,
+  loadLocationDisclosureChoice,
+  saveLocationDisclosureChoice,
+} from '@/features/social/net/persistence';
 import { buildTransportReport, type TransportReport } from '@/features/social/net/transports';
 import {
   ensureLocalNetworkPermission,
@@ -29,6 +34,13 @@ import {
 export type LocationRuntimeStatus =
   'starting' | 'running' | 'permission-denied' | 'unavailable' | 'error';
 
+/**
+ * Google Play requires a "prominent disclosure" screen — shown in-app, before the OS runtime
+ * permission prompt — for any app requesting ACCESS_BACKGROUND_LOCATION. `pending` gates the app
+ * behind `LocationDisclosureScreen`; `loading` is the brief KV read on boot.
+ */
+export type LocationDisclosureStatus = 'loading' | 'pending' | 'accepted' | 'declined';
+
 interface LocationSharingContextValue {
   snapshot: SharingSnapshot | null;
   pairing: PairingSnapshot | null;
@@ -38,6 +50,10 @@ interface LocationSharingContextValue {
   friends: FriendPresence[];
   locationStatus: LocationRuntimeStatus;
   error: string | null;
+  /** Status of the in-app background-location disclosure gate (see `LocationDisclosureScreen`). */
+  disclosureStatus: LocationDisclosureStatus;
+  /** Record the user's choice on the disclosure screen; `true` proceeds to request OS permission. */
+  acknowledgeLocationDisclosure(accepted: boolean): Promise<void>;
   armBump(): Promise<void>;
   commitBump(): Promise<void>;
   cancelBump(): Promise<void>;
@@ -112,6 +128,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   const bluetoothPermissionGranted = useRef(false);
   const trailRefreshId = useRef(0);
   const publishedProfileSignature = useRef('');
+  const [kv] = useState(() => createPersistentKV());
   const [snapshot, setSnapshot] = useState<SharingSnapshot | null>(null);
   const [trail, setTrail] = useState<TrailPoint[]>([]);
   const [persistedSelfFix, setPersistedSelfFix] = useState<LocationFix | null>(null);
@@ -119,6 +136,29 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   const [locationStatus, setLocationStatus] = useState<LocationRuntimeStatus>('starting');
   const [locationError, setLocationError] = useState<string | null>(null);
   const [serviceError, setServiceError] = useState<string | null>(null);
+  const [disclosureStatus, setDisclosureStatus] = useState<LocationDisclosureStatus>('loading');
+  const [serviceReady, setServiceReady] = useState(false);
+  const locationStartRequested = useRef(false);
+
+  // Read the disclosure choice as soon as possible — independent of (and faster than) the heavy
+  // service-init effect below, so the gate can render its "loading" state as briefly as possible.
+  useEffect(() => {
+    let active = true;
+    void loadLocationDisclosureChoice(kv).then((choice) => {
+      if (active) setDisclosureStatus(choice ?? 'pending');
+    });
+    return () => {
+      active = false;
+    };
+  }, [kv]);
+
+  const acknowledgeLocationDisclosure = useCallback(
+    async (accepted: boolean) => {
+      await saveLocationDisclosureChoice(kv, accepted ? 'accepted' : 'declined');
+      setDisclosureStatus(accepted ? 'accepted' : 'declined');
+    },
+    [kv]
+  );
 
   const refreshTrail = useCallback(async (service: LocationSharingService): Promise<void> => {
     const requestId = ++trailRefreshId.current;
@@ -171,6 +211,18 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     });
     return () => subscription.remove();
   }, [locationStatus, startLocation]);
+
+  // Fires once both the node is ready and the user has accepted the in-app disclosure — whichever
+  // resolves last. Covers a returning user (disclosure already 'accepted' from a prior session, node
+  // still initializing) and a first-run user (node ready first, waiting on the disclosure screen).
+  useEffect(() => {
+    if (!serviceReady || disclosureStatus !== 'accepted') return;
+    if (locationStartRequested.current) return;
+    const service = serviceRef.current;
+    if (!service) return;
+    locationStartRequested.current = true;
+    void startLocation(service);
+  }, [serviceReady, disclosureStatus, startLocation]);
 
   useEffect(() => {
     if (!initialProfile) return;
@@ -227,7 +279,10 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
         publishedProfileSignature.current = profileSignature(initialProfile);
         if (!active) return;
         await refreshTrail(service);
-        await startLocation(service);
+        // Background location itself is gated behind the disclosure screen below (Play Store
+        // requires that prominent, in-app disclosure before the OS runtime prompt fires) — this
+        // effect only readies everything else the node needs (pairing, trail sync).
+        setServiceReady(true);
         await service.syncTrail(0);
       } catch (initError: unknown) {
         if (!active) return;
@@ -461,6 +516,8 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       friends,
       locationStatus,
       error,
+      disclosureStatus,
+      acknowledgeLocationDisclosure,
       armBump,
       commitBump,
       cancelBump,
@@ -487,6 +544,8 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       hasLiveSelfFix,
       friends,
       locationStatus,
+      disclosureStatus,
+      acknowledgeLocationDisclosure,
       error,
       armBump,
       commitBump,

@@ -7,6 +7,7 @@ import { StashSettingRow } from '@/features/social/components/stash-setting-row'
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 import { useTheme } from '@/hooks/use-theme';
 
+import { LocationAccessRow } from '../components/location-access-row';
 import { RelayOnlyRow } from '../components/relay-only-row';
 import { TransportDiagnostic } from '../components/transport-diagnostic';
 
@@ -22,7 +23,14 @@ export default function SettingsScreen() {
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
   const insets = useSafeAreaInsets();
 
-  const { snapshot, transportReport, setStashOptIn, setRelayOnly } = useLocationSharing();
+  const {
+    snapshot,
+    transportReport,
+    setStashOptIn,
+    setRelayOnly,
+    disclosureStatus,
+    acknowledgeLocationDisclosure,
+  } = useLocationSharing();
 
   const stash = snapshot?.stash ?? { available: false, optedIn: false };
   const transports = snapshot?.transports ?? { relayOnly: false, relayOnlyEnforced: false };
@@ -83,6 +91,11 @@ export default function SettingsScreen() {
           relayOnly={transports.relayOnly}
           enforced={transports.relayOnlyEnforced}
           onToggle={(relayOnly) => void setRelayOnly(relayOnly)}
+        />
+        <LocationAccessRow
+          accent={chrome.amber}
+          status={disclosureStatus}
+          onTurnOn={() => void acknowledgeLocationDisclosure(true)}
         />
       </View>
     </ScrollView>
