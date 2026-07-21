@@ -8,16 +8,19 @@ import { Spacing } from '@/constants/theme';
 import {
   clearEventLog,
   EVENT_LOG_MAX_ENTRIES,
+  eventLogEntryMatchesQuery,
   getEventLog,
   loadEventLog,
   subscribeEventLog,
   type EventLogEntry,
+  type EventLogLaunchContext,
   type EventLogLevel,
 } from '@/features/dev/telemetry';
 import { useTheme } from '@/hooks/use-theme';
 
 type CategoryFilter = 'all' | 'transport' | 'pairing' | 'system';
 type LevelFilter = 'all' | EventLogLevel;
+type LaunchContextFilter = 'all' | EventLogLaunchContext;
 
 const PAGE_SIZE = 100;
 const LEVEL_WEIGHT: Record<EventLogLevel, number> = {
@@ -36,16 +39,20 @@ function filterEntries(
   entries: EventLogEntry[],
   category: CategoryFilter,
   level: LevelFilter,
-  search: string
+  launchContext: LaunchContextFilter,
+  search: string,
+  exclude: string
 ): EventLogEntry[] {
-  const query = search.trim().toLocaleLowerCase();
+  const excludedQueries = exclude
+    .split(/[,\n]/)
+    .map((query) => query.trim())
+    .filter(Boolean);
   return entries.filter((entry) => {
     if (category !== 'all' && entry.category !== category) return false;
     if (level !== 'all' && LEVEL_WEIGHT[entry.level] < LEVEL_WEIGHT[level]) return false;
-    if (!query) return true;
-    return [entry.action, entry.summary, entry.category, entry.transport, entry.level].some((value) =>
-      value?.toLocaleLowerCase().includes(query)
-    );
+    if (launchContext !== 'all' && entry.launchContext !== launchContext) return false;
+    if (!eventLogEntryMatchesQuery(entry, search)) return false;
+    return !excludedQueries.some((query) => eventLogEntryMatchesQuery(entry, query));
   });
 }
 
@@ -93,6 +100,9 @@ const EventRow = memo(function EventRow({
             <ThemedText type="code" themeColor="textSecondary">
               {entry.category}
             </ThemedText>
+            <ThemedText type="code" themeColor="textSecondary">
+              {entry.launchContext}
+            </ThemedText>
             {entry.transport ? (
               <ThemedText type="code" themeColor="textSecondary">
                 via {entry.transport}
@@ -116,7 +126,9 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
   const [paused, setPaused] = useState(false);
   const [category, setCategory] = useState<CategoryFilter>('all');
   const [level, setLevel] = useState<LevelFilter>('all');
+  const [launchContext, setLaunchContext] = useState<LaunchContextFilter>('all');
   const [search, setSearch] = useState('');
+  const [exclude, setExclude] = useState('');
   const [visibleLimit, setVisibleLimit] = useState(PAGE_SIZE);
   const [entries, setEntries] = useState(getEventLog);
   const pausedRef = useRef(false);
@@ -140,8 +152,8 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
   );
 
   const filteredEntries = useMemo(
-    () => filterEntries(entries, category, level, search),
-    [category, entries, level, search]
+    () => filterEntries(entries, category, level, launchContext, search, exclude),
+    [category, entries, exclude, launchContext, level, search]
   );
   const visibleEntries = filteredEntries.slice(0, visibleLimit);
 
@@ -274,6 +286,37 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
               ))}
             </View>
           </View>
+          <View style={styles.filterGroup}>
+            <ThemedText type="smallBold" themeColor="textSecondary">
+              LAUNCH CONTEXT
+            </ThemedText>
+            <View style={styles.controls}>
+              {(['all', 'foreground', 'background'] as const).map((value) => (
+                <Pressable
+                  key={value}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: launchContext === value }}
+                  onPress={() => {
+                    setLaunchContext(value);
+                    setVisibleLimit(PAGE_SIZE);
+                  }}
+                  style={[
+                    styles.control,
+                    {
+                      borderColor:
+                        launchContext === value ? activeColor : theme.backgroundSelected,
+                    },
+                  ]}
+                >
+                  <ThemedText type="smallBold">
+                    {value === 'all'
+                      ? 'All'
+                      : `${value.charAt(0).toUpperCase()}${value.slice(1)}`}
+                  </ThemedText>
+                </Pressable>
+              ))}
+            </View>
+          </View>
           <TextInput
             accessibilityLabel="Search event log"
             autoCapitalize="none"
@@ -292,6 +335,25 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
               },
             ]}
             value={search}
+          />
+          <TextInput
+            accessibilityLabel="Exclude events from event log"
+            autoCapitalize="none"
+            autoCorrect={false}
+            onChangeText={(value) => {
+              setExclude(value);
+              setVisibleLimit(PAGE_SIZE);
+            }}
+            placeholder="Exclude names or properties (comma-separated)…"
+            placeholderTextColor={theme.textSecondary}
+            style={[
+              styles.search,
+              {
+                borderColor: theme.backgroundSelected,
+                color: theme.text,
+              },
+            ]}
+            value={exclude}
           />
           <ThemedText type="small" themeColor="textSecondary">
             Showing {visibleEntries.length} of {filteredEntries.length} matching events

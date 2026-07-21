@@ -1,4 +1,8 @@
-import { getTelemetry, type SpanContext } from '@/features/dev/telemetry';
+import {
+  getTelemetry,
+  type SpanContext,
+  withEventLogLaunchContext,
+} from '@/features/dev/telemetry';
 
 /**
  * Periodic RECEIVE-side background task — the counterpart to the event-driven location SEND task in
@@ -60,24 +64,26 @@ export function defineBackgroundBackfillTask(run: (parent?: SpanContext) => Prom
   const taskManager = tryTaskManager();
   const backgroundTask = tryBackgroundTask();
   if (!taskManager || !backgroundTask) return;
-  taskManager.defineTask(BACKGROUND_BACKFILL_TASK, async () => {
-    const telemetry = getTelemetry();
-    // One span per OS-scheduled backfill — the receive-side counterpart of `bg.wake`.
-    const span = telemetry.startSpan('bg.backfill');
-    try {
-      await run(span.context);
-      span.setStatus('ok');
-      return backgroundTask.BackgroundTaskResult.Success;
-    } catch (err) {
-      span.recordError(err);
-      console.warn('[background-backfill] task failed', err);
-      return backgroundTask.BackgroundTaskResult.Failed;
-    } finally {
-      span.end();
-      // The OS may freeze this headless context the moment we return; unexported batches die with it.
-      await telemetry.flush();
-    }
-  });
+  taskManager.defineTask(BACKGROUND_BACKFILL_TASK, () =>
+    withEventLogLaunchContext('background', async () => {
+      const telemetry = getTelemetry();
+      // One span per OS-scheduled backfill — the receive-side counterpart of `bg.wake`.
+      const span = telemetry.startSpan('bg.backfill');
+      try {
+        await run(span.context);
+        span.setStatus('ok');
+        return backgroundTask.BackgroundTaskResult.Success;
+      } catch (err) {
+        span.recordError(err);
+        console.warn('[background-backfill] task failed', err);
+        return backgroundTask.BackgroundTaskResult.Failed;
+      } finally {
+        span.end();
+        // The OS may freeze this headless context the moment we return; unexported batches die with it.
+        await telemetry.flush();
+      }
+    })
+  );
 }
 
 /** Ask the OS to run the backfill task periodically. Idempotent — re-registering just re-arms it. */

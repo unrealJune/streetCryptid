@@ -1,6 +1,11 @@
 import * as Location from 'expo-location';
 
-import { getSystemSnapshot, getTelemetry, type SpanContext } from '@/features/dev/telemetry';
+import {
+  getSystemSnapshot,
+  getTelemetry,
+  type SpanContext,
+  withEventLogLaunchContext,
+} from '@/features/dev/telemetry';
 import type { LocationFix } from '../../core/types';
 import type { AccuracyTier, ActivityKind } from './types';
 
@@ -95,36 +100,38 @@ export interface BackgroundStartConfig {
  * so it must reconstruct the sink from persistent storage only (no closures over app state).
  */
 export function defineBackgroundLocationTask(makeSink: () => BackgroundFixSink): void {
-  taskManager().defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
-    const telemetry = getTelemetry();
-    if (error) {
-      console.warn('[background-location] task error', error);
-      telemetry.log('error', `background task error: ${error.message}`);
-      await telemetry.flush();
-      return;
-    }
-    const locations = (data as { locations?: Location.LocationObject[] } | undefined)?.locations;
-    if (!locations || locations.length === 0) {
-      return;
-    }
-    // One `bg.wake` span per OS delivery — THE anchor when debugging dropped pings: it says the
-    // phone woke, with how many fixes, and in what network/battery/app state. Its context is passed
-    // explicitly so outbox/publish/native spans form one hierarchy without AsyncLocalStorage.
-    const span = telemetry.startSpan('bg.wake', { attributes: { fixes: locations.length } });
-    span.setAttributes(await getSystemSnapshot());
-    try {
-      await makeSink().onBackgroundFixes(locations.map(toFix), span.context);
-      span.setStatus('ok');
-    } catch (err) {
-      console.warn('[background-location] sink failed', err);
-      span.recordError(err);
-    } finally {
-      span.end();
-      // The OS may freeze this headless context the moment we return; unexported batches would
-      // die with it.
-      await telemetry.flush();
-    }
-  });
+  taskManager().defineTask(BACKGROUND_LOCATION_TASK, ({ data, error }) =>
+    withEventLogLaunchContext('background', async () => {
+      const telemetry = getTelemetry();
+      if (error) {
+        console.warn('[background-location] task error', error);
+        telemetry.log('error', `background task error: ${error.message}`);
+        await telemetry.flush();
+        return;
+      }
+      const locations = (data as { locations?: Location.LocationObject[] } | undefined)?.locations;
+      if (!locations || locations.length === 0) {
+        return;
+      }
+      // One `bg.wake` span per OS delivery — THE anchor when debugging dropped pings: it says the
+      // phone woke, with how many fixes, and in what network/battery/app state. Its context is passed
+      // explicitly so outbox/publish/native spans form one hierarchy without AsyncLocalStorage.
+      const span = telemetry.startSpan('bg.wake', { attributes: { fixes: locations.length } });
+      span.setAttributes(await getSystemSnapshot());
+      try {
+        await makeSink().onBackgroundFixes(locations.map(toFix), span.context);
+        span.setStatus('ok');
+      } catch (err) {
+        console.warn('[background-location] sink failed', err);
+        span.recordError(err);
+      } finally {
+        span.end();
+        // The OS may freeze this headless context the moment we return; unexported batches would
+        // die with it.
+        await telemetry.flush();
+      }
+    })
+  );
 }
 
 export interface LocationPermissionResult {

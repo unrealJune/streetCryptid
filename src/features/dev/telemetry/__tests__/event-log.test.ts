@@ -1,8 +1,10 @@
 import {
+  eventLogEntryMatchesQuery,
   getEventLog,
   recordEventLog,
   resetEventLogForTesting,
   subscribeEventLog,
+  withEventLogLaunchContext,
 } from '../event-log';
 import { createTelemetry } from '../telemetry';
 
@@ -101,5 +103,33 @@ describe('local event log', () => {
       expect.objectContaining({ action: 'transport.poll' }),
     ]);
     unsubscribe();
+  });
+
+  it('tags entries recorded by a background task', async () => {
+    await withEventLogLaunchContext('background', async () => {
+      recordEventLog({
+        category: 'transport',
+        action: 'bg.backfill',
+        summary: 'completed',
+      });
+    });
+
+    expect(getEventLog()[0].launchContext).toBe('background');
+  });
+
+  it('matches event names and nested properties for filtering', () => {
+    const entry = recordEventLog({
+      category: 'transport',
+      action: 'transport.status.changed',
+      summary: 'relay status changed',
+      status: 'ok',
+      details: { attributes: { connected: true, path: 'relay' } },
+    });
+
+    expect(eventLogEntryMatchesQuery(entry, 'transport.status.changed')).toBe(true);
+    expect(eventLogEntryMatchesQuery(entry, 'name:transport.status.changed')).toBe(true);
+    expect(eventLogEntryMatchesQuery(entry, 'connected:true')).toBe(true);
+    expect(eventLogEntryMatchesQuery(entry, 'path:relay')).toBe(true);
+    expect(eventLogEntryMatchesQuery(entry, 'path:direct')).toBe(false);
   });
 });
