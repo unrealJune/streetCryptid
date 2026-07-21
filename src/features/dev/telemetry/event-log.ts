@@ -214,6 +214,7 @@ export async function withEventLogLaunchContext<T>(
 }
 
 function searchableValues(value: unknown, path = ''): string[] {
+  if (typeof value === 'undefined') return [];
   if (value === null || typeof value !== 'object') {
     const text = String(value);
     if (!path) return [text];
@@ -337,6 +338,7 @@ export function resetEventLogForTesting(): void {
   entries = [];
   sequence = 0;
   writesSinceTrim = 0;
+  backgroundContextDepth = 0;
   persistenceQueue = Promise.resolve();
   listeners.clear();
 }

@@ -131,5 +131,6 @@ describe('local event log', () => {
     expect(eventLogEntryMatchesQuery(entry, 'connected:true')).toBe(true);
     expect(eventLogEntryMatchesQuery(entry, 'path:relay')).toBe(true);
     expect(eventLogEntryMatchesQuery(entry, 'path:direct')).toBe(false);
+    expect(eventLogEntryMatchesQuery(entry, 'transport:undefined')).toBe(false);
   });
 });
