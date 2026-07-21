@@ -21,14 +21,17 @@ export { installConsoleTelemetryBridge, uninstallConsoleTelemetryBridge } from '
 export {
   clearEventLog,
   EVENT_LOG_MAX_ENTRIES,
+  eventLogEntryMatchesQuery,
   flushEventLog,
   getEventLog,
   loadEventLog,
   recordEventLog,
   subscribeEventLog,
+  withEventLogLaunchContext,
 } from './event-log';
 export type {
   EventLogEntry,
+  EventLogLaunchContext,
   EventLogLevel,
   EventLogStatus,
   RecordEventLogEntry,

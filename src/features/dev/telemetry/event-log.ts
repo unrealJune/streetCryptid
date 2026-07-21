@@ -1,5 +1,8 @@
+import { AppState } from 'react-native';
+
 export type EventLogLevel = 'debug' | 'info' | 'warn' | 'error';
 export type EventLogStatus = 'ok' | 'error' | 'unset';
+export type EventLogLaunchContext = 'foreground' | 'background';
 
 export interface EventLogEntry {
   id: string;
@@ -9,6 +12,7 @@ export interface EventLogEntry {
   action: string;
   summary: string;
   status: EventLogStatus;
+  launchContext: EventLogLaunchContext;
   transport?: string;
   details: unknown;
 }
@@ -43,7 +47,12 @@ interface EventLogRow {
   summary: string;
   status: EventLogStatus;
   transport: string | null;
+  launch_context: EventLogLaunchContext | null;
   details: string;
+}
+
+interface SqliteColumn {
+  name: string;
 }
 
 const DB_NAME = 'streetcryptid.events.db';
@@ -58,6 +67,7 @@ let sequence = 0;
 let persistenceQueue: Promise<void> = Promise.resolve();
 let clearGeneration = 0;
 let writesSinceTrim = 0;
+let backgroundContextDepth = 0;
 const listeners = new Set<EventLogListener>();
 
 function trySqlite(): SqliteModule | null {
@@ -86,10 +96,15 @@ function getDb(): Promise<SqliteDb | null> {
         action TEXT NOT NULL,
         summary TEXT NOT NULL,
         status TEXT NOT NULL,
+        launch_context TEXT,
         transport TEXT,
         details TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS event_log_timestamp ON event_log (timestamp DESC);`);
+      const columns = await db.getAllAsync<SqliteColumn>('PRAGMA table_info(event_log)');
+      if (!columns.some((column) => column.name === 'launch_context')) {
+        await db.execAsync('ALTER TABLE event_log ADD COLUMN launch_context TEXT');
+      }
       return db;
     } catch {
       return null;
@@ -152,8 +167,8 @@ async function persist(entry: EventLogEntry): Promise<void> {
   try {
     await db.runAsync(
       `INSERT OR REPLACE INTO event_log
-       (id, timestamp, level, category, action, summary, status, transport, details)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, timestamp, level, category, action, summary, status, launch_context, transport, details)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       entry.id,
       entry.timestamp,
       entry.level,
@@ -161,6 +176,7 @@ async function persist(entry: EventLogEntry): Promise<void> {
       entry.action,
       entry.summary,
       entry.status,
+      entry.launchContext,
       entry.transport ?? null,
       JSON.stringify(entry.details)
     );
@@ -179,6 +195,59 @@ async function persist(entry: EventLogEntry): Promise<void> {
   }
 }
 
+function currentLaunchContext(): EventLogLaunchContext {
+  return backgroundContextDepth > 0 || AppState.currentState === 'background'
+    ? 'background'
+    : 'foreground';
+}
+
+export async function withEventLogLaunchContext<T>(
+  context: EventLogLaunchContext,
+  operation: () => Promise<T>
+): Promise<T> {
+  if (context === 'background') backgroundContextDepth += 1;
+  try {
+    return await operation();
+  } finally {
+    if (context === 'background') backgroundContextDepth -= 1;
+  }
+}
+
+function searchableValues(value: unknown, path = ''): string[] {
+  if (typeof value === 'undefined') return [];
+  if (value === null || typeof value !== 'object') {
+    const text = String(value);
+    if (!path) return [text];
+    const key = path.split('.').at(-1);
+    return [text, `${path}:${text}`, ...(key ? [`${key}:${text}`] : [])];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => searchableValues(item, path));
+  }
+  return Object.entries(value).flatMap(([key, child]) =>
+    searchableValues(child, path ? `${path}.${key}` : key)
+  );
+}
+
+export function eventLogEntryMatchesQuery(entry: EventLogEntry, query: string): boolean {
+  const normalized = query.trim().toLocaleLowerCase();
+  if (!normalized) return true;
+  const fields = {
+    name: entry.action,
+    action: entry.action,
+    summary: entry.summary,
+    category: entry.category,
+    level: entry.level,
+    status: entry.status,
+    launchContext: entry.launchContext,
+    transport: entry.transport,
+    details: entry.details,
+  };
+  return searchableValues(fields).some((value) =>
+    value.toLocaleLowerCase().includes(normalized)
+  );
+}
+
 export function recordEventLog(input: RecordEventLogEntry): EventLogEntry {
   const timestamp = input.timestamp ?? Date.now();
   const entry: EventLogEntry = {
@@ -189,6 +258,7 @@ export function recordEventLog(input: RecordEventLogEntry): EventLogEntry {
     action: input.action,
     summary: sanitizeText(input.summary),
     status: input.status ?? 'unset',
+    launchContext: currentLaunchContext(),
     ...(input.transport ? { transport: input.transport } : {}),
     details: sanitize(input.details ?? {}),
   };
@@ -209,15 +279,16 @@ export async function loadEventLog(): Promise<EventLogEntry[]> {
   if (!db) return getEventLog();
   try {
     const rows = await db.getAllAsync<EventLogRow>(
-      `SELECT id, timestamp, level, category, action, summary, status, transport, details
+      `SELECT id, timestamp, level, category, action, summary, status, launch_context, transport, details
        FROM event_log ORDER BY timestamp DESC, rowid DESC LIMIT ?`,
       EVENT_LOG_MAX_ENTRIES
     );
     const persisted: EventLogEntry[] = rows.map((row) => {
-      const { transport, details, ...rest } = row;
+      const { launch_context, transport, details, ...rest } = row;
       return {
         ...rest,
         timestamp: Number(row.timestamp),
+        launchContext: launch_context === 'background' ? 'background' : 'foreground',
         ...(transport ? { transport } : {}),
         details: sanitize(JSON.parse(details) as unknown),
       };
@@ -267,6 +338,7 @@ export function resetEventLogForTesting(): void {
   entries = [];
   sequence = 0;
   writesSinceTrim = 0;
+  backgroundContextDepth = 0;
   persistenceQueue = Promise.resolve();
   listeners.clear();
 }
