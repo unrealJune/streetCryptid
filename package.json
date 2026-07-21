@@ -9,6 +9,7 @@
     "@mapbox/vector-tile": "^3.0.0",
     "@shopify/react-native-skia": "2.6.2",
     "expo": "~57.0.6",
+    "expo-application": "~57.0.2",
     "expo-background-task": "~57.0.4",
     "expo-battery": "~57.0.1",
     "expo-build-properties": "~57.0.5",
