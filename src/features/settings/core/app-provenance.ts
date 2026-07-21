@@ -22,8 +22,7 @@ function optionalString(value: unknown): string | null {
 
 export function getAppProvenance(): AppProvenance {
   const embedded = Constants.expoConfig?.extra?.buildProvenance as
-    | EmbeddedBuildProvenance
-    | undefined;
+    EmbeddedBuildProvenance | undefined;
 
   return {
     appVersion: Application.nativeApplicationVersion ?? Constants.expoConfig?.version ?? null,

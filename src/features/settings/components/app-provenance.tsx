@@ -9,9 +9,7 @@ interface AppProvenanceProps {
   provenance?: AppProvenance;
 }
 
-export function AppProvenanceDetails({
-  provenance = getAppProvenance(),
-}: AppProvenanceProps) {
+export function AppProvenanceDetails({ provenance = getAppProvenance() }: AppProvenanceProps) {
   const rows = [
     { label: 'App version', value: provenance.appVersion },
     { label: 'Native build', value: provenance.buildVersion },

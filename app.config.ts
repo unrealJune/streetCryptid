@@ -16,6 +16,8 @@ function gitCommit(): string | undefined {
 
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
+  name: config.name ?? 'streetCryptid',
+  slug: config.slug ?? 'streetCryptid',
   extra: {
     ...config.extra,
     buildProvenance: {
