@@ -98,7 +98,6 @@
   ],
   "patchedDependencies": {
     "expo-modules-jsi@57.0.3": "patches/expo-modules-jsi@57.0.3.patch",
-    "h3-js@4.5.0": "patches/h3-js@4.5.0.patch",
-    "pbf@5.1.2": "patches/pbf@5.1.2.patch"
+    "h3-js@4.5.0": "patches/h3-js@4.5.0.patch"
   }
 }

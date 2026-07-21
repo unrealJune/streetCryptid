@@ -7,7 +7,6 @@
  */
 
 import { VectorTile, VectorTileFeature, VectorTileLayer } from '@mapbox/vector-tile';
-import { PbfReader } from 'pbf';
 
 import type {
   AreaFeature,
@@ -20,6 +19,7 @@ import type {
 } from '../core/types';
 import type { TileCoord } from './tile-math';
 import { tileWorldRect } from './tile-math';
+import { Utf8PbfReader } from './utf8-pbf-reader';
 
 /**
  * OMT `transportation.class` → the mock's 0–4 road class. Classes that aren't
@@ -56,7 +56,7 @@ const GEOM_LINE = 2;
 const GEOM_POLYGON = 3;
 
 export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
-  const vt = new VectorTile(new PbfReader(data));
+  const vt = new VectorTile(new Utf8PbfReader(data));
   const rect = tileWorldRect(tile);
   const spanX = rect.maxX - rect.minX;
   const spanY = rect.maxY - rect.minY;
