@@ -9,6 +9,7 @@ import { StashSettingRow } from '@/features/social/components/stash-setting-row'
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 import { useTheme } from '@/hooks/use-theme';
 
+import { AppProvenanceDetails } from '../components/app-provenance';
 import { LocationAccessRow } from '../components/location-access-row';
 import { RelayOnlyRow } from '../components/relay-only-row';
 import { TransportDiagnostic } from '../components/transport-diagnostic';
@@ -110,6 +111,13 @@ export default function SettingsScreen() {
           status={disclosureStatus}
           onTurnOn={() => void acknowledgeLocationDisclosure(true)}
         />
+      </View>
+
+      <View style={styles.section}>
+        <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
+          APP
+        </ThemedText>
+        <AppProvenanceDetails />
       </View>
     </ScrollView>
   );
