@@ -4,7 +4,7 @@ import { buildMaskPaths } from '../mask-paths';
 
 const camera: CameraState = { center: [0.3, 0.3], zoom: 15 };
 const viewport: Viewport = { width: 400, height: 800 };
-const spec = computeRegionSpec(camera, viewport);
+const spec = computeRegionSpec(camera, viewport, { dataZooms: { min: 0, max: 14 } });
 const { minX, minY, maxX, maxY } = spec.rect;
 const lx = (t: number): number => minX + (maxX - minX) * t;
 const ly = (t: number): number => minY + (maxY - minY) * t;

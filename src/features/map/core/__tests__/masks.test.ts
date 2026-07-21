@@ -78,28 +78,32 @@ describe('streets mask', () => {
 
 describe('streets mask – class layering', () => {
   it('overlapping streets keep the higher class value at the intersection', () => {
-    // class 2 (value 205) horizontal + class 3 (value 225) vertical crossing at (50,50).
-    // Both are arterials (CLASS_MIN_ZOOM 0) so they draw at this zoomed-out camera.
+    // class 2 (value 205) horizontal + class 3 (value 225) vertical crossing at
+    // (50,50). Run at a street-zoom camera so both classes clear CLASS_MIN_ZOOM
+    // (2 needs z≥9, 3 needs z≥7); same 100×100 screen window, just a finer world.
+    const hiZoom = Math.log2(4_096_000 / 256); // scaleFor ≈ 4.1e6 px/world → z≈14
+    const hiCamera: CameraState = { center: [0.5, 0.5], zoom: hiZoom };
+    const half = 50 / 4_096_000; // world half-span of the 100 px window
     const geo: MapGeometry = {
       ...emptyGeo(),
       streets: [
         {
           roadClass: 2,
           points: [
-            [0.45, 0.5],
-            [0.55, 0.5],
+            [0.5 - half, 0.5],
+            [0.5 + half, 0.5],
           ],
         },
         {
           roadClass: 3,
           points: [
-            [0.5, 0.45],
-            [0.5, 0.55],
+            [0.5, 0.5 - half],
+            [0.5, 0.5 + half],
           ],
         },
       ],
     };
-    const masks = buildFeatureMasks(geo, camera, viewport);
+    const masks = buildFeatureMasks(geo, hiCamera, viewport);
     expect(sample(masks.streets, 50, 50)).toBe(ROAD_VALUES[3]); // 225, not 205
   });
 });

@@ -5,9 +5,11 @@ export const ROAD_WIDTHS = [2.2, 3.0, 4.2, 5.4, 7.0] as const;
 
 /**
  * Below this build zoom, a road class is omitted entirely (declutters city /
- * region views). Index = road class 0..4. Classes 2–4 (arterials) always draw.
+ * region / global views). Index = road class 0..4: service/path off below
+ * z13.5, residential below z12, secondary/tertiary below z9, primary below z7,
+ * motorways always draw (they're the only roads that read at globe zooms).
  */
-export const CLASS_MIN_ZOOM = [13.5, 12.0, 0, 0, 0] as const;
+export const CLASS_MIN_ZOOM = [13.5, 12.0, 9.0, 7.0, 0] as const;
 
 /** Global stroke-width multiplier: full detail at z>=14, tapering to 0.6 by z<=11. */
 export function roadWidthScale(zoom: number): number {

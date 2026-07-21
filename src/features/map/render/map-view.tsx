@@ -31,6 +31,8 @@ import {
   transformDistanceSq,
   translationRange,
 } from '../core/gesture';
+import type { LocationFix } from '@/features/social/core/types';
+
 import type {
   CameraState,
   LatLon,
@@ -45,7 +47,12 @@ import { useMapEngine } from '../hooks/use-map-engine';
 import { latLonToWorld } from '../core/mercator';
 import { FriendLocator } from './friend-locator';
 import { FriendLocatorStack } from './friend-locator-stack';
-import { makeHexImage, makeLutImage, makeMaskImage, renderRegionImage } from './region-shader';
+import {
+  makeCellStateImage,
+  makeLutImage,
+  makeMaskImage,
+  renderRegionImage,
+} from './region-shader';
 import { YouLocator } from './you-locator';
 
 /** Region crossfade duration (ms) — new bitmap fades in over the old one. */
@@ -116,6 +123,7 @@ export function MapView({
   onReadout,
   initialCenter = null,
   selfLocation = null,
+  selfFix = null,
   selfHistory = [],
   selfSelected = false,
   friends = [],
@@ -129,6 +137,8 @@ export function MapView({
   onReadout?: (readout: MapReadout) => void;
   initialCenter?: LatLon | null;
   selfLocation?: LatLon | null;
+  /** The full live self fix (accuracy + ts) — feeds live exploration. */
+  selfFix?: LocationFix | null;
   selfHistory?: readonly LatLon[];
   selfSelected?: boolean;
   friends?: readonly MapFriendLocation[];
@@ -140,8 +150,11 @@ export function MapView({
 }) {
   const [viewport, setViewport] = useState<Viewport | null>(null);
   const reducedMotion = useReducedMotion();
-  const { theme, region, anchor, limits, hexRadius, coverage, placeName, commit, prefetchAt } =
-    useMapEngine(viewport, initialCenter);
+  const { theme, region, anchor, limits, coverage, placeName, commit, prefetchAt } = useMapEngine(
+    viewport,
+    initialCenter,
+    selfFix
+  );
 
   // ── The one live view transform (anchor space → screen), UI-thread-owned ──
   const k = useSharedValue(1);
@@ -154,10 +167,10 @@ export function MapView({
   const trailStrokeWidth = useDerivedValue(() => 2.5 / Math.max(0.001, k.value));
   const trailDotRadius = useDerivedValue(() => 2.8 / Math.max(0.001, k.value));
 
-  // Mask/hex textures per region; LUT per theme. Kept for both the current region
+  // Mask/cell textures per region; LUT per theme. Kept for both the current region
   // and the outgoing one so each can be (re)rendered independently.
   const maskImage = useMemo(() => (region ? makeMaskImage(region) : null), [region]);
-  const hexImage = useMemo(() => (region ? makeHexImage(region) : null), [region]);
+  const cellImage = useMemo(() => (region ? makeCellStateImage(region) : null), [region]);
   const lutImage = useMemo(() => makeLutImage(theme.canvas), [theme]);
 
   // Region transition (derive-state pattern): the new bitmap fades in over the
@@ -192,33 +205,34 @@ export function MapView({
   }, [track.seq]);
 
   const prevMask = useMemo(() => (track.prev ? makeMaskImage(track.prev) : null), [track.prev]);
-  const prevHex = useMemo(() => (track.prev ? makeHexImage(track.prev) : null), [track.prev]);
+  const prevCell = useMemo(
+    () => (track.prev ? makeCellStateImage(track.prev) : null),
+    [track.prev]
+  );
 
   const curImage = useMemo(() => {
-    if (!track.cur || !maskImage || !hexImage || !lutImage) return null;
+    if (!track.cur || !maskImage || !cellImage || !lutImage) return null;
     return renderRegionImage({
       region: track.cur,
       palette: theme.canvas,
-      hexRadius,
       maskImage,
-      hexImage,
+      cellImage,
       lutImage,
       explorationEnabled,
     });
-  }, [track.cur, theme, hexRadius, maskImage, hexImage, lutImage, explorationEnabled]);
+  }, [track.cur, theme, maskImage, cellImage, lutImage, explorationEnabled]);
 
   const prevImage = useMemo(() => {
-    if (!track.prev || !prevMask || !prevHex || !lutImage) return null;
+    if (!track.prev || !prevMask || !prevCell || !lutImage) return null;
     return renderRegionImage({
       region: track.prev,
       palette: theme.canvas,
-      hexRadius,
       maskImage: prevMask,
-      hexImage: prevHex,
+      cellImage: prevCell,
       lutImage,
       explorationEnabled,
     });
-  }, [track.prev, theme, hexRadius, prevMask, prevHex, lutImage, explorationEnabled]);
+  }, [track.prev, theme, prevMask, prevCell, lutImage, explorationEnabled]);
 
   const curRect = useMemo(
     () => (track.cur && viewport ? anchorRect(track.cur.spec.rect, anchor, viewport) : null),

@@ -1,6 +1,7 @@
 import { visibleWorldRect } from './camera';
-import { coverageOf, type ExplorationState } from './exploration';
-import type { HexGrid } from './hex';
+import { resForZoom } from './cell-ladder';
+import type { ExplorationIndex } from './exploration-index';
+import type { H3Grid } from './h3-grid';
 import type { CameraState, Place, Viewport, WorldPoint } from './types';
 
 /** Kinds that make sense as a "where you are" headline, most local first. */
@@ -26,12 +27,20 @@ export function nearestPlaceName(places: readonly Place[], center: WorldPoint): 
   return best?.name ?? null;
 }
 
-/** Discovered fraction (0–1) of the hex sectors currently in view. */
+/**
+ * Explored fraction (0–1) of the cells currently in view, evaluated at the
+ * zoom's ladder rung — so the island reads per-sector at street zoom and
+ * "explored share of the visible world" at globe zoom.
+ */
 export function coverageInView(
-  exploration: ExplorationState,
-  grid: HexGrid,
+  exploration: ExplorationIndex,
+  grid: H3Grid,
   camera: CameraState,
   viewport: Viewport
 ): number {
-  return coverageOf(exploration, grid.cellsIn(visibleWorldRect(camera, viewport)));
+  const cells = grid.cellsInRect(visibleWorldRect(camera, viewport), resForZoom(camera.zoom));
+  if (!cells.length) return 0;
+  let total = 0;
+  for (const cell of cells) total += exploration.fractionAt(cell);
+  return total / cells.length;
 }

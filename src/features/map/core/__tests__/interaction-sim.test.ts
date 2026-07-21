@@ -36,6 +36,7 @@ const PREFETCH_LEAD_MAX_PX = 900;
 
 const viewport: Viewport = { width: 390, height: 780 };
 const anchor: CameraState = { center: [0.156, 0.352], zoom: 15 };
+const dataZooms = { min: 0, max: 14 } as const;
 const constraints: CameraConstraints = {
   // A city-scale world: ~50 viewport-widths of pan room in each direction.
   bounds: (() => {
@@ -71,8 +72,8 @@ class MapSim {
 
   constructor(buildLatencyMs: number) {
     this.session = new RegionSessionSim(
-      { viewport, buildLatencySteps: Math.ceil(buildLatencyMs / DT_MS) },
-      (camera, vp) => computeRegionSpec(camera, vp)
+      { viewport, buildLatencySteps: Math.ceil(buildLatencyMs / DT_MS), dataZooms },
+      (camera, vp) => computeRegionSpec(camera, vp, { dataZooms })
     ).warmStart(anchor);
   }
 

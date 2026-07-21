@@ -1,11 +1,14 @@
 import { scaleFor, worldToScreen } from '../camera';
 import { anyCovers, layerScreenPoint, regionAction, RegionSessionSim } from '../region-session';
 import { computeRegionSpec, coversView } from '../region';
+import { resForZoom } from '../cell-ladder';
 import type { CameraState, Viewport, WorldPoint } from '../types';
 
 const viewport: Viewport = { width: 800, height: 1700 };
 const home: WorldPoint = [0.1596, 0.3565];
-const specFor = (camera: CameraState, vp: Viewport) => computeRegionSpec(camera, vp);
+const legacyZooms = { min: 12, max: 14 };
+const specFor = (camera: CameraState, vp: Viewport) =>
+  computeRegionSpec(camera, vp, { dataZooms: legacyZooms });
 
 /** Pan `views` viewport-widths east over `steps` frames at zoom 15. */
 function panTrajectory(views: number, steps: number, zoom = 15): CameraState[] {
@@ -25,7 +28,10 @@ function zoomTrajectory(z0: number, z1: number, steps: number): CameraState[] {
 }
 
 function run(trajectory: CameraState[], buildLatencySteps: number): RegionSessionSim {
-  const sim = new RegionSessionSim({ viewport, buildLatencySteps }, specFor);
+  const sim = new RegionSessionSim(
+    { viewport, buildLatencySteps, dataZooms: legacyZooms },
+    specFor
+  );
   sim.warmStart(trajectory[0]); // initial load finished before the user interacts
   for (const camera of trajectory) sim.advance(camera);
   return sim;
@@ -33,20 +39,20 @@ function run(trajectory: CameraState[], buildLatencySteps: number): RegionSessio
 
 describe('regionAction', () => {
   it('rebuilds when there is no region yet', () => {
-    expect(regionAction(null, { center: home, zoom: 15 }, viewport)).toBe('rebuild');
+    expect(regionAction(null, { center: home, zoom: 15 }, viewport, legacyZooms)).toBe('rebuild');
   });
 
   it('reuses a fresh region at its build camera', () => {
-    const spec = computeRegionSpec({ center: home, zoom: 15 }, viewport);
-    expect(regionAction(spec, { center: home, zoom: 15 }, viewport)).toBe('reuse');
+    const spec = specFor({ center: home, zoom: 15 }, viewport);
+    expect(regionAction(spec, { center: home, zoom: 15 }, viewport, legacyZooms)).toBe('reuse');
   });
 
   it('rebuilds (prefetch) as the view nears the region edge', () => {
-    const spec = computeRegionSpec({ center: home, zoom: 15 }, viewport);
+    const spec = specFor({ center: home, zoom: 15 }, viewport);
     const worldPerView = viewport.width / scaleFor(15);
     // pad = 1.0 view of headroom; margin 0.35 → prefetch past ~0.65 views.
     const nearEdge: CameraState = { center: [home[0] + worldPerView * 0.75, home[1]], zoom: 15 };
-    expect(regionAction(spec, nearEdge, viewport)).toBe('rebuild');
+    expect(regionAction(spec, nearEdge, viewport, legacyZooms)).toBe('rebuild');
   });
 });
 
@@ -83,7 +89,10 @@ describe('coverage over a pan (no blank)', () => {
   it('keeps the previous layer covering while a rebuild is in flight', () => {
     // Brisk pan (0.033 view/step) with a realistic build latency (4 steps): the
     // prefetch lead exceeds the latency, so prev+current always jointly cover.
-    const sim = new RegionSessionSim({ viewport, buildLatencySteps: 4 }, specFor);
+    const sim = new RegionSessionSim(
+      { viewport, buildLatencySteps: 4, dataZooms: legacyZooms },
+      specFor
+    );
     const traj = panTrajectory(2, 60);
     sim.warmStart(traj[0]);
     let sawPending = false;
@@ -121,7 +130,10 @@ describe('coverage over a zoom (no blank)', () => {
 
 describe('sim fidelity (the model can actually gap)', () => {
   it('a teleport beyond all padding before any build lands does gap', () => {
-    const sim = new RegionSessionSim({ viewport, buildLatencySteps: 5 }, specFor);
+    const sim = new RegionSessionSim(
+      { viewport, buildLatencySteps: 5, dataZooms: legacyZooms },
+      specFor
+    );
     sim.advance({ center: home, zoom: 15 }); // builds region A (lands after 5 steps)
     const worldPerView = viewport.width / scaleFor(15);
     // Jump 5 viewports away instantly — nothing built there yet.
@@ -130,10 +142,46 @@ describe('sim fidelity (the model can actually gap)', () => {
   });
 
   it('settledFor is true once a region is built for the camera', () => {
-    const sim = new RegionSessionSim({ viewport, buildLatencySteps: 0 }, specFor);
+    const sim = new RegionSessionSim(
+      { viewport, buildLatencySteps: 0, dataZooms: legacyZooms },
+      specFor
+    );
     const camera: CameraState = { center: home, zoom: 15 };
     sim.warmStart(camera);
     expect(sim.settledFor(camera)).toBe(true);
+  });
+});
+
+describe('global zoom-out (planet range + ladder)', () => {
+  const planet = { min: 0, max: 14 };
+  const planetSpecFor = (camera: CameraState, vp: Viewport) =>
+    computeRegionSpec(camera, vp, { dataZooms: planet });
+
+  it('never gaps on a continuous z15 → z1 zoom-out to the globe', () => {
+    const sim = new RegionSessionSim(
+      { viewport, buildLatencySteps: 5, dataZooms: planet },
+      planetSpecFor
+    );
+    const traj = zoomTrajectory(15, 1, 420);
+    sim.warmStart(traj[0]);
+    for (const camera of traj) sim.advance(camera);
+    expect(sim.gapSteps).toBe(0);
+    // Crosses 14 zoom levels; the prefetch cadence is one rebuild per ~0.45
+    // zoom of drift (~31) plus rung/data-zoom rebuilds — bounded well below
+    // one per step, which is what would signal churn.
+    expect(sim.builds).toBeGreaterThan(14);
+    expect(sim.builds).toBeLessThan(80);
+  });
+
+  it('keeps every region build within a sane cell budget across the descent', () => {
+    for (let z = 15; z >= 1; z -= 0.5) {
+      const spec = planetSpecFor({ center: home, zoom: z }, viewport);
+      // The ladder holds the rect-to-res pairing monotone — the direct
+      // cell-count budget is asserted in map-engine tests against real
+      // enumeration.
+      expect(spec.cellRes).toBe(resForZoom(z));
+      expect(spec.tileZoom).toBeLessThanOrEqual(14);
+    }
   });
 });
 
@@ -143,7 +191,7 @@ describe('anyCovers', () => {
   });
 
   it('is true when a retained region covers the view', () => {
-    const spec = computeRegionSpec({ center: home, zoom: 15 }, viewport);
+    const spec = specFor({ center: home, zoom: 15 }, viewport);
     expect(anyCovers([null, spec], { center: home, zoom: 15 }, viewport)).toBe(true);
     expect(coversView(spec, { center: home, zoom: 15 }, viewport)).toBe(true);
   });

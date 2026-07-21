@@ -184,6 +184,16 @@ build-prod platform="android":
 submit platform="android":
     bunx eas-cli submit --platform {{platform}}
 
+# Build a production binary and auto-submit it (iOS→TestFlight, Android→Play internal track).
+# Example: `just release android` or `just release ios`.
+release platform="android":
+    bunx eas-cli build --platform {{platform}} --profile production --auto-submit
+
+# Remote-build BOTH iOS and Android and auto-submit each to its internal track
+# (iOS→TestFlight, Android→Google Play internal). One command, one release.
+release-all:
+    bunx eas-cli build --platform all --profile production --auto-submit
+
 # Publish an over-the-air update. Example: `just update "fix crash"`.
 update message="update":
     bunx eas-cli update --auto --message "{{message}}"

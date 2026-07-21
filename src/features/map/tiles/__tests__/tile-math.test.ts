@@ -1,53 +1,32 @@
-import {
-  DATA_MAX_ZOOM,
-  DATA_MIN_ZOOM,
-  DATA_ZOOM_BIAS,
-  dataZoomFor,
-  tileKeyOf,
-  tileWorldRect,
-  tileZoomFor,
-  tilesCovering,
-} from '../tile-math';
-
-describe('tileZoomFor', () => {
-  it('clamps below DATA_MIN_ZOOM up to 12', () => {
-    expect(tileZoomFor(11)).toBe(DATA_MIN_ZOOM);
-    expect(tileZoomFor(0)).toBe(DATA_MIN_ZOOM);
-    expect(tileZoomFor(-5)).toBe(DATA_MIN_ZOOM);
-  });
-
-  it('clamps above DATA_MAX_ZOOM down to 14', () => {
-    expect(tileZoomFor(15)).toBe(DATA_MAX_ZOOM);
-    expect(tileZoomFor(18)).toBe(DATA_MAX_ZOOM);
-    expect(tileZoomFor(15.2)).toBe(DATA_MAX_ZOOM);
-  });
-
-  it('floors fractional zooms within range', () => {
-    expect(tileZoomFor(12.0)).toBe(12);
-    expect(tileZoomFor(12.9)).toBe(12);
-    expect(tileZoomFor(13.0)).toBe(13);
-    expect(tileZoomFor(13.7)).toBe(13);
-    expect(tileZoomFor(14.0)).toBe(14);
-  });
-
-  it('returns exact integer zooms within range unchanged', () => {
-    expect(tileZoomFor(12)).toBe(12);
-    expect(tileZoomFor(13)).toBe(13);
-    expect(tileZoomFor(14)).toBe(14);
-  });
-});
+import { DATA_ZOOM_BIAS, dataZoomFor, tileKeyOf, tileWorldRect, tilesCovering } from '../tile-math';
 
 describe('dataZoomFor', () => {
+  const planet = { min: 0, max: 14 };
+  const fixture = { min: 12, max: 14 };
+
   it('overzooms geometry by DATA_ZOOM_BIAS levels below the display tile zoom', () => {
-    expect(dataZoomFor(15)).toBe(tileZoomFor(15) - DATA_ZOOM_BIAS); // 14 - 1 = 13
-    expect(dataZoomFor(14)).toBe(13);
-    expect(dataZoomFor(16)).toBe(13); // capped display zoom 14, overzoomed to 13
+    expect(DATA_ZOOM_BIAS).toBe(1);
+    expect(dataZoomFor(15, planet)).toBe(13); // capped display zoom 14 − bias
+    expect(dataZoomFor(16, planet)).toBe(13);
+    expect(dataZoomFor(14, planet)).toBe(13);
+    expect(dataZoomFor(8.7, planet)).toBe(7);
   });
 
-  it('never fetches below what the tileset carries (DATA_MIN_ZOOM)', () => {
-    expect(dataZoomFor(12)).toBe(DATA_MIN_ZOOM);
-    expect(dataZoomFor(12.9)).toBe(DATA_MIN_ZOOM);
-    expect(dataZoomFor(0)).toBe(DATA_MIN_ZOOM);
+  it('clamps into the range at both ends', () => {
+    expect(dataZoomFor(0, planet)).toBe(0);
+    expect(dataZoomFor(-3, planet)).toBe(0);
+    expect(dataZoomFor(0, fixture)).toBe(12);
+    expect(dataZoomFor(12.9, fixture)).toBe(12);
+    expect(dataZoomFor(20, fixture)).toBe(13);
+  });
+
+  it('is monotonically non-decreasing in camera zoom', () => {
+    let prev = -Infinity;
+    for (let z = 0; z <= 16.5; z += 0.25) {
+      const dz = dataZoomFor(z, planet);
+      expect(dz).toBeGreaterThanOrEqual(prev);
+      prev = dz;
+    }
   });
 });
 

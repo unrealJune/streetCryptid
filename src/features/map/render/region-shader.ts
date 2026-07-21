@@ -4,18 +4,24 @@ import {
   drawAsImageFromPicture,
   FilterMode,
   MipmapMode,
+  PaintStyle,
   Skia,
+  StrokeJoin,
   TileMode,
+  type SkCanvas,
   type SkImage,
 } from '@shopify/react-native-skia';
 
 import { buildPaletteLut } from '../core/region';
 import type { MapPalette } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
+import { buildCellStateImage } from './cell-state-image';
+import { cellLatticePath, cellRimPath } from './cell-overlay-paths';
 import { getDotFieldEffect } from './dot-field-shader';
 import { buildMaskImage } from './mask-image';
 import {
   DOT_FIELD_UNIFORM_FLOATS,
+  lodForZoom,
   packDotFieldUniforms,
   regionLogicalSize,
 } from './shader-uniforms';
@@ -24,6 +30,12 @@ import {
 const MAX_IMAGE_DIM = 2400;
 /** Device-pixel ceiling: 2× is indistinguishable for 1–2px dots, half the work of 3×. */
 const MAX_PIXEL_RATIO = 2;
+
+/** Ghost lattice / frontier rim styling (logical px + alphas from the old shader). */
+const LATTICE_WIDTH = 1.0;
+const LATTICE_ALPHA = 0.09;
+const RIM_WIDTH = 1.25;
+const RIM_ALPHA = 0.42;
 
 /** Wrap a tightly-packed opaque RGBA8888 buffer as an SkImage. */
 function imageFromRgba(data: Uint8Array, width: number, height: number): SkImage | null {
@@ -42,10 +54,9 @@ export function makeMaskImage(region: MapRegion): SkImage | null {
   return buildMaskImage(region.geometry, region.spec);
 }
 
-/** The region's hex table as a texture (R=discovered G=frontier), one texel per cell. */
-export function makeHexImage(region: MapRegion): SkImage | null {
-  const { cols, rows, data } = region.hexTable;
-  return imageFromRgba(data, cols, rows);
+/** The region's cell field baked as a texture (R=fraction G=jitter B=reveal order). */
+export function makeCellStateImage(region: MapRegion): SkImage | null {
+  return buildCellStateImage(region.cellField, region.spec);
 }
 
 /** The palette ramps baked into a 256×3 LUT texture (rows 0=terr 1=water 2=park). */
@@ -56,11 +67,10 @@ export function makeLutImage(palette: MapPalette): SkImage | null {
 export interface RegionImageInput {
   readonly region: MapRegion;
   readonly palette: MapPalette;
-  readonly hexRadius: number;
   readonly maskImage: SkImage;
-  readonly hexImage: SkImage;
+  readonly cellImage: SkImage;
   readonly lutImage: SkImage;
-  /** Load reveal 0..1 (default 1 = fully shown); < 1 renders a hex-by-hex wipe. */
+  /** Load reveal 0..1 (default 1 = fully shown); < 1 renders a cell-by-cell wipe. */
   readonly reveal?: number;
   /** Show the explored/unexplored fog treatment (default true). */
   readonly explorationEnabled?: boolean;
@@ -73,11 +83,15 @@ export interface RegionImageInput {
 }
 
 /**
- * Rasterize the whole region rect into one static bitmap with the dot-field
- * shader. This runs the heavy per-pixel work (dots, fog, ramps, hex rim) **once
- * per region** — not per frame and not per settle — because the result is
- * camera-independent: the map view positions/scales this bitmap for the live
- * camera, so in-region pans/zooms and gestures are pure image transforms.
+ * Rasterize the whole region rect into one static bitmap: the dot-field shader
+ * pass (dots, fog, ramps — sampling the baked cell state texture), then the
+ * ghost lattice and amber frontier rim stroked on top as vector paths (H3
+ * cells aren't an analytic lattice, so the crisp 1px line work moved from the
+ * shader to paths — see cell-overlay-paths.ts). This runs the heavy per-pixel
+ * work **once per region** — not per frame and not per settle — because the
+ * result is camera-independent: the map view positions/scales this bitmap for
+ * the live camera, so in-region pans/zooms and gestures are pure image
+ * transforms.
  *
  * The bitmap covers the padded region, so panning reveals pre-rendered padding
  * instead of blank tiles until the camera leaves the region entirely. Rendered
@@ -87,9 +101,8 @@ export interface RegionImageInput {
 export function renderRegionImage({
   region,
   palette,
-  hexRadius,
   maskImage,
-  hexImage,
+  cellImage,
   lutImage,
   reveal = 1,
   explorationEnabled = true,
@@ -109,7 +122,6 @@ export function renderRegionImage({
   const uniforms = packDotFieldUniforms({
     region,
     palette,
-    hexRadius,
     pixelRatio,
     reveal,
     explorationEnabled,
@@ -127,7 +139,12 @@ export function renderRegionImage({
       FilterMode.Nearest,
       MipmapMode.None
     ),
-    hexImage.makeShaderOptions(TileMode.Clamp, TileMode.Clamp, FilterMode.Nearest, MipmapMode.None),
+    cellImage.makeShaderOptions(
+      TileMode.Clamp,
+      TileMode.Clamp,
+      FilterMode.Nearest,
+      MipmapMode.None
+    ),
     lutImage.makeShaderOptions(TileMode.Clamp, TileMode.Clamp, FilterMode.Linear, MipmapMode.None),
   ]);
 
@@ -139,9 +156,54 @@ export function renderRegionImage({
   const picture = Skia.PictureRecorder();
   const canvas = picture.beginRecording(Skia.XYWHRect(0, 0, width, height));
   canvas.drawPaint(paint);
+  if (explorationEnabled) {
+    drawCellOverlays(canvas, region, palette, pixelRatio, reveal);
+  }
   const recorded = picture.finishRecordingAsPicture();
 
   const image = drawAsImageFromPicture(recorded, { width, height });
   if (!image && __DEV__) console.warn(`[map] region raster failed (${width}×${height})`);
   return image;
+}
+
+/**
+ * Ghost lattice + frontier rim over the dot field, in region-logical coords
+ * (the canvas scale maps them to device px). During the reveal wipe both fade
+ * globally with `reveal` — a small fidelity trade vs the old per-cell line
+ * reveal, invisible at 320 ms.
+ */
+function drawCellOverlays(
+  canvas: SkCanvas,
+  region: MapRegion,
+  palette: MapPalette,
+  pixelRatio: number,
+  reveal: number
+): void {
+  const lod = lodForZoom(region.spec.zoom);
+  const latticeAlpha = LATTICE_ALPHA * (1 - lod * 0.7) * reveal;
+  const rimAlpha = RIM_ALPHA * reveal;
+  if (latticeAlpha <= 0 && rimAlpha <= 0) return;
+
+  canvas.save();
+  canvas.scale(pixelRatio, pixelRatio);
+  if (latticeAlpha > 0) {
+    const lattice = Skia.Path.MakeFromSVGString(cellLatticePath(region.cellField, region.spec));
+    if (lattice)
+      canvas.drawPath(lattice, strokePaint(palette.streetLabel, LATTICE_WIDTH, latticeAlpha));
+  }
+  if (rimAlpha > 0) {
+    const rim = Skia.Path.MakeFromSVGString(cellRimPath(region.cellField, region.spec));
+    if (rim) canvas.drawPath(rim, strokePaint(palette.accent, RIM_WIDTH, rimAlpha));
+  }
+  canvas.restore();
+}
+
+function strokePaint(rgb: readonly [number, number, number], width: number, alpha: number) {
+  const paint = Skia.Paint();
+  paint.setColor(Skia.Color(`rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`));
+  paint.setStyle(PaintStyle.Stroke);
+  paint.setStrokeWidth(width);
+  paint.setStrokeJoin(StrokeJoin.Round);
+  paint.setAntiAlias(true);
+  return paint;
 }

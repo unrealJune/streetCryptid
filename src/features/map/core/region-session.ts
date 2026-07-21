@@ -1,6 +1,7 @@
 import { coversView, needsNewRegion, shouldPrefetchRegion, type RegionSpec } from './region';
 import type { CameraState, Viewport, WorldPoint } from './types';
 import { worldToScreen } from './camera';
+import type { DataZoomRange } from '../tiles/tile-math';
 
 /**
  * The map runs as a small stack of region "layers": the current one plus the
@@ -20,10 +21,11 @@ export type RegionAction = 'reuse' | 'rebuild';
 export function regionAction(
   current: RegionSpec | null,
   target: CameraState,
-  viewport: Viewport
+  viewport: Viewport,
+  dataZooms: DataZoomRange
 ): RegionAction {
   if (!current) return 'rebuild';
-  return shouldPrefetchRegion(current, target, viewport) ? 'rebuild' : 'reuse';
+  return shouldPrefetchRegion(current, target, viewport, dataZooms) ? 'rebuild' : 'reuse';
 }
 
 /**
@@ -58,6 +60,8 @@ export interface SessionConfig {
   readonly viewport: Viewport;
   /** How many trajectory steps a background build takes before it lands. */
   readonly buildLatencySteps: number;
+  /** The tileset's data zoom range, driving rebuild decisions. */
+  readonly dataZooms: DataZoomRange;
 }
 
 /**
@@ -118,7 +122,7 @@ export class RegionSessionSim {
 
     // The rebuild check runs against the LEADED camera (like the app's
     // prefetch): "will the view still be covered a build from now?"
-    if (regionAction(this.current, buildCamera, viewport) === 'rebuild') {
+    if (regionAction(this.current, buildCamera, viewport, this.config.dataZooms) === 'rebuild') {
       if (this.inFlight)
         this.queued = buildCamera; // replace any waiting request
       else this.start(buildCamera);
@@ -133,7 +137,10 @@ export class RegionSessionSim {
    * the app's `prefetchAt`: no-op while the current region serves `camera`.
    */
   request(camera: CameraState): void {
-    if (regionAction(this.current, camera, this.config.viewport) !== 'rebuild') return;
+    if (
+      regionAction(this.current, camera, this.config.viewport, this.config.dataZooms) !== 'rebuild'
+    )
+      return;
     if (this.inFlight) this.queued = camera;
     else this.start(camera);
   }
@@ -148,6 +155,9 @@ export class RegionSessionSim {
 
   /** True once the current region no longer needs an immediate rebuild for `camera`. */
   settledFor(camera: CameraState): boolean {
-    return this.current != null && !needsNewRegion(this.current, camera, this.config.viewport);
+    return (
+      this.current != null &&
+      !needsNewRegion(this.current, camera, this.config.viewport, this.config.dataZooms)
+    );
   }
 }

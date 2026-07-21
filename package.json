@@ -34,6 +34,7 @@
     "expo-system-ui": "~57.0.1",
     "expo-task-manager": "~57.0.4",
     "expo-web-browser": "~57.0.1",
+    "h3-js": "4.5.0",
     "pbf": "^5.1.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -96,6 +97,8 @@
     "unrs-resolver"
   ],
   "patchedDependencies": {
-    "expo-modules-jsi@57.0.3": "patches/expo-modules-jsi@57.0.3.patch"
+    "expo-modules-jsi@57.0.3": "patches/expo-modules-jsi@57.0.3.patch",
+    "h3-js@4.5.0": "patches/h3-js@4.5.0.patch",
+    "pbf@5.1.2": "patches/pbf@5.1.2.patch"
   }
 }

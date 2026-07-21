@@ -35,14 +35,14 @@ const region: MapRegion = {
     maskHeight: 768,
     zoom: 15,
     tileZoom: 13,
+    cellRes: 10,
   },
   geometry: { streets: [], rivers: [], water: [], parks: [], places: [] },
-  hexTable: { q0: 0, r0: 0, cols: 12, rows: 9, data: new Uint8Array(12 * 9 * 4) },
-  axialOrigin: [1.5, -2.5],
+  cellField: { res: 10, cells: [] },
   places: [],
 };
 
-const base = { region, palette, hexRadius: 5e-6, pixelRatio: 2 };
+const base = { region, palette, pixelRatio: 2 };
 
 describe('packDotFieldUniforms', () => {
   it('emits exactly the shader-declared float count', () => {
@@ -57,15 +57,10 @@ describe('packDotFieldUniforms', () => {
     expect(u[3]).toBeCloseTo(0.3, 12); // uRectSize.y
     expect(u.slice(4, 6)).toEqual([512, 768]); // uMaskSize
     expect(u[6]).toBe(DOT_STEP); // uStep
-    expect(u[7]).toBe(5e-6); // uHexRadius
-    expect(u.slice(8, 10)).toEqual([1.5, -2.5]); // uAxialOrigin
-    expect(u.slice(10, 12)).toEqual([12, 9]); // uHexTableSize
-    expect(u.slice(12, 15)).toEqual([10 / 255, 20 / 255, 30 / 255]); // uBg
-    expect(u.slice(15, 18)).toEqual([1, 128 / 255, 0]); // uAccent
-    expect(u.slice(18, 21)).toEqual([40 / 255, 80 / 255, 120 / 255]); // uStreetLabel
-    expect(u[21]).toBe(1); // uReveal defaults to 1 (fully shown)
-    expect(u[22]).toBe(0); // uLod: build zoom 15 → full detail
-    expect(u[23]).toBe(1); // uExploration defaults to visible
+    expect(u.slice(7, 10)).toEqual([10 / 255, 20 / 255, 30 / 255]); // uBg
+    expect(u[10]).toBe(1); // uReveal defaults to 1 (fully shown)
+    expect(u[11]).toBe(0); // uLod: build zoom 15 → full detail
+    expect(u[12]).toBe(1); // uExploration defaults to visible
   });
 
   it('honors a custom lattice step', () => {
@@ -73,20 +68,20 @@ describe('packDotFieldUniforms', () => {
   });
 
   it('passes the reveal fraction through', () => {
-    expect(packDotFieldUniforms({ ...base, reveal: 0.4 })[21]).toBe(0.4);
+    expect(packDotFieldUniforms({ ...base, reveal: 0.4 })[10]).toBe(0.4);
     expect(packDotFieldUniforms({ ...base, reveal: 0.4 })).toHaveLength(DOT_FIELD_UNIFORM_FLOATS);
   });
 
   it('derives uLod from the region build zoom, overridable', () => {
     // base region builds at zoom 15 → full detail.
-    expect(packDotFieldUniforms(base)[22]).toBe(0);
+    expect(packDotFieldUniforms(base)[11]).toBe(0);
     const cityRegion = { ...region, spec: { ...region.spec, zoom: 11 } };
-    expect(packDotFieldUniforms({ ...base, region: cityRegion })[22]).toBe(1);
-    expect(packDotFieldUniforms({ ...base, lod: 0.5 })[22]).toBe(0.5);
+    expect(packDotFieldUniforms({ ...base, region: cityRegion })[11]).toBe(1);
+    expect(packDotFieldUniforms({ ...base, lod: 0.5 })[11]).toBe(0.5);
   });
 
   it('can disable explored/unexplored styling', () => {
-    expect(packDotFieldUniforms({ ...base, explorationEnabled: false })[23]).toBe(0);
+    expect(packDotFieldUniforms({ ...base, explorationEnabled: false })[12]).toBe(0);
   });
 });
 

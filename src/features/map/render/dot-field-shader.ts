@@ -2,8 +2,8 @@ import { Skia, type SkRuntimeEffect } from '@shopify/react-native-skia';
 
 /**
  * The GPU dot-field shader — a faithful port of the CPU `buildDotField` +
- * `buildHexOverlay` + background fill (see the retired `core/scene.ts` /
- * `core/dot-raster.ts`), evaluated per pixel instead of stamped per dot.
+ * background fill (see the retired `core/scene.ts` / `core/dot-raster.ts`),
+ * evaluated per pixel instead of stamped per dot.
  *
  * It is **camera-independent**: it renders the whole region rect into a bitmap
  * once, in region-local logical coordinates (0 at rect.min). The map view then
@@ -12,10 +12,19 @@ import { Skia, type SkRuntimeEffect } from '@shopify/react-native-skia';
  * map math stays in region-local world coords (world − rect.min), which keeps it
  * clear of the float32 cancellation that ~0.16 normalized-mercator numbers cause.
  *
+ * Exploration cells are H3 hexagons, which are NOT an analytic lattice in
+ * mercator — so unlike the retired axial grid the shader derives nothing per
+ * pixel. It samples `cellTex`, a region-anchored texture baked on the CPU from
+ * the region's cell field (`cell-state-image.ts`): R = explored fraction
+ * (continuous — aggregated parent shading at coarse ladder rungs falls out of
+ * the same fog math), G = per-cell jitter, B = center-out reveal order. The
+ * ghost lattice and frontier rim are drawn as vector paths over this bitmap
+ * (`cell-overlay-paths.ts`), no longer in-shader.
+ *
  * Inputs are three child image-shaders + numeric uniforms from
  * `packDotFieldUniforms`:
  *   - `maskTex`  RGBA feature mask, R=street G=park B=water (nearest).
- *   - `hexTex`   RGBA hex table, R=discovered G=frontier (nearest).
+ *   - `cellTex`  RGBA cell state, R=fraction G=jitter B=reveal order (nearest).
  *   - `lut`      256×3 palette LUT, rows 0=terr 1=water 2=park (linear).
  */
 export const DOT_FIELD_SKSL = `
@@ -24,50 +33,22 @@ uniform float  uScale;        // region-logical px per world unit (anchor zoom)
 uniform float2 uRectSize;     // region rect size (world)
 uniform float2 uMaskSize;     // mask texture size (px)
 uniform float  uStep;         // dot lattice step (logical px)
-uniform float  uHexRadius;    // hex circumradius (world)
-uniform float2 uAxialOrigin;  // region-local axial coord of rect.min
-uniform float2 uHexTableSize; // hex table (cols, rows)
 uniform float3 uBg;           // background rgb (0..1)
-uniform float3 uAccent;       // frontier rim rgb (0..1)
-uniform float3 uStreetLabel;  // ghost lattice ink rgb (0..1)
-uniform float  uReveal;       // load reveal 0..1 (1 = fully shown); hex-by-hex wipe
+uniform float  uReveal;       // load reveal 0..1 (1 = fully shown); cell-by-cell wipe
 uniform float  uLod;          // zoom LOD 0 (street detail) .. 1 (city): simplify terrain
 uniform float  uExploration;  // 1 = explored/unexplored treatment, 0 = unmasked city
 
 uniform shader maskTex;
-uniform shader hexTex;
+uniform shader cellTex;
 uniform shader lut;
-
-const float SQRT3 = 1.7320508;
 
 // region-logical px -> region-local world (0 at rect.min)
 float2 toWorld(float2 s) { return s / uScale; }
 // region-local world -> mask pixel coord
 float2 toMaskPx(float2 w) { return w / uRectSize * uMaskSize; }
 float3 maskAt(float2 s) { return maskTex.eval(toMaskPx(toWorld(s))).rgb; }
-
-// region-local world -> fractional local axial (q, r)
-float2 axialFrac(float2 w) {
-  float dx = w.x / uHexRadius;
-  float dy = w.y / uHexRadius;
-  float q = uAxialOrigin.x + (2.0 / 3.0) * dx;
-  float r = uAxialOrigin.y + (-1.0 / 3.0) * dx + (SQRT3 / 3.0) * dy;
-  return float2(q, r);
-}
-// cube rounding, an exact port of HexGrid.keyAt
-float2 axialRound(float2 qr) {
-  float q = qr.x; float r = qr.y; float s = -q - r;
-  float rq = floor(q + 0.5); float rr = floor(r + 0.5); float rs = floor(s + 0.5);
-  float dq = abs(rq - q); float dr = abs(rr - r); float ds = abs(rs - s);
-  if (dq > dr && dq > ds) rq = -rr - rs;
-  else if (dr > ds) rr = -rq - rs;
-  return float2(rq, rr);
-}
-// hex table (discovered, frontier) for a rounded local axial cell
-float2 hexFlags(float2 cell) {
-  float2 uv = clamp(cell + 0.5, float2(0.5), uHexTableSize - 0.5);
-  return hexTex.eval(uv).rg;
-}
+// cell state (fraction, jitter, reveal order) at a region-logical point
+float3 cellAt(float2 s) { return cellTex.eval(toMaskPx(toWorld(s))).rgb; }
 
 // classic GLSL sin-fract hash (port of hash2)
 float hash2(float2 p) {
@@ -102,8 +83,9 @@ float4 dotAt(float ix, float iy, float2 frag) {
   float dist = distance(frag, center);
   if (dist > 2.5) return float4(0.0);                 // no dot reaches this far
 
-  float2 w = toWorld(center);
-  float explored = hexFlags(axialRound(axialFrac(w))).r > 0.5 ? 1.0 : 0.0;
+  // Explored fraction of this dot's cell — binary at the display res, a
+  // continuous 0..1 shade at aggregated (coarse-rung) resolutions.
+  float explored = cellAt(center).r;
   float e = mix(1.0, explored, uExploration);
   if (e < 0.5 && (mod(ix, 2.0) > 0.5 || mod(iy, 2.0) > 0.5)) return float4(0.0);
   float coarse = e < 0.5 ? 1.0 : 0.0;
@@ -173,30 +155,12 @@ half4 main(float2 fragCoord) {
     }
   }
 
-  // Hex fog overlay: ghost lattice on undiscovered cells + amber frontier rim.
-  float2 fa = axialFrac(toWorld(frag));
-  float2 ra = axialRound(fa);
-  float2 da = fa - ra;
-  float2 offPx = (da.x * float2(1.5, 0.8660254) + da.y * float2(0.0, SQRT3)) * uHexRadius * uScale;
-  float apothemPx = uHexRadius * uScale * 0.8660254;
-  float md = max(abs(dot(offPx, float2(0.8660254, 0.5))),
-            max(abs(dot(offPx, float2(0.0, 1.0))),
-                abs(dot(offPx, float2(-0.8660254, 0.5)))));
-  float dEdge = apothemPx - md;
-  float2 flags = hexFlags(ra);
-  if (uExploration > 0.5 && flags.r < 0.5)
-    col = mix(col, uStreetLabel, clamp(1.0 - dEdge, 0.0, 1.0) * 0.09 * (1.0 - uLod * 0.7));
-  if (uExploration > 0.5 && flags.g > 0.5)
-    col = mix(col, uAccent, clamp(1.25 - dEdge, 0.0, 1.0) * 0.42);
-
-  // Hex-by-hex load reveal: cells reveal center-out (with a little per-hex jitter)
-  // so a fresh region grows in hexagon by hexagon over the previous one — its
-  // not-yet-revealed cells stay fully transparent. uReveal=1 → everything shown.
-  float2 centerAxial = axialRound(axialFrac(uRectSize * 0.5));
-  float2 dc = ra - centerAxial;
-  float hexDist = (abs(dc.x) + abs(dc.y) + abs(dc.x + dc.y)) * 0.5;
-  float maxDist = length(uHexTableSize) * 0.5 + 1.0;
-  float order = clamp(0.85 * (hexDist / maxDist) + (hash2(ra) - 0.5) * 0.06, 0.0, 0.9);
+  // Cell-by-cell load reveal: cells reveal center-out (baked order channel,
+  // staggered by the baked per-cell jitter) so a fresh region grows in cell by
+  // cell over the previous one — its not-yet-revealed cells stay fully
+  // transparent. uReveal=1 → everything shown.
+  float3 cell = cellAt(frag);
+  float order = clamp(0.85 * cell.b + (cell.g - 0.5) * 0.06, 0.0, 0.9);
   float revealA = smoothstep(order, order + 0.12, uReveal);
 
   // Premultiplied output (Skia runtime shaders return premultiplied color).

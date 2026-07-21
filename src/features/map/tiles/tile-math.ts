@@ -9,20 +9,21 @@ export interface TileCoord {
 
 export type TileKey = string; // "z/x/y"
 
+/** The whole [0,1]² world. */
+export const WORLD_RECT: WorldRect = { minX: 0, minY: 0, maxX: 1, maxY: 1 };
+
 /**
- * Highest zoom the tileset carries real data at. OpenMapTiles/Planetiler bake up
- * to z14; deeper camera zooms overzoom (reuse z14 vectors at a larger transform).
+ * The contiguous zoom range a tileset carries real data at. The planet bake
+ * covers z0–14; the bundled fixture covers z12–14. Camera zooms outside the
+ * range overzoom (reuse the nearest baked vectors at a larger transform).
  */
-export const DATA_MAX_ZOOM = 14;
-export const DATA_MIN_ZOOM = 12;
+export interface DataZoomRange {
+  readonly min: number;
+  readonly max: number;
+}
 
 export function tileKeyOf(z: number, x: number, y: number): TileKey {
   return z + '/' + x + '/' + y;
-}
-
-/** The tile zoom to fetch for a continuous camera zoom. */
-export function tileZoomFor(cameraZoom: number): number {
-  return Math.max(DATA_MIN_ZOOM, Math.min(DATA_MAX_ZOOM, Math.floor(cameraZoom)));
 }
 
 /**
@@ -35,8 +36,9 @@ export function tileZoomFor(cameraZoom: number): number {
 export const DATA_ZOOM_BIAS = 1;
 
 /** The (overzoomed) tile zoom to fetch geometry at, clamped to what the tileset carries. */
-export function dataZoomFor(cameraZoom: number): number {
-  return Math.max(DATA_MIN_ZOOM, tileZoomFor(cameraZoom) - DATA_ZOOM_BIAS);
+export function dataZoomFor(cameraZoom: number, range: DataZoomRange): number {
+  const tileZoom = Math.max(range.min, Math.min(range.max, Math.floor(cameraZoom)));
+  return Math.max(range.min, tileZoom - DATA_ZOOM_BIAS);
 }
 
 /** World rect covered by a tile ([0,1]² world space, y south). */

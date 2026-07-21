@@ -1,5 +1,8 @@
 import { visibleWorldRect } from '../camera';
-import { createHexGrid } from '../hex';
+import { resForZoom } from '../cell-ladder';
+import { createExplorationIndex } from '../exploration-index';
+import { createH3Grid, realH3 } from '../h3-grid';
+import { latLonToWorld } from '../mercator';
 import { coverageInView, nearestPlaceName } from '../readout';
 import type { CameraState, Place, Viewport, WorldPoint } from '../types';
 
@@ -33,24 +36,40 @@ describe('nearestPlaceName', () => {
 });
 
 describe('coverageInView', () => {
-  const grid = createHexGrid(0.02);
-  const camera: CameraState = { center: [0.5, 0.5], zoom: 3 };
+  const grid = createH3Grid(realH3());
+  const camera: CameraState = { center: latLonToWorld({ lat: 47.62, lon: -122.32 }), zoom: 15 };
   const viewport: Viewport = { width: 200, height: 200 };
-  const visibleCells = grid.cellsIn(visibleWorldRect(camera, viewport));
+  // zoom 15 sits at the display res, so the readout enumerates res-10 cells.
+  const visibleCells = grid.cellsInRect(
+    visibleWorldRect(camera, viewport),
+    resForZoom(camera.zoom)
+  );
 
   it('is 0 when nothing is explored', () => {
-    expect(coverageInView(new Set(), grid, camera, viewport)).toBe(0);
+    const index = createExplorationIndex(grid, []);
+    expect(coverageInView(index, grid, camera, viewport)).toBe(0);
   });
 
   it('is 1 when every visible sector is explored', () => {
-    expect(coverageInView(new Set(visibleCells), grid, camera, viewport)).toBe(1);
+    const index = createExplorationIndex(grid, visibleCells);
+    expect(coverageInView(index, grid, camera, viewport)).toBe(1);
   });
 
   it('is a proper fraction when partially explored', () => {
     expect(visibleCells.length).toBeGreaterThan(1);
-    const cov = coverageInView(new Set([visibleCells[0]]), grid, camera, viewport);
+    const index = createExplorationIndex(grid, [visibleCells[0]]);
+    const cov = coverageInView(index, grid, camera, viewport);
     expect(cov).toBeGreaterThan(0);
     expect(cov).toBeLessThan(1);
     expect(cov).toBeCloseTo(1 / visibleCells.length, 10);
+  });
+
+  it('aggregates through the ladder when zoomed out', () => {
+    // z12 → a coarser rung: the same explored res-10 cells shade parents partially.
+    const zoomedOut: CameraState = { ...camera, zoom: 12 };
+    const index = createExplorationIndex(grid, visibleCells);
+    const cov = coverageInView(index, grid, zoomedOut, viewport);
+    expect(cov).toBeGreaterThan(0);
+    expect(cov).toBeLessThan(1);
   });
 });

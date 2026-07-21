@@ -1,0 +1,1395 @@
+{
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": [],
+      "title": "Pipeline flow — broadcast → stash → receivers",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "options": {
+        "infinitePan": true,
+        "inlineEditing": true,
+        "panZoom": true,
+        "root": {
+          "background": {
+            "color": {
+              "fixed": "transparent"
+            }
+          },
+          "border": {
+            "color": {
+              "fixed": "transparent"
+            }
+          },
+          "constraint": {
+            "horizontal": "left",
+            "vertical": "top"
+          },
+          "elements": [
+            {
+              "background": {
+                "color": {
+                  "fixed": "#3274d9"
+                }
+              },
+              "border": {
+                "color": {
+                  "fixed": "#ffffff"
+                },
+                "width": 2
+              },
+              "config": {
+                "align": "center",
+                "color": {
+                  "fixed": "#ffffff"
+                },
+                "size": 16,
+                "text": {
+                  "fixed": "📡 BROADCAST\n\npublish.fix (sender phone)\ngossip + docs.write",
+                  "mode": "fixed"
+                },
+                "valign": "top"
+              },
+              "connections": [
+                {
+                  "color": {
+                    "fixed": "#73bf69"
+                  },
+                  "path": "straight",
+                  "size": {
+                    "fixed": 3
+                  },
+                  "source": {
+                    "x": 1,
+                    "y": -0.4
+                  },
+                  "target": {
+                    "x": -1,
+                    "y": -0.4
+                  },
+                  "targetName": "stash"
+                },
+                {
+                  "color": {
+                    "fixed": "#f2cc0c"
+                  },
+                  "path": "straight",
+                  "size": {
+                    "fixed": 2
+                  },
+                  "source": {
+                    "x": 1,
+                    "y": 0.6
+                  },
+                  "target": {
+                    "x": -1,
+                    "y": 0.6
+                  },
+                  "targetName": "receivers"
+                }
+              ],
+              "constraint": {
+                "horizontal": "left",
+                "vertical": "top"
+              },
+              "name": "broadcast",
+              "placement": {
+                "height": 160,
+                "left": 40,
+                "top": 60,
+                "width": 300
+              },
+              "type": "text"
+            },
+            {
+              "background": {
+                "color": {
+                  "fixed": "#8e44ad"
+                }
+              },
+              "border": {
+                "color": {
+                  "fixed": "#ffffff"
+                },
+                "width": 2
+              },
+              "config": {
+                "align": "center",
+                "color": {
+                  "fixed": "#ffffff"
+                },
+                "size": 16,
+                "text": {
+                  "fixed": "🗄 STASH SERVER\n\nstash.entry.received\n(durable offline relay)",
+                  "mode": "fixed"
+                },
+                "valign": "top"
+              },
+              "connections": [
+                {
+                  "color": {
+                    "fixed": "#e74c3c"
+                  },
+                  "path": "straight",
+                  "size": {
+                    "fixed": 2
+                  },
+                  "source": {
+                    "x": 1,
+                    "y": 0
+                  },
+                  "target": {
+                    "x": -1,
+                    "y": 0
+                  },
+                  "targetName": "receivers"
+                }
+              ],
+              "constraint": {
+                "horizontal": "left",
+                "vertical": "top"
+              },
+              "name": "stash",
+              "placement": {
+                "height": 160,
+                "left": 470,
+                "top": 60,
+                "width": 300
+              },
+              "type": "text"
+            },
+            {
+              "background": {
+                "color": {
+                  "fixed": "#2e7d32"
+                }
+              },
+              "border": {
+                "color": {
+                  "fixed": "#ffffff"
+                },
+                "width": 2
+              },
+              "config": {
+                "align": "center",
+                "color": {
+                  "fixed": "#ffffff"
+                },
+                "size": 16,
+                "text": {
+                  "fixed": "📱 RECEIVERS\n\ntrail.sync.app (backfill)\nfix.received.app (live)",
+                  "mode": "fixed"
+                },
+                "valign": "top"
+              },
+              "connections": [],
+              "constraint": {
+                "horizontal": "left",
+                "vertical": "top"
+              },
+              "name": "receivers",
+              "placement": {
+                "height": 160,
+                "left": 900,
+                "top": 60,
+                "width": 300
+              },
+              "type": "text"
+            },
+            {
+              "background": {
+                "color": {
+                  "fixed": "transparent"
+                }
+              },
+              "border": {
+                "color": {
+                  "fixed": "transparent"
+                },
+                "width": 0
+              },
+              "config": {
+                "align": "center",
+                "color": {
+                  "fixed": "#eaffea"
+                },
+                "size": 40,
+                "text": {
+                  "field": "publish.fix",
+                  "mode": "field"
+                },
+                "valign": "middle"
+              },
+              "connections": [],
+              "constraint": {
+                "horizontal": "left",
+                "vertical": "top"
+              },
+              "name": "send_v",
+              "placement": {
+                "height": 60,
+                "left": 40,
+                "top": 150,
+                "width": 300
+              },
+              "type": "metric-value"
+            },
+            {
+              "background": {
+                "color": {
+                  "fixed": "transparent"
+                }
+              },
+              "border": {
+                "color": {
+                  "fixed": "transparent"
+                },
+                "width": 0
+              },
+              "config": {
+                "align": "center",
+                "color": {
+                  "fixed": "#eaffea"
+                },
+                "size": 40,
+                "text": {
+                  "field": "stash.entry.received",
+                  "mode": "field"
+                },
+                "valign": "middle"
+              },
+              "connections": [],
+              "constraint": {
+                "horizontal": "left",
+                "vertical": "top"
+              },
+              "name": "stash_v",
+              "placement": {
+                "height": 60,
+                "left": 470,
+                "top": 150,
+                "width": 300
+              },
+              "type": "metric-value"
+            },
+            {
+              "background": {
+                "color": {
+                  "fixed": "transparent"
+                }
+              },
+              "border": {
+                "color": {
+                  "fixed": "transparent"
+                },
+                "width": 0
+              },
+              "config": {
+                "align": "center",
+                "color": {
+                  "fixed": "#eaffea"
+                },
+                "size": 40,
+                "text": {
+                  "field": "trail.sync.app",
+                  "mode": "field"
+                },
+                "valign": "middle"
+              },
+              "connections": [],
+              "constraint": {
+                "horizontal": "left",
+                "vertical": "top"
+              },
+              "name": "recv_v",
+              "placement": {
+                "height": 60,
+                "left": 900,
+                "top": 150,
+                "width": 300
+              },
+              "type": "metric-value"
+            }
+          ],
+          "placement": {
+            "height": 320,
+            "left": 0,
+            "top": 0,
+            "width": 1240
+          },
+          "type": "frame"
+        },
+        "showAdvancedTypes": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name=~\"publish.fix|stash.entry.received|trail.sync.app\" } | count_over_time() by (name)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Ping pipeline — the path a location fix takes (counts over range)",
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "pattern": "^(time|publish\\.fix|stash\\.entry\\.received|trail\\.sync\\.app)$"
+            }
+          }
+        },
+        {
+          "id": "reduce",
+          "options": {
+            "includeTimeField": false,
+            "mode": "reduceFields",
+            "reducers": ["sum"]
+          }
+        }
+      ],
+      "type": "canvas"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 12
+      },
+      "panels": [],
+      "title": "Per-author — is each author SENDING and RECEIVING? (rate = spans/sec)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "How often each author publishes its own fix.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "cps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "max", "sum"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ name=\"publish.fix\" && resource.service.instance.id =~ \"$author\" } | rate() by (resource.service.instance.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Sending — publish.fix /s by author",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "How often each device backfills from stash/peers.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "cps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "max", "sum"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ name=\"trail.sync.app\" && resource.service.instance.id =~ \"$author\" } | rate() by (resource.service.instance.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Receiving — trail.sync.app (backfill) /s by author",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "OS background location deliveries. Zero while still publishing = iOS bg broken.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "cps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "max", "sum"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ name=\"bg.wake\" && resource.service.instance.id =~ \"$author\" } | rate() by (resource.service.instance.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Background wakes — bg.wake /s by author",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "New expo-background-task RECEIVE task firing.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "cps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "max", "sum"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ name=\"bg.backfill\" && resource.service.instance.id =~ \"$author\" } | rate() by (resource.service.instance.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Periodic backfill — bg.backfill /s by author",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "Friend fixes recovered per backfill.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "max", "sum"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ name=\"trail.sync.app\" && resource.service.instance.id =~ \"$author\" } | sum_over_time(span.recovered) by (resource.service.instance.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Backfill volume — recovered fixes by author",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "Live delivery to the app. Zero = live receive dead.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "cps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 29
+      },
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "max", "sum"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ name=\"fix.received.app\" && resource.service.instance.id =~ \"$author\" } | rate() by (resource.service.instance.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Live receive — fix.received.app /s by author",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "panels": [],
+      "title": "Stash server — receiving? rebroadcasting? responsible?",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "The stash IS receiving, and from whom.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "cps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "max", "sum"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ resource.service.name=\"trail-stash\" && name=\"stash.entry.received\" && span.sc.author =~ \"$author\" } | rate() by (span.sc.author)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Stash — entries received /s by author",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "A=in, B=had someone to wake, C=pushes. B/C=0 while A>0 = receives but never rebroadcasts.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "cps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "max", "sum"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ name=\"stash.entry.received\" } | rate()",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        },
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ name=\"stash.entry.received\" && span.wake_targets != \"0\" } | rate()",
+          "queryType": "traceql",
+          "refId": "B",
+          "tableType": "spans"
+        },
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ name=\"stash.wake.push\" } | rate()",
+          "queryType": "traceql",
+          "refId": "C",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Stash — rebroadcast: in vs has-target vs pushes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "Stash responsiveness.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 46
+      },
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "max", "sum"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ resource.service.name=\"trail-stash\" && name=\"http.request\" } | rate() by (span.http.response.status_code)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Stash — HTTP /s by status",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "Trail namespaces the stash tracks.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "cps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 46
+      },
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "max", "sum"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ resource.service.name=\"trail-stash\" && name=\"stash.namespace.import\" } | rate()",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Stash — namespace imports /s",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 54
+      },
+      "panels": [],
+      "title": "Drops & failures",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "Drop-decisions by reason.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "cps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "max", "sum"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ span.sc.drop_reason != \"\" } | rate() by (span.sc.drop_reason)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Drops by reason /s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "description": "",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 61
+      },
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "expr": "{service_name=\"streetcryptid-app\"}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "App logs — warn/error from devices (Loki)",
+      "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "description": "",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 61
+      },
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "expr": "{service_name=\"trail-stash\"}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Stash logs (Loki)",
+      "type": "logs"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 70
+      },
+      "panels": [],
+      "title": "Follow one ping — broadcast → stash → receivers (click to follow)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "Click an author to follow all their pings, or an entry_hash for one envelope.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sc.author"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "→ follow this author",
+                    "url": "/d/streetcryptid-pingflow?var-author=${__value.raw}&${__url_time_range}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sc.entry_hash"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "→ follow this envelope",
+                    "url": "/d/streetcryptid-pingflow?var-entry_hash=${__value.raw}&var-author=${__data.fields[\"sc.author\"]}&${__url_time_range}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 71
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ name=\"stash.entry.received\" && span.sc.author =~ \"$author\" } | select(span.sc.author, span.sc.seq, span.sc.entry_hash, span.sc.namespace, span.wake_targets)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Recent envelopes at the stash — click sc.author or sc.entry_hash",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "publish.fix (app) + stash.entry.received (stash), correlate by sc.seq.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sc.entry_hash"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "→ follow this envelope",
+                    "url": "/d/streetcryptid-pingflow?var-entry_hash=${__value.raw}&${__url_time_range}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 79
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ span.sc.author =~ \"$author\" } | select(resource.service.name, name, span.sc.seq, span.sc.entry_hash, span.sc.namespace, span.wake_targets, span.sc.drop_reason)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Journey by AUTHOR (broadcast → stash) — set $author",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "description": "Every span for one sealed envelope.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 79
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "filters": [],
+          "limit": 100,
+          "query": "{ span.sc.entry_hash =~ \"$entry_hash\" } | select(resource.service.name, name, span.sc.author, span.sc.seq, span.sc.namespace, span.wake_targets)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Journey by ENVELOPE (sc.entry_hash) — set $entry_hash",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "description": "Receiver trail.backfill + stash lines mentioning this entry_hash.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 89
+      },
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "expr": "{service_name=~\"streetcryptid-app|streetcryptid-core|trail-stash\"} |~ \"$entry_hash\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Logs for this envelope (Loki) — set $entry_hash",
+      "type": "logs"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["streetcryptid", "location", "otel"],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "Tempo",
+          "value": "P214B5B846CF3925F"
+        },
+        "hide": 0,
+        "label": "Tempo",
+        "name": "tempo",
+        "query": "tempo",
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "text": "Loki",
+          "value": "P8E80F9AEF21F6940"
+        },
+        "hide": 0,
+        "label": "Loki",
+        "name": "loki",
+        "query": "loki",
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "label": "Author/device (regex)",
+        "name": "author",
+        "query": ".*",
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "label": "Envelope entry_hash (regex)",
+        "name": "entry_hash",
+        "query": ".*",
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "streetCryptid — ping flow (authors + stash)",
+  "uid": "streetcryptid-pingflow",
+  "version": 0
+}

@@ -1,24 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 
 import type { CryptidTheme } from '@/constants/cryptid-theme';
+import type { LocationFix } from '@/features/social/core/types';
+import { createPersistentTrailStorage } from '@/features/social/net/persistence';
 
-import {
-  CAMERA_INITIAL_ZOOM,
-  CAMERA_MAX_ZOOM,
-  CAMERA_MIN_ZOOM,
-  HEX_RADIUS_WORLD,
-  createMapDataset,
-  type MapDataset,
-} from '../config';
+import { CAMERA_INITIAL_ZOOM, createMapDataset, type MapDataset } from '../config';
 import { applyViewTransform, clampCamera, scaleFor, type ViewTransform } from '../core/camera';
-import { demoExploration } from '../core/exploration';
 import { makeViewLimits, type ViewLimits } from '../core/gesture';
-import { createHexGrid } from '../core/hex';
+import { createH3Grid, realH3 } from '../core/h3-grid';
 import { coverageInView, nearestPlaceName } from '../core/readout';
 import { coversView, shouldPrefetchRegion } from '../core/region';
 import type { CameraState, LatLon, Viewport, WorldPoint } from '../core/types';
 import { latLonToWorld } from '../core/mercator';
 import { MapEngine, type MapRegion } from '../engine/map-engine';
+import {
+  createDemoExplorationSource,
+  createLiveExplorationSource,
+} from '../exploration/exploration-source';
+import { createExplorationStore } from '../exploration/exploration-store';
 import { useMapTheme } from './use-map-theme';
 
 export interface MapEngineState {
@@ -35,9 +35,7 @@ export interface MapEngineState {
   readonly anchor: CameraState;
   /** Zoom/bounds limits in anchor-space pixels, for the UI-thread clamps. */
   readonly limits: ViewLimits | null;
-  /** Hex circumradius in world units — a uniform for the dot-field shader. */
-  readonly hexRadius: number;
-  /** Discovered fraction of the hex sectors in view, 0–1. */
+  /** Explored fraction of the cells in view (ladder-rung aggregated), 0–1. */
   readonly coverage: number;
   /** Nearest prominent place name to the camera center, for the island. */
   readonly placeName: string | null;
@@ -56,15 +54,16 @@ export interface MapEngineState {
 }
 
 /**
- * Owns the map's DATA state for one screen: dataset selection, demo
- * exploration, the engine lifecycle, and region rebuilds on commit/viewport
- * changes. It never writes the visual transform — the view owns that on the
- * UI thread — so nothing here (build latency, region swaps, re-renders) can
- * ever move the map under the user's finger.
+ * Owns the map's DATA state for one screen: dataset selection, exploration,
+ * the engine lifecycle, and region rebuilds on commit/viewport changes. It
+ * never writes the visual transform — the view owns that on the UI thread — so
+ * nothing here (build latency, region swaps, re-renders) can ever move the map
+ * under the user's finger.
  */
 export function useMapEngine(
   viewport: Viewport | null,
-  initialCenter: LatLon | null = null
+  initialCenter: LatLon | null = null,
+  selfFix: LocationFix | null = null
 ): MapEngineState {
   const theme = useMapTheme();
 
@@ -78,13 +77,43 @@ export function useMapEngine(
       requestedHome && pointInside(requestedHome, dataset.bounds) ? requestedHome : dataset.home,
     [dataset, requestedHome]
   );
-  const grid = useMemo(() => createHexGrid(HEX_RADIUS_WORLD), []);
-  const exploration = useMemo(() => demoExploration(grid, dataset.home), [grid, dataset]);
+  const grid = useMemo(() => createH3Grid(realH3()), []);
+  const exploration = useMemo(
+    () =>
+      dataset.explorationMode === 'live'
+        ? createLiveExplorationSource(
+            grid,
+            createExplorationStore({ grid }),
+            createPersistentTrailStorage()
+          )
+        : createDemoExplorationSource(grid, dataset.home),
+    [grid, dataset]
+  );
+
+  /** Bumps when cells are added — regions and readouts re-key on it. */
+  const [explorationVersion, setExplorationVersion] = useState(0);
+  useEffect(
+    () => exploration.subscribe(() => setExplorationVersion(exploration.version())),
+    [exploration]
+  );
+
+  // Live fixes fold in as they arrive; a foreground return re-scans the trail
+  // for fixes the background task published while the app was asleep.
+  useEffect(() => {
+    if (selfFix) exploration.noteSelfFix(selfFix);
+  }, [exploration, selfFix]);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') void exploration.backfill();
+    });
+    return () => sub.remove();
+  }, [exploration]);
   const engine = useMemo(
     () =>
       new MapEngine({
         source: dataset.source,
         grid,
+        dataZooms: dataset.dataZooms,
         onTiming: __DEV__
           ? (t) =>
               console.log(
@@ -97,7 +126,7 @@ export function useMapEngine(
 
   const anchor = useMemo<CameraState>(() => ({ center: home, zoom: CAMERA_INITIAL_ZOOM }), [home]);
   const constraints = useMemo(
-    () => ({ bounds: dataset.bounds, minZoom: CAMERA_MIN_ZOOM, maxZoom: CAMERA_MAX_ZOOM }),
+    () => ({ bounds: dataset.bounds, minZoom: dataset.minZoom, maxZoom: dataset.maxZoom }),
     [dataset]
   );
   const limits = useMemo(
@@ -118,11 +147,17 @@ export function useMapEngine(
     regionRef.current = region;
   }, [region]);
 
+  /** Exploration version the on-screen region was built with. */
+  const builtVersionRef = useRef(-1);
+
   useEffect(() => {
     if (!viewport) return;
     const current = regionRef.current;
     const covers = current ? coversView(current.spec, target, viewport) : false;
-    const rebuild = !current || shouldPrefetchRegion(current.spec, target, viewport);
+    const rebuild =
+      !current ||
+      shouldPrefetchRegion(current.spec, target, viewport, dataset.dataZooms) ||
+      builtVersionRef.current !== explorationVersion;
 
     // The data camera follows immediately whenever the region still covers the
     // view; readouts (coverage/place) update without waiting on a build.
@@ -131,9 +166,10 @@ export function useMapEngine(
 
     let live = true;
     engine
-      .buildRegion({ camera: target, viewport, exploration })
+      .buildRegion({ camera: target, viewport, exploration: exploration.index() })
       .then((built) => {
         if (!live || !built) return; // superseded builds resolve null
+        builtVersionRef.current = explorationVersion;
         setRegion(built);
         setCamera(target);
       })
@@ -143,7 +179,7 @@ export function useMapEngine(
     return () => {
       live = false;
     };
-  }, [engine, target, viewport, exploration]);
+  }, [engine, target, viewport, exploration, explorationVersion, dataset]);
 
   const commit = useCallback(
     (t: ViewTransform) => {
@@ -161,9 +197,9 @@ export function useMapEngine(
       if (!viewport) return;
       const live = clampCamera(applyViewTransform(anchor, viewport, t), viewport, constraints);
       const current = regionRef.current;
-      if (current && !shouldPrefetchRegion(current.spec, live, viewport)) return;
+      if (current && !shouldPrefetchRegion(current.spec, live, viewport, dataset.dataZooms)) return;
       engine
-        .buildRegion({ camera: live, viewport, exploration })
+        .buildRegion({ camera: live, viewport, exploration: exploration.index() })
         .then((built) => {
           if (built) setRegion(built); // region only — the committed camera is untouched
         })
@@ -171,12 +207,14 @@ export function useMapEngine(
           /* a superseded/failed prefetch is harmless; the current layer stays */
         });
     },
-    [viewport, anchor, constraints, engine, exploration]
+    [viewport, anchor, constraints, engine, exploration, dataset]
   );
 
   const coverage = useMemo(
-    () => (viewport ? coverageInView(exploration, grid, camera, viewport) : 0),
-    [exploration, grid, camera, viewport]
+    () => (viewport ? coverageInView(exploration.index(), grid, camera, viewport) : 0),
+    // explorationVersion re-keys the memo: the index is identity-stable but mutable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [exploration, explorationVersion, grid, camera, viewport]
   );
 
   const placeName = useMemo(
@@ -190,7 +228,6 @@ export function useMapEngine(
     camera,
     anchor,
     limits,
-    hexRadius: grid.radius,
     coverage,
     placeName,
     commit,
