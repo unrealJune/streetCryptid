@@ -17,6 +17,7 @@ import {
   type ProfileView,
   type SasChallenge,
   type SasRole,
+  type TransportDiagnostics,
 } from 'iroh-location';
 
 import {
@@ -176,6 +177,12 @@ export interface SharingSnapshot {
   lastSyncRecovered: number | null;
   /** Offline-delivery stash: whether a stash is deployed and whether the user opted in. */
   stash: { available: boolean; optedIn: boolean };
+  /** Live iroh endpoint addresses and known peer path usage for the diagnostics screen. */
+  transportDiagnostics: {
+    snapshot: TransportDiagnostics | null;
+    updatedAt: number | null;
+    error: string | null;
+  };
   /**
    * Transport preferences: whether the user forced relay-only, and whether that's actually
    * enforced at the native endpoint yet (Phase 2). In Phase 1 `enforced` is always false — the
@@ -261,6 +268,10 @@ export class LocationSharingService implements FixPublisher {
   private bleCaps: BleCapabilities | null = null;
   private nearbyPeers: BlePeer[] = [];
   private pairSessions: PairStateRecord[] = [];
+  private transportDiagnostics: TransportDiagnostics | null = null;
+  private transportDiagnosticsUpdatedAt: number | null = null;
+  private transportDiagnosticsError: string | null = null;
+  private transportDiagnosticsInFlight: Promise<void> | null = null;
   private pendingPairRequests: PairEvent[] = [];
   private verifications: PairingVerification[] = [];
   private bumpUntil = 0;
@@ -1068,6 +1079,12 @@ export class LocationSharingService implements FixPublisher {
     await this.pollPairingOnce();
   }
 
+  /** Refresh native endpoint addresses and known peer path usage immediately. */
+  async refreshTransportDiagnostics(): Promise<void> {
+    await this.pollTransportDiagnosticsOnce();
+    this.emit();
+  }
+
   /** True once the node is bound and can publish (the {@link FixPublisher} contract). */
   isReady(): boolean {
     return this.mod !== null && this.status === 'ready';
@@ -1684,6 +1701,11 @@ export class LocationSharingService implements FixPublisher {
       backgroundAccess: this.backgroundAccess,
       lastSyncRecovered: this.lastSyncRecovered,
       stash: this.stashState(),
+      transportDiagnostics: {
+        snapshot: this.transportDiagnostics,
+        updatedAt: this.transportDiagnosticsUpdatedAt,
+        error: this.transportDiagnosticsError,
+      },
       transports: this.relayOnlyState(),
       pairing: this.pairingSnapshot(),
     };
@@ -1845,6 +1867,7 @@ export class LocationSharingService implements FixPublisher {
       this.nearbyPeers = peers;
       this.bleCaps = caps;
       this.pairingReadyFlag = caps.pairingReady;
+      await this.pollTransportDiagnosticsOnce();
       for (const profile of profileEvents) this.applyProfile(profile);
       for (const event of pairEvents) await this.handlePairEvent(event);
       // Ready is a drained, one-shot native event. A transient bridge/result failure must not lose
@@ -1874,6 +1897,32 @@ export class LocationSharingService implements FixPublisher {
       this.emitIfPairingChanged();
     } catch (err) {
       this.reportPollError(err);
+    }
+  }
+
+  private pollTransportDiagnosticsOnce(): Promise<void> {
+    if (this.transportDiagnosticsInFlight) return this.transportDiagnosticsInFlight;
+    this.transportDiagnosticsInFlight = this.doPollTransportDiagnosticsOnce().finally(() => {
+      this.transportDiagnosticsInFlight = null;
+    });
+    return this.transportDiagnosticsInFlight;
+  }
+
+  private async doPollTransportDiagnosticsOnce(): Promise<void> {
+    const mod = this.mod;
+    if (!mod) return;
+    if (typeof mod.transportDiagnostics !== 'function') {
+      this.transportDiagnosticsError =
+        'This native build does not expose endpoint transport diagnostics.';
+      return;
+    }
+    try {
+      const peerEndpointIds = pool.friendList(this.state).map((friend) => friend.endpointId);
+      this.transportDiagnostics = await mod.transportDiagnostics(peerEndpointIds);
+      this.transportDiagnosticsUpdatedAt = Date.now();
+      this.transportDiagnosticsError = null;
+    } catch (error) {
+      this.transportDiagnosticsError = errorMessage(error);
     }
   }
 

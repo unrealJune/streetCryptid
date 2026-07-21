@@ -370,7 +370,17 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_doc_ticket(uint64_t ptr
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_DOCS_WRITE
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_DOCS_WRITE
-uint64_t uniffi_iroh_location_fn_method_locationnode_docs_write(uint64_t ptr, RustBuffer _subscription_id, uint64_t seq, uint32_t epoch, RustBuffer fix, RustBuffer recipients
+uint64_t uniffi_iroh_location_fn_method_locationnode_docs_write(uint64_t ptr, RustBuffer subscription_id, uint64_t seq, uint32_t epoch, RustBuffer fix, RustBuffer recipients
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_DOCS_WRITE_INNER
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_DOCS_WRITE_INNER
+uint64_t uniffi_iroh_location_fn_method_locationnode_docs_write_inner(uint64_t ptr, RustBuffer _subscription_id, uint64_t seq, uint32_t epoch, RustBuffer fix, RustBuffer recipients, RustBuffer traceparent
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_DOCS_WRITE_TRACED
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_DOCS_WRITE_TRACED
+uint64_t uniffi_iroh_location_fn_method_locationnode_docs_write_traced(uint64_t ptr, RustBuffer subscription_id, uint64_t seq, uint32_t epoch, RustBuffer fix, RustBuffer recipients, RustBuffer traceparent
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_ENDPOINT_ID
@@ -528,9 +538,24 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_subscribe(uint64_t ptr, Rus
 uint64_t uniffi_iroh_location_fn_method_locationnode_sync_trail(uint64_t ptr, uint64_t since_ts, RustBuffer peer_ticket
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SYNC_TRAIL_INNER
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SYNC_TRAIL_INNER
+uint64_t uniffi_iroh_location_fn_method_locationnode_sync_trail_inner(uint64_t ptr, uint64_t since_ts, RustBuffer peer_ticket, RustBuffer traceparent
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SYNC_TRAIL_TRACED
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SYNC_TRAIL_TRACED
+uint64_t uniffi_iroh_location_fn_method_locationnode_sync_trail_traced(uint64_t ptr, uint64_t since_ts, RustBuffer peer_ticket, RustBuffer traceparent
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_TICKET
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_TICKET
 uint64_t uniffi_iroh_location_fn_method_locationnode_ticket(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_TRANSPORT_DIAGNOSTICS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_TRANSPORT_DIAGNOSTICS
+uint64_t uniffi_iroh_location_fn_method_locationnode_transport_diagnostics(uint64_t ptr, RustBuffer peer_endpoint_ids
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CLONE_SUBSCRIPTION
@@ -546,6 +571,16 @@ void uniffi_iroh_location_fn_free_subscription(uint64_t handle, RustCallStatus *
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_PUBLISH
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_PUBLISH
 uint64_t uniffi_iroh_location_fn_method_subscription_publish(uint64_t ptr, uint64_t seq, uint32_t epoch, RustBuffer fix, RustBuffer recipients
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_PUBLISH_INNER
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_PUBLISH_INNER
+uint64_t uniffi_iroh_location_fn_method_subscription_publish_inner(uint64_t ptr, uint64_t seq, uint32_t epoch, RustBuffer fix, RustBuffer recipients, RustBuffer traceparent
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_PUBLISH_TRACED
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_PUBLISH_TRACED
+uint64_t uniffi_iroh_location_fn_method_subscription_publish_traced(uint64_t ptr, uint64_t seq, uint32_t epoch, RustBuffer fix, RustBuffer recipients, RustBuffer traceparent
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_DECODE_PAIR_INVITE
@@ -948,6 +983,18 @@ uint16_t uniffi_iroh_location_checksum_method_locationnode_docs_write(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_DOCS_WRITE_INNER
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_DOCS_WRITE_INNER
+uint16_t uniffi_iroh_location_checksum_method_locationnode_docs_write_inner(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_DOCS_WRITE_TRACED
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_DOCS_WRITE_TRACED
+uint16_t uniffi_iroh_location_checksum_method_locationnode_docs_write_traced(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_ENDPOINT_ID
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_ENDPOINT_ID
 uint16_t uniffi_iroh_location_checksum_method_locationnode_endpoint_id(void
@@ -1134,15 +1181,45 @@ uint16_t uniffi_iroh_location_checksum_method_locationnode_sync_trail(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SYNC_TRAIL_INNER
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SYNC_TRAIL_INNER
+uint16_t uniffi_iroh_location_checksum_method_locationnode_sync_trail_inner(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SYNC_TRAIL_TRACED
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SYNC_TRAIL_TRACED
+uint16_t uniffi_iroh_location_checksum_method_locationnode_sync_trail_traced(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_TICKET
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_TICKET
 uint16_t uniffi_iroh_location_checksum_method_locationnode_ticket(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_TRANSPORT_DIAGNOSTICS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_TRANSPORT_DIAGNOSTICS
+uint16_t uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH
 uint16_t uniffi_iroh_location_checksum_method_subscription_publish(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH_INNER
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH_INNER
+uint16_t uniffi_iroh_location_checksum_method_subscription_publish_inner(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH_TRACED
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH_TRACED
+uint16_t uniffi_iroh_location_checksum_method_subscription_publish_traced(void
     
 );
 #endif

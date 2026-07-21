@@ -49,6 +49,7 @@ class FakeNativeModule {
     pairResult: [] as string[],
     nearbyBlePeers: 0,
     bleCapabilities: 0,
+    transportDiagnostics: 0,
     createNode: 0,
     start: 0,
   };
@@ -134,6 +135,10 @@ class FakeNativeModule {
     return [];
   }
   async pruneTrail() {}
+  async transportDiagnostics() {
+    this.calls.transportDiagnostics += 1;
+    return { localAddresses: [], peers: [] };
+  }
 
   async setPairingReady(ready: boolean) {
     this.calls.setPairingReady.push(ready);

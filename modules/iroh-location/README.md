@@ -51,7 +51,7 @@ source before each cloud build.
 
 ```bash
 # Rust + mobile targets
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim \
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios \
   aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 cargo install cargo-ndk cargo-make
 # Android NDK installed; ANDROID_NDK_HOME set. Kotlin 2.2+.
@@ -73,62 +73,35 @@ cargo build          # compiles iroh + gossip glue against the pinned versions
 > `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` and
 > `sudo xcodebuild -license accept`.
 
-The validated manual pipeline (no `cargo make` needed). Build one iOS static-lib slice
-per arch, generate the Swift bindings from any built lib, then assemble an XCFramework:
+Run `just bindgen-ios` to regenerate the tracked Swift/C bindings and assemble the
+git-ignored XCFramework. The recipe fixes the deployment target at iOS 16.4, builds the
+device arm64 archive, combines arm64 and x86_64 simulator archives into one universal
+simulator slice, and packages both slices:
 
 ```bash
-cd modules/iroh-location/rust
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-
-# Swift bindings (uses an unstripped host build because release stripping can remove UniFFI
-# metadata on ELF hosts; needs the `cli` feature):
-cargo build --features cli
-cargo run --bin uniffi-bindgen --features cli -- generate \
-  --library target/debug/libiroh_location.dylib --crate iroh_location \
-  --language swift --out-dir ../ios/generated
-# -> ../ios/generated/{iroh_location.swift, iroh_locationFFI.h, iroh_locationFFI.modulemap}
-
-# Static libs (device = aarch64-apple-ios; simulator = aarch64-apple-ios-sim on Apple
-# Silicon, or x86_64-apple-ios on an Intel Mac):
-cargo build --release --target aarch64-apple-ios
-cargo build --release --target aarch64-apple-ios-sim   # or x86_64-apple-ios (Intel)
-
-# Assemble the XCFramework the podspec expects, wiring the modulemap as headers:
-mkdir -p ../ios/headers && cp ../ios/generated/iroh_locationFFI.h ../ios/headers/
-cp ../ios/generated/iroh_locationFFI.modulemap ../ios/headers/module.modulemap
-xcodebuild -create-xcframework \
-  -library target/aarch64-apple-ios/release/libiroh_location.a -headers ../ios/headers \
-  -library target/aarch64-apple-ios-sim/release/libiroh_location.a -headers ../ios/headers \
-  -output ../ios/IrohLocationFFI.xcframework
+just bindgen-ios
 ```
 
 For EAS iOS builds, `eas-build-pre-install` runs
 `scripts/eas-build-pre-install.sh` before prebuild and CocoaPods. The hook installs the
-Rust toolchain when needed, builds the App Store device slice with the iOS 16.4
-deployment target used by Expo SDK 57, and creates the git-ignored XCFramework from the
-checked-in UniFFI headers. The podspec propagates the Rust archive's `Network`,
-`CoreBluetooth`, and `SystemConfiguration` dependencies to the app linker. Local device
-and simulator builds still use `just bindgen-ios`.
+Rust toolchain when needed, regenerates the Swift/FFI bindings from the current Rust API,
+builds the App Store device slice with the iOS 16.4 deployment target used by Expo SDK 57,
+and creates the git-ignored XCFramework. Regenerating is required because UniFFI aborts on
+first use when a generated API checksum does not match the linked archive. The podspec
+propagates the Rust archive's `Network`, `CoreBluetooth`, and `SystemConfiguration`
+dependencies to the app linker. Local device and simulator builds still use
+`just bindgen-ios`.
 
-> **Temporary iOS App Store limitation (2026-07-12):** the
-> `com.apple.developer.networking.multicast` entitlement is intentionally omitted from
-> `app.json` while Apple reviews the managed-capability request for
-> `com.unrealjune.streetcryptid`. iOS remains functional through authenticated relay/DNS
-> discovery and BLE, but the direct same-Wi-Fi mDNS fast path may be unavailable. After
-> Apple approves the capability, restore the entitlement under `expo.ios.entitlements`,
-> regenerate the App Store provisioning profile with
-> `eas credentials:configure-build --platform ios --profile production`, and rebuild.
+The Apple-managed `com.apple.developer.networking.multicast` capability is approved for
+`com.unrealjune.streetcryptid` and declared under `expo.ios.entitlements`. After changing
+this entitlement, regenerate every affected EAS provisioning profile; profiles created
+before approval cannot sign the app. The signed app and its embedded profile should both
+contain the entitlement.
 
 ### 3. Android — jniLibs + Kotlin bindings
 
 ```bash
-cd modules/iroh-location/rust
-cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
-  -o ../android/src/main/jniLibs build --release
-cargo build --features cli
-cargo run --bin uniffi-bindgen --features cli -- generate \
-  --library target/debug/libiroh_location.so --crate iroh_location \
-  --language kotlin --out-dir ../android/src/main/java
+just bindgen-android
 ```
 
 `build.gradle` pins the JNA **`@aar`** variant (bundles `libjnidispatch.so`) — the plain
@@ -136,7 +109,15 @@ jar crashes on device. Requires Kotlin 2.2+.
 
 `IrohAndroidBootstrap.install(...)` runs during module `OnCreate`: it loads the
 shared library, installs a process-lifetime application context for iroh's DNS
-resolver, and initializes the BLE managers before any endpoint is constructed.
+resolver, initializes the BLE managers, and then runs UniFFI's generated integrity
+checks before any endpoint is constructed.
+
+The EAS pre-install hook uses the same generator before cross-compiling the Android
+libraries, so bindings are refreshed before Gradle packages the ABI-specific `.so` files.
+
+`just check-bindings` regenerates Kotlin and Swift/C bindings into a temporary directory
+and compares them with the tracked files, so CI can detect Rust API drift without
+modifying the worktree. `just check-all` includes this check.
 
 The BLE transport also needs the vendored `blew` Android runtime under
 `android/src/main/java/org/jakebot/blew/`. The Expo module loads

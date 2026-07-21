@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   KeyboardAvoidingView,
   Platform,
@@ -35,7 +35,17 @@ import {
 import type { GeneratedCryptid } from '../core/cryptid-generator';
 import { CryptidAvatar } from './cryptid-avatar';
 import { CryptidGeneratorDialog } from './cryptid-generator-dialog';
-import { SignalColorPicker } from './signal-color-picker';
+
+// Loaded lazily so its `@shopify/react-native-skia` import does NOT evaluate at
+// app boot. On web, importing Skia snapshots `global.CanvasKit` at module-eval
+// time (react-native-skia's `Skia.web.ts`); if that happens before
+// `WithSkiaWeb` (the map screen) loads CanvasKit, the singleton `Skia` freezes
+// with an undefined CanvasKit and every `Skia.Image.MakeImage` throws. Deferring
+// this leaf lets the map's WithSkiaWeb be the first to evaluate Skia — after
+// CanvasKit is loaded. Harmless on native (Metro supports dynamic import).
+const SignalColorPicker = lazy(() =>
+  import('./signal-color-picker').then((m) => ({ default: m.SignalColorPicker }))
+);
 
 const AUTOSAVE_DELAY_MS = 450;
 const PROFILE_MAX_WIDTH = 640;
@@ -609,14 +619,16 @@ export function CryptidProfileEditor({
                 <ThemedText type="small" themeColor="textSecondary">
                   This marks your profile icon, map pin, and shared trail on friends&apos; maps.
                 </ThemedText>
-                <SignalColorPicker
-                  color={color}
-                  onChange={(value) => {
-                    setSaveError(null);
-                    setSaveStatus('idle');
-                    setColor(value);
-                  }}
-                />
+                <Suspense fallback={null}>
+                  <SignalColorPicker
+                    color={color}
+                    onChange={(value) => {
+                      setSaveError(null);
+                      setSaveStatus('idle');
+                      setColor(value);
+                    }}
+                  />
+                </Suspense>
                 <ThemedText style={styles.fieldLabel}>Quick colors</ThemedText>
                 <View
                   accessibilityLabel="Signal color"

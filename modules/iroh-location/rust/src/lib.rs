@@ -299,6 +299,34 @@ pub struct BleCapabilities {
     pub pairing_ready: bool,
 }
 
+/// One endpoint address as exposed by iroh's live path table.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TransportAddressDiagnostic {
+    /// `relay` | `ip` | `custom`.
+    pub kind: String,
+    /// Full display form (`relay:https://…`, `ip:host:port`, or the custom transport address).
+    pub address: String,
+    /// Whether a remote path is actively carrying traffic. `None` for local advertised addresses,
+    /// whose presence does not prove another endpoint is using them.
+    pub active: Option<bool>,
+}
+
+/// Iroh's current address knowledge for one requested peer.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PeerTransportDiagnostic {
+    pub endpoint_id: Vec<u8>,
+    /// False when iroh has no retained path information for this peer.
+    pub known: bool,
+    pub addresses: Vec<TransportAddressDiagnostic>,
+}
+
+/// Live endpoint transport snapshot used by the in-app diagnostics.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TransportDiagnostics {
+    pub local_addresses: Vec<TransportAddressDiagnostic>,
+    pub peers: Vec<PeerTransportDiagnostic>,
+}
+
 /// A nearby BLE peer surfaced by the transport snapshot (no RSSI — the crate discards it).
 ///
 /// `verified_endpoint_id` and `endpoint_hint` are deliberately separate: the former is trusted
@@ -1243,6 +1271,67 @@ impl LocationNode {
         Ok(Some(pair_result(&data, peer_profile)))
     }
 
+    /// Snapshot the local endpoint's advertised addresses and iroh's retained path table for the
+    /// requested peers. Remote path usage is point-in-time; callers should poll when displaying it.
+    pub async fn transport_diagnostics(
+        &self,
+        peer_endpoint_ids: Vec<Vec<u8>>,
+    ) -> Result<TransportDiagnostics, LocationError> {
+        let endpoint = {
+            let guard = self.inner.lock().await;
+            guard
+                .as_ref()
+                .ok_or(LocationError::NotStarted)?
+                .endpoint
+                .clone()
+        };
+
+        let local_addresses = endpoint
+            .addr()
+            .addrs
+            .iter()
+            .map(|address| transport_address_diagnostic(address, None))
+            .collect();
+
+        let mut peers = Vec::with_capacity(peer_endpoint_ids.len());
+        for peer_endpoint_id in peer_endpoint_ids {
+            let bytes: [u8; 32] = peer_endpoint_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| LocationError::Decode("peer endpoint id must be 32 bytes".into()))?;
+            let endpoint_id = EndpointId::from_bytes(&bytes)
+                .map_err(|e| LocationError::Decode(format!("bad peer endpoint id: {e}")))?;
+            let info = endpoint.remote_info(endpoint_id).await;
+            let (known, addresses) = match info {
+                Some(info) => (
+                    true,
+                    info.addrs()
+                        .map(|address| {
+                            transport_address_diagnostic(
+                                address.addr(),
+                                Some(matches!(
+                                    address.usage(),
+                                    iroh::endpoint::TransportAddrUsage::Active
+                                )),
+                            )
+                        })
+                        .collect(),
+                ),
+                None => (false, Vec::new()),
+            };
+            peers.push(PeerTransportDiagnostic {
+                endpoint_id: peer_endpoint_id,
+                known,
+                addresses,
+            });
+        }
+
+        Ok(TransportDiagnostics {
+            local_addresses,
+            peers,
+        })
+    }
+
     // ── BLE status (Android/Apple only; honest stub elsewhere) — ARCHITECTURE.md §2 ────────
 
     /// Whether a BLE transport is wired into this node's endpoint on this platform.
@@ -1500,6 +1589,24 @@ fn invite_from_uniffi(inv: &PairInvite) -> Result<InviteData, LocationError> {
         endpoint_ticket: inv.endpoint_ticket.clone(),
         expires_at_ms: inv.expires_at_ms,
     })
+}
+
+fn transport_address_diagnostic(
+    address: &iroh::TransportAddr,
+    active: Option<bool>,
+) -> TransportAddressDiagnostic {
+    let kind = if address.is_relay() {
+        "relay"
+    } else if address.is_ip() {
+        "ip"
+    } else {
+        "custom"
+    };
+    TransportAddressDiagnostic {
+        kind: kind.into(),
+        address: address.to_string(),
+        active,
+    }
 }
 
 fn ble_peer(p: &ble::BlePeerView) -> BlePeer {

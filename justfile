@@ -85,8 +85,8 @@ test:
 # Run the full local gate: types, lint, formatting, and tests (JS/TS only).
 check: typecheck lint format-check test
 
-# Full gate including the native iroh-location Rust crate (needs the Rust toolchain).
-check-all: check test-rust
+# Full gate including the native iroh-location Rust crate and generated bindings.
+check-all: check test-rust check-bindings
 
 # Expo project health check.
 doctor:
@@ -110,6 +110,10 @@ test-rust:
 build-rust:
     cd modules/iroh-location/rust && cargo build
 
+# Verify tracked Swift/C and Kotlin UniFFI bindings match the Rust API.
+check-bindings:
+    bash scripts/check-uniffi-bindings.sh
+
 # Needs wasm-pack + the wasm32-unknown-unknown target; web/ is a git-ignored build output (README §5).
 # Build the browser WASM bundle (relay-only iroh + in-memory docs) into modules/iroh-location/web/.
 build-wasm:
@@ -120,37 +124,34 @@ build-wasm:
 bindgen-android:
     #!/usr/bin/env sh
     set -eu
+    bash scripts/generate-uniffi-bindings.sh android
     cd modules/iroh-location/rust
-    # 1. Cross-compile the .so for every Android ABI into jniLibs.
+    # Cross-compile the .so for every Android ABI into jniLibs.
     cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../android/src/main/jniLibs build --release
-    # 2. Generate Kotlin bindings from a HOST-built library. uniffi's --library mode reads metadata
-    #    from a native binary; a cross-compiled Android .so silently yields nothing off-device, so we
-    #    build an unstripped host cdylib and point at it (.dll on Windows, .dylib on macOS, .so on
-    #    Linux). The release profile strips UniFFI metadata on ELF hosts.
-    cargo build --features cli
-    LIB="$(ls target/debug/iroh_location.dll target/debug/libiroh_location.dylib target/debug/libiroh_location.so 2>/dev/null | head -1)"
-    cargo run --bin uniffi-bindgen --features cli -- generate \
-      --library "$LIB" --crate iroh_location --language kotlin --no-format \
-      --out-dir ../android/src/main/java
 
 # Regenerate the iOS XCFramework + Swift UniFFI bindings. macOS + full Xcode only (see README §2).
 bindgen-ios:
     #!/usr/bin/env sh
     set -eu
+    export IPHONEOS_DEPLOYMENT_TARGET=16.4
+    rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+    bash scripts/generate-uniffi-bindings.sh ios
     cd modules/iroh-location/rust
-    cargo build --features cli
-    cargo run --bin uniffi-bindgen --features cli -- generate \
-      --library target/debug/libiroh_location.dylib --crate iroh_location \
-      --language swift --out-dir ../ios/generated
-    cargo build --release --target aarch64-apple-ios
-    cargo build --release --target aarch64-apple-ios-sim
+    cargo build --locked --release --target aarch64-apple-ios
+    cargo build --locked --release --target aarch64-apple-ios-sim
+    cargo build --locked --release --target x86_64-apple-ios
     mkdir -p ../ios/headers
     cp ../ios/generated/iroh_locationFFI.h ../ios/headers/
     cp ../ios/generated/iroh_locationFFI.modulemap ../ios/headers/module.modulemap
     rm -rf ../ios/IrohLocationFFI.xcframework
+    mkdir -p target/ios-simulator/release
+    lipo -create \
+      target/aarch64-apple-ios-sim/release/libiroh_location.a \
+      target/x86_64-apple-ios/release/libiroh_location.a \
+      -output target/ios-simulator/release/libiroh_location.a
     xcodebuild -create-xcframework \
       -library target/aarch64-apple-ios/release/libiroh_location.a -headers ../ios/headers \
-      -library target/aarch64-apple-ios-sim/release/libiroh_location.a -headers ../ios/headers \
+      -library target/ios-simulator/release/libiroh_location.a -headers ../ios/headers \
       -output ../ios/IrohLocationFFI.xcframework
 
 # --- EAS: cloud build / submit / update --------------------------------------

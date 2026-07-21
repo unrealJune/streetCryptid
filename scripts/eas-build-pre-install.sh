@@ -18,12 +18,11 @@ fi
 
 # A rustup installed by this hook is not on the inherited PATH yet.
 export PATH="$HOME/.cargo/bin:$PATH"
-# Keep C/assembly dependencies built by Rust aligned with Expo SDK 57's iOS minimum.
-export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-16.4}"
-
 rustup toolchain install stable --profile minimal --no-self-update
+export RUSTUP_TOOLCHAIN=stable
 
 if [[ "$platform" == "android" ]]; then
+  "$repo_root/scripts/generate-uniffi-bindings.sh" android
   rustup target add --toolchain stable \
     aarch64-linux-android \
     armv7-linux-androideabi \
@@ -49,6 +48,13 @@ ios_dir="$repo_root/modules/iroh-location/ios"
 headers_dir="$ios_dir/headers"
 framework_path="$ios_dir/IrohLocationFFI.xcframework"
 library_path="$crate_dir/target/aarch64-apple-ios/release/libiroh_location.a"
+
+# Keep C/assembly dependencies built by Rust aligned with Expo SDK 57's iOS minimum.
+export IPHONEOS_DEPLOYMENT_TARGET=16.4
+
+# Keep the committed Swift source and C header synchronized with the Rust archive built below.
+# UniFFI validates every API checksum on first use and aborts when generated bindings are stale.
+"$repo_root/scripts/generate-uniffi-bindings.sh" ios
 
 rustup target add --toolchain stable aarch64-apple-ios
 cargo +stable build \

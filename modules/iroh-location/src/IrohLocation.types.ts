@@ -222,6 +222,29 @@ export interface BleCapabilities {
   pairingReady: boolean;
 }
 
+export type TransportAddressKind = 'relay' | 'ip' | 'custom';
+
+/** One local or remote endpoint address from iroh's live path table. */
+export interface TransportAddressDiagnostic {
+  kind: TransportAddressKind;
+  address: string;
+  /** Remote path usage; null for local advertised addresses. */
+  active: boolean | null;
+}
+
+/** Iroh's retained address/path knowledge for one requested peer. */
+export interface PeerTransportDiagnostic {
+  endpointId: string;
+  known: boolean;
+  addresses: TransportAddressDiagnostic[];
+}
+
+/** Point-in-time endpoint transport snapshot. */
+export interface TransportDiagnostics {
+  localAddresses: TransportAddressDiagnostic[];
+  peers: PeerTransportDiagnostic[];
+}
+
 /** A nearby BLE peer surfaced by the transport snapshot (no RSSI — the crate discards it). */
 export interface BlePeer {
   deviceId: string;
@@ -412,6 +435,9 @@ export interface IrohLocationApi {
   encodePairInvite(invite: PairInvite): Promise<string>;
   /** Decode an opaque `scpair1:<hex>` token back into a {@link PairInvite}. */
   decodePairInvite(token: string): Promise<PairInvite>;
+
+  /** Local addresses plus live path usage for the requested peer EndpointIds. */
+  transportDiagnostics(peerEndpointIdsHex: string[]): Promise<TransportDiagnostics>;
 
   // ── BLE status (Android/Apple only; honest stub elsewhere) — ARCHITECTURE.md §2 ────────────
   /** Whether a BLE transport is wired into this node's endpoint on this platform. */
