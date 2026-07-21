@@ -47,7 +47,7 @@ interface EventLogRow {
 }
 
 const DB_NAME = 'streetcryptid.events.db';
-const MAX_ENTRIES = 1000;
+export const EVENT_LOG_MAX_ENTRIES = 10_000;
 const SENSITIVE_KEY = /authorization|password|psk|secret|ticket|token/i;
 const LOCATION_KEY = /^(lat|latitude|lon|lng|longitude)$/i;
 
@@ -136,6 +136,7 @@ function sanitize(value: unknown, key = '', seen = new WeakSet<object>()): unkno
 }
 
 function notify(): void {
+  if (listeners.size === 0) return;
   const snapshot = [...entries];
   listeners.forEach((listener) => listener(snapshot));
 }
@@ -170,7 +171,7 @@ async function persist(entry: EventLogEntry): Promise<void> {
         `DELETE FROM event_log WHERE id NOT IN (
           SELECT id FROM event_log ORDER BY timestamp DESC, rowid DESC LIMIT ?
         )`,
-        MAX_ENTRIES
+        EVENT_LOG_MAX_ENTRIES
       );
     }
   } catch {
@@ -191,7 +192,8 @@ export function recordEventLog(input: RecordEventLogEntry): EventLogEntry {
     ...(input.transport ? { transport: input.transport } : {}),
     details: sanitize(input.details ?? {}),
   };
-  entries = [entry, ...entries].slice(0, MAX_ENTRIES);
+  entries.unshift(entry);
+  if (entries.length > EVENT_LOG_MAX_ENTRIES) entries.pop();
   notify();
   void enqueuePersistence(() => persist(entry));
   return entry;
@@ -209,7 +211,7 @@ export async function loadEventLog(): Promise<EventLogEntry[]> {
     const rows = await db.getAllAsync<EventLogRow>(
       `SELECT id, timestamp, level, category, action, summary, status, transport, details
        FROM event_log ORDER BY timestamp DESC, rowid DESC LIMIT ?`,
-      MAX_ENTRIES
+      EVENT_LOG_MAX_ENTRIES
     );
     const persisted: EventLogEntry[] = rows.map((row) => {
       const { transport, details, ...rest } = row;
@@ -225,7 +227,9 @@ export async function loadEventLog(): Promise<EventLogEntry[]> {
     persisted.forEach((entry) => {
       if (!merged.has(entry.id)) merged.set(entry.id, entry);
     });
-    entries = [...merged.values()].sort((a, b) => b.timestamp - a.timestamp).slice(0, MAX_ENTRIES);
+    entries = [...merged.values()]
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, EVENT_LOG_MAX_ENTRIES);
     notify();
   } catch {
     // Keep current in-memory entries.

@@ -1967,6 +1967,7 @@ export class LocationSharingService implements FixPublisher {
       );
       recordEventLog({
         timestamp: this.transportDiagnosticsUpdatedAt,
+        level: changed ? 'info' : 'debug',
         category: 'transport',
         action: changed ? 'transport.status.changed' : 'transport.poll',
         summary: `${current.peers.length} peer(s), ${activePaths.length} active path(s)`,

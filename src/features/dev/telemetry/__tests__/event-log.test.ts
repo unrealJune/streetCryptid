@@ -24,6 +24,7 @@ describe('local event log', () => {
         timestamp: 1234,
         category: 'transport',
         action: 'publish.fix',
+        level: 'debug',
         status: 'ok',
         transport: 'iroh',
       }),
@@ -34,6 +35,17 @@ describe('local event log', () => {
         events: [expect.objectContaining({ name: 'gossip.publish.completed' })],
       })
     );
+  });
+
+  it('uses warning and error levels for meaningful failures', () => {
+    const telemetry = createTelemetry({ now: () => 1234 });
+    const dropped = telemetry.startSpan('engine.ingest', {
+      attributes: { 'sc.drop_reason': 'sampling-suspended' },
+    });
+    dropped.end();
+    telemetry.log('error', 'publish failed');
+
+    expect(getEventLog().map(({ level }) => level)).toEqual(['error', 'warn']);
   });
 
   it('redacts credentials and precise locations from details', () => {

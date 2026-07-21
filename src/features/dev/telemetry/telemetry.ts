@@ -74,7 +74,7 @@ function recordSpan(span: FinishedSpan): void {
   const status = span.status === 'unset' && !dropReason ? 'ok' : span.status;
   recordEventLog({
     timestamp: span.endMs,
-    level: span.status === 'error' ? 'error' : dropReason ? 'warn' : 'info',
+    level: span.status === 'error' ? 'error' : dropReason ? 'warn' : 'debug',
     category: categoryFor(span.name),
     action: span.name,
     summary: dropReason
