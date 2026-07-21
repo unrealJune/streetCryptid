@@ -248,6 +248,31 @@ export async function saveStashOptIn(kv: PersistentKV, optedIn: boolean): Promis
   await kv.set(STASH_OPTIN_KEY, optedIn ? '1' : '0');
 }
 
+const LOCATION_DISCLOSURE_KEY = 'sc.social.locationDisclosureAck';
+
+export type LocationDisclosureChoice = 'accepted' | 'declined' | null;
+
+/**
+ * Whether the user has been shown the in-app background-location disclosure and what they chose.
+ * `null` means the disclosure hasn't been shown yet this install (fresh install, or the KV/SQLite
+ * store was unavailable and fell back to in-memory). Shown once, before the OS runtime permission
+ * prompt fires — see `LocationDisclosureScreen`.
+ */
+export async function loadLocationDisclosureChoice(
+  kv: PersistentKV
+): Promise<LocationDisclosureChoice> {
+  const raw = await kv.get(LOCATION_DISCLOSURE_KEY);
+  return raw === 'accepted' || raw === 'declined' ? raw : null;
+}
+
+/** Persist the user's choice on the background-location disclosure screen. */
+export async function saveLocationDisclosureChoice(
+  kv: PersistentKV,
+  choice: 'accepted' | 'declined'
+): Promise<void> {
+  await kv.set(LOCATION_DISCLOSURE_KEY, choice);
+}
+
 const RELAY_ONLY_KEY = 'sc.social.relayOnly';
 
 /**

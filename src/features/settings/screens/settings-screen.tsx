@@ -9,6 +9,7 @@ import { StashSettingRow } from '@/features/social/components/stash-setting-row'
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 import { useTheme } from '@/hooks/use-theme';
 
+import { LocationAccessRow } from '../components/location-access-row';
 import { RelayOnlyRow } from '../components/relay-only-row';
 import { TransportDiagnostic } from '../components/transport-diagnostic';
 
@@ -31,6 +32,8 @@ export default function SettingsScreen() {
     refreshTransportDiagnostics,
     setStashOptIn,
     setRelayOnly,
+    disclosureStatus,
+    acknowledgeLocationDisclosure,
   } = useLocationSharing();
 
   useFocusEffect(
@@ -101,6 +104,11 @@ export default function SettingsScreen() {
           relayOnly={transports.relayOnly}
           enforced={transports.relayOnlyEnforced}
           onToggle={(relayOnly) => void setRelayOnly(relayOnly)}
+        />
+        <LocationAccessRow
+          accent={chrome.amber}
+          status={disclosureStatus}
+          onTurnOn={() => void acknowledgeLocationDisclosure(true)}
         />
       </View>
     </ScrollView>

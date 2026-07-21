@@ -21,6 +21,7 @@ import AppTabs from '@/components/app-tabs';
 import { CryptidAccountGate } from '@/features/account/components/cryptid-account-gate';
 import { CryptidProfileProvider } from '@/features/account/hooks/use-cryptid-profile';
 import { installConsoleTelemetryBridge } from '@/features/dev/telemetry';
+import { LocationDisclosureGate } from '@/features/social/components/location-disclosure-gate';
 import { LocationSharingProvider } from '@/features/social/hooks/use-location-sharing';
 
 // Developer telemetry: ship console.warn/error to the OTLP collector (inert without an endpoint).
@@ -50,7 +51,9 @@ export default function TabLayout() {
           <AnimatedSplashOverlay />
           <CryptidAccountGate>
             <LocationSharingProvider>
-              <AppTabs />
+              <LocationDisclosureGate>
+                <AppTabs />
+              </LocationDisclosureGate>
             </LocationSharingProvider>
           </CryptidAccountGate>
         </CryptidProfileProvider>
