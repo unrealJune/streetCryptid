@@ -1,4 +1,5 @@
 import { createOtlpExporter, type OtlpExporter, type OtlpTransport } from './exporter';
+import { flushEventLog, recordEventLog } from './event-log';
 import { newSpanId, newTraceId } from './ids';
 import { getOtelConfig } from './otel-config';
 import { getDeviceResource } from './resource';
@@ -15,10 +16,9 @@ import type {
 
 /**
  * The tracer facade every instrumented code path talks to. Two implementations behind one shape:
- * a real one when `EXPO_PUBLIC_OTEL_ENDPOINT` is configured (dev/preview builds), and a frozen
- * no-op otherwise — so instrumentation is written unconditionally and costs a method call in
- * production. Context propagation is EXPLICIT (pass `parent`), not ambient: Hermes has no reliable
- * AsyncLocalStorage, and explicit parents keep the headless background paths honest.
+ * a remote-exporting one when `EXPO_PUBLIC_OTEL_ENDPOINT` is configured (dev/preview builds), and
+ * a local-journal-only one otherwise. Context propagation is EXPLICIT (pass `parent`), not ambient:
+ * Hermes has no reliable AsyncLocalStorage, and explicit parents keep headless paths honest.
  */
 
 export interface StartSpanOptions {
@@ -42,43 +42,69 @@ export interface Telemetry {
   flush(): Promise<void>;
 }
 
-const NOOP_CONTEXT: SpanContext = { traceId: '0'.repeat(32), spanId: '0'.repeat(16) };
-
-const NOOP_SPAN: Span = Object.freeze({
-  context: NOOP_CONTEXT,
-  setAttribute: () => {},
-  setAttributes: () => {},
-  addEvent: () => {},
-  recordError: () => {},
-  setStatus: () => {},
-  end: () => {},
-});
-
-const NOOP_TELEMETRY: Telemetry = Object.freeze({
-  enabled: false,
-  startSpan: () => NOOP_SPAN,
-  withSpan: <T>(_n: string, _o: StartSpanOptions, fn: (span: Span) => Promise<T>) => fn(NOOP_SPAN),
-  log: () => {},
-  setResourceAttributes: () => {},
-  flush: () => Promise.resolve(),
-});
-
 export interface CreateTelemetryOptions {
-  endpoint: string;
+  endpoint?: string;
   resource?: Attributes;
   transport?: OtlpTransport;
   now?: () => number;
 }
 
+function categoryFor(name: string): string {
+  if (/pair|ble|bump|profile/i.test(name)) return 'pairing';
+  if (
+    /transport|relay|gossip|docs|trail|stash|fix|outbox|engine|background|bg\.|push/i.test(name)
+  ) {
+    return 'transport';
+  }
+  return 'system';
+}
+
+function transportFor(name: string): string | undefined {
+  if (/stash/i.test(name)) return 'stash';
+  if (/gossip/i.test(name)) return 'gossip';
+  if (/docs|trail|backfill/i.test(name)) return 'durable trail';
+  if (/ble|bump/i.test(name)) return 'BLE';
+  if (/publish|fix|outbox|engine/i.test(name)) return 'iroh';
+  return undefined;
+}
+
+function recordSpan(span: FinishedSpan): void {
+  const dropReason = span.attributes['sc.drop_reason'];
+  const duration = Math.max(0, span.endMs - span.startMs);
+  const status = span.status === 'unset' && !dropReason ? 'ok' : span.status;
+  recordEventLog({
+    timestamp: span.endMs,
+    level: span.status === 'error' ? 'error' : dropReason ? 'warn' : 'info',
+    category: categoryFor(span.name),
+    action: span.name,
+    summary: dropReason
+      ? `${span.name}: ${String(dropReason)}`
+      : `${span.name} ${status === 'error' ? 'failed' : 'completed'} in ${duration}ms`,
+    status,
+    transport: transportFor(span.name),
+    details: {
+      duration_ms: duration,
+      attributes: span.attributes,
+      events: span.events,
+      trace: span.context,
+      parent_span_id: span.parentSpanId,
+      links: span.links,
+      status_message: span.statusMessage,
+    },
+  });
+}
+
 /** Build a live telemetry instance. Exported for tests; app code uses {@link getTelemetry}. */
 export function createTelemetry(options: CreateTelemetryOptions): Telemetry {
   const now = options.now ?? Date.now;
-  const exporter: OtlpExporter = createOtlpExporter({
-    endpoint: options.endpoint,
-    resource: { 'service.name': 'streetcryptid-app', ...options.resource },
-    transport: options.transport,
-    now,
-  });
+  const exporter: OtlpExporter | undefined = options.endpoint
+    ? createOtlpExporter({
+        endpoint: options.endpoint,
+        resource: { 'service.name': 'streetcryptid-app', ...options.resource },
+        transport: options.transport,
+        now,
+      })
+    : undefined;
 
   function startSpan(name: string, opts: StartSpanOptions = {}): Span {
     const context: SpanContext = {
@@ -132,13 +158,14 @@ export function createTelemetry(options: CreateTelemetryOptions): Telemetry {
           status,
           statusMessage,
         };
-        exporter.enqueueSpan(finished);
+        recordSpan(finished);
+        exporter?.enqueueSpan(finished);
       },
     };
   }
 
   return {
-    enabled: true,
+    enabled: exporter !== undefined,
     startSpan,
     async withSpan<T>(
       name: string,
@@ -158,12 +185,24 @@ export function createTelemetry(options: CreateTelemetryOptions): Telemetry {
       }
     },
     log(severity, body, attributes, context): void {
-      exporter.enqueueLog({ timeMs: now(), severity, body, attributes, context });
+      const timeMs = now();
+      recordEventLog({
+        timestamp: timeMs,
+        level: severity,
+        category: categoryFor(body),
+        action: 'log',
+        summary: body,
+        status: severity === 'error' ? 'error' : 'unset',
+        details: { attributes, context },
+      });
+      exporter?.enqueueLog({ timeMs, severity, body, attributes, context });
     },
     setResourceAttributes(attrs: Attributes): void {
-      exporter.setResourceAttributes(attrs);
+      exporter?.setResourceAttributes(attrs);
     },
-    flush: () => exporter.flush(),
+    async flush(): Promise<void> {
+      await Promise.all([exporter?.flush() ?? Promise.resolve(), flushEventLog()]);
+    },
   };
 }
 
@@ -176,9 +215,10 @@ let singleton: Telemetry | undefined;
 export function getTelemetry(): Telemetry {
   if (singleton === undefined) {
     const config = getOtelConfig();
-    singleton = config
-      ? createTelemetry({ endpoint: config.endpoint, resource: getDeviceResource() })
-      : NOOP_TELEMETRY;
+    singleton = createTelemetry({
+      endpoint: config?.endpoint,
+      resource: getDeviceResource(),
+    });
   }
   return singleton;
 }

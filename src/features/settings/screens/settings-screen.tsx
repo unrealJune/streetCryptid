@@ -10,6 +10,7 @@ import { useLocationSharing } from '@/features/social/hooks/use-location-sharing
 import { useTheme } from '@/hooks/use-theme';
 
 import { LocationAccessRow } from '../components/location-access-row';
+import { EventLogPanel } from '../components/event-log-panel';
 import { RelayOnlyRow } from '../components/relay-only-row';
 import { TransportDiagnostic } from '../components/transport-diagnostic';
 
@@ -75,6 +76,13 @@ export default function SettingsScreen() {
           activeColor={chrome.green}
           availableColor={chrome.amber}
         />
+      </View>
+
+      <View style={styles.section}>
+        <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
+          DEBUG
+        </ThemedText>
+        <EventLogPanel activeColor={chrome.green} warningColor={chrome.amber} />
       </View>
 
       <View style={styles.section}>

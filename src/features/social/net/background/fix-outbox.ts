@@ -144,30 +144,29 @@ export function createFixOutbox(opts: OutboxOptions): FixOutbox {
         // Both branches are legitimate "a captured fix will never hit the wire" outcomes — the
         // exact thing a dropped-ping investigation needs to see (searchable via sc.drop_reason).
         const telemetry = getTelemetry();
-        if (telemetry.enabled && (coalesced || overflowDropped > 0)) {
-          const span = telemetry.startSpan('outbox.enqueue', {
-            parent,
-            attributes: {
-              coalesced,
+        const span = telemetry.startSpan('outbox.enqueue', {
+          parent,
+          attributes: {
+            coalesced,
+            overflow_dropped: overflowDropped,
+            pending: items.length,
+            'sc.drop_reason':
+              overflowDropped > 0 ? 'outbox-overflow' : coalesced ? 'coalesced' : undefined,
+          },
+        });
+        span.end();
+        if (overflowDropped > 0) {
+          // A captured fix was evicted before it could publish — real, silent data loss. Surface
+          // it as a log (→ Loki) in addition to the span, searchable via sc.drop_reason.
+          telemetry.log(
+            'warn',
+            `outbox overflow: dropped ${overflowDropped} oldest fix(es) before publish`,
+            {
               overflow_dropped: overflowDropped,
               pending: items.length,
-              'sc.drop_reason': overflowDropped > 0 ? 'outbox-overflow' : 'coalesced',
-            },
-          });
-          span.end();
-          if (overflowDropped > 0) {
-            // A captured fix was evicted before it could publish — real, silent data loss. Surface
-            // it as a log (→ Loki) in addition to the span, searchable via sc.drop_reason.
-            telemetry.log(
-              'warn',
-              `outbox overflow: dropped ${overflowDropped} oldest fix(es) before publish`,
-              {
-                overflow_dropped: overflowDropped,
-                pending: items.length,
-                'sc.drop_reason': 'outbox-overflow',
-              }
-            );
-          }
+              'sc.drop_reason': 'outbox-overflow',
+            }
+          );
         }
       });
     },

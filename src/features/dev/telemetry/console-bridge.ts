@@ -5,8 +5,8 @@ import type { LogSeverity } from './types';
  * Mirror `console.warn` / `console.error` into the dev telemetry log pipeline (→ OTLP `/v1/logs` →
  * Loki), so the app's existing diagnostics (e.g. "[background-location] …") become searchable
  * alongside traces and carry the same resource attributes (`service.instance.id`, `os.name`, …).
- * The original console methods are ALWAYS still called. Inert unless telemetry is enabled, so
- * production builds (no `EXPO_PUBLIC_OTEL_ENDPOINT`) leave `console` untouched. Idempotent.
+ * The original console methods are ALWAYS still called. The local event journal remains active
+ * without an OTLP endpoint; remote export is still developer-only. Idempotent.
  *
  * Developer-only, like the rest of this folder: the collector is a developer-controlled endpoint and
  * these bodies are the same lines already printed to the dev console. Never enable in production.
@@ -46,10 +46,9 @@ function wrap(original: ConsoleMethod, severity: LogSeverity): ConsoleMethod {
   };
 }
 
-/** Route `console.warn`/`console.error` through telemetry. Safe to call repeatedly (installs once). */
+/** Route `console.warn`/`console.error` through the local journal and optional OTLP export. */
 export function installConsoleTelemetryBridge(): void {
   if (originalWarn) return; // already installed
-  if (!getTelemetry().enabled) return; // production / no endpoint → leave console untouched
   originalWarn = console.warn.bind(console) as ConsoleMethod;
   originalError = console.error.bind(console) as ConsoleMethod;
   console.warn = wrap(originalWarn, 'warn');
