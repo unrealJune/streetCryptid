@@ -1,33 +1,55 @@
 import { SymbolView } from 'expo-symbols';
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Pressable, StyleSheet, TextInput, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import {
   clearEventLog,
+  EVENT_LOG_MAX_ENTRIES,
   getEventLog,
   loadEventLog,
   subscribeEventLog,
   type EventLogEntry,
+  type EventLogLevel,
 } from '@/features/dev/telemetry';
 import { useTheme } from '@/hooks/use-theme';
 
-type Filter = 'all' | 'transport' | 'errors';
+type CategoryFilter = 'all' | 'transport' | 'pairing' | 'system';
+type LevelFilter = 'all' | EventLogLevel;
+
+const PAGE_SIZE = 100;
+const LEVEL_WEIGHT: Record<EventLogLevel, number> = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3,
+};
 
 interface EventLogPanelProps {
   activeColor: string;
   warningColor: string;
 }
 
-function filterEntries(entries: EventLogEntry[], filter: Filter): EventLogEntry[] {
-  if (filter === 'errors') return entries.filter((entry) => entry.status === 'error');
-  if (filter === 'transport') return entries.filter((entry) => entry.category === 'transport');
-  return entries;
+function filterEntries(
+  entries: EventLogEntry[],
+  category: CategoryFilter,
+  level: LevelFilter,
+  search: string
+): EventLogEntry[] {
+  const query = search.trim().toLocaleLowerCase();
+  return entries.filter((entry) => {
+    if (category !== 'all' && entry.category !== category) return false;
+    if (level !== 'all' && LEVEL_WEIGHT[entry.level] < LEVEL_WEIGHT[level]) return false;
+    if (!query) return true;
+    return [entry.action, entry.summary, entry.category, entry.transport, entry.level].some((value) =>
+      value?.toLocaleLowerCase().includes(query)
+    );
+  });
 }
 
-function EventRow({
+const EventRow = memo(function EventRow({
   entry,
   activeColor,
   warningColor,
@@ -66,6 +88,9 @@ function EventRow({
           </ThemedText>
           <View style={styles.tags}>
             <ThemedText type="code" themeColor="textSecondary">
+              {entry.level}
+            </ThemedText>
+            <ThemedText type="code" themeColor="textSecondary">
               {entry.category}
             </ThemedText>
             {entry.transport ? (
@@ -83,26 +108,42 @@ function EventRow({
       ) : null}
     </View>
   );
-}
+});
 
 export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps) {
   const theme = useTheme();
   const [expanded, setExpanded] = useState(false);
-  const [filter, setFilter] = useState<Filter>('all');
+  const [paused, setPaused] = useState(false);
+  const [category, setCategory] = useState<CategoryFilter>('all');
+  const [level, setLevel] = useState<LevelFilter>('all');
+  const [search, setSearch] = useState('');
+  const [visibleLimit, setVisibleLimit] = useState(PAGE_SIZE);
   const [entries, setEntries] = useState(getEventLog);
+  const pausedRef = useRef(false);
 
   useEffect(() => {
+    if (!expanded || paused) return;
     const unsubscribe = subscribeEventLog(setEntries);
     return unsubscribe;
-  }, []);
+  }, [expanded, paused]);
 
   useFocusEffect(
     useCallback(() => {
-      void loadEventLog();
+      let active = true;
+      void loadEventLog().then((loaded) => {
+        if (active && !pausedRef.current) setEntries(loaded);
+      });
+      return () => {
+        active = false;
+      };
     }, [])
   );
 
-  const visibleEntries = useMemo(() => filterEntries(entries, filter), [entries, filter]);
+  const filteredEntries = useMemo(
+    () => filterEntries(entries, category, level, search),
+    [category, entries, level, search]
+  );
+  const visibleEntries = filteredEntries.slice(0, visibleLimit);
 
   return (
     <View style={[styles.container, { borderColor: theme.backgroundSelected }]}>
@@ -135,35 +176,126 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
         <View style={[styles.body, { borderTopColor: theme.backgroundSelected }]}>
           <ThemedText type="small" themeColor="textSecondary">
             Live transport, pairing, delivery, and error history. Precise locations and credentials
-            are redacted; the newest 1,000 events are retained on this device.
+            are redacted; the newest {EVENT_LOG_MAX_ENTRIES.toLocaleString()} events are retained on
+            this device.
           </ThemedText>
           <View style={styles.controls}>
-            {(['all', 'transport', 'errors'] as const).map((value) => (
-              <Pressable
-                key={value}
-                accessibilityRole="button"
-                accessibilityState={{ selected: filter === value }}
-                onPress={() => setFilter(value)}
-                style={[
-                  styles.control,
-                  {
-                    borderColor: filter === value ? activeColor : theme.backgroundSelected,
-                  },
-                ]}
-              >
-                <ThemedText type="smallBold">
-                  {value === 'all' ? 'All' : value === 'transport' ? 'Transport' : 'Errors'}
-                </ThemedText>
-              </Pressable>
-            ))}
             <Pressable
               accessibilityRole="button"
-              onPress={() => void clearEventLog()}
+              accessibilityState={{ selected: paused }}
+              onPress={() =>
+                setPaused((current) => {
+                  pausedRef.current = !current;
+                  return !current;
+                })
+              }
+              style={[
+                styles.control,
+                { borderColor: paused ? warningColor : theme.backgroundSelected },
+              ]}
+            >
+              <ThemedText type="smallBold">{paused ? 'Resume' : 'Pause'}</ThemedText>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                setEntries([]);
+                void clearEventLog();
+              }}
               style={[styles.control, styles.clear, { borderColor: warningColor }]}
             >
               <ThemedText type="smallBold">Clear</ThemedText>
             </Pressable>
           </View>
+          {paused ? (
+            <ThemedText type="small" themeColor="textSecondary">
+              Paused — new events are still being recorded.
+            </ThemedText>
+          ) : null}
+          <View style={styles.filterGroup}>
+            <ThemedText type="smallBold" themeColor="textSecondary">
+              LEVEL
+            </ThemedText>
+            <View style={styles.controls}>
+              {(['all', 'info', 'warn', 'error'] as const).map((value) => (
+                <Pressable
+                  key={value}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: level === value }}
+                  onPress={() => {
+                    setLevel(value);
+                    setVisibleLimit(PAGE_SIZE);
+                  }}
+                  style={[
+                    styles.control,
+                    { borderColor: level === value ? activeColor : theme.backgroundSelected },
+                  ]}
+                >
+                  <ThemedText type="smallBold">
+                    {value === 'all'
+                      ? 'All'
+                      : value === 'info'
+                        ? 'Info+'
+                        : value === 'warn'
+                          ? 'Warn+'
+                          : 'Errors'}
+                  </ThemedText>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+          <View style={styles.filterGroup}>
+            <ThemedText type="smallBold" themeColor="textSecondary">
+              CATEGORY
+            </ThemedText>
+            <View style={styles.controls}>
+              {(['all', 'transport', 'pairing', 'system'] as const).map((value) => (
+                <Pressable
+                  key={value}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: category === value }}
+                  onPress={() => {
+                    setCategory(value);
+                    setVisibleLimit(PAGE_SIZE);
+                  }}
+                  style={[
+                    styles.control,
+                    {
+                      borderColor: category === value ? activeColor : theme.backgroundSelected,
+                    },
+                  ]}
+                >
+                  <ThemedText type="smallBold">
+                    {value === 'all'
+                      ? 'All'
+                      : `${value.charAt(0).toUpperCase()}${value.slice(1)}`}
+                  </ThemedText>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+          <TextInput
+            accessibilityLabel="Search event log"
+            autoCapitalize="none"
+            autoCorrect={false}
+            onChangeText={(value) => {
+              setSearch(value);
+              setVisibleLimit(PAGE_SIZE);
+            }}
+            placeholder="Filter action, summary, transport…"
+            placeholderTextColor={theme.textSecondary}
+            style={[
+              styles.search,
+              {
+                borderColor: theme.backgroundSelected,
+                color: theme.text,
+              },
+            ]}
+            value={search}
+          />
+          <ThemedText type="small" themeColor="textSecondary">
+            Showing {visibleEntries.length} of {filteredEntries.length} matching events
+          </ThemedText>
 
           <View style={[styles.events, { borderColor: theme.backgroundSelected }]}>
             {visibleEntries.length > 0 ? (
@@ -181,6 +313,15 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
               </ThemedText>
             )}
           </View>
+          {visibleEntries.length < filteredEntries.length ? (
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => setVisibleLimit((current) => current + PAGE_SIZE)}
+              style={[styles.control, styles.showMore, { borderColor: theme.backgroundSelected }]}
+            >
+              <ThemedText type="smallBold">Show {PAGE_SIZE} more</ThemedText>
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
     </View>
@@ -215,6 +356,9 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: Spacing.two,
   },
+  filterGroup: {
+    gap: Spacing.one,
+  },
   control: {
     borderRadius: Spacing.two,
     borderWidth: StyleSheet.hairlineWidth,
@@ -223,6 +367,16 @@ const styles = StyleSheet.create({
   },
   clear: {
     marginLeft: 'auto',
+  },
+  search: {
+    borderRadius: Spacing.two,
+    borderWidth: StyleSheet.hairlineWidth,
+    fontFamily: 'IBMPlexMono_400Regular',
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+  },
+  showMore: {
+    alignItems: 'center',
   },
   events: {
     borderBottomWidth: StyleSheet.hairlineWidth,

@@ -68,13 +68,26 @@ function transportFor(name: string): string | undefined {
   return undefined;
 }
 
+function levelForSpan(span: FinishedSpan): LogSeverity {
+  if (span.status === 'error') return 'error';
+  const dropReason = span.attributes['sc.drop_reason'];
+  if (
+    dropReason === 'sampling-suspended' ||
+    dropReason === 'engine-not-running' ||
+    dropReason === 'coalesced'
+  ) {
+    return 'debug';
+  }
+  return dropReason ? 'warn' : 'debug';
+}
+
 function recordSpan(span: FinishedSpan): void {
   const dropReason = span.attributes['sc.drop_reason'];
   const duration = Math.max(0, span.endMs - span.startMs);
   const status = span.status === 'unset' && !dropReason ? 'ok' : span.status;
   recordEventLog({
     timestamp: span.endMs,
-    level: span.status === 'error' ? 'error' : dropReason ? 'warn' : 'info',
+    level: levelForSpan(span),
     category: categoryFor(span.name),
     action: span.name,
     summary: dropReason

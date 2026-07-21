@@ -20,6 +20,7 @@ export { getDeviceResource } from './resource';
 export { installConsoleTelemetryBridge, uninstallConsoleTelemetryBridge } from './console-bridge';
 export {
   clearEventLog,
+  EVENT_LOG_MAX_ENTRIES,
   flushEventLog,
   getEventLog,
   loadEventLog,
