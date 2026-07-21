@@ -25,6 +25,16 @@ mod docs;
 #[path = "../../rust/src/relay.rs"]
 mod relay;
 
+mod telemetry {
+    pub(crate) fn short_hex(bytes: &[u8]) -> String {
+        bytes
+            .iter()
+            .take(5)
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+}
+
 use docs::{TrailDocs, TrailFix, TrailSink};
 
 const TOPIC_PREFIX: &[u8] = b"streetcryptid.loc";
