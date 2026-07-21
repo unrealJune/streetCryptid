@@ -128,11 +128,15 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
 
   useFocusEffect(
     useCallback(() => {
-      void loadEventLog().then(setEntries);
+      let active = true;
+      void loadEventLog().then((loaded) => {
+        if (active) setEntries(loaded);
+      });
+      return () => {
+        active = false;
+      };
     }, [])
   );
-
-  useEffect(() => setVisibleLimit(PAGE_SIZE), [category, level, search]);
 
   const filteredEntries = useMemo(
     () => filterEntries(entries, category, level, search),
@@ -209,7 +213,10 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
                   key={value}
                   accessibilityRole="button"
                   accessibilityState={{ selected: level === value }}
-                  onPress={() => setLevel(value)}
+                  onPress={() => {
+                    setLevel(value);
+                    setVisibleLimit(PAGE_SIZE);
+                  }}
                   style={[
                     styles.control,
                     { borderColor: level === value ? activeColor : theme.backgroundSelected },
@@ -238,7 +245,10 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
                   key={value}
                   accessibilityRole="button"
                   accessibilityState={{ selected: category === value }}
-                  onPress={() => setCategory(value)}
+                  onPress={() => {
+                    setCategory(value);
+                    setVisibleLimit(PAGE_SIZE);
+                  }}
                   style={[
                     styles.control,
                     {
@@ -259,7 +269,10 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
             accessibilityLabel="Search event log"
             autoCapitalize="none"
             autoCorrect={false}
-            onChangeText={setSearch}
+            onChangeText={(value) => {
+              setSearch(value);
+              setVisibleLimit(PAGE_SIZE);
+            }}
             placeholder="Filter action, summary, transport…"
             placeholderTextColor={theme.textSecondary}
             style={[
