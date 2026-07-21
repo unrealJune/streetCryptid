@@ -44,7 +44,7 @@ function decodeUtf8(bytes: Uint8Array, start: number, end: number): string {
         const fourth = bytes[i + 3];
         if ((second & 0xc0) === 0x80 && (third & 0xc0) === 0x80 && (fourth & 0xc0) === 0x80) {
           const decoded =
-            ((first & 0x0f) << 18) |
+            ((first & 0x07) << 18) |
             ((second & 0x3f) << 12) |
             ((third & 0x3f) << 6) |
             (fourth & 0x3f);

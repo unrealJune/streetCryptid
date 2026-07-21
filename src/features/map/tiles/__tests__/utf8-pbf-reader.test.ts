@@ -19,7 +19,14 @@ describe('Utf8PbfReader', () => {
     }
   });
 
-  it('replaces malformed UTF-8 sequences', () => {
-    expect(new Utf8PbfReader(new Uint8Array([2, 0xc0, 0xaf])).readString()).toBe('\ufffd\ufffd');
+  it.each([
+    [[0xc0, 0xaf], '\ufffd\ufffd'],
+    [[0xe2, 0x82], '\ufffd\ufffd'],
+    [[0xe2, 0x28, 0xa1], '\ufffd(\ufffd'],
+    [[0xed, 0xa0, 0x80], '\ufffd\ufffd\ufffd'],
+  ])('replaces malformed UTF-8 bytes %#', (encoded, expected) => {
+    expect(new Utf8PbfReader(new Uint8Array([encoded.length, ...encoded])).readString()).toBe(
+      expected
+    );
   });
 });
