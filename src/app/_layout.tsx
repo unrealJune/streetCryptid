@@ -24,7 +24,7 @@ import { installConsoleTelemetryBridge } from '@/features/dev/telemetry';
 import { LocationDisclosureGate } from '@/features/social/components/location-disclosure-gate';
 import { LocationSharingProvider } from '@/features/social/hooks/use-location-sharing';
 
-// Developer telemetry: ship console.warn/error to the OTLP collector (inert without an endpoint).
+// Keep warnings/errors in the local event journal and optionally ship them to the OTLP collector.
 installConsoleTelemetryBridge();
 
 SplashScreen.preventAutoHideAsync();

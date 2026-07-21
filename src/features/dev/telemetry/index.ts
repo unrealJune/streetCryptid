@@ -18,4 +18,18 @@ export type { StartSpanOptions, Telemetry } from './telemetry';
 export { attachSystemSnapshot, getSystemSnapshot } from './snapshot';
 export { getDeviceResource } from './resource';
 export { installConsoleTelemetryBridge, uninstallConsoleTelemetryBridge } from './console-bridge';
+export {
+  clearEventLog,
+  flushEventLog,
+  getEventLog,
+  loadEventLog,
+  recordEventLog,
+  subscribeEventLog,
+} from './event-log';
+export type {
+  EventLogEntry,
+  EventLogLevel,
+  EventLogStatus,
+  RecordEventLogEntry,
+} from './event-log';
 export type { Attributes, AttrValue, LogSeverity, Span, SpanContext, SpanStatus } from './types';

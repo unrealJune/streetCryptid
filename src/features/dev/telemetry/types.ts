@@ -35,7 +35,7 @@ export interface FinishedSpan {
 
 /**
  * The live span handle instrumentation code holds. Every method is safe to call in any state
- * (disabled telemetry hands out a no-op with the same shape), so call sites never branch.
+ * (local-only telemetry has the same shape), so call sites never branch.
  */
 export interface Span {
   readonly context: SpanContext;

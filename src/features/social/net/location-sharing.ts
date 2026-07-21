@@ -24,6 +24,7 @@ import {
   getOtelConfig,
   getTelemetry,
   parseTraceparent,
+  recordEventLog,
   traceparentFor,
   type SpanContext,
 } from '@/features/dev/telemetry';
@@ -1132,12 +1133,25 @@ export class LocationSharingService implements FixPublisher {
         ts: fix.ts,
       };
       const recipients = pool.recipientRecvKeys(this.state);
-      span.setAttribute('recipients', recipients.length);
+      span.setAttributes({
+        recipients: recipients.length,
+        payload_type: 'location-fix',
+        payload_ts: fix.ts,
+        payload_accuracy_m: fix.accuracyM,
+        payload_heading_deg: fix.headingDeg,
+        transport_paths: 'gossip-live,docs-durable',
+      });
       const traceparent = getTelemetry().enabled ? traceparentFor(span.context) : null;
+      span.addEvent('gossip.publish.started', {
+        recipients: recipients.length,
+        payload_ts: fix.ts,
+      });
       await this.mod.publish(this.mySubId, seq, 0, native, recipients, traceparent);
+      span.addEvent('gossip.publish.completed');
       try {
         // Durable mirror: same sealed bytes, so per-recipient revocation carries over (ARCHITECTURE §6).
         await this.mod.docsWrite(this.mySubId, seq, 0, native, recipients, traceparent);
+        span.addEvent('docs.write.completed');
       } catch (err) {
         // Best effort; the live path already delivered. A later syncTrail can reconcile — but the
         // durable/stash mirror is what OFFLINE peers backfill from, so its failure is a real reason
@@ -1180,6 +1194,7 @@ export class LocationSharingService implements FixPublisher {
         this.stashEnabled() ? this.stashTicket : null,
         getTelemetry().enabled ? traceparentFor(span.context) : null
       );
+      span.setStatus('ok');
     } catch (err) {
       // Best effort — the durable path may be unavailable (e.g. web without docs) — but when it
       // fails the user simply won't see friends' missed fixes, so surface it as a log too.
@@ -1189,6 +1204,7 @@ export class LocationSharingService implements FixPublisher {
         since_ts: sinceTs,
         stash: this.stashEnabled(),
       });
+      span.setStatus('error', reason);
     }
     const recovered = await this.refreshTrailFromReplica(sinceTs);
     span.setAttribute('recovered', recovered);
@@ -1615,21 +1631,24 @@ export class LocationSharingService implements FixPublisher {
 
   private handleFix(event: OnFixEvent): void {
     const telemetry = getTelemetry();
-    if (telemetry.enabled) {
-      // App-level delivery marker: the native `gossip.receive`/`trail.backfill` span says the
-      // envelope arrived and decrypted; this one says the app actually surfaced it (or that a
-      // non-friend/removing gate ate it — the last place a ping can silently die).
-      const known = !!this.state.friends[event.author] && !this.removingFriends.has(event.author);
-      const span = telemetry.startSpan('fix.received.app', {
-        attributes: {
-          'sc.author': event.author.slice(0, 10),
-          'sc.seq': event.seq,
-          backfill: !!event.backfill,
-          ...(known ? {} : { 'sc.drop_reason': 'unknown-or-removing-author' }),
-        },
-      });
-      span.end();
-    }
+    // App-level delivery marker: the native `gossip.receive`/`trail.backfill` span says the
+    // envelope arrived and decrypted; this one says the app actually surfaced it (or that a
+    // non-friend/removing gate ate it — the last place a ping can silently die).
+    const known = !!this.state.friends[event.author] && !this.removingFriends.has(event.author);
+    const span = telemetry.startSpan('fix.received.app', {
+      attributes: {
+        'sc.author': event.author.slice(0, 10),
+        'sc.seq': event.seq,
+        backfill: !!event.backfill,
+        payload_type: 'location-fix',
+        payload_ts: event.fix.ts,
+        payload_accuracy_m: event.fix.accuracyM,
+        payload_heading_deg: event.fix.headingDeg,
+        transport_path: event.backfill ? 'durable-trail' : 'live-gossip',
+        ...(known ? {} : { 'sc.drop_reason': 'unknown-or-removing-author' }),
+      },
+    });
+    span.end();
     if (!this.state.friends[event.author] || this.removingFriends.has(event.author)) return;
 
     const fix: IncomingFix = {
@@ -1854,6 +1873,7 @@ export class LocationSharingService implements FixPublisher {
   private async doPollPairingOnce(): Promise<void> {
     const mod = this.mod;
     if (!mod) return;
+    const span = getTelemetry().startSpan('pairing.poll');
     try {
       const [pairEvents, profileEvents, sessions, peers, caps] = await Promise.all([
         mod.pollPairEvents(),
@@ -1867,6 +1887,13 @@ export class LocationSharingService implements FixPublisher {
       this.nearbyPeers = peers;
       this.bleCaps = caps;
       this.pairingReadyFlag = caps.pairingReady;
+      span.setAttributes({
+        pair_events: pairEvents.length,
+        profile_events: profileEvents.length,
+        sessions: sessions.length,
+        ble_peers: peers.length,
+        pairing_ready: caps.pairingReady,
+      });
       await this.pollTransportDiagnosticsOnce();
       for (const profile of profileEvents) this.applyProfile(profile);
       for (const event of pairEvents) await this.handlePairEvent(event);
@@ -1895,8 +1922,12 @@ export class LocationSharingService implements FixPublisher {
         this.errorListeners.forEach((listener) => listener(''));
       }
       this.emitIfPairingChanged();
+      span.setStatus('ok');
     } catch (err) {
+      span.recordError(err);
       this.reportPollError(err);
+    } finally {
+      span.end();
     }
   }
 
@@ -1914,15 +1945,51 @@ export class LocationSharingService implements FixPublisher {
     if (typeof mod.transportDiagnostics !== 'function') {
       this.transportDiagnosticsError =
         'This native build does not expose endpoint transport diagnostics.';
+      recordEventLog({
+        category: 'transport',
+        action: 'transport.poll',
+        summary: this.transportDiagnosticsError,
+        status: 'error',
+        transport: 'iroh',
+      });
       return;
     }
     try {
       const peerEndpointIds = pool.friendList(this.state).map((friend) => friend.endpointId);
-      this.transportDiagnostics = await mod.transportDiagnostics(peerEndpointIds);
+      const previous = this.transportDiagnostics;
+      const current = await mod.transportDiagnostics(peerEndpointIds);
+      this.transportDiagnostics = current;
       this.transportDiagnosticsUpdatedAt = Date.now();
       this.transportDiagnosticsError = null;
+      const changed = JSON.stringify(previous) !== JSON.stringify(current);
+      const activePaths = current.peers.flatMap((peer) =>
+        peer.addresses.filter((address) => address.active).map((address) => address.kind)
+      );
+      recordEventLog({
+        timestamp: this.transportDiagnosticsUpdatedAt,
+        category: 'transport',
+        action: changed ? 'transport.status.changed' : 'transport.poll',
+        summary: `${current.peers.length} peer(s), ${activePaths.length} active path(s)`,
+        status: 'ok',
+        transport: activePaths.length > 0 ? [...new Set(activePaths)].join(', ') : 'iroh',
+        details: {
+          requested_peers: peerEndpointIds,
+          changed,
+          active_paths: activePaths,
+          diagnostics: current,
+          previous: changed ? previous : undefined,
+        },
+      });
     } catch (error) {
       this.transportDiagnosticsError = errorMessage(error);
+      recordEventLog({
+        category: 'transport',
+        action: 'transport.poll',
+        summary: `Transport poll failed: ${this.transportDiagnosticsError}`,
+        status: 'error',
+        transport: 'iroh',
+        details: { error: this.transportDiagnosticsError },
+      });
     }
   }
 

@@ -72,7 +72,7 @@ describe('installConsoleTelemetryBridge', () => {
     expect(logs).toHaveLength(0);
   });
 
-  it('is inert when telemetry is disabled — leaves console untouched', () => {
+  it('keeps local console capture active when remote telemetry is disabled', () => {
     const { instance, logs } = fakeTelemetry(false);
     setTelemetryForTesting(instance);
     const spy = jest.fn();
@@ -82,7 +82,6 @@ describe('installConsoleTelemetryBridge', () => {
     console.warn('hello');
 
     expect(spy).toHaveBeenCalledWith('hello');
-    expect(logs).toHaveLength(0);
-    expect(console.warn).toBe(spy);
+    expect(logs).toEqual([{ severity: 'warn', body: 'hello' }]);
   });
 });
