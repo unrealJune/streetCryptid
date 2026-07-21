@@ -1,6 +1,6 @@
 import { SymbolView } from 'expo-symbols';
 import { useFocusEffect } from 'expo-router';
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, TextInput, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -119,6 +119,7 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
   const [search, setSearch] = useState('');
   const [visibleLimit, setVisibleLimit] = useState(PAGE_SIZE);
   const [entries, setEntries] = useState(getEventLog);
+  const pausedRef = useRef(false);
 
   useEffect(() => {
     if (!expanded || paused) return;
@@ -130,7 +131,7 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
     useCallback(() => {
       let active = true;
       void loadEventLog().then((loaded) => {
-        if (active) setEntries(loaded);
+        if (active && !pausedRef.current) setEntries(loaded);
       });
       return () => {
         active = false;
@@ -182,7 +183,12 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
             <Pressable
               accessibilityRole="button"
               accessibilityState={{ selected: paused }}
-              onPress={() => setPaused((current) => !current)}
+              onPress={() =>
+                setPaused((current) => {
+                  pausedRef.current = !current;
+                  return !current;
+                })
+              }
               style={[
                 styles.control,
                 { borderColor: paused ? warningColor : theme.backgroundSelected },
@@ -192,7 +198,10 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              onPress={() => void clearEventLog().then(() => setEntries([]))}
+              onPress={() => {
+                setEntries([]);
+                void clearEventLog();
+              }}
               style={[styles.control, styles.clear, { borderColor: warningColor }]}
             >
               <ThemedText type="smallBold">Clear</ThemedText>

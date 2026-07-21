@@ -37,15 +37,19 @@ describe('local event log', () => {
     );
   });
 
-  it('uses warning and error levels for meaningful failures', () => {
+  it('keeps routine drops at debug and raises meaningful failures', () => {
     const telemetry = createTelemetry({ now: () => 1234 });
-    const dropped = telemetry.startSpan('engine.ingest', {
+    const suspended = telemetry.startSpan('engine.ingest', {
       attributes: { 'sc.drop_reason': 'sampling-suspended' },
+    });
+    suspended.end();
+    const dropped = telemetry.startSpan('fix.received.app', {
+      attributes: { 'sc.drop_reason': 'unknown-author' },
     });
     dropped.end();
     telemetry.log('error', 'publish failed');
 
-    expect(getEventLog().map(({ level }) => level)).toEqual(['error', 'warn']);
+    expect(getEventLog().map(({ level }) => level)).toEqual(['error', 'warn', 'debug']);
   });
 
   it('redacts credentials and precise locations from details', () => {
