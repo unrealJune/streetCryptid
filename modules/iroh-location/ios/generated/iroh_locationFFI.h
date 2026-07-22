@@ -583,6 +583,16 @@ uint64_t uniffi_iroh_location_fn_method_subscription_publish_inner(uint64_t ptr,
 uint64_t uniffi_iroh_location_fn_method_subscription_publish_traced(uint64_t ptr, uint64_t seq, uint32_t epoch, RustBuffer fix, RustBuffer recipients, RustBuffer traceparent
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_DECODE_MVT_BUNDLE
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_DECODE_MVT_BUNDLE
+RustBuffer uniffi_iroh_location_fn_func_decode_mvt_bundle(RustBuffer bundle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_DECODE_MVT_TILE
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_DECODE_MVT_TILE
+RustBuffer uniffi_iroh_location_fn_func_decode_mvt_tile(RustBuffer bytes, uint32_t z, uint32_t x, uint32_t y, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_DECODE_PAIR_INVITE
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_DECODE_PAIR_INVITE
 RustBuffer uniffi_iroh_location_fn_func_decode_pair_invite(RustBuffer token, RustCallStatus *_Nonnull out_status
@@ -873,6 +883,18 @@ void ffi_iroh_location_rust_future_free_void(uint64_t handle
 #ifndef UNIFFI_FFIDEF_FFI_IROH_LOCATION_RUST_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FFI_IROH_LOCATION_RUST_FUTURE_COMPLETE_VOID
 void ffi_iroh_location_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_DECODE_MVT_BUNDLE
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_DECODE_MVT_BUNDLE
+uint16_t uniffi_iroh_location_checksum_func_decode_mvt_bundle(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_DECODE_MVT_TILE
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_DECODE_MVT_TILE
+uint16_t uniffi_iroh_location_checksum_func_decode_mvt_tile(void
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_DECODE_PAIR_INVITE
