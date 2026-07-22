@@ -33,6 +33,7 @@
       "extends": "production",
       "developmentClient": true,
       "distribution": "internal",
+      "autoIncrement": false,
       "ios": {
         "simulator": false
       }
@@ -41,6 +42,7 @@
       "extends": "production",
       "developmentClient": true,
       "distribution": "internal",
+      "autoIncrement": false,
       "android": {
         "buildType": "apk"
       }

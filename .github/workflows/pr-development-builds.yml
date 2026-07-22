@@ -1,0 +1,253 @@
+name: PR development builds
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-development-builds-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CI: '1'
+  EXPO_NO_TELEMETRY: '1'
+  EAS_CLI_VERSION: 21.0.3
+
+jobs:
+  build_ios:
+    name: Build and upload iOS
+    if: >-
+      ${{
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (github.event.pull_request.user.login == 'Cobular' ||
+          github.event.pull_request.user.login == 'unrealJune')
+      }}
+    runs-on: macos-26-intel
+    timeout-minutes: 90
+    environment: development-builds
+    permissions:
+      contents: read
+    outputs:
+      install_url: ${{ steps.upload.outputs.url }}
+    env:
+      BUILD_ARTIFACT: ${{ runner.temp }}/streetcryptid-pr-${{ github.event.pull_request.number }}.ipa
+      EAS_BUILD_GIT_COMMIT_HASH: ${{ github.event.pull_request.head.sha }}
+      EAS_LOCAL_BUILD_ARTIFACTS_DIR: ${{ runner.temp }}/eas-artifacts-ios
+      EAS_LOCAL_BUILD_SKIP_CLEANUP: '0'
+      EAS_LOCAL_BUILD_WORKINGDIR: ${{ runner.temp }}/eas-local-build-ios
+      EXPO_NO_KEYCHAIN: '1'
+    steps:
+      - name: Require Expo token
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          if [[ -z "$EXPO_TOKEN" ]]; then
+            echo "The development-builds environment is missing EXPO_TOKEN." >&2
+            exit 1
+          fi
+
+      - name: Check out PR revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Select the SDK 57 Xcode toolchain
+        run: sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+
+      - name: Install EAS CLI
+        run: bun add --global "eas-cli@$EAS_CLI_VERSION"
+
+      - name: Verify EAS log isolation
+        run: bash scripts/test-eas-ci-log-isolation.sh
+
+      - name: Build locally and upload the IPA to EAS
+        id: upload
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$EAS_LOCAL_BUILD_ARTIFACTS_DIR" "$EAS_LOCAL_BUILD_WORKINGDIR"
+          bash scripts/eas-local-build-ci.sh \
+            ios \
+            production-development-ios \
+            "$BUILD_ARTIFACT"
+
+      - name: Remove local build state
+        if: always()
+        run: |
+          set -euo pipefail
+          for path in \
+            "$EAS_LOCAL_BUILD_ARTIFACTS_DIR" \
+            "$EAS_LOCAL_BUILD_WORKINGDIR"; do
+            if [[ "$path" != "$RUNNER_TEMP/"* ]]; then
+              echo "Refusing to clean unexpected path: $path" >&2
+              exit 1
+            fi
+            if [[ -d "$path" ]]; then
+              find "$path" -depth -delete
+            fi
+          done
+          rm -f -- "$BUILD_ARTIFACT"
+
+  build_android:
+    name: Build and upload Android
+    if: >-
+      ${{
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (github.event.pull_request.user.login == 'Cobular' ||
+          github.event.pull_request.user.login == 'unrealJune')
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: development-builds
+    permissions:
+      contents: read
+    outputs:
+      install_url: ${{ steps.upload.outputs.url }}
+    env:
+      BUILD_ARTIFACT: ${{ runner.temp }}/streetcryptid-pr-${{ github.event.pull_request.number }}.apk
+      EAS_BUILD_GIT_COMMIT_HASH: ${{ github.event.pull_request.head.sha }}
+      EAS_LOCAL_BUILD_ARTIFACTS_DIR: ${{ runner.temp }}/eas-artifacts-android
+      EAS_LOCAL_BUILD_SKIP_CLEANUP: '0'
+      EAS_LOCAL_BUILD_WORKINGDIR: ${{ runner.temp }}/eas-local-build-android
+    steps:
+      - name: Require Expo token
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          if [[ -z "$EXPO_TOKEN" ]]; then
+            echo "The development-builds environment is missing EXPO_TOKEN." >&2
+            exit 1
+          fi
+
+      - name: Check out PR revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Install the SDK 57 Android NDK
+        run: |
+          set -euo pipefail
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.1.12297006"
+          ndk_home="$ANDROID_HOME/ndk/27.1.12297006"
+          {
+            echo "ANDROID_NDK=$ndk_home"
+            echo "ANDROID_NDK_HOME=$ndk_home"
+            echo "ANDROID_NDK_ROOT=$ndk_home"
+          } >> "$GITHUB_ENV"
+
+      - name: Install EAS CLI
+        run: bun add --global "eas-cli@$EAS_CLI_VERSION"
+
+      - name: Verify EAS log isolation
+        run: bash scripts/test-eas-ci-log-isolation.sh
+
+      - name: Build locally and upload the APK to EAS
+        id: upload
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$EAS_LOCAL_BUILD_ARTIFACTS_DIR" "$EAS_LOCAL_BUILD_WORKINGDIR"
+          bash scripts/eas-local-build-ci.sh \
+            android \
+            production-development-android \
+            "$BUILD_ARTIFACT"
+
+      - name: Remove local build state
+        if: always()
+        run: |
+          set -euo pipefail
+          for path in \
+            "$EAS_LOCAL_BUILD_ARTIFACTS_DIR" \
+            "$EAS_LOCAL_BUILD_WORKINGDIR"; do
+            if [[ "$path" != "$RUNNER_TEMP/"* ]]; then
+              echo "Refusing to clean unexpected path: $path" >&2
+              exit 1
+            fi
+            if [[ -d "$path" ]]; then
+              find "$path" -depth -delete
+            fi
+          done
+          rm -f -- "$BUILD_ARTIFACT"
+
+  comment:
+    name: Post install links
+    if: >-
+      ${{
+        always() &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (github.event.pull_request.user.login == 'Cobular' ||
+          github.event.pull_request.user.login == 'unrealJune')
+      }}
+    needs:
+      - build_ios
+      - build_android
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      IOS_RESULT: ${{ needs.build_ios.result }}
+      IOS_URL: ${{ needs.build_ios.outputs.install_url }}
+      ANDROID_RESULT: ${{ needs.build_android.result }}
+      ANDROID_URL: ${{ needs.build_android.outputs.install_url }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Comment with EAS install pages
+        run: |
+          set -euo pipefail
+
+          platform_line() {
+            local platform="$1"
+            local result="$2"
+            local url="$3"
+            if [[ "$result" == "success" && -n "$url" ]]; then
+              printf -- '- **%s:** [Install from EAS (QR code)](%s)\n' "$platform" "$url"
+            else
+              printf -- '- **%s:** Build failed — [view GitHub Actions logs](%s)\n' "$platform" "$RUN_URL"
+            fi
+          }
+
+          body="$(
+            printf '🏗️ **PR development builds**\n\n'
+            platform_line "iOS" "$IOS_RESULT" "$IOS_URL"
+            platform_line "Android" "$ANDROID_RESULT" "$ANDROID_URL"
+            printf '\nBuilt on ephemeral GitHub-hosted runners; EAS only hosts the finished app archives.'
+          )"
+
+          gh api \
+            --method POST \
+            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            --raw-field body="$body" \
+            >/dev/null

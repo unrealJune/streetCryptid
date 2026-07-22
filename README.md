@@ -7,17 +7,17 @@ over BLE, and renders current friend presence on the map.
 
 ## Tech stack
 
-| Piece           | Choice                                                                              |
-| --------------- | ----------------------------------------------------------------------------------- |
-| Framework       | [Expo](https://expo.dev) SDK **57**                                                 |
-| Native runtime  | React Native **0.86** (New Architecture, on)                                        |
-| UI runtime      | React **19.2** (React Compiler enabled)                                             |
-| Routing         | [expo-router](https://docs.expo.dev/router/introduction) (file-based, typed routes) |
-| Language        | TypeScript **6** (strict)                                                           |
-| Package manager | [bun](https://bun.sh)                                                               |
-| Task runner     | [just](https://github.com/casey/just)                                               |
-| Cloud builds    | [EAS](https://docs.expo.dev/eas/) (`eas.json`)                                      |
-| Lint / format   | ESLint 9 (`eslint-config-expo`) + Prettier                                          |
+| Piece            | Choice                                                                              |
+| ---------------- | ----------------------------------------------------------------------------------- |
+| Framework        | [Expo](https://expo.dev) SDK **57**                                                 |
+| Native runtime   | React Native **0.86** (New Architecture, on)                                        |
+| UI runtime       | React **19.2** (React Compiler enabled)                                             |
+| Routing          | [expo-router](https://docs.expo.dev/router/introduction) (file-based, typed routes) |
+| Language         | TypeScript **6** (strict)                                                           |
+| Package manager  | [bun](https://bun.sh)                                                               |
+| Task runner      | [just](https://github.com/casey/just)                                               |
+| Build/distribute | GitHub Actions + [EAS](https://docs.expo.dev/eas/) (`eas.json`)                     |
+| Lint / format    | ESLint 9 (`eslint-config-expo`) + Prettier                                          |
 
 ## Prerequisites
 
@@ -97,8 +97,8 @@ just submit ios            # submit latest build to the store
 just update "message"      # publish an OTA update
 ```
 
-EAS pre-install hooks rebuild the git-ignored Rust artifacts for both Android and iOS, so cloud
-builds always package the native code that matches the committed UniFFI bindings.
+EAS pre-install hooks rebuild the git-ignored Rust artifacts for both Android and iOS, so local
+and cloud EAS builds always package the native code that matches the committed UniFFI bindings.
 
 ### Debugging dropped location pings (developer telemetry)
 
@@ -140,6 +140,35 @@ just build         # cloud build (android / preview APK by default)
 
 Build profiles live in `eas.json`: `development` (dev client), `preview`
 (internal APK), and `production` (auto-incrementing store build).
+
+### PR development builds
+
+PRs authored by `Cobular` or `unrealJune` from branches in this repository build the iOS and
+Android development clients on ephemeral GitHub-hosted runners. The jobs run `eas build --local`
+with the production-development profiles, upload only the finished IPA/APK with `eas upload`, and
+post EAS install pages (including QR codes) on the PR. They do not consume EAS cloud-build quota.
+
+The build jobs use the `development-builds` GitHub environment. A repository administrator must
+create that environment, then add a Developer-role Expo robot-user token as its `EXPO_TOKEN` secret
+before enabling the workflow:
+
+```bash
+gh secret set EXPO_TOKEN --env development-builds
+```
+
+Remote EAS signing credentials and the iOS ad hoc provisioning profile must already exist. CI
+freezes those credentials rather than modifying them; register new iPhones and refresh the profile
+outside the PR workflow. Build working directories stay under `runner.temp`, are never cached or
+uploaded as GitHub artifacts, and are explicitly removed after the final app archive is uploaded
+to EAS.
+
+EAS CLI serializes the local build job, including signing credentials, into a base64 child-process
+argument. Debug/error output can therefore be sensitive. The CI wrapper never forwards any
+`eas build` output to GitHub or disk, and it captures `eas upload` output only in memory. Failures
+emit only a fixed message. The wrapper removes GitHub command-file variables from the EAS
+subprocess environment and allow-lists the single Expo build-page URL written to the job output.
+CI exercises build success, build failure, and malformed upload output with a fake base64
+signing-key sentinel to ensure it cannot escape into command output.
 
 ## License
 
