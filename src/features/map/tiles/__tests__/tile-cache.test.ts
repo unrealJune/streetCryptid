@@ -1,4 +1,4 @@
-import type { MapGeometry } from '../../core/types';
+import { packGeometry, unpackPacked, type PackedGeometry } from '../packed-geometry';
 import type { GeometrySource } from '../geometry-source';
 import { EMPTY_GEOMETRY, mergeGeometry } from '../geometry-source';
 import { CachedGeometrySource } from '../tile-cache';
@@ -8,14 +8,14 @@ import type { TileCoord } from '../tile-math';
 
 interface FakeCall {
   tile: TileCoord;
-  resolve: (g: MapGeometry) => void;
+  resolve: (g: PackedGeometry) => void;
   reject: (e: unknown) => void;
 }
 
 class FakeSource implements GeometrySource {
   readonly calls: FakeCall[] = [];
 
-  getTile(tile: TileCoord): Promise<MapGeometry> {
+  getTile(tile: TileCoord): Promise<PackedGeometry> {
     return new Promise((resolve, reject) => {
       this.calls.push({ tile, resolve, reject });
     });
@@ -27,7 +27,7 @@ class FakeSource implements GeometrySource {
   }
 
   /** Resolve the most-recent call. */
-  resolveLast(g: MapGeometry = EMPTY_GEOMETRY): void {
+  resolveLast(g: PackedGeometry = EMPTY_GEOMETRY): void {
     const call = this.calls[this.calls.length - 1];
     if (!call) throw new Error('No pending call');
     call.resolve(g);
@@ -41,7 +41,7 @@ class FakeSource implements GeometrySource {
   }
 }
 
-function makeGeometry(tag: string): MapGeometry {
+function makeGeometry(tag: string): PackedGeometry {
   return { ...EMPTY_GEOMETRY, places: [{ name: tag, world: [0, 0], kind: 'test' }] };
 }
 
@@ -218,37 +218,34 @@ describe('mergeGeometry', () => {
     expect(mergeGeometry([g])).toBe(g);
   });
 
-  it('EMPTY_GEOMETRY has all arrays empty', () => {
-    expect(EMPTY_GEOMETRY.streets).toHaveLength(0);
-    expect(EMPTY_GEOMETRY.rivers).toHaveLength(0);
-    expect(EMPTY_GEOMETRY.water).toHaveLength(0);
-    expect(EMPTY_GEOMETRY.parks).toHaveLength(0);
+  it('EMPTY_GEOMETRY has no parts and no places', () => {
+    expect(EMPTY_GEOMETRY.parts).toHaveLength(0);
     expect(EMPTY_GEOMETRY.places).toHaveLength(0);
   });
 
-  it('merges arrays across multiple parts', () => {
+  it('merges features across multiple parts', () => {
     const street = { roadClass: 2 as const, points: [[0, 0] as const, [1, 1] as const] };
     const river = { points: [[0.1, 0.1] as const, [0.2, 0.2] as const] };
     const area = { rings: [[[0, 0] as const, [1, 0] as const, [0, 1] as const]] };
     const place1 = { name: 'A', world: [0, 0] as const, kind: 'city' };
     const place2 = { name: 'B', world: [1, 1] as const, kind: 'town' };
 
-    const g1: MapGeometry = {
+    const g1: PackedGeometry = packGeometry({
       streets: [street],
       rivers: [river],
       water: [],
       parks: [area],
       places: [place1],
-    };
-    const g2: MapGeometry = {
+    });
+    const g2: PackedGeometry = packGeometry({
       streets: [],
       rivers: [],
       water: [area],
       parks: [],
       places: [place2],
-    };
+    });
 
-    const merged = mergeGeometry([g1, g2]);
+    const merged = unpackPacked(mergeGeometry([g1, g2]));
     expect(merged.streets).toHaveLength(1);
     expect(merged.rivers).toHaveLength(1);
     expect(merged.water).toHaveLength(1);
@@ -257,12 +254,49 @@ describe('mergeGeometry', () => {
     expect(merged.places.map((p) => p.name)).toEqual(['A', 'B']);
   });
 
-  it('merging empty parts yields empty arrays', () => {
+  it('merging empty parts yields empty geometry', () => {
     const merged = mergeGeometry([EMPTY_GEOMETRY, EMPTY_GEOMETRY, EMPTY_GEOMETRY]);
-    expect(merged.streets).toHaveLength(0);
-    expect(merged.rivers).toHaveLength(0);
-    expect(merged.water).toHaveLength(0);
-    expect(merged.parks).toHaveLength(0);
+    expect(merged.parts).toHaveLength(0);
     expect(merged.places).toHaveLength(0);
+  });
+});
+
+// ─── prefetch ────────────────────────────────────────────────────────────────
+
+describe('CachedGeometrySource.prefetch', () => {
+  it('warms uncached tiles and skips ones already cached', async () => {
+    const upstream = new FakeSource();
+    const cache = new CachedGeometrySource(upstream, 8);
+
+    const p1 = cache.getTile(T1);
+    upstream.resolveLast(makeGeometry('T1'));
+    await p1;
+    expect(upstream.callCount).toBe(1);
+
+    const pf = cache.prefetch([T1, T2]); // T1 cached → skip, T2 → warm
+    await Promise.resolve();
+    expect(upstream.callCount).toBe(2); // only T2 requested
+    upstream.resolveLast(makeGeometry('T2'));
+    await pf;
+    expect(cache.has(T2)).toBe(true);
+  });
+
+  it('swallows upstream failures (best-effort)', async () => {
+    const upstream = new FakeSource();
+    const cache = new CachedGeometrySource(upstream, 8);
+    const pf = cache.prefetch([T1]);
+    await Promise.resolve();
+    upstream.rejectLast(new Error('network down'));
+    await expect(pf).resolves.toBeUndefined();
+    expect(cache.has(T1)).toBe(false);
+  });
+
+  it('stops immediately when already aborted', async () => {
+    const upstream = new FakeSource();
+    const cache = new CachedGeometrySource(upstream, 8);
+    const controller = new AbortController();
+    controller.abort();
+    await cache.prefetch([T1, T2], controller.signal);
+    expect(upstream.callCount).toBe(0);
   });
 });

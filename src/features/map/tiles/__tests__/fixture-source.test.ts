@@ -1,6 +1,8 @@
+import type { MapGeometry } from '../../core/types';
 import { FIXTURE_BOUNDS, FIXTURE_TILES } from '../__fixtures__/caphill-tiles';
 import { EMPTY_GEOMETRY } from '../geometry-source';
 import { FixtureGeometrySource } from '../fixture-source';
+import { unpackPacked } from '../packed-geometry';
 import { tileWorldRect } from '../tile-math';
 
 const source = new FixtureGeometrySource();
@@ -46,7 +48,7 @@ describe('FixtureGeometrySource — content', () => {
     let maxStreets = 0;
     for (const key of fixtureKeys) {
       const [z, x, y] = key.split('/').map(Number);
-      const geom = await source.getTile({ z, x, y });
+      const geom = unpackPacked(await source.getTile({ z, x, y }));
       if (geom.streets.length > maxStreets) maxStreets = geom.streets.length;
     }
     expect(maxStreets).toBeGreaterThan(50);
@@ -72,7 +74,7 @@ describe('FixtureGeometrySource — unknown tile', () => {
   it('resolves to EMPTY_GEOMETRY for a tile not in the fixture set', async () => {
     // (z:14, x:0, y:0) is far from Capitol Hill and not in the fixture set
     const geom = await source.getTile({ z: 14, x: 0, y: 0 });
-    expect(geom.streets).toHaveLength(0);
+    expect(geom.parts).toHaveLength(0);
     expect(geom).toEqual(EMPTY_GEOMETRY);
   });
 });
@@ -95,13 +97,13 @@ describe('FixtureGeometrySource — geographic sanity', () => {
       const z14Key = fixtureKeys.find((k) => k.startsWith('14/'));
       if (!z14Key) return; // no z=14 tiles at all, nothing to test
       const [z, x, y] = z14Key.split('/').map(Number);
-      const geom = await source.getTile({ z, x, y });
+      const geom = unpackPacked(await source.getTile({ z, x, y }));
       const rect = tileWorldRect({ z, x, y });
       assertPointsInBounds(geom, rect);
       return;
     }
 
-    const geom = await source.getTile(tile);
+    const geom = unpackPacked(await source.getTile(tile));
     expect(geom.streets.length).toBeGreaterThan(0); // tile should be non-empty
 
     // Points must lie within the tile's world rect, expanded by FIXTURE_BOUNDS ± 20%.
@@ -128,10 +130,7 @@ describe('FixtureGeometrySource — geographic sanity', () => {
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
-function assertPointsInBounds(
-  geom: Awaited<ReturnType<FixtureGeometrySource['getTile']>>,
-  rect: ReturnType<typeof tileWorldRect>
-): void {
+function assertPointsInBounds(geom: MapGeometry, rect: ReturnType<typeof tileWorldRect>): void {
   // Allow a 20% tile-width buffer for MVT encoding artifacts
   const bx = (rect.maxX - rect.minX) * 0.2;
   const by = (rect.maxY - rect.minY) * 0.2;

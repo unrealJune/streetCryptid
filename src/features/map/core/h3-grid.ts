@@ -81,28 +81,49 @@ const EARTH_CIRCUMFERENCE_KM = 40_075;
 const MAX_QUERY_SPAN_X = 0.35;
 
 export function createH3Grid(core: H3Core): H3Grid {
+  // H3 cell geometry is immutable, so cache it for the grid's lifetime. This is
+  // the map's hottest reuse: `buildCellField` calls these per cell every region
+  // build, and panning/zooming revisits mostly the same cells — turning the
+  // expensive h3-js boundary/center/neighbor calls into Map lookups on repeat.
+  // Keyed by cell index; bounded in practice by the cells a session visits.
+  const centerCache = new Map<CellIndex, WorldPoint>();
+  const boundaryCache = new Map<CellIndex, WorldPoint[]>();
+  const neighborCache = new Map<CellIndex, CellIndex[]>();
+
   function cellAt(point: WorldPoint, res: number): CellIndex {
     const { lat, lon } = worldToLatLon(point);
     return core.latLngToCell(lat, lon, res);
   }
 
   function centerWorld(cell: CellIndex): WorldPoint {
+    const hit = centerCache.get(cell);
+    if (hit) return hit;
     const [lat, lng] = core.cellToLatLng(cell);
-    return latLonToWorld({ lat, lon: lng });
+    const world = latLonToWorld({ lat, lon: lng });
+    centerCache.set(cell, world);
+    return world;
   }
 
   function boundaryWorld(cell: CellIndex): WorldPoint[] {
+    const hit = boundaryCache.get(cell);
+    if (hit) return hit;
     const [, centerLng] = core.cellToLatLng(cell);
-    return core.cellToBoundary(cell).map(([lat, lng]) => {
+    const world = core.cellToBoundary(cell).map(([lat, lng]) => {
       let lon = lng;
       while (lon - centerLng > 180) lon -= 360;
       while (lon - centerLng < -180) lon += 360;
       return latLonToWorld({ lat, lon });
     });
+    boundaryCache.set(cell, world);
+    return world;
   }
 
   function neighborsOf(cell: CellIndex): CellIndex[] {
-    return core.gridDisk(cell, 1).filter((c) => c !== cell);
+    const hit = neighborCache.get(cell);
+    if (hit) return hit;
+    const neighbors = core.gridDisk(cell, 1).filter((c) => c !== cell);
+    neighborCache.set(cell, neighbors);
+    return neighbors;
   }
 
   function collectCells(rect: WorldRect, res: number, into: Set<CellIndex>): void {

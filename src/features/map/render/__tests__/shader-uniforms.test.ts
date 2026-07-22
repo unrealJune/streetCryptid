@@ -1,6 +1,7 @@
 import { scaleFor } from '../../core/camera';
 import type { MapPalette } from '../../core/types';
 import type { MapRegion } from '../../engine/map-engine';
+import { EMPTY_PACKED } from '../../tiles/packed-geometry';
 import {
   DOT_FIELD_UNIFORM_FLOATS,
   DOT_STEP,
@@ -37,7 +38,7 @@ const region: MapRegion = {
     tileZoom: 13,
     cellRes: 10,
   },
-  geometry: { streets: [], rivers: [], water: [], parks: [], places: [] },
+  geometry: EMPTY_PACKED,
   cellField: { res: 10, cells: [] },
   places: [],
 };

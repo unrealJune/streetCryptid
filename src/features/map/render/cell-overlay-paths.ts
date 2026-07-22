@@ -2,7 +2,6 @@ import { scaleFor, worldToScreen } from '../core/camera';
 import type { RegionCellField } from '../core/cell-field';
 import { regionMaskCamera, type RegionSpec } from '../core/region';
 import type { WorldPoint } from '../core/types';
-import { polyline } from './mask-paths';
 
 /**
  * Pure SVG-path builders for the H3 cell layer (mask-paths.ts pattern: no Skia,
@@ -42,6 +41,36 @@ export function cellStateFills(field: RegionCellField, spec: RegionSpec): CellFi
   return fills;
 }
 
+/** One cell's projected boundary (mask px) + fill color. */
+export interface CellFillGeometry {
+  readonly points: readonly WorldPoint[];
+  readonly color: string;
+}
+
+/**
+ * Like {@link cellStateFills} but returns each cell's projected boundary points
+ * directly instead of an SVG string. The renderer builds Skia paths from these
+ * with `moveTo`/`lineTo`, avoiding a per-cell string build (`toFixed` per point)
+ * and `MakeFromSVGString` parse — the bulk of the cell-state-texture cost at the
+ * thousands of cells a region carries.
+ */
+export function cellStateFillGeometry(
+  field: RegionCellField,
+  spec: RegionSpec
+): CellFillGeometry[] {
+  const { camera, viewport } = regionMaskCamera(spec);
+  const project = (p: WorldPoint): WorldPoint => worldToScreen(camera, viewport, p);
+  const out: CellFillGeometry[] = [];
+  for (const cell of field.cells) {
+    if (cell.boundary.length < 3) continue;
+    out.push({
+      points: cell.boundary.map(project),
+      color: `rgb(${to255(cell.fraction)},${to255(cell.jitter)},${to255(cell.order)})`,
+    });
+  }
+  return out;
+}
+
 /** Projection into region-logical px (0 at rect.min, scaleFor(zoom) px/world). */
 function logicalProject(spec: RegionSpec): (p: WorldPoint) => WorldPoint {
   const scale = scaleFor(spec.zoom);
@@ -77,4 +106,15 @@ export function cellRimPath(field: RegionCellField, spec: RegionSpec): string {
 function ring(boundary: readonly WorldPoint[], project: (p: WorldPoint) => WorldPoint): string {
   const line = polyline(boundary, project);
   return line ? `${line}Z` : '';
+}
+
+/** An SVG "M…L…" open polyline over projected world points (hex-cell boundaries). */
+function polyline(points: readonly WorldPoint[], project: (p: WorldPoint) => WorldPoint): string {
+  if (points.length < 2) return '';
+  let out = '';
+  for (let i = 0; i < points.length; i++) {
+    const [x, y] = project(points[i]);
+    out += `${i === 0 ? 'M' : 'L'}${x.toFixed(1)} ${y.toFixed(1)}`;
+  }
+  return out;
 }

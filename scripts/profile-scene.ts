@@ -31,6 +31,7 @@ import {
 } from '../src/features/map/config';
 import { FIXTURE_HOME } from '../src/features/map/tiles/__fixtures__/caphill-tiles';
 import { FixtureGeometrySource } from '../src/features/map/tiles/fixture-source';
+import { unpackPacked } from '../src/features/map/tiles/packed-geometry';
 
 const sourceUrl = process.argv[2];
 const viewport: Viewport = { width: 390, height: 780 };
@@ -68,9 +69,10 @@ async function main() {
     `mask size: ${region.spec.maskWidth}×${region.spec.maskHeight} px ` +
       `(GPU-rasterized in render layer)`
   );
+  const geo = unpackPacked(region.geometry);
   console.log(
-    `geometry: ${region.geometry.streets.length} streets, ` +
-      `${region.geometry.water.length} water, ${region.geometry.parks.length} parks`
+    `geometry: ${geo.streets.length} streets, ` +
+      `${geo.water.length} water, ${geo.parks.length} parks`
   );
   console.log(`cell field: ${region.cellField.cells.length} cells at res ${region.cellField.res}`);
   console.log(`places: ${region.places.length}`);

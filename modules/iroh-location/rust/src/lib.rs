@@ -18,6 +18,8 @@
 mod ble;
 mod crypto;
 mod docs;
+/// Native MVT tile/bundle decoder for the map pipeline (pure; see `mvt.rs`).
+pub mod mvt;
 mod pairing;
 mod profile;
 mod relay;
@@ -166,6 +168,20 @@ pub fn derive_topic(author_endpoint_id: Vec<u8>) -> Vec<u8> {
 pub fn generate_recv_keypair() -> Vec<Vec<u8>> {
     let (sk, pk) = crypto::generate_recv_keypair();
     vec![sk, pk]
+}
+
+/// Decode an SCB1 privacy bundle of MVT tiles into one flat SCG1 geometry buffer
+/// for the map renderer (see [`mvt`]). Stateless and thread-safe; the Expo module
+/// runs it off the JS thread so 340k-feature bundles no longer block Hermes.
+#[uniffi::export]
+pub fn decode_mvt_bundle(bundle: Vec<u8>) -> Result<Vec<u8>, LocationError> {
+    mvt::decode_bundle(&bundle).map_err(LocationError::Decode)
+}
+
+/// Decode one coarse XYZ MVT tile (z ≤ anchor) into a flat SCG1 geometry buffer.
+#[uniffi::export]
+pub fn decode_mvt_tile(bytes: Vec<u8>, z: u32, x: u32, y: u32) -> Vec<u8> {
+    mvt::decode_tile(&bytes, z, x, y)
 }
 
 /// A verified cryptid **profile** as surfaced to the app (§3). Returned already signature- and

@@ -1,5 +1,6 @@
 import { computeRegionSpec } from '../../core/region';
 import type { CameraState, MapGeometry, Viewport, WorldPoint } from '../../core/types';
+import { packGeometry } from '../../tiles/packed-geometry';
 import { buildMaskPaths } from '../mask-paths';
 
 const camera: CameraState = { center: [0.3, 0.3], zoom: 15 };
@@ -13,7 +14,7 @@ const EMPTY: MapGeometry = { streets: [], rivers: [], water: [], parks: [], plac
 
 describe('buildMaskPaths', () => {
   it('returns all-empty strings for empty geometry', () => {
-    const p = buildMaskPaths(EMPTY, spec);
+    const p = buildMaskPaths(packGeometry(EMPTY), spec);
     expect(p.streets).toEqual(['', '', '', '', '']);
     expect(p.park).toBe('');
     expect(p.water).toBe('');
@@ -47,7 +48,7 @@ describe('buildMaskPaths', () => {
         },
       ],
     };
-    const p = buildMaskPaths(geometry, spec);
+    const p = buildMaskPaths(packGeometry(geometry), spec);
     // class 0 has two ways → two M commands in one string; class 3 has one.
     expect((p.streets[0].match(/M/g) ?? []).length).toBe(2);
     expect((p.streets[3].match(/M/g) ?? []).length).toBe(1);
@@ -68,7 +69,7 @@ describe('buildMaskPaths', () => {
       parks: [{ rings: [ring] }],
       water: [{ rings: [ring] }],
     };
-    const p = buildMaskPaths(geometry, spec);
+    const p = buildMaskPaths(packGeometry(geometry), spec);
     expect(p.park.startsWith('M')).toBe(true);
     expect(p.park.endsWith('Z')).toBe(true);
     expect(p.water.endsWith('Z')).toBe(true);
@@ -86,7 +87,7 @@ describe('buildMaskPaths', () => {
         },
       ],
     };
-    const p = buildMaskPaths(geometry, spec);
+    const p = buildMaskPaths(packGeometry(geometry), spec);
     expect(p.rivers.startsWith('M')).toBe(true);
     expect(p.rivers).toContain('L');
     expect(p.rivers).not.toContain('Z');
@@ -97,7 +98,7 @@ describe('buildMaskPaths', () => {
       ...EMPTY,
       streets: [{ roadClass: 2, points: [[lx(0.5), ly(0.5)]] as WorldPoint[] }],
     };
-    expect(buildMaskPaths(geometry, spec).streets[2]).toBe('');
+    expect(buildMaskPaths(packGeometry(geometry), spec).streets[2]).toBe('');
   });
 
   it('projects into the mask pixel box', () => {
@@ -113,7 +114,7 @@ describe('buildMaskPaths', () => {
         },
       ],
     };
-    const coords = buildMaskPaths(geometry, spec)
+    const coords = buildMaskPaths(packGeometry(geometry), spec)
       .streets[1].replace(/[ML]/g, ' ')
       .trim()
       .split(/\s+/)

@@ -129,6 +129,46 @@ bindgen-android:
     # Cross-compile the .so for every Android ABI into jniLibs.
     cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../android/src/main/jniLibs build --release
 
+# Rebuild ONLY the arm64 iroh-location .so into jniLibs — the fast path before a
+# local on-device release build (most phones are arm64). Full 3-ABI + binding
+# regen is `bindgen-android`. cargo-ndk auto-detects the NDK under $ANDROID_HOME.
+bindgen-android-arm64:
+    cd modules/iroh-location/rust && cargo ndk -t arm64-v8a -o ../android/src/main/jniLibs build --release
+
+# Build a STANDALONE release APK locally (Hermes bundle embedded, no Metro at
+# runtime) and install + launch it on a USB-connected arm64 device. Use to verify
+# release-only behavior — production Hermes bytecode, minification, patched deps
+# (e.g. the pbf MVT/Hermes patch) — without an EAS cloud build.
+#
+# PREFER `eas build --local -p android --profile development` when you can: it runs
+# the real CI pipeline (eas-build-pre-install.sh regenerates UniFFI bindings AND
+# cargo-ndk-builds every-ABI .so, so the stale-.so startup abort below is impossible)
+# and signs with the EAS *remote* key, so `adb install -r` needs no uninstall. It is
+# NOT supported on native Windows — run it from WSL2/macOS/Linux — and needs a
+# profile whose environment sets EXPO_PUBLIC_TILE_URL (development/preview; the
+# production profile leaves some EXPO_PUBLIC_* unset). This recipe is the native-
+# Windows fast path when WSL2/cloud isn't handy.
+#
+# Rebuilds the arm64 iroh-location .so FIRST so the packaged native library matches
+# the committed UniFFI bindings. A stale jniLibs .so aborts at startup with
+# `undefined symbol: uniffi_iroh_location_checksum_method_...` (the Kotlin bindings
+# assert each method's checksum at load). For all ABIs run `just bindgen-android`.
+#
+# Local builds sign with credentials/streetcryptid.keystore — a DIFFERENT key from
+# the EAS *remote* keystore (eas.json credentialsSource: remote) and a lower
+# versionCode — so an installed EAS build blocks the update on signature/downgrade.
+# This recipe therefore UNINSTALLS first, wiping on-device app data (tile SQLite
+# cache, trails, pairing). Uses the ambient JAVA_HOME: point it at JDK 17/21 (e.g.
+# Android Studio's bundled JBR); the Expo/AGP gradle plugins reject JDK 25+.
+run-android-release: bindgen-android-arm64
+    #!/usr/bin/env sh
+    set -eu
+    cd android && ./gradlew assembleRelease && cd ..
+    apk="android/app/build/outputs/apk/release/app-release.apk"
+    adb uninstall com.unrealjune.streetcryptid || true
+    adb install "$apk"
+    adb shell am start -n com.unrealjune.streetcryptid/.MainActivity
+
 # Regenerate the iOS XCFramework + Swift UniFFI bindings. macOS + full Xcode only (see README §2).
 bindgen-ios:
     #!/usr/bin/env sh
