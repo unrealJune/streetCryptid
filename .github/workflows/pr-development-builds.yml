@@ -43,6 +43,15 @@ jobs:
       EAS_LOCAL_BUILD_WORKINGDIR: ${{ runner.temp }}/eas-local-build-ios
       EXPO_NO_KEYCHAIN: '1'
     steps:
+      - name: Require Expo token
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          if [[ -z "$EXPO_TOKEN" ]]; then
+            echo "The development-builds environment is missing EXPO_TOKEN." >&2
+            exit 1
+          fi
+
       - name: Check out PR revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -119,6 +128,15 @@ jobs:
       EAS_LOCAL_BUILD_SKIP_CLEANUP: '0'
       EAS_LOCAL_BUILD_WORKINGDIR: ${{ runner.temp }}/eas-local-build-android
     steps:
+      - name: Require Expo token
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          if [[ -z "$EXPO_TOKEN" ]]; then
+            echo "The development-builds environment is missing EXPO_TOKEN." >&2
+            exit 1
+          fi
+
       - name: Check out PR revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
