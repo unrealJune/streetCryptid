@@ -101,8 +101,11 @@ jobs:
         run: |
           set -euo pipefail
           for path in \
-            "$EAS_LOCAL_BUILD_ARTIFACTS_DIR" \
-            "$EAS_LOCAL_BUILD_WORKINGDIR"; do
+            "${EAS_LOCAL_BUILD_ARTIFACTS_DIR:-}" \
+            "${EAS_LOCAL_BUILD_WORKINGDIR:-}"; do
+            if [[ -z "$path" ]]; then
+              continue
+            fi
             if [[ "$path" != "$RUNNER_TEMP/"* ]]; then
               echo "Refusing to clean unexpected path: $path" >&2
               exit 1
@@ -111,7 +114,9 @@ jobs:
               find "$path" -depth -delete
             fi
           done
-          rm -f -- "$BUILD_ARTIFACT"
+          if [[ -n "${BUILD_ARTIFACT:-}" ]]; then
+            rm -f -- "$BUILD_ARTIFACT"
+          fi
 
   build_android:
     name: Build and upload Android
@@ -201,8 +206,11 @@ jobs:
         run: |
           set -euo pipefail
           for path in \
-            "$EAS_LOCAL_BUILD_ARTIFACTS_DIR" \
-            "$EAS_LOCAL_BUILD_WORKINGDIR"; do
+            "${EAS_LOCAL_BUILD_ARTIFACTS_DIR:-}" \
+            "${EAS_LOCAL_BUILD_WORKINGDIR:-}"; do
+            if [[ -z "$path" ]]; then
+              continue
+            fi
             if [[ "$path" != "$RUNNER_TEMP/"* ]]; then
               echo "Refusing to clean unexpected path: $path" >&2
               exit 1
@@ -211,7 +219,9 @@ jobs:
               find "$path" -depth -delete
             fi
           done
-          rm -f -- "$BUILD_ARTIFACT"
+          if [[ -n "${BUILD_ARTIFACT:-}" ]]; then
+            rm -f -- "$BUILD_ARTIFACT"
+          fi
 
   comment:
     name: Post install links
