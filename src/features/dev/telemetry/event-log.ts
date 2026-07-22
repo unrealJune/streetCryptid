@@ -243,9 +243,7 @@ export function eventLogEntryMatchesQuery(entry: EventLogEntry, query: string): 
     transport: entry.transport,
     details: entry.details,
   };
-  return searchableValues(fields).some((value) =>
-    value.toLocaleLowerCase().includes(normalized)
-  );
+  return searchableValues(fields).some((value) => value.toLocaleLowerCase().includes(normalized));
 }
 
 export function recordEventLog(input: RecordEventLogEntry): EventLogEntry {

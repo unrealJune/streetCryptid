@@ -16,11 +16,7 @@ import { useTheme } from '@/hooks/use-theme';
  * persists a decline and lets the person use the app without background location — they can turn
  * it on later from Settings.
  */
-export function LocationDisclosureScreen({
-  onChoice,
-}: {
-  onChoice: (accepted: boolean) => void;
-}) {
+export function LocationDisclosureScreen({ onChoice }: { onChoice: (accepted: boolean) => void }) {
   const theme = useTheme();
   const scheme = useColorScheme();
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
@@ -37,8 +33,8 @@ export function LocationDisclosureScreen({
       <View style={styles.header}>
         <ThemedText style={styles.title}>Before we turn on location</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">
-          streetCryptid uses your location — including while the app is closed or in the
-          background — for two things. Here&apos;s exactly what and why.
+          streetCryptid uses your location — including while the app is closed or in the background
+          — for two things. Here&apos;s exactly what and why.
         </ThemedText>
       </View>
 
@@ -48,9 +44,9 @@ export function LocationDisclosureScreen({
         </ThemedText>
         <ThemedText type="small" themeColor="textSecondary" style={styles.cardBody}>
           As you walk through your city, streetCryptid reveals the streets and hex-shaped sectors
-          you&apos;ve actually covered — building your personal explored map. This only works if
-          the app can sample your location occasionally in the background, since most of your
-          walking happens while the app is closed.
+          you&apos;ve actually covered — building your personal explored map. This only works if the
+          app can sample your location occasionally in the background, since most of your walking
+          happens while the app is closed.
         </ThemedText>
       </View>
 
