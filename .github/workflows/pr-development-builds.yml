@@ -36,11 +36,8 @@ jobs:
     outputs:
       install_url: ${{ steps.upload.outputs.url }}
     env:
-      BUILD_ARTIFACT: ${{ runner.temp }}/streetcryptid-pr-${{ github.event.pull_request.number }}.ipa
       EAS_BUILD_GIT_COMMIT_HASH: ${{ github.event.pull_request.head.sha }}
-      EAS_LOCAL_BUILD_ARTIFACTS_DIR: ${{ runner.temp }}/eas-artifacts-ios
       EAS_LOCAL_BUILD_SKIP_CLEANUP: '0'
-      EAS_LOCAL_BUILD_WORKINGDIR: ${{ runner.temp }}/eas-local-build-ios
       EXPO_NO_KEYCHAIN: '1'
     steps:
       - name: Require Expo token
@@ -51,6 +48,16 @@ jobs:
             echo "The development-builds environment is missing EXPO_TOKEN." >&2
             exit 1
           fi
+
+      - name: Configure isolated build paths
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo "BUILD_ARTIFACT=$RUNNER_TEMP/streetcryptid-pr-$PR_NUMBER.ipa"
+            echo "EAS_LOCAL_BUILD_ARTIFACTS_DIR=$RUNNER_TEMP/eas-artifacts-ios"
+            echo "EAS_LOCAL_BUILD_WORKINGDIR=$RUNNER_TEMP/eas-local-build-ios"
+          } >> "$GITHUB_ENV"
 
       - name: Check out PR revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -122,11 +129,8 @@ jobs:
     outputs:
       install_url: ${{ steps.upload.outputs.url }}
     env:
-      BUILD_ARTIFACT: ${{ runner.temp }}/streetcryptid-pr-${{ github.event.pull_request.number }}.apk
       EAS_BUILD_GIT_COMMIT_HASH: ${{ github.event.pull_request.head.sha }}
-      EAS_LOCAL_BUILD_ARTIFACTS_DIR: ${{ runner.temp }}/eas-artifacts-android
       EAS_LOCAL_BUILD_SKIP_CLEANUP: '0'
-      EAS_LOCAL_BUILD_WORKINGDIR: ${{ runner.temp }}/eas-local-build-android
     steps:
       - name: Require Expo token
         env:
@@ -136,6 +140,16 @@ jobs:
             echo "The development-builds environment is missing EXPO_TOKEN." >&2
             exit 1
           fi
+
+      - name: Configure isolated build paths
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo "BUILD_ARTIFACT=$RUNNER_TEMP/streetcryptid-pr-$PR_NUMBER.apk"
+            echo "EAS_LOCAL_BUILD_ARTIFACTS_DIR=$RUNNER_TEMP/eas-artifacts-android"
+            echo "EAS_LOCAL_BUILD_WORKINGDIR=$RUNNER_TEMP/eas-local-build-android"
+          } >> "$GITHUB_ENV"
 
       - name: Check out PR revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
