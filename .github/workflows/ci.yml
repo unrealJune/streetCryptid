@@ -1,0 +1,175 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: '1'
+  EXPO_NO_TELEMETRY: '1'
+
+jobs:
+  quality:
+    name: Quality / ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Lint
+            script: lint
+          - name: Format
+            script: format:check
+          - name: Jest
+            script: test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Install project dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run ${{ matrix.name }}
+        run: bun run "${{ matrix.script }}"
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Restore generated WASM bindings
+        id: wasm-bindings
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: modules/iroh-location/web
+          key: wasm-output-${{ runner.os }}-rust-1.97.0-wasm-pack-0.15.0-binaryen-117-${{ hashFiles('modules/iroh-location/rust-wasm/Cargo.lock', 'modules/iroh-location/rust-wasm/Cargo.toml', 'modules/iroh-location/rust-wasm/src/**/*.rs', 'modules/iroh-location/rust/Cargo.lock', 'modules/iroh-location/rust/Cargo.toml', 'modules/iroh-location/rust/src/**/*.rs', 'justfile') }}
+
+      - name: Install Linux build dependencies
+        if: steps.wasm-bindings.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential clang cmake libssl-dev perl pkg-config
+
+      - name: Install Rust and WASM build tools
+        if: steps.wasm-bindings.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: |
+            rust@1.97.0+wasm32-unknown-unknown
+            just@1.57.0
+            wasm-pack@0.15.0
+          fallback: none
+
+      - name: Restore WASM compilation cache
+        if: steps.wasm-bindings.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: modules/iroh-location/rust-wasm -> target
+          key: wasm
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Install Binaryen
+        if: steps.wasm-bindings.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --silent --show-error \
+            --output /tmp/binaryen.tar.gz \
+            https://github.com/WebAssembly/binaryen/releases/download/version_117/binaryen-version_117-x86_64-linux.tar.gz
+          echo "3dc677006555b355ea2da5e82602065a161d5e83eaefd3f759afa00b96e83212  /tmp/binaryen.tar.gz" |
+            sha256sum --check
+          tar --extract --gzip --file /tmp/binaryen.tar.gz --directory /tmp
+          sudo install --mode 0755 /tmp/binaryen-version_117/bin/wasm-opt /usr/local/bin/wasm-opt
+
+      - name: Build web bindings
+        if: steps.wasm-bindings.outputs.cache-hit != 'true'
+        run: just build-wasm
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Install project dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate Expo types
+        run: |
+          bunx expo customize tsconfig.json
+          git diff --exit-code -- .gitignore tsconfig.json
+
+      - name: Run Typecheck
+        run: bun run typecheck
+
+  native:
+    name: Native
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential clang cmake libssl-dev perl pkg-config
+
+      - name: Install Rust build tools
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: |
+            rust@1.97.0
+            just@1.57.0
+          fallback: none
+
+      - name: Restore Rust compilation cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: modules/iroh-location/rust -> target
+          key: native
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Run Rust tests
+        run: just test-rust
+
+      - name: Check generated UniFFI bindings
+        run: just check-bindings
+
+  required:
+    name: Required
+    if: always()
+    needs:
+      - quality
+      - typecheck
+      - native
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify required jobs
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          TYPECHECK_RESULT: ${{ needs.typecheck.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+        run: |
+          for result in "$QUALITY_RESULT" "$TYPECHECK_RESULT" "$NATIVE_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              echo "A required CI job did not succeed." >&2
+              exit 1
+            fi
+          done

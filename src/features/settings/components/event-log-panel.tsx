@@ -278,9 +278,7 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
                   ]}
                 >
                   <ThemedText type="smallBold">
-                    {value === 'all'
-                      ? 'All'
-                      : `${value.charAt(0).toUpperCase()}${value.slice(1)}`}
+                    {value === 'all' ? 'All' : `${value.charAt(0).toUpperCase()}${value.slice(1)}`}
                   </ThemedText>
                 </Pressable>
               ))}
@@ -303,15 +301,12 @@ export function EventLogPanel({ activeColor, warningColor }: EventLogPanelProps)
                   style={[
                     styles.control,
                     {
-                      borderColor:
-                        launchContext === value ? activeColor : theme.backgroundSelected,
+                      borderColor: launchContext === value ? activeColor : theme.backgroundSelected,
                     },
                   ]}
                 >
                   <ThemedText type="smallBold">
-                    {value === 'all'
-                      ? 'All'
-                      : `${value.charAt(0).toUpperCase()}${value.slice(1)}`}
+                    {value === 'all' ? 'All' : `${value.charAt(0).toUpperCase()}${value.slice(1)}`}
                   </ThemedText>
                 </Pressable>
               ))}
