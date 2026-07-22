@@ -1,6 +1,16 @@
 'use no memo'; // react-compiler: keep it away from Skia/Reanimated JSI objects
 
-import { Canvas, Circle, Group, Image as SkiaImage, Path, Skia } from '@shopify/react-native-skia';
+import {
+  Canvas,
+  Circle,
+  Group,
+  Image as SkiaImage,
+  ImageShader,
+  Path,
+  Rect,
+  Shader,
+  Skia,
+} from '@shopify/react-native-skia';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, StyleSheet, View, type LayoutChangeEvent } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
@@ -13,6 +23,7 @@ import {
   useReducedMotion,
   useSharedValue,
   withDecay,
+  withRepeat,
   withTiming,
 } from 'react-native-reanimated';
 
@@ -39,6 +50,7 @@ import type {
   MapReadout,
   ScreenPoint,
   Viewport,
+  WorldPoint,
   WorldRect,
 } from '../core/types';
 import { clusterMarkers } from '../core/marker-clusters';
@@ -53,10 +65,20 @@ import {
   makeMaskImage,
   renderRegionImage,
 } from './region-shader';
+import { getRevealMaskEffect } from './reveal-mask-shader';
+import { prevRectUniform, REVEAL_TARGET } from './reveal-mask';
 import { YouLocator } from './you-locator';
 
-/** Region crossfade duration (ms) — new bitmap fades in over the old one. */
+/** Crossfade duration (ms) — fallback only, when a bundle lacks its textures. */
 const CROSSFADE_MS = 200;
+/**
+ * Hex-by-hex load-in duration (ms) for a region swap. The shader swaps in
+ * whatever the previous layer already covered instantly and hex-loads only the
+ * newly-exposed ground around it, each hex flaring as it appears — so covered
+ * panning stays seamless and only new territory animates. Long enough that the
+ * per-hex pop reads.
+ */
+const REVEAL_MS = 640;
 /** Movement (screen px, pan-equivalent) between mid-gesture prefetch checks. */
 const PREFETCH_STRIDE_PX = 90;
 /**
@@ -68,6 +90,11 @@ const PREFETCH_LEAD_FRAMES = 18;
 const PREFETCH_LEAD_MAX_PX = 900;
 /** Fling below this speed (px/s) settles immediately instead of decaying. */
 const MIN_FLING_SPEED = 50;
+/**
+ * How many friend locations to warm during idle (selected + nearest). Bounded so
+ * the tile LRU isn't thrashed out of the region the user is actually looking at.
+ */
+const FRIEND_PREFETCH_MAX = 4;
 /** Double-tap zoom-in factor and animation length. */
 const DOUBLE_TAP_FACTOR = 2;
 const DOUBLE_TAP_MS = 260;
@@ -115,9 +142,10 @@ function anchorRect(rect: WorldRect, anchor: CameraState, viewport: Viewport): S
  * data region to build. So a build landing, a prefetch swap, or any re-render
  * physically cannot move the map under the user's finger.
  *
- * Two layers are kept during a rebuild — the outgoing bitmap crossfades under
- * the incoming one (UI-thread opacity tween; no re-rasterization) — so a region
- * swap is a dissolve and the map is never blank.
+ * Two layers are kept during a rebuild — the incoming region hex-loads in over
+ * the retained outgoing one (a UI-thread wipe that swaps covered ground in
+ * instantly and only animates newly-exposed area; no re-rasterization) — so a
+ * region swap reads as the world drawing itself in and the map is never blank.
  */
 export function MapView({
   onReadout,
@@ -150,11 +178,28 @@ export function MapView({
 }) {
   const [viewport, setViewport] = useState<Viewport | null>(null);
   const reducedMotion = useReducedMotion();
-  const { theme, region, anchor, limits, coverage, placeName, commit, prefetchAt } = useMapEngine(
-    viewport,
-    initialCenter,
-    selfFix
-  );
+
+  // Friend locations to warm during idle: the selected friend first, then the
+  // nearest fresh friends (the `friends` prop already arrives nearest-first),
+  // capped and stale-filtered so tapping through to a friend lands warm without
+  // evicting the region in view. Mapped to world space for the engine.
+  const friendTargets = useMemo<readonly WorldPoint[]>(() => {
+    const out: WorldPoint[] = [];
+    const selected =
+      selectedFriendId != null
+        ? friends.find((f) => f.id === selectedFriendId && !f.stale)
+        : undefined;
+    if (selected) out.push(latLonToWorld(selected.location));
+    for (const friend of friends) {
+      if (out.length >= FRIEND_PREFETCH_MAX) break;
+      if (friend.stale || friend.id === selectedFriendId) continue;
+      out.push(latLonToWorld(friend.location));
+    }
+    return out;
+  }, [friends, selectedFriendId]);
+
+  const { theme, region, pending, anchor, limits, coverage, placeName, commit, prefetchAt } =
+    useMapEngine(viewport, initialCenter, selfFix, friendTargets);
 
   // ── The one live view transform (anchor space → screen), UI-thread-owned ──
   const k = useSharedValue(1);
@@ -173,12 +218,17 @@ export function MapView({
   // next swap the whole bundle slides into the outgoing (`prev`) slot instead of
   // being rebuilt — so each region is rasterized a single time, not twice per
   // swap (the outgoing rebuild was ~180ms of pure waste per region change).
-  type RegionBundle = { region: MapRegion; image: ReturnType<typeof renderRegionImage> };
+  type RegionBundle = {
+    region: MapRegion;
+    image: ReturnType<typeof renderRegionImage>;
+    /** The baked cell-state texture — reused by the loading reveal's alpha wipe. */
+    cellImage: ReturnType<typeof makeCellStateImage>;
+  };
   const curBundle = useMemo<RegionBundle | null>(() => {
     if (!region) return null;
     const maskImage = makeMaskImage(region);
     const cellImage = makeCellStateImage(region);
-    if (!maskImage || !cellImage || !lutImage) return { region, image: null };
+    if (!maskImage || !cellImage || !lutImage) return { region, image: null, cellImage: null };
     const image = renderRegionImage({
       region,
       palette: theme.canvas,
@@ -187,7 +237,7 @@ export function MapView({
       lutImage,
       explorationEnabled,
     });
-    return { region, image };
+    return { region, image, cellImage };
   }, [region, theme, lutImage, explorationEnabled]);
 
   // Region transition (derive-state pattern): the new bitmap fades in over the
@@ -196,14 +246,37 @@ export function MapView({
   // fade) as the coverage fallback until the next region replaces it, exactly
   // like a tile map keeps stale tiles under fresh ones.
   const curOpacity = useSharedValue(1);
+  // Reveal wipe front (uReveal): 1 = fully shown. Dropped to 0 when a cold
+  // region lands, then animated to REVEAL_TARGET so its hexes fill in.
+  const revealFront = useSharedValue(REVEAL_TARGET);
   const [track, setTrack] = useState<{
     cur: RegionBundle | null;
     prev: RegionBundle | null;
     seq: number;
-  }>({ cur: null, prev: null, seq: 0 });
+    /** This swap is a cache-miss arrival — play the hex reveal, not the crossfade. */
+    reveal: boolean;
+  }>({ cur: null, prev: null, seq: 0, reveal: false });
+  // Whether the current layer is mid-reveal — while true it draws through the
+  // reveal shader (one cheap GPU pass); on completion it hands back to a plain
+  // <Image>, so there is zero residual cost once settled. Set here in the
+  // derive-during-render block (not an effect) alongside `track`.
+  const [revealing, setRevealing] = useState(false);
+  const endReveal = () => setRevealing(false);
   if (curBundle !== track.cur) {
-    curOpacity.value = 0; // start hidden this frame (no flash); tween starts post-commit
-    setTrack((t) => ({ cur: curBundle, prev: t.cur, seq: t.seq + 1 }));
+    // Every swap hex-loads in: the shader masks off whatever the previous layer
+    // already covered, so only newly-exposed ground animates (covered panning
+    // stays seamless) — no all-at-once crossfade. The plain crossfade remains
+    // only as a fallback when a bundle lacks its textures.
+    const reveal = Boolean(curBundle?.image && curBundle?.cellImage);
+    if (reveal) {
+      revealFront.value = 0; // hexes start hidden; the wipe fills them in
+      curOpacity.value = 1; // image is fully opaque — the mask controls visibility
+      setRevealing(true);
+    } else {
+      curOpacity.value = 0; // start hidden this frame (no flash); tween starts post-commit
+      setRevealing(false); // textureless fallback drops back to the <Image> crossfade
+    }
+    setTrack((t) => ({ cur: curBundle, prev: t.cur, seq: t.seq + 1, reveal }));
   }
 
   // A state tick per completed crossfade: guarantees the canvas paints the
@@ -215,9 +288,26 @@ export function MapView({
 
   useEffect(() => {
     if (!track.cur) return;
-    curOpacity.value = withTiming(1, { duration: reducedMotion ? 0 : CROSSFADE_MS }, (fin) => {
-      if (fin) runOnJS(bumpFadeTick)();
-    });
+    if (track.reveal) {
+      curOpacity.value = 1;
+      // Cancel any prior wipe so its (finished=false) callback can't end this
+      // one — overlapping cold reveals are rare but must not cross-cancel.
+      cancelAnimation(revealFront);
+      revealFront.value = withTiming(
+        REVEAL_TARGET,
+        { duration: reducedMotion ? 0 : REVEAL_MS },
+        (fin) => {
+          if (fin) {
+            runOnJS(endReveal)();
+            runOnJS(bumpFadeTick)();
+          }
+        }
+      );
+    } else {
+      curOpacity.value = withTiming(1, { duration: reducedMotion ? 0 : CROSSFADE_MS }, (fin) => {
+        if (fin) runOnJS(bumpFadeTick)();
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [track.seq]);
 
@@ -225,16 +315,62 @@ export function MapView({
   // with, so no region is ever rasterized a second time.
   const curImage = track.cur?.image ?? null;
   const prevImage = track.prev?.image ?? null;
+  /** Current region's cell texture — sampled by the reveal wipe for its alpha. */
+  const curCellImage = track.cur?.cellImage ?? null;
+
+  const revealEffect = useMemo(() => getRevealMaskEffect(), []);
 
   const curRect = useMemo(
     () => (track.cur && viewport ? anchorRect(track.cur.region.spec.rect, anchor, viewport) : null),
     [track.cur, anchor, viewport]
+  );
+  // SkRect twin of curRect for the reveal's ImageShaders — placed at the same
+  // rect as the settled <Image>, so the wipe and the plain draw are pixel-aligned.
+  const curRectSk = useMemo(
+    () => (curRect ? Skia.XYWHRect(curRect.x, curRect.y, curRect.width, curRect.height) : null),
+    [curRect]
   );
   const prevRect = useMemo(
     () =>
       track.prev && viewport ? anchorRect(track.prev.region.spec.rect, anchor, viewport) : null,
     [track.prev, anchor, viewport]
   );
+  // The area the outgoing layer already covered — the reveal shader swaps these
+  // pixels in instantly and only hex-loads the newly-exposed ground around them.
+  const prevRectVec = useMemo(() => prevRectUniform(prevRect), [prevRect]);
+  const revealUniforms = useDerivedValue(
+    () => ({ uReveal: revealFront.value, uPrevRect: prevRectVec }),
+    [prevRectVec]
+  );
+
+  // Loading skeleton: while a cold region is fetching over an uncovered area
+  // (`pending`), a gently pulsing tint sits where the map will appear, so the
+  // long network wait reads as "loading here" instead of a blank canvas. Cheap
+  // by construction — no cell field is built for it — and mounted only while the
+  // fetch is outstanding.
+  const pendingRect = useMemo(
+    () => (pending && viewport ? anchorRect(pending.rect, anchor, viewport) : null),
+    [pending, anchor, viewport]
+  );
+  const skeletonPulse = useSharedValue(0);
+  useEffect(() => {
+    if (!pendingRect || reducedMotion) {
+      skeletonPulse.value = reducedMotion ? 1 : 0;
+      return;
+    }
+    skeletonPulse.value = 0;
+    skeletonPulse.value = withRepeat(withTiming(1, { duration: 900 }), -1, true);
+    return () => {
+      cancelAnimation(skeletonPulse);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [Boolean(pendingRect), reducedMotion]);
+  const skeletonOpacity = useDerivedValue(() => 0.05 + 0.07 * skeletonPulse.value);
+  // The wipe must EXPOSE the region, not flash over it: while revealing we hide
+  // the retained prev layer and back the wipe with the loading tint at the
+  // region's own rect, so unrevealed hexes read as "still loading" and the flash
+  // brings the real tiles in over that backdrop instead of over visible tiles.
+  const loadingRect = pendingRect ?? (revealing ? curRect : null);
   const selfAnchor = useMemo(
     () =>
       viewport && selfLocation
@@ -492,6 +628,19 @@ export function MapView({
           {viewport && (
             <Canvas style={styles.fill}>
               <Group transform={transform}>
+                {loadingRect && (
+                  <Rect
+                    x={loadingRect.x}
+                    y={loadingRect.y}
+                    width={loadingRect.width}
+                    height={loadingRect.height}
+                    color={theme.chrome.island}
+                    opacity={skeletonOpacity}
+                  />
+                )}
+                {/* Retained coverage layer — stays under the reveal now: the wipe
+                    swaps its pixels in instantly where prev already covered
+                    (uPrevRect), so only the newly-exposed ground hex-loads in. */}
                 {prevImage && prevRect && (
                   <SkiaImage
                     image={prevImage}
@@ -502,17 +651,30 @@ export function MapView({
                     fit="fill"
                   />
                 )}
-                {curImage && curRect && (
-                  <SkiaImage
-                    image={curImage}
-                    x={curRect.x}
-                    y={curRect.y}
-                    width={curRect.width}
-                    height={curRect.height}
-                    fit="fill"
-                    opacity={curOpacityValue}
-                  />
-                )}
+                {curImage &&
+                  curRect &&
+                  (revealing && revealEffect && curCellImage && curRectSk ? (
+                    // Hex load-in: paint the finished bitmap through the reveal
+                    // wipe (one cheap GPU pass). Pixels prev already covered swap
+                    // in instantly; only new ground animates. Bounded to curRect;
+                    // hands back to <Image> the instant the wipe completes.
+                    <Rect x={curRect.x} y={curRect.y} width={curRect.width} height={curRect.height}>
+                      <Shader source={revealEffect} uniforms={revealUniforms}>
+                        <ImageShader image={curImage} rect={curRectSk} fit="fill" />
+                        <ImageShader image={curCellImage} rect={curRectSk} fit="fill" />
+                      </Shader>
+                    </Rect>
+                  ) : (
+                    <SkiaImage
+                      image={curImage}
+                      x={curRect.x}
+                      y={curRect.y}
+                      width={curRect.width}
+                      height={curRect.height}
+                      fit="fill"
+                      opacity={curOpacityValue}
+                    />
+                  ))}
                 {selectedTrail ? (
                   <>
                     <Path

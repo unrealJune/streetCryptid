@@ -21,6 +21,15 @@ export interface GeometrySource {
    * Optional — sources with no network (fixtures) omit it.
    */
   prefetch?(tiles: readonly TileCoord[], signal?: AbortSignal): Promise<void>;
+
+  /**
+   * True when `tile` is already decoded in cache, so `getTile` resolves
+   * synchronously-fast with no network. Lets the engine tell a warm region swap
+   * (crossfade) from a cold one (the loading reveal). Optional — a source that
+   * can't answer is treated as always-cold. Implemented by
+   * {@link CachedGeometrySource}, which every dataset wraps at the top.
+   */
+  has?(tile: TileCoord): boolean;
 }
 
 /** Empty region geometry (no tiles). */
