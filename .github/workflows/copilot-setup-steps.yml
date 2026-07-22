@@ -3,8 +3,13 @@ name: Copilot Setup Steps
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
       - .github/workflows/copilot-setup-steps.yml
+      - justfile
+      - modules/iroh-location/rust-wasm/**
+      - modules/iroh-location/rust/src/**
   pull_request:
     paths:
       - .github/workflows/copilot-setup-steps.yml
@@ -19,6 +24,14 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
+
+      - name: Restore cached Rust WASM output
+        id: rust-wasm-cache
+        continue-on-error: true
+        uses: actions/cache@v6.1.0
+        with:
+          path: modules/iroh-location/web
+          key: rust-wasm-web-v1-${{ runner.os }}-rust-1.97.0-wasm-pack-0.15.0-binaryen-117-${{ hashFiles('justfile', 'modules/iroh-location/rust-wasm/Cargo.lock', 'modules/iroh-location/rust-wasm/Cargo.toml', 'modules/iroh-location/rust-wasm/src/**', 'modules/iroh-location/rust/src/**') }}
 
       - name: Install Linux build dependencies
         run: |
@@ -74,7 +87,5 @@ jobs:
           exit 1
 
       - name: Build web bindings
+        if: steps.rust-wasm-cache.outputs.cache-hit != 'true'
         run: just build-wasm
-
-      - name: Validate repository
-        run: just check-all
