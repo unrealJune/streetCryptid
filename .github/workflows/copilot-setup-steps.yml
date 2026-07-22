@@ -10,9 +10,6 @@ on:
       - justfile
       - modules/iroh-location/rust-wasm/**
       - modules/iroh-location/rust/src/**
-  pull_request:
-    paths:
-      - .github/workflows/copilot-setup-steps.yml
 
 jobs:
   copilot-setup-steps:
