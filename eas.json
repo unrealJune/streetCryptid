@@ -9,6 +9,7 @@
       "distribution": "internal",
       "channel": "development",
       "environment": "development",
+      "credentialsSource": "remote",
       "android": {
         "buildType": "apk"
       }
@@ -17,6 +18,7 @@
       "distribution": "internal",
       "channel": "preview",
       "environment": "preview",
+      "credentialsSource": "remote",
       "android": {
         "buildType": "apk"
       }
@@ -24,7 +26,8 @@
     "production": {
       "channel": "production",
       "environment": "production",
-      "autoIncrement": true
+      "autoIncrement": true,
+      "credentialsSource": "remote"
     },
     "production-development-ios": {
       "extends": "production",

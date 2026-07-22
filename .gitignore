@@ -14,10 +14,18 @@ expo-env.d.ts
 target/
 *.orig.*
 *.jks
+*.keystore
 *.p8
 *.p12
 *.key
 *.mobileprovision
+
+# Signing credentials — NEVER commit (keystore + passwords)
+/credentials/
+credentials.json
+
+# Internal-only Play Store runbooks (not for the public repo)
+docs/play-store/
 
 # Metro
 .metro-health-check*

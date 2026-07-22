@@ -2,7 +2,7 @@ import { buildCellField, type RegionCellField } from '../core/cell-field';
 import type { ExplorationIndex } from '../core/exploration-index';
 import type { H3Grid } from '../core/h3-grid';
 import { computeRegionSpec, type RegionSpec } from '../core/region';
-import type { CameraState, Place, Viewport, WorldPoint } from '../core/types';
+import type { CameraState, Place, Viewport, WorldPoint, WorldRect } from '../core/types';
 import type { GeometrySource } from '../tiles/geometry-source';
 import { mergeGeometry } from '../tiles/geometry-source';
 import type { PackedGeometry } from '../tiles/packed-geometry';
@@ -41,6 +41,24 @@ export interface RegionTiming {
   readonly buildMs: number;
 }
 
+/**
+ * Live progress of one region build, for the loading reveal. Emitted once at
+ * `loaded: 0` the moment the build starts (carrying `coldStart` + `rect` so the
+ * caller can raise a skeleton over a would-be-blank area) and again as each tile
+ * lands. `coldStart` is decided up front from the cache: false when every tile
+ * is already decoded (a warm swap — the caller keeps the cheap crossfade), true
+ * when at least one tile needs a fetch/decode (the reveal wipe is worth playing).
+ */
+export interface BuildProgress {
+  readonly rect: WorldRect;
+  readonly loaded: number;
+  readonly total: number;
+  readonly coldStart: boolean;
+}
+
+/** Notified as a build advances; see {@link BuildProgress}. */
+export type BuildProgressListener = (progress: BuildProgress) => void;
+
 export interface MapEngineOptions {
   readonly source: GeometrySource;
   readonly grid: H3Grid;
@@ -69,6 +87,7 @@ export class MapEngine {
   private busy = false;
   private queued: {
     request: RegionRequest;
+    onProgress?: BuildProgressListener;
     resolve: (region: MapRegion | null) => void;
     reject: (error: unknown) => void;
   } | null = null;
@@ -88,16 +107,21 @@ export class MapEngine {
   /**
    * Build (or enqueue) a region for `request`. Resolves with the built region,
    * the last good region on failure, or null if a newer request replaced this
-   * one while it waited in the queue.
+   * one while it waited in the queue. `onProgress` (if given) fires only for the
+   * build that actually runs — a superseded (queued-then-replaced) request never
+   * emits, so its skeleton/reveal is never raised.
    */
-  buildRegion(request: RegionRequest): Promise<MapRegion | null> {
+  buildRegion(
+    request: RegionRequest,
+    onProgress?: BuildProgressListener
+  ): Promise<MapRegion | null> {
     if (this.busy) {
       this.queued?.resolve(null); // superseded while waiting
       return new Promise((resolve, reject) => {
-        this.queued = { request, resolve, reject };
+        this.queued = { request, onProgress, resolve, reject };
       });
     }
-    return this.runBuild(request);
+    return this.runBuild(request, onProgress);
   }
 
   /**
@@ -143,28 +167,83 @@ export class MapEngine {
     await this.source.prefetch(tiles, signal);
   }
 
-  private async runBuild(request: RegionRequest): Promise<MapRegion | null> {
+  /**
+   * Idle prefetch of specific world points (friends' locations) at the current
+   * zoom, so tapping through to a friend — which remounts the map centered on
+   * them — lands on a cache hit instead of a cold fetch. `points` is expected
+   * pre-ordered/capped by the caller (selected friend first, then nearest);
+   * tiles are deduped across points so overlapping friends cost nothing extra.
+   * Shares `prefetchAround`'s guarantees: one bundle in flight, cancels on
+   * `signal`, a no-op when the source can't prefetch.
+   */
+  async prefetchPoints(
+    points: readonly WorldPoint[],
+    zoom: number,
+    viewport: Viewport,
+    signal?: AbortSignal
+  ): Promise<void> {
+    if (!this.source.prefetch || points.length === 0) return;
+
+    const seen = new Set<string>();
+    const tiles: TileCoord[] = [];
+    for (const center of points) {
+      if (signal?.aborted) return;
+      const spec = computeRegionSpec({ center, zoom }, viewport, { dataZooms: this.dataZooms });
+      for (const t of tilesCovering(spec.rect, spec.tileZoom)) {
+        const key = tileKeyOf(t.z, t.x, t.y);
+        if (!seen.has(key)) {
+          seen.add(key);
+          tiles.push(t);
+        }
+      }
+    }
+    await this.source.prefetch(tiles, signal);
+  }
+
+  private async runBuild(
+    request: RegionRequest,
+    onProgress?: BuildProgressListener
+  ): Promise<MapRegion | null> {
     this.busy = true;
     try {
-      return await this.buildNow(request);
+      return await this.buildNow(request, onProgress);
     } finally {
       this.busy = false;
       const next = this.queued;
       this.queued = null;
-      if (next) this.runBuild(next.request).then(next.resolve, next.reject);
+      if (next) this.runBuild(next.request, next.onProgress).then(next.resolve, next.reject);
     }
   }
 
-  private async buildNow(request: RegionRequest): Promise<MapRegion | null> {
+  private async buildNow(
+    request: RegionRequest,
+    onProgress?: BuildProgressListener
+  ): Promise<MapRegion | null> {
     const spec = computeRegionSpec(request.camera, request.viewport, {
       dataZooms: this.dataZooms,
     });
     const tiles = tilesCovering(spec.rect, spec.tileZoom);
 
+    // Cold vs warm is a cache question, decided before any fetch: a swap is warm
+    // (no reveal, keep the crossfade) only when every tile is already decoded.
+    // A source that can't answer `has` is treated as cold.
+    const total = tiles.length;
+    const coldStart = this.source.has ? !tiles.every((t) => this.source.has!(t)) : true;
+    let loaded = 0;
+    onProgress?.({ rect: spec.rect, loaded, total, coldStart });
+
     const t0 = now();
     let geometry;
     try {
-      const parts = await Promise.all(tiles.map((t) => this.source.getTile(t)));
+      const parts = await Promise.all(
+        tiles.map((t) =>
+          this.source.getTile(t).then((part) => {
+            loaded++;
+            onProgress?.({ rect: spec.rect, loaded, total, coldStart });
+            return part;
+          })
+        )
+      );
       geometry = mergeGeometry(parts);
     } catch (error) {
       if (this.last) return this.last;

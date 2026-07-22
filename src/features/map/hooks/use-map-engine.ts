@@ -11,7 +11,7 @@ import { makeViewLimits, type ViewLimits } from '../core/gesture';
 import { createH3Grid, realH3 } from '../core/h3-grid';
 import { coverageInView, nearestPlaceName } from '../core/readout';
 import { coversView, shouldPrefetchRegion } from '../core/region';
-import type { CameraState, LatLon, Viewport, WorldPoint } from '../core/types';
+import type { CameraState, LatLon, Viewport, WorldPoint, WorldRect } from '../core/types';
 import { latLonToWorld } from '../core/mercator';
 import { MapEngine, type MapRegion } from '../engine/map-engine';
 import {
@@ -24,10 +24,27 @@ import { useMapTheme } from './use-map-theme';
 /** How long the camera must sit still before idle neighbor prefetch kicks in. */
 const PREFETCH_IDLE_MS = 1200;
 
+/**
+ * A cold region build in flight over an area no retained layer covers — the
+ * "3-second blank" window. Drives the loading skeleton (ghost lattice + shimmer)
+ * so the user sees the hexes-to-be filling rather than bare background.
+ */
+export interface PendingLoad {
+  readonly rect: WorldRect;
+  readonly loaded: number;
+  readonly total: number;
+}
+
 export interface MapEngineState {
   readonly theme: CryptidTheme;
   /** The latest built data region (shader textures). */
   readonly region: MapRegion | null;
+  /**
+   * A build is in flight over a not-yet-covered area — drives the loading
+   * skeleton. Null whenever a retained layer still covers the view (no blank to
+   * paper over) or nothing is building.
+   */
+  readonly pending: PendingLoad | null;
   /** The committed DATA camera — what regions are built for. Never drives the view. */
   readonly camera: CameraState;
   /**
@@ -66,7 +83,12 @@ export interface MapEngineState {
 export function useMapEngine(
   viewport: Viewport | null,
   initialCenter: LatLon | null = null,
-  selfFix: LocationFix | null = null
+  selfFix: LocationFix | null = null,
+  /**
+   * Friend locations (world space) to warm during idle, pre-ordered/capped by
+   * the caller (selected first, then nearest). Empty by default.
+   */
+  friendTargets: readonly WorldPoint[] = []
 ): MapEngineState {
   const theme = useMapTheme();
 
@@ -142,6 +164,8 @@ export function useMapEngine(
   /** Camera whose region is on screen (advances when its build lands). */
   const [camera, setCamera] = useState<CameraState>(anchor);
   const [region, setRegion] = useState<MapRegion | null>(null);
+  /** A build in flight over an uncovered area (drives the skeleton). */
+  const [pending, setPending] = useState<PendingLoad | null>(null);
 
   // Read the live region imperatively so the build effect can decide to reuse it
   // without taking it as a dependency (which would re-run on every rebuild).
@@ -157,6 +181,10 @@ export function useMapEngine(
     if (!viewport) return;
     const current = regionRef.current;
     const covers = current ? coversView(current.spec, target, viewport) : false;
+    // No retained layer covers the target → this swap would flash blank, so it
+    // gets the skeleton + hex reveal. Independent of cache state: a fast fling or
+    // recenter into cached ground is uncovered too (the prefetch didn't lead it).
+    const uncovered = !covers;
     const rebuild =
       !current ||
       shouldPrefetchRegion(current.spec, target, viewport, dataset.dataZooms) ||
@@ -165,18 +193,31 @@ export function useMapEngine(
     // The data camera follows immediately whenever the region still covers the
     // view; readouts (coverage/place) update without waiting on a build.
     if (covers) setCamera(target);
-    if (!rebuild) return;
+    if (!rebuild) {
+      setPending(null); // nothing loading — clear any stale skeleton
+      return;
+    }
 
     let live = true;
     engine
-      .buildRegion({ camera: target, viewport, exploration: exploration.index() })
+      .buildRegion({ camera: target, viewport, exploration: exploration.index() }, (progress) => {
+        if (!live) return;
+        // Skeleton while an uncovered build is outstanding (cold fetch, or a warm
+        // rebuild that would otherwise flash blank), tracking its tile progress.
+        // A covered rebuild (e.g. exploration changed) never blanks → no skeleton.
+        setPending(
+          uncovered ? { rect: progress.rect, loaded: progress.loaded, total: progress.total } : null
+        );
+      })
       .then((built) => {
         if (!live || !built) return; // superseded builds resolve null
         builtVersionRef.current = explorationVersion;
+        setPending(null);
         setRegion(built);
         setCamera(target);
       })
       .catch((error) => {
+        if (live) setPending(null);
         console.warn('[map] region build failed:', error);
       });
     return () => {
@@ -193,13 +234,19 @@ export function useMapEngine(
     if (!viewport) return;
     const controller = new AbortController();
     const timer = setTimeout(() => {
-      void engine.prefetchAround(camera, viewport, controller.signal);
+      // Neighbors first (the likeliest next pan), then friends — so a friend
+      // never delays warming the ground the user is about to reach. One shared
+      // signal: any camera change (or friends update) aborts the whole chain.
+      void (async () => {
+        await engine.prefetchAround(camera, viewport, controller.signal);
+        await engine.prefetchPoints(friendTargets, camera.zoom, viewport, controller.signal);
+      })();
     }, PREFETCH_IDLE_MS);
     return () => {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [engine, camera, viewport]);
+  }, [engine, camera, viewport, friendTargets]);
 
   const commit = useCallback(
     (t: ViewTransform) => {
@@ -221,7 +268,11 @@ export function useMapEngine(
       engine
         .buildRegion({ camera: live, viewport, exploration: exploration.index() })
         .then((built) => {
-          if (built) setRegion(built); // region only — the committed camera is untouched
+          if (!built) return;
+          // Ahead-of-the-finger prefetch swaps reveal like any other: the shader
+          // masks off whatever the current layer already covered, so only the new
+          // leading strip hex-loads in and covered ground stays put.
+          setRegion(built); // region only — the committed camera is untouched
         })
         .catch(() => {
           /* a superseded/failed prefetch is harmless; the current layer stays */
@@ -245,6 +296,7 @@ export function useMapEngine(
   return {
     theme,
     region,
+    pending,
     camera,
     anchor,
     limits,

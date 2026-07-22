@@ -3,7 +3,7 @@ import { createExplorationIndex } from '../../core/exploration-index';
 import { createH3Grid, realH3 } from '../../core/h3-grid';
 import { latLonToWorld } from '../../core/mercator';
 import { computeRegionSpec } from '../../core/region';
-import type { CameraState, Viewport } from '../../core/types';
+import type { CameraState, Viewport, WorldPoint } from '../../core/types';
 import type { PackedGeometry } from '../../tiles/packed-geometry';
 import { EMPTY_GEOMETRY, type GeometrySource } from '../../tiles/geometry-source';
 import { tileKeyOf, tilesCovering, type TileCoord } from '../../tiles/tile-math';
@@ -25,11 +25,17 @@ class FakeSource implements GeometrySource {
   requests: string[] = [];
   private pending = new Map<string, (g: PackedGeometry) => void>();
   private failures = new Map<string, Error>();
+  /** Keys reported as already cached by `has` (undefined ⇒ no `has` support). */
+  cached?: Set<string>;
   auto = true;
   geometryFor: (tile: TileCoord) => PackedGeometry = () => EMPTY_GEOMETRY;
 
   failNext(key: string, error: Error) {
     this.failures.set(key, error);
+  }
+
+  has(tile: TileCoord): boolean {
+    return this.cached?.has(tileKeyOf(tile.z, tile.x, tile.y)) ?? false;
   }
 
   getTile(tile: TileCoord): Promise<PackedGeometry> {
@@ -47,6 +53,15 @@ class FakeSource implements GeometrySource {
   resolveAll(geometry: PackedGeometry = EMPTY_GEOMETRY) {
     for (const resolve of this.pending.values()) resolve(geometry);
     this.pending.clear();
+  }
+
+  /** Tiles handed to prefetch, in order (deduped keys computed by the caller). */
+  prefetched: string[] = [];
+  async prefetch(tiles: readonly TileCoord[], signal?: AbortSignal): Promise<void> {
+    for (const tile of tiles) {
+      if (signal?.aborted) return;
+      this.prefetched.push(tileKeyOf(tile.z, tile.x, tile.y));
+    }
   }
 }
 
@@ -165,5 +180,141 @@ describe('MapEngine.buildRegion', () => {
 
     await expect(engine.buildRegion(baseRequest)).rejects.toThrow('boom');
     expect(engine.lastRegion).toBeNull();
+  });
+});
+
+describe('MapEngine build progress', () => {
+  const specOf = (c: CameraState = camera) => computeRegionSpec(c, viewport, { dataZooms });
+  const tileKeys = (c: CameraState = camera) => {
+    const spec = specOf(c);
+    return tilesCovering(spec.rect, spec.tileZoom).map((t) => tileKeyOf(t.z, t.x, t.y));
+  };
+
+  it('emits an initial 0/total then one step per landed tile', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    const total = tileKeys().length;
+    const progress: number[] = [];
+
+    await engine.buildRegion(baseRequest, (p) => {
+      expect(p.total).toBe(total);
+      expect(p.rect).toEqual(specOf().rect);
+      progress.push(p.loaded);
+    });
+
+    expect(progress[0]).toBe(0);
+    expect(progress[progress.length - 1]).toBe(total);
+    // Monotonic non-decreasing, one emission per tile plus the initial.
+    expect(progress).toHaveLength(total + 1);
+    for (let i = 1; i < progress.length; i++) expect(progress[i]).toBeGreaterThan(progress[i - 1]);
+  });
+
+  it('reports coldStart when a tile is not cached, warm when all are', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+
+    let cold: boolean | null = null;
+    await engine.buildRegion(baseRequest, (p) => {
+      cold = p.coldStart;
+    });
+    expect(cold).toBe(true); // nothing cached yet
+
+    // Mark every tile of the region as cached → the next build is warm.
+    source.cached = new Set(tileKeys());
+    cold = null;
+    await engine.buildRegion(baseRequest, (p) => {
+      cold = p.coldStart;
+    });
+    expect(cold).toBe(false);
+  });
+
+  it('is cold when only some tiles are cached (a partial warm still reveals)', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    // A wide viewport spans many tiles, so "all but one cached" is a real case.
+    const wideViewport: Viewport = { width: 800, height: 800 };
+    const wideRequest = { ...baseRequest, viewport: wideViewport };
+    const spec = computeRegionSpec(camera, wideViewport, { dataZooms });
+    const keys = tilesCovering(spec.rect, spec.tileZoom).map((t) => tileKeyOf(t.z, t.x, t.y));
+    expect(keys.length).toBeGreaterThan(1);
+    source.cached = new Set(keys.slice(1)); // all but the first
+
+    let cold: boolean | null = null;
+    await engine.buildRegion(wideRequest, (p) => {
+      cold = p.coldStart;
+    });
+    expect(cold).toBe(true);
+  });
+
+  it('never emits progress for a superseded (queued-then-replaced) request', async () => {
+    const source = new FakeSource();
+    source.auto = false;
+    const engine = makeEngine(source);
+
+    const first = engine.buildRegion(baseRequest); // in flight
+    let secondEmitted = false;
+    const second = engine.buildRegion(
+      { ...baseRequest, camera: { center: [0.16, 0.357], zoom: 13 } },
+      () => {
+        secondEmitted = true;
+      }
+    );
+    engine.buildRegion({ ...baseRequest, camera: { center: [0.161, 0.358], zoom: 13 } }); // replaces second
+
+    await expect(second).resolves.toBeNull();
+    source.resolveAll();
+    await first;
+    source.resolveAll();
+    expect(secondEmitted).toBe(false);
+  });
+});
+
+describe('MapEngine.prefetchPoints', () => {
+  const farFriend: WorldPoint = latLonToWorld({ lat: 40.7128, lon: -74.006 }); // NYC
+  const nearFriend: WorldPoint = latLonToWorld({ lat: 47.63, lon: -122.34 }); // near Seattle
+
+  it('warms the tiles covering each friend location at the current zoom', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    await engine.prefetchPoints([farFriend], camera.zoom, viewport);
+
+    const spec = computeRegionSpec({ center: farFriend, zoom: camera.zoom }, viewport, {
+      dataZooms,
+    });
+    const expected = tilesCovering(spec.rect, spec.tileZoom).map((t) => tileKeyOf(t.z, t.x, t.y));
+    expect(expected.length).toBeGreaterThan(0);
+    expect(source.prefetched.sort()).toEqual(expected.sort());
+  });
+
+  it('dedupes tiles shared by overlapping friend points', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    // Two points at the same location must not warm the same tile twice.
+    await engine.prefetchPoints([nearFriend, nearFriend], camera.zoom, viewport);
+    expect(source.prefetched.length).toBe(new Set(source.prefetched).size);
+  });
+
+  it('is a no-op for an empty point list', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    await engine.prefetchPoints([], camera.zoom, viewport);
+    expect(source.prefetched).toHaveLength(0);
+  });
+
+  it('does nothing when the source cannot prefetch', async () => {
+    const noPrefetch: GeometrySource = { getTile: () => Promise.resolve(EMPTY_GEOMETRY) };
+    const engine = makeEngine(noPrefetch);
+    await expect(
+      engine.prefetchPoints([nearFriend], camera.zoom, viewport)
+    ).resolves.toBeUndefined();
+  });
+
+  it('stops early once the signal aborts', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    const controller = new AbortController();
+    controller.abort();
+    await engine.prefetchPoints([nearFriend, farFriend], camera.zoom, viewport, controller.signal);
+    expect(source.prefetched).toHaveLength(0);
   });
 });
