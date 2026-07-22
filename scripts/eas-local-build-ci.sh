@@ -50,6 +50,11 @@ run_eas_privately() {
     eas "$@"
 }
 
+if ! run_eas_privately whoami >/dev/null 2>&1; then
+  echo "Expo token authentication failed. EAS output was withheld." >&2
+  exit 1
+fi
+
 if ! run_eas_privately build \
   --local \
   --platform "$platform" \

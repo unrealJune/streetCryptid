@@ -30,6 +30,15 @@ if [[ "${EAS_LOCAL_BUILD_LOGGER_LEVEL:-}" != "error" ]]; then
   exit 24
 fi
 
+if [[ "$command" == "whoami" ]]; then
+  printf 'credential on auth stdout: %s\n' "$FAKE_SIGNING_CREDENTIAL"
+  printf 'credential on auth stderr: %s\n' "$FAKE_SIGNING_CREDENTIAL" >&2
+  if [[ "${FAKE_EAS_FAIL_AUTH:-0}" == "1" ]]; then
+    exit 25
+  fi
+  exit 0
+fi
+
 if [[ "$command" == "build" ]]; then
   printf 'credential on stdout: %s\n' "$FAKE_SIGNING_CREDENTIAL"
   printf 'credential on stderr: %s\n' "$FAKE_SIGNING_CREDENTIAL" >&2
@@ -82,6 +91,35 @@ fi
 grep -Fxq \
   'url=https://expo.dev/accounts/streetcryptid/projects/streetCryptid/builds/12345678-1234-1234-1234-123456789abc' \
   "$success_output"
+
+auth_failure_output="$test_root/auth-failure-output"
+set +e
+auth_failure_transcript="$(
+  PATH="$test_root/bin:$PATH" \
+    EXPO_TOKEN=fake-token \
+    FAKE_SIGNING_CREDENTIAL="$sentinel" \
+    FAKE_EAS_FAIL_AUTH=1 \
+    GITHUB_OUTPUT="$auth_failure_output" \
+    RUNNER_TEMP="$test_root" \
+    bash "$repo_root/scripts/eas-local-build-ci.sh" \
+    ios production-development-ios "$test_root/auth-failure.ipa" \
+    2>&1
+)"
+auth_failure_status=$?
+set -e
+
+if [[ "$auth_failure_status" -eq 0 ]]; then
+  echo "The simulated failed Expo authentication unexpectedly succeeded." >&2
+  exit 1
+fi
+if [[ "$auth_failure_transcript" == *"$sentinel"* ]]; then
+  echo "The signing credential sentinel escaped from authentication output." >&2
+  exit 1
+fi
+if [[ "$auth_failure_transcript" != *"Expo token authentication failed"* ]]; then
+  echo "The failed authentication did not emit its fixed error." >&2
+  exit 1
+fi
 
 failure_output="$test_root/failure-output"
 set +e
