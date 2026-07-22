@@ -4423,6 +4423,31 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     }
 }
 /**
+ * Decode an SCB1 privacy bundle of MVT tiles into one flat SCG1 geometry buffer
+ * for the map renderer (see [`mvt`]). Stateless and thread-safe; the Expo module
+ * runs it off the JS thread so 340k-feature bundles no longer block Hermes.
+ */
+public func decodeMvtBundle(bundle: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_func_decode_mvt_bundle(
+        FfiConverterData.lower(bundle),$0
+    )
+})
+}
+/**
+ * Decode one coarse XYZ MVT tile (z ≤ anchor) into a flat SCG1 geometry buffer.
+ */
+public func decodeMvtTile(bytes: Data, z: UInt32, x: UInt32, y: UInt32) -> Data  {
+    return try!  FfiConverterData.lift(try! rustCall() {
+    uniffi_iroh_location_fn_func_decode_mvt_tile(
+        FfiConverterData.lower(bytes),
+        FfiConverterUInt32.lower(z),
+        FfiConverterUInt32.lower(x),
+        FfiConverterUInt32.lower(y),$0
+    )
+})
+}
+/**
  * Decode an opaque `scpair1:<hex>` token back into a [`PairInvite`].
  */
 public func decodePairInvite(token: String)throws  -> PairInvite  {
@@ -4512,6 +4537,12 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_iroh_location_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_decode_mvt_bundle() != 8028) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_decode_mvt_tile() != 45603) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_decode_pair_invite() != 566) {
         return InitializationResult.apiChecksumMismatch
