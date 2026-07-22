@@ -1,0 +1,88 @@
+name: Copilot Setup Steps
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+      - justfile
+      - modules/iroh-location/rust-wasm/**
+      - modules/iroh-location/rust/src/**
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 59
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Restore cached Rust WASM output
+        id: rust-wasm-cache
+        continue-on-error: true
+        uses: actions/cache@v6.1.0
+        with:
+          path: modules/iroh-location/web
+          key: rust-wasm-web-v1-${{ runner.os }}-rust-1.97.0-wasm-pack-0.15.0-binaryen-117-${{ hashFiles('justfile', 'modules/iroh-location/rust-wasm/Cargo.lock', 'modules/iroh-location/rust-wasm/Cargo.toml', 'modules/iroh-location/rust-wasm/src/**', 'modules/iroh-location/rust/src/**') }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential clang cmake libssl-dev perl pkg-config
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Install Rust and build tools
+        uses: taiki-e/install-action@v2.84.0
+        with:
+          tool: |
+            rust@1.97.0+rustfmt+wasm32-unknown-unknown
+            just@1.57.0
+            wasm-pack@0.15.0
+          fallback: none
+
+      - name: Install Binaryen
+        run: |
+          curl --fail --location --silent --show-error \
+            --output /tmp/binaryen.tar.gz \
+            https://github.com/WebAssembly/binaryen/releases/download/version_117/binaryen-version_117-x86_64-linux.tar.gz
+          echo "3dc677006555b355ea2da5e82602065a161d5e83eaefd3f759afa00b96e83212  /tmp/binaryen.tar.gz" |
+            sha256sum --check
+          tar --extract --gzip --file /tmp/binaryen.tar.gz --directory /tmp
+          sudo install --mode 0755 /tmp/binaryen-version_117/bin/wasm-opt /usr/local/bin/wasm-opt
+
+      - name: Install project dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate Expo typed routes
+        run: |
+          CI=1 bunx expo start --offline >/tmp/expo-start.log 2>&1 &
+          expo_pid=$!
+          trap 'kill "$expo_pid" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 60); do
+            if [[ -f expo-env.d.ts && -f .expo/types/router.d.ts ]]; then
+              exit 0
+            fi
+            if ! kill -0 "$expo_pid" 2>/dev/null; then
+              cat /tmp/expo-start.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+          cat /tmp/expo-start.log
+          echo "Expo typed-route generation timed out." >&2
+          exit 1
+
+      - name: Build web bindings
+        if: steps.rust-wasm-cache.outputs.cache-hit != 'true'
+        run: just build-wasm
