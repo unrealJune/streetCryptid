@@ -1,8 +1,8 @@
-import type { MapGeometry } from '../core/types';
 import { decodeBase64 } from './base64';
 import type { GeometrySource } from './geometry-source';
 import { EMPTY_GEOMETRY } from './geometry-source';
 import { decodeMvtTile } from './mvt-mapping';
+import { packGeometry, type PackedGeometry } from './packed-geometry';
 import type { TileCoord } from './tile-math';
 import { tileKeyOf } from './tile-math';
 
@@ -17,9 +17,9 @@ import { FIXTURE_TILES } from './__fixtures__/caphill-tiles';
 export class FixtureGeometrySource implements GeometrySource {
   constructor(private readonly tiles: Record<string, string> = FIXTURE_TILES) {}
 
-  getTile(tile: TileCoord): Promise<MapGeometry> {
+  getTile(tile: TileCoord): Promise<PackedGeometry> {
     const b64 = this.tiles[tileKeyOf(tile.z, tile.x, tile.y)];
     if (!b64) return Promise.resolve(EMPTY_GEOMETRY);
-    return Promise.resolve(decodeMvtTile(decodeBase64(b64), tile));
+    return Promise.resolve(packGeometry(decodeMvtTile(decodeBase64(b64), tile)));
   }
 }

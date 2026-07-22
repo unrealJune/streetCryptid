@@ -37,6 +37,8 @@ import uniffi.iroh_location.PeerTransportDiagnostic
 import uniffi.iroh_location.TransportAddressDiagnostic
 import uniffi.iroh_location.TransportDiagnostics
 import uniffi.iroh_location.configureTelemetry
+import uniffi.iroh_location.decodeMvtBundle
+import uniffi.iroh_location.decodeMvtTile
 import uniffi.iroh_location.decodePairInvite
 import uniffi.iroh_location.deriveTopic
 import uniffi.iroh_location.encodePairInvite
@@ -391,6 +393,14 @@ class IrohLocationModule : Module() {
     AsyncFunction("ticket") Coroutine { -> node?.ticket() ?: "" }
 
     Function("deriveTopic") { authorHex: String -> deriveTopic(authorHex.hexToBytes()).toHex() }
+
+    // Map tile decode (see rust/src/mvt.rs). AsyncFunction bodies run off the JS
+    // thread, so decoding a bundle never blocks Hermes. Bytes cross as Uint8Array.
+    AsyncFunction("decodeMvtBundle") { bundle: ByteArray -> decodeMvtBundle(bundle) }
+
+    AsyncFunction("decodeMvtTile") { bytes: ByteArray, z: Int, x: Int, y: Int ->
+      decodeMvtTile(bytes, z.toUInt(), x.toUInt(), y.toUInt())
+    }
 
     AsyncFunction("subscribe") Coroutine
       { topicHex: String, bootstrap: List<String> ->

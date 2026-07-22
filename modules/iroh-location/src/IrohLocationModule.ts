@@ -64,6 +64,13 @@ export declare class IrohLocationNativeModule
   configureTelemetry?(endpoint: string, instanceId: string): Promise<boolean>;
   flushTelemetry?(): Promise<void>;
 
+  // Native MVT map-tile decoder (see modules/iroh-location/rust/src/mvt.rs). Runs
+  // off the JS thread; returns a flat SCG1 geometry buffer. Optional: present on
+  // Android dev-client/release builds and on iOS after `just bindgen-ios`; absent
+  // in Expo Go / older binaries. Guard with `typeof … === 'function'`.
+  decodeMvtBundle?(bundle: Uint8Array): Promise<Uint8Array>;
+  decodeMvtTile?(bytes: Uint8Array, z: number, x: number, y: number): Promise<Uint8Array>;
+
   publishProfile(
     handle: string,
     cryptidName: string,

@@ -1,0 +1,22 @@
+diff --git a/index.js b/index.js
+index 9614462c84c893931adb72280369d55f4f6622fd..56d039b3c6a4ebc23fe966121d0f2cfffb4b3a74 100644
+--- a/index.js
++++ b/index.js
+@@ -5,7 +5,16 @@ const SHIFT_RIGHT_32 = 1 / SHIFT_LEFT_32;
+ // Threshold chosen based on both benchmarking and knowledge about browser string
+ // data structures (which currently switch structure types at 12 bytes or more)
+ const TEXT_DECODER_MIN_LENGTH = 12;
+-const utf8TextDecoder = typeof TextDecoder === 'undefined' ? null : new TextDecoder('utf-8');
++// PATCHED (streetCryptid): Hermes's TextDecoder mishandles typed-array views with a
++// non-zero byteOffset. readString() below passes `this.buf.subarray(pos, end)` (offset
++// = pos), so on-device every string >= 12 bytes — MVT layer names like "transportation",
++// place `class` values like "neighbourhood" — decoded to garbage. Layers were then never
++// found (vt.layers['transportation'] === undefined) and tiles yielded empty geometry: the
++// map rendered only the dot-field noise ("static", blank place label). Web/Node have a
++// correct TextDecoder so they were unaffected. Forcing the hand-rolled readUtf8 fallback
++// (pure absolute-index byte reads, byteOffset-safe) fixes Hermes; it stays correct on web
++// at a negligible cost for tile-sized strings. Same class of bug as the h3-js patch.
++const utf8TextDecoder = null;
+
+ const PBF_VARINT  = 0; // varint: int32, int64, uint32, uint64, sint32, sint64, bool, enum
+ const PBF_FIXED64 = 1; // 64-bit: double, fixed64, sfixed64

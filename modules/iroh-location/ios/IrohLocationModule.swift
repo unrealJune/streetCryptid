@@ -290,6 +290,17 @@ public final class IrohLocationModule: Module {
       dataToHex(deriveTopic(authorEndpointId: hexToData(authorHex)))
     }
 
+    // Map tile decode (see rust/src/mvt.rs). AsyncFunction runs off the JS thread.
+    // Bytes cross as Uint8Array <-> Data. Requires `just bindgen-ios` (macOS) so the
+    // UniFFI Swift bindings include these free functions.
+    AsyncFunction("decodeMvtBundle") { (bundle: Data) throws -> Data in
+      try decodeMvtBundle(bundle: bundle)
+    }
+
+    AsyncFunction("decodeMvtTile") { (bytes: Data, z: Int, x: Int, y: Int) -> Data in
+      decodeMvtTile(bytes: bytes, z: UInt32(z), x: UInt32(x), y: UInt32(y))
+    }
+
     AsyncFunction("subscribe") { (topicHex: String, bootstrap: [String]) async throws -> String in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       let subscriptionId = UUID().uuidString

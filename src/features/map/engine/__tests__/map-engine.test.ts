@@ -3,7 +3,8 @@ import { createExplorationIndex } from '../../core/exploration-index';
 import { createH3Grid, realH3 } from '../../core/h3-grid';
 import { latLonToWorld } from '../../core/mercator';
 import { computeRegionSpec } from '../../core/region';
-import type { CameraState, MapGeometry, Viewport } from '../../core/types';
+import type { CameraState, Viewport } from '../../core/types';
+import type { PackedGeometry } from '../../tiles/packed-geometry';
 import { EMPTY_GEOMETRY, type GeometrySource } from '../../tiles/geometry-source';
 import { tileKeyOf, tilesCovering, type TileCoord } from '../../tiles/tile-math';
 import { MapEngine, type RegionRequest } from '../map-engine';
@@ -22,16 +23,16 @@ const baseRequest: RegionRequest = {
 /** A controllable fake source: records requests, resolves on demand. */
 class FakeSource implements GeometrySource {
   requests: string[] = [];
-  private pending = new Map<string, (g: MapGeometry) => void>();
+  private pending = new Map<string, (g: PackedGeometry) => void>();
   private failures = new Map<string, Error>();
   auto = true;
-  geometryFor: (tile: TileCoord) => MapGeometry = () => EMPTY_GEOMETRY;
+  geometryFor: (tile: TileCoord) => PackedGeometry = () => EMPTY_GEOMETRY;
 
   failNext(key: string, error: Error) {
     this.failures.set(key, error);
   }
 
-  getTile(tile: TileCoord): Promise<MapGeometry> {
+  getTile(tile: TileCoord): Promise<PackedGeometry> {
     const key = tileKeyOf(tile.z, tile.x, tile.y);
     this.requests.push(key);
     const failure = this.failures.get(key);
@@ -43,7 +44,7 @@ class FakeSource implements GeometrySource {
     return new Promise((resolve) => this.pending.set(key, resolve));
   }
 
-  resolveAll(geometry: MapGeometry = EMPTY_GEOMETRY) {
+  resolveAll(geometry: PackedGeometry = EMPTY_GEOMETRY) {
     for (const resolve of this.pending.values()) resolve(geometry);
     this.pending.clear();
   }

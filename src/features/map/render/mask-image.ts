@@ -14,7 +14,7 @@ import {
 import { RIVER_WIDTH, ROAD_VALUES } from '../core/masks';
 import { type RegionSpec } from '../core/region';
 import { roadWidthFor } from '../core/road-lod';
-import type { MapGeometry } from '../core/types';
+import type { PackedGeometry } from '../tiles/packed-geometry';
 import { buildMaskPaths } from './mask-paths';
 
 /**
@@ -30,7 +30,7 @@ import { buildMaskPaths } from './mask-paths';
  * reproduces the software mask's max-blend for overlapping features. The result
  * is sampled by the dot-field shader as `maskTex` — no shader change.
  */
-export function buildMaskImage(geometry: MapGeometry, spec: RegionSpec): SkImage | null {
+export function buildMaskImage(geometry: PackedGeometry, spec: RegionSpec): SkImage | null {
   const paths = buildMaskPaths(geometry, spec);
 
   const recorder = Skia.PictureRecorder();

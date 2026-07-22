@@ -1,5 +1,5 @@
-import type { MapGeometry } from '../core/types';
 import type { GeometrySource } from './geometry-source';
+import type { PackedGeometry } from './packed-geometry';
 import { tileKeyOf, type TileCoord, type TileKey } from './tile-math';
 
 /**
@@ -8,8 +8,8 @@ import { tileKeyOf, type TileCoord, type TileKey } from './tile-math';
  * Failed fetches are not cached; the next request retries.
  */
 export class CachedGeometrySource implements GeometrySource {
-  private readonly cache = new Map<TileKey, MapGeometry>();
-  private readonly inFlight = new Map<TileKey, Promise<MapGeometry>>();
+  private readonly cache = new Map<TileKey, PackedGeometry>();
+  private readonly inFlight = new Map<TileKey, Promise<PackedGeometry>>();
 
   constructor(
     private readonly upstream: GeometrySource,
@@ -20,7 +20,25 @@ export class CachedGeometrySource implements GeometrySource {
     return this.cache.has(tileKeyOf(tile.z, tile.x, tile.y));
   }
 
-  getTile(tile: TileCoord, signal?: AbortSignal): Promise<MapGeometry> {
+  /**
+   * Idle prefetch: warm the cache one tile at a time so at most one bundle is
+   * ever in flight (kind to a weak connection), skipping tiles already cached
+   * or in flight. Best-effort — failures are swallowed — and it bails the moment
+   * the signal aborts (e.g. the user starts panning again).
+   */
+  async prefetch(tiles: readonly TileCoord[], signal?: AbortSignal): Promise<void> {
+    for (const tile of tiles) {
+      if (signal?.aborted) return;
+      if (this.has(tile)) continue;
+      try {
+        await this.getTile(tile, signal);
+      } catch {
+        // A failed or aborted warm is harmless; the real request will retry.
+      }
+    }
+  }
+
+  getTile(tile: TileCoord, signal?: AbortSignal): Promise<PackedGeometry> {
     const key = tileKeyOf(tile.z, tile.x, tile.y);
 
     const hit = this.cache.get(key);

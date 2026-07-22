@@ -683,6 +683,10 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
+    external fun uniffi_iroh_location_checksum_func_decode_mvt_bundle(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_decode_mvt_tile(
+    ): Int
     external fun uniffi_iroh_location_checksum_func_decode_pair_invite(
     ): Int
     external fun uniffi_iroh_location_checksum_func_derive_topic(
@@ -940,6 +944,10 @@ external fun uniffi_iroh_location_fn_method_subscription_publish_inner(`ptr`: Lo
 ): Long
 external fun uniffi_iroh_location_fn_method_subscription_publish_traced(`ptr`: Long,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_func_decode_mvt_bundle(`bundle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_decode_mvt_tile(`bytes`: RustBuffer.ByValue,`z`: Int,`x`: Int,`y`: Int,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_decode_pair_invite(`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_derive_topic(`authorEndpointId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1071,6 +1079,12 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_iroh_location_checksum_func_decode_mvt_bundle() != 8028) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_decode_mvt_tile() != 45603) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_func_decode_pair_invite() != 566) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -5743,6 +5757,35 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
 
 
 
+
+        /**
+         * Decode an SCB1 privacy bundle of MVT tiles into one flat SCG1 geometry buffer
+         * for the map renderer (see [`mvt`]). Stateless and thread-safe; the Expo module
+         * runs it off the JS thread so 340k-feature bundles no longer block Hermes.
+         */
+    @Throws(LocationException::class) fun `decodeMvtBundle`(`bundle`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_decode_mvt_bundle(
+    
+        FfiConverterByteArray.lower(`bundle`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Decode one coarse XYZ MVT tile (z ≤ anchor) into a flat SCG1 geometry buffer.
+         */ fun `decodeMvtTile`(`bytes`: kotlin.ByteArray, `z`: kotlin.UInt, `x`: kotlin.UInt, `y`: kotlin.UInt): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_decode_mvt_tile(
+    
+        FfiConverterByteArray.lower(`bytes`),FfiConverterUInt.lower(`z`),FfiConverterUInt.lower(`x`),FfiConverterUInt.lower(`y`),_status)
+}
+    )
+    }
+    
 
         /**
          * Decode an opaque `scpair1:<hex>` token back into a [`PairInvite`].

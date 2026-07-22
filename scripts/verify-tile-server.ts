@@ -22,6 +22,7 @@
  */
 
 import { latLonToWorld } from '../src/features/map/core/mercator';
+import { unpackPacked } from '../src/features/map/tiles/packed-geometry';
 import { createPlanetGeometrySource } from '../src/features/map/config';
 import { DecodingGeometrySource } from '../src/features/map/tiles/decode-source';
 import { MartinByteSource } from '../src/features/map/tiles/martin-source';
@@ -51,7 +52,7 @@ async function main() {
   // These pass through as ordinary tiles; the app requests them individually.
   console.log('coarse public XYZ (z0–10):');
   try {
-    const world = await source.getTile({ z: 0, x: 0, y: 0 });
+    const world = unpackPacked(await source.getTile({ z: 0, x: 0, y: 0 }));
     console.log(`  z0 (0/0): ${world.water.length} water, ${world.places.length} places`);
     if (world.water.length === 0) {
       console.error('  ✗ z0 decodes no water — wrong schema or empty bake');
@@ -69,7 +70,7 @@ async function main() {
   ] as const) {
     const tile = tileFor(SEATTLE.lat, SEATTLE.lon, z);
     try {
-      const geo = await source.getTile(tile);
+      const geo = unpackPacked(await source.getTile(tile));
       const count = expect === 'places' ? geo.places.length : geo.streets.length;
       console.log(
         `  z${z} (${tile.x}/${tile.y}): ${geo.streets.length} streets, ` +
@@ -119,7 +120,7 @@ async function main() {
     for (const z of [12, 13, 14]) {
       const tile = tileFor(SEATTLE.lat, SEATTLE.lon, z);
       const t0 = performance.now();
-      const geo = await privateSource.getTile(tile);
+      const geo = unpackPacked(await privateSource.getTile(tile));
       const ms = (performance.now() - t0).toFixed(0);
       const places = geo.places
         .slice(0, 5)

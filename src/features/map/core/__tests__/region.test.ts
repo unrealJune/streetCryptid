@@ -1,5 +1,6 @@
 import { CryptidThemes } from '@/constants/cryptid-theme';
 
+import { packGeometry } from '../../tiles/packed-geometry';
 import { visibleWorldRect, worldToScreen } from '../camera';
 import { buildFeatureMasks } from '../masks';
 import {
@@ -168,7 +169,7 @@ describe('packMaskTexture', () => {
     };
     const spec = computeRegionSpec(camera, viewport, { dataZooms, pad: 0.25 });
     const { camera: maskCam, viewport: maskVp } = regionMaskCamera(spec);
-    const masks = buildFeatureMasks(geometry, maskCam, maskVp);
+    const masks = buildFeatureMasks(packGeometry(geometry), maskCam, maskVp);
     const packed = packMaskTexture(masks);
     expect(packed.length).toBe(masks.streets.width * masks.streets.height * 4);
     // find a texel with street coverage: R > 0, G = B = 0, A = 255

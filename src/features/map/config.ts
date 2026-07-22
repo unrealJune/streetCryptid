@@ -6,6 +6,7 @@ import { BundleFetchByteSource } from './tiles/bundle-fetch';
 import { DecodingGeometrySource } from './tiles/decode-source';
 import type { GeometrySource } from './tiles/geometry-source';
 import { MartinByteSource } from './tiles/martin-source';
+import { createNativeTileDecoder } from './tiles/native-tile-decoder';
 import { createTileByteStore } from './tiles/sqlite-tile-store';
 import { CachedGeometrySource } from './tiles/tile-cache';
 import { MartinTileBundleSource, TILE_BUNDLE_ANCHOR_ZOOM } from './tiles/tile-bundle';
@@ -122,7 +123,9 @@ export function createPlanetGeometrySource(
         sourceId: 'planet-z10-v1',
         anchorZoom: PRIVACY_ANCHOR_ZOOM,
         ttlMs: TILE_TTL_MS,
-      })
+      }),
+      // Native Rust decoder (off the JS thread) when available; else JS default.
+      createNativeTileDecoder() ?? undefined
     ),
     TILE_CACHE_CAPACITY
   );

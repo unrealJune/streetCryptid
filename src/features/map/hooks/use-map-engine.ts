@@ -21,6 +21,9 @@ import {
 import { createExplorationStore } from '../exploration/exploration-store';
 import { useMapTheme } from './use-map-theme';
 
+/** How long the camera must sit still before idle neighbor prefetch kicks in. */
+const PREFETCH_IDLE_MS = 1200;
+
 export interface MapEngineState {
   readonly theme: CryptidTheme;
   /** The latest built data region (shader textures). */
@@ -180,6 +183,23 @@ export function useMapEngine(
       live = false;
     };
   }, [engine, target, viewport, exploration, explorationVersion, dataset]);
+
+  // Idle prefetch: once the on-screen camera has held still for a beat, warm the
+  // neighboring regions so the next pan/zoom lands on a cache hit instead of a
+  // blank fetch. Any camera change cancels it (aborting the in-flight warm),
+  // so it only ever runs while the user is paused — never competing with an
+  // active build or the tile they're actually waiting on.
+  useEffect(() => {
+    if (!viewport) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void engine.prefetchAround(camera, viewport, controller.signal);
+    }, PREFETCH_IDLE_MS);
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [engine, camera, viewport]);
 
   const commit = useCallback(
     (t: ViewTransform) => {

@@ -1,3 +1,4 @@
+import { packGeometry } from '../../tiles/packed-geometry';
 import { buildFeatureMasks, ROAD_VALUES } from '../masks';
 import { worldToScreen } from '../camera';
 import { sample } from '../raster';
@@ -40,7 +41,7 @@ describe('streets mask', () => {
         },
       ],
     };
-    const masks = buildFeatureMasks(geo, camera, viewport);
+    const masks = buildFeatureMasks(packGeometry(geo), camera, viewport);
 
     expect(sample(masks.streets, 50, sy)).toBe(ROAD_VALUES[4]); // 245
     expect(sample(masks.parks, 50, sy)).toBe(0);
@@ -69,7 +70,7 @@ describe('streets mask', () => {
         },
       ],
     };
-    const masks = buildFeatureMasks(geo, camera, viewport);
+    const masks = buildFeatureMasks(packGeometry(geo), camera, viewport);
     expect(masks.streets.data.every((v) => v === 0)).toBe(true);
   });
 });
@@ -103,7 +104,7 @@ describe('streets mask – class layering', () => {
         },
       ],
     };
-    const masks = buildFeatureMasks(geo, hiCamera, viewport);
+    const masks = buildFeatureMasks(packGeometry(geo), hiCamera, viewport);
     expect(sample(masks.streets, 50, 50)).toBe(ROAD_VALUES[3]); // 225, not 205
   });
 });
@@ -128,7 +129,7 @@ describe('parks mask', () => {
         },
       ],
     };
-    const masks = buildFeatureMasks(geo, camera, viewport);
+    const masks = buildFeatureMasks(packGeometry(geo), camera, viewport);
 
     const [cx, cy] = px(0.5, 0.5); // (50,50) — inside polygon
     expect(sample(masks.parks, cx, cy)).toBe(255);
@@ -158,7 +159,7 @@ describe('water mask', () => {
         },
       ],
     };
-    const masks = buildFeatureMasks(geo, camera, viewport);
+    const masks = buildFeatureMasks(packGeometry(geo), camera, viewport);
     const [cx, cy] = px(0.5, 0.5);
     expect(sample(masks.water, cx, cy)).toBe(255);
   });
@@ -177,7 +178,7 @@ describe('water mask', () => {
         },
       ],
     };
-    const masks = buildFeatureMasks(geo, camera, viewport);
+    const masks = buildFeatureMasks(packGeometry(geo), camera, viewport);
 
     expect(sample(masks.water, 50, ry)).toBe(255);
 
@@ -199,7 +200,7 @@ describe('water mask', () => {
         },
       ],
     };
-    const masks = buildFeatureMasks(geo, camera, viewport);
+    const masks = buildFeatureMasks(packGeometry(geo), camera, viewport);
     // 2 px off: cy=ry+2+0.5, distance=2.5, coverage=RIVER_WIDTH/2+0.5−2.5=0.5 → partial > 0
     expect(sample(masks.water, 50, ry + 2)).toBeGreaterThan(0);
   });
@@ -229,7 +230,7 @@ describe('water mask', () => {
         },
       ],
     };
-    const masks = buildFeatureMasks(geo, camera, viewport);
+    const masks = buildFeatureMasks(packGeometry(geo), camera, viewport);
 
     const [cx, cy] = px(0.5, 0.5);
     const [, ry] = px(0.5, 0.47);
@@ -242,7 +243,7 @@ describe('water mask', () => {
 
 describe('empty geometry', () => {
   it('produces all-zero masks for all three channels', () => {
-    const masks = buildFeatureMasks(emptyGeo(), camera, viewport);
+    const masks = buildFeatureMasks(packGeometry(emptyGeo()), camera, viewport);
 
     for (const mask of [masks.streets, masks.parks, masks.water]) {
       expect(mask.data.every((v) => v === 0)).toBe(true);

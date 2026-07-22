@@ -167,11 +167,28 @@ export function MapView({
   const trailStrokeWidth = useDerivedValue(() => 2.5 / Math.max(0.001, k.value));
   const trailDotRadius = useDerivedValue(() => 2.8 / Math.max(0.001, k.value));
 
-  // Mask/cell textures per region; LUT per theme. Kept for both the current region
-  // and the outgoing one so each can be (re)rendered independently.
-  const maskImage = useMemo(() => (region ? makeMaskImage(region) : null), [region]);
-  const cellImage = useMemo(() => (region ? makeCellStateImage(region) : null), [region]);
   const lutImage = useMemo(() => makeLutImage(theme.canvas), [theme]);
+
+  // Build a region's mask + cell textures AND its bitmap together, once. On the
+  // next swap the whole bundle slides into the outgoing (`prev`) slot instead of
+  // being rebuilt — so each region is rasterized a single time, not twice per
+  // swap (the outgoing rebuild was ~180ms of pure waste per region change).
+  type RegionBundle = { region: MapRegion; image: ReturnType<typeof renderRegionImage> };
+  const curBundle = useMemo<RegionBundle | null>(() => {
+    if (!region) return null;
+    const maskImage = makeMaskImage(region);
+    const cellImage = makeCellStateImage(region);
+    if (!maskImage || !cellImage || !lutImage) return { region, image: null };
+    const image = renderRegionImage({
+      region,
+      palette: theme.canvas,
+      maskImage,
+      cellImage,
+      lutImage,
+      explorationEnabled,
+    });
+    return { region, image };
+  }, [region, theme, lutImage, explorationEnabled]);
 
   // Region transition (derive-state pattern): the new bitmap fades in over the
   // outgoing one. Opacity is a UI-thread tween — the bitmaps themselves are
@@ -180,13 +197,13 @@ export function MapView({
   // like a tile map keeps stale tiles under fresh ones.
   const curOpacity = useSharedValue(1);
   const [track, setTrack] = useState<{
-    cur: MapRegion | null;
-    prev: MapRegion | null;
+    cur: RegionBundle | null;
+    prev: RegionBundle | null;
     seq: number;
   }>({ cur: null, prev: null, seq: 0 });
-  if (region !== track.cur) {
+  if (curBundle !== track.cur) {
     curOpacity.value = 0; // start hidden this frame (no flash); tween starts post-commit
-    setTrack((t) => ({ cur: region, prev: t.cur, seq: t.seq + 1 }));
+    setTrack((t) => ({ cur: curBundle, prev: t.cur, seq: t.seq + 1 }));
   }
 
   // A state tick per completed crossfade: guarantees the canvas paints the
@@ -204,42 +221,18 @@ export function MapView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [track.seq]);
 
-  const prevMask = useMemo(() => (track.prev ? makeMaskImage(track.prev) : null), [track.prev]);
-  const prevCell = useMemo(
-    () => (track.prev ? makeCellStateImage(track.prev) : null),
-    [track.prev]
-  );
-
-  const curImage = useMemo(() => {
-    if (!track.cur || !maskImage || !cellImage || !lutImage) return null;
-    return renderRegionImage({
-      region: track.cur,
-      palette: theme.canvas,
-      maskImage,
-      cellImage,
-      lutImage,
-      explorationEnabled,
-    });
-  }, [track.cur, theme, maskImage, cellImage, lutImage, explorationEnabled]);
-
-  const prevImage = useMemo(() => {
-    if (!track.prev || !prevMask || !prevCell || !lutImage) return null;
-    return renderRegionImage({
-      region: track.prev,
-      palette: theme.canvas,
-      maskImage: prevMask,
-      cellImage: prevCell,
-      lutImage,
-      explorationEnabled,
-    });
-  }, [track.prev, theme, prevMask, prevCell, lutImage, explorationEnabled]);
+  // Already-built bitmaps — the outgoing layer reuses the bundle it was rendered
+  // with, so no region is ever rasterized a second time.
+  const curImage = track.cur?.image ?? null;
+  const prevImage = track.prev?.image ?? null;
 
   const curRect = useMemo(
-    () => (track.cur && viewport ? anchorRect(track.cur.spec.rect, anchor, viewport) : null),
+    () => (track.cur && viewport ? anchorRect(track.cur.region.spec.rect, anchor, viewport) : null),
     [track.cur, anchor, viewport]
   );
   const prevRect = useMemo(
-    () => (track.prev && viewport ? anchorRect(track.prev.spec.rect, anchor, viewport) : null),
+    () =>
+      track.prev && viewport ? anchorRect(track.prev.region.spec.rect, anchor, viewport) : null,
     [track.prev, anchor, viewport]
   );
   const selfAnchor = useMemo(
