@@ -6,7 +6,8 @@ on:
 jobs:
   comment_started:
     name: Comment that builds started
-    if: ${{ github.event.pull_request.user.login == 'Cobular' || github.event.pull_request.user.login == 'unrealJune' }}
+    # Copilot owns agent PRs and records its initiating trusted user as an assignee.
+    if: ${{contains('["Cobular","unrealJune"]',toJSON(github.event.pull_request.user.login))||contains(toJSON(github.event.pull_request.assignees),'"login":"Cobular"')||contains(toJSON(github.event.pull_request.assignees),'"login":"unrealJune"')}}
     type: github-comment
     params:
       payload: |
