@@ -39,6 +39,15 @@ if [[ "$command" == "whoami" ]]; then
   exit 0
 fi
 
+if [[ "$command" == "project:info" ]]; then
+  printf 'credential on project stdout: %s\n' "$FAKE_SIGNING_CREDENTIAL"
+  printf 'credential on project stderr: %s\n' "$FAKE_SIGNING_CREDENTIAL" >&2
+  if [[ "${FAKE_EAS_FAIL_PROJECT:-0}" == "1" ]]; then
+    exit 26
+  fi
+  exit 0
+fi
+
 if [[ "$command" == "build" ]]; then
   printf 'credential on stdout: %s\n' "$FAKE_SIGNING_CREDENTIAL"
   printf 'credential on stderr: %s\n' "$FAKE_SIGNING_CREDENTIAL" >&2
@@ -118,6 +127,35 @@ if [[ "$auth_failure_transcript" == *"$sentinel"* ]]; then
 fi
 if [[ "$auth_failure_transcript" != *"Expo token authentication failed"* ]]; then
   echo "The failed authentication did not emit its fixed error." >&2
+  exit 1
+fi
+
+project_failure_output="$test_root/project-failure-output"
+set +e
+project_failure_transcript="$(
+  PATH="$test_root/bin:$PATH" \
+    EXPO_TOKEN=fake-token \
+    FAKE_SIGNING_CREDENTIAL="$sentinel" \
+    FAKE_EAS_FAIL_PROJECT=1 \
+    GITHUB_OUTPUT="$project_failure_output" \
+    RUNNER_TEMP="$test_root" \
+    bash "$repo_root/scripts/eas-local-build-ci.sh" \
+    android production-development-android "$test_root/project-failure.apk" \
+    2>&1
+)"
+project_failure_status=$?
+set -e
+
+if [[ "$project_failure_status" -eq 0 ]]; then
+  echo "The simulated failed EAS project access unexpectedly succeeded." >&2
+  exit 1
+fi
+if [[ "$project_failure_transcript" == *"$sentinel"* ]]; then
+  echo "The signing credential sentinel escaped from project access output." >&2
+  exit 1
+fi
+if [[ "$project_failure_transcript" != *"cannot access the configured EAS project"* ]]; then
+  echo "The failed project access did not emit its fixed error." >&2
   exit 1
 fi
 
