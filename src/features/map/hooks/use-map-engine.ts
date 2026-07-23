@@ -71,7 +71,7 @@ export interface MapEngineState {
    * without advancing the committed camera — keeps long pans loading ahead of
    * the finger. No-op while the current region still has headroom.
    */
-  readonly prefetchAt: (t: ViewTransform) => void;
+  readonly prefetchAt: (t: ViewTransform) => Promise<void>;
 }
 
 /**
@@ -265,12 +265,14 @@ export function useMapEngine(
   );
 
   const prefetchAt = useCallback(
-    (t: ViewTransform) => {
-      if (!viewport) return;
+    (t: ViewTransform): Promise<void> => {
+      if (!viewport) return Promise.resolve();
       const live = clampCamera(applyViewTransform(anchor, viewport, t), viewport, constraints);
       const current = regionRef.current;
-      if (current && !shouldPrefetchRegion(current.spec, live, viewport, dataset.dataZooms)) return;
-      engine
+      if (current && !shouldPrefetchRegion(current.spec, live, viewport, dataset.dataZooms)) {
+        return Promise.resolve();
+      }
+      return engine
         .buildRegion({ camera: live, viewport, exploration: exploration.index() })
         .then((built) => {
           if (!built) return;

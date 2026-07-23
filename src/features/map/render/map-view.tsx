@@ -221,6 +221,8 @@ export function MapView({
   const lastPrefetch = useSharedValue<ViewTransform>({ k: 1, tx: 0, ty: 0 });
   /** Resets the pan stride origin on the first frame after scale motion ends. */
   const wasScaling = useSharedValue(false);
+  /** UI-side backpressure: never enqueue a second JS prefetch behind a blocked build. */
+  const prefetchInFlight = useSharedValue(false);
   const trailStrokeWidth = useDerivedValue(() => 2.5 / Math.max(0.001, k.value));
   const trailDotRadius = useDerivedValue(() => 2.8 / Math.max(0.001, k.value));
 
@@ -517,6 +519,15 @@ export function MapView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewport, anchor]);
 
+  const requestPrefetch = useCallback(
+    (t: ViewTransform) => {
+      void prefetchAt(t).finally(() => {
+        prefetchInFlight.value = false;
+      });
+    },
+    [prefetchAt, prefetchInFlight]
+  );
+
   // Mid-pan/fling prefetch: request a region about one build latency ahead of
   // translation. Scale motion keeps transforming the padded retained bitmap and
   // coalesces to one edge-coverage request plus the final commit; building at
@@ -529,7 +540,10 @@ export function MapView({
         wasScaling.value = true;
         if (shouldPrefetchScaleMotion(t, prev, lastPrefetch.value)) {
           lastPrefetch.value = t;
-          runOnJS(prefetchAt)(clampTranslation(t, limits));
+          if (!prefetchInFlight.value) {
+            prefetchInFlight.value = true;
+            runOnJS(requestPrefetch)(clampTranslation(t, limits));
+          }
         } else if (t.k > prev.k) {
           // Zoom-in can never expose an outer edge; track it only to reset the
           // cumulative ratio for a later zoom-out.
@@ -545,6 +559,8 @@ export function MapView({
       if (transformDistanceSq(t, lastPrefetch.value) < PREFETCH_STRIDE_PX * PREFETCH_STRIDE_PX)
         return;
       lastPrefetch.value = t;
+      if (prefetchInFlight.value) return;
+      prefetchInFlight.value = true;
       let dx = (t.tx - prev.tx) * PREFETCH_LEAD_FRAMES;
       let dy = (t.ty - prev.ty) * PREFETCH_LEAD_FRAMES;
       const lead = Math.hypot(dx, dy);
@@ -552,9 +568,9 @@ export function MapView({
         dx *= PREFETCH_LEAD_MAX_PX / lead;
         dy *= PREFETCH_LEAD_MAX_PX / lead;
       }
-      runOnJS(prefetchAt)(clampTranslation({ k: t.k, tx: t.tx + dx, ty: t.ty + dy }, limits));
+      runOnJS(requestPrefetch)(clampTranslation({ k: t.k, tx: t.tx + dx, ty: t.ty + dy }, limits));
     },
-    [prefetchAt, limits]
+    [requestPrefetch, limits]
   );
 
   const composedGesture = useMemo(() => {
