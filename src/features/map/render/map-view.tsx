@@ -40,6 +40,8 @@ import {
   applyPan,
   applyPinch,
   clampTranslation,
+  hasScaleMotion,
+  shouldPrefetchScaleMotion,
   transformDistanceSq,
   translationRange,
 } from '../core/gesture';
@@ -217,6 +219,8 @@ export function MapView({
   const decaysLeft = useSharedValue(0);
   /** Transform at the last prefetch check, to gate by movement. */
   const lastPrefetch = useSharedValue<ViewTransform>({ k: 1, tx: 0, ty: 0 });
+  /** Resets the pan stride origin on the first frame after scale motion ends. */
+  const wasScaling = useSharedValue(false);
   const trailStrokeWidth = useDerivedValue(() => 2.5 / Math.max(0.001, k.value));
   const trailDotRadius = useDerivedValue(() => 2.8 / Math.max(0.001, k.value));
 
@@ -513,15 +517,31 @@ export function MapView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewport, anchor]);
 
-  // Mid-gesture/fling prefetch: whenever the view has moved ~a stride since the
-  // last check, request a region for a point LED ahead along the motion (about
-  // one build latency), so the build lands where the camera will be. Uniform
-  // across drags, flings, wheel zooms, and double-tap animations — anything
-  // that moves the transform.
+  // Mid-pan/fling prefetch: request a region about one build latency ahead of
+  // translation. Scale motion keeps transforming the padded retained bitmap and
+  // coalesces to one edge-coverage request plus the final commit; building at
+  // every scale stride starved Hermes long after a pinch had visually ended.
   useAnimatedReaction(
     () => ({ k: k.value, tx: tx.value, ty: ty.value }),
     (t, prev) => {
       if (!limits || !prev) return;
+      if (hasScaleMotion(t, prev)) {
+        wasScaling.value = true;
+        if (shouldPrefetchScaleMotion(t, prev, lastPrefetch.value)) {
+          lastPrefetch.value = t;
+          runOnJS(prefetchAt)(clampTranslation(t, limits));
+        } else if (t.k > prev.k) {
+          // Zoom-in can never expose an outer edge; track it only to reset the
+          // cumulative ratio for a later zoom-out.
+          lastPrefetch.value = t;
+        }
+        return;
+      }
+      if (wasScaling.value) {
+        wasScaling.value = false;
+        lastPrefetch.value = t;
+        return;
+      }
       if (transformDistanceSq(t, lastPrefetch.value) < PREFETCH_STRIDE_PX * PREFETCH_STRIDE_PX)
         return;
       lastPrefetch.value = t;

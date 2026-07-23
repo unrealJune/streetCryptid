@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useFrameCallback, useSharedValue } from 'react-native-reanimated';
 
 import { viewTransformFor, type ViewTransform } from '../core/camera';
-import { coversView } from '../core/region';
+import { coversView, PREFETCH_ZOOM_DELTA } from '../core/region';
 import type { CameraState, Viewport } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
 import {
@@ -172,7 +172,8 @@ export function useMapPerfRunner({
     const rendered = currentRef.current;
     if (!active || active.animationEndedAt === null || !rendered || !viewport) return;
     if (rendered.region === active.startRegion) return;
-    if (Math.abs(rendered.region.spec.zoom - active.definition.camera.zoom) > 0.08) return;
+    if (Math.abs(rendered.region.spec.zoom - active.definition.camera.zoom) > PREFETCH_ZOOM_DELTA)
+      return;
     if (!coversView(rendered.region.spec, active.definition.camera, viewport)) return;
     finishScenario('complete');
   }, [finishScenario, viewport]);
