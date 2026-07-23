@@ -12,6 +12,7 @@ or the final Skia raster.
 | ------------------------------------- | ------: | ------------: | ------: | ---------------: | -------: | ----------: |
 | Baseline (`copilot/map-perf-harness`) | 3.076 s |       5.963 s | 7.999 s |          7.747 s |  5.847 s |     6.253 s |
 | Coalesced zoom prefetch               |       - |       3.065 s | 1.833 s |          1.465 s |     open |        open |
+| Coalesced engine queue                |       - |       1.964 s | 1.884 s |          1.497 s |     open |        open |
 
 Target: a 60 fps UI and responsive JS thread throughout every operation, with cached settles
 below 300 ms and cold network/decode hidden behind retained coverage plus the hex loading
@@ -146,21 +147,41 @@ prefetch churn: a 3-second cold pan took 9.12 seconds, and the return pan starve
 past the 30-second harness deadline. That is the next isolated branch, not evidence that tile
 fetching or zoom coalescing regressed.
 
+## Pass 2: coalesced engine queue
+
+Run ID: `ios-queue-coalescing-1`.
+
+After an in-flight region lands, the engine now resolves a queued request from that immutable
+region when it already satisfies the production coverage and prefetch margins. This removes a
+redundant queued final build without changing the one-deep pipeline or canceling useful work.
+
+The cold zoom-out dropped from 3065 ms to 1964 ms (-35.9%) and from two region builds to one.
+Zoom-in and cached zoom stayed within noise at 1884 ms and 1497 ms. All engine, interaction,
+coverage, and rendering tests passed.
+
+This did not improve pan: the cold pan built nine regions and took 9.23 seconds; the cached
+return built 39 regions and crossed the 30-second harness deadline. The profile exposed a
+different mechanism. While Hermes constructs H3 fields, Reanimated continues enqueueing
+`runOnJS(prefetchAt)` calls. They arrive one at a time after each block, when the engine is no
+longer busy, so queue replacement cannot see or supersede the newer callbacks. UI-to-JS
+backpressure is required before the engine boundary.
+
 ## Experiment journal
 
-| Branch / attempt                                        | Hypothesis                                                            | Result                                                                                                                                                                                | Decision                                                                                                                                                     |
-| ------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Pre-harness `scripts/profile-scene.ts`                  | Existing script could supply a baseline.                              | Failed under Bun on React Native's Flow-only `import typeof`. It also measured only one camera.                                                                                       | Replaced with a pure six-scenario host harness that does not import native React Native modules.                                                             |
-| `copilot/map-perf-harness`, pilot `ios-baseline-cold-1` | First automated camera sequence would cover all scenarios.            | Zoom/pan data exposed the bottleneck, but horizontal pan timed out because completion was attached to unchanged Y translation. Async metrics could also spill into the next scenario. | Corrected callback selection, distance-based pans, target coverage checks, and per-scenario async metric scopes; pilot numbers are not used as the baseline. |
-| Instruments `Animation Hitches`                         | Native hitch counts could supplement UI frame callbacks.              | Recording failed because the template is unsupported on iOS Simulator.                                                                                                                | Retained the failure here; use Time Profiler plus Reanimated UI frame data on simulator.                                                                     |
-| Instruments `Time Profiler`                             | A native CPU trace can validate the thread-level profile.             | Recorded successfully for 45 seconds. No `>250 ms` main-thread hang rows were emitted; the long stalls are on the React Native JavaScript thread.                                     | Retained as the native baseline artifact.                                                                                                                    |
-| `copilot/map-perf-zoom-prefetch`, naive                 | Skip all scale-motion region builds and render only the final target. | Zoom latency fell, but extreme zoom-out exposed 20 blank frames before the final build landed.                                                                                        | Rejected; retained coverage is mandatory.                                                                                                                    |
-| `copilot/map-perf-zoom-prefetch`, thresholded           | Coalesce scale builds to one coverage prefetch plus the final commit. | Zoom latency fell 49-81%, UI remained 60 fps, and all zero-gap simulations passed.                                                                                                    | Accepted.                                                                                                                                                    |
+| Branch / attempt                                        | Hypothesis                                                                   | Result                                                                                                                                                                                | Decision                                                                                                                                                     |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Pre-harness `scripts/profile-scene.ts`                  | Existing script could supply a baseline.                                     | Failed under Bun on React Native's Flow-only `import typeof`. It also measured only one camera.                                                                                       | Replaced with a pure six-scenario host harness that does not import native React Native modules.                                                             |
+| `copilot/map-perf-harness`, pilot `ios-baseline-cold-1` | First automated camera sequence would cover all scenarios.                   | Zoom/pan data exposed the bottleneck, but horizontal pan timed out because completion was attached to unchanged Y translation. Async metrics could also spill into the next scenario. | Corrected callback selection, distance-based pans, target coverage checks, and per-scenario async metric scopes; pilot numbers are not used as the baseline. |
+| Instruments `Animation Hitches`                         | Native hitch counts could supplement UI frame callbacks.                     | Recording failed because the template is unsupported on iOS Simulator.                                                                                                                | Retained the failure here; use Time Profiler plus Reanimated UI frame data on simulator.                                                                     |
+| Instruments `Time Profiler`                             | A native CPU trace can validate the thread-level profile.                    | Recorded successfully for 45 seconds. No `>250 ms` main-thread hang rows were emitted; the long stalls are on the React Native JavaScript thread.                                     | Retained as the native baseline artifact.                                                                                                                    |
+| `copilot/map-perf-zoom-prefetch`, naive                 | Skip all scale-motion region builds and render only the final target.        | Zoom latency fell, but extreme zoom-out exposed 20 blank frames before the final build landed.                                                                                        | Rejected; retained coverage is mandatory.                                                                                                                    |
+| `copilot/map-perf-zoom-prefetch`, thresholded           | Coalesce scale builds to one coverage prefetch plus the final commit.        | Zoom latency fell 49-81%, UI remained 60 fps, and all zero-gap simulations passed.                                                                                                    | Accepted.                                                                                                                                                    |
+| `copilot/map-perf-queue-coalescing`                     | Reuse the just-built padded region when it already serves the queued camera. | Cold zoom-out fell another 35.9%; pan still built 9/39 regions because bridge callbacks reached the engine serially.                                                                  | Accepted for redundant engine work; rejected as the pan solution.                                                                                            |
 
 ## Next measured hypotheses
 
-1. Coalesce translation prefetch so a deliberate pan cannot queue region builds faster than
-   Hermes can construct them.
+1. Apply UI-to-JS backpressure so only one translation prefetch can cross the bridge while a
+   region build is outstanding.
 2. Cache complete H3 region fields or move immutable field construction out of Hermes so a
    warm final region does not spend about one second rebuilding identical cells.
 3. Batch SQLite bundle writes in an exclusive WAL transaction and measure cold source time.

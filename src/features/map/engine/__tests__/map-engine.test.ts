@@ -185,6 +185,28 @@ describe('MapEngine.buildRegion', () => {
     expect(engine.lastRegion).toBe(builtThird);
   });
 
+  it('coalesces a queued camera already served by the build that just landed', async () => {
+    const source = new FakeSource();
+    source.auto = false;
+    const timings: RegionTiming[] = [];
+    const engine = new MapEngine({
+      source,
+      grid,
+      dataZooms,
+      onTiming: (timing) => timings.push(timing),
+    });
+    const spec = computeRegionSpec(camera, viewport, { dataZooms });
+
+    const first = engine.buildRegion(baseRequest);
+    const coveredQueued = engine.buildRegion(baseRequest);
+    source.resolveAll();
+
+    const built = await first;
+    await expect(coveredQueued).resolves.toBe(built);
+    expect(timings).toHaveLength(1);
+    expect(source.requests).toHaveLength(tilesCovering(spec.rect, spec.tileZoom).length);
+  });
+
   it('degrades to the last good region when a fetch fails', async () => {
     const source = new FakeSource();
     const engine = makeEngine(source);
