@@ -20,7 +20,7 @@
 //! [`ProfileDocs`] wraps the live iroh-docs replica.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -317,24 +317,9 @@ pub fn is_newer_epoch(candidate: u64, last_seen: Option<u64>) -> bool {
 /// fresh namespace on `create()`.
 pub const PROFILE_NS_FILE: &str = "profile-namespace.bin";
 
-/// Read a persisted 32-byte namespace id from `path`, or `None` if absent / malformed.
-pub fn read_ns_file(path: &Path) -> Option<[u8; 32]> {
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.len() != 32 {
-        return None;
-    }
-    let mut id = [0u8; 32];
-    id.copy_from_slice(&bytes);
-    Some(id)
-}
-
-/// Persist a 32-byte namespace id to `path` (best-effort; creates parent dirs).
-pub fn write_ns_file(path: &Path, id: &[u8; 32]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, id)
-}
+// The `read_ns_file`/`write_ns_file` helpers now live in `docs` (shared by the native + wasm
+// crates); re-exported here so the profile init/tests keep referring to them unqualified.
+pub use crate::docs::{read_ns_file, write_ns_file};
 
 // ── Live-node wrapper ───────────────────────────────────────────────────────────────────
 

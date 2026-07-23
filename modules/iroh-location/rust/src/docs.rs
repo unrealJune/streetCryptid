@@ -20,7 +20,7 @@
 //! cross-compile gate is unblocked (see `README.md`). The pure logic above is fully tested.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use iroh::EndpointAddr;
@@ -40,7 +40,6 @@ use n0_future::StreamExt;
 use tokio::sync::Mutex;
 
 use crate::crypto;
-use crate::profile::{read_ns_file, write_ns_file};
 
 #[cfg(feature = "cli")]
 use iroh_blobs::HashAndFormat;
@@ -65,6 +64,30 @@ pub const KEY_SEP: u8 = b'/';
 /// restart would orphan every friend's stored trail read-ticket (durable/stash backfill would
 /// silently break while the live gossip path kept working).
 pub const TRAIL_NS_FILE: &str = "trail-namespace.bin";
+
+/// Read a persisted 32-byte namespace id from `path`, or `None` if absent / malformed. Lives
+/// here (shared by both the native and wasm crates via `#[path]`) rather than in `profile`,
+/// which is native-only. On wasm there is no real filesystem, so the read simply yields `None`
+/// and a fresh namespace is minted each time — correct for the ephemeral in-memory store there.
+pub fn read_ns_file(path: &Path) -> Option<[u8; 32]> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&bytes);
+    Some(id)
+}
+
+/// Persist a 32-byte namespace id to `path` (best-effort; creates parent dirs). Failures are
+/// swallowed by callers, so an unwritable/absent filesystem (e.g. wasm) is a no-op.
+pub fn write_ns_file(path: &Path, id: &[u8; 32]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, id)
+}
+
 /// Width of the zero-padded decimal sequence number. `u64::MAX` has 20 digits, so this keeps
 /// keys lexicographically sortable in the same order as the numeric `seq`.
 pub const SEQ_WIDTH: usize = 20;
