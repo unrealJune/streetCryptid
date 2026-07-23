@@ -1,7 +1,7 @@
 import { buildCellField, type RegionCellField } from '../core/cell-field';
 import type { ExplorationIndex } from '../core/exploration-index';
 import type { H3Grid } from '../core/h3-grid';
-import { computeRegionSpec, type RegionSpec } from '../core/region';
+import { computeRegionSpec, shouldPrefetchRegion, type RegionSpec } from '../core/region';
 import type { CameraState, Place, Viewport, WorldPoint, WorldRect } from '../core/types';
 import type { GeometrySource } from '../tiles/geometry-source';
 import { mergeGeometry } from '../tiles/geometry-source';
@@ -223,7 +223,22 @@ export class MapEngine {
       this.busy = false;
       const next = this.queued;
       this.queued = null;
-      if (next) this.runBuild(next.request, next.onProgress).then(next.resolve, next.reject);
+      if (next) {
+        const built = this.last;
+        if (
+          built &&
+          !shouldPrefetchRegion(
+            built.spec,
+            next.request.camera,
+            next.request.viewport,
+            this.dataZooms
+          )
+        ) {
+          next.resolve(built);
+        } else {
+          this.runBuild(next.request, next.onProgress).then(next.resolve, next.reject);
+        }
+      }
     }
   }
 
