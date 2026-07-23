@@ -81,6 +81,7 @@ class DbExplorationStore implements ExplorationStore {
 
   private known(): Promise<Set<CellIndex>> {
     if (!this.knownPromise) {
+      // Cache the normalized set: legacy parent lookups run once per store lifetime.
       this.knownPromise = this.db()
         .then((db) => db.allCells())
         .then((cells) => {

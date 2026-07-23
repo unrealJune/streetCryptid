@@ -305,7 +305,7 @@ export class MapEngine {
       this.cellFieldCache.delete(cellKey);
       this.cellFieldCache.set(cellKey, cellField);
     } else {
-      let built: Awaited<ReturnType<typeof buildCellFieldWithTimingAsync>>;
+      let built;
       if (spec.cellRes === null) {
         built = {
           field: { res: H3_DISPLAY_RES, cells: [] },
