@@ -149,11 +149,8 @@ export default function MapScreenBody() {
   const initialCenter =
     sessionFocus?.location ??
     (hasLiveSelfFix && selfFix ? { lat: selfFix.lat, lon: selfFix.lon } : null);
-  const mapSessionKey = sessionFocus
-    ? `friend-${sessionFocus.id}`
-    : hasLiveSelfFix
-      ? 'gps-centered'
-      : 'default-centered';
+  // First GPS lock updates the marker, but must not destroy the user's camera.
+  const mapSessionKey = sessionFocus ? `friend-${sessionFocus.id}` : 'persistent-map';
   // Native tabs already apply Android's bottom inset to their screen content.
   const islandBottomPadding = Platform.OS === 'android' ? Spacing.two : insets.bottom + Spacing.two;
 
@@ -229,7 +226,7 @@ function MapSession({
   onReadout(readout: MapReadout): void;
   onSelectFriend(friendId: string): void;
   onSelectSelf(): void;
-  selfHistory: readonly MapFriendLocation['location'][];
+  selfHistory: MapFriendLocation['history'];
   selfSelected: boolean;
 }) {
   const [sessionCenter] = useState(initialCenter);
@@ -252,8 +249,11 @@ function MapSession({
   );
 }
 
-function trailLocations(points: readonly TrailPoint[]): MapFriendLocation['location'][] {
-  return points.map((point) => ({ lat: point.fix.lat, lon: point.fix.lon }));
+function trailLocations(points: readonly TrailPoint[]): MapFriendLocation['history'] {
+  return points.map((point) => ({
+    id: `${point.author}:${point.seq}`,
+    location: { lat: point.fix.lat, lon: point.fix.lon },
+  }));
 }
 
 const styles = StyleSheet.create({

@@ -123,10 +123,15 @@ export interface MapFriendLocation {
   cryptidName?: string;
   color: string;
   location: LatLon;
-  history: readonly LatLon[];
+  history: readonly MapTrailLocation[];
   historyCount: number;
   latestTs: number;
   stale?: boolean;
+}
+
+export interface MapTrailLocation {
+  readonly id: string;
+  readonly location: LatLon;
 }
 
 /**
@@ -177,7 +182,7 @@ export function MapView({
   selfLocation?: LatLon | null;
   /** The full live self fix (accuracy + ts) — feeds live exploration. */
   selfFix?: LocationFix | null;
-  selfHistory?: readonly LatLon[];
+  selfHistory?: readonly MapTrailLocation[];
   selfSelected?: boolean;
   friends?: readonly MapFriendLocation[];
   selectedFriendId?: string | null;
@@ -467,7 +472,10 @@ export function MapView({
   const selfTrailPoints = useMemo(
     () =>
       viewport
-        ? selfHistory.map((location) => worldToScreen(anchor, viewport, latLonToWorld(location)))
+        ? selfHistory.map(({ id, location }) => ({
+            id,
+            screen: worldToScreen(anchor, viewport, latLonToWorld(location)),
+          }))
         : [],
     [anchor, selfHistory, viewport]
   );
@@ -479,9 +487,10 @@ export function MapView({
     if (!selectedFriendId) return null;
     const friend = friends.find((candidate) => candidate.id === selectedFriendId);
     if (!friend) return null;
-    const points = friend.history.map((location) =>
-      worldToScreen(anchor, viewport, latLonToWorld(location))
-    );
+    const points = friend.history.map(({ id, location }) => ({
+      id,
+      screen: worldToScreen(anchor, viewport, latLonToWorld(location)),
+    }));
     return buildTrail(points, friend.color);
   }, [
     anchor,
@@ -782,12 +791,12 @@ export function MapView({
                       strokeWidth={trailStrokeWidth}
                       style="stroke"
                     />
-                    {selectedTrail.points.map((point, index) => (
+                    {selectedTrail.points.map(({ id, screen }, index) => (
                       <Circle
                         color={selectedTrail.color}
-                        cx={point[0]}
-                        cy={point[1]}
-                        key={`${point[0]}:${point[1]}:${index}`}
+                        cx={screen[0]}
+                        cy={screen[1]}
+                        key={id}
                         opacity={0.34 + (0.5 * (index + 1)) / selectedTrail.points.length}
                         r={trailDotRadius}
                       />
@@ -881,10 +890,15 @@ const styles = StyleSheet.create({
   fill: { flex: 1 },
 });
 
-function buildTrail(points: readonly ScreenPoint[], color: string) {
+interface TrailScreenPoint {
+  readonly id: string;
+  readonly screen: ScreenPoint;
+}
+
+function buildTrail(points: readonly TrailScreenPoint[], color: string) {
   if (points.length === 0) return null;
   const path = Skia.Path.Make();
-  path.moveTo(points[0][0], points[0][1]);
-  for (const point of points.slice(1)) path.lineTo(point[0], point[1]);
+  path.moveTo(points[0].screen[0], points[0].screen[1]);
+  for (const { screen } of points.slice(1)) path.lineTo(screen[0], screen[1]);
   return { color, path, points };
 }
