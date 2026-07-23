@@ -20,6 +20,7 @@
 //! cross-compile gate is unblocked (see `README.md`). The pure logic above is fully tested.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use iroh::EndpointAddr;
@@ -39,6 +40,17 @@ use n0_future::StreamExt;
 use tokio::sync::Mutex;
 
 use crate::crypto;
+use crate::profile::{read_ns_file, write_ns_file};
+
+#[cfg(feature = "cli")]
+use iroh_blobs::HashAndFormat;
+#[cfg(feature = "cli")]
+use iroh_docs::{
+    actor::{OpenOpts, SyncHandle},
+    net::connect_and_sync,
+    store::Store as DocsStore,
+    DocTicket,
+};
 
 /// Stop a reconciliation after this many seconds without a new event (peer likely unreachable),
 /// so `sync` always returns instead of hanging on a stalled connection.
@@ -46,6 +58,13 @@ const SYNC_IDLE_TIMEOUT_SECS: u64 = 8;
 
 /// Key separator between the hex author and the zero-padded sequence number.
 pub const KEY_SEP: u8 = b'/';
+
+/// Filename (under `data_dir`) holding the persisted trail `NamespaceId`, so our own trail
+/// namespace is stable across [`crate::LocationNode`] restarts even though iroh-docs mints a
+/// fresh namespace on `create()`. Mirrors [`crate::profile::PROFILE_NS_FILE`]; without it a
+/// restart would orphan every friend's stored trail read-ticket (durable/stash backfill would
+/// silently break while the live gossip path kept working).
+pub const TRAIL_NS_FILE: &str = "trail-namespace.bin";
 /// Width of the zero-padded decimal sequence number. `u64::MAX` has 20 digits, so this keeps
 /// keys lexicographically sortable in the same order as the numeric `seq`.
 pub const SEQ_WIDTH: usize = 20;
@@ -163,12 +182,34 @@ pub struct TrailDocs {
 impl TrailDocs {
     /// Initialise from an already-spawned [`Docs`] protocol + its backing blobs store.
     ///
-    /// Creates (or, on a persistent store, reuses) our own trail namespace and the default
-    /// docs author. The caller is responsible for having registered the `Docs`/`Blobs`/`Gossip`
-    /// protocols on the iroh [`Router`](iroh::protocol::Router).
-    pub async fn init(docs: Docs, blobs: BlobsStore) -> Result<Self> {
+    /// Reuses the persisted trail namespace under `data_dir` when possible (stable across
+    /// restarts), otherwise creating a new one and persisting its id. iroh-docs mints a fresh
+    /// namespace on every `create()`, so without this a restart would rotate our trail namespace
+    /// and orphan every friend's stored read-ticket (see [`TRAIL_NS_FILE`]). Mirrors
+    /// [`crate::profile::ProfileDocs::init`]. The caller is responsible for having registered the
+    /// `Docs`/`Blobs`/`Gossip` protocols on the iroh [`Router`](iroh::protocol::Router).
+    pub async fn init(docs: Docs, blobs: BlobsStore, data_dir: PathBuf) -> Result<Self> {
         let author = docs.author_default().await?;
-        let own = docs.create().await?;
+        let ns_path = data_dir.join(TRAIL_NS_FILE);
+
+        // Reopen the persisted namespace if we have one and it's still in the local store;
+        // otherwise fall through to minting + persisting a fresh one.
+        let doc = match read_ns_file(&ns_path) {
+            Some(id) => match docs.open(NamespaceId::from(id)).await {
+                Ok(Some(doc)) => Some(doc),
+                _ => None,
+            },
+            None => None,
+        };
+        let own = match doc {
+            Some(doc) => doc,
+            None => {
+                let doc = docs.create().await?;
+                // Best-effort persist; a failure just means we mint a fresh ns next boot.
+                let _ = write_ns_file(&ns_path, &doc.id().to_bytes());
+                doc
+            }
+        };
         let own_ns = own.id();
         let mut handles = HashMap::new();
         handles.insert(own_ns.to_bytes(), own);
@@ -311,7 +352,7 @@ impl TrailDocs {
         // recovered so the UI always gets a `completed` (with count), never a dead button.
         loop {
             match timeout(Duration::from_secs(SYNC_IDLE_TIMEOUT_SECS), events.next()).await {
-                Ok(Some(Ok(LiveEvent::InsertRemote { entry, .. }))) => {
+                Ok(Some(Ok(LiveEvent::InsertRemote { from, entry, .. }))) => {
                     let bytes = match self.blobs.blobs().get_bytes(entry.content_hash()).await {
                         Ok(b) => b,
                         Err(_) => continue,
@@ -326,6 +367,7 @@ impl TrailDocs {
                                     sc.entry_hash = %crate::telemetry::short_hex(entry.content_hash().as_bytes()),
                                     sc.author = %crate::telemetry::short_hex(&author_bytes),
                                     sc.seq = seq,
+                                    entry.origin = %from.fmt_short(),
                                     "trail.backfill: recovered envelope via reconciliation"
                                 );
                                 sink.on_backfill(author_bytes, seq, opened.payload);
@@ -343,6 +385,83 @@ impl TrailDocs {
 
         sink.on_sync_status(author_label, "completed".to_string(), Some(recovered));
         Ok(recovered)
+    }
+
+    /// Perform one direct range-reconciliation exchange with `peer` without opening the namespace
+    /// in the iroh-docs live engine. This deliberately avoids gossip membership and remembered
+    /// useful peers, so the desktop observer has exactly one metadata and blob source: trail-stash.
+    #[cfg(feature = "cli")]
+    pub async fn sync_direct(
+        &self,
+        endpoint: &iroh::Endpoint,
+        ticket: DocTicket,
+        peer: EndpointAddr,
+        since_ts: u64,
+        recv_secret: &[u8],
+    ) -> Result<Vec<TrailFix>> {
+        let sync = SyncHandle::spawn(
+            DocsStore::memory(),
+            None,
+            format!("stash-cli-{}", endpoint.id().fmt_short()),
+        );
+        let namespace = sync.import_namespace(ticket.capability).await?;
+        sync.open(namespace, OpenOpts::default().sync()).await?;
+
+        let result = async {
+            let finished = connect_and_sync(endpoint, &sync, namespace, peer.clone(), None).await?;
+            if finished.peer != peer.id {
+                return Err(anyhow!(
+                    "direct trail sync expected {}, got {}",
+                    peer.id.fmt_short(),
+                    finished.peer.fmt_short()
+                ));
+            }
+
+            let (tx, mut rx) = irpc::channel::mpsc::channel(256);
+            sync.get_many(namespace, Query::all().build(), tx).await?;
+            let downloader = self.blobs.downloader(endpoint);
+            let mut out = Vec::new();
+            while let Some(entry) = rx.recv().await? {
+                let entry = entry?;
+                if entry.content_len() == 0 {
+                    continue;
+                }
+                let hash = entry.content_hash();
+                if self.blobs.blobs().get_bytes(hash).await.is_err() {
+                    downloader
+                        .download(HashAndFormat::raw(hash), [peer.id])
+                        .await?;
+                }
+                let bytes = self.blobs.blobs().get_bytes(hash).await?;
+                let opened = match crypto::open(recv_secret, &bytes) {
+                    Ok(opened) => opened,
+                    Err(_) => continue,
+                };
+                if let Some((author, seq)) = decode_key(entry.key()) {
+                    if fix_ts_at_least(&opened.payload, since_ts) {
+                        tracing::info!(
+                            sc.entry_hash = %crate::telemetry::short_hex(hash.as_bytes()),
+                            sc.author = %crate::telemetry::short_hex(&author),
+                            sc.seq = seq,
+                            sync.peer = %peer.id.fmt_short(),
+                            "trail.backfill: recovered envelope via direct stash reconciliation"
+                        );
+                        out.push(TrailFix {
+                            author,
+                            seq,
+                            payload: opened.payload,
+                        });
+                    }
+                }
+            }
+            Ok(out)
+        }
+        .await;
+
+        let shutdown = sync.shutdown().await.map(|_| ());
+        let fixes = result?;
+        shutdown?;
+        Ok(fixes)
     }
 
     /// Explicitly prune entries in `ns` older than `older_than_ts`. Only
@@ -573,5 +692,137 @@ mod tests {
             crypto::open(&c_sk, &e2),
             Err(crypto::CryptoError::NotARecipient)
         ));
+    }
+
+    // ── own trail namespace is stable across restarts (regression) ───────────────────────────
+    //
+    // iroh-docs mints a fresh namespace on every `create()`. Before the persistence fix,
+    // `TrailDocs::init` called `create()` unconditionally, so each restart rotated our trail
+    // namespace and orphaned every friend's stored read-ticket (durable/stash backfill silently
+    // broke while the live gossip path kept working). These tests pin the reuse behaviour.
+
+    use iroh::{Endpoint, RelayMode, SecretKey};
+    use iroh_blobs::store::fs::FsStore;
+    use iroh_gossip::net::Gossip;
+
+    /// A live docs node over `data_dir`. Holds the endpoint/gossip alive so the persistent docs
+    /// store stays open for the duration of a test (init is local-only — no network sync).
+    struct DocsFixture {
+        docs: Docs,
+        blobs: BlobsStore,
+        _endpoint: Endpoint,
+        _gossip: Gossip,
+    }
+
+    async fn spawn_docs(data_dir: &std::path::Path) -> DocsFixture {
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(SecretKey::generate())
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind test endpoint");
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let blobs = FsStore::load(data_dir.join("blobs"))
+            .await
+            .expect("load test blobs");
+        let docs = iroh_docs::protocol::Docs::persistent(data_dir.to_path_buf())
+            .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
+            .await
+            .expect("spawn test docs");
+        DocsFixture {
+            docs,
+            blobs: (*blobs).clone(),
+            _endpoint: endpoint,
+            _gossip: gossip,
+        }
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sc-trail-ns-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn trail_namespace_is_stable_across_reinit() {
+        let dir = scratch_dir("stable");
+        let fx = spawn_docs(&dir).await;
+
+        let first = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone())
+            .await
+            .unwrap();
+        let ns1 = first.own_namespace();
+        // The id was persisted so the next boot can reopen it.
+        assert_eq!(
+            read_ns_file(&dir.join(TRAIL_NS_FILE)),
+            Some(ns1.to_bytes()),
+            "init must persist the trail namespace id"
+        );
+
+        // A second init over the same data_dir (a restart) must REUSE the namespace, not mint one.
+        let second = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            second.own_namespace(),
+            ns1,
+            "trail namespace must be stable across restarts"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn trail_namespace_differs_per_data_dir() {
+        let d1 = scratch_dir("distinct-a");
+        let d2 = scratch_dir("distinct-b");
+
+        let fx1 = spawn_docs(&d1).await;
+        let ns_a = TrailDocs::init(fx1.docs.clone(), fx1.blobs.clone(), d1.clone())
+            .await
+            .unwrap()
+            .own_namespace();
+        let fx2 = spawn_docs(&d2).await;
+        let ns_b = TrailDocs::init(fx2.docs.clone(), fx2.blobs.clone(), d2.clone())
+            .await
+            .unwrap()
+            .own_namespace();
+
+        assert_ne!(
+            ns_a, ns_b,
+            "separate installs must not share a trail namespace"
+        );
+
+        let _ = std::fs::remove_dir_all(&d1);
+        let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    #[tokio::test]
+    async fn trail_namespace_recreated_when_persisted_id_absent_from_store() {
+        let dir = scratch_dir("fallback");
+        // A persisted id that was never created in this store (e.g. the store was wiped but the
+        // metadata file survived). init must fall back to minting + persisting a fresh one.
+        let stale = [0x11u8; 32];
+        write_ns_file(&dir.join(TRAIL_NS_FILE), &stale).unwrap();
+
+        let fx = spawn_docs(&dir).await;
+        let td = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone())
+            .await
+            .unwrap();
+        let ns = td.own_namespace();
+
+        assert_ne!(
+            ns.to_bytes(),
+            stale,
+            "must not adopt a persisted id that isn't in the store"
+        );
+        assert_eq!(
+            read_ns_file(&dir.join(TRAIL_NS_FILE)),
+            Some(ns.to_bytes()),
+            "the freshly minted id must replace the stale one on disk"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

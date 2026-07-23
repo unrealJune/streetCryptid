@@ -48,6 +48,7 @@ use pairing::{
     PairStateData, SasChallengeData, SasRole,
 };
 use profile::{ProfileDocs, ProfileFields, ProfileRecord, ProfileSink};
+pub use telemetry::{configure_telemetry, flush_telemetry};
 
 uniffi::setup_scaffolding!();
 
@@ -447,6 +448,48 @@ pub struct LocationNode {
     profile_events: ProfileEventQueue,
 }
 
+fn new_location_node_at(
+    identity_secret: Option<Vec<u8>>,
+    recv_secret: Option<Vec<u8>>,
+    data_dir: Option<PathBuf>,
+) -> Result<Arc<LocationNode>, LocationError> {
+    telemetry::init_tracing();
+    let secret = match identity_secret {
+        Some(bytes) => SecretKey::from_bytes(
+            &bytes
+                .try_into()
+                .map_err(|_| LocationError::Decode("bad identity key".into()))?,
+        ),
+        None => SecretKey::generate(),
+    };
+    let identity_seed = secret.to_bytes();
+    let author = secret.public().as_bytes().to_owned();
+
+    let (recv_secret, recv_public) = match recv_secret {
+        Some(sk) => {
+            // derive the public half from the stored secret for a stable id.
+            let both = derive_recv_public(&sk)?;
+            (sk, both)
+        }
+        None => {
+            let (sk, pk) = crypto::generate_recv_keypair();
+            (sk, pk)
+        }
+    };
+
+    Ok(Arc::new(LocationNode {
+        identity_seed,
+        author,
+        recv_secret,
+        recv_public: recv_public.clone(),
+        data_dir: data_dir.unwrap_or_else(|| default_data_dir(&author)),
+        inner: Mutex::new(None),
+        listener: Mutex::new(None),
+        pair: PairCore::new(identity_seed, author, recv_public),
+        profile_events: ProfileEventQueue::default(),
+    }))
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl LocationNode {
     /// Create (or restore) a node from persisted key material. Pass `None` to generate
@@ -457,41 +500,7 @@ impl LocationNode {
         identity_secret: Option<Vec<u8>>,
         recv_secret: Option<Vec<u8>>,
     ) -> Result<Arc<Self>, LocationError> {
-        telemetry::init_tracing();
-        let secret = match identity_secret {
-            Some(bytes) => SecretKey::from_bytes(
-                &bytes
-                    .try_into()
-                    .map_err(|_| LocationError::Decode("bad identity key".into()))?,
-            ),
-            None => SecretKey::generate(),
-        };
-        let identity_seed = secret.to_bytes();
-        let author = secret.public().as_bytes().to_owned();
-
-        let (recv_secret, recv_public) = match recv_secret {
-            Some(sk) => {
-                // derive the public half from the stored secret for a stable id.
-                let both = derive_recv_public(&sk)?;
-                (sk, both)
-            }
-            None => {
-                let (sk, pk) = crypto::generate_recv_keypair();
-                (sk, pk)
-            }
-        };
-
-        Ok(Arc::new(Self {
-            identity_seed,
-            author,
-            recv_secret,
-            recv_public: recv_public.clone(),
-            data_dir: default_data_dir(&author),
-            inner: Mutex::new(None),
-            listener: Mutex::new(None),
-            pair: PairCore::new(identity_seed, author, recv_public),
-            profile_events: ProfileEventQueue::default(),
-        }))
+        new_location_node_at(identity_secret, recv_secret, None)
     }
 
     /// Bind the iroh endpoint + spawn the gossip router. Idempotent.
@@ -583,7 +592,7 @@ impl LocationNode {
             .spawn();
 
         let trail = Arc::new(
-            TrailDocs::init(docs.clone(), (*blobs).clone())
+            TrailDocs::init(docs.clone(), (*blobs).clone(), self.data_dir.clone())
                 .await
                 .map_err(|e| LocationError::Network(e.to_string()))?,
         );
@@ -1482,6 +1491,70 @@ impl LocationNode {
             .as_ref()
             .map(|s| s.ble.has_scan_hint(&endpoint_id))
             .unwrap_or(false)
+    }
+}
+
+#[cfg(feature = "cli")]
+impl LocationNode {
+    /// Construct a host-side node with an explicit replica directory. The trail-stash CLI uses
+    /// separate pairing and watcher stores so direct pairing traffic can never contaminate a
+    /// stash-only observation.
+    pub fn new_with_data_dir(
+        identity_secret: Option<Vec<u8>>,
+        recv_secret: Option<Vec<u8>>,
+        data_dir: PathBuf,
+    ) -> Result<Arc<Self>, LocationError> {
+        new_location_node_at(identity_secret, recv_secret, Some(data_dir))
+    }
+
+    /// Directly reconcile a trail capability with exactly `peer_ticket`, without importing it into
+    /// the live docs engine or joining its gossip swarm. Returns decryptable fixes from that peer.
+    pub async fn sync_trail_via_only(
+        &self,
+        since_ts: u64,
+        read_ticket: String,
+        peer_ticket: String,
+    ) -> Result<Vec<IncomingFix>, LocationError> {
+        use tracing::Instrument;
+
+        let doc_ticket = read_ticket
+            .parse::<iroh_docs::DocTicket>()
+            .map_err(|_| LocationError::Decode("bad trail docs read-ticket".into()))?;
+        let endpoint_ticket = peer_ticket
+            .parse::<EndpointTicket>()
+            .map_err(|_| LocationError::Decode("bad strict sync endpoint ticket".into()))?;
+        let peer = endpoint_ticket.endpoint_addr().clone();
+
+        let span = tracing::info_span!(
+            "trail.sync.stash_only",
+            sc.author = %telemetry::short_hex(&self.author),
+            stash.peer = %telemetry::short_hex(peer.id.as_bytes()),
+            since_ts,
+            recovered = tracing::field::Empty,
+        );
+        async move {
+            let (endpoint, trail, memory) = {
+                let guard = self.inner.lock().await;
+                let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+                (
+                    started.endpoint.clone(),
+                    started.trail.clone(),
+                    started.memory.clone(),
+                )
+            };
+            memory.add_endpoint_info(peer.clone());
+            let fixes = trail
+                .sync_direct(&endpoint, doc_ticket, peer, since_ts, &self.recv_secret)
+                .await
+                .map_err(|e| LocationError::Network(e.to_string()))?;
+            tracing::Span::current().record("recovered", fixes.len());
+            Ok(fixes
+                .into_iter()
+                .filter_map(trail_fix_to_incoming)
+                .collect())
+        }
+        .instrument(span)
+        .await
     }
 }
 

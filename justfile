@@ -118,6 +118,14 @@ profile-mvt:
 build-rust:
     cd modules/iroh-location/rust && cargo build
 
+# Pair/watch a phone through the trail stash with the host-side Rust debug client.
+# Examples:
+#   just trail-stash-client status
+#   just trail-stash-client pair --adb
+#   just trail-stash-client watch --once --json
+trail-stash-client *args:
+    cargo run --manifest-path modules/iroh-location/rust/Cargo.toml --features cli --bin trail-stash-client -- {{args}}
+
 # Verify tracked Swift/C and Kotlin UniFFI bindings match the Rust API.
 check-bindings:
     bash scripts/check-uniffi-bindings.sh
