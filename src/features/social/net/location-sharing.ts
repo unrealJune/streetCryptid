@@ -1115,9 +1115,16 @@ export class LocationSharingService implements FixPublisher {
   async publishFix(fix: LocationFix, parent?: SpanContext): Promise<number> {
     // Spans below join the native `gossip.publish`/`docs.write` (same sc.author + sc.seq) and,
     // via the envelope hash those record, the stash + receiving phones.
+    const stashReplicationEnabled = this.stashEnabled();
     const span = getTelemetry().startSpan('publish.fix', {
       parent,
-      attributes: { 'sc.author': this.keys ? this.keys.endpointId.slice(0, 10) : undefined },
+      attributes: {
+        'sc.author': this.keys ? this.keys.endpointId.slice(0, 10) : undefined,
+        'stash.client_configured': this.stash.configured,
+        'stash.ticket_configured': this.stashTicket !== null,
+        'stash.opted_in': this.stashOptIn,
+        'stash.replication_enabled': stashReplicationEnabled,
+      },
     });
     try {
       if (!this.mod) throw new Error('publishFix: native module not bound');
@@ -1151,7 +1158,9 @@ export class LocationSharingService implements FixPublisher {
       try {
         // Durable mirror: same sealed bytes, so per-recipient revocation carries over (ARCHITECTURE §6).
         await this.mod.docsWrite(this.mySubId, seq, 0, native, recipients, traceparent);
-        span.addEvent('docs.write.completed');
+        span.addEvent('docs.write.completed', {
+          'stash.replication_enabled': stashReplicationEnabled,
+        });
       } catch (err) {
         // Best effort; the live path already delivered. A later syncTrail can reconcile — but the
         // durable/stash mirror is what OFFLINE peers backfill from, so its failure is a real reason

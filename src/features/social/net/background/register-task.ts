@@ -38,7 +38,7 @@ export function ensureBackgroundTaskRegistered(): void {
   if (registered) return;
   registered = true;
   defineBackgroundLocationTask(() => ({
-    onBackgroundFixes: (fixes) => dispatcher.dispatch(fixes),
+    onBackgroundFixes: (fixes, parent) => dispatcher.dispatch(fixes, parent),
   }));
 }
 
