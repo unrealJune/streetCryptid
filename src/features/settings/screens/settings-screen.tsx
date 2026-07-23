@@ -10,6 +10,7 @@ import { useLocationSharing } from '@/features/social/hooks/use-location-sharing
 import { useTheme } from '@/hooks/use-theme';
 
 import { AppProvenanceDetails } from '../components/app-provenance';
+import { DebugLocationControls } from '../components/debug-location-controls';
 import { LocationAccessRow } from '../components/location-access-row';
 import { EventLogPanel } from '../components/event-log-panel';
 import { RelayOnlyRow } from '../components/relay-only-row';
@@ -36,6 +37,7 @@ export default function SettingsScreen() {
     setRelayOnly,
     disclosureStatus,
     acknowledgeLocationDisclosure,
+    forceLocationPush,
   } = useLocationSharing();
 
   useFocusEffect(
@@ -83,6 +85,7 @@ export default function SettingsScreen() {
         <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
           DEBUG
         </ThemedText>
+        <DebugLocationControls accent={chrome.green} onPush={forceLocationPush} />
         <EventLogPanel activeColor={chrome.green} warningColor={chrome.amber} />
       </View>
 

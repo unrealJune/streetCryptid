@@ -1177,6 +1177,38 @@ export class LocationSharingService implements FixPublisher {
   }
 
   /**
+   * Capture and publish a fresh GPS fix immediately, bypassing the motion/battery sampling gate.
+   * This is intentionally a developer diagnostic path: the normal publish span, durable mirror,
+   * and local trail update still run so the resulting ping can be followed end to end.
+   */
+  async forceLocationPush(trigger: 'manual' | 'scheduled' = 'manual'): Promise<number> {
+    const span = getTelemetry().startSpan('debug.location.push', {
+      attributes: { trigger },
+    });
+    try {
+      if (!this.isReady()) throw new Error('Friend sync is not ready to publish a location.');
+      const { BackgroundLocationProvider: Provider } = await import(
+        './background/background-provider'
+      );
+      const provider = this.bgProvider ?? new Provider();
+      if (!this.bgProvider && !(await provider.ensurePermission())) {
+        throw new Error('Location permission is required to force a location push.');
+      }
+      const fix = await provider.getCurrent();
+      this.recordLocalFix(fix);
+      const seq = await this.publishFix(fix, span.context);
+      span.setAttribute('sc.seq', seq);
+      span.setStatus('ok');
+      return seq;
+    } catch (error) {
+      span.recordError(error);
+      throw error;
+    } finally {
+      span.end();
+    }
+  }
+
+  /**
    * Recover envelopes missed while offline. Triggers range reconciliation, then reads the durable
    * replica into the trail cache — reconciliation can land entries silently (at friend-import or via
    * live sync) without firing backfill events, so reading the replica afterwards is what actually

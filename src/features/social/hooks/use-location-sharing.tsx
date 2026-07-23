@@ -72,6 +72,8 @@ interface LocationSharingContextValue {
   setStashOptIn(optedIn: boolean): Promise<void>;
   /** Force (or unforce) relay-only transport. */
   setRelayOnly(relayOnly: boolean): Promise<void>;
+  /** Capture and publish a fresh GPS fix immediately, bypassing normal sampling. */
+  forceLocationPush(trigger?: 'manual' | 'scheduled'): Promise<number>;
   /** Honest, live diagnostic of every transport (for the Settings tab). */
   transportReport: TransportReport;
   acknowledgeDiscoveredFriend(): void;
@@ -449,6 +451,22 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     },
     [run]
   );
+  const forceLocationPush = useCallback(async (trigger: 'manual' | 'scheduled' = 'manual') => {
+    const service = serviceRef.current;
+    if (!service) {
+      const message = 'Friend sync is not ready. Try again.';
+      setServiceError(message);
+      throw new Error(message);
+    }
+    try {
+      const seq = await service.forceLocationPush(trigger);
+      setServiceError(null);
+      return seq;
+    } catch (pushError: unknown) {
+      setServiceError(errorMessage(pushError));
+      throw pushError;
+    }
+  }, []);
   const toggleShare = useCallback(
     (endpointId: string, on: boolean) => {
       setServiceError(null);
@@ -550,6 +568,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       retryLocation,
       setStashOptIn,
       setRelayOnly,
+      forceLocationPush,
       transportReport,
       acknowledgeDiscoveredFriend,
       rejectDiscoveredFriend,
@@ -580,6 +599,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       retryLocation,
       setStashOptIn,
       setRelayOnly,
+      forceLocationPush,
       transportReport,
       acknowledgeDiscoveredFriend,
       rejectDiscoveredFriend,
