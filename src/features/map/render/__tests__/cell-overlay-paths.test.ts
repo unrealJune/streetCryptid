@@ -12,7 +12,7 @@ const camera: CameraState = { center: HOME, zoom: 15 };
 const viewport: Viewport = { width: 200, height: 200 };
 const spec = computeRegionSpec(camera, viewport, { dataZooms: { min: 0, max: 14 } });
 
-const exploration = createExplorationIndex(grid, demoExploration(grid, HOME));
+const exploration = createExplorationIndex(demoExploration(grid, HOME));
 const field = buildCellField(grid, spec.rect, spec.cellRes!, exploration);
 
 describe('cellStateFills', () => {

@@ -76,6 +76,13 @@ describe('recordFix', () => {
     const loaded = await makeStore(db).store.load();
     expect(loaded).toEqual(new Set([grid.parentOf(legacy, H3_DISPLAY_RES)]));
   });
+
+  it('ignores cells coarser than the occupancy resolution on load', async () => {
+    const db = new InMemoryExplorationDb();
+    await db.insertCell(grid.cellAt(latLonToWorld({ lat: 47.62, lon: -122.32 }), 8), 1000);
+
+    expect(await makeStore(db).store.load()).toEqual(new Set());
+  });
 });
 
 describe('backfillFromTrail', () => {

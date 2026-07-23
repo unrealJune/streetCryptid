@@ -17,7 +17,7 @@ const dataZooms = { min: 0, max: 14 } as const;
 const baseRequest: RegionRequest = {
   camera,
   viewport,
-  exploration: createExplorationIndex(grid, []),
+  exploration: createExplorationIndex([]),
   explorationVersion: 0,
 };
 
@@ -182,7 +182,7 @@ describe('MapEngine.buildRegion', () => {
   it('rebuilds the cell field when exploration advances', async () => {
     const source = new FakeSource();
     const engine = makeEngine(source);
-    const exploration = createExplorationIndex(grid, []);
+    const exploration = createExplorationIndex([]);
     const first = await engine.buildRegion({ ...baseRequest, exploration });
     exploration.add(grid.cellAt(camera.center, H3_DISPLAY_RES));
     const second = await engine.buildRegion({
@@ -202,7 +202,7 @@ describe('MapEngine.buildRegion', () => {
     const home = grid.cellAt(camera.center, H3_DISPLAY_RES);
     const region = await engine.buildRegion({
       ...baseRequest,
-      exploration: createExplorationIndex(grid, [home]),
+      exploration: createExplorationIndex([home]),
     });
 
     const cell = region!.cellField.cells.find((c) => c.cell === home);
@@ -270,7 +270,7 @@ describe('MapEngine.buildRegion', () => {
     const first = engine.buildRegion(baseRequest);
     const updated = engine.buildRegion({
       ...baseRequest,
-      exploration: createExplorationIndex(grid, [home]),
+      exploration: createExplorationIndex([home]),
       explorationVersion: 1,
     });
     source.resolveAll();

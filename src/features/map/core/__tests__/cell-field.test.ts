@@ -31,7 +31,7 @@ describe('cellHash', () => {
 });
 
 describe('buildCellField', () => {
-  const exploration = createExplorationIndex(grid, demoExploration(grid, HOME));
+  const exploration = createExplorationIndex(demoExploration(grid, HOME));
   const rect = rectAround(HOME, 6e-5);
 
   it('annotates display-res cells with binary fractions and a frontier', () => {

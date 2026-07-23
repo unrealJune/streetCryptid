@@ -46,18 +46,18 @@ describe('coverageInView', () => {
   );
 
   it('is 0 when nothing is explored', () => {
-    const index = createExplorationIndex(grid, []);
+    const index = createExplorationIndex([]);
     expect(coverageInView(index, grid, camera, viewport)).toBe(0);
   });
 
   it('is 1 when every visible sector is explored', () => {
-    const index = createExplorationIndex(grid, visibleCells);
+    const index = createExplorationIndex(visibleCells);
     expect(coverageInView(index, grid, camera, viewport)).toBe(1);
   });
 
   it('is a proper fraction when partially explored', () => {
     expect(visibleCells.length).toBeGreaterThan(1);
-    const index = createExplorationIndex(grid, [visibleCells[0]]);
+    const index = createExplorationIndex([visibleCells[0]]);
     const cov = coverageInView(index, grid, camera, viewport);
     expect(cov).toBeGreaterThan(0);
     expect(cov).toBeLessThan(1);
@@ -66,7 +66,7 @@ describe('coverageInView', () => {
 
   it('disables coverage when zoomed out below the render threshold', () => {
     const zoomedOut: CameraState = { ...camera, zoom: 12 };
-    const index = createExplorationIndex(grid, visibleCells);
+    const index = createExplorationIndex(visibleCells);
     expect(coverageInView(index, grid, zoomedOut, viewport)).toBe(0);
   });
 });

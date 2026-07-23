@@ -15,7 +15,7 @@ describe('createExplorationIndex', () => {
   it('answers membership at the display res', () => {
     const cell = grid.cellAt(HOME, H3_DISPLAY_RES);
     const other = grid.neighborsOf(cell)[0];
-    const index = createExplorationIndex(grid, [cell]);
+    const index = createExplorationIndex([cell]);
     expect(index.fractionAt(cell)).toBe(1);
     expect(index.fractionAt(other)).toBe(0);
   });
@@ -23,11 +23,11 @@ describe('createExplorationIndex', () => {
   it('add() updates fixed-resolution membership', () => {
     const cell = grid.cellAt(HOME, H3_DISPLAY_RES);
     const ring = grid.neighborsOf(cell);
-    const incremental = createExplorationIndex(grid, [cell]);
+    const incremental = createExplorationIndex([cell]);
     for (const n of ring) expect(incremental.add(n)).toBe(true);
     expect(incremental.add(cell)).toBe(false); // duplicate
 
-    const fromScratch = createExplorationIndex(grid, [cell, ...ring]);
+    const fromScratch = createExplorationIndex([cell, ...ring]);
     expect(incremental.cells).toEqual(fromScratch.cells);
     expect(incremental.cells.size).toBe(7);
   });

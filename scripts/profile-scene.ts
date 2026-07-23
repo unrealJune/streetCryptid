@@ -55,7 +55,7 @@ console.log(sourceUrl ? 'source: live privacy-bundle endpoint' : 'source: bundle
 
 async function main() {
   const grid = createH3Grid(realH3());
-  const exploration = createExplorationIndex(grid, demoExploration(grid, FIXTURE_HOME));
+  const exploration = createExplorationIndex(demoExploration(grid, FIXTURE_HOME));
   const source = sourceUrl ? createLiveSource(sourceUrl) : createFixtureSource();
   const dataZooms = sourceUrl ? PLANET_DATA_ZOOMS : FIXTURE_DATA_ZOOMS;
   let latestTiming = null;

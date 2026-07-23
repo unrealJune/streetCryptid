@@ -19,10 +19,7 @@ export interface ExplorationIndex {
   add(cell: CellIndex): boolean;
 }
 
-export function createExplorationIndex(
-  _grid: H3Grid,
-  cells: Iterable<CellIndex>
-): ExplorationIndex {
+export function createExplorationIndex(cells: Iterable<CellIndex>): ExplorationIndex {
   const explored = new Set(cells);
   return {
     cells: explored,
