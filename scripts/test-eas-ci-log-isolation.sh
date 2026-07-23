@@ -6,6 +6,24 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/streetcryptid-eas-log-test.XXXXXX")"
 sentinel='RkFLRV9BUFBMRV9HT09HTEVfU0lHTklOR19LRVlfTVVTVF9ORVZFUl9BUFBFQVJfSU5fQUNUSU9OU19MT0dT'
 
+if ! jq -e '
+  .build["production-internal-ios"] as $ios |
+  .build["production-internal-android"] as $android |
+  ($ios.extends == "production") and
+  ($ios.developmentClient == false) and
+  ($ios.distribution == "internal") and
+  ($ios.autoIncrement == false) and
+  ($ios.ios.simulator == false) and
+  ($android.extends == "production") and
+  ($android.developmentClient == false) and
+  ($android.distribution == "internal") and
+  ($android.autoIncrement == false) and
+  ($android.android.buildType == "apk")
+' "$repo_root/eas.json" >/dev/null; then
+  echo "The PR build profiles must produce installable standalone Release apps." >&2
+  exit 1
+fi
+
 cleanup() {
   if [[ -d "$test_root" ]]; then
     find "$test_root" -depth -delete
@@ -89,7 +107,7 @@ success_transcript="$(
     GITHUB_OUTPUT="$success_output" \
     RUNNER_TEMP="$test_root" \
     bash "$repo_root/scripts/eas-local-build-ci.sh" \
-    ios production-development-ios "$test_root/app.ipa" \
+    ios production-internal-ios "$test_root/app.ipa" \
     2>&1
 )"
 
@@ -111,7 +129,7 @@ auth_failure_transcript="$(
     GITHUB_OUTPUT="$auth_failure_output" \
     RUNNER_TEMP="$test_root" \
     bash "$repo_root/scripts/eas-local-build-ci.sh" \
-    ios production-development-ios "$test_root/auth-failure.ipa" \
+    ios production-internal-ios "$test_root/auth-failure.ipa" \
     2>&1
 )"
 auth_failure_status=$?
@@ -140,7 +158,7 @@ project_failure_transcript="$(
     GITHUB_OUTPUT="$project_failure_output" \
     RUNNER_TEMP="$test_root" \
     bash "$repo_root/scripts/eas-local-build-ci.sh" \
-    android production-development-android "$test_root/project-failure.apk" \
+    android production-internal-android "$test_root/project-failure.apk" \
     2>&1
 )"
 project_failure_status=$?
@@ -169,7 +187,7 @@ failure_transcript="$(
     GITHUB_OUTPUT="$failure_output" \
     RUNNER_TEMP="$test_root" \
     bash "$repo_root/scripts/eas-local-build-ci.sh" \
-    android production-development-android "$test_root/app.apk" \
+    android production-internal-android "$test_root/app.apk" \
     2>&1
 )"
 failure_status=$?
@@ -198,7 +216,7 @@ bad_upload_transcript="$(
     GITHUB_OUTPUT="$bad_upload_output" \
     RUNNER_TEMP="$test_root" \
     bash "$repo_root/scripts/eas-local-build-ci.sh" \
-    ios production-development-ios "$test_root/bad-upload.ipa" \
+    ios production-internal-ios "$test_root/bad-upload.ipa" \
     2>&1
 )"
 bad_upload_status=$?
