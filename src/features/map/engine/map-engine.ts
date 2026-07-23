@@ -1,5 +1,5 @@
 import {
-  buildCellFieldWithTiming,
+  buildCellFieldWithTimingAsync,
   type CellFieldTiming,
   type RegionCellField,
 } from '../core/cell-field';
@@ -301,7 +301,7 @@ export class MapEngine {
       this.cellFieldCache.delete(cellKey);
       this.cellFieldCache.set(cellKey, cellField);
     } else {
-      const built = buildCellFieldWithTiming(
+      const built = await buildCellFieldWithTimingAsync(
         this.grid,
         spec.rect,
         spec.cellRes,

@@ -402,6 +402,10 @@ class IrohLocationModule : Module() {
       decodeMvtTile(bytes, z.toUInt(), x.toUInt(), y.toUInt())
     }
 
+    AsyncFunction("h3CellsForPolygon") { coordinates: List<Double>, resolution: Int ->
+      h3CellsForPolygon(coordinates, resolution.toUByte())
+    }
+
     AsyncFunction("subscribe") Coroutine
       { topicHex: String, bootstrap: List<String> ->
         val n = node ?: throw IllegalStateException("call createNode first")

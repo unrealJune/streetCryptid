@@ -68,6 +68,30 @@ export function buildCellFieldWithTiming(
   const enumerateStarted = now();
   const ids = grid.cellsInRect(rect, res);
   const centersStarted = now();
+  return buildFromIds(grid, rect, res, index, ids, enumerateStarted, centersStarted);
+}
+
+export async function buildCellFieldWithTimingAsync(
+  grid: H3Grid,
+  rect: WorldRect,
+  res: number,
+  index: ExplorationIndex
+): Promise<{ readonly field: RegionCellField; readonly timing: CellFieldTiming }> {
+  const enumerateStarted = now();
+  const ids = await grid.cellsInRectAsync(rect, res);
+  const centersStarted = now();
+  return buildFromIds(grid, rect, res, index, ids, enumerateStarted, centersStarted);
+}
+
+function buildFromIds(
+  grid: H3Grid,
+  rect: WorldRect,
+  res: number,
+  index: ExplorationIndex,
+  ids: readonly CellIndex[],
+  enumerateStarted: number,
+  centersStarted: number
+): { readonly field: RegionCellField; readonly timing: CellFieldTiming } {
   const midX = (rect.minX + rect.maxX) / 2;
   const midY = (rect.minY + rect.maxY) / 2;
 

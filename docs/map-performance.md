@@ -2,12 +2,11 @@
 
 ## Headline
 
-Four accepted passes keep the UI-thread bitmap transform at 60 fps, cut measured zoom latency
-by up to 88%, and remove the pan callback starvation that previously crossed 30 seconds. It is
-not yet a smooth map experience: the best revisited zoom takes 0.93 seconds, cached zoom-out
-takes 1.47 seconds, and cached pan takes 4.23 seconds. The dominant remaining cost is
-synchronous H3 region construction for non-identical regions, not tile merging or the final
-Skia raster.
+Five accepted passes keep the UI-thread bitmap transform at 60 fps, cut measured zoom latency
+by up to 89%, and bring both pans to about 3.27 seconds including their requested 3-second
+motion. Warm launch is 1.03 seconds and cached region settles are now 247-266 ms. The dominant
+remaining synchronous cost is the 165-266 ms Skia bitmap build plus first-visit H3 annotation;
+polygon enumeration no longer blocks Hermes.
 
 | Accepted point                        |  Launch | Zoom out, new | Zoom in | Zoom out, cached | Pan, new | Pan, cached |
 | ------------------------------------- | ------: | ------------: | ------: | ---------------: | -------: | ----------: |
@@ -16,6 +15,7 @@ Skia raster.
 | Coalesced engine queue                |       - |       1.964 s | 1.884 s |          1.497 s |     open |        open |
 | UI-to-JS prefetch backpressure        |       - |             - |       - |                - |  4.431 s |     4.225 s |
 | Exact cell-field LRU                  |       - |             - | 0.931 s |                - |        - |           - |
+| Native H3 enumeration                 | 1.031 s |       1.998 s | 0.919 s |          0.882 s |  3.266 s |     3.262 s |
 
 Target: a 60 fps UI and responsive JS thread throughout every operation, with cached settles
 below 300 ms and cold network/decode hidden behind retained coverage plus the hex loading
@@ -220,6 +220,33 @@ Run ID: `ios-h3-breakdown-1` (warm durable tile bytes).
 the remaining JS annotation work is only 13-30 ms. The next optimization should therefore move
 polygon-to-cell enumeration off Hermes; rewriting the annotation loops cannot reach the target.
 
+## Pass 5: native H3 enumeration
+
+Run IDs: `ios-native-h3-1` (cold durable bytes) and `ios-native-h3-warm-1`.
+
+The same padded latitude/longitude polygon now runs through Rust `h3o` in an Expo
+`AsyncFunction`. It returns sorted canonical H3 IDs; centers, boundaries, exploration
+fractions, frontier state, jitter, and reveal order remain in the existing JS/render pipeline.
+Web, Expo Go, and older iOS binaries use the unchanged `h3-js` fallback. iOS access is guarded
+with `typeof mod.h3CellsForPolygon === 'function'`.
+
+| Scenario         | Before native H3 | Native H3 | Change | Enumeration | Final H3 total | Post-motion settle | UI dropped |
+| ---------------- | ---------------: | --------: | -----: | ----------: | -------------: | -----------------: | ---------: |
+| Warm launch      |          1967 ms |   1031 ms | -47.6% |      7.0 ms |         273 ms |            1031 ms |          0 |
+| Zoom out, cached |          1465 ms |    882 ms | -39.8% |      7.3 ms |          36 ms |             248 ms |          0 |
+| Pan, new         |          4431 ms |   3266 ms | -26.3% |      6.5 ms |          27 ms |             250 ms |          0 |
+| Pan, cached      |          4225 ms |   3282 ms | -22.3% |      7.0 ms |          48 ms |             266 ms |          1 |
+
+Launch polygon enumeration fell from 938 ms to 8.8 ms in the cold run. Warm zoom-out fell from
+639 ms to 7.3 ms. The native launch returned exactly 2,651 cells, matching the JS baseline for
+the same region. Native calls are 4-9 ms for one region on this simulator; no fine tile or
+location coordinate is logged or sent off-device.
+
+Swift and Kotlin UniFFI bindings were regenerated. The iOS XCFramework/dev client was rebuilt
+and profiled. Android arm64-v8a, armeabi-v7a, and x86_64 libraries cross-compile from the same
+Rust implementation; the JS fallback remains available when an installed binary predates the
+new export.
+
 ## Experiment journal
 
 | Branch / attempt                                        | Hypothesis                                                                        | Result                                                                                                                                                                                | Decision                                                                                                                                                     |
@@ -234,13 +261,12 @@ polygon-to-cell enumeration off Hermes; rewriting the annotation loops cannot re
 | `copilot/map-perf-pan-backpressure`                     | Allow only one UI-to-JS prefetch bridge call while a region build is outstanding. | Pan builds fell from 9/39 to 3/3, both scenarios completed, and UI stayed at 60 fps.                                                                                                  | Accepted.                                                                                                                                                    |
 | `copilot/map-perf-cell-field-cache`                     | Reuse complete immutable H3 fields for exact region and exploration revisions.    | Exact zoom revisit fell 50.6%; H3 work fell from 941 ms to 0.017 ms without stale exploration.                                                                                        | Accepted.                                                                                                                                                    |
 | `copilot/map-perf-h3-breakdown`                         | Time H3 enumeration, centers, and annotation independently.                       | Polygon enumeration is 77-98% of uncached H3 time; warm annotation is only 13-30 ms.                                                                                                  | Accepted instrumentation; native enumeration is the next pass.                                                                                               |
+| `copilot/map-perf-native-h3`                            | Run exact center-containment H3 enumeration in Rust off Hermes.                   | Enumeration fell to 4-9 ms, cached settles reached 247-266 ms, and native/JS launch coverage matched at 2,651 cells.                                                                  | Accepted.                                                                                                                                                    |
 
 ## Next measured hypotheses
 
-1. Move polygon-to-cell enumeration off Hermes while preserving canonical H3 IDs and exact
-   center-containment coverage.
-2. Batch SQLite bundle writes in an exclusive WAL transaction and measure cold source time.
-3. Remove SVG string construction/parsing from lattice, rim, and feature masks if Skia remains
+1. Batch SQLite bundle writes in an exclusive WAL transaction and measure cold source time.
+2. Remove SVG string construction/parsing from lattice, rim, and feature masks now that Skia is
    above the post-H3 budget.
-4. Stabilize trail/locator geometry identity and batch trail dots to eliminate asynchronous
+3. Stabilize trail/locator geometry identity and batch trail dots to eliminate asynchronous
    overlay remounts and the reported visual jump.

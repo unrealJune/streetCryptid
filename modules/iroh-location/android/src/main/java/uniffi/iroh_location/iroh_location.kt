@@ -695,6 +695,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_func_generate_recv_keypair(
     ): Int
+    external fun uniffi_iroh_location_checksum_func_h3_cells_for_polygon(
+    ): Int
     external fun uniffi_iroh_location_checksum_func_configure_telemetry(
     ): Int
     external fun uniffi_iroh_location_checksum_func_flush_telemetry(
@@ -956,6 +958,8 @@ external fun uniffi_iroh_location_fn_func_encode_pair_invite(`invite`: RustBuffe
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_generate_recv_keypair(uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_h3_cells_for_polygon(`coordinates`: RustBuffer.ByValue,`resolution`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_configure_telemetry(`endpoint`: RustBuffer.ByValue,`instanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_iroh_location_fn_func_flush_telemetry(
@@ -1095,6 +1099,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_generate_recv_keypair() != 62550) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_h3_cells_for_polygon() != 51742) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {
@@ -5505,6 +5512,34 @@ public object FfiConverterSequenceUInt: FfiConverterRustBuffer<List<kotlin.UInt>
 /**
  * @suppress
  */
+public object FfiConverterSequenceDouble: FfiConverterRustBuffer<List<kotlin.Double>> {
+    override fun read(buf: ByteBuffer): List<kotlin.Double> {
+        val len = buf.getInt()
+        return List<kotlin.Double>(len) {
+            FfiConverterDouble.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.Double>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterDouble.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.Double>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterDouble.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
@@ -5836,6 +5871,20 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
     UniffiLib.uniffi_iroh_location_fn_func_generate_recv_keypair(
     
         _status)
+}
+    )
+    }
+    
+
+        /**
+         * Enumerate canonical H3 cells for a latitude/longitude polygon off the JS thread.
+         */
+    @Throws(LocationException::class) fun `h3CellsForPolygon`(`coordinates`: List<kotlin.Double>, `resolution`: kotlin.UByte): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_h3_cells_for_polygon(
+    
+        FfiConverterSequenceDouble.lower(`coordinates`),FfiConverterUByte.lower(`resolution`),_status)
 }
     )
     }

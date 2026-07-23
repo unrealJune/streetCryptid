@@ -301,6 +301,10 @@ public final class IrohLocationModule: Module {
       decodeMvtTile(bytes: bytes, z: UInt32(z), x: UInt32(x), y: UInt32(y))
     }
 
+    AsyncFunction("h3CellsForPolygon") { (coordinates: [Double], resolution: Int) throws -> [String] in
+      try h3CellsForPolygon(coordinates: coordinates, resolution: UInt8(resolution))
+    }
+
     AsyncFunction("subscribe") { (topicHex: String, bootstrap: [String]) async throws -> String in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       let subscriptionId = UUID().uuidString
