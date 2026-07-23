@@ -71,6 +71,38 @@ describe('createH3Grid over real h3-js', () => {
     expect(cells.length).toBeLessThan(400);
   });
 
+  it('keeps async fallback enumeration identical to the synchronous path', async () => {
+    const half = 3e-5;
+    const rect: WorldRect = {
+      minX: SEATTLE[0] - half,
+      minY: SEATTLE[1] - half,
+      maxX: SEATTLE[0] + half,
+      maxY: SEATTLE[1] + half,
+    };
+
+    await expect(grid.cellsInRectAsync(rect, 10)).resolves.toEqual(grid.cellsInRect(rect, 10));
+  });
+
+  it('uses an injected async polygon enumerator without changing coverage', async () => {
+    const core = realH3();
+    const enumerate = jest.fn(async (loop: readonly [number, number][], resolution: number) =>
+      core.polygonToCells([...loop], resolution)
+    );
+    const nativeGrid = createH3Grid(core, enumerate);
+    const half = 3e-5;
+    const rect: WorldRect = {
+      minX: SEATTLE[0] - half,
+      minY: SEATTLE[1] - half,
+      maxX: SEATTLE[0] + half,
+      maxY: SEATTLE[1] + half,
+    };
+
+    await expect(nativeGrid.cellsInRectAsync(rect, 10)).resolves.toEqual(
+      grid.cellsInRect(rect, 10)
+    );
+    expect(enumerate).toHaveBeenCalledTimes(1);
+  });
+
   it('enumerates the whole world at res 2 through the split path', () => {
     const world: WorldRect = { minX: 0, minY: 0, maxX: 1, maxY: 1 };
     const cells = grid.cellsInRect(world, 2);

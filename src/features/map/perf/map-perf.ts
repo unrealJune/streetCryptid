@@ -32,6 +32,9 @@ export interface MapPipelineMetrics {
   tileDecodeMs: number;
   nativeDecodeCalls: number;
   nativeDecodeMs: number;
+  nativeH3Calls: number;
+  nativeH3Ms: number;
+  nativeH3Cells: number;
   unalignedScg1Copies: number;
 }
 
@@ -203,6 +206,9 @@ function emptyPipeline(): MapPipelineMetrics {
     tileDecodeMs: 0,
     nativeDecodeCalls: 0,
     nativeDecodeMs: 0,
+    nativeH3Calls: 0,
+    nativeH3Ms: 0,
+    nativeH3Cells: 0,
     unalignedScg1Copies: 0,
   };
 }

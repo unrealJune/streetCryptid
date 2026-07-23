@@ -9,6 +9,7 @@ import { CAMERA_INITIAL_ZOOM, createMapDataset, type MapDataset } from '../confi
 import { applyViewTransform, clampCamera, scaleFor, type ViewTransform } from '../core/camera';
 import { makeViewLimits, type ViewLimits } from '../core/gesture';
 import { createH3Grid, realH3 } from '../core/h3-grid';
+import { createNativeH3Enumerator } from '../core/native-h3-enumerator';
 import { coverageInView, nearestPlaceName } from '../core/readout';
 import { coversView, shouldPrefetchRegion } from '../core/region';
 import type { CameraState, LatLon, Viewport, WorldPoint, WorldRect } from '../core/types';
@@ -103,7 +104,7 @@ export function useMapEngine(
       requestedHome && pointInside(requestedHome, dataset.bounds) ? requestedHome : dataset.home,
     [dataset, requestedHome]
   );
-  const grid = useMemo(() => createH3Grid(realH3()), []);
+  const grid = useMemo(() => createH3Grid(realH3(), createNativeH3Enumerator()), []);
   const exploration = useMemo(
     () =>
       dataset.explorationMode === 'live'
