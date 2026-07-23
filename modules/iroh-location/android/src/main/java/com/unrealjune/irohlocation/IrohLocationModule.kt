@@ -43,6 +43,7 @@ import uniffi.iroh_location.decodePairInvite
 import uniffi.iroh_location.deriveTopic
 import uniffi.iroh_location.encodePairInvite
 import uniffi.iroh_location.flushTelemetry
+import uniffi.iroh_location.h3CellsForPolygon
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
