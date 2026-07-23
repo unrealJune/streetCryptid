@@ -41,6 +41,16 @@ const region: MapRegion = {
   geometry: EMPTY_PACKED,
   cellField: { res: 10, cells: [] },
   places: [],
+  timing: {
+    tiles: 0,
+    coldStart: false,
+    sourceMs: 0,
+    mergeMs: 0,
+    cellFieldMs: 0,
+    totalMs: 0,
+    fetchMs: 0,
+    buildMs: 0,
+  },
 };
 
 const base = { region, palette, pixelRatio: 2 };

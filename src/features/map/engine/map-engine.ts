@@ -32,12 +32,24 @@ export interface MapRegion {
   readonly cellField: RegionCellField;
   /** Named places inside the region (island headline lookup). */
   readonly places: readonly Place[];
+  /** Phase-level timings captured when this immutable region was built. */
+  readonly timing: RegionTiming;
 }
 
 /** Per-build timing breakdown, for dev logging / perf tracking. */
 export interface RegionTiming {
   readonly tiles: number;
+  readonly coldStart: boolean;
+  /** Tile source work, including byte cache/network and decode. */
+  readonly sourceMs: number;
+  /** Struct-of-arrays concatenation after all tiles land. */
+  readonly mergeMs: number;
+  /** H3 enumeration, immutable geometry lookup, and exploration annotation. */
+  readonly cellFieldMs: number;
+  readonly totalMs: number;
+  /** Backward-compatible aggregate: source + merge. */
   readonly fetchMs: number;
+  /** Backward-compatible aggregate: H3 cell-field construction. */
   readonly buildMs: number;
 }
 
@@ -233,9 +245,9 @@ export class MapEngine {
     onProgress?.({ rect: spec.rect, loaded, total, coldStart });
 
     const t0 = now();
-    let geometry;
+    let parts: PackedGeometry[];
     try {
-      const parts = await Promise.all(
+      parts = await Promise.all(
         tiles.map((t) =>
           this.source.getTile(t).then((part) => {
             loaded++;
@@ -244,24 +256,38 @@ export class MapEngine {
           })
         )
       );
-      geometry = mergeGeometry(parts);
     } catch (error) {
       if (this.last) return this.last;
       throw error;
     }
     const t1 = now();
 
+    const geometry = mergeGeometry(parts);
+    const t2 = now();
     const cellField = buildCellField(this.grid, spec.rect, spec.cellRes, request.exploration);
+    const t3 = now();
+
+    const timing: RegionTiming = {
+      tiles: tiles.length,
+      coldStart,
+      sourceMs: t1 - t0,
+      mergeMs: t2 - t1,
+      cellFieldMs: t3 - t2,
+      totalMs: t3 - t0,
+      fetchMs: t2 - t0,
+      buildMs: t3 - t2,
+    };
 
     const region: MapRegion = {
       spec,
       geometry,
       cellField,
       places: geometry.places,
+      timing,
     };
 
     this.last = region;
-    this.onTiming?.({ tiles: tiles.length, fetchMs: t1 - t0, buildMs: now() - t1 });
+    this.onTiming?.(timing);
     return region;
   }
 }

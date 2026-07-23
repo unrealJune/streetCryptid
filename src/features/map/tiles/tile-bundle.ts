@@ -1,4 +1,5 @@
 import type { TileCoord } from './tile-math';
+import { addMapPerfMetric, captureMapPerfMetricScope, perfNow } from '../perf/map-perf';
 
 export const TILE_BUNDLE_MEDIA_TYPE = 'application/vnd.streetcryptid.tile-bundle';
 export const TILE_BUNDLE_VERSION = 1;
@@ -159,12 +160,14 @@ export class MartinTileBundleSource implements TileBundleSource {
   }
 
   async getBundle(request: TileBundleRequest): Promise<readonly TileBundleEntry[]> {
+    const metrics = captureMapPerfMetricScope();
     validateRequest(request);
     const url =
       `${this.sourceUrl}/bundle/v1/${request.anchorX}/${request.anchorY}/` + request.tileZoom;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TILE_BUNDLE_TIMEOUT_MS);
     try {
+      const started = metrics ? perfNow() : 0;
       const response = await fetch(url, {
         headers: { Accept: TILE_BUNDLE_MEDIA_TYPE },
         signal: controller.signal,
@@ -183,10 +186,15 @@ export class MartinTileBundleSource implements TileBundleSource {
         throw new Error(`Tile bundle exceeds the ${TILE_BUNDLE_MAX_BYTES}-byte limit`);
       }
       const bytes = new Uint8Array(await response.arrayBuffer());
+      if (metrics) addMapPerfMetric('networkMs', perfNow() - started, metrics);
+      addMapPerfMetric('responseBytes', bytes.byteLength, metrics);
       if (bytes.byteLength > TILE_BUNDLE_MAX_BYTES) {
         throw new Error(`Tile bundle exceeds the ${TILE_BUNDLE_MAX_BYTES}-byte limit`);
       }
-      return decodeTileBundle(bytes, request);
+      const parseStarted = metrics ? perfNow() : 0;
+      const entries = decodeTileBundle(bytes, request);
+      if (metrics) addMapPerfMetric('bundleParseMs', perfNow() - parseStarted, metrics);
+      return entries;
     } finally {
       clearTimeout(timer);
     }

@@ -82,6 +82,10 @@ format-check:
 test:
     bun run test
 
+# Profile the deterministic launch/zoom/pan region-build sequence (fixture by default).
+profile-map source="":
+    bun scripts/profile-scene.ts {{source}}
+
 # Run the full local gate: types, lint, formatting, and tests (JS/TS only).
 check: typecheck lint format-check test
 
@@ -105,6 +109,10 @@ deps-fix:
 # Test the Rust crate: crypto envelope + durable-trail (iroh-docs) logic. Portable; runs anywhere.
 test-rust:
     cd modules/iroh-location/rust && cargo test
+
+# Benchmark Rust protobuf parsing + SCG1 encoding with committed fixtures.
+profile-mvt:
+    cd modules/iroh-location/rust && cargo run --release --example profile_mvt -- 200 20
 
 # Compile the Rust crate against the pinned iroh/gossip/docs deps (no bindings generated).
 build-rust:
