@@ -3,7 +3,7 @@ import { createExplorationIndex } from '../../core/exploration-index';
 import { createH3Grid, realH3 } from '../../core/h3-grid';
 import { latLonToWorld } from '../../core/mercator';
 import { computeRegionSpec } from '../../core/region';
-import type { CameraState, Viewport, WorldPoint } from '../../core/types';
+import type { CameraState, Viewport, WorldPoint, WorldRect } from '../../core/types';
 import type { PackedGeometry } from '../../tiles/packed-geometry';
 import { EMPTY_GEOMETRY, type GeometrySource } from '../../tiles/geometry-source';
 import { tileKeyOf, tilesCovering, type TileCoord } from '../../tiles/tile-math';
@@ -247,6 +247,27 @@ describe('MapEngine.buildRegion', () => {
     expect(source.requests).toHaveLength(tilesCovering(spec.rect, spec.tileZoom).length);
   });
 
+  it('does not coalesce a queued exploration revision into a stale cell field', async () => {
+    const source = new FakeSource();
+    source.auto = false;
+    const engine = makeEngine(source);
+    const home = grid.cellAt(camera.center, H3_DISPLAY_RES);
+
+    const first = engine.buildRegion(baseRequest);
+    const updated = engine.buildRegion({
+      ...baseRequest,
+      exploration: createExplorationIndex(grid, [home]),
+      explorationVersion: 1,
+    });
+    source.resolveAll();
+    await first;
+    source.resolveAll();
+
+    const built = await updated;
+    expect(built?.explorationVersion).toBe(1);
+    expect(built?.cellField.cells.some((cell) => cell.fraction > 0)).toBe(true);
+  });
+
   it('degrades to the last good region when a fetch fails', async () => {
     const source = new FakeSource();
     const engine = makeEngine(source);
@@ -271,6 +292,27 @@ describe('MapEngine.buildRegion', () => {
 
     await expect(engine.buildRegion(baseRequest)).rejects.toThrow('boom');
     expect(engine.lastRegion).toBeNull();
+  });
+
+  it('degrades to the last good region when cell-field construction fails', async () => {
+    let failCells = false;
+    const flakyGrid = {
+      ...grid,
+      cellsInRectAsync: (rect: WorldRect, resolution: number) =>
+        failCells
+          ? Promise.reject(new Error('h3 unavailable'))
+          : grid.cellsInRectAsync(rect, resolution),
+    };
+    const source = new FakeSource();
+    const engine = new MapEngine({ source, grid: flakyGrid, dataZooms });
+    const good = await engine.buildRegion(baseRequest);
+    failCells = true;
+
+    const degraded = await engine.buildRegion({
+      ...baseRequest,
+      camera: { ...camera, zoom: 13 },
+    });
+    expect(degraded).toBe(good);
   });
 });
 

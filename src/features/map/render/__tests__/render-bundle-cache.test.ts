@@ -45,6 +45,7 @@ const region: MapRegion = {
   geometry: EMPTY_PACKED,
   cellField: field,
   places: [],
+  explorationVersion: 0,
   timing,
 };
 

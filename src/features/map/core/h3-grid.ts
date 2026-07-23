@@ -161,7 +161,14 @@ export function createH3Grid(core: H3Core, nativeEnumerator?: H3PolygonEnumerato
       await collectCellsAsync({ ...rect, minX: midX }, res, into);
       return;
     }
-    for (const cell of await nativeEnumerator(loopForRect(rect), res)) into.add(cell);
+    try {
+      for (const cell of await nativeEnumerator(loopForRect(rect), res)) into.add(cell);
+    } catch (error) {
+      if (__DEV__) {
+        console.warn('[map] native H3 enumeration failed; using h3-js fallback:', error);
+      }
+      collectCells(rect, res, into);
+    }
   }
 
   function queryRect(rect: WorldRect, res: number): WorldRect {
