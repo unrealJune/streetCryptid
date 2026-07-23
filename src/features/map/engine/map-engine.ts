@@ -41,6 +41,8 @@ export interface MapRegion {
   readonly cellField: RegionCellField;
   /** Named places inside the region (island headline lookup). */
   readonly places: readonly Place[];
+  /** Exploration revision represented by the immutable cell field. */
+  readonly explorationVersion: number;
   /** Phase-level timings captured when this immutable region was built. */
   readonly timing: RegionTiming;
 }
@@ -241,6 +243,7 @@ export class MapEngine {
         const built = this.last;
         if (
           built &&
+          built.explorationVersion === next.request.explorationVersion &&
           !shouldPrefetchRegion(
             built.spec,
             next.request.camera,
@@ -301,12 +304,18 @@ export class MapEngine {
       this.cellFieldCache.delete(cellKey);
       this.cellFieldCache.set(cellKey, cellField);
     } else {
-      const built = await buildCellFieldWithTimingAsync(
-        this.grid,
-        spec.rect,
-        spec.cellRes,
-        request.exploration
-      );
+      let built;
+      try {
+        built = await buildCellFieldWithTimingAsync(
+          this.grid,
+          spec.rect,
+          spec.cellRes,
+          request.exploration
+        );
+      } catch (error) {
+        if (this.last) return this.last;
+        throw error;
+      }
       cellField = built.field;
       cellTiming = built.timing;
       this.cellFieldCache.set(cellKey, cellField);
@@ -337,6 +346,7 @@ export class MapEngine {
       geometry,
       cellField,
       places: geometry.places,
+      explorationVersion: request.explorationVersion,
       timing,
     };
 
