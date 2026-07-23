@@ -105,7 +105,7 @@ export class RegionSessionSim {
    * extrapolation) so a build lands about where the camera will be, not where
    * it was when the build started.
    */
-  advance(camera: CameraState, buildCamera: CameraState = camera): void {
+  advance(camera: CameraState, buildCamera: CameraState = camera, allowBuildRequest = true): void {
     const { viewport } = this.config;
 
     // A build lands after its latency: it becomes current, the old current is
@@ -122,7 +122,10 @@ export class RegionSessionSim {
 
     // The rebuild check runs against the LEADED camera (like the app's
     // prefetch): "will the view still be covered a build from now?"
-    if (regionAction(this.current, buildCamera, viewport, this.config.dataZooms) === 'rebuild') {
+    if (
+      allowBuildRequest &&
+      regionAction(this.current, buildCamera, viewport, this.config.dataZooms) === 'rebuild'
+    ) {
       if (this.inFlight)
         this.queued = buildCamera; // replace any waiting request
       else this.start(buildCamera);

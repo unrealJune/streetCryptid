@@ -1,4 +1,10 @@
-import { createTileByteStore, InMemoryTileDb, type TileDb } from '../sqlite-tile-store';
+import {
+  createTileByteStore,
+  InMemoryTileDb,
+  SqliteTileDb,
+  type SqliteDb,
+  type TileDb,
+} from '../sqlite-tile-store';
 import type { TileCoord } from '../tile-math';
 
 const T1: TileCoord = { z: 14, x: 1, y: 1 };
@@ -84,6 +90,39 @@ describe('createTileByteStore — degradation', () => {
     await store.putMany('planet-v1', [{ tile: T1, bytes: bytesOf(3) }], 1);
 
     expect((await store.get('planet-v1', T1))?.bytes).toEqual(bytesOf(3));
+  });
+
+  describe('SqliteTileDb', () => {
+    it('writes a bundle inside one exclusive transaction', async () => {
+      const statements: unknown[][] = [];
+      let transactions = 0;
+      const transaction = {
+        runAsync: async (...args: unknown[]) => {
+          statements.push(args);
+          return { changes: 1 };
+        },
+      };
+      const db = {
+        withExclusiveTransactionAsync: async (
+          task: (value: Pick<SqliteDb, 'runAsync'>) => Promise<void>
+        ) => {
+          transactions++;
+          await task(transaction as Pick<SqliteDb, 'runAsync'>);
+        },
+      } as SqliteDb;
+
+      await new SqliteTileDb(db).upsertMany(
+        'planet-v1',
+        [
+          { tile: T1, bytes: bytesOf(3) },
+          { tile: T2, bytes: null },
+        ],
+        1234
+      );
+
+      expect(transactions).toBe(1);
+      expect(statements).toHaveLength(2);
+    });
   });
 
   it('openDb throwing falls back to a working in-memory store', async () => {

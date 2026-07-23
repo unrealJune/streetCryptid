@@ -3,11 +3,11 @@ import { createExplorationIndex } from '../../core/exploration-index';
 import { createH3Grid, realH3 } from '../../core/h3-grid';
 import { latLonToWorld } from '../../core/mercator';
 import { computeRegionSpec } from '../../core/region';
-import type { CameraState, Viewport, WorldPoint } from '../../core/types';
+import type { CameraState, Viewport, WorldPoint, WorldRect } from '../../core/types';
 import type { PackedGeometry } from '../../tiles/packed-geometry';
 import { EMPTY_GEOMETRY, type GeometrySource } from '../../tiles/geometry-source';
 import { tileKeyOf, tilesCovering, type TileCoord } from '../../tiles/tile-math';
-import { MapEngine, type RegionRequest } from '../map-engine';
+import { MapEngine, type RegionRequest, type RegionTiming } from '../map-engine';
 
 const viewport: Viewport = { width: 100, height: 100 };
 const camera: CameraState = { center: latLonToWorld({ lat: 47.6205, lon: -122.3169 }), zoom: 14 };
@@ -18,6 +18,7 @@ const baseRequest: RegionRequest = {
   camera,
   viewport,
   exploration: createExplorationIndex(grid, []),
+  explorationVersion: 0,
 };
 
 /** A controllable fake source: records requests, resolves on demand. */
@@ -113,6 +114,74 @@ describe('MapEngine.buildRegion', () => {
     expect(engine.lastRegion).toBe(region);
   });
 
+  it('reports source, merge, cell-field, and total build timings', async () => {
+    const source = new FakeSource();
+    const timings: RegionTiming[] = [];
+    const engine = new MapEngine({
+      source,
+      grid,
+      dataZooms,
+      onTiming: (timing) => timings.push(timing),
+    });
+
+    const region = await engine.buildRegion(baseRequest);
+    expect(timings).toHaveLength(1);
+    expect(region?.timing).toBe(timings[0]);
+    expect(timings[0]).toMatchObject({
+      tiles: expect.any(Number),
+      coldStart: true,
+      cellFieldCacheHit: false,
+      sourceMs: expect.any(Number),
+      mergeMs: expect.any(Number),
+      cellFieldMs: expect.any(Number),
+      cellEnumerateMs: expect.any(Number),
+      cellCentersMs: expect.any(Number),
+      cellAnnotateMs: expect.any(Number),
+      totalMs: expect.any(Number),
+    });
+
+    expect(timings[0].fetchMs).toBeCloseTo(timings[0].sourceMs + timings[0].mergeMs, 6);
+    expect(timings[0].buildMs).toBe(timings[0].cellFieldMs);
+    expect(timings[0].totalMs).toBeCloseTo(
+      timings[0].sourceMs + timings[0].mergeMs + timings[0].cellFieldMs,
+      6
+    );
+  });
+
+  it('reuses an exact cell field for the same exploration revision', async () => {
+    const source = new FakeSource();
+    const timings: RegionTiming[] = [];
+    const engine = new MapEngine({
+      source,
+      grid,
+      dataZooms,
+      onTiming: (timing) => timings.push(timing),
+    });
+
+    const first = await engine.buildRegion(baseRequest);
+    const second = await engine.buildRegion(baseRequest);
+
+    expect(first?.cellField).toBe(second?.cellField);
+    expect(timings.map((timing) => timing.cellFieldCacheHit)).toEqual([false, true]);
+  });
+
+  it('rebuilds the cell field when exploration advances', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    const exploration = createExplorationIndex(grid, []);
+    const first = await engine.buildRegion({ ...baseRequest, exploration });
+    exploration.add(grid.cellAt(camera.center, H3_DISPLAY_RES));
+    const second = await engine.buildRegion({
+      ...baseRequest,
+      exploration,
+      explorationVersion: 1,
+    });
+
+    expect(first?.cellField).not.toBe(second?.cellField);
+    expect(second?.cellField.cells.some((cell) => cell.fraction > 0)).toBe(true);
+    expect(second?.timing.cellFieldCacheHit).toBe(false);
+  });
+
   it('marks exploration in the cell field', async () => {
     const source = new FakeSource();
     const engine = makeEngine(source);
@@ -156,6 +225,49 @@ describe('MapEngine.buildRegion', () => {
     expect(engine.lastRegion).toBe(builtThird);
   });
 
+  it('coalesces a queued camera already served by the build that just landed', async () => {
+    const source = new FakeSource();
+    source.auto = false;
+    const timings: RegionTiming[] = [];
+    const engine = new MapEngine({
+      source,
+      grid,
+      dataZooms,
+      onTiming: (timing) => timings.push(timing),
+    });
+    const spec = computeRegionSpec(camera, viewport, { dataZooms });
+
+    const first = engine.buildRegion(baseRequest);
+    const coveredQueued = engine.buildRegion(baseRequest);
+    source.resolveAll();
+
+    const built = await first;
+    await expect(coveredQueued).resolves.toBe(built);
+    expect(timings).toHaveLength(1);
+    expect(source.requests).toHaveLength(tilesCovering(spec.rect, spec.tileZoom).length);
+  });
+
+  it('does not coalesce a queued exploration revision into a stale cell field', async () => {
+    const source = new FakeSource();
+    source.auto = false;
+    const engine = makeEngine(source);
+    const home = grid.cellAt(camera.center, H3_DISPLAY_RES);
+
+    const first = engine.buildRegion(baseRequest);
+    const updated = engine.buildRegion({
+      ...baseRequest,
+      exploration: createExplorationIndex(grid, [home]),
+      explorationVersion: 1,
+    });
+    source.resolveAll();
+    await first;
+    source.resolveAll();
+
+    const built = await updated;
+    expect(built?.explorationVersion).toBe(1);
+    expect(built?.cellField.cells.some((cell) => cell.fraction > 0)).toBe(true);
+  });
+
   it('degrades to the last good region when a fetch fails', async () => {
     const source = new FakeSource();
     const engine = makeEngine(source);
@@ -180,6 +292,27 @@ describe('MapEngine.buildRegion', () => {
 
     await expect(engine.buildRegion(baseRequest)).rejects.toThrow('boom');
     expect(engine.lastRegion).toBeNull();
+  });
+
+  it('degrades to the last good region when cell-field construction fails', async () => {
+    let failCells = false;
+    const flakyGrid = {
+      ...grid,
+      cellsInRectAsync: (rect: WorldRect, resolution: number) =>
+        failCells
+          ? Promise.reject(new Error('h3 unavailable'))
+          : grid.cellsInRectAsync(rect, resolution),
+    };
+    const source = new FakeSource();
+    const engine = new MapEngine({ source, grid: flakyGrid, dataZooms });
+    const good = await engine.buildRegion(baseRequest);
+    failCells = true;
+
+    const degraded = await engine.buildRegion({
+      ...baseRequest,
+      camera: { ...camera, zoom: 13 },
+    });
+    expect(degraded).toBe(good);
   });
 });
 

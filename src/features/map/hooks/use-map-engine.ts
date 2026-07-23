@@ -9,11 +9,13 @@ import { CAMERA_INITIAL_ZOOM, createMapDataset, type MapDataset } from '../confi
 import { applyViewTransform, clampCamera, scaleFor, type ViewTransform } from '../core/camera';
 import { makeViewLimits, type ViewLimits } from '../core/gesture';
 import { createH3Grid, realH3 } from '../core/h3-grid';
+import { createNativeH3Enumerator } from '../core/native-h3-enumerator';
 import { coverageInView, nearestPlaceName } from '../core/readout';
 import { coversView, shouldPrefetchRegion } from '../core/region';
 import type { CameraState, LatLon, Viewport, WorldPoint, WorldRect } from '../core/types';
 import { latLonToWorld } from '../core/mercator';
 import { MapEngine, type MapRegion } from '../engine/map-engine';
+import { emitMapPerfEvent } from '../perf/map-perf';
 import {
   createDemoExplorationSource,
   createLiveExplorationSource,
@@ -70,7 +72,7 @@ export interface MapEngineState {
    * without advancing the committed camera — keeps long pans loading ahead of
    * the finger. No-op while the current region still has headroom.
    */
-  readonly prefetchAt: (t: ViewTransform) => void;
+  readonly prefetchAt: (t: ViewTransform) => Promise<void>;
 }
 
 /**
@@ -102,7 +104,7 @@ export function useMapEngine(
       requestedHome && pointInside(requestedHome, dataset.bounds) ? requestedHome : dataset.home,
     [dataset, requestedHome]
   );
-  const grid = useMemo(() => createH3Grid(realH3()), []);
+  const grid = useMemo(() => createH3Grid(realH3(), createNativeH3Enumerator()), []);
   const exploration = useMemo(
     () =>
       dataset.explorationMode === 'live'
@@ -140,10 +142,14 @@ export function useMapEngine(
         grid,
         dataZooms: dataset.dataZooms,
         onTiming: __DEV__
-          ? (t) =>
+          ? (t) => {
               console.log(
-                `[map] region: fetch ${t.fetchMs.toFixed(0)} ms (${t.tiles} tiles) + build ${t.buildMs.toFixed(0)} ms`
-              )
+                `[map] region: source ${t.sourceMs.toFixed(0)} ms + merge ${t.mergeMs.toFixed(
+                  0
+                )} ms + cells ${t.cellFieldMs.toFixed(0)} ms (${t.tiles} tiles)`
+              );
+              emitMapPerfEvent('region-engine', { ...t });
+            }
           : undefined,
       }),
     [dataset, grid]
@@ -200,15 +206,25 @@ export function useMapEngine(
 
     let live = true;
     engine
-      .buildRegion({ camera: target, viewport, exploration: exploration.index() }, (progress) => {
-        if (!live) return;
-        // Skeleton while an uncovered build is outstanding (cold fetch, or a warm
-        // rebuild that would otherwise flash blank), tracking its tile progress.
-        // A covered rebuild (e.g. exploration changed) never blanks → no skeleton.
-        setPending(
-          uncovered ? { rect: progress.rect, loaded: progress.loaded, total: progress.total } : null
-        );
-      })
+      .buildRegion(
+        {
+          camera: target,
+          viewport,
+          exploration: exploration.index(),
+          explorationVersion,
+        },
+        (progress) => {
+          if (!live) return;
+          // Skeleton while an uncovered build is outstanding (cold fetch, or a warm
+          // rebuild that would otherwise flash blank), tracking its tile progress.
+          // A covered rebuild (e.g. exploration changed) never blanks → no skeleton.
+          setPending(
+            uncovered
+              ? { rect: progress.rect, loaded: progress.loaded, total: progress.total }
+              : null
+          );
+        }
+      )
       .then((built) => {
         if (!live || !built) return; // superseded builds resolve null
         builtVersionRef.current = explorationVersion;
@@ -260,13 +276,20 @@ export function useMapEngine(
   );
 
   const prefetchAt = useCallback(
-    (t: ViewTransform) => {
-      if (!viewport) return;
+    (t: ViewTransform): Promise<void> => {
+      if (!viewport) return Promise.resolve();
       const live = clampCamera(applyViewTransform(anchor, viewport, t), viewport, constraints);
       const current = regionRef.current;
-      if (current && !shouldPrefetchRegion(current.spec, live, viewport, dataset.dataZooms)) return;
-      engine
-        .buildRegion({ camera: live, viewport, exploration: exploration.index() })
+      if (current && !shouldPrefetchRegion(current.spec, live, viewport, dataset.dataZooms)) {
+        return Promise.resolve();
+      }
+      return engine
+        .buildRegion({
+          camera: live,
+          viewport,
+          exploration: exploration.index(),
+          explorationVersion,
+        })
         .then((built) => {
           if (!built) return;
           // Ahead-of-the-finger prefetch swaps reveal like any other: the shader
@@ -278,7 +301,7 @@ export function useMapEngine(
           /* a superseded/failed prefetch is harmless; the current layer stays */
         });
     },
-    [viewport, anchor, constraints, engine, exploration, dataset]
+    [viewport, anchor, constraints, engine, exploration, explorationVersion, dataset]
   );
 
   const coverage = useMemo(

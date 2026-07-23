@@ -4153,6 +4153,31 @@ fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceDouble: FfiConverterRustBuffer {
+    typealias SwiftType = [Double]
+
+    public static func write(_ value: [Double], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterDouble.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Double] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Double]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterDouble.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -4487,6 +4512,17 @@ public func generateRecvKeypair() -> [Data]  {
 })
 }
 /**
+ * Enumerate canonical H3 cells for a latitude/longitude polygon off the JS thread.
+ */
+public func h3CellsForPolygon(coordinates: [Double], resolution: UInt8)throws  -> [String]  {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_func_h3_cells_for_polygon(
+        FfiConverterSequenceDouble.lower(coordinates),
+        FfiConverterUInt8.lower(resolution),$0
+    )
+})
+}
+/**
  * Point developer telemetry at an OTLP/HTTP collector (`http://<lan-ip>:4318`), or disable it by
  * passing an empty endpoint. Returns whether export is active — always `false` when the crate was
  * built without the `otel` feature (store builds), so the uniffi surface is identical either way
@@ -4554,6 +4590,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_generate_recv_keypair() != 62550) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_h3_cells_for_polygon() != 51742) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {

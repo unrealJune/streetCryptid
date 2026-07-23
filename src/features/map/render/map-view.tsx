@@ -11,12 +11,13 @@ import {
   Shader,
   Skia,
 } from '@shopify/react-native-skia';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, StyleSheet, View, type LayoutChangeEvent } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import {
   cancelAnimation,
   Easing,
+  ReduceMotion,
   runOnJS,
   useAnimatedReaction,
   useDerivedValue,
@@ -39,6 +40,8 @@ import {
   applyPan,
   applyPinch,
   clampTranslation,
+  hasScaleMotion,
+  shouldPrefetchScaleMotion,
   transformDistanceSq,
   translationRange,
 } from '../core/gesture';
@@ -57,8 +60,16 @@ import { clusterMarkers } from '../core/marker-clusters';
 import type { MapRegion } from '../engine/map-engine';
 import { useMapEngine } from '../hooks/use-map-engine';
 import { latLonToWorld } from '../core/mercator';
+import {
+  emitMapPerfEvent,
+  isMapPerfRunEnabled,
+  perfNow,
+  type RegionRenderTiming,
+} from '../perf/map-perf';
+import { useMapPerfRunner } from '../perf/use-map-perf-runner';
 import { FriendLocator } from './friend-locator';
 import { FriendLocatorStack } from './friend-locator-stack';
+import { RegionRenderCache } from './render-bundle-cache';
 import {
   makeCellStateImage,
   makeLutImage,
@@ -106,6 +117,16 @@ interface ScreenRect {
   height: number;
 }
 
+interface RegionBundle {
+  region: MapRegion;
+  image: ReturnType<typeof renderRegionImage>;
+  /** The baked cell-state texture — reused by the loading reveal's alpha wipe. */
+  cellImage: ReturnType<typeof makeCellStateImage>;
+  timing: RegionRenderTiming;
+}
+
+const REGION_RENDER_CACHE_CAPACITY = 3;
+
 export interface MapFriendLocation {
   id: string;
   handle: string;
@@ -113,10 +134,15 @@ export interface MapFriendLocation {
   cryptidName?: string;
   color: string;
   location: LatLon;
-  history: readonly LatLon[];
+  history: readonly MapTrailLocation[];
   historyCount: number;
   latestTs: number;
   stale?: boolean;
+}
+
+export interface MapTrailLocation {
+  readonly id: string;
+  readonly location: LatLon;
 }
 
 /**
@@ -167,7 +193,7 @@ export function MapView({
   selfLocation?: LatLon | null;
   /** The full live self fix (accuracy + ts) — feeds live exploration. */
   selfFix?: LocationFix | null;
-  selfHistory?: readonly LatLon[];
+  selfHistory?: readonly MapTrailLocation[];
   selfSelected?: boolean;
   friends?: readonly MapFriendLocation[];
   selectedFriendId?: string | null;
@@ -209,36 +235,115 @@ export function MapView({
   const decaysLeft = useSharedValue(0);
   /** Transform at the last prefetch check, to gate by movement. */
   const lastPrefetch = useSharedValue<ViewTransform>({ k: 1, tx: 0, ty: 0 });
+  /** Resets the pan stride origin on the first frame after scale motion ends. */
+  const wasScaling = useSharedValue(false);
+  /** UI-side backpressure: never enqueue a second JS prefetch behind a blocked build. */
+  const prefetchInFlight = useSharedValue(false);
   const trailStrokeWidth = useDerivedValue(() => 2.5 / Math.max(0.001, k.value));
   const trailDotRadius = useDerivedValue(() => 2.8 / Math.max(0.001, k.value));
 
   const lutImage = useMemo(() => makeLutImage(theme.canvas), [theme]);
+  const regionRenderCache = useMemo(
+    () =>
+      new RegionRenderCache<{
+        image: RegionBundle['image'];
+        cellImage: RegionBundle['cellImage'];
+      }>(REGION_RENDER_CACHE_CAPACITY),
+    []
+  );
 
   // Build a region's mask + cell textures AND its bitmap together, once. On the
   // next swap the whole bundle slides into the outgoing (`prev`) slot instead of
   // being rebuilt — so each region is rasterized a single time, not twice per
   // swap (the outgoing rebuild was ~180ms of pure waste per region change).
-  type RegionBundle = {
-    region: MapRegion;
-    image: ReturnType<typeof renderRegionImage>;
-    /** The baked cell-state texture — reused by the loading reveal's alpha wipe. */
-    cellImage: ReturnType<typeof makeCellStateImage>;
-  };
   const curBundle = useMemo<RegionBundle | null>(() => {
     if (!region) return null;
+    const cached = regionRenderCache.get(region, lutImage, explorationEnabled);
+    if (cached) {
+      const timing: RegionRenderTiming = {
+        cacheHit: true,
+        maskMs: 0,
+        cellTextureMs: 0,
+        rasterMs: 0,
+        totalMs: 0,
+      };
+      emitMapPerfEvent('region-render', {
+        ...timing,
+        cells: region.cellField.cells.length,
+        maskWidth: region.spec.maskWidth,
+        maskHeight: region.spec.maskHeight,
+      });
+      return { region, image: cached.image, cellImage: cached.cellImage, timing };
+    }
+    const measure = isMapPerfRunEnabled();
+    const started = measure ? perfNow() : 0;
+    const maskStarted = measure ? perfNow() : 0;
     const maskImage = makeMaskImage(region);
+    const maskMs = measure ? perfNow() - maskStarted : 0;
+    const cellStarted = measure ? perfNow() : 0;
     const cellImage = makeCellStateImage(region);
-    if (!maskImage || !cellImage || !lutImage) return { region, image: null, cellImage: null };
-    const image = renderRegionImage({
-      region,
-      palette: theme.canvas,
-      maskImage,
-      cellImage,
-      lutImage,
-      explorationEnabled,
+    const cellTextureMs = measure ? perfNow() - cellStarted : 0;
+    const rasterStarted = measure ? perfNow() : 0;
+    const image =
+      maskImage && cellImage && lutImage
+        ? renderRegionImage({
+            region,
+            palette: theme.canvas,
+            maskImage,
+            cellImage,
+            lutImage,
+            explorationEnabled,
+          })
+        : null;
+    const rasterMs = measure ? perfNow() - rasterStarted : 0;
+    const timing = {
+      cacheHit: false,
+      maskMs,
+      cellTextureMs,
+      rasterMs,
+      totalMs: measure ? perfNow() - started : 0,
+    };
+    emitMapPerfEvent('region-render', {
+      ...timing,
+      cells: region.cellField.cells.length,
+      maskWidth: region.spec.maskWidth,
+      maskHeight: region.spec.maskHeight,
     });
-    return { region, image, cellImage };
-  }, [region, theme, lutImage, explorationEnabled]);
+    const bundle = { region, image, cellImage, timing };
+    if (image && cellImage && lutImage) {
+      regionRenderCache.set(region, lutImage, explorationEnabled, { image, cellImage });
+    }
+    return bundle;
+  }, [region, theme, lutImage, explorationEnabled, regionRenderCache]);
+
+  const animateProfileCamera = useCallback(
+    (
+      to: ViewTransform,
+      index: number,
+      durationMs: number,
+      onFinished: (finishedIndex: number) => void
+    ) => {
+      const config = {
+        duration: durationMs,
+        easing: Easing.inOut(Easing.cubic),
+        reduceMotion: ReduceMotion.Never,
+      };
+      k.value = withTiming(to.k, config);
+      tx.value = withTiming(to.tx, config, (finished) => {
+        if (finished) runOnJS(onFinished)(index);
+      });
+      ty.value = withTiming(to.ty, config);
+    },
+    [k, tx, ty]
+  );
+
+  useMapPerfRunner({
+    viewport,
+    anchor,
+    current: curBundle,
+    animate: animateProfileCamera,
+    commit,
+  });
 
   // Region transition (derive-state pattern): the new bitmap fades in over the
   // outgoing one. Opacity is a UI-thread tween — the bitmaps themselves are
@@ -401,7 +506,10 @@ export function MapView({
   const selfTrailPoints = useMemo(
     () =>
       viewport
-        ? selfHistory.map((location) => worldToScreen(anchor, viewport, latLonToWorld(location)))
+        ? selfHistory.map(({ id, location }) => ({
+            id,
+            screen: worldToScreen(anchor, viewport, latLonToWorld(location)),
+          }))
         : [],
     [anchor, selfHistory, viewport]
   );
@@ -413,9 +521,10 @@ export function MapView({
     if (!selectedFriendId) return null;
     const friend = friends.find((candidate) => candidate.id === selectedFriendId);
     if (!friend) return null;
-    const points = friend.history.map((location) =>
-      worldToScreen(anchor, viewport, latLonToWorld(location))
-    );
+    const points = friend.history.map(({ id, location }) => ({
+      id,
+      screen: worldToScreen(anchor, viewport, latLonToWorld(location)),
+    }));
     return buildTrail(points, friend.color);
   }, [
     anchor,
@@ -453,18 +562,48 @@ export function MapView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewport, anchor]);
 
-  // Mid-gesture/fling prefetch: whenever the view has moved ~a stride since the
-  // last check, request a region for a point LED ahead along the motion (about
-  // one build latency), so the build lands where the camera will be. Uniform
-  // across drags, flings, wheel zooms, and double-tap animations — anything
-  // that moves the transform.
+  const requestPrefetch = useCallback(
+    (t: ViewTransform) => {
+      void prefetchAt(t).finally(() => {
+        prefetchInFlight.value = false;
+      });
+    },
+    [prefetchAt, prefetchInFlight]
+  );
+
+  // Mid-pan/fling prefetch: request a region about one build latency ahead of
+  // translation. Scale motion keeps transforming the padded retained bitmap and
+  // coalesces to one edge-coverage request plus the final commit; building at
+  // every scale stride starved Hermes long after a pinch had visually ended.
   useAnimatedReaction(
     () => ({ k: k.value, tx: tx.value, ty: ty.value }),
     (t, prev) => {
       if (!limits || !prev) return;
+      if (hasScaleMotion(t, prev)) {
+        wasScaling.value = true;
+        if (shouldPrefetchScaleMotion(t, prev, lastPrefetch.value)) {
+          lastPrefetch.value = t;
+          if (!prefetchInFlight.value) {
+            prefetchInFlight.value = true;
+            runOnJS(requestPrefetch)(clampTranslation(t, limits));
+          }
+        } else if (t.k > prev.k) {
+          // Zoom-in can never expose an outer edge; track it only to reset the
+          // cumulative ratio for a later zoom-out.
+          lastPrefetch.value = t;
+        }
+        return;
+      }
+      if (wasScaling.value) {
+        wasScaling.value = false;
+        lastPrefetch.value = t;
+        return;
+      }
       if (transformDistanceSq(t, lastPrefetch.value) < PREFETCH_STRIDE_PX * PREFETCH_STRIDE_PX)
         return;
       lastPrefetch.value = t;
+      if (prefetchInFlight.value) return;
+      prefetchInFlight.value = true;
       let dx = (t.tx - prev.tx) * PREFETCH_LEAD_FRAMES;
       let dy = (t.ty - prev.ty) * PREFETCH_LEAD_FRAMES;
       const lead = Math.hypot(dx, dy);
@@ -472,9 +611,9 @@ export function MapView({
         dx *= PREFETCH_LEAD_MAX_PX / lead;
         dy *= PREFETCH_LEAD_MAX_PX / lead;
       }
-      runOnJS(prefetchAt)(clampTranslation({ k: t.k, tx: t.tx + dx, ty: t.ty + dy }, limits));
+      runOnJS(requestPrefetch)(clampTranslation({ k: t.k, tx: t.tx + dx, ty: t.ty + dy }, limits));
     },
-    [prefetchAt, limits]
+    [requestPrefetch, limits]
   );
 
   const composedGesture = useMemo(() => {
@@ -686,12 +825,12 @@ export function MapView({
                       strokeWidth={trailStrokeWidth}
                       style="stroke"
                     />
-                    {selectedTrail.points.map((point, index) => (
+                    {selectedTrail.points.map(({ id, screen }, index) => (
                       <Circle
                         color={selectedTrail.color}
-                        cx={point[0]}
-                        cy={point[1]}
-                        key={`${point[0]}:${point[1]}:${index}`}
+                        cx={screen[0]}
+                        cy={screen[1]}
+                        key={id}
                         opacity={0.34 + (0.5 * (index + 1)) / selectedTrail.points.length}
                         r={trailDotRadius}
                       />
@@ -785,10 +924,15 @@ const styles = StyleSheet.create({
   fill: { flex: 1 },
 });
 
-function buildTrail(points: readonly ScreenPoint[], color: string) {
+interface TrailScreenPoint {
+  readonly id: string;
+  readonly screen: ScreenPoint;
+}
+
+function buildTrail(points: readonly TrailScreenPoint[], color: string) {
   if (points.length === 0) return null;
   const path = Skia.Path.Make();
-  path.moveTo(points[0][0], points[0][1]);
-  for (const point of points.slice(1)) path.lineTo(point[0], point[1]);
+  path.moveTo(points[0].screen[0], points[0].screen[1]);
+  for (const { screen } of points.slice(1)) path.lineTo(screen[0], screen[1]);
   return { color, path, points };
 }

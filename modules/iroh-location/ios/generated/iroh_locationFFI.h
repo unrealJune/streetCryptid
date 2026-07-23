@@ -614,6 +614,11 @@ RustBuffer uniffi_iroh_location_fn_func_generate_recv_keypair(RustCallStatus *_N
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_H3_CELLS_FOR_POLYGON
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_H3_CELLS_FOR_POLYGON
+RustBuffer uniffi_iroh_location_fn_func_h3_cells_for_polygon(RustBuffer coordinates, uint8_t resolution, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_CONFIGURE_TELEMETRY
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_CONFIGURE_TELEMETRY
 int8_t uniffi_iroh_location_fn_func_configure_telemetry(RustBuffer endpoint, RustBuffer instance_id, RustCallStatus *_Nonnull out_status
@@ -918,6 +923,12 @@ uint16_t uniffi_iroh_location_checksum_func_encode_pair_invite(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_GENERATE_RECV_KEYPAIR
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_GENERATE_RECV_KEYPAIR
 uint16_t uniffi_iroh_location_checksum_func_generate_recv_keypair(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_H3_CELLS_FOR_POLYGON
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_H3_CELLS_FOR_POLYGON
+uint16_t uniffi_iroh_location_checksum_func_h3_cells_for_polygon(void
     
 );
 #endif

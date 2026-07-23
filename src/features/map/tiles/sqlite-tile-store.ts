@@ -163,10 +163,13 @@ export class InMemoryTileDb implements TileDb {
 
 type SqlParam = string | number | null | Uint8Array;
 
-interface SqliteDb {
+export interface SqliteDb {
   execAsync(sql: string): Promise<void>;
   runAsync(sql: string, ...params: SqlParam[]): Promise<{ changes: number }>;
   getFirstAsync<T>(sql: string, ...params: SqlParam[]): Promise<T | null>;
+  withExclusiveTransactionAsync?(
+    task: (transaction: Pick<SqliteDb, 'runAsync'>) => Promise<void>
+  ): Promise<void>;
 }
 
 type SqliteModule = { openDatabaseAsync(name: string): Promise<SqliteDb> };
@@ -207,7 +210,7 @@ interface SqliteTileRow {
   last_used: number;
 }
 
-class SqliteTileDb implements TileDb {
+export class SqliteTileDb implements TileDb {
   constructor(private readonly db: SqliteDb) {}
 
   async get(source: string, tile: TileCoord): Promise<TileRow | null> {
@@ -242,22 +245,29 @@ class SqliteTileDb implements TileDb {
     entries: readonly { tile: TileCoord; bytes: Uint8Array | null }[],
     fetchedAt: number
   ): Promise<void> {
-    for (const { tile, bytes } of entries) {
-      await this.db.runAsync(
-        `INSERT INTO tiles (source, z, x, y, bytes, size, fetched_at, last_used)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(source, z, x, y) DO UPDATE SET
-           bytes = excluded.bytes, size = excluded.size,
-           fetched_at = excluded.fetched_at, last_used = excluded.last_used`,
-        source,
-        tile.z,
-        tile.x,
-        tile.y,
-        bytes,
-        bytes?.byteLength ?? 0,
-        fetchedAt,
-        fetchedAt
-      );
+    const writeEntries = async (db: Pick<SqliteDb, 'runAsync'>) => {
+      for (const { tile, bytes } of entries) {
+        await db.runAsync(
+          `INSERT INTO tiles (source, z, x, y, bytes, size, fetched_at, last_used)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(source, z, x, y) DO UPDATE SET
+             bytes = excluded.bytes, size = excluded.size,
+             fetched_at = excluded.fetched_at, last_used = excluded.last_used`,
+          source,
+          tile.z,
+          tile.x,
+          tile.y,
+          bytes,
+          bytes?.byteLength ?? 0,
+          fetchedAt,
+          fetchedAt
+        );
+      }
+    };
+    if (this.db.withExclusiveTransactionAsync) {
+      await this.db.withExclusiveTransactionAsync(writeEntries);
+    } else {
+      await writeEntries(this.db);
     }
   }
 

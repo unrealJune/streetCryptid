@@ -25,6 +25,11 @@ export interface H3Core {
   gridDisk(cell: CellIndex, k: number): CellIndex[];
 }
 
+export type H3PolygonEnumerator = (
+  loop: readonly [number, number][],
+  resolution: number
+) => Promise<CellIndex[]>;
+
 let real: H3Core | undefined;
 
 /** The real h3-js implementation (lazy — pulls in the emscripten bundle). */
@@ -57,6 +62,8 @@ export interface H3Grid {
    * grown by ~1.5 cell edges, so partially visible boundary cells count).
    */
   cellsInRect(rect: WorldRect, res: number): CellIndex[];
+  /** Async equivalent, using native h3o enumeration when the app binary exposes it. */
+  cellsInRectAsync(rect: WorldRect, res: number): Promise<CellIndex[]>;
   parentOf(cell: CellIndex, res: number): CellIndex;
   /** Exact descendant count at `res` — 7^Δ except along pentagon lineages. */
   childrenSize(cell: CellIndex, res: number): number;
@@ -80,7 +87,7 @@ const EARTH_CIRCUMFERENCE_KM = 40_075;
  */
 const MAX_QUERY_SPAN_X = 0.35;
 
-export function createH3Grid(core: H3Core): H3Grid {
+export function createH3Grid(core: H3Core, nativeEnumerator?: H3PolygonEnumerator | null): H3Grid {
   // H3 cell geometry is immutable, so cache it for the grid's lifetime. This is
   // the map's hottest reuse: `buildCellField` calls these per cell every region
   // build, and panning/zooming revisits mostly the same cells — turning the
@@ -134,34 +141,60 @@ export function createH3Grid(core: H3Core): H3Grid {
       collectCells({ ...rect, minX: midX }, res, into);
       return;
     }
-    const nw = worldToLatLon([rect.minX, rect.minY]);
-    const ne = worldToLatLon([rect.maxX, rect.minY]);
-    const se = worldToLatLon([rect.maxX, rect.maxY]);
-    const sw = worldToLatLon([rect.minX, rect.maxY]);
-    const loop: [number, number][] = [
-      [nw.lat, nw.lon],
-      [ne.lat, ne.lon],
-      [se.lat, se.lon],
-      [sw.lat, sw.lon],
-    ];
+    const loop = loopForRect(rect);
     for (const cell of core.polygonToCells(loop, res)) into.add(cell);
   }
 
-  function cellsInRect(rect: WorldRect, res: number): CellIndex[] {
+  async function collectCellsAsync(
+    rect: WorldRect,
+    res: number,
+    into: Set<CellIndex>
+  ): Promise<void> {
+    if (!nativeEnumerator) {
+      collectCells(rect, res, into);
+      return;
+    }
+    if (rect.minX >= rect.maxX || rect.minY >= rect.maxY) return;
+    if (rect.maxX - rect.minX >= MAX_QUERY_SPAN_X) {
+      const midX = (rect.minX + rect.maxX) / 2;
+      await collectCellsAsync({ ...rect, maxX: midX }, res, into);
+      await collectCellsAsync({ ...rect, minX: midX }, res, into);
+      return;
+    }
+    try {
+      for (const cell of await nativeEnumerator(loopForRect(rect), res)) into.add(cell);
+    } catch (error) {
+      if (__DEV__) {
+        console.warn('[map] native H3 enumeration failed; using h3-js fallback:', error);
+      }
+      collectCells(rect, res, into);
+    }
+  }
+
+  function queryRect(rect: WorldRect, res: number): WorldRect {
     // Pad by ~1.5 cell edges so cells whose center sits just outside the rect
     // (but whose area pokes in) are included. Mercator is conformal, so one
     // margin serves both axes; the local scale comes from the rect's mid-lat.
     const midLat = worldToLatLon([0.5, (rect.minY + rect.maxY) / 2]).lat;
     const cosLat = Math.max(0.087, Math.cos((midLat * Math.PI) / 180)); // ≥ cos 85°
     const margin = Math.min(0.05, (1.5 * avgEdgeKm(res)) / (EARTH_CIRCUMFERENCE_KM * cosLat));
-    const grown: WorldRect = {
+    return {
       minX: Math.max(0, rect.minX - margin),
       minY: Math.max(0, rect.minY - margin),
       maxX: Math.min(1, rect.maxX + margin),
       maxY: Math.min(1, rect.maxY + margin),
     };
+  }
+
+  function cellsInRect(rect: WorldRect, res: number): CellIndex[] {
     const cells = new Set<CellIndex>();
-    collectCells(grown, res, cells);
+    collectCells(queryRect(rect, res), res, cells);
+    return [...cells];
+  }
+
+  async function cellsInRectAsync(rect: WorldRect, res: number): Promise<CellIndex[]> {
+    const cells = new Set<CellIndex>();
+    await collectCellsAsync(queryRect(rect, res), res, cells);
     return [...cells];
   }
 
@@ -171,8 +204,22 @@ export function createH3Grid(core: H3Core): H3Grid {
     boundaryWorld,
     neighborsOf,
     cellsInRect,
+    cellsInRectAsync,
     parentOf: (cell, res) => core.cellToParent(cell, res),
     childrenSize: (cell, res) => core.cellToChildrenSize(cell, res),
     resolutionOf: (cell) => core.getResolution(cell),
   };
+}
+
+function loopForRect(rect: WorldRect): [number, number][] {
+  const nw = worldToLatLon([rect.minX, rect.minY]);
+  const ne = worldToLatLon([rect.maxX, rect.minY]);
+  const se = worldToLatLon([rect.maxX, rect.maxY]);
+  const sw = worldToLatLon([rect.minX, rect.maxY]);
+  return [
+    [nw.lat, nw.lon],
+    [ne.lat, ne.lon],
+    [se.lat, se.lon],
+    [sw.lat, sw.lon],
+  ];
 }
