@@ -247,6 +247,21 @@ and profiled. Android arm64-v8a, armeabi-v7a, and x86_64 libraries cross-compile
 Rust implementation; the JS fallback remains available when an installed binary predates the
 new export.
 
+## Pass 6: exclusive SQLite bundle writes
+
+Run IDs: `ios-sqlite-tx-1` and `ios-sqlite-tx-2`.
+
+Each privacy bundle is now persisted inside one Expo SQLite
+`withExclusiveTransactionAsync` scope. Older/native-incompatible implementations retain the
+sequential fallback. This does not combine bundles, defer persistence, or change cache keys:
+every descendant and known-empty tile is still durable before the requested tile resolves.
+
+Cold launch persistence fell from 63.2 ms to 41.1/30.2 ms (35-52%). The repeated cold zoom
+persisted in 26.9/32.6 ms versus 39.4 ms before this pass. One first-run pan showed a 698 ms
+contention outlier, but an identical clean-cache repeat completed its bundle writes in 28.7 ms
+and the scenario remained 3.27 seconds. Network variance dominates cold wall time, so no
+headline camera latency is claimed for this pass.
+
 ## Experiment journal
 
 | Branch / attempt                                        | Hypothesis                                                                        | Result                                                                                                                                                                                | Decision                                                                                                                                                     |
@@ -262,11 +277,11 @@ new export.
 | `copilot/map-perf-cell-field-cache`                     | Reuse complete immutable H3 fields for exact region and exploration revisions.    | Exact zoom revisit fell 50.6%; H3 work fell from 941 ms to 0.017 ms without stale exploration.                                                                                        | Accepted.                                                                                                                                                    |
 | `copilot/map-perf-h3-breakdown`                         | Time H3 enumeration, centers, and annotation independently.                       | Polygon enumeration is 77-98% of uncached H3 time; warm annotation is only 13-30 ms.                                                                                                  | Accepted instrumentation; native enumeration is the next pass.                                                                                               |
 | `copilot/map-perf-native-h3`                            | Run exact center-containment H3 enumeration in Rust off Hermes.                   | Enumeration fell to 4-9 ms, cached settles reached 247-266 ms, and native/JS launch coverage matched at 2,651 cells.                                                                  | Accepted.                                                                                                                                                    |
+| `copilot/map-perf-sqlite-transaction`                   | Persist each SCB1 descendant set in one exclusive transaction.                    | Launch writes fell 35-52%; a contention outlier did not reproduce, while request and durability semantics stayed unchanged.                                                           | Accepted as a modest cold-cache win.                                                                                                                         |
 
 ## Next measured hypotheses
 
-1. Batch SQLite bundle writes in an exclusive WAL transaction and measure cold source time.
-2. Remove SVG string construction/parsing from lattice, rim, and feature masks now that Skia is
+1. Remove SVG string construction/parsing from lattice, rim, and feature masks now that Skia is
    above the post-H3 budget.
-3. Stabilize trail/locator geometry identity and batch trail dots to eliminate asynchronous
+2. Stabilize trail/locator geometry identity and batch trail dots to eliminate asynchronous
    overlay remounts and the reported visual jump.
