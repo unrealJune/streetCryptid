@@ -129,6 +129,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   const { profile } = useCryptidProfile();
   const [initialProfile] = useState(profile);
   const serviceRef = useRef<LocationSharingService | null>(null);
+  const foregroundLocationProviderRef = useRef<ExpoLocationProvider | null>(null);
   const bluetoothPermissionGranted = useRef(false);
   const trailRefreshId = useRef(0);
   const publishedProfileSignature = useRef('');
@@ -460,7 +461,9 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       throw new Error(message);
     }
     try {
-      const provider = new ExpoLocationProvider();
+      const provider =
+        foregroundLocationProviderRef.current ??
+        (foregroundLocationProviderRef.current = new ExpoLocationProvider());
       if (!(await provider.ensurePermission())) {
         throw new Error('Location permission is required to force a location push.');
       }

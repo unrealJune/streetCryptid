@@ -63,6 +63,38 @@ describe('DebugLocationControls', () => {
     expect(onPush).toHaveBeenCalledTimes(1);
   });
 
+  it('surfaces a skipped schedule tick while a push is still running', async () => {
+    let finishPush: ((seq: number) => void) | undefined;
+    const onPush = jest.fn(
+      () =>
+        new Promise<number>((resolve) => {
+          finishPush = resolve;
+        })
+    );
+    await act(async () => {
+      renderer = create(
+        <DebugLocationControls accent="#2f9e6a" warningColor="#f2ad42" onPush={onPush} />
+      );
+    });
+
+    act(() => {
+      renderer.root.findByType(TextInput).props.onChangeText('1');
+      renderer.root.findByType(Switch).props.onValueChange(true);
+    });
+    act(() => {
+      jest.advanceTimersByTime(2000);
+    });
+
+    expect(onPush).toHaveBeenCalledTimes(1);
+    expect(
+      renderer.root.findAllByProps({
+        children: 'Scheduled push skipped — another push is still running.',
+      }).length
+    ).toBeGreaterThan(0);
+
+    await act(async () => finishPush?.(10));
+  });
+
   it('supports intervals in minutes', async () => {
     const onPush = jest.fn(async () => 9);
     await act(async () => {

@@ -39,7 +39,14 @@ export function DebugLocationControls({
 
   const push = useCallback(
     async (trigger: PushTrigger) => {
-      if (inFlight.current) return;
+      if (inFlight.current) {
+        setStatus(
+          trigger === 'scheduled'
+            ? 'Scheduled push skipped — another push is still running.'
+            : 'A location push is already running.'
+        );
+        return;
+      }
       inFlight.current = true;
       setStatus(trigger === 'manual' ? 'Pushing…' : 'Scheduled push…');
       try {
