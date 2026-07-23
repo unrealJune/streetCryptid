@@ -134,6 +134,9 @@ describe('MapEngine.buildRegion', () => {
       sourceMs: expect.any(Number),
       mergeMs: expect.any(Number),
       cellFieldMs: expect.any(Number),
+      cellEnumerateMs: expect.any(Number),
+      cellCentersMs: expect.any(Number),
+      cellAnnotateMs: expect.any(Number),
       totalMs: expect.any(Number),
     });
 

@@ -205,6 +205,21 @@ The cache deliberately did not claim non-identical regions: zoom-out and pan spe
 their edges and remained within noise. This is evidence for profiling H3 enumeration and
 annotation separately before attempting canonical regions or native offload.
 
+## H3 phase breakdown
+
+Run ID: `ios-h3-breakdown-1` (warm durable tile bytes).
+
+| Scenario         | Total H3 | Polygon enumeration | Cached centers | Annotation/boundaries | Enumeration share |
+| ---------------- | -------: | ------------------: | -------------: | --------------------: | ----------------: |
+| Launch           |  1183 ms |              938 ms |          46 ms |                199 ms |             79.3% |
+| Zoom out, cached |   654 ms |              639 ms |           2 ms |                 13 ms |             97.8% |
+| Pan, new         |  1012 ms |              778 ms |          43 ms |                191 ms |             76.9% |
+| Pan, cached      |   815 ms |              779 ms |           6 ms |                 30 ms |             95.6% |
+
+`h3-js` polygon enumeration is 77-98% of uncached cell-field time. On revisited cell geometry,
+the remaining JS annotation work is only 13-30 ms. The next optimization should therefore move
+polygon-to-cell enumeration off Hermes; rewriting the annotation loops cannot reach the target.
+
 ## Experiment journal
 
 | Branch / attempt                                        | Hypothesis                                                                        | Result                                                                                                                                                                                | Decision                                                                                                                                                     |
@@ -218,11 +233,12 @@ annotation separately before attempting canonical regions or native offload.
 | `copilot/map-perf-queue-coalescing`                     | Reuse the just-built padded region when it already serves the queued camera.      | Cold zoom-out fell another 35.9%; pan still built 9/39 regions because bridge callbacks reached the engine serially.                                                                  | Accepted for redundant engine work; rejected as the pan solution.                                                                                            |
 | `copilot/map-perf-pan-backpressure`                     | Allow only one UI-to-JS prefetch bridge call while a region build is outstanding. | Pan builds fell from 9/39 to 3/3, both scenarios completed, and UI stayed at 60 fps.                                                                                                  | Accepted.                                                                                                                                                    |
 | `copilot/map-perf-cell-field-cache`                     | Reuse complete immutable H3 fields for exact region and exploration revisions.    | Exact zoom revisit fell 50.6%; H3 work fell from 941 ms to 0.017 ms without stale exploration.                                                                                        | Accepted.                                                                                                                                                    |
+| `copilot/map-perf-h3-breakdown`                         | Time H3 enumeration, centers, and annotation independently.                       | Polygon enumeration is 77-98% of uncached H3 time; warm annotation is only 13-30 ms.                                                                                                  | Accepted instrumentation; native enumeration is the next pass.                                                                                               |
 
 ## Next measured hypotheses
 
-1. Split H3 enumeration, cached geometry lookup, and exploration annotation timings; then
-   canonicalize reusable regions or move the dominant phase out of Hermes.
+1. Move polygon-to-cell enumeration off Hermes while preserving canonical H3 IDs and exact
+   center-containment coverage.
 2. Batch SQLite bundle writes in an exclusive WAL transaction and measure cold source time.
 3. Remove SVG string construction/parsing from lattice, rim, and feature masks if Skia remains
    above the post-H3 budget.
