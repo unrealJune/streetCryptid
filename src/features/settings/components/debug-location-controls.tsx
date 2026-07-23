@@ -10,6 +10,7 @@ type PushTrigger = 'manual' | 'scheduled';
 
 interface DebugLocationControlsProps {
   accent: string;
+  warningColor: string;
   onPush(trigger: PushTrigger): Promise<number>;
 }
 
@@ -17,7 +18,11 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function DebugLocationControls({ accent, onPush }: DebugLocationControlsProps) {
+export function DebugLocationControls({
+  accent,
+  warningColor,
+  onPush,
+}: DebugLocationControlsProps) {
   const theme = useTheme();
   const [amount, setAmount] = useState('30');
   const [unit, setUnit] = useState<IntervalUnit>('seconds');
@@ -112,7 +117,7 @@ export function DebugLocationControls({ accent, onPush }: DebugLocationControlsP
           style={[
             styles.input,
             {
-              borderColor: intervalMs === null ? theme.error : theme.backgroundSelected,
+              borderColor: intervalMs === null ? warningColor : theme.backgroundSelected,
               color: theme.text,
             },
           ]}
@@ -128,8 +133,7 @@ export function DebugLocationControls({ accent, onPush }: DebugLocationControlsP
             style={[
               styles.unit,
               {
-                backgroundColor:
-                  unit === option ? theme.backgroundSelected : theme.backgroundSecondary,
+                backgroundColor: unit === option ? theme.backgroundSelected : theme.background,
               },
             ]}
           >

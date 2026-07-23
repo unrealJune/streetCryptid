@@ -27,7 +27,9 @@ describe('DebugLocationControls', () => {
   it('publishes immediately on demand', async () => {
     const onPush = jest.fn(async () => 7);
     await act(async () => {
-      renderer = create(<DebugLocationControls accent="#2f9e6a" onPush={onPush} />);
+      renderer = create(
+        <DebugLocationControls accent="#2f9e6a" warningColor="#f2ad42" onPush={onPush} />
+      );
     });
 
     await act(async () => {
@@ -40,7 +42,9 @@ describe('DebugLocationControls', () => {
   it('publishes on the configured foreground schedule and pauses in background', async () => {
     const onPush = jest.fn(async () => 8);
     await act(async () => {
-      renderer = create(<DebugLocationControls accent="#2f9e6a" onPush={onPush} />);
+      renderer = create(
+        <DebugLocationControls accent="#2f9e6a" warningColor="#f2ad42" onPush={onPush} />
+      );
     });
 
     act(() => {
@@ -62,7 +66,9 @@ describe('DebugLocationControls', () => {
   it('supports intervals in minutes', async () => {
     const onPush = jest.fn(async () => 9);
     await act(async () => {
-      renderer = create(<DebugLocationControls accent="#2f9e6a" onPush={onPush} />);
+      renderer = create(
+        <DebugLocationControls accent="#2f9e6a" warningColor="#f2ad42" onPush={onPush} />
+      );
     });
 
     const minuteButton = renderer.root.findByProps({

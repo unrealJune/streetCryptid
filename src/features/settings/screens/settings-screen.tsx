@@ -85,7 +85,11 @@ export default function SettingsScreen() {
         <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
           DEBUG
         </ThemedText>
-        <DebugLocationControls accent={chrome.green} onPush={forceLocationPush} />
+        <DebugLocationControls
+          accent={chrome.green}
+          warningColor={chrome.amber}
+          onPush={forceLocationPush}
+        />
         <EventLogPanel activeColor={chrome.green} warningColor={chrome.amber} />
       </View>
 
