@@ -140,14 +140,14 @@ bindgen-android-arm64:
 # release-only behavior — production Hermes bytecode, minification, patched deps
 # (e.g. the pbf MVT/Hermes patch) — without an EAS cloud build.
 #
-# PREFER `eas build --local -p android --profile development` when you can: it runs
-# the real CI pipeline (eas-build-pre-install.sh regenerates UniFFI bindings AND
-# cargo-ndk-builds every-ABI .so, so the stale-.so startup abort below is impossible)
-# and signs with the EAS *remote* key, so `adb install -r` needs no uninstall. It is
-# NOT supported on native Windows — run it from WSL2/macOS/Linux — and needs a
-# profile whose environment sets EXPO_PUBLIC_TILE_URL (development/preview; the
-# production profile leaves some EXPO_PUBLIC_* unset). This recipe is the native-
-# Windows fast path when WSL2/cloud isn't handy.
+# PREFER `eas build --local -p android --profile production-internal-android`
+# when you can: it runs the real CI pipeline (eas-build-pre-install.sh regenerates
+# UniFFI bindings AND cargo-ndk-builds every-ABI .so, so the stale-.so startup abort
+# below is impossible), embeds the Hermes bundle, and signs with the EAS *remote*
+# key, so `adb install -r` needs no uninstall. It is NOT supported on native Windows
+# — run it from WSL2/macOS/Linux. Configure required EXPO_PUBLIC_* values in the EAS
+# production environment. This recipe is the native-Windows fast path when
+# WSL2/cloud isn't handy.
 #
 # Rebuilds the arm64 iroh-location .so FIRST so the packaged native library matches
 # the committed UniFFI bindings. A stale jniLibs .so aborts at startup with

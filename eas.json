@@ -29,18 +29,18 @@
       "autoIncrement": true,
       "credentialsSource": "remote"
     },
-    "production-development-ios": {
+    "production-internal-ios": {
       "extends": "production",
-      "developmentClient": true,
+      "developmentClient": false,
       "distribution": "internal",
       "autoIncrement": false,
       "ios": {
         "simulator": false
       }
     },
-    "production-development-android": {
+    "production-internal-android": {
       "extends": "production",
-      "developmentClient": true,
+      "developmentClient": false,
       "distribution": "internal",
       "autoIncrement": false,
       "android": {

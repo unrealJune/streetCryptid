@@ -141,12 +141,13 @@ just build         # cloud build (android / preview APK by default)
 Build profiles live in `eas.json`: `development` (dev client), `preview`
 (internal APK), and `production` (auto-incrementing store build).
 
-### PR development builds
+### PR standalone Release builds
 
-PRs authored by `Cobular` or `unrealJune` from branches in this repository build the iOS and
-Android development clients on ephemeral GitHub-hosted runners. The jobs run `eas build --local`
-with the production-development profiles, upload only the finished IPA/APK with `eas upload`, and
-post EAS install pages (including QR codes) on the PR. They do not consume EAS cloud-build quota.
+PRs authored by `Cobular` or `unrealJune` from branches in this repository build installable iOS
+and Android internal Release apps on ephemeral GitHub-hosted runners. The jobs run
+`eas build --local` with the production-internal profiles, so the Hermes bundle is embedded and
+the installed apps run without Metro. They upload only the finished IPA/APK with `eas upload` and
+post EAS install pages (including QR codes) on the PR without consuming EAS cloud-build quota.
 
 The build jobs use the `development-builds` GitHub environment. A repository administrator must
 create that environment, then add a Developer-role Expo robot-user token as its `EXPO_TOKEN` secret
@@ -160,7 +161,8 @@ Remote EAS signing credentials and the iOS ad hoc provisioning profile must alre
 freezes those credentials rather than modifying them; register new iPhones and refresh the profile
 outside the PR workflow. Build working directories stay under `runner.temp`, are never cached or
 uploaded as GitHub artifacts, and are explicitly removed after the final app archive is uploaded
-to EAS.
+to EAS. Only package-manager downloads and Cargo compiler outputs are cached; generated native
+projects, app archives, keychains, provisioning profiles, and other EAS state remain excluded.
 
 EAS CLI serializes the local build job, including signing credentials, into a base64 child-process
 argument. Debug/error output can therefore be sensitive. The CI wrapper never forwards any
