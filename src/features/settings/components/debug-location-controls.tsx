@@ -122,6 +122,7 @@ export function DebugLocationControls({ accent, onPush }: DebugLocationControlsP
           <Pressable
             key={option}
             accessibilityRole="button"
+            accessibilityLabel={`Use ${option} for the location push interval`}
             accessibilityState={{ selected: unit === option }}
             onPress={() => setUnit(option)}
             style={[

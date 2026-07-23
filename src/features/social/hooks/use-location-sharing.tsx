@@ -24,6 +24,7 @@ import {
   loadLocationDisclosureChoice,
   saveLocationDisclosureChoice,
 } from '@/features/social/net/persistence';
+import { ExpoLocationProvider } from '@/features/social/net/expo-location-provider';
 import { buildTransportReport, type TransportReport } from '@/features/social/net/transports';
 import {
   ensureLocalNetworkPermission,
@@ -459,7 +460,12 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       throw new Error(message);
     }
     try {
-      const seq = await service.forceLocationPush(trigger);
+      const provider = new ExpoLocationProvider();
+      if (!(await provider.ensurePermission())) {
+        throw new Error('Location permission is required to force a location push.');
+      }
+      const fix = await provider.getCurrent();
+      const seq = await service.forceLocationPush(fix, trigger);
       setServiceError(null);
       return seq;
     } catch (pushError: unknown) {
