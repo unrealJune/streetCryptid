@@ -262,6 +262,27 @@ contention outlier, but an identical clean-cache repeat completed its bundle wri
 and the scenario remained 3.27 seconds. Network variance dominates cold wall time, so no
 headline camera latency is claimed for this pass.
 
+## Pass 7: stable trails and location overlays
+
+The reported overlay jump had two data/identity causes independent of region placement:
+
+- Uniform resampling recalculated a fractional stride from the latest trail length, replacing
+  about half of the immutable interior points after every append.
+- First GPS lock changed the React key from `default-centered` to `gps-centered`, destroying
+  the complete map, camera transform, trail, and locator subtree.
+
+Sampling now uses a deterministic binary hierarchy ranked by monotonic publish sequence.
+Appending a fix can replace at most one previously selected interior point; the first and newest
+fix remain guaranteed. Stable `author:seq` IDs flow through to Skia circle keys, so unchanged
+historical dots update in place instead of remounting. The default map session key is now
+persistent; GPS available before first mount still sets the initial center, while GPS arriving
+later updates the live marker without resetting the camera.
+
+For a 200-point trail rendered at a 32-point limit over 60 successive appends, the old sampler
+removed exactly 15 historical interior points per append. The new sampler removed 0.13 on
+average and never more than one. Existing fixed-anchor interaction tests still report zero
+content motion when regions land.
+
 ## Experiment journal
 
 | Branch / attempt                                        | Hypothesis                                                                        | Result                                                                                                                                                                                | Decision                                                                                                                                                     |
@@ -278,10 +299,9 @@ headline camera latency is claimed for this pass.
 | `copilot/map-perf-h3-breakdown`                         | Time H3 enumeration, centers, and annotation independently.                       | Polygon enumeration is 77-98% of uncached H3 time; warm annotation is only 13-30 ms.                                                                                                  | Accepted instrumentation; native enumeration is the next pass.                                                                                               |
 | `copilot/map-perf-native-h3`                            | Run exact center-containment H3 enumeration in Rust off Hermes.                   | Enumeration fell to 4-9 ms, cached settles reached 247-266 ms, and native/JS launch coverage matched at 2,651 cells.                                                                  | Accepted.                                                                                                                                                    |
 | `copilot/map-perf-sqlite-transaction`                   | Persist each SCB1 descendant set in one exclusive transaction.                    | Launch writes fell 35-52%; a contention outlier did not reproduce, while request and durability semantics stayed unchanged.                                                           | Accepted as a modest cold-cache win.                                                                                                                         |
+| `copilot/map-perf-stable-overlays`                      | Make trail sampling and map component identity stable across appends/first GPS.   | Historical replacements fell from 15 per append to 0.13 average (max 1); first GPS no longer remounts the map.                                                                        | Accepted; fixes the reported trail/location jump.                                                                                                            |
 
 ## Next measured hypotheses
 
 1. Remove SVG string construction/parsing from lattice, rim, and feature masks now that Skia is
    above the post-H3 budget.
-2. Stabilize trail/locator geometry identity and batch trail dots to eliminate asynchronous
-   overlay remounts and the reported visual jump.
