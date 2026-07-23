@@ -43,6 +43,7 @@ import uniffi.iroh_location.decodePairInvite
 import uniffi.iroh_location.deriveTopic
 import uniffi.iroh_location.encodePairInvite
 import uniffi.iroh_location.flushTelemetry
+import uniffi.iroh_location.h3CellsForPolygon
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
@@ -400,6 +401,10 @@ class IrohLocationModule : Module() {
 
     AsyncFunction("decodeMvtTile") { bytes: ByteArray, z: Int, x: Int, y: Int ->
       decodeMvtTile(bytes, z.toUInt(), x.toUInt(), y.toUInt())
+    }
+
+    AsyncFunction("h3CellsForPolygon") { coordinates: List<Double>, resolution: Int ->
+      h3CellsForPolygon(coordinates, resolution.toUByte())
     }
 
     AsyncFunction("subscribe") Coroutine

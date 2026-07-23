@@ -278,6 +278,67 @@ describe('LocationSharingService — durable trail wiring', () => {
     });
   });
 
+  it('records configured stash replication on the publish trace', async () => {
+    mockHolder.stashConfig = {
+      baseUrl: 'https://stash.example.com',
+      ticket: 'ticket-stash',
+      psk: null,
+    };
+    const sent: {
+      resourceSpans?: {
+        scopeSpans?: {
+          spans?: { name: string; attributes: unknown; events: unknown }[];
+        }[];
+      }[];
+    }[] = [];
+    const telemetry = createTelemetry({
+      endpoint: 'http://collector.test',
+      transport: async (_url, body) => {
+        sent.push(JSON.parse(body) as (typeof sent)[number]);
+      },
+    });
+    setTelemetryForTesting(telemetry);
+    const svc = new LocationSharingService({
+      stash: {
+        configured: true,
+        registerNamespace: async () => {},
+        unsubscribe: async () => {},
+      },
+      pushTokens: {
+        acquire: async () => null,
+        registerBackgroundSync: () => {},
+      },
+    });
+    await svc.init('@me', 'mothman');
+    await svc.setStashOptIn(true);
+
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+    await telemetry.flush();
+
+    const publishSpan = sent
+      .flatMap((payload) => payload.resourceSpans?.[0]?.scopeSpans?.[0]?.spans ?? [])
+      .find((span) => span.name === 'publish.fix');
+    if (!publishSpan) throw new Error('publish.fix span was not exported');
+    expect(publishSpan.attributes).toEqual(
+      expect.arrayContaining([
+        { key: 'stash.client_configured', value: { boolValue: true } },
+        { key: 'stash.ticket_configured', value: { boolValue: true } },
+        { key: 'stash.opted_in', value: { boolValue: true } },
+        { key: 'stash.replication_enabled', value: { boolValue: true } },
+      ])
+    );
+    expect(publishSpan.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'docs.write.completed',
+          attributes: expect.arrayContaining([
+            { key: 'stash.replication_enabled', value: { boolValue: true } },
+          ]),
+        }),
+      ])
+    );
+  });
+
   it('syncTrail reads the durable replica into the trail (silent reconciliation)', async () => {
     const svc = new LocationSharingService();
     await svc.init('@me', 'mothman');

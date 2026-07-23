@@ -1,18 +1,27 @@
-import { buildCellField, type RegionCellField } from '../core/cell-field';
+import {
+  buildCellFieldWithTimingAsync,
+  type CellFieldTiming,
+  type RegionCellField,
+} from '../core/cell-field';
 import type { ExplorationIndex } from '../core/exploration-index';
 import type { H3Grid } from '../core/h3-grid';
-import { computeRegionSpec, type RegionSpec } from '../core/region';
+import { computeRegionSpec, shouldPrefetchRegion, type RegionSpec } from '../core/region';
 import type { CameraState, Place, Viewport, WorldPoint, WorldRect } from '../core/types';
 import type { GeometrySource } from '../tiles/geometry-source';
 import { mergeGeometry } from '../tiles/geometry-source';
 import type { PackedGeometry } from '../tiles/packed-geometry';
 import { tileKeyOf, tilesCovering, type DataZoomRange, type TileCoord } from '../tiles/tile-math';
 
+/** Complete fields are large; retain only the camera regions most likely to be revisited. */
+const CELL_FIELD_CACHE_CAPACITY = 8;
+
 /** Everything a region build depends on besides the engine's own wiring. */
 export interface RegionRequest {
   readonly camera: CameraState;
   readonly viewport: Viewport;
   readonly exploration: ExplorationIndex;
+  /** Monotonic revision of the mutable exploration index. */
+  readonly explorationVersion: number;
 }
 
 /**
@@ -32,12 +41,30 @@ export interface MapRegion {
   readonly cellField: RegionCellField;
   /** Named places inside the region (island headline lookup). */
   readonly places: readonly Place[];
+  /** Exploration revision represented by the immutable cell field. */
+  readonly explorationVersion: number;
+  /** Phase-level timings captured when this immutable region was built. */
+  readonly timing: RegionTiming;
 }
 
 /** Per-build timing breakdown, for dev logging / perf tracking. */
 export interface RegionTiming {
   readonly tiles: number;
+  readonly coldStart: boolean;
+  readonly cellFieldCacheHit: boolean;
+  /** Tile source work, including byte cache/network and decode. */
+  readonly sourceMs: number;
+  /** Struct-of-arrays concatenation after all tiles land. */
+  readonly mergeMs: number;
+  /** H3 enumeration, immutable geometry lookup, and exploration annotation. */
+  readonly cellFieldMs: number;
+  readonly cellEnumerateMs: number;
+  readonly cellCentersMs: number;
+  readonly cellAnnotateMs: number;
+  readonly totalMs: number;
+  /** Backward-compatible aggregate: source + merge. */
   readonly fetchMs: number;
+  /** Backward-compatible aggregate: H3 cell-field construction. */
   readonly buildMs: number;
 }
 
@@ -92,6 +119,7 @@ export class MapEngine {
     reject: (error: unknown) => void;
   } | null = null;
   private last: MapRegion | null = null;
+  private readonly cellFieldCache = new Map<string, RegionCellField>();
 
   constructor(options: MapEngineOptions) {
     this.source = options.source;
@@ -211,7 +239,23 @@ export class MapEngine {
       this.busy = false;
       const next = this.queued;
       this.queued = null;
-      if (next) this.runBuild(next.request, next.onProgress).then(next.resolve, next.reject);
+      if (next) {
+        const built = this.last;
+        if (
+          built &&
+          built.explorationVersion === next.request.explorationVersion &&
+          !shouldPrefetchRegion(
+            built.spec,
+            next.request.camera,
+            next.request.viewport,
+            this.dataZooms
+          )
+        ) {
+          next.resolve(built);
+        } else {
+          this.runBuild(next.request, next.onProgress).then(next.resolve, next.reject);
+        }
+      }
     }
   }
 
@@ -233,9 +277,9 @@ export class MapEngine {
     onProgress?.({ rect: spec.rect, loaded, total, coldStart });
 
     const t0 = now();
-    let geometry;
+    let parts: PackedGeometry[];
     try {
-      const parts = await Promise.all(
+      parts = await Promise.all(
         tiles.map((t) =>
           this.source.getTile(t).then((part) => {
             loaded++;
@@ -244,28 +288,79 @@ export class MapEngine {
           })
         )
       );
-      geometry = mergeGeometry(parts);
     } catch (error) {
       if (this.last) return this.last;
       throw error;
     }
     const t1 = now();
 
-    const cellField = buildCellField(this.grid, spec.rect, spec.cellRes, request.exploration);
+    const geometry = mergeGeometry(parts);
+    const t2 = now();
+    const cellKey = cellFieldKey(spec, request.explorationVersion);
+    let cellField = this.cellFieldCache.get(cellKey);
+    const cellFieldCacheHit = cellField !== undefined;
+    let cellTiming: CellFieldTiming = { enumerateMs: 0, centersMs: 0, annotateMs: 0 };
+    if (cellField) {
+      this.cellFieldCache.delete(cellKey);
+      this.cellFieldCache.set(cellKey, cellField);
+    } else {
+      let built;
+      try {
+        built = await buildCellFieldWithTimingAsync(
+          this.grid,
+          spec.rect,
+          spec.cellRes,
+          request.exploration
+        );
+      } catch (error) {
+        if (this.last) return this.last;
+        throw error;
+      }
+      cellField = built.field;
+      cellTiming = built.timing;
+      this.cellFieldCache.set(cellKey, cellField);
+      if (this.cellFieldCache.size > CELL_FIELD_CACHE_CAPACITY) {
+        const oldest = this.cellFieldCache.keys().next().value;
+        if (oldest !== undefined) this.cellFieldCache.delete(oldest);
+      }
+    }
+    const t3 = now();
+
+    const timing: RegionTiming = {
+      tiles: tiles.length,
+      coldStart,
+      cellFieldCacheHit,
+      sourceMs: t1 - t0,
+      mergeMs: t2 - t1,
+      cellFieldMs: t3 - t2,
+      cellEnumerateMs: cellTiming.enumerateMs,
+      cellCentersMs: cellTiming.centersMs,
+      cellAnnotateMs: cellTiming.annotateMs,
+      totalMs: t3 - t0,
+      fetchMs: t2 - t0,
+      buildMs: t3 - t2,
+    };
 
     const region: MapRegion = {
       spec,
       geometry,
       cellField,
       places: geometry.places,
+      explorationVersion: request.explorationVersion,
+      timing,
     };
 
     this.last = region;
-    this.onTiming?.({ tiles: tiles.length, fetchMs: t1 - t0, buildMs: now() - t1 });
+    this.onTiming?.(timing);
     return region;
   }
 }
 
 function now(): number {
   return typeof performance !== 'undefined' ? performance.now() : Date.now();
+}
+
+function cellFieldKey(spec: RegionSpec, explorationVersion: number): string {
+  const { rect } = spec;
+  return `${explorationVersion}|${spec.cellRes}|${rect.minX},${rect.minY},${rect.maxX},${rect.maxY}`;
 }

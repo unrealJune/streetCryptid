@@ -18,6 +18,26 @@ import type { CameraState, Viewport } from './types';
  * data in/out), so the exact production math is unit-testable in Node.
  */
 
+/** True for pinch, wheel, and double-tap frames; ignores floating-point dust. */
+export function hasScaleMotion(current: ViewTransform, previous: ViewTransform): boolean {
+  'worklet';
+  return Math.abs(current.k - previous.k) > 1e-6;
+}
+
+/**
+ * Coalesce zoom-out prefetch to one build per ~1.15 zoom levels. The 0.45
+ * threshold starts before a 3x-padded region can expose an edge, while avoiding
+ * a heavyweight build at every scale stride.
+ */
+export function shouldPrefetchScaleMotion(
+  current: ViewTransform,
+  previous: ViewTransform,
+  lastPrefetch: ViewTransform
+): boolean {
+  'worklet';
+  return current.k < previous.k && current.k / lastPrefetch.k <= 0.45;
+}
+
 /** Zoom + pan limits, precomputed into anchor-space pixels for worklet use. */
 export interface ViewLimits {
   /** Composed-scale range: k ∈ [kMin, kMax] ⇔ zoom ∈ [minZoom, maxZoom]. */

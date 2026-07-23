@@ -6,6 +6,12 @@ import {
 } from './tile-bundle';
 import type { StoredTile, TileByteSource, TileByteStore } from './tile-bytes';
 import { tileKeyOf, type TileCoord, type TileKey } from './tile-math';
+import {
+  addMapPerfMetric,
+  captureMapPerfMetricScope,
+  perfNow,
+  type MapPerfMetricScope,
+} from '../perf/map-perf';
 
 /**
  * Privacy-quantized tile fetching with one fixed-anchor bundle request. Fine
@@ -45,14 +51,21 @@ export class BundleFetchByteSource implements TileByteSource {
   // callers and worth persisting even if the original requester left —
   // the same reasoning as CachedGeometrySource not forwarding its signal.
   async getTileBytes(tile: TileCoord): Promise<Uint8Array | null> {
+    const metrics = captureMapPerfMetricScope();
+    const storeStarted = metrics ? perfNow() : 0;
     const stored = await this.opts.store.get(this.opts.sourceId, tile);
-    if (stored && this.isFresh(stored)) return stored.bytes;
+    if (metrics) addMapPerfMetric('storeReadMs', perfNow() - storeStarted, metrics);
+    if (stored && this.isFresh(stored)) {
+      addMapPerfMetric('storeFreshHits', 1, metrics);
+      return stored.bytes;
+    }
+    addMapPerfMetric(stored ? 'storeStaleHits' : 'storeMisses', 1, metrics);
 
     try {
       const fetched =
         tile.z <= this.opts.anchorZoom
-          ? await this.fetchCoarseTile(tile)
-          : await this.fetchBundle(tile);
+          ? await this.fetchCoarseTile(tile, metrics)
+          : await this.fetchBundle(tile, metrics);
       return fetched.get(tileKeyOf(tile.z, tile.x, tile.y)) ?? null;
     } catch (e) {
       // Stale beats blank when the network is down.
@@ -65,16 +78,22 @@ export class BundleFetchByteSource implements TileByteSource {
     return this.now() - stored.fetchedAt <= this.opts.ttlMs;
   }
 
-  private fetchCoarseTile(tile: TileCoord): Promise<Map<TileKey, Uint8Array | null>> {
+  private fetchCoarseTile(
+    tile: TileCoord,
+    metrics: MapPerfMetricScope | null
+  ): Promise<Map<TileKey, Uint8Array | null>> {
     const tileKey = tileKeyOf(tile.z, tile.x, tile.y);
     const key = `tile:${tileKey}`;
     const pending = this.inFlight.get(key);
     if (pending) return pending;
+    addMapPerfMetric('coarseRequests', 1, metrics);
 
     const request = this.opts.coarseUpstream
       .getTileBytes(tile)
       .then(async (bytes) => {
+        const storeStarted = metrics ? perfNow() : 0;
         await this.opts.store.putMany(this.opts.sourceId, [{ tile, bytes }], this.now());
+        if (metrics) addMapPerfMetric('storeWriteMs', perfNow() - storeStarted, metrics);
         return new Map([[tileKey, bytes]]);
       })
       .finally(() => {
@@ -85,17 +104,23 @@ export class BundleFetchByteSource implements TileByteSource {
     return request;
   }
 
-  private fetchBundle(tile: TileCoord): Promise<Map<TileKey, Uint8Array | null>> {
+  private fetchBundle(
+    tile: TileCoord,
+    metrics: MapPerfMetricScope | null
+  ): Promise<Map<TileKey, Uint8Array | null>> {
     const bundleRequest = bundleRequestFor(tile, this.opts.anchorZoom);
     const key = `bundle:${bundleKeyOf(bundleRequest)}`;
     const pending = this.inFlight.get(key);
     if (pending) return pending;
+    addMapPerfMetric('bundleRequests', 1, metrics);
 
     const request = this.opts.bundleUpstream
       .getBundle(bundleRequest)
       .then(async (entries) => {
         validateTileBundleEntries(bundleRequest, entries);
+        const storeStarted = metrics ? perfNow() : 0;
         await this.opts.store.putMany(this.opts.sourceId, entries, this.now());
+        if (metrics) addMapPerfMetric('storeWriteMs', perfNow() - storeStarted, metrics);
         return new Map(entries.map((e) => [tileKeyOf(e.tile.z, e.tile.x, e.tile.y), e.bytes]));
       })
       .finally(() => {

@@ -3,6 +3,7 @@ import { tryGetIrohLocation } from 'iroh-location';
 import type { TileDecoder } from './decode-source';
 import { packedTileToGeometry } from './packed-geometry';
 import { wrapScg1 } from './scg1';
+import { addMapPerfMetric, captureMapPerfMetricScope, perfNow } from '../perf/map-perf';
 
 /**
  * The native Rust MVT decoder, exposed through the `iroh-location` Expo module,
@@ -18,7 +19,12 @@ export function createNativeTileDecoder(): TileDecoder | null {
   const decodeMvtTile = mod.decodeMvtTile.bind(mod);
 
   return async (bytes, tile) => {
+    const metrics = captureMapPerfMetricScope();
+    const started = metrics ? perfNow() : 0;
     const buf = await decodeMvtTile(bytes, tile.z, tile.x, tile.y);
-    return packedTileToGeometry(wrapScg1(buf));
+    const geometry = packedTileToGeometry(wrapScg1(buf, metrics));
+    addMapPerfMetric('nativeDecodeCalls', 1, metrics);
+    if (metrics) addMapPerfMetric('nativeDecodeMs', perfNow() - started, metrics);
+    return geometry;
   };
 }

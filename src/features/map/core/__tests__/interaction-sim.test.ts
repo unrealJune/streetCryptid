@@ -6,7 +6,14 @@ import {
   type CameraConstraints,
   type ViewTransform,
 } from '../camera';
-import { applyPan, applyPinch, clampTranslation, makeViewLimits } from '../gesture';
+import {
+  applyPan,
+  applyPinch,
+  clampTranslation,
+  hasScaleMotion,
+  makeViewLimits,
+  shouldPrefetchScaleMotion,
+} from '../gesture';
 import { computeRegionSpec } from '../region';
 import { RegionSessionSim } from '../region-session';
 import type { CameraState, Viewport } from '../types';
@@ -69,6 +76,7 @@ class MapSim {
   readonly session: RegionSessionSim;
   /** Screen-space movement of the content between consecutive frames (px). */
   readonly frameDeltas: number[] = [];
+  private lastPrefetch: ViewTransform = IDENTITY_TRANSFORM;
 
   constructor(buildLatencyMs: number) {
     this.session = new RegionSessionSim(
@@ -99,7 +107,15 @@ class MapSim {
       { k: this.t.k, tx: this.t.tx + lx, ty: this.t.ty + ly },
       limits
     );
-    this.session.advance(cameraOf(this.t), cameraOf(leaded));
+    const scaleMotion = hasScaleMotion(this.t, before);
+    const scalePrefetch =
+      scaleMotion && shouldPrefetchScaleMotion(this.t, before, this.lastPrefetch);
+    if (scalePrefetch || (scaleMotion && this.t.k > before.k)) this.lastPrefetch = this.t;
+    this.session.advance(
+      cameraOf(this.t),
+      cameraOf(scalePrefetch ? this.t : leaded),
+      !scaleMotion || scalePrefetch
+    );
   }
 
   /**
@@ -137,6 +153,7 @@ class MapSim {
       const [fx, fy] = focal(i);
       this.frame((t) => applyPinch(t, factorPerFrame, fx, fy, limits));
     }
+    this.session.request(cameraOf(this.t));
   }
 
   /** Idle frames (e.g. waiting for a build to land). */
@@ -189,6 +206,14 @@ describe('interaction sim: no blank frames (cold network, 300 ms builds)', () =>
     // ~0.7%/frame out ≈ halving scale every ~1.6 s — a realistic two-finger zoom-out.
     sim.pinch(0.993, 2600, () => [200, 400]);
     sim.idle(500);
+    expect(sim.session.gapSteps).toBe(0);
+  });
+
+  it('builds only the committed zoom target instead of intermediate scale frames', () => {
+    const sim = new MapSim(300);
+    sim.pinch(0.993, 1200, () => [200, 400]);
+    expect(sim.session.builds).toBe(1);
+    sim.idle(400);
     expect(sim.session.gapSteps).toBe(0);
   });
 

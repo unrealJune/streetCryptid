@@ -10,9 +10,10 @@ import { useLocationSharing } from '@/features/social/hooks/use-location-sharing
 import { useTheme } from '@/hooks/use-theme';
 
 import { AppProvenanceDetails } from '../components/app-provenance';
+import { AuthorIdRow } from '../components/author-id-row';
 import { DebugLocationControls } from '../components/debug-location-controls';
-import { LocationAccessRow } from '../components/location-access-row';
 import { EventLogPanel } from '../components/event-log-panel';
+import { LocationAccessRow } from '../components/location-access-row';
 import { RelayOnlyRow } from '../components/relay-only-row';
 import { TransportDiagnostic } from '../components/transport-diagnostic';
 
@@ -132,6 +133,7 @@ export default function SettingsScreen() {
         <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
           APP
         </ThemedText>
+        <AuthorIdRow authorId={snapshot?.self?.endpointId ?? null} />
         <AppProvenanceDetails />
       </View>
     </ScrollView>

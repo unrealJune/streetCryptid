@@ -70,6 +70,7 @@ export declare class IrohLocationNativeModule
   // in Expo Go / older binaries. Guard with `typeof … === 'function'`.
   decodeMvtBundle?(bundle: Uint8Array): Promise<Uint8Array>;
   decodeMvtTile?(bytes: Uint8Array, z: number, x: number, y: number): Promise<Uint8Array>;
+  h3CellsForPolygon?(coordinates: number[], resolution: number): Promise<string[]>;
 
   publishProfile(
     handle: string,

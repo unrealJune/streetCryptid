@@ -1,6 +1,7 @@
 import type { GeometrySource } from './geometry-source';
 import type { PackedGeometry } from './packed-geometry';
 import { tileKeyOf, type TileCoord, type TileKey } from './tile-math';
+import { addMapPerfMetric } from '../perf/map-perf';
 
 /**
  * LRU cache + in-flight de-duplication around any {@link GeometrySource}.
@@ -43,6 +44,7 @@ export class CachedGeometrySource implements GeometrySource {
 
     const hit = this.cache.get(key);
     if (hit) {
+      addMapPerfMetric('memoryCacheHits');
       // Map iteration order is insertion order; re-inserting marks it recently used.
       this.cache.delete(key);
       this.cache.set(key, hit);
@@ -50,7 +52,11 @@ export class CachedGeometrySource implements GeometrySource {
     }
 
     const pending = this.inFlight.get(key);
-    if (pending) return pending;
+    if (pending) {
+      addMapPerfMetric('memoryInFlightHits');
+      return pending;
+    }
+    addMapPerfMetric('memoryCacheMisses');
 
     // Deliberately not passing `signal` upstream: several viewports may await the
     // same tile, and a decoded tile is worth caching even if its requester left.

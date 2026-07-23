@@ -92,6 +92,8 @@ opentelemetry-otlp = { version = "0.31", default-features = false, features = [
 ], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 opentelemetry-appender-tracing = { version = "0.31", optional = true }
+h3o = { version = "0.10.0", features = ["geo"] }
+geo = { version = "0.33.1", default-features = false }
 
 # Android needs getrandom's std backend; harmless elsewhere.
 [target.'cfg(target_os = "android")'.dependencies]

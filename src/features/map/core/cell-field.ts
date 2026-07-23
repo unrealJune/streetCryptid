@@ -29,6 +29,12 @@ export interface RegionCellField {
   readonly cells: readonly FieldCell[];
 }
 
+export interface CellFieldTiming {
+  readonly enumerateMs: number;
+  readonly centersMs: number;
+  readonly annotateMs: number;
+}
+
 /** FNV-1a of the cell index string, folded to [0, 1) — per-cell reveal jitter. */
 export function cellHash(cell: CellIndex): number {
   let h = 0x811c9dc5;
@@ -50,7 +56,42 @@ export function buildCellField(
   res: number,
   index: ExplorationIndex
 ): RegionCellField {
+  return buildCellFieldWithTiming(grid, rect, res, index).field;
+}
+
+export function buildCellFieldWithTiming(
+  grid: H3Grid,
+  rect: WorldRect,
+  res: number,
+  index: ExplorationIndex
+): { readonly field: RegionCellField; readonly timing: CellFieldTiming } {
+  const enumerateStarted = now();
   const ids = grid.cellsInRect(rect, res);
+  const centersStarted = now();
+  return buildFromIds(grid, rect, res, index, ids, enumerateStarted, centersStarted);
+}
+
+export async function buildCellFieldWithTimingAsync(
+  grid: H3Grid,
+  rect: WorldRect,
+  res: number,
+  index: ExplorationIndex
+): Promise<{ readonly field: RegionCellField; readonly timing: CellFieldTiming }> {
+  const enumerateStarted = now();
+  const ids = await grid.cellsInRectAsync(rect, res);
+  const centersStarted = now();
+  return buildFromIds(grid, rect, res, index, ids, enumerateStarted, centersStarted);
+}
+
+function buildFromIds(
+  grid: H3Grid,
+  rect: WorldRect,
+  res: number,
+  index: ExplorationIndex,
+  ids: readonly CellIndex[],
+  enumerateStarted: number,
+  centersStarted: number
+): { readonly field: RegionCellField; readonly timing: CellFieldTiming } {
   const midX = (rect.minX + rect.maxX) / 2;
   const midY = (rect.minY + rect.maxY) / 2;
 
@@ -61,6 +102,7 @@ export function buildCellField(
     if (d > maxDist) maxDist = d;
     return d;
   });
+  const annotateStarted = now();
 
   const cells = ids.map((id, i): FieldCell => {
     const fraction = index.fractionAt(id);
@@ -79,5 +121,17 @@ export function buildCellField(
     };
   });
 
-  return { res, cells };
+  const finished = now();
+  return {
+    field: { res, cells },
+    timing: {
+      enumerateMs: centersStarted - enumerateStarted,
+      centersMs: annotateStarted - centersStarted,
+      annotateMs: finished - annotateStarted,
+    },
+  };
+}
+
+function now(): number {
+  return typeof performance !== 'undefined' ? performance.now() : Date.now();
 }

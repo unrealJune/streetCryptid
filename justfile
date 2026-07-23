@@ -82,6 +82,10 @@ format-check:
 test:
     bun run test
 
+# Profile the deterministic launch/zoom/pan region-build sequence (fixture by default).
+profile-map source="":
+    bun scripts/profile-scene.ts {{source}}
+
 # Run the full local gate: types, lint, formatting, and tests (JS/TS only).
 check: typecheck lint format-check test
 
@@ -105,6 +109,10 @@ deps-fix:
 # Test the Rust crate: crypto envelope + durable-trail (iroh-docs) logic. Portable; runs anywhere.
 test-rust:
     cd modules/iroh-location/rust && cargo test
+
+# Benchmark Rust protobuf parsing + SCG1 encoding with committed fixtures.
+profile-mvt:
+    cd modules/iroh-location/rust && cargo run --release --example profile_mvt -- 200 20
 
 # Compile the Rust crate against the pinned iroh/gossip/docs deps (no bindings generated).
 build-rust:
@@ -140,14 +148,14 @@ bindgen-android-arm64:
 # release-only behavior — production Hermes bytecode, minification, patched deps
 # (e.g. the pbf MVT/Hermes patch) — without an EAS cloud build.
 #
-# PREFER `eas build --local -p android --profile development` when you can: it runs
-# the real CI pipeline (eas-build-pre-install.sh regenerates UniFFI bindings AND
-# cargo-ndk-builds every-ABI .so, so the stale-.so startup abort below is impossible)
-# and signs with the EAS *remote* key, so `adb install -r` needs no uninstall. It is
-# NOT supported on native Windows — run it from WSL2/macOS/Linux — and needs a
-# profile whose environment sets EXPO_PUBLIC_TILE_URL (development/preview; the
-# production profile leaves some EXPO_PUBLIC_* unset). This recipe is the native-
-# Windows fast path when WSL2/cloud isn't handy.
+# PREFER `eas build --local -p android --profile production-internal-android`
+# when you can: it runs the real CI pipeline (eas-build-pre-install.sh regenerates
+# UniFFI bindings AND cargo-ndk-builds every-ABI .so, so the stale-.so startup abort
+# below is impossible), embeds the Hermes bundle, and signs with the EAS *remote*
+# key, so `adb install -r` needs no uninstall. It is NOT supported on native Windows
+# — run it from WSL2/macOS/Linux. Configure required EXPO_PUBLIC_* values in the EAS
+# production environment. This recipe is the native-Windows fast path when
+# WSL2/cloud isn't handy.
 #
 # Rebuilds the arm64 iroh-location .so FIRST so the packaged native library matches
 # the committed UniFFI bindings. A stale jniLibs .so aborts at startup with

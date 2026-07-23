@@ -18,6 +18,7 @@
 mod ble;
 mod crypto;
 mod docs;
+mod h3;
 /// Native MVT tile/bundle decoder for the map pipeline (pure; see `mvt.rs`).
 pub mod mvt;
 mod pairing;
@@ -182,6 +183,15 @@ pub fn decode_mvt_bundle(bundle: Vec<u8>) -> Result<Vec<u8>, LocationError> {
 #[uniffi::export]
 pub fn decode_mvt_tile(bytes: Vec<u8>, z: u32, x: u32, y: u32) -> Vec<u8> {
     mvt::decode_tile(&bytes, z, x, y)
+}
+
+/// Enumerate canonical H3 cells for a latitude/longitude polygon off the JS thread.
+#[uniffi::export]
+pub fn h3_cells_for_polygon(
+    coordinates: Vec<f64>,
+    resolution: u8,
+) -> Result<Vec<String>, LocationError> {
+    h3::cells_for_polygon(&coordinates, resolution).map_err(LocationError::Decode)
 }
 
 /// A verified cryptid **profile** as surfaced to the app (§3). Returned already signature- and

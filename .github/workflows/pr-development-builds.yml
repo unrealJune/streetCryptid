@@ -1,4 +1,4 @@
-name: PR development builds
+name: PR standalone Release builds
 
 on:
   pull_request:
@@ -21,14 +21,15 @@ env:
 
 jobs:
   build_ios:
-    name: Build and upload iOS
+    name: Build and upload iOS Release
     if: >-
       ${{
         github.event.pull_request.head.repo.full_name == github.repository &&
         (github.event.pull_request.user.login == 'Cobular' ||
+          github.event.pull_request.user.login == 'ava-ankenbrandt' ||
           github.event.pull_request.user.login == 'unrealJune')
       }}
-    runs-on: macos-26-intel
+    runs-on: macos-latest
     timeout-minutes: 90
     environment: development-builds
     permissions:
@@ -57,6 +58,8 @@ jobs:
             echo "BUILD_ARTIFACT=$RUNNER_TEMP/streetcryptid-pr-$PR_NUMBER.ipa"
             echo "EAS_LOCAL_BUILD_ARTIFACTS_DIR=$RUNNER_TEMP/eas-artifacts-ios"
             echo "EAS_LOCAL_BUILD_WORKINGDIR=$RUNNER_TEMP/eas-local-build-ios"
+            echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/modules/iroh-location/rust/target"
+            echo "RUSTUP_TOOLCHAIN=stable"
           } >> "$GITHUB_ENV"
 
       - name: Check out PR revision
@@ -75,11 +78,39 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      - name: Restore JavaScript package caches
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.bun/install/cache
+            ~/.npm/_cacache
+          key: eas-local-js-${{ runner.os }}-${{ runner.arch }}-${{ env.EAS_CLI_VERSION }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            eas-local-js-${{ runner.os }}-${{ runner.arch }}-${{ env.EAS_CLI_VERSION }}-
+
       - name: Install project dependencies
         run: bun install --frozen-lockfile
 
       - name: Select the SDK 57 Xcode toolchain
         run: sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: modules/iroh-location/rust -> target
+          key: eas-local-${{ hashFiles('scripts/eas-build-pre-install.sh', 'scripts/generate-uniffi-bindings.sh', 'modules/iroh-location/rust/src/**/*.rs', 'modules/iroh-location/rust/third_party/**/*.rs') }}
+          cache-workspace-crates: 'true'
+
+      - name: Restore CocoaPods download cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/CocoaPods
+          key: eas-local-cocoapods-${{ runner.os }}-${{ hashFiles('bun.lock', 'package.json', 'app.json', 'app.config.ts', 'modules/iroh-location/ios/IrohLocation.podspec') }}
+          restore-keys: |
+            eas-local-cocoapods-${{ runner.os }}-
 
       - name: Install EAS CLI
         run: bun add --global "eas-cli@$EAS_CLI_VERSION"
@@ -96,7 +127,7 @@ jobs:
           mkdir -p "$EAS_LOCAL_BUILD_ARTIFACTS_DIR" "$EAS_LOCAL_BUILD_WORKINGDIR"
           bash scripts/eas-local-build-ci.sh \
             ios \
-            production-development-ios \
+            production-internal-ios \
             "$BUILD_ARTIFACT"
 
       - name: Remove local build state
@@ -122,11 +153,12 @@ jobs:
           fi
 
   build_android:
-    name: Build and upload Android
+    name: Build and upload Android Release
     if: >-
       ${{
         github.event.pull_request.head.repo.full_name == github.repository &&
         (github.event.pull_request.user.login == 'Cobular' ||
+          github.event.pull_request.user.login == 'ava-ankenbrandt' ||
           github.event.pull_request.user.login == 'unrealJune')
       }}
     runs-on: ubuntu-24.04
@@ -157,6 +189,8 @@ jobs:
             echo "BUILD_ARTIFACT=$RUNNER_TEMP/streetcryptid-pr-$PR_NUMBER.apk"
             echo "EAS_LOCAL_BUILD_ARTIFACTS_DIR=$RUNNER_TEMP/eas-artifacts-android"
             echo "EAS_LOCAL_BUILD_WORKINGDIR=$RUNNER_TEMP/eas-local-build-android"
+            echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/modules/iroh-location/rust/target"
+            echo "RUSTUP_TOOLCHAIN=stable"
           } >> "$GITHUB_ENV"
 
       - name: Check out PR revision
@@ -175,6 +209,16 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      - name: Restore JavaScript package caches
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.bun/install/cache
+            ~/.npm/_cacache
+          key: eas-local-js-${{ runner.os }}-${{ runner.arch }}-${{ env.EAS_CLI_VERSION }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            eas-local-js-${{ runner.os }}-${{ runner.arch }}-${{ env.EAS_CLI_VERSION }}-
+
       - name: Install project dependencies
         run: bun install --frozen-lockfile
 
@@ -188,6 +232,28 @@ jobs:
             echo "ANDROID_NDK_HOME=$ndk_home"
             echo "ANDROID_NDK_ROOT=$ndk_home"
           } >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: modules/iroh-location/rust -> target
+          key: eas-local-${{ hashFiles('scripts/eas-build-pre-install.sh', 'scripts/generate-uniffi-bindings.sh', 'modules/iroh-location/rust/src/**/*.rs', 'modules/iroh-location/rust/third_party/**/*.rs') }}
+          cache-workspace-crates: 'true'
+
+      - name: Restore Gradle dependency cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/caches/jars-*
+            ~/.gradle/caches/transforms-*
+            ~/.gradle/wrapper
+          key: eas-local-gradle-${{ runner.os }}-${{ hashFiles('bun.lock', 'package.json', 'app.json', 'app.config.ts', 'modules/iroh-location/android/build.gradle') }}
+          restore-keys: |
+            eas-local-gradle-${{ runner.os }}-
 
       - name: Install EAS CLI
         run: bun add --global "eas-cli@$EAS_CLI_VERSION"
@@ -204,7 +270,7 @@ jobs:
           mkdir -p "$EAS_LOCAL_BUILD_ARTIFACTS_DIR" "$EAS_LOCAL_BUILD_WORKINGDIR"
           bash scripts/eas-local-build-ci.sh \
             android \
-            production-development-android \
+            production-internal-android \
             "$BUILD_ARTIFACT"
 
       - name: Remove local build state
@@ -236,6 +302,7 @@ jobs:
         always() &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         (github.event.pull_request.user.login == 'Cobular' ||
+          github.event.pull_request.user.login == 'ava-ankenbrandt' ||
           github.event.pull_request.user.login == 'unrealJune')
       }}
     needs:
@@ -270,7 +337,7 @@ jobs:
           }
 
           body="$(
-            printf '🏗️ **PR development builds**\n\n'
+            printf '🏗️ **PR standalone Release builds**\n\n'
             platform_line "iOS" "$IOS_RESULT" "$IOS_URL"
             platform_line "Android" "$ANDROID_RESULT" "$ANDROID_URL"
             printf '\nBuilt on ephemeral GitHub-hosted runners; EAS only hosts the finished app archives.'

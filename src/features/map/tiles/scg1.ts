@@ -12,12 +12,14 @@
 
 import type { Place } from '../core/types';
 import type { PackedAreas, PackedLines, PackedStreets, PackedTile } from './packed-geometry';
+import { addMapPerfMetric, type MapPerfMetricScope } from '../perf/map-perf';
 
 const SCG1_MAGIC = 0x31474353; // "SCG1" little-endian
 
-export function wrapScg1(input: Uint8Array): PackedTile {
+export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null): PackedTile {
   // Typed-array views require a 4-byte-aligned byteOffset; the native module's
   // Uint8Array may not be aligned, so copy into a fresh (aligned) buffer if not.
+  if (input.byteOffset % 4 !== 0) addMapPerfMetric('unalignedScg1Copies', 1, metrics);
   const buf = input.byteOffset % 4 === 0 ? input : input.slice();
   const { buffer, byteOffset: base } = buf;
   const dv = new DataView(buffer, base, buf.byteLength);

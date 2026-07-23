@@ -49,6 +49,23 @@ describe('sampleTrailForMap', () => {
     expect(sampled.at(-1)).toBe(trail.at(-1));
   });
 
+  it('keeps historical samples stable as new fixes append', () => {
+    let trail = Array.from({ length: 200 }, (_, index) => point('a', index + 1));
+    let sampled = sampleTrailForMap(trail, 32);
+
+    for (let sequence = 201; sequence <= 260; sequence++) {
+      trail = [...trail, point('a', sequence)];
+      const next = sampleTrailForMap(trail, 32);
+      const nextSequences = new Set(next.map(({ seq }) => seq));
+      const removedInterior = sampled.slice(1, -1).filter(({ seq }) => !nextSequences.has(seq));
+
+      expect(removedInterior.length).toBeLessThanOrEqual(1);
+      expect(next[0]).toBe(trail[0]);
+      expect(next.at(-1)).toBe(trail.at(-1));
+      sampled = next;
+    }
+  });
+
   it('rejects an unusable map-point limit', () => {
     expect(() => sampleTrailForMap([point('a', 1)], 1)).toThrow(
       'sampleTrailForMap requires at least two points.'
