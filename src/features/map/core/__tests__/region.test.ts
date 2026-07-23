@@ -16,7 +16,7 @@ import {
   shouldPrefetchRegion,
 } from '../region';
 import { ramp } from '../color';
-import { resForZoom } from '../cell-ladder';
+import { H3_DISPLAY_RES, H3_MIN_RENDER_ZOOM, resForZoom } from '../cell-ladder';
 import type { CameraState, Viewport } from '../types';
 
 const viewport: Viewport = { width: 390, height: 780 };
@@ -205,10 +205,10 @@ describe('buildPaletteLut', () => {
   });
 });
 
-describe('data zooms + cell ladder in region specs', () => {
+describe('data zooms + fixed exploration resolution in region specs', () => {
   const planet = { min: 0, max: 14 };
 
-  it('stamps cellRes from the ladder and tileZoom from the range clamp', () => {
+  it('stamps the fixed cell resolution and tile zoom', () => {
     const spec = computeRegionSpec(camera, viewport, { dataZooms: planet });
     expect(spec.cellRes).toBe(resForZoom(camera.zoom));
     expect(spec.tileZoom).toBe(13); // z15 camera → z14 display − bias
@@ -216,21 +216,30 @@ describe('data zooms + cell ladder in region specs', () => {
     const globe = computeRegionSpec({ center: [0.6, 0.6], zoom: 3 }, viewport, {
       dataZooms: planet,
     });
-    expect(globe.cellRes).toBe(resForZoom(3));
+    expect(globe.cellRes).toBeNull();
     expect(globe.tileZoom).toBe(2); // z3 → floor 3 − bias
   });
 
-  it('needsNewRegion fires on a ladder-rung change even within the zoom band', () => {
-    // z12.6 → res 9; z12.4 → res 8. The 0.2 zoom delta is inside the 0.75
-    // mask band, so only the cellRes clause can trigger the rebuild.
-    const spec = computeRegionSpec({ ...camera, zoom: 12.6 }, viewport, { dataZooms });
-    expect(needsNewRegion(spec, { ...camera, zoom: 12.4 }, viewport, dataZooms)).toBe(true);
-    expect(needsNewRegion(spec, { ...camera, zoom: 12.55 }, viewport, dataZooms)).toBe(false);
+  it('needsNewRegion fires when exploration crosses its render threshold', () => {
+    const spec = computeRegionSpec(
+      { ...camera, zoom: H3_MIN_RENDER_ZOOM + 0.1 },
+      viewport,
+      { dataZooms }
+    );
+    expect(spec.cellRes).toBe(H3_DISPLAY_RES);
+    expect(
+      needsNewRegion(
+        spec,
+        { ...camera, zoom: H3_MIN_RENDER_ZOOM - 0.1 },
+        viewport,
+        dataZooms
+      )
+    ).toBe(true);
   });
 
   it('needsNewRegion fires when the data zoom steps within the planet range', () => {
-    // z8.9 → data z7, z9.2 → data z8, same ladder rung (res 6), zoom delta
-    // 0.3 < 0.75 — only the tileZoom clause can trigger this rebuild.
+    // z8.9 → data z7, z9.2 → data z8; exploration is disabled at both zooms.
+    // The 0.3 delta is < 0.75, so only tileZoom can trigger this rebuild.
     const spec = computeRegionSpec({ ...camera, zoom: 8.9 }, viewport, { dataZooms: planet });
     expect(needsNewRegion(spec, { ...camera, zoom: 9.2 }, viewport, planet)).toBe(true);
   });

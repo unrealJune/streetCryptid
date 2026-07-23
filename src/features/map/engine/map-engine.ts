@@ -3,6 +3,7 @@ import {
   type CellFieldTiming,
   type RegionCellField,
 } from '../core/cell-field';
+import { H3_DISPLAY_RES } from '../core/cell-ladder';
 import type { ExplorationIndex } from '../core/exploration-index';
 import type { H3Grid } from '../core/h3-grid';
 import { computeRegionSpec, shouldPrefetchRegion, type RegionSpec } from '../core/region';
@@ -37,7 +38,7 @@ export interface MapRegion {
    * region carries geometry rather than a packed pixel buffer.
    */
   readonly geometry: PackedGeometry;
-  /** Exploration cells at the region's ladder rung, annotated for rendering. */
+  /** Fixed-resolution exploration cells, empty below their render threshold. */
   readonly cellField: RegionCellField;
   /** Named places inside the region (island headline lookup). */
   readonly places: readonly Place[];
@@ -304,17 +305,24 @@ export class MapEngine {
       this.cellFieldCache.delete(cellKey);
       this.cellFieldCache.set(cellKey, cellField);
     } else {
-      let built;
-      try {
-        built = await buildCellFieldWithTimingAsync(
-          this.grid,
-          spec.rect,
-          spec.cellRes,
-          request.exploration
-        );
-      } catch (error) {
-        if (this.last) return this.last;
-        throw error;
+      let built: Awaited<ReturnType<typeof buildCellFieldWithTimingAsync>>;
+      if (spec.cellRes === null) {
+        built = {
+          field: { res: H3_DISPLAY_RES, cells: [] },
+          timing: { enumerateMs: 0, centersMs: 0, annotateMs: 0 },
+        };
+      } else {
+        try {
+          built = await buildCellFieldWithTimingAsync(
+            this.grid,
+            spec.rect,
+            spec.cellRes,
+            request.exploration
+          );
+        } catch (error) {
+          if (this.last) return this.last;
+          throw error;
+        }
       }
       cellField = built.field;
       cellTiming = built.timing;

@@ -14,9 +14,9 @@ export interface FieldCell {
   /** Cell outline, lng-unwrapped world coords (from {@link H3Grid.boundaryWorld}). */
   readonly boundary: readonly WorldPoint[];
   readonly center: WorldPoint;
-  /** Explored fraction 0–1 (0|1 at res 10, child ratio at coarser rungs). */
+  /** Explored fraction 0 or 1 at the fixed display resolution. */
   readonly fraction: number;
-  /** Discovered cell bordering undiscovered ground — amber rim. Res 10 only. */
+  /** Discovered cell bordering undiscovered ground — amber rim. */
   readonly frontier: boolean;
   /** Stable per-cell hash 0–1, drives the reveal wipe's per-cell stagger. */
   readonly jitter: number;
@@ -46,9 +46,7 @@ export function cellHash(cell: CellIndex): number {
 }
 
 /**
- * Enumerate and annotate the exploration cells of one region. The frontier
- * scan only runs at the display res: coarser rungs shade by fraction and the
- * rim concept doesn't aggregate.
+ * Enumerate and annotate the exploration cells of one region.
  */
 export function buildCellField(
   grid: H3Grid,
@@ -109,7 +107,7 @@ function buildFromIds(
     const frontier =
       res === H3_DISPLAY_RES &&
       fraction >= 1 &&
-      grid.neighborsOf(id).some((n) => !index.res10.has(n));
+      grid.neighborsOf(id).some((n) => !index.cells.has(n));
     return {
       cell: id,
       boundary: grid.boundaryWorld(id),

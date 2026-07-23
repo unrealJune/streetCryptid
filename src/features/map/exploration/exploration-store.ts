@@ -6,7 +6,7 @@ import type { CellIndex, H3Grid } from '../core/h3-grid';
 import { latLonToWorld } from '../core/mercator';
 
 /**
- * Durable record of which res-10 H3 cells the user has explored — the map's
+ * Durable record of which res-9 H3 cells the user has explored — the map's
  * own database, deliberately separate from the disposable tile cache
  * (exploration is user data and is never evicted) and from the social DB
  * (it never syncs; cells never leave the device).
@@ -24,7 +24,7 @@ import { latLonToWorld } from '../core/mercator';
 
 const DB_NAME = 'streetcryptid.exploration.db';
 
-/** Fixes coarser than this can't place the user in a ~131 m cell — ignored. */
+/** Fixes coarser than this cannot reliably place the user in an occupancy cell. */
 export const EXPLORATION_ACCURACY_MAX_M = 100;
 
 const BACKFILL_CURSOR_KEY = 'backfill.cursor';
@@ -83,7 +83,17 @@ class DbExplorationStore implements ExplorationStore {
     if (!this.knownPromise) {
       this.knownPromise = this.db()
         .then((db) => db.allCells())
-        .then((cells) => new Set(cells));
+        .then((cells) => {
+          const normalized = new Set<CellIndex>();
+          for (const cell of cells) {
+            const resolution = this.grid.resolutionOf(cell);
+            if (resolution === H3_DISPLAY_RES) normalized.add(cell);
+            else if (resolution > H3_DISPLAY_RES) {
+              normalized.add(this.grid.parentOf(cell, H3_DISPLAY_RES));
+            }
+          }
+          return normalized;
+        });
     }
     return this.knownPromise;
   }

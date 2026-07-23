@@ -1,70 +1,38 @@
-import { H3_DISPLAY_RES } from './cell-ladder';
 import type { CellIndex, H3Grid } from './h3-grid';
 import type { WorldPoint } from './types';
 
 /**
- * Which res-10 cells have been acquired. A plain set of H3 indexes — trivially
+ * Which res-9 cells have been acquired. A plain set of H3 indexes — trivially
  * serializable, and exactly what the GPS trail bridge appends to.
  */
 export type ExplorationState = ReadonlySet<CellIndex>;
 
 /**
- * Exploration truth plus lazily memoized parent roll-ups: `fractionAt` answers
- * "how explored is this cell" for the display res AND every coarser ladder
- * rung. The first query at a res does one pass over the res-10 set (once per
- * session); `add` then maintains every materialized rung incrementally, so
- * live GPS updates never trigger a rescan.
+ * Exploration truth at the one resolution used for both occupancy and display.
  */
 export interface ExplorationIndex {
-  readonly res10: ExplorationState;
-  /** Explored fraction 0–1: membership at res 10, child-count ratio above. */
+  readonly cells: ExplorationState;
+  /** Explored fraction 0 or 1 at the fixed display resolution. */
   fractionAt(cell: CellIndex): number;
-  /** Record a res-10 cell; `false` if already present. Updates roll-ups. */
+  /** Record a display-resolution cell; `false` if already present. */
   add(cell: CellIndex): boolean;
 }
 
-export function createExplorationIndex(grid: H3Grid, cells: Iterable<CellIndex>): ExplorationIndex {
-  const res10 = new Set(cells);
-  const rollups = new Map<number, Map<CellIndex, number>>();
-
-  function rollupFor(res: number): Map<CellIndex, number> {
-    let counts = rollups.get(res);
-    if (!counts) {
-      counts = new Map();
-      for (const cell of res10) {
-        const parent = grid.parentOf(cell, res);
-        counts.set(parent, (counts.get(parent) ?? 0) + 1);
-      }
-      rollups.set(res, counts);
-    }
-    return counts;
-  }
-
+export function createExplorationIndex(_grid: H3Grid, cells: Iterable<CellIndex>): ExplorationIndex {
+  const explored = new Set(cells);
   return {
-    res10,
-    fractionAt(cell) {
-      const res = grid.resolutionOf(cell);
-      if (res === H3_DISPLAY_RES) return res10.has(cell) ? 1 : 0;
-      const count = rollupFor(res).get(cell) ?? 0;
-      if (count === 0) return 0;
-      // childrenSize is exact per lineage (pentagons have 6-child generations),
-      // so the ratio is a true fraction; min() only guards float/fake-core slack.
-      return Math.min(1, count / grid.childrenSize(cell, H3_DISPLAY_RES));
-    },
+    cells: explored,
+    fractionAt: (cell) => (explored.has(cell) ? 1 : 0),
     add(cell) {
-      if (res10.has(cell)) return false;
-      res10.add(cell);
-      for (const [res, counts] of rollups) {
-        const parent = grid.parentOf(cell, res);
-        counts.set(parent, (counts.get(parent) ?? 0) + 1);
-      }
+      if (explored.has(cell)) return false;
+      explored.add(cell);
       return true;
     },
   };
 }
 
 /**
- * Of `cells` (res 10), the discovered ones bordering at least one undiscovered
+ * Of `cells` (res 9), the discovered ones bordering at least one undiscovered
  * neighbor — the cells that get the amber frontier rim.
  */
 export function frontierOf(

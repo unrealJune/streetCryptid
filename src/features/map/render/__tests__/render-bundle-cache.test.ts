@@ -40,7 +40,7 @@ const region: MapRegion = {
     maskHeight: 200,
     zoom: 15,
     tileZoom: 14,
-    cellRes: 10,
+    cellRes: 9,
   },
   geometry: EMPTY_PACKED,
   cellField: field,

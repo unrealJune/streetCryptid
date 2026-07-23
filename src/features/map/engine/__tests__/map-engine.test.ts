@@ -97,11 +97,24 @@ describe('MapEngine.buildRegion', () => {
     expect(source.requests.sort()).toEqual(expected.sort());
   });
 
-  it('builds the cell field at the spec ladder rung and passes places through', async () => {
+  it('builds the fixed-resolution cell field and passes places through', async () => {
     const source = new FakeSource();
     source.geometryFor = () => ({
       ...EMPTY_GEOMETRY,
       places: [{ name: 'Regionville', world: camera.center, kind: 'suburb' }],
+    });
+
+    it('skips cell enumeration below the exploration render threshold', async () => {
+      const source = new FakeSource();
+      const engine = makeEngine(source);
+      const region = await engine.buildRegion({
+        ...baseRequest,
+        camera: { ...camera, zoom: 4 },
+      });
+
+      expect(region?.spec.cellRes).toBeNull();
+      expect(region?.cellField.cells).toEqual([]);
+      expect(region?.timing.cellEnumerateMs).toBe(0);
     });
     const engine = makeEngine(source);
 

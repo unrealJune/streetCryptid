@@ -36,10 +36,10 @@ const region: MapRegion = {
     maskHeight: 768,
     zoom: 15,
     tileZoom: 13,
-    cellRes: 10,
+    cellRes: 9,
   },
   geometry: EMPTY_PACKED,
-  cellField: { res: 10, cells: [] },
+  cellField: { res: 9, cells: [] },
   places: [],
   explorationVersion: 0,
   timing: {
