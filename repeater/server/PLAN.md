@@ -213,7 +213,9 @@ MLS delivery-service seam stubbed.
   and relay transport; **no** GPS, **no** gossip publish.  *(pure core: DONE &
   tested; live `node.rs`: written, unverified pending iroh build.)*
 - Control API (`POST /v1/namespaces`, `DELETE …/subscription`, `/healthz`) →
-  `docs.import(ticket)` + in-memory subscription registry.
+  passive `docs.import_namespace(ticket.capability)` + `start_sync([])` + in-memory subscription
+  registry. Registration never dials ticket bootstrap nodes: the phone already has the stash
+  endpoint and drives reconciliation, avoiding registration-time `AlreadySyncing` collisions.
 - Prune loop on `TRAIL_STASH_RETENTION_HOURS` / `TRAIL_STASH_PRUNE_INTERVAL_MIN`.
   Note: because entries are authored by the phones, cross-author eviction from an
   in-memory replica is best-effort; the hard memory bound is the retention window

@@ -50,8 +50,9 @@ Opt-in and wake registration. Presenting a read-ticket **is** the grant. When
 - Body: `{ "read_ticket": "<iroh-docs read ticket>", "push_token"?: "<token>", "platform"?: "apns"|"fcm" }`
   - `push_token` and `platform` must be supplied together, or both omitted.
   - Unknown JSON fields are rejected.
-- **201 Created** on success (imports the namespace, records the opt-in + optional
-  wake subscription; idempotent per namespace).
+- **201 Created** on success (imports the namespace capability, records the opt-in + optional
+  wake subscription; idempotent per namespace). Registration joins the namespace without dialing
+  the ticket's bootstrap nodes; the phone drives reconciliation against the stash endpoint.
 - **400 Bad Request** for a malformed ticket, partial push fields, bad platform,
   or an over-long/empty token.
 - **502 Bad Gateway** if importing the ticket fails transiently.

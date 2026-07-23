@@ -131,12 +131,23 @@ impl StashNode {
         EndpointTicket::new(self.endpoint.addr()).to_string()
     }
 
-    /// Handle a validated `POST /v1/namespaces`: import the read-ticket (idempotent), record the
-    /// opt-in grant + optional wake subscription, and start watching the namespace once.
+    /// Handle a validated `POST /v1/namespaces`: import the read capability (idempotent), record
+    /// the opt-in grant + optional wake subscription, and start watching the namespace once.
+    ///
+    /// Registration deliberately does **not** dial the bootstrap nodes embedded in the ticket.
+    /// The registering phone already has the stash endpoint and drives the initial reconciliation;
+    /// dialing the writer here races that phone, produces `AlreadySyncing`, and can wedge
+    /// iroh-docs 0.101 callers in a permanently-running state. We still call `start_sync([])` once
+    /// so the stash joins the namespace gossip swarm and can receive later live inserts.
     #[tracing::instrument(
         name = "stash.namespace.import",
         skip_all,
-        fields(sc.namespace = tracing::field::Empty, first_watch = tracing::field::Empty)
+        fields(
+            sc.namespace = tracing::field::Empty,
+            first_watch = tracing::field::Empty,
+            ticket_bootstrap_nodes = tracing::field::Empty,
+            registration_dialed_peer = false,
+        )
     )]
     pub async fn register(
         self: &Arc<Self>,
@@ -146,22 +157,35 @@ impl StashNode {
         let ticket: DocTicket = read_ticket
             .parse()
             .map_err(|e| anyhow!("parse doc ticket: {e}"))?;
-        let doc = self
-            .docs
-            .import(ticket)
-            .await
-            .map_err(|e| anyhow!("import ticket: {e}"))?;
-        let ns_bytes = doc.id().to_bytes();
+        let ns_bytes = ticket.capability.id().to_bytes();
         tracing::Span::current().record(
             "sc.namespace",
             tracing::field::display(crate::telemetry::short_hex(&ns_bytes)),
         );
+        tracing::Span::current().record("ticket_bootstrap_nodes", ticket.nodes.len());
 
-        self.handles
-            .lock()
-            .await
-            .entry(ns_bytes)
-            .or_insert_with(|| doc.clone());
+        // Hold the map lock through the first import so two simultaneous registrations cannot both
+        // create watchers/start the same namespace. Registrations are rare control-plane calls;
+        // serializing this small critical section is preferable to duplicate live engines.
+        let doc = {
+            let mut handles = self.handles.lock().await;
+            if let Some(doc) = handles.get(&ns_bytes) {
+                doc.clone()
+            } else {
+                let doc = self
+                    .docs
+                    .import_namespace(ticket.capability)
+                    .await
+                    .map_err(|e| anyhow!("import namespace capability: {e}"))?;
+                // Enable gossip/listening without using the ticket's author addresses as outbound
+                // sync targets. The phone's explicit stash sync supplies the first connection.
+                doc.start_sync(Vec::new())
+                    .await
+                    .map_err(|e| anyhow!("join namespace without bootstrap peers: {e}"))?;
+                handles.insert(ns_bytes, doc.clone());
+                doc
+            }
+        };
 
         let first = self.registry.register(ns_bytes, subscription);
         tracing::Span::current().record("first_watch", first);
@@ -472,7 +496,14 @@ mod live_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use iroh::protocol::{AcceptError as ProtocolAcceptError, ProtocolHandler};
     use iroh_docs::api::protocol::{AddrInfoOptions, ShareMode};
+    use iroh_docs::{
+        actor::{OpenOpts, SyncHandle},
+        net::{connect_and_sync, AbortReason, ConnectError},
+        store::Store as DocsStore,
+    };
+    use tokio::sync::Notify;
 
     use crate::subscriptions::Platform;
 
@@ -484,6 +515,27 @@ mod live_tests {
     impl crate::waker::Waker for CountWaker {
         fn wake(&self, _ns: &NsBytes, targets: &[PushSubscription]) {
             self.count.fetch_add(targets.len().max(1), Ordering::SeqCst);
+        }
+    }
+
+    /// A docs-ALPN peer that accepts the QUIC connection but never answers the reconciliation
+    /// protocol until released. Pointing a ticket at it makes an unwanted registration-time
+    /// `start_sync` deterministic instead of racing a fast real writer. The same endpoint later
+    /// initiates a reader sync back to the stash, reproducing the exact same-peer collision.
+    #[derive(Debug)]
+    struct StalledDocsPeer {
+        entered: Notify,
+        release: Notify,
+    }
+
+    impl ProtocolHandler for StalledDocsPeer {
+        async fn accept(
+            &self,
+            _connection: iroh::endpoint::Connection,
+        ) -> Result<(), ProtocolAcceptError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(())
         }
     }
 
@@ -558,6 +610,87 @@ mod live_tests {
         assert!(
             observed,
             "stash did not reconcile the writer's entry within 30s"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn registration_does_not_make_a_reader_hit_already_syncing() -> anyhow::Result<()> {
+        let (writer_ticket, _writer_ep, _writer_router) = spawn_writer().await?;
+        let mut ticket: DocTicket = writer_ticket.parse()?;
+
+        let stash = StashNode::spawn(
+            SecretKey::from_bytes(&[7u8; 32]),
+            RetentionPolicy::from_hours(48),
+            &[],
+            None,
+            default_delivery(),
+            Arc::new(NoopWaker),
+        )
+        .await?;
+
+        // Choose a peer id that makes the live engine's deterministic collision rule retain the
+        // stash's outgoing direction, so this same peer is rejected with `AlreadySyncing` on old
+        // code when it dials back.
+        let stash_id = stash.endpoint.id();
+        let reader_secret = (12u8..=u8::MAX)
+            .map(|byte| SecretKey::from_bytes(&[byte; 32]))
+            .find(|secret| secret.public().as_bytes() > stash_id.as_bytes())
+            .expect("find a reader endpoint ordered after the stash");
+        let stalled = Arc::new(StalledDocsPeer {
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let stalled_endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(reader_secret)
+            .bind()
+            .await?;
+        let _stalled_router = Router::builder(stalled_endpoint.clone())
+            .accept(iroh_docs::ALPN, stalled.clone())
+            .spawn();
+        ticket.nodes = vec![stalled_endpoint.addr()];
+
+        stash.register(&ticket.to_string(), None).await?;
+
+        // Old behavior: registration calls `Docs::import`, which starts an outbound sync to the
+        // ticket's writer. Wait briefly so that unwanted connection is definitely occupying this
+        // namespace before the reader arrives. Fixed behavior never dials it.
+        let registration_dialed_writer =
+            tokio::time::timeout(Duration::from_secs(2), stalled.entered.notified())
+                .await
+                .is_ok();
+
+        let sync = SyncHandle::spawn(DocsStore::memory(), None, "regression-reader".into());
+        let namespace = sync.import_namespace(ticket.capability.clone()).await?;
+        sync.open(namespace, OpenOpts::default().sync()).await?;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_and_sync(
+                &stalled_endpoint,
+                &sync,
+                namespace,
+                stash.endpoint.addr(),
+                None,
+            ),
+        )
+        .await
+        .map_err(|_| anyhow!("reader sync timed out"))?;
+        stalled.release.notify_one();
+        let _ = sync.shutdown().await;
+
+        if matches!(
+            result,
+            Err(ConnectError::RemoteAbort(AbortReason::AlreadySyncing))
+        ) {
+            return Err(anyhow!(
+                "registration occupied the namespace and made the stash reject its reader with AlreadySyncing"
+            ));
+        }
+        result?;
+        assert!(
+            !registration_dialed_writer,
+            "registration must import the capability without dialing ticket bootstrap nodes"
         );
         Ok(())
     }
