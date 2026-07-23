@@ -69,6 +69,7 @@ import {
 import { useMapPerfRunner } from '../perf/use-map-perf-runner';
 import { FriendLocator } from './friend-locator';
 import { FriendLocatorStack } from './friend-locator-stack';
+import { RegionRenderCache } from './render-bundle-cache';
 import {
   makeCellStateImage,
   makeLutImage,
@@ -115,6 +116,16 @@ interface ScreenRect {
   width: number;
   height: number;
 }
+
+interface RegionBundle {
+  region: MapRegion;
+  image: ReturnType<typeof renderRegionImage>;
+  /** The baked cell-state texture — reused by the loading reveal's alpha wipe. */
+  cellImage: ReturnType<typeof makeCellStateImage>;
+  timing: RegionRenderTiming;
+}
+
+const REGION_RENDER_CACHE_CAPACITY = 3;
 
 export interface MapFriendLocation {
   id: string;
@@ -232,20 +243,38 @@ export function MapView({
   const trailDotRadius = useDerivedValue(() => 2.8 / Math.max(0.001, k.value));
 
   const lutImage = useMemo(() => makeLutImage(theme.canvas), [theme]);
+  const regionRenderCache = useMemo(
+    () =>
+      new RegionRenderCache<{
+        image: RegionBundle['image'];
+        cellImage: RegionBundle['cellImage'];
+      }>(REGION_RENDER_CACHE_CAPACITY),
+    []
+  );
 
   // Build a region's mask + cell textures AND its bitmap together, once. On the
   // next swap the whole bundle slides into the outgoing (`prev`) slot instead of
   // being rebuilt — so each region is rasterized a single time, not twice per
   // swap (the outgoing rebuild was ~180ms of pure waste per region change).
-  type RegionBundle = {
-    region: MapRegion;
-    image: ReturnType<typeof renderRegionImage>;
-    /** The baked cell-state texture — reused by the loading reveal's alpha wipe. */
-    cellImage: ReturnType<typeof makeCellStateImage>;
-    timing: RegionRenderTiming;
-  };
   const curBundle = useMemo<RegionBundle | null>(() => {
     if (!region) return null;
+    const cached = regionRenderCache.get(region, lutImage, explorationEnabled);
+    if (cached) {
+      const timing: RegionRenderTiming = {
+        cacheHit: true,
+        maskMs: 0,
+        cellTextureMs: 0,
+        rasterMs: 0,
+        totalMs: 0,
+      };
+      emitMapPerfEvent('region-render', {
+        ...timing,
+        cells: region.cellField.cells.length,
+        maskWidth: region.spec.maskWidth,
+        maskHeight: region.spec.maskHeight,
+      });
+      return { region, image: cached.image, cellImage: cached.cellImage, timing };
+    }
     const measure = isMapPerfRunEnabled();
     const started = measure ? perfNow() : 0;
     const maskStarted = measure ? perfNow() : 0;
@@ -268,6 +297,7 @@ export function MapView({
         : null;
     const rasterMs = measure ? perfNow() - rasterStarted : 0;
     const timing = {
+      cacheHit: false,
       maskMs,
       cellTextureMs,
       rasterMs,
@@ -279,8 +309,12 @@ export function MapView({
       maskWidth: region.spec.maskWidth,
       maskHeight: region.spec.maskHeight,
     });
-    return { region, image, cellImage, timing };
-  }, [region, theme, lutImage, explorationEnabled]);
+    const bundle = { region, image, cellImage, timing };
+    if (image && cellImage && lutImage) {
+      regionRenderCache.set(region, lutImage, explorationEnabled, { image, cellImage });
+    }
+    return bundle;
+  }, [region, theme, lutImage, explorationEnabled, regionRenderCache]);
 
   const animateProfileCamera = useCallback(
     (

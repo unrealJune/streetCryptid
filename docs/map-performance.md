@@ -2,11 +2,11 @@
 
 ## Headline
 
-Five accepted passes keep the UI-thread bitmap transform at 60 fps, cut measured zoom latency
-by up to 89%, and bring both pans to about 3.27 seconds including their requested 3-second
-motion. Warm launch is 1.03 seconds and cached region settles are now 247-266 ms. The dominant
-remaining synchronous cost is the 165-266 ms Skia bitmap build plus first-visit H3 annotation;
-polygon enumeration no longer blocks Hermes.
+Eight accepted passes keep the UI-thread bitmap transform at 60 fps, cut measured zoom latency
+by up to 90%, and bring both pans to about 3.27 seconds including their requested 3-second
+motion. Warm launch is 1.03 seconds, an exact zoom revisit is 0.77 seconds, and cached region
+settles are now 201-266 ms. The dominant remaining synchronous cost is the 165-266 ms Skia
+bitmap build plus first-visit H3 annotation; polygon enumeration no longer blocks Hermes.
 
 | Accepted point                        |  Launch | Zoom out, new | Zoom in | Zoom out, cached | Pan, new | Pan, cached |
 | ------------------------------------- | ------: | ------------: | ------: | ---------------: | -------: | ----------: |
@@ -16,6 +16,7 @@ polygon enumeration no longer blocks Hermes.
 | UI-to-JS prefetch backpressure        |       - |             - |       - |                - |  4.431 s |     4.225 s |
 | Exact cell-field LRU                  |       - |             - | 0.931 s |                - |        - |           - |
 | Native H3 enumeration                 | 1.031 s |       1.998 s | 0.919 s |          0.882 s |  3.266 s |     3.262 s |
+| Rendered-bundle LRU                   |       - |             - | 0.766 s |                - |        - |           - |
 
 Target: a 60 fps UI and responsive JS thread throughout every operation, with cached settles
 below 300 ms and cold network/decode hidden behind retained coverage plus the hex loading
@@ -283,6 +284,17 @@ removed exactly 15 historical interior points per append. The new sampler remove
 average and never more than one. Existing fixed-anchor interaction tests still report zero
 content motion when regions land.
 
+## Pass 8: bounded rendered-bundle reuse
+
+Run ID: `ios-render-cache-1`.
+
+`MapView` now retains three rendered bundles and reuses one only when region bounds, build zoom,
+mask dimensions, immutable packed tile parts, cell-field object, palette texture, and
+exploration mode all match exactly. Exact zoom-in revisit fell from 919 ms to 766 ms (-16.6%).
+Its post-motion settle fell from 366 ms to 201 ms (-45.1%), render work fell to zero, and the
+worst JS frame fell from 347 ms to 172 ms. Non-identical zoom and pan regions correctly missed
+the cache and stayed within noise. Capacity is fixed at three GPU bundles.
+
 ## Experiment journal
 
 | Branch / attempt                                        | Hypothesis                                                                        | Result                                                                                                                                                                                | Decision                                                                                                                                                     |
@@ -300,8 +312,9 @@ content motion when regions land.
 | `copilot/map-perf-native-h3`                            | Run exact center-containment H3 enumeration in Rust off Hermes.                   | Enumeration fell to 4-9 ms, cached settles reached 247-266 ms, and native/JS launch coverage matched at 2,651 cells.                                                                  | Accepted.                                                                                                                                                    |
 | `copilot/map-perf-sqlite-transaction`                   | Persist each SCB1 descendant set in one exclusive transaction.                    | Launch writes fell 35-52%; a contention outlier did not reproduce, while request and durability semantics stayed unchanged.                                                           | Accepted as a modest cold-cache win.                                                                                                                         |
 | `copilot/map-perf-stable-overlays`                      | Make trail sampling and map component identity stable across appends/first GPS.   | Historical replacements fell from 15 per append to 0.13 average (max 1); first GPS no longer remounts the map.                                                                        | Accepted; fixes the reported trail/location jump.                                                                                                            |
+| `copilot/map-perf-render-bundle-cache`                  | Reuse exact immutable GPU region bundles in a three-entry LRU.                    | Exact zoom settle fell 45.1%, with zero reraster work and no effect on non-identical regions.                                                                                         | Accepted.                                                                                                                                                    |
 
 ## Next measured hypotheses
 
-1. Remove SVG string construction/parsing from lattice, rim, and feature masks now that Skia is
-   above the post-H3 budget.
+1. Retain batched SVG masks; investigate platform-native GPU profiling on physical devices
+   before changing the now-sub-300 ms cached settle path.
