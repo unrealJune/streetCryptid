@@ -11,12 +11,13 @@ import {
   Shader,
   Skia,
 } from '@shopify/react-native-skia';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, StyleSheet, View, type LayoutChangeEvent } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import {
   cancelAnimation,
   Easing,
+  ReduceMotion,
   runOnJS,
   useAnimatedReaction,
   useDerivedValue,
@@ -57,6 +58,13 @@ import { clusterMarkers } from '../core/marker-clusters';
 import type { MapRegion } from '../engine/map-engine';
 import { useMapEngine } from '../hooks/use-map-engine';
 import { latLonToWorld } from '../core/mercator';
+import {
+  emitMapPerfEvent,
+  isMapPerfRunEnabled,
+  perfNow,
+  type RegionRenderTiming,
+} from '../perf/map-perf';
+import { useMapPerfRunner } from '../perf/use-map-perf-runner';
 import { FriendLocator } from './friend-locator';
 import { FriendLocatorStack } from './friend-locator-stack';
 import {
@@ -223,22 +231,74 @@ export function MapView({
     image: ReturnType<typeof renderRegionImage>;
     /** The baked cell-state texture — reused by the loading reveal's alpha wipe. */
     cellImage: ReturnType<typeof makeCellStateImage>;
+    timing: RegionRenderTiming;
   };
   const curBundle = useMemo<RegionBundle | null>(() => {
     if (!region) return null;
+    const measure = isMapPerfRunEnabled();
+    const started = measure ? perfNow() : 0;
+    const maskStarted = measure ? perfNow() : 0;
     const maskImage = makeMaskImage(region);
+    const maskMs = measure ? perfNow() - maskStarted : 0;
+    const cellStarted = measure ? perfNow() : 0;
     const cellImage = makeCellStateImage(region);
-    if (!maskImage || !cellImage || !lutImage) return { region, image: null, cellImage: null };
-    const image = renderRegionImage({
-      region,
-      palette: theme.canvas,
-      maskImage,
-      cellImage,
-      lutImage,
-      explorationEnabled,
+    const cellTextureMs = measure ? perfNow() - cellStarted : 0;
+    const rasterStarted = measure ? perfNow() : 0;
+    const image =
+      maskImage && cellImage && lutImage
+        ? renderRegionImage({
+            region,
+            palette: theme.canvas,
+            maskImage,
+            cellImage,
+            lutImage,
+            explorationEnabled,
+          })
+        : null;
+    const rasterMs = measure ? perfNow() - rasterStarted : 0;
+    const timing = {
+      maskMs,
+      cellTextureMs,
+      rasterMs,
+      totalMs: measure ? perfNow() - started : 0,
+    };
+    emitMapPerfEvent('region-render', {
+      ...timing,
+      cells: region.cellField.cells.length,
+      maskWidth: region.spec.maskWidth,
+      maskHeight: region.spec.maskHeight,
     });
-    return { region, image, cellImage };
+    return { region, image, cellImage, timing };
   }, [region, theme, lutImage, explorationEnabled]);
+
+  const animateProfileCamera = useCallback(
+    (
+      to: ViewTransform,
+      index: number,
+      durationMs: number,
+      onFinished: (finishedIndex: number) => void
+    ) => {
+      const config = {
+        duration: durationMs,
+        easing: Easing.inOut(Easing.cubic),
+        reduceMotion: ReduceMotion.Never,
+      };
+      k.value = withTiming(to.k, config);
+      tx.value = withTiming(to.tx, config, (finished) => {
+        if (finished) runOnJS(onFinished)(index);
+      });
+      ty.value = withTiming(to.ty, config);
+    },
+    [k, tx, ty]
+  );
+
+  useMapPerfRunner({
+    viewport,
+    anchor,
+    current: curBundle,
+    animate: animateProfileCamera,
+    commit,
+  });
 
   // Region transition (derive-state pattern): the new bitmap fades in over the
   // outgoing one. Opacity is a UI-thread tween — the bitmaps themselves are

@@ -14,6 +14,7 @@ import { coversView, shouldPrefetchRegion } from '../core/region';
 import type { CameraState, LatLon, Viewport, WorldPoint, WorldRect } from '../core/types';
 import { latLonToWorld } from '../core/mercator';
 import { MapEngine, type MapRegion } from '../engine/map-engine';
+import { emitMapPerfEvent } from '../perf/map-perf';
 import {
   createDemoExplorationSource,
   createLiveExplorationSource,
@@ -140,10 +141,14 @@ export function useMapEngine(
         grid,
         dataZooms: dataset.dataZooms,
         onTiming: __DEV__
-          ? (t) =>
+          ? (t) => {
               console.log(
-                `[map] region: fetch ${t.fetchMs.toFixed(0)} ms (${t.tiles} tiles) + build ${t.buildMs.toFixed(0)} ms`
-              )
+                `[map] region: source ${t.sourceMs.toFixed(0)} ms + merge ${t.mergeMs.toFixed(
+                  0
+                )} ms + cells ${t.cellFieldMs.toFixed(0)} ms (${t.tiles} tiles)`
+              );
+              emitMapPerfEvent('region-engine', { ...t });
+            }
           : undefined,
       }),
     [dataset, grid]

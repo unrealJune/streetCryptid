@@ -7,7 +7,7 @@ import type { CameraState, Viewport, WorldPoint } from '../../core/types';
 import type { PackedGeometry } from '../../tiles/packed-geometry';
 import { EMPTY_GEOMETRY, type GeometrySource } from '../../tiles/geometry-source';
 import { tileKeyOf, tilesCovering, type TileCoord } from '../../tiles/tile-math';
-import { MapEngine, type RegionRequest } from '../map-engine';
+import { MapEngine, type RegionRequest, type RegionTiming } from '../map-engine';
 
 const viewport: Viewport = { width: 100, height: 100 };
 const camera: CameraState = { center: latLonToWorld({ lat: 47.6205, lon: -122.3169 }), zoom: 14 };
@@ -111,6 +111,35 @@ describe('MapEngine.buildRegion', () => {
     expect(region!.cellField.cells.length).toBeGreaterThan(0);
     expect(region!.places.some((p) => p.name === 'Regionville')).toBe(true);
     expect(engine.lastRegion).toBe(region);
+  });
+
+  it('reports source, merge, cell-field, and total build timings', async () => {
+    const source = new FakeSource();
+    const timings: RegionTiming[] = [];
+    const engine = new MapEngine({
+      source,
+      grid,
+      dataZooms,
+      onTiming: (timing) => timings.push(timing),
+    });
+
+    const region = await engine.buildRegion(baseRequest);
+    expect(timings).toHaveLength(1);
+    expect(region?.timing).toBe(timings[0]);
+    expect(timings[0]).toMatchObject({
+      tiles: expect.any(Number),
+      coldStart: true,
+      sourceMs: expect.any(Number),
+      mergeMs: expect.any(Number),
+      cellFieldMs: expect.any(Number),
+      totalMs: expect.any(Number),
+    });
+    expect(timings[0].fetchMs).toBeCloseTo(timings[0].sourceMs + timings[0].mergeMs, 6);
+    expect(timings[0].buildMs).toBe(timings[0].cellFieldMs);
+    expect(timings[0].totalMs).toBeCloseTo(
+      timings[0].sourceMs + timings[0].mergeMs + timings[0].cellFieldMs,
+      6
+    );
   });
 
   it('marks exploration in the cell field', async () => {

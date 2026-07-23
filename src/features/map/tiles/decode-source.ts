@@ -4,6 +4,7 @@ import { decodeMvtTile } from './mvt-mapping';
 import { packGeometry, type PackedGeometry } from './packed-geometry';
 import type { TileByteSource } from './tile-bytes';
 import type { TileCoord } from './tile-math';
+import { addMapPerfMetric, captureMapPerfMetricScope, perfNow } from '../perf/map-perf';
 
 /**
  * Decodes one tile's raw MVT bytes into {@link PackedGeometry}. The native Rust
@@ -30,8 +31,15 @@ export class DecodingGeometrySource implements GeometrySource {
   ) {}
 
   async getTile(tile: TileCoord, signal?: AbortSignal): Promise<PackedGeometry> {
+    const metrics = captureMapPerfMetricScope();
+    const byteStarted = metrics ? perfNow() : 0;
     const raw = await this.bytes.getTileBytes(tile, signal);
+    if (metrics) addMapPerfMetric('byteLoadMs', perfNow() - byteStarted, metrics);
     if (raw === null || raw.byteLength === 0) return EMPTY_GEOMETRY;
-    return this.decode(raw, tile);
+    const decodeStarted = metrics ? perfNow() : 0;
+    const geometry = await this.decode(raw, tile);
+    addMapPerfMetric('tileDecodeCalls', 1, metrics);
+    if (metrics) addMapPerfMetric('tileDecodeMs', perfNow() - decodeStarted, metrics);
+    return geometry;
   }
 }
