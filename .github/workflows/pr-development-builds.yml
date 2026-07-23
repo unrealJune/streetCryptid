@@ -26,9 +26,10 @@ jobs:
       ${{
         github.event.pull_request.head.repo.full_name == github.repository &&
         (github.event.pull_request.user.login == 'Cobular' ||
+          github.event.pull_request.user.login == 'ava-ankenbrandt' ||
           github.event.pull_request.user.login == 'unrealJune')
       }}
-    runs-on: macos-26-intel
+    runs-on: macos-latest
     timeout-minutes: 90
     environment: development-builds
     permissions:
@@ -127,6 +128,7 @@ jobs:
       ${{
         github.event.pull_request.head.repo.full_name == github.repository &&
         (github.event.pull_request.user.login == 'Cobular' ||
+          github.event.pull_request.user.login == 'ava-ankenbrandt' ||
           github.event.pull_request.user.login == 'unrealJune')
       }}
     runs-on: ubuntu-24.04
@@ -236,6 +238,7 @@ jobs:
         always() &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         (github.event.pull_request.user.login == 'Cobular' ||
+          github.event.pull_request.user.login == 'ava-ankenbrandt' ||
           github.event.pull_request.user.login == 'unrealJune')
       }}
     needs:
