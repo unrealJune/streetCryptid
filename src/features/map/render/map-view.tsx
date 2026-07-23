@@ -258,7 +258,7 @@ export function MapView({
   // swap (the outgoing rebuild was ~180ms of pure waste per region change).
   const curBundle = useMemo<RegionBundle | null>(() => {
     if (!region) return null;
-    const renderExploration = explorationEnabled && region.cellField.cells.length > 0;
+    const renderExploration = explorationEnabled && region.spec.cellRes !== null;
     const cached = regionRenderCache.get(region, lutImage, renderExploration);
     if (cached) {
       const timing: RegionRenderTiming = {
