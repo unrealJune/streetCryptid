@@ -205,15 +205,25 @@ export function useMapEngine(
 
     let live = true;
     engine
-      .buildRegion({ camera: target, viewport, exploration: exploration.index() }, (progress) => {
-        if (!live) return;
-        // Skeleton while an uncovered build is outstanding (cold fetch, or a warm
-        // rebuild that would otherwise flash blank), tracking its tile progress.
-        // A covered rebuild (e.g. exploration changed) never blanks → no skeleton.
-        setPending(
-          uncovered ? { rect: progress.rect, loaded: progress.loaded, total: progress.total } : null
-        );
-      })
+      .buildRegion(
+        {
+          camera: target,
+          viewport,
+          exploration: exploration.index(),
+          explorationVersion,
+        },
+        (progress) => {
+          if (!live) return;
+          // Skeleton while an uncovered build is outstanding (cold fetch, or a warm
+          // rebuild that would otherwise flash blank), tracking its tile progress.
+          // A covered rebuild (e.g. exploration changed) never blanks → no skeleton.
+          setPending(
+            uncovered
+              ? { rect: progress.rect, loaded: progress.loaded, total: progress.total }
+              : null
+          );
+        }
+      )
       .then((built) => {
         if (!live || !built) return; // superseded builds resolve null
         builtVersionRef.current = explorationVersion;
@@ -273,7 +283,12 @@ export function useMapEngine(
         return Promise.resolve();
       }
       return engine
-        .buildRegion({ camera: live, viewport, exploration: exploration.index() })
+        .buildRegion({
+          camera: live,
+          viewport,
+          exploration: exploration.index(),
+          explorationVersion,
+        })
         .then((built) => {
           if (!built) return;
           // Ahead-of-the-finger prefetch swaps reveal like any other: the shader
@@ -285,7 +300,7 @@ export function useMapEngine(
           /* a superseded/failed prefetch is harmless; the current layer stays */
         });
     },
-    [viewport, anchor, constraints, engine, exploration, dataset]
+    [viewport, anchor, constraints, engine, exploration, explorationVersion, dataset]
   );
 
   const coverage = useMemo(

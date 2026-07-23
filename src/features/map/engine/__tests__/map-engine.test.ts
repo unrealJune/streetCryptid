@@ -18,6 +18,7 @@ const baseRequest: RegionRequest = {
   camera,
   viewport,
   exploration: createExplorationIndex(grid, []),
+  explorationVersion: 0,
 };
 
 /** A controllable fake source: records requests, resolves on demand. */
@@ -129,17 +130,53 @@ describe('MapEngine.buildRegion', () => {
     expect(timings[0]).toMatchObject({
       tiles: expect.any(Number),
       coldStart: true,
+      cellFieldCacheHit: false,
       sourceMs: expect.any(Number),
       mergeMs: expect.any(Number),
       cellFieldMs: expect.any(Number),
       totalMs: expect.any(Number),
     });
+
     expect(timings[0].fetchMs).toBeCloseTo(timings[0].sourceMs + timings[0].mergeMs, 6);
     expect(timings[0].buildMs).toBe(timings[0].cellFieldMs);
     expect(timings[0].totalMs).toBeCloseTo(
       timings[0].sourceMs + timings[0].mergeMs + timings[0].cellFieldMs,
       6
     );
+  });
+
+  it('reuses an exact cell field for the same exploration revision', async () => {
+    const source = new FakeSource();
+    const timings: RegionTiming[] = [];
+    const engine = new MapEngine({
+      source,
+      grid,
+      dataZooms,
+      onTiming: (timing) => timings.push(timing),
+    });
+
+    const first = await engine.buildRegion(baseRequest);
+    const second = await engine.buildRegion(baseRequest);
+
+    expect(first?.cellField).toBe(second?.cellField);
+    expect(timings.map((timing) => timing.cellFieldCacheHit)).toEqual([false, true]);
+  });
+
+  it('rebuilds the cell field when exploration advances', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    const exploration = createExplorationIndex(grid, []);
+    const first = await engine.buildRegion({ ...baseRequest, exploration });
+    exploration.add(grid.cellAt(camera.center, H3_DISPLAY_RES));
+    const second = await engine.buildRegion({
+      ...baseRequest,
+      exploration,
+      explorationVersion: 1,
+    });
+
+    expect(first?.cellField).not.toBe(second?.cellField);
+    expect(second?.cellField.cells.some((cell) => cell.fraction > 0)).toBe(true);
+    expect(second?.timing.cellFieldCacheHit).toBe(false);
   });
 
   it('marks exploration in the cell field', async () => {

@@ -8,11 +8,16 @@ import { mergeGeometry } from '../tiles/geometry-source';
 import type { PackedGeometry } from '../tiles/packed-geometry';
 import { tileKeyOf, tilesCovering, type DataZoomRange, type TileCoord } from '../tiles/tile-math';
 
+/** Complete fields are large; retain only the camera regions most likely to be revisited. */
+const CELL_FIELD_CACHE_CAPACITY = 8;
+
 /** Everything a region build depends on besides the engine's own wiring. */
 export interface RegionRequest {
   readonly camera: CameraState;
   readonly viewport: Viewport;
   readonly exploration: ExplorationIndex;
+  /** Monotonic revision of the mutable exploration index. */
+  readonly explorationVersion: number;
 }
 
 /**
@@ -40,6 +45,7 @@ export interface MapRegion {
 export interface RegionTiming {
   readonly tiles: number;
   readonly coldStart: boolean;
+  readonly cellFieldCacheHit: boolean;
   /** Tile source work, including byte cache/network and decode. */
   readonly sourceMs: number;
   /** Struct-of-arrays concatenation after all tiles land. */
@@ -104,6 +110,7 @@ export class MapEngine {
     reject: (error: unknown) => void;
   } | null = null;
   private last: MapRegion | null = null;
+  private readonly cellFieldCache = new Map<string, RegionCellField>();
 
   constructor(options: MapEngineOptions) {
     this.source = options.source;
@@ -279,12 +286,26 @@ export class MapEngine {
 
     const geometry = mergeGeometry(parts);
     const t2 = now();
-    const cellField = buildCellField(this.grid, spec.rect, spec.cellRes, request.exploration);
+    const cellKey = cellFieldKey(spec, request.explorationVersion);
+    let cellField = this.cellFieldCache.get(cellKey);
+    const cellFieldCacheHit = cellField !== undefined;
+    if (cellField) {
+      this.cellFieldCache.delete(cellKey);
+      this.cellFieldCache.set(cellKey, cellField);
+    } else {
+      cellField = buildCellField(this.grid, spec.rect, spec.cellRes, request.exploration);
+      this.cellFieldCache.set(cellKey, cellField);
+      if (this.cellFieldCache.size > CELL_FIELD_CACHE_CAPACITY) {
+        const oldest = this.cellFieldCache.keys().next().value;
+        if (oldest !== undefined) this.cellFieldCache.delete(oldest);
+      }
+    }
     const t3 = now();
 
     const timing: RegionTiming = {
       tiles: tiles.length,
       coldStart,
+      cellFieldCacheHit,
       sourceMs: t1 - t0,
       mergeMs: t2 - t1,
       cellFieldMs: t3 - t2,
@@ -309,4 +330,9 @@ export class MapEngine {
 
 function now(): number {
   return typeof performance !== 'undefined' ? performance.now() : Date.now();
+}
+
+function cellFieldKey(spec: RegionSpec, explorationVersion: number): string {
+  const { rect } = spec;
+  return `${explorationVersion}|${spec.cellRes}|${rect.minX},${rect.minY},${rect.maxX},${rect.maxY}`;
 }

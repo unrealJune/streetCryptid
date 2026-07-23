@@ -80,6 +80,7 @@ async function main() {
       camera: scenario.camera,
       viewport,
       exploration,
+      explorationVersion: 0,
     });
     const totalMs = performance.now() - started;
     if (!region) throw new Error(`Scenario ${scenario.name} was superseded`);

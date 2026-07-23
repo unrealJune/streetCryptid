@@ -44,6 +44,7 @@ const region: MapRegion = {
   timing: {
     tiles: 0,
     coldStart: false,
+    cellFieldCacheHit: false,
     sourceMs: 0,
     mergeMs: 0,
     cellFieldMs: 0,
