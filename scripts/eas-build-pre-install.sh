@@ -10,6 +10,11 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 crate_dir="$repo_root/modules/iroh-location/rust"
+target_dir="${CARGO_TARGET_DIR:-$crate_dir/target}"
+if [[ "$target_dir" != /* ]]; then
+  target_dir="$crate_dir/$target_dir"
+fi
+export CARGO_TARGET_DIR="$target_dir"
 
 if ! command -v rustup >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
@@ -47,7 +52,7 @@ fi
 ios_dir="$repo_root/modules/iroh-location/ios"
 headers_dir="$ios_dir/headers"
 framework_path="$ios_dir/IrohLocationFFI.xcframework"
-library_path="$crate_dir/target/aarch64-apple-ios/release/libiroh_location.a"
+library_path="$target_dir/aarch64-apple-ios/release/libiroh_location.a"
 
 # Keep C/assembly dependencies built by Rust aligned with Expo SDK 57's iOS minimum.
 export IPHONEOS_DEPLOYMENT_TARGET=16.4
