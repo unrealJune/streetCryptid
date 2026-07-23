@@ -2,11 +2,12 @@
 
 ## Headline
 
-Three accepted passes keep the UI-thread bitmap transform at 60 fps, cut measured zoom latency
-by 49-81%, and remove the pan callback starvation that previously crossed 30 seconds. It is not
-yet a smooth map experience: the best cached zoom takes 1.47 seconds and cached pan takes
-4.23 seconds. The dominant remaining cost is synchronous H3 region construction, not tile
-merging or the final Skia raster.
+Four accepted passes keep the UI-thread bitmap transform at 60 fps, cut measured zoom latency
+by up to 88%, and remove the pan callback starvation that previously crossed 30 seconds. It is
+not yet a smooth map experience: the best revisited zoom takes 0.93 seconds, cached zoom-out
+takes 1.47 seconds, and cached pan takes 4.23 seconds. The dominant remaining cost is
+synchronous H3 region construction for non-identical regions, not tile merging or the final
+Skia raster.
 
 | Accepted point                        |  Launch | Zoom out, new | Zoom in | Zoom out, cached | Pan, new | Pan, cached |
 | ------------------------------------- | ------: | ------------: | ------: | ---------------: | -------: | ----------: |
@@ -14,6 +15,7 @@ merging or the final Skia raster.
 | Coalesced zoom prefetch               |       - |       3.065 s | 1.833 s |          1.465 s |     open |        open |
 | Coalesced engine queue                |       - |       1.964 s | 1.884 s |          1.497 s |     open |        open |
 | UI-to-JS prefetch backpressure        |       - |             - |       - |                - |  4.431 s |     4.225 s |
+| Exact cell-field LRU                  |       - |             - | 0.931 s |                - |        - |           - |
 
 Target: a 60 fps UI and responsive JS thread throughout every operation, with cached settles
 below 300 ms and cold network/decode hidden behind retained coverage plus the hex loading
@@ -186,6 +188,23 @@ return callback arrives in 3688 ms instead of being starved for more than 31 sec
 pattern changed: the cold pan still made one fixed-z10 SCB1 bundle request and the cached return
 made none.
 
+## Pass 4: exact cell-field LRU
+
+Run ID: `ios-cell-cache-1`.
+
+`MapEngine` now retains eight complete immutable H3 fields, keyed by exact region geometry and
+the exploration source's monotonic revision. Revisited regions share the same field object.
+Advancing exploration changes the key and rebuilds immediately, so discovery state, frontier
+rims, and reveal ordering cannot go stale.
+
+The exact launch-region revisit on zoom-in fell from 1884 ms to 931 ms (-50.6%). Its engine H3
+phase fell from 941 ms to 0.017 ms, and the worst JS frame fell from 1313 ms to 340 ms. Skia
+still spent 169 ms producing the identical-quality bitmap. The UI thread dropped no frames.
+
+The cache deliberately did not claim non-identical regions: zoom-out and pan specs differed at
+their edges and remained within noise. This is evidence for profiling H3 enumeration and
+annotation separately before attempting canonical regions or native offload.
+
 ## Experiment journal
 
 | Branch / attempt                                        | Hypothesis                                                                        | Result                                                                                                                                                                                | Decision                                                                                                                                                     |
@@ -198,11 +217,12 @@ made none.
 | `copilot/map-perf-zoom-prefetch`, thresholded           | Coalesce scale builds to one coverage prefetch plus the final commit.             | Zoom latency fell 49-81%, UI remained 60 fps, and all zero-gap simulations passed.                                                                                                    | Accepted.                                                                                                                                                    |
 | `copilot/map-perf-queue-coalescing`                     | Reuse the just-built padded region when it already serves the queued camera.      | Cold zoom-out fell another 35.9%; pan still built 9/39 regions because bridge callbacks reached the engine serially.                                                                  | Accepted for redundant engine work; rejected as the pan solution.                                                                                            |
 | `copilot/map-perf-pan-backpressure`                     | Allow only one UI-to-JS prefetch bridge call while a region build is outstanding. | Pan builds fell from 9/39 to 3/3, both scenarios completed, and UI stayed at 60 fps.                                                                                                  | Accepted.                                                                                                                                                    |
+| `copilot/map-perf-cell-field-cache`                     | Reuse complete immutable H3 fields for exact region and exploration revisions.    | Exact zoom revisit fell 50.6%; H3 work fell from 941 ms to 0.017 ms without stale exploration.                                                                                        | Accepted.                                                                                                                                                    |
 
 ## Next measured hypotheses
 
-1. Cache complete H3 region fields or move immutable field construction out of Hermes so a
-   warm final region does not spend about one second rebuilding identical cells.
+1. Split H3 enumeration, cached geometry lookup, and exploration annotation timings; then
+   canonicalize reusable regions or move the dominant phase out of Hermes.
 2. Batch SQLite bundle writes in an exclusive WAL transaction and measure cold source time.
 3. Remove SVG string construction/parsing from lattice, rim, and feature masks if Skia remains
    above the post-H3 budget.
