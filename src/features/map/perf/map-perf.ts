@@ -43,6 +43,7 @@ export interface MapPerfMetricScope {
 }
 
 export interface RegionRenderTiming {
+  readonly cacheHit: boolean;
   readonly maskMs: number;
   readonly cellTextureMs: number;
   readonly rasterMs: number;
