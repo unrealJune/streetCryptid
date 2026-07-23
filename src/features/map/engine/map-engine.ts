@@ -1,4 +1,8 @@
-import { buildCellField, type RegionCellField } from '../core/cell-field';
+import {
+  buildCellFieldWithTiming,
+  type CellFieldTiming,
+  type RegionCellField,
+} from '../core/cell-field';
 import type { ExplorationIndex } from '../core/exploration-index';
 import type { H3Grid } from '../core/h3-grid';
 import { computeRegionSpec, shouldPrefetchRegion, type RegionSpec } from '../core/region';
@@ -52,6 +56,9 @@ export interface RegionTiming {
   readonly mergeMs: number;
   /** H3 enumeration, immutable geometry lookup, and exploration annotation. */
   readonly cellFieldMs: number;
+  readonly cellEnumerateMs: number;
+  readonly cellCentersMs: number;
+  readonly cellAnnotateMs: number;
   readonly totalMs: number;
   /** Backward-compatible aggregate: source + merge. */
   readonly fetchMs: number;
@@ -289,11 +296,19 @@ export class MapEngine {
     const cellKey = cellFieldKey(spec, request.explorationVersion);
     let cellField = this.cellFieldCache.get(cellKey);
     const cellFieldCacheHit = cellField !== undefined;
+    let cellTiming: CellFieldTiming = { enumerateMs: 0, centersMs: 0, annotateMs: 0 };
     if (cellField) {
       this.cellFieldCache.delete(cellKey);
       this.cellFieldCache.set(cellKey, cellField);
     } else {
-      cellField = buildCellField(this.grid, spec.rect, spec.cellRes, request.exploration);
+      const built = buildCellFieldWithTiming(
+        this.grid,
+        spec.rect,
+        spec.cellRes,
+        request.exploration
+      );
+      cellField = built.field;
+      cellTiming = built.timing;
       this.cellFieldCache.set(cellKey, cellField);
       if (this.cellFieldCache.size > CELL_FIELD_CACHE_CAPACITY) {
         const oldest = this.cellFieldCache.keys().next().value;
@@ -309,6 +324,9 @@ export class MapEngine {
       sourceMs: t1 - t0,
       mergeMs: t2 - t1,
       cellFieldMs: t3 - t2,
+      cellEnumerateMs: cellTiming.enumerateMs,
+      cellCentersMs: cellTiming.centersMs,
+      cellAnnotateMs: cellTiming.annotateMs,
       totalMs: t3 - t0,
       fetchMs: t2 - t0,
       buildMs: t3 - t2,
