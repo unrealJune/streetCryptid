@@ -1,3 +1,4 @@
+import { H3_DISPLAY_RES } from './cell-ladder';
 import type { CellIndex, H3Grid } from './h3-grid';
 import type { WorldPoint } from './types';
 
@@ -18,7 +19,10 @@ export interface ExplorationIndex {
   add(cell: CellIndex): boolean;
 }
 
-export function createExplorationIndex(_grid: H3Grid, cells: Iterable<CellIndex>): ExplorationIndex {
+export function createExplorationIndex(
+  _grid: H3Grid,
+  cells: Iterable<CellIndex>
+): ExplorationIndex {
   const explored = new Set(cells);
   return {
     cells: explored,

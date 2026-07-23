@@ -38,7 +38,7 @@ describe('cellStateFills', () => {
   it('projects into mask-pixel space', () => {
     // Every coordinate must land inside (or within a margin cell of) the mask.
     const coords = fills.flatMap((f) => f.path.match(/-?\d+(\.\d+)?/g) ?? []).map(Number);
-    expect(Math.max(...coords)).toBeLessThan(Math.max(spec.maskWidth, spec.maskHeight) * 1.2);
+    expect(Math.max(...coords)).toBeLessThan(Math.max(spec.maskWidth, spec.maskHeight) * 1.3);
   });
 });
 

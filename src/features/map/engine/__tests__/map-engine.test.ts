@@ -104,18 +104,6 @@ describe('MapEngine.buildRegion', () => {
       places: [{ name: 'Regionville', world: camera.center, kind: 'suburb' }],
     });
 
-    it('skips cell enumeration below the exploration render threshold', async () => {
-      const source = new FakeSource();
-      const engine = makeEngine(source);
-      const region = await engine.buildRegion({
-        ...baseRequest,
-        camera: { ...camera, zoom: 4 },
-      });
-
-      expect(region?.spec.cellRes).toBeNull();
-      expect(region?.cellField.cells).toEqual([]);
-      expect(region?.timing.cellEnumerateMs).toBe(0);
-    });
     const engine = makeEngine(source);
 
     const region = await engine.buildRegion(baseRequest);
@@ -125,6 +113,19 @@ describe('MapEngine.buildRegion', () => {
     expect(region!.cellField.cells.length).toBeGreaterThan(0);
     expect(region!.places.some((p) => p.name === 'Regionville')).toBe(true);
     expect(engine.lastRegion).toBe(region);
+  });
+
+  it('skips cell enumeration below the exploration render threshold', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    const region = await engine.buildRegion({
+      ...baseRequest,
+      camera: { ...camera, zoom: 4 },
+    });
+
+    expect(region?.spec.cellRes).toBeNull();
+    expect(region?.cellField.cells).toEqual([]);
+    expect(region?.timing.cellEnumerateMs).toBe(0);
   });
 
   it('reports source, merge, cell-field, and total build timings', async () => {

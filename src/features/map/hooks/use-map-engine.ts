@@ -57,7 +57,7 @@ export interface MapEngineState {
   readonly anchor: CameraState;
   /** Zoom/bounds limits in anchor-space pixels, for the UI-thread clamps. */
   readonly limits: ViewLimits | null;
-  /** Explored fraction of the cells in view (ladder-rung aggregated), 0–1. */
+  /** Explored fraction of fixed-resolution cells in view, or 0 when hidden. */
   readonly coverage: number;
   /** Nearest prominent place name to the camera center, for the island. */
   readonly placeName: string | null;

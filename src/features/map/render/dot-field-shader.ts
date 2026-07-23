@@ -83,8 +83,7 @@ float4 dotAt(float ix, float iy, float2 frag) {
   float dist = distance(frag, center);
   if (dist > 2.5) return float4(0.0);                 // no dot reaches this far
 
-  // Explored fraction of this dot's cell — binary at the display res, a
-  // continuous 0..1 shade at aggregated (coarse-rung) resolutions.
+  // Explored occupancy of this dot's fixed-resolution cell.
   float explored = cellAt(center).r;
   float e = mix(1.0, explored, uExploration);
   if (e < 0.5 && (mod(ix, 2.0) > 0.5 || mod(iy, 2.0) > 0.5)) return float4(0.0);

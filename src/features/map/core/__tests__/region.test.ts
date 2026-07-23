@@ -221,19 +221,12 @@ describe('data zooms + fixed exploration resolution in region specs', () => {
   });
 
   it('needsNewRegion fires when exploration crosses its render threshold', () => {
-    const spec = computeRegionSpec(
-      { ...camera, zoom: H3_MIN_RENDER_ZOOM + 0.1 },
-      viewport,
-      { dataZooms }
-    );
+    const spec = computeRegionSpec({ ...camera, zoom: H3_MIN_RENDER_ZOOM + 0.1 }, viewport, {
+      dataZooms,
+    });
     expect(spec.cellRes).toBe(H3_DISPLAY_RES);
     expect(
-      needsNewRegion(
-        spec,
-        { ...camera, zoom: H3_MIN_RENDER_ZOOM - 0.1 },
-        viewport,
-        dataZooms
-      )
+      needsNewRegion(spec, { ...camera, zoom: H3_MIN_RENDER_ZOOM - 0.1 }, viewport, dataZooms)
     ).toBe(true);
   });
 
