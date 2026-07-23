@@ -17,6 +17,7 @@ bitmap build plus first-visit H3 annotation; polygon enumeration no longer block
 | Exact cell-field LRU                  |       - |             - | 0.931 s |                - |        - |           - |
 | Native H3 enumeration                 | 1.031 s |       1.998 s | 0.919 s |          0.882 s |  3.266 s |     3.262 s |
 | Rendered-bundle LRU                   |       - |             - | 0.766 s |                - |        - |           - |
+| Final iOS integration                 | 1.031 s |       1.998 s | 0.766 s |          0.882 s |  3.266 s |     3.262 s |
 
 Target: a 60 fps UI and responsive JS thread throughout every operation, with cached settles
 below 300 ms and cold network/decode hidden behind retained coverage plus the hex loading
@@ -295,6 +296,56 @@ Its post-motion settle fell from 366 ms to 201 ms (-45.1%), render work fell to 
 worst JS frame fell from 347 ms to 172 ms. Non-identical zoom and pan regions correctly missed
 the cache and stayed within noise. Capacity is fixed at three GPU bundles.
 
+## Cross-platform final validation
+
+### Android API 36 emulator
+
+The merged app was compiled with the arm64 Rust library, installed on an API 36 ARM emulator,
+and run through the same automated camera sequence. The final run used the host Apple M2
+Vulkan/Metal backend and already-persisted tile bytes after one-time profile, disclosure, and
+permission onboarding.
+
+| Scenario         | Android total | Post-motion settle | UI dropped |
+| ---------------- | ------------: | -----------------: | ---------: |
+| Warm launch      |       2752 ms |            2752 ms |         10 |
+| Zoom out, warm   |        921 ms |             291 ms |          0 |
+| Zoom in          |       1064 ms |             484 ms |          0 |
+| Zoom out, cached |        927 ms |             133 ms |          0 |
+| Pan, new         |       3238 ms |             204 ms |          0 |
+| Pan, cached      |       3192 ms |              23 ms |          2 |
+
+Native H3 enumeration is active on Android (typically 6-13 ms per final region). Zoom and cold
+pan animation stay at 60 fps on the host-GPU emulator; cached pan recorded two dropped frames.
+Android Skia remains slower than iOS in this debug emulator (roughly 222-342 ms for settled
+regions), while the camera stays responsive because the bitmap transform remains UI-thread
+owned.
+
+An earlier headless SwiftShader run averaged 22-34 ms UI frames and took 0.8-2.3 seconds per
+Skia render. It was rejected as a platform comparison: the software GPU, not app code, was the
+bottleneck. The host-GPU rerun above is the Android result used for final validation.
+
+Kotlin and Swift UniFFI bindings match the Rust API. The native core cross-compiles for Android
+arm64-v8a, armeabi-v7a, and x86_64; the iOS XCFramework and Android debug app both compile and
+load the new export.
+
+### Network interpretation
+
+Cold network timings vary independently of renderer work (observed launch network spans ranged
+from about 1.1 to 5.3 seconds). New areas keep the previous bitmap interactive and show the
+existing pulsing requested-area tint followed by the hex reveal. Warm operations issue no tile
+request; z11-z14 cold misses still expose only one fixed z10 SCB1 ancestor per data zoom.
+
+## Rejected: direct Skia feature-mask paths
+
+Run ID: `ios-direct-mask-1`.
+
+Replacing SVG path strings and `MakeFromSVGString` with direct `moveTo`/`lineTo` calls was not
+consistently faster. Launch mask time regressed from 84.1 ms to 94.9 ms, cached zoom from
+119.1 ms to 126.8 ms, and cold zoom from 110.0 ms to 115.9 ms. One cached-pan sample improved
+from 159.0 ms to 125.7 ms, but that did not offset the other regressions. Thousands of
+JS-to-JSI calls cost at least as much as the batched SVG parse, so branch
+`copilot/map-perf-direct-mask-paths` is retained but unmerged.
+
 ## Experiment journal
 
 | Branch / attempt                                        | Hypothesis                                                                        | Result                                                                                                                                                                                | Decision                                                                                                                                                     |
@@ -313,8 +364,11 @@ the cache and stayed within noise. Capacity is fixed at three GPU bundles.
 | `copilot/map-perf-sqlite-transaction`                   | Persist each SCB1 descendant set in one exclusive transaction.                    | Launch writes fell 35-52%; a contention outlier did not reproduce, while request and durability semantics stayed unchanged.                                                           | Accepted as a modest cold-cache win.                                                                                                                         |
 | `copilot/map-perf-stable-overlays`                      | Make trail sampling and map component identity stable across appends/first GPS.   | Historical replacements fell from 15 per append to 0.13 average (max 1); first GPS no longer remounts the map.                                                                        | Accepted; fixes the reported trail/location jump.                                                                                                            |
 | `copilot/map-perf-render-bundle-cache`                  | Reuse exact immutable GPU region bundles in a three-entry LRU.                    | Exact zoom settle fell 45.1%, with zero reraster work and no effect on non-identical regions.                                                                                         | Accepted.                                                                                                                                                    |
+| `copilot/map-perf-direct-mask-paths`                    | Avoid SVG construction/parsing with direct Skia path commands.                    | Three mask scenarios regressed 5-13%; one improved 21%, consistent with per-point JSI overhead.                                                                                       | Rejected and left unmerged.                                                                                                                                  |
 
-## Next measured hypotheses
+## Remaining device validation
 
-1. Retain batched SVG masks; investigate platform-native GPU profiling on physical devices
-   before changing the now-sub-300 ms cached settle path.
+Physical-device GPU/thermal profiling remains valuable before changing the now-sub-300 ms
+cached settle path. Simulator `Animation Hitches` is unsupported, so this work used Reanimated
+UI-frame timestamps plus an iOS Time Profiler trace. The retained batched SVG masks should not
+be replaced without device evidence.
