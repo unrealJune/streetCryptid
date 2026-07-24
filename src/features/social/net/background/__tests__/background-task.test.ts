@@ -30,6 +30,7 @@ describe('background location registration', () => {
       expect.objectContaining({
         timeInterval: 15_000,
         distanceInterval: 25,
+        showsBackgroundLocationIndicator: false,
       })
     );
   });
