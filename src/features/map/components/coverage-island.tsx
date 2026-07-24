@@ -7,12 +7,28 @@ import { Spacing } from '@/constants/theme';
 
 const SEGMENTS = 26;
 
+/**
+ * Side of the chevron's touch target, and the header's floor. The chevron is
+ * what sets the island's collapsed height, so when it is hidden (below the
+ * exploration cutoff) the header would otherwise shrink to the 28pt minimized
+ * hero line and the island would read visibly thinner. One constant for both
+ * keeps the two states the same height by construction.
+ */
+const TOGGLE_SIZE = 48;
+
 interface CoverageIslandProps {
   readonly theme: CryptidTheme;
   /** Hero place name; em-dash placeholder while tiles are still loading. */
   readonly placeName: string | null;
   /** Discovered fraction of the visible sectors, 0–1. */
   readonly coverage: number;
+  /**
+   * Whether the exploration layer is drawn at this zoom. When false the whole
+   * sector readout is suppressed — `coverage` would otherwise render a
+   * misleading 0%. The user's own minimize choice is kept untouched, so zooming
+   * back in restores whatever state they left it in.
+   */
+  readonly sectorsVisible: boolean;
 }
 
 /**
@@ -20,19 +36,30 @@ interface CoverageIslandProps {
  * flip-dot coverage bar, one percentage — and nothing else (declutter law).
  * Doubles as the screen-reader text model for the canvas (PRODUCT.md P0).
  */
-export function CoverageIsland({ theme, placeName, coverage }: CoverageIslandProps) {
+export function CoverageIsland({
+  theme,
+  placeName,
+  coverage,
+  sectorsVisible,
+}: CoverageIslandProps) {
   const { chrome } = theme;
   const [isMinimized, setIsMinimized] = useState(false);
   const pct = Math.round(coverage * 100);
   const lit = Math.round(coverage * SEGMENTS);
   const hero = placeName ?? '—';
-  const summary = `${hero}. ${pct} percent of visible sectors explored.`;
+  // Zooming past the exploration cutoff collapses the island like the chevron
+  // would, WITHOUT writing `isMinimized` — zooming back in restores the user's
+  // own choice rather than whatever the zoom left behind.
+  const showSectors = sectorsVisible && !isMinimized;
+  const summary = sectorsVisible
+    ? `${hero}. ${pct} percent of visible sectors explored.`
+    : `${hero}. Sector coverage is hidden at this zoom.`;
 
   return (
     <View
       style={[
         styles.island,
-        isMinimized ? styles.islandMinimized : styles.islandExpanded,
+        showSectors ? styles.islandExpanded : styles.islandMinimized,
         { backgroundColor: chrome.island, borderColor: chrome.islandBorder },
       ]}
     >
@@ -44,42 +71,46 @@ export function CoverageIsland({ theme, placeName, coverage }: CoverageIslandPro
           style={styles.summary}
         >
           <Text
-            style={[styles.hero, isMinimized && styles.heroMinimized, { color: chrome.ink }]}
+            style={[styles.hero, !showSectors && styles.heroMinimized, { color: chrome.ink }]}
             numberOfLines={1}
           >
             {hero}
           </Text>
-          {isMinimized ? (
+          {sectorsVisible && isMinimized ? (
             <Text style={[styles.compactPct, { color: chrome.ink }]}>{pct}%</Text>
           ) : null}
         </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={isMinimized ? 'Expand location summary' : 'Minimize location summary'}
-          accessibilityState={{ expanded: !isMinimized }}
-          onPress={() => setIsMinimized((current) => !current)}
-          style={({ pressed }) => [styles.toggle, pressed && styles.togglePressed]}
-        >
-          <SymbolView
-            name={
-              isMinimized
-                ? { ios: 'chevron.up', android: 'keyboard_arrow_up', web: 'keyboard_arrow_up' }
-                : {
-                    ios: 'chevron.down',
-                    android: 'keyboard_arrow_down',
-                    web: 'keyboard_arrow_down',
-                  }
+        {sectorsVisible ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={
+              isMinimized ? 'Expand location summary' : 'Minimize location summary'
             }
-            size={20}
-            tintColor={chrome.steel}
-          />
-        </Pressable>
+            accessibilityState={{ expanded: !isMinimized }}
+            onPress={() => setIsMinimized((current) => !current)}
+            style={({ pressed }) => [styles.toggle, pressed && styles.togglePressed]}
+          >
+            <SymbolView
+              name={
+                isMinimized
+                  ? { ios: 'chevron.up', android: 'keyboard_arrow_up', web: 'keyboard_arrow_up' }
+                  : {
+                      ios: 'chevron.down',
+                      android: 'keyboard_arrow_down',
+                      web: 'keyboard_arrow_down',
+                    }
+              }
+              size={20}
+              tintColor={chrome.steel}
+            />
+          </Pressable>
+        ) : null}
       </View>
 
-      {!isMinimized ? (
+      {showSectors ? (
         <View accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
           <Text style={[styles.sub, { color: chrome.steel }]} numberOfLines={1}>
-            SECTORS IN VIEW · © OPENSTREETMAP
+            SECTORS IN VIEW
           </Text>
           <View style={styles.barRow}>
             <View style={styles.bar}>
@@ -116,6 +147,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
+    // Floor, not a fixed height: with the chevron present the row already
+    // measures TOGGLE_SIZE, so this only takes effect when it is hidden.
+    minHeight: TOGGLE_SIZE,
   },
   summary: {
     flex: 1,
@@ -141,9 +175,9 @@ const styles = StyleSheet.create({
     textAlign: 'right',
   },
   toggle: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: TOGGLE_SIZE,
+    height: TOGGLE_SIZE,
+    borderRadius: TOGGLE_SIZE / 2,
     alignItems: 'center',
     justifyContent: 'center',
   },

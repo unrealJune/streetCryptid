@@ -29,7 +29,14 @@ start-clear:
 # Advertises this machine's Tailscale MagicDNS name so a `development`-profile
 # dev-client build reaches Metro over the tailnet. Shows a Tailscale QR code.
 # Serve Metro over Tailscale for a dev-client build (needs Tailscale + MagicDNS).
-start-with-tailscale port="8081":
+#
+# Pass any second argument to clear Metro's transform cache on the way up — needed
+# after adding a NEW source file (an already-running bundler can miss it, and the
+# import lands as undefined at runtime) or after changing .env.local, since
+# EXPO_PUBLIC_* values are inlined at bundle time.
+#   just start-with-tailscale
+#   just start-with-tailscale 8081 clear
+start-with-tailscale port="8081" clear="":
     #!/usr/bin/env sh
     set -eu
     ts=tailscale
@@ -40,7 +47,11 @@ start-with-tailscale port="8081":
       exit 1
     fi
     echo "Metro over Tailscale -> http://$name:{{port}}"
-    EXPO_PACKAGER_PROXY_URL="http://$name:{{port}}" bun run start
+    if [ -n "{{clear}}" ]; then
+      EXPO_PACKAGER_PROXY_URL="http://$name:{{port}}" bunx expo start --clear
+    else
+      EXPO_PACKAGER_PROXY_URL="http://$name:{{port}}" bun run start
+    fi
 
 # Open the app on a connected Android device / emulator.
 android:

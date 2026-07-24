@@ -137,6 +137,12 @@ export interface MapPalette {
 export interface MapReadout {
   /** Discovered fraction of the hex sectors in view, 0–1. */
   readonly coverage: number;
+  /**
+   * Whether the exploration layer is drawn at this zoom. When false, `coverage`
+   * is a placeholder 0 and chrome should hide the sector readout entirely
+   * rather than claim nothing has been explored.
+   */
+  readonly sectorsVisible: boolean;
   /** Nearest prominent place name to the camera center, or null. */
   readonly placeName: string | null;
 }

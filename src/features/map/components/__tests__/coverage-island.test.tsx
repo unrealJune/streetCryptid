@@ -20,11 +20,16 @@ describe('CoverageIsland', () => {
   it('toggles between the detailed and compact location summaries', () => {
     act(() => {
       renderer = create(
-        <CoverageIsland theme={CryptidThemes.daybreak} placeName="Capitol Hill" coverage={0.42} />
+        <CoverageIsland
+          theme={CryptidThemes.daybreak}
+          placeName="Capitol Hill"
+          coverage={0.42}
+          sectorsVisible
+        />
       );
     });
 
-    expect(findText(renderer, 'SECTORS IN VIEW · © OPENSTREETMAP')).toHaveLength(1);
+    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(1);
 
     const minimizeButton = renderer.root.findByProps({
       accessibilityLabel: 'Minimize location summary',
@@ -33,7 +38,7 @@ describe('CoverageIsland', () => {
 
     act(() => minimizeButton.props.onPress());
 
-    expect(findText(renderer, 'SECTORS IN VIEW · © OPENSTREETMAP')).toHaveLength(0);
+    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(0);
     expect(findText(renderer, '42%')).toHaveLength(1);
 
     const expandButton = renderer.root.findByProps({
@@ -43,7 +48,72 @@ describe('CoverageIsland', () => {
 
     act(() => expandButton.props.onPress());
 
-    expect(findText(renderer, 'SECTORS IN VIEW · © OPENSTREETMAP')).toHaveLength(1);
+    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(1);
+  });
+
+  it('hides the sector readout below the exploration render cutoff', () => {
+    act(() => {
+      renderer = create(
+        <CoverageIsland
+          theme={CryptidThemes.daybreak}
+          placeName="Capitol Hill"
+          coverage={0}
+          sectorsVisible={false}
+        />
+      );
+    });
+
+    // No readout, no misleading 0%, and no chevron to expand into nothing.
+    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(0);
+    expect(findText(renderer, '0%')).toHaveLength(0);
+    expect(
+      renderer.root.findAllByProps({ accessibilityLabel: 'Minimize location summary' })
+    ).toHaveLength(0);
+    // The place name still headlines the island.
+    expect(findText(renderer, 'Capitol Hill')).toHaveLength(1);
+  });
+
+  it('restores the user’s own minimize choice when sectors come back', () => {
+    act(() => {
+      renderer = create(
+        <CoverageIsland
+          theme={CryptidThemes.daybreak}
+          placeName="Capitol Hill"
+          coverage={0.42}
+          sectorsVisible
+        />
+      );
+    });
+    // User expands nothing — it starts expanded. Minimize it by hand.
+    act(() =>
+      renderer.root.findByProps({ accessibilityLabel: 'Minimize location summary' }).props.onPress()
+    );
+    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(0);
+
+    // Zoom out past the cutoff and back in: still minimized, not re-expanded.
+    act(() => {
+      renderer.update(
+        <CoverageIsland
+          theme={CryptidThemes.daybreak}
+          placeName="Capitol Hill"
+          coverage={0}
+          sectorsVisible={false}
+        />
+      );
+    });
+    act(() => {
+      renderer.update(
+        <CoverageIsland
+          theme={CryptidThemes.daybreak}
+          placeName="Capitol Hill"
+          coverage={0.42}
+          sectorsVisible
+        />
+      );
+    });
+
+    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(0);
+    expect(findText(renderer, '42%')).toHaveLength(1);
   });
 });
 

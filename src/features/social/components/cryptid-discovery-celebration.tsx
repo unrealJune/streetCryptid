@@ -225,6 +225,10 @@ const styles = StyleSheet.create({
     fontFamily: 'Rajdhani_700Bold',
     fontSize: 34,
     fontWeight: '700',
+    // Rajdhani's ascenders overflow the default line box, clipping the top of
+    // the glyphs (the '@' loses its upper half). Every other Rajdhani style
+    // sets this explicitly; 38 at size 34 matches the coverage island's hero.
+    lineHeight: 38,
   },
   caption: {
     letterSpacing: 1.3,

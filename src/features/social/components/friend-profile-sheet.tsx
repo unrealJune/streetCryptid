@@ -329,6 +329,8 @@ const styles = StyleSheet.create({
     fontFamily: 'Rajdhani_700Bold',
     fontSize: 34,
     fontWeight: '700',
+    // Without this Rajdhani's ascenders clip — same fix as the discovery popup.
+    lineHeight: 38,
   },
   details: {
     borderBottomWidth: StyleSheet.hairlineWidth,
