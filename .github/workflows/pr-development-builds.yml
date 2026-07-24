@@ -23,14 +23,7 @@ jobs:
   build_ios:
     name: Build and upload iOS Release
     if: >-
-      ${{
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        (github.event.pull_request.user.login == 'Cobular' ||
-          github.event.pull_request.user.login == 'ava-ankenbrandt' ||
-          github.event.pull_request.user.login == 'unrealJune' ||
-          (github.event.pull_request.user.login == 'copilot-swe-agent[bot]' &&
-            startsWith(github.event.pull_request.head.ref, 'copilot/')))
-      }}
+      ${{github.event.pull_request.head.repo.full_name == github.repository}}
     runs-on: macos-latest
     timeout-minutes: 90
     environment: development-builds
@@ -157,14 +150,7 @@ jobs:
   build_android:
     name: Build and upload Android Release
     if: >-
-      ${{
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        (github.event.pull_request.user.login == 'Cobular' ||
-          github.event.pull_request.user.login == 'ava-ankenbrandt' ||
-          github.event.pull_request.user.login == 'unrealJune' ||
-          (github.event.pull_request.user.login == 'copilot-swe-agent[bot]' &&
-            startsWith(github.event.pull_request.head.ref, 'copilot/')))
-      }}
+      ${{github.event.pull_request.head.repo.full_name == github.repository}}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     environment: development-builds
