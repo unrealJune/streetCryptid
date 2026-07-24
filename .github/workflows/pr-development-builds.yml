@@ -285,8 +285,8 @@ jobs:
             rm -f -- "$BUILD_ARTIFACT"
           fi
 
-  comment:
-    name: Post install links
+  comment_ios:
+    name: Post iOS install link
     if: >-
       ${{
         always() &&
@@ -299,6 +299,50 @@ jobs:
       }}
     needs:
       - build_ios
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUILD_RESULT: ${{ needs.build_ios.result }}
+      INSTALL_URL: ${{ needs.build_ios.outputs.install_url }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Comment with iOS EAS install page
+        run: |
+          set -euo pipefail
+
+          body="$(
+            printf '🏗️ **PR standalone iOS Release build**\n\n'
+            if [[ "$BUILD_RESULT" == "success" && -n "$INSTALL_URL" ]]; then
+              printf '[Install from EAS (QR code)](%s)\n' "$INSTALL_URL"
+            else
+              printf 'Build failed — [view GitHub Actions logs](%s)\n' "$RUN_URL"
+            fi
+            printf '\nBuilt on ephemeral GitHub-hosted runners; EAS only hosts the finished app archives.'
+          )"
+
+          gh api \
+            --method POST \
+            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            --raw-field body="$body" \
+            >/dev/null
+
+  comment_android:
+    name: Post Android install link
+    if: >-
+      ${{
+        always() &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (github.event.pull_request.user.login == 'Cobular' ||
+          github.event.pull_request.user.login == 'ava-ankenbrandt' ||
+          github.event.pull_request.user.login == 'unrealJune' ||
+          (github.event.pull_request.user.login == 'copilot-swe-agent[bot]' &&
+            startsWith(github.event.pull_request.head.ref, 'copilot/')))
+      }}
+    needs:
       - build_android
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -306,32 +350,22 @@ jobs:
       pull-requests: write
     env:
       GH_TOKEN: ${{ github.token }}
-      IOS_RESULT: ${{ needs.build_ios.result }}
-      IOS_URL: ${{ needs.build_ios.outputs.install_url }}
-      ANDROID_RESULT: ${{ needs.build_android.result }}
-      ANDROID_URL: ${{ needs.build_android.outputs.install_url }}
+      BUILD_RESULT: ${{ needs.build_android.result }}
+      INSTALL_URL: ${{ needs.build_android.outputs.install_url }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
-      - name: Comment with EAS install pages
+      - name: Comment with Android EAS install page
         run: |
           set -euo pipefail
 
-          platform_line() {
-            local platform="$1"
-            local result="$2"
-            local url="$3"
-            if [[ "$result" == "success" && -n "$url" ]]; then
-              printf -- '- **%s:** [Install from EAS (QR code)](%s)\n' "$platform" "$url"
-            else
-              printf -- '- **%s:** Build failed — [view GitHub Actions logs](%s)\n' "$platform" "$RUN_URL"
-            fi
-          }
-
           body="$(
-            printf '🏗️ **PR standalone Release builds**\n\n'
-            platform_line "iOS" "$IOS_RESULT" "$IOS_URL"
-            platform_line "Android" "$ANDROID_RESULT" "$ANDROID_URL"
+            printf '🏗️ **PR standalone Android Release build**\n\n'
+            if [[ "$BUILD_RESULT" == "success" && -n "$INSTALL_URL" ]]; then
+              printf '[Install from EAS (QR code)](%s)\n' "$INSTALL_URL"
+            else
+              printf 'Build failed — [view GitHub Actions logs](%s)\n' "$RUN_URL"
+            fi
             printf '\nBuilt on ephemeral GitHub-hosted runners; EAS only hosts the finished app archives.'
           )"
 
