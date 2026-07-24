@@ -109,6 +109,8 @@ const FRIEND_PREFETCH_MAX = 4;
 /** Double-tap zoom-in factor and animation length. */
 const DOUBLE_TAP_FACTOR = 2;
 const DOUBLE_TAP_MS = 260;
+/** Locate-me camera animation length. */
+const LOCATE_ME_MS = 360;
 
 interface ScreenRect {
   x: number;
@@ -186,6 +188,7 @@ export function MapView({
   accessibilityLabel,
   onSelectSelf,
   onSelectFriend,
+  locateTarget = null,
 }: {
   /** Surfaces the coverage/place readout to the surrounding chrome. */
   onReadout?: (readout: MapReadout) => void;
@@ -201,6 +204,7 @@ export function MapView({
   accessibilityLabel?: string;
   onSelectSelf?: () => void;
   onSelectFriend?: (friendId: string) => void;
+  locateTarget?: { readonly requestId: number; readonly location: LatLon } | null;
 }) {
   const [viewport, setViewport] = useState<Viewport | null>(null);
   const reducedMotion = useReducedMotion();
@@ -562,6 +566,40 @@ export function MapView({
     commit(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewport, anchor]);
+
+  useEffect(() => {
+    if (!viewport || !limits || !locateTarget) return;
+    cancelAnimation(k);
+    cancelAnimation(tx);
+    cancelAnimation(ty);
+    decaysLeft.value = 0;
+
+    const current = applyViewTransform(anchor, viewport, {
+      k: k.value,
+      tx: tx.value,
+      ty: ty.value,
+    });
+    const to = clampTranslation(
+      viewTransformFor(anchor, viewport, {
+        center: latLonToWorld(locateTarget.location),
+        zoom: current.zoom,
+      }),
+      limits
+    );
+    const config = {
+      duration: reducedMotion ? 0 : LOCATE_ME_MS,
+      easing: Easing.out(Easing.cubic),
+    };
+    lastPrefetch.value = to;
+    k.value = withTiming(to.k, config);
+    tx.value = withTiming(to.tx, config);
+    ty.value = withTiming(to.ty, config, (finished) => {
+      if (finished) runOnJS(commit)(to);
+    });
+    // Shared values are stable references; requestId intentionally retriggers
+    // when the user taps locate again at the same coordinates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locateTarget?.requestId, viewport, anchor, limits, reducedMotion, commit]);
 
   const requestPrefetch = useCallback(
     (t: ViewTransform) => {

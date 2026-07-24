@@ -2,6 +2,7 @@
 
 export { CoverageIsland } from './components/coverage-island';
 export { FriendHistoryIsland } from './components/friend-history-island';
+export { LocateMeControl } from './components/locate-me-control';
 export { MapLayersControl } from './components/map-layers-control';
 export { MapView } from './render/map-view';
 export type { MapFriendLocation } from './render/map-view';
