@@ -149,8 +149,20 @@ export default function MapScreenBody() {
   const initialCenter =
     sessionFocus?.location ??
     (hasLiveSelfFix && selfFix ? { lat: selfFix.lat, lon: selfFix.lon } : null);
-  // First GPS lock updates the marker, but must not destroy the user's camera.
-  const mapSessionKey = sessionFocus ? `friend-${sessionFocus.id}` : 'persistent-map';
+  // Once we have ever had a live self fix, the map stays self-anchored.
+  // A fix going stale later must not recenter the session out from under the user.
+  const [selfCenterSeen, setSelfCenterSeen] = useState(false);
+  if (!selfCenterSeen && hasLiveSelfFix && selfFix) setSelfCenterSeen(true);
+  // `useMapEngine` fixes its session anchor at mount, so the map opens on the
+  // dataset's fallback home and re-anchors on the user when the first fix lands.
+  // Keying on `selfCenterSeen` makes that re-anchor happen exactly once, whenever
+  // the fix arrives — there is no deadline to wait out, and no blank map if a fix
+  // never comes at all. Later fixes move the marker without moving the camera.
+  const mapSessionKey = sessionFocus
+    ? `friend-${sessionFocus.id}`
+    : selfCenterSeen
+      ? 'self-anchored'
+      : 'fallback-anchored';
   // Native tabs already apply Android's bottom inset to their screen content.
   const islandBottomPadding = Platform.OS === 'android' ? Spacing.two : insets.bottom + Spacing.two;
 
