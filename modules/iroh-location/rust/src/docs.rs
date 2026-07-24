@@ -369,29 +369,30 @@ impl TrailDocs {
         doc.start_sync(peers).await?;
 
         let mut recovered: u64 = 0;
-        let mut pending = HashMap::new();
+        let mut pending_entries = HashMap::new();
         // Bound the reconciliation: with no reachable peer (e.g. relay-only web where direct-IP
         // transmits are dropped) `SyncFinished` may never arrive, which would hang this call — and
         // therefore the `syncTrail` promise — forever. Break after an idle gap and report what we
         // recovered so the UI always gets a `completed` (with count), never a dead button.
         loop {
-            let remote = match timeout(Duration::from_secs(SYNC_IDLE_TIMEOUT_SECS), events.next())
-                .await
-            {
-                Ok(Some(Ok(LiveEvent::InsertRemote { from, entry, .. }))) => Some((from, entry)),
-                Ok(Some(Ok(LiveEvent::ContentReady { hash }))) => pending.remove(&hash),
-                Ok(Some(Ok(LiveEvent::SyncFinished(_)))) => None,
-                Ok(Some(Ok(LiveEvent::PendingContentReady))) => break,
-                Ok(Some(Ok(_))) => None,
-                Ok(Some(Err(_))) => break,
-                Ok(None) => break, // stream ended
-                Err(_) => break,   // idle timeout — stop waiting, report what we have
-            };
-            if let Some((from, entry)) = remote {
+            let entry_to_process =
+                match timeout(Duration::from_secs(SYNC_IDLE_TIMEOUT_SECS), events.next()).await {
+                    Ok(Some(Ok(LiveEvent::InsertRemote { from, entry, .. }))) => {
+                        Some((from, entry))
+                    }
+                    Ok(Some(Ok(LiveEvent::ContentReady { hash }))) => pending_entries.remove(&hash),
+                    Ok(Some(Ok(LiveEvent::SyncFinished(_)))) => None,
+                    Ok(Some(Ok(LiveEvent::PendingContentReady))) => break,
+                    Ok(Some(Ok(_))) => None,
+                    Ok(Some(Err(_))) => break,
+                    Ok(None) => break, // stream ended
+                    Err(_) => break,   // idle timeout — stop waiting, report what we have
+                };
+            if let Some((from, entry)) = entry_to_process {
                 let bytes = match self.blobs.blobs().get_bytes(entry.content_hash()).await {
                     Ok(b) => b,
                     Err(_) => {
-                        pending.insert(entry.content_hash(), (from, entry));
+                        pending_entries.insert(entry.content_hash(), (from, entry));
                         continue;
                     }
                 };
