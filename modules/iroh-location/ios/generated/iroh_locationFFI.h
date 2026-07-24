@@ -520,7 +520,7 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_shutdown(uint64_t ptr
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_START
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_START
-uint64_t uniffi_iroh_location_fn_method_locationnode_start(uint64_t ptr, RustBuffer relay_urls, RustBuffer relay_auth_token
+uint64_t uniffi_iroh_location_fn_method_locationnode_start(uint64_t ptr, RustBuffer relay_urls, RustBuffer relay_auth_token, int8_t relay_enabled, int8_t ip_enabled, int8_t ble_enabled
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SUBMIT_PAIR_CHOICE

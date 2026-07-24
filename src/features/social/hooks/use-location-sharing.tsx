@@ -73,10 +73,7 @@ interface LocationSharingContextValue {
   /** Opt in/out of offline delivery via the trail stash. */
   setStashOptIn(optedIn: boolean): Promise<void>;
   /** Enable or disable one native endpoint transport. */
-  setTransportEnabled(
-    transport: keyof TransportPreferences,
-    enabled: boolean
-  ): Promise<void>;
+  setTransportEnabled(transport: keyof TransportPreferences, enabled: boolean): Promise<void>;
   /** Capture and publish a fresh GPS fix immediately, bypassing normal sampling. */
   forceLocationPush(trigger?: 'manual' | 'scheduled'): Promise<number>;
   /** Honest, live diagnostic of every transport (for the Settings tab). */

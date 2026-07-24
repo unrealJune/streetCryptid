@@ -558,7 +558,10 @@ impl LocationNode {
             ble::disabled()
         };
         #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
-        let ble = ble::disabled();
+        let ble = {
+            let _ = ble_enabled;
+            ble::disabled()
+        };
 
         let endpoint = builder
             .bind()

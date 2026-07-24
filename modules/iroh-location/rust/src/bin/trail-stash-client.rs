@@ -250,8 +250,8 @@ async fn run_pair(
         true,
         true,
     )
-        .await
-        .context("starting the pairing node")?;
+    .await
+    .context("starting the pairing node")?;
     node.publish_profile(
         "@stash-debug".into(),
         "Trail Stash Debug".into(),
@@ -389,8 +389,8 @@ async fn run_watch(
             true,
             true,
         )
-            .await
-            .context("starting the stash-only node")?;
+        .await
+        .context("starting the stash-only node")?;
 
         let attempt = async {
             let fixes = node

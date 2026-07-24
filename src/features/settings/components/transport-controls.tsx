@@ -33,11 +33,7 @@ const TRANSPORTS: {
   },
 ];
 
-export function TransportControls({
-  accent,
-  preferences,
-  onToggle,
-}: TransportControlsProps) {
+export function TransportControls({ accent, preferences, onToggle }: TransportControlsProps) {
   const theme = useTheme();
   const enabledCount = Object.values(preferences).filter(Boolean).length;
 

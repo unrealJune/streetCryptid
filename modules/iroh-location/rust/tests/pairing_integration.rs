@@ -28,8 +28,8 @@ async fn start_node() -> Arc<LocationNode> {
         true,
         true,
     )
-        .await
-        .expect("start node");
+    .await
+    .expect("start node");
     node
 }
 

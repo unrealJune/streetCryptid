@@ -920,7 +920,7 @@ external fun uniffi_iroh_location_fn_method_locationnode_set_pairing_ready(`ptr`
 ): Unit
 external fun uniffi_iroh_location_fn_method_locationnode_shutdown(`ptr`: Long,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_start(`ptr`: Long,`relayUrls`: RustBuffer.ByValue,`relayAuthToken`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_locationnode_start(`ptr`: Long,`relayUrls`: RustBuffer.ByValue,`relayAuthToken`: RustBuffer.ByValue,`relayEnabled`: Byte,`ipEnabled`: Byte,`bleEnabled`: Byte,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_submit_pair_choice(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`chosenIndex`: Int,
 ): Long
@@ -1233,7 +1233,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_shutdown() != 37069) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_start() != 54155) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_start() != 8886) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_submit_pair_choice() != 8652) {
@@ -2474,7 +2474,7 @@ public interface LocationNodeInterface {
     /**
      * Bind the iroh endpoint + spawn the gossip router. Idempotent.
      */
-    suspend fun `start`(`relayUrls`: List<kotlin.String>, `relayAuthToken`: kotlin.String)
+    suspend fun `start`(`relayUrls`: List<kotlin.String>, `relayAuthToken`: kotlin.String, `relayEnabled`: kotlin.Boolean, `ipEnabled`: kotlin.Boolean, `bleEnabled`: kotlin.Boolean)
     
     /**
      * Picker action: submit the chosen figure index. A correct choice latches the local SAS and
@@ -3518,12 +3518,12 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `start`(`relayUrls`: List<kotlin.String>, `relayAuthToken`: kotlin.String) {
+    override suspend fun `start`(`relayUrls`: List<kotlin.String>, `relayAuthToken`: kotlin.String, `relayEnabled`: kotlin.Boolean, `ipEnabled`: kotlin.Boolean, `bleEnabled`: kotlin.Boolean) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_start(
                 uniffiHandle,
-                FfiConverterSequenceString.lower(`relayUrls`),FfiConverterString.lower(`relayAuthToken`),
+                FfiConverterSequenceString.lower(`relayUrls`),FfiConverterString.lower(`relayAuthToken`),FfiConverterBoolean.lower(`relayEnabled`),FfiConverterBoolean.lower(`ipEnabled`),FfiConverterBoolean.lower(`bleEnabled`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },

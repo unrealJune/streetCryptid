@@ -201,19 +201,19 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
     status: !input.transportEnabled.relay
       ? 'inactive'
       : !relayConfigured
-      ? 'unavailable'
-      : relayActive
-        ? 'active'
-        : input.nodeReady
-          ? 'available'
-          : 'inactive',
+        ? 'unavailable'
+        : relayActive
+          ? 'active'
+          : input.nodeReady
+            ? 'available'
+            : 'inactive',
     detail: !input.transportEnabled.relay
       ? TRANSPORT_DISABLED
       : !relayConfigured
-      ? 'No authenticated relay is configured.'
-      : relayActive
-        ? `${relayPaths.filter(({ address }) => address.active).length} active peer relay path${relayPaths.filter(({ address }) => address.active).length === 1 ? '' : 's'}.`
-        : `${input.relayUrls.length} configured; no active peer relay path observed.`,
+        ? 'No authenticated relay is configured.'
+        : relayActive
+          ? `${relayPaths.filter(({ address }) => address.active).length} active peer relay path${relayPaths.filter(({ address }) => address.active).length === 1 ? '' : 's'}.`
+          : `${input.relayUrls.length} configured; no active peer relay path observed.`,
     groups: [
       { label: 'NODE', items: nodeItems(input) },
       {

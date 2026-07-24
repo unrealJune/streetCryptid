@@ -302,9 +302,7 @@ export async function saveRelayOnly(kv: PersistentKV, relayOnly: boolean): Promi
 }
 
 /** Restore debug transport restrictions, migrating the old relay-only preference when present. */
-export async function loadTransportPreferences(
-  kv: PersistentKV
-): Promise<TransportPreferences> {
+export async function loadTransportPreferences(kv: PersistentKV): Promise<TransportPreferences> {
   const raw = await kv.get(TRANSPORT_CONFIG_KEY);
   if (raw) {
     try {
