@@ -5,8 +5,8 @@ import type { ConfigContext, ExpoConfig } from 'expo/config';
 /**
  * The `development` (dev-client) build allows cleartext ATS loads to Tailscale
  * MagicDNS names (`*.ts.net`), so the dev client can reach Metro over the tailnet.
- * Requires your tailnet to have MagicDNS enabled (DNS only; HTTPS certs not needed). 
- * ATS can only scope cleartext by hostname, not by IP range, so this targets the 
+ * Requires your tailnet to have MagicDNS enabled (DNS only; HTTPS certs not needed).
+ * ATS can only scope cleartext by hostname, not by IP range, so this targets the
  * MagicDNS name rather than the tailnet IP.
  *
  * Scoped to the `development` profile only.

@@ -19,9 +19,16 @@ crate-type = ["cdylib", "staticlib", "lib"]
 # endpoint, so a default build without a configured collector behaves exactly like a non-otel
 # build. Store builds compile it out entirely with `--no-default-features`.
 default = ["otel"]
-# Enables the uniffi-bindgen CLI (clap etc.); only needed to generate bindings, so it's
-# kept off the default mobile cdylib build.
-cli = ["uniffi/cli"]
+# Enables host-side developer CLIs. Kept off the default mobile cdylib build.
+cli = [
+    "uniffi/cli",
+    "dep:clap",
+    "dep:dotenvy",
+    "dep:irpc",
+    "dep:reqwest",
+    "dep:serde_json",
+    "tokio/signal",
+]
 # OTLP export of `tracing` spans + events (traces AND logs) to a developer-configured collector
 # (see infra/otel/ at the repo root). This is how we see phone⇄stash⇄phone interactions: spans
 # carry `sc.author` / `sc.seq` / `sc.entry_hash` join attributes, and iroh's internal relay /
@@ -40,6 +47,7 @@ otel = [
 iroh = "1"
 iroh-gossip = "0.101"
 iroh-tickets = "1"
+irpc = { version = "0.17", optional = true }
 # Same-wifi / LAN fast path: mDNS (swarm-discovery) address lookup for iroh 1.0. This lives in
 # a SEPARATE crate (iroh 1.0 core only ships dns/pkarr/memory address lookups). Added ALONGSIDE
 # the N0 preset's relay + DNS discovery in `LocationNode::start` — never replacing it — so two
@@ -70,6 +78,13 @@ postcard = { version = "1", features = ["alloc"] }
 thiserror = "2"
 anyhow = "1" # error plumbing for the iroh-docs/iroh-blobs durable-trail glue
 tracing = "0.1" # mobile BLE transport diagnostics
+clap = { version = "4", features = ["derive"], optional = true }
+dotenvy = { version = "0.15", optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+], optional = true }
+serde_json = { version = "1", optional = true }
 
 # --- developer telemetry (the `otel` feature; see src/telemetry.rs) ---
 # tracing-subscriber moves to a normal dependency (it was already in the tree via iroh, and the
@@ -129,6 +144,11 @@ uniffi = { version = "0.31", features = ["tokio", "bindgen-tests"] }
 [[bin]]
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "trail-stash-client"
+path = "src/bin/trail-stash-client.rs"
 required-features = ["cli"]
 
 [profile.release]
