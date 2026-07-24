@@ -25,8 +25,8 @@ export interface RegionSpec {
   readonly zoom: number;
   /** (Overzoomed) tile zoom the geometry was fetched at — see `dataZoomFor`. */
   readonly tileZoom: number;
-  /** H3 ladder rung the exploration cell field was built at — see `resForZoom`. */
-  readonly cellRes: number;
+  /** Fixed H3 exploration resolution, or null when the layer is disabled. */
+  readonly cellRes: number | null;
 }
 
 export interface RegionOptions {
@@ -115,7 +115,7 @@ export function regionMaskCamera(spec: RegionSpec): {
 /**
  * True when `camera`'s view is no longer comfortably served by `spec`: the
  * visible rect pokes outside the region, the mask resolution is a zoom band
- * off, the data zoom changed, or the exploration ladder rung changed.
+ * off, the data zoom changed, or exploration crosses its render threshold.
  */
 export function needsNewRegion(
   spec: RegionSpec,

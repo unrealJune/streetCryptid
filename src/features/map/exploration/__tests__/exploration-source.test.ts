@@ -23,7 +23,7 @@ describe('demo exploration source', () => {
   it('is ready immediately with the deterministic demo territory', async () => {
     const source = createDemoExplorationSource(grid, HOME);
     await source.ready;
-    expect(source.index().res10.size).toBeGreaterThan(50);
+    expect(source.index().cells.size).toBeGreaterThan(50);
     expect(source.version()).toBe(0);
     source.noteSelfFix(fixAt(47.62, -122.32)); // no-op
     await source.backfill(); // no-op
@@ -45,7 +45,7 @@ describe('live exploration source', () => {
 
     const { source } = makeLive(db, trail);
     await source.ready;
-    expect(source.index().res10.size).toBe(2);
+    expect(source.index().cells.size).toBe(2);
     expect(source.version()).toBeGreaterThan(0);
   });
 
@@ -60,7 +60,7 @@ describe('live exploration source', () => {
     await source.ready; // flush microtasks
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(source.index().res10.size).toBe(1);
+    expect(source.index().cells.size).toBe(1);
     expect(source.version()).toBe(before + 1);
     expect(notified).toBe(1);
   });
@@ -84,7 +84,7 @@ describe('live exploration source', () => {
   it('backfill() picks up trail points published after init', async () => {
     const { source, trail } = makeLive();
     await source.ready;
-    expect(source.index().res10.size).toBe(0);
+    expect(source.index().cells.size).toBe(0);
 
     await trail.put({
       author: SELF_AUTHOR,
@@ -93,7 +93,7 @@ describe('live exploration source', () => {
       receivedAt: 5000,
     });
     await source.backfill();
-    expect(source.index().res10.size).toBe(1);
+    expect(source.index().cells.size).toBe(1);
   });
 
   it('unsubscribe stops notifications', async () => {

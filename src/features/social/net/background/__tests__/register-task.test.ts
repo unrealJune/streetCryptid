@@ -42,8 +42,8 @@ describe('background task registration', () => {
       typeof import('../register-task').registerActiveBackgroundFixHandler | undefined;
     jest.isolateModules(() => {
       // eslint-disable-next-line @typescript-eslint/no-require-imports -- module-load side effect under test
-      ({ registerActiveBackgroundFixHandler: registerActiveHandler } =
-        require('../register-task') as typeof import('../register-task'));
+      const registerTask = require('../register-task') as typeof import('../register-task');
+      registerActiveHandler = registerTask.registerActiveBackgroundFixHandler;
     });
     if (!registerActiveHandler) throw new Error('register-task module did not load');
     const handler = jest.fn(async () => {});

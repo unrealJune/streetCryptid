@@ -152,7 +152,7 @@ describe('sim fidelity (the model can actually gap)', () => {
   });
 });
 
-describe('global zoom-out (planet range + ladder)', () => {
+describe('global zoom-out (planet range + exploration cutoff)', () => {
   const planet = { min: 0, max: 14 };
   const planetSpecFor = (camera: CameraState, vp: Viewport) =>
     computeRegionSpec(camera, vp, { dataZooms: planet });
@@ -167,18 +167,15 @@ describe('global zoom-out (planet range + ladder)', () => {
     for (const camera of traj) sim.advance(camera);
     expect(sim.gapSteps).toBe(0);
     // Crosses 14 zoom levels; the prefetch cadence is one rebuild per ~0.45
-    // zoom of drift (~31) plus rung/data-zoom rebuilds — bounded well below
+    // zoom of drift (~31) plus cutoff/data-zoom rebuilds — bounded well below
     // one per step, which is what would signal churn.
     expect(sim.builds).toBeGreaterThan(14);
     expect(sim.builds).toBeLessThan(80);
   });
 
-  it('keeps every region build within a sane cell budget across the descent', () => {
+  it('disables fixed-resolution cells across the zoom-out threshold', () => {
     for (let z = 15; z >= 1; z -= 0.5) {
       const spec = planetSpecFor({ center: home, zoom: z }, viewport);
-      // The ladder holds the rect-to-res pairing monotone — the direct
-      // cell-count budget is asserted in map-engine tests against real
-      // enumeration.
       expect(spec.cellRes).toBe(resForZoom(z));
       expect(spec.tileZoom).toBeLessThanOrEqual(14);
     }

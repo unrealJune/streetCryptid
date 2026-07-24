@@ -31,13 +31,13 @@ describe('cellHash', () => {
 });
 
 describe('buildCellField', () => {
-  const exploration = createExplorationIndex(grid, demoExploration(grid, HOME));
+  const exploration = createExplorationIndex(demoExploration(grid, HOME));
   const rect = rectAround(HOME, 6e-5);
 
   it('annotates display-res cells with binary fractions and a frontier', () => {
     const field = buildCellField(grid, rect, H3_DISPLAY_RES, exploration);
     expect(field.res).toBe(H3_DISPLAY_RES);
-    expect(field.cells.length).toBeGreaterThan(50);
+    expect(field.cells.length).toBeGreaterThan(5);
 
     const byId = new Map(field.cells.map((c) => [c.cell, c]));
     const home = byId.get(grid.cellAt(HOME, H3_DISPLAY_RES))!;
@@ -57,16 +57,6 @@ describe('buildCellField', () => {
     }
     // A demo blob inside the rect must expose an edge somewhere.
     expect(frontiers).toBeGreaterThan(0);
-  });
-
-  it('shades coarser rungs by fraction with no frontier', () => {
-    const field = buildCellField(grid, rectAround(HOME, 3e-3), 7, exploration);
-    expect(field.cells.every((c) => !c.frontier)).toBe(true);
-    const fractions = field.cells.map((c) => c.fraction);
-    // The explored blob makes at least one res-7 parent partially explored.
-    expect(Math.max(...fractions)).toBeGreaterThan(0);
-    expect(Math.max(...fractions)).toBeLessThan(1);
-    expect(Math.min(...fractions)).toBe(0);
   });
 
   it('orders cells center-out', () => {

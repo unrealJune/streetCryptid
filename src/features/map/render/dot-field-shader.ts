@@ -15,9 +15,9 @@ import { Skia, type SkRuntimeEffect } from '@shopify/react-native-skia';
  * Exploration cells are H3 hexagons, which are NOT an analytic lattice in
  * mercator — so unlike the retired axial grid the shader derives nothing per
  * pixel. It samples `cellTex`, a region-anchored texture baked on the CPU from
- * the region's cell field (`cell-state-image.ts`): R = explored fraction
- * (continuous — aggregated parent shading at coarse ladder rungs falls out of
- * the same fog math), G = per-cell jitter, B = center-out reveal order. The
+ * the region's cell field (`cell-state-image.ts`): R = explored occupancy
+ * (binary at the fixed display resolution), G = per-cell jitter,
+ * B = center-out reveal order. The
  * ghost lattice and frontier rim are drawn as vector paths over this bitmap
  * (`cell-overlay-paths.ts`), no longer in-shader.
  *
@@ -83,8 +83,7 @@ float4 dotAt(float ix, float iy, float2 frag) {
   float dist = distance(frag, center);
   if (dist > 2.5) return float4(0.0);                 // no dot reaches this far
 
-  // Explored fraction of this dot's cell — binary at the display res, a
-  // continuous 0..1 shade at aggregated (coarse-rung) resolutions.
+  // Explored occupancy of this dot's fixed-resolution cell.
   float explored = cellAt(center).r;
   float e = mix(1.0, explored, uExploration);
   if (e < 0.5 && (mod(ix, 2.0) > 0.5 || mod(iy, 2.0) > 0.5)) return float4(0.0);

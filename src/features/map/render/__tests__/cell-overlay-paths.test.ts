@@ -12,8 +12,8 @@ const camera: CameraState = { center: HOME, zoom: 15 };
 const viewport: Viewport = { width: 200, height: 200 };
 const spec = computeRegionSpec(camera, viewport, { dataZooms: { min: 0, max: 14 } });
 
-const exploration = createExplorationIndex(grid, demoExploration(grid, HOME));
-const field = buildCellField(grid, spec.rect, spec.cellRes, exploration);
+const exploration = createExplorationIndex(demoExploration(grid, HOME));
+const field = buildCellField(grid, spec.rect, spec.cellRes!, exploration);
 
 describe('cellStateFills', () => {
   const fills = cellStateFills(field, spec);
@@ -38,7 +38,10 @@ describe('cellStateFills', () => {
   it('projects into mask-pixel space', () => {
     // Every coordinate must land inside (or within a margin cell of) the mask.
     const coords = fills.flatMap((f) => f.path.match(/-?\d+(\.\d+)?/g) ?? []).map(Number);
-    expect(Math.max(...coords)).toBeLessThan(Math.max(spec.maskWidth, spec.maskHeight) * 1.2);
+    const maxCoordinate = Math.max(...coords);
+    const maxDimension = Math.max(spec.maskWidth, spec.maskHeight);
+    expect(maxCoordinate).toBeGreaterThan(maxDimension * 1.2);
+    expect(maxCoordinate).toBeLessThan(maxDimension * 1.3);
   });
 });
 

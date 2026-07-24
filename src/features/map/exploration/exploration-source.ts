@@ -47,7 +47,7 @@ class Notifier {
 
 /** Fixture-mode source: deterministic demo walks, ready synchronously. */
 export function createDemoExplorationSource(grid: H3Grid, home: WorldPoint): ExplorationSource {
-  const index = createExplorationIndex(grid, demoExploration(grid, home));
+  const index = createExplorationIndex(demoExploration(grid, home));
   const notifier = new Notifier();
   return {
     ready: Promise.resolve(),
@@ -70,7 +70,7 @@ export function createLiveExplorationSource(
   store: ExplorationStore,
   trailStorage: TrailStorage
 ): ExplorationSource {
-  const index = createExplorationIndex(grid, []);
+  const index = createExplorationIndex([]);
   const notifier = new Notifier();
 
   const fold = (cells: Iterable<string>): void => {

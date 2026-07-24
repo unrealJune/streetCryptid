@@ -1,23 +1,16 @@
 /**
- * The camera-zoom → H3-resolution ladder. Exploration truth lives at res 10
- * (~131 m across ≈ the retired hex cells); coarser views aggregate to parent
- * cells shaded by explored fraction. One step down the ladder per 1.5 camera
- * zoom levels keeps cells-in-view bounded (~0.2–6k) at every zoom, which is
- * what lets the coverage layer stay on all the way out to the globe.
+ * Exploration uses one fixed H3 resolution. Below the render threshold those
+ * cells become too small to read, so the coverage layer is disabled instead of
+ * aggregating occupancy into progressively coarser parents.
  */
 
 /** The resolution exploration is recorded at — the data contract. */
-export const H3_DISPLAY_RES = 10;
+export const H3_DISPLAY_RES = 9;
 
-/** Coarsest ladder rung; res 2 has only 5,882 cells worldwide. */
-export const H3_MIN_RES = 2;
+/** Smallest camera zoom at which res-9 cells remain useful on screen. */
+export const H3_MIN_RENDER_ZOOM = 12.5;
 
-/** Camera zoom at (and above) which the ladder sits at {@link H3_DISPLAY_RES}. */
-export const H3_FULL_DETAIL_ZOOM = 14;
-
-/** H3 resolution to build a region's cell field at, for a camera zoom. */
-export function resForZoom(zoom: number): number {
-  const steps = Math.ceil((H3_FULL_DETAIL_ZOOM - zoom) / 1.5);
-  const res = H3_DISPLAY_RES - Math.max(0, steps);
-  return Math.max(H3_MIN_RES, Math.min(H3_DISPLAY_RES, res));
+/** Fixed H3 resolution to render, or null when exploration should be hidden. */
+export function resForZoom(zoom: number): number | null {
+  return zoom >= H3_MIN_RENDER_ZOOM ? H3_DISPLAY_RES : null;
 }

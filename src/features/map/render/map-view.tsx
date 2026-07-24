@@ -258,7 +258,8 @@ export function MapView({
   // swap (the outgoing rebuild was ~180ms of pure waste per region change).
   const curBundle = useMemo<RegionBundle | null>(() => {
     if (!region) return null;
-    const cached = regionRenderCache.get(region, lutImage, explorationEnabled);
+    const renderExploration = explorationEnabled && region.spec.cellRes !== null;
+    const cached = regionRenderCache.get(region, lutImage, renderExploration);
     if (cached) {
       const timing: RegionRenderTiming = {
         cacheHit: true,
@@ -292,7 +293,7 @@ export function MapView({
             maskImage,
             cellImage,
             lutImage,
-            explorationEnabled,
+            explorationEnabled: renderExploration,
           })
         : null;
     const rasterMs = measure ? perfNow() - rasterStarted : 0;
@@ -311,7 +312,7 @@ export function MapView({
     });
     const bundle = { region, image, cellImage, timing };
     if (image && cellImage && lutImage) {
-      regionRenderCache.set(region, lutImage, explorationEnabled, { image, cellImage });
+      regionRenderCache.set(region, lutImage, renderExploration, { image, cellImage });
     }
     return bundle;
   }, [region, theme, lutImage, explorationEnabled, regionRenderCache]);

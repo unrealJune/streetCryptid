@@ -17,7 +17,7 @@ const dataZooms = { min: 0, max: 14 } as const;
 const baseRequest: RegionRequest = {
   camera,
   viewport,
-  exploration: createExplorationIndex(grid, []),
+  exploration: createExplorationIndex([]),
   explorationVersion: 0,
 };
 
@@ -97,12 +97,13 @@ describe('MapEngine.buildRegion', () => {
     expect(source.requests.sort()).toEqual(expected.sort());
   });
 
-  it('builds the cell field at the spec ladder rung and passes places through', async () => {
+  it('builds the fixed-resolution cell field and passes places through', async () => {
     const source = new FakeSource();
     source.geometryFor = () => ({
       ...EMPTY_GEOMETRY,
       places: [{ name: 'Regionville', world: camera.center, kind: 'suburb' }],
     });
+
     const engine = makeEngine(source);
 
     const region = await engine.buildRegion(baseRequest);
@@ -112,6 +113,19 @@ describe('MapEngine.buildRegion', () => {
     expect(region!.cellField.cells.length).toBeGreaterThan(0);
     expect(region!.places.some((p) => p.name === 'Regionville')).toBe(true);
     expect(engine.lastRegion).toBe(region);
+  });
+
+  it('skips cell enumeration below the exploration render threshold', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    const region = await engine.buildRegion({
+      ...baseRequest,
+      camera: { ...camera, zoom: 4 },
+    });
+
+    expect(region?.spec.cellRes).toBeNull();
+    expect(region?.cellField.cells).toEqual([]);
+    expect(region?.timing.cellEnumerateMs).toBe(0);
   });
 
   it('reports source, merge, cell-field, and total build timings', async () => {
@@ -168,7 +182,7 @@ describe('MapEngine.buildRegion', () => {
   it('rebuilds the cell field when exploration advances', async () => {
     const source = new FakeSource();
     const engine = makeEngine(source);
-    const exploration = createExplorationIndex(grid, []);
+    const exploration = createExplorationIndex([]);
     const first = await engine.buildRegion({ ...baseRequest, exploration });
     exploration.add(grid.cellAt(camera.center, H3_DISPLAY_RES));
     const second = await engine.buildRegion({
@@ -188,7 +202,7 @@ describe('MapEngine.buildRegion', () => {
     const home = grid.cellAt(camera.center, H3_DISPLAY_RES);
     const region = await engine.buildRegion({
       ...baseRequest,
-      exploration: createExplorationIndex(grid, [home]),
+      exploration: createExplorationIndex([home]),
     });
 
     const cell = region!.cellField.cells.find((c) => c.cell === home);
@@ -256,7 +270,7 @@ describe('MapEngine.buildRegion', () => {
     const first = engine.buildRegion(baseRequest);
     const updated = engine.buildRegion({
       ...baseRequest,
-      exploration: createExplorationIndex(grid, [home]),
+      exploration: createExplorationIndex([home]),
       explorationVersion: 1,
     });
     source.resolveAll();

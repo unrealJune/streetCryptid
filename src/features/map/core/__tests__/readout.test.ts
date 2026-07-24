@@ -39,37 +39,34 @@ describe('coverageInView', () => {
   const grid = createH3Grid(realH3());
   const camera: CameraState = { center: latLonToWorld({ lat: 47.62, lon: -122.32 }), zoom: 15 };
   const viewport: Viewport = { width: 200, height: 200 };
-  // zoom 15 sits at the display res, so the readout enumerates res-10 cells.
+  // Zoom 15 renders the fixed-resolution occupancy cells.
   const visibleCells = grid.cellsInRect(
     visibleWorldRect(camera, viewport),
-    resForZoom(camera.zoom)
+    resForZoom(camera.zoom)!
   );
 
   it('is 0 when nothing is explored', () => {
-    const index = createExplorationIndex(grid, []);
+    const index = createExplorationIndex([]);
     expect(coverageInView(index, grid, camera, viewport)).toBe(0);
   });
 
   it('is 1 when every visible sector is explored', () => {
-    const index = createExplorationIndex(grid, visibleCells);
+    const index = createExplorationIndex(visibleCells);
     expect(coverageInView(index, grid, camera, viewport)).toBe(1);
   });
 
   it('is a proper fraction when partially explored', () => {
     expect(visibleCells.length).toBeGreaterThan(1);
-    const index = createExplorationIndex(grid, [visibleCells[0]]);
+    const index = createExplorationIndex([visibleCells[0]]);
     const cov = coverageInView(index, grid, camera, viewport);
     expect(cov).toBeGreaterThan(0);
     expect(cov).toBeLessThan(1);
     expect(cov).toBeCloseTo(1 / visibleCells.length, 10);
   });
 
-  it('aggregates through the ladder when zoomed out', () => {
-    // z12 → a coarser rung: the same explored res-10 cells shade parents partially.
+  it('disables coverage when zoomed out below the render threshold', () => {
     const zoomedOut: CameraState = { ...camera, zoom: 12 };
-    const index = createExplorationIndex(grid, visibleCells);
-    const cov = coverageInView(index, grid, zoomedOut, viewport);
-    expect(cov).toBeGreaterThan(0);
-    expect(cov).toBeLessThan(1);
+    const index = createExplorationIndex(visibleCells);
+    expect(coverageInView(index, grid, zoomedOut, viewport)).toBe(0);
   });
 });

@@ -28,9 +28,8 @@ export function nearestPlaceName(places: readonly Place[], center: WorldPoint): 
 }
 
 /**
- * Explored fraction (0–1) of the cells currently in view, evaluated at the
- * zoom's ladder rung — so the island reads per-sector at street zoom and
- * "explored share of the visible world" at globe zoom.
+ * Explored fraction (0–1) of fixed-resolution cells currently in view.
+ * Returns zero while the exploration layer is disabled at low zoom.
  */
 export function coverageInView(
   exploration: ExplorationIndex,
@@ -38,7 +37,9 @@ export function coverageInView(
   camera: CameraState,
   viewport: Viewport
 ): number {
-  const cells = grid.cellsInRect(visibleWorldRect(camera, viewport), resForZoom(camera.zoom));
+  const resolution = resForZoom(camera.zoom);
+  if (resolution === null) return 0;
+  const cells = grid.cellsInRect(visibleWorldRect(camera, viewport), resolution);
   if (!cells.length) return 0;
   let total = 0;
   for (const cell of cells) total += exploration.fractionAt(cell);
