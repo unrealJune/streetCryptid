@@ -143,19 +143,29 @@ Build profiles live in `eas.json`: `development` (dev client), `preview`
 
 ### PR standalone Release builds
 
-PRs authored by `Cobular` or `unrealJune` from branches in this repository build installable iOS
-and Android internal Release apps on ephemeral GitHub-hosted runners. The jobs run
-`eas build --local` with the production-internal profiles, so the Hermes bundle is embedded and
-the installed apps run without Metro. They upload only the finished IPA/APK with `eas upload` and
-post EAS install pages (including QR codes) on the PR without consuming EAS cloud-build quota.
+PRs authored by `Cobular`, `ava-ankenbrandt`, or `unrealJune` from branches in this repository
+build installable iOS and Android internal Release apps on ephemeral GitHub-hosted runners.
+Copilot coding agent PRs are also eligible only when the author is exactly
+`copilot-swe-agent[bot]`, the branch is in this repository, and its name starts with `copilot/`.
+The jobs run `eas build --local` with the production-internal profiles, so the Hermes bundle is
+embedded and the installed apps run without Metro. They upload only the finished IPA/APK with
+`eas upload` and post EAS install pages (including QR codes) on the PR without consuming EAS
+cloud-build quota.
 
 The build jobs use the `development-builds` GitHub environment. A repository administrator must
-create that environment, then add a Developer-role Expo robot-user token as its `EXPO_TOKEN` secret
-before enabling the workflow:
+configure that environment before enabling the workflow:
 
-```bash
-gh secret set EXPO_TOKEN --env development-builds
-```
+1. In **Settings → Environments → development-builds**, add maintainers as required reviewers and
+   enable **Prevent self-review**. Do not allow administrators to bypass the protection rule.
+2. Add a Developer-role Expo robot-user token named `EXPO_TOKEN` as an environment secret. Do not
+   duplicate it as a repository or organization secret.
+3. Approve each pending workflow run separately, including every run created after new commits.
+   Do not substitute a persistent PR label for this per-run approval.
+
+Before approving, verify that the pending deployment's commit SHA is the exact revision reviewed.
+Pay particular attention to changes in GitHub Actions workflows, package lifecycle scripts, Expo
+configuration hooks, and native build scripts: after approval, that revision executes with access
+to the environment secret and remote signing credentials.
 
 Remote EAS signing credentials and the iOS ad hoc provisioning profile must already exist. CI
 freezes those credentials rather than modifying them; register new iPhones and refresh the profile

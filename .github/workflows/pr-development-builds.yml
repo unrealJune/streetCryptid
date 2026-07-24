@@ -27,7 +27,9 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         (github.event.pull_request.user.login == 'Cobular' ||
           github.event.pull_request.user.login == 'ava-ankenbrandt' ||
-          github.event.pull_request.user.login == 'unrealJune')
+          github.event.pull_request.user.login == 'unrealJune' ||
+          (github.event.pull_request.user.login == 'copilot-swe-agent[bot]' &&
+            startsWith(github.event.pull_request.head.ref, 'copilot/')))
       }}
     runs-on: macos-latest
     timeout-minutes: 90
@@ -159,7 +161,9 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         (github.event.pull_request.user.login == 'Cobular' ||
           github.event.pull_request.user.login == 'ava-ankenbrandt' ||
-          github.event.pull_request.user.login == 'unrealJune')
+          github.event.pull_request.user.login == 'unrealJune' ||
+          (github.event.pull_request.user.login == 'copilot-swe-agent[bot]' &&
+            startsWith(github.event.pull_request.head.ref, 'copilot/')))
       }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -303,7 +307,9 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         (github.event.pull_request.user.login == 'Cobular' ||
           github.event.pull_request.user.login == 'ava-ankenbrandt' ||
-          github.event.pull_request.user.login == 'unrealJune')
+          github.event.pull_request.user.login == 'unrealJune' ||
+          (github.event.pull_request.user.login == 'copilot-swe-agent[bot]' &&
+            startsWith(github.event.pull_request.head.ref, 'copilot/')))
       }}
     needs:
       - build_ios
