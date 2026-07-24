@@ -147,6 +147,8 @@ PRs authored by `Cobular`, `ava-ankenbrandt`, or `unrealJune` from branches in t
 build installable iOS and Android internal Release apps on ephemeral GitHub-hosted runners.
 Copilot coding agent PRs are also eligible only when the author is exactly
 `copilot-swe-agent[bot]`, the branch is in this repository, and its name starts with `copilot/`.
+Copilot generates the remainder of that branch name, so it is intentionally not allow-listed; the
+exact bot identity and same-repository check are the security boundaries.
 The jobs run `eas build --local` with the production-internal profiles, so the Hermes bundle is
 embedded and the installed apps run without Metro. They upload only the finished IPA/APK with
 `eas upload` and post EAS install pages (including QR codes) on the PR without consuming EAS
