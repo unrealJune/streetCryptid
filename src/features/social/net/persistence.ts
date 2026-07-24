@@ -274,6 +274,19 @@ export async function saveLocationDisclosureChoice(
 }
 
 const RELAY_ONLY_KEY = 'sc.social.relayOnly';
+const TRANSPORT_CONFIG_KEY = 'sc.social.transportConfig';
+
+export interface TransportPreferences {
+  relay: boolean;
+  ip: boolean;
+  ble: boolean;
+}
+
+export const DEFAULT_TRANSPORT_PREFERENCES: TransportPreferences = {
+  relay: true,
+  ip: true,
+  ble: true,
+};
 
 /**
  * Whether the user forced relay-only transport (no BLE / Wi-Fi Aware / direct / LAN). Defaults to
@@ -286,4 +299,35 @@ export async function loadRelayOnly(kv: PersistentKV): Promise<boolean> {
 /** Persist the force-relay-only choice. */
 export async function saveRelayOnly(kv: PersistentKV, relayOnly: boolean): Promise<void> {
   await kv.set(RELAY_ONLY_KEY, relayOnly ? '1' : '0');
+}
+
+/** Restore debug transport restrictions, migrating the old relay-only preference when present. */
+export async function loadTransportPreferences(
+  kv: PersistentKV
+): Promise<TransportPreferences> {
+  const raw = await kv.get(TRANSPORT_CONFIG_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as Partial<TransportPreferences>;
+      if (
+        typeof parsed.relay === 'boolean' &&
+        typeof parsed.ip === 'boolean' &&
+        typeof parsed.ble === 'boolean'
+      ) {
+        return parsed as TransportPreferences;
+      }
+    } catch {
+      // Fall through to safe defaults.
+    }
+  }
+  if (await loadRelayOnly(kv)) return { relay: true, ip: false, ble: false };
+  return { ...DEFAULT_TRANSPORT_PREFERENCES };
+}
+
+/** Persist the endpoint transport set used for the next native bind. */
+export async function saveTransportPreferences(
+  kv: PersistentKV,
+  preferences: TransportPreferences
+): Promise<void> {
+  await kv.set(TRANSPORT_CONFIG_KEY, JSON.stringify(preferences));
 }

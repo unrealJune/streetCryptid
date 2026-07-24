@@ -243,7 +243,13 @@ async fn run_pair(
     let (node, mut state) = create_node(existing.as_ref(), pair_replica)?;
     save_state(&state_path, &state)?;
     configure_node_telemetry(&node, config);
-    node.start(config.relay_urls.clone(), config.relay_token.clone())
+    node.start(
+        config.relay_urls.clone(),
+        config.relay_token.clone(),
+        true,
+        true,
+        true,
+    )
         .await
         .context("starting the pairing node")?;
     node.publish_profile(
@@ -376,7 +382,13 @@ async fn run_watch(
         let watch_replica = watch_root.join(format!("attempt-{}-{sync_attempt}", now_ms()));
         let (node, _) = create_node(Some(&state), watch_replica.clone())?;
         configure_node_telemetry(&node, config);
-        node.start(config.relay_urls.clone(), config.relay_token.clone())
+        node.start(
+            config.relay_urls.clone(),
+            config.relay_token.clone(),
+            true,
+            true,
+            true,
+        )
             .await
             .context("starting the stash-only node")?;
 

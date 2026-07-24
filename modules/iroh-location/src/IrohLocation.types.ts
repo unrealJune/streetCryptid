@@ -26,6 +26,13 @@ export interface NodeKeys {
   recvPublic: string;
 }
 
+/** Native endpoint transports enabled for a debug session. */
+export interface TransportConfig {
+  relay: boolean;
+  ip: boolean;
+  ble: boolean;
+}
+
 export interface OnFixEvent {
   author: string;
   seq: number;
@@ -292,7 +299,7 @@ export interface IrohLocationApi {
    */
   createNode(identitySecretHex: string | null, recvSecretHex: string | null): Promise<NodeKeys>;
   /** Bind the iroh endpoint + spawn the gossip router. Idempotent. */
-  start(): Promise<void>;
+  start(config?: TransportConfig): Promise<void>;
   /** Drop subscriptions and release the native endpoint/router. */
   shutdown(): Promise<void>;
   /** A shareable endpoint ticket (dialing info) for the contact card / bootstrap. */

@@ -14,12 +14,12 @@ import { AuthorIdRow } from '../components/author-id-row';
 import { DebugLocationControls } from '../components/debug-location-controls';
 import { EventLogPanel } from '../components/event-log-panel';
 import { LocationAccessRow } from '../components/location-access-row';
-import { RelayOnlyRow } from '../components/relay-only-row';
+import { TransportControls } from '../components/transport-controls';
 import { TransportDiagnostic } from '../components/transport-diagnostic';
 
 /**
  * The centralized Settings tab: offline-delivery (trail stash) opt-in, a live transport
- * diagnostic covering every path the node can use, and the force-relay-only switch. Everything
+ * diagnostic covering every path the node can use, and per-transport debug switches. Everything
  * degrades honestly when the native module is absent (web / Expo Go): the diagnostic shows
  * "unavailable"/"n/a" rows and the toggles persist as preferences.
  */
@@ -35,7 +35,7 @@ export default function SettingsScreen() {
     refreshPairing,
     refreshTransportDiagnostics,
     setStashOptIn,
-    setRelayOnly,
+    setTransportEnabled,
     disclosureStatus,
     acknowledgeLocationDisclosure,
     forceLocationPush,
@@ -51,7 +51,7 @@ export default function SettingsScreen() {
   );
 
   const stash = snapshot?.stash ?? { available: false, optedIn: false };
-  const transports = snapshot?.transports ?? { relayOnly: false, relayOnlyEnforced: false };
+  const transports = snapshot?.transports ?? { relay: true, ip: true, ble: true };
 
   return (
     <ScrollView
@@ -79,6 +79,11 @@ export default function SettingsScreen() {
           report={transportReport}
           activeColor={chrome.green}
           availableColor={chrome.amber}
+        />
+        <TransportControls
+          accent={chrome.green}
+          preferences={transports}
+          onToggle={(transport, enabled) => void setTransportEnabled(transport, enabled)}
         />
       </View>
 
@@ -116,12 +121,6 @@ export default function SettingsScreen() {
         <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
           PRIVACY
         </ThemedText>
-        <RelayOnlyRow
-          accent={chrome.amber}
-          relayOnly={transports.relayOnly}
-          enforced={transports.relayOnlyEnforced}
-          onToggle={(relayOnly) => void setRelayOnly(relayOnly)}
-        />
         <LocationAccessRow
           accent={chrome.amber}
           status={disclosureStatus}

@@ -21,7 +21,13 @@ const SYNC_TIMEOUT_SECS: u64 = 10;
 
 async fn start_node() -> Arc<LocationNode> {
     let node = LocationNode::new(None, None).expect("construct node");
-    node.start(vec!["https://127.0.0.1:1".into()], "test-token".into())
+    node.start(
+        vec!["https://127.0.0.1:1".into()],
+        "test-token".into(),
+        true,
+        true,
+        true,
+    )
         .await
         .expect("start node");
     node

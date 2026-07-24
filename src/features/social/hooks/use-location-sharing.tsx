@@ -23,6 +23,7 @@ import {
   createPersistentKV,
   loadLocationDisclosureChoice,
   saveLocationDisclosureChoice,
+  type TransportPreferences,
 } from '@/features/social/net/persistence';
 import { ExpoLocationProvider } from '@/features/social/net/expo-location-provider';
 import { buildTransportReport, type TransportReport } from '@/features/social/net/transports';
@@ -71,8 +72,11 @@ interface LocationSharingContextValue {
   retryLocation(): Promise<void>;
   /** Opt in/out of offline delivery via the trail stash. */
   setStashOptIn(optedIn: boolean): Promise<void>;
-  /** Force (or unforce) relay-only transport. */
-  setRelayOnly(relayOnly: boolean): Promise<void>;
+  /** Enable or disable one native endpoint transport. */
+  setTransportEnabled(
+    transport: keyof TransportPreferences,
+    enabled: boolean
+  ): Promise<void>;
   /** Capture and publish a fresh GPS fix immediately, bypassing normal sampling. */
   forceLocationPush(trigger?: 'manual' | 'scheduled'): Promise<number>;
   /** Honest, live diagnostic of every transport (for the Settings tab). */
@@ -446,10 +450,10 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     },
     [run]
   );
-  const setRelayOnly = useCallback(
-    (relayOnly: boolean) => {
+  const setTransportEnabled = useCallback(
+    (transport: keyof TransportPreferences, enabled: boolean) => {
       setServiceError(null);
-      return run((service) => service.setRelayOnly(relayOnly));
+      return run((service) => service.setTransportEnabled(transport, enabled));
     },
     [run]
   );
@@ -536,10 +540,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
         // Wi-Fi Aware / Multipeer is Phase 3; null renders an honest "planned" row.
         nearby: null,
         stash: snapshot?.stash ?? { available: false, optedIn: false },
-        relayOnly: {
-          enabled: snapshot?.transports.relayOnly ?? false,
-          enforced: snapshot?.transports.relayOnlyEnforced ?? false,
-        },
+        transportEnabled: snapshot?.transports ?? { relay: true, ip: true, ble: true },
         friends: snapshot?.friends ?? [],
         background: {
           sharing: snapshot?.backgroundSharing ?? false,
@@ -576,7 +577,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       removeFriend,
       retryLocation,
       setStashOptIn,
-      setRelayOnly,
+      setTransportEnabled,
       forceLocationPush,
       transportReport,
       acknowledgeDiscoveredFriend,
@@ -607,7 +608,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       removeFriend,
       retryLocation,
       setStashOptIn,
-      setRelayOnly,
+      setTransportEnabled,
       forceLocationPush,
       transportReport,
       acknowledgeDiscoveredFriend,

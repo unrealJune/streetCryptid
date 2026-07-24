@@ -378,9 +378,9 @@ class IrohLocationModule : Module() {
       }
 
     AsyncFunction("start") Coroutine
-      { relayUrls: List<String>, relayAuthToken: String ->
-        acquireMulticastLock()
-        node?.start(relayUrls, relayAuthToken)
+      { relayUrls: List<String>, relayAuthToken: String, relayEnabled: Boolean, ipEnabled: Boolean, bleEnabled: Boolean ->
+        if (ipEnabled) acquireMulticastLock()
+        node?.start(relayUrls, relayAuthToken, relayEnabled, ipEnabled, bleEnabled)
         registerNetworkCallback()
         Unit
       }

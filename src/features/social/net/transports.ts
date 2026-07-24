@@ -6,6 +6,7 @@ import type {
   TransportAddressDiagnostic,
   TransportDiagnostics,
 } from 'iroh-location';
+import type { TransportPreferences } from './persistence';
 
 export type TransportStatus =
   'active' | 'available' | 'inactive' | 'unavailable' | 'n/a' | 'planned';
@@ -62,12 +63,12 @@ export interface TransportInputs {
   pairingSessions: PairStateRecord[];
   nearby: NearbyCapabilities | null;
   stash: { available: boolean; optedIn: boolean };
-  relayOnly: { enabled: boolean; enforced: boolean };
+  transportEnabled: TransportPreferences;
   friends: TransportFriend[];
   background: { sharing: boolean; access: string };
 }
 
-const RADIO_OFF_BY_RELAY_ONLY = 'Disabled while relay-only is on.';
+const TRANSPORT_DISABLED = 'Disabled by the transport debug controls.';
 
 function yesNo(value: boolean): string {
   return value ? 'Yes' : 'No';
@@ -157,25 +158,20 @@ function nodeItems(input: TransportInputs): TransportDetailItem[] {
       label: 'Background sharing',
       value: `${input.background.sharing ? 'Running' : 'Stopped'} · ${input.background.access}`,
     },
-    {
-      label: 'Relay-only preference',
-      value: input.relayOnly.enabled
-        ? input.relayOnly.enforced
-          ? 'Enabled and enforced'
-          : 'Enabled, not enforced by native endpoint'
-        : 'Off',
-    },
+    { label: 'Relay transport', value: input.transportEnabled.relay ? 'Enabled' : 'Disabled' },
+    { label: 'IP transport', value: input.transportEnabled.ip ? 'Enabled' : 'Disabled' },
+    { label: 'BLE transport', value: input.transportEnabled.ble ? 'Enabled' : 'Disabled' },
   ];
 }
 
 function radioStatus(
   available: boolean,
   active: boolean,
-  relayOnly: boolean,
+  enabled: boolean,
   nodeReady: boolean
 ): TransportStatus {
+  if (!enabled) return 'inactive';
   if (!available) return 'unavailable';
-  if (relayOnly) return 'inactive';
   if (active) return 'active';
   return nodeReady ? 'available' : 'inactive';
 }
@@ -183,11 +179,6 @@ function radioStatus(
 export function buildTransportReport(input: TransportInputs): TransportReport {
   const web = input.platformOS === 'web';
   const native = input.nativeAvailable && !web;
-  const relayOnly = input.relayOnly.enabled && input.relayOnly.enforced;
-  const relayOnlyPending = input.relayOnly.enabled && !input.relayOnly.enforced;
-  const pendingRelayOnlySuffix = relayOnlyPending
-    ? ' Relay-only is requested but not enforced by the native endpoint.'
-    : '';
   const peers = input.diagnostics?.peers ?? [];
   const friends = new Map(input.friends.map((friend) => [friend.endpointId, friend]));
 
@@ -207,14 +198,18 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
   rows.push({
     id: 'relay',
     label: 'Relay',
-    status: !relayConfigured
+    status: !input.transportEnabled.relay
+      ? 'inactive'
+      : !relayConfigured
       ? 'unavailable'
       : relayActive
         ? 'active'
         : input.nodeReady
           ? 'available'
           : 'inactive',
-    detail: !relayConfigured
+    detail: !input.transportEnabled.relay
+      ? TRANSPORT_DISABLED
+      : !relayConfigured
       ? 'No authenticated relay is configured.'
       : relayActive
         ? `${relayPaths.filter(({ address }) => address.active).length} active peer relay path${relayPaths.filter(({ address }) => address.active).length === 1 ? '' : 's'}.`
@@ -243,7 +238,7 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
       ? 'n/a'
       : !native
         ? 'unavailable'
-        : relayOnly
+        : !input.transportEnabled.ip
           ? 'inactive'
           : directActive
             ? 'active'
@@ -252,11 +247,11 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
               : 'inactive',
     detail: web
       ? 'Not available in the browser build.'
-      : relayOnly
-        ? RADIO_OFF_BY_RELAY_ONLY
+      : !input.transportEnabled.ip
+        ? TRANSPORT_DISABLED
         : directActive
-          ? `${directPaths.filter(({ address }) => address.active).length} active public IP path${directPaths.filter(({ address }) => address.active).length === 1 ? '' : 's'}.${pendingRelayOnlySuffix}`
-          : `Ready for hole-punched peer-to-peer traffic; no active public IP path observed.${pendingRelayOnlySuffix}`,
+          ? `${directPaths.filter(({ address }) => address.active).length} active public IP path${directPaths.filter(({ address }) => address.active).length === 1 ? '' : 's'}.`
+          : 'Ready for hole-punched peer-to-peer traffic; no active public IP path observed.',
     groups: [
       { label: 'NODE', items: nodeItems(input) },
       {
@@ -286,7 +281,7 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
       ? 'n/a'
       : !native
         ? 'unavailable'
-        : relayOnly
+        : !input.transportEnabled.ip
           ? 'inactive'
           : lanActive
             ? 'active'
@@ -295,11 +290,11 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
               : 'inactive',
     detail: web
       ? 'Not available in the browser build.'
-      : relayOnly
-        ? RADIO_OFF_BY_RELAY_ONLY
+      : !input.transportEnabled.ip
+        ? TRANSPORT_DISABLED
         : lanActive
-          ? `${lanPaths.filter(({ address }) => address.active).length} active same-network path${lanPaths.filter(({ address }) => address.active).length === 1 ? '' : 's'}.${pendingRelayOnlySuffix}`
-          : `mDNS and ticket-seeded LAN dialing are ready; no active LAN path observed.${pendingRelayOnlySuffix}`,
+          ? `${lanPaths.filter(({ address }) => address.active).length} active same-network path${lanPaths.filter(({ address }) => address.active).length === 1 ? '' : 's'}.`
+          : 'mDNS and ticket-seeded LAN dialing are ready; no active LAN path observed.',
     groups: [
       {
         label: 'OS SUPPORT',
@@ -330,16 +325,18 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
   rows.push({
     id: 'ble',
     label: 'BLE mesh',
-    status: web ? 'n/a' : radioStatus(bleAvailable, bleActive, relayOnly, input.nodeReady),
+    status: web
+      ? 'n/a'
+      : radioStatus(bleAvailable, bleActive, input.transportEnabled.ble, input.nodeReady),
     detail: web
       ? 'Not available in the browser build.'
       : !bleAvailable
         ? 'No BLE transport is attached to this endpoint.'
-        : relayOnly
-          ? RADIO_OFF_BY_RELAY_ONLY
+        : !input.transportEnabled.ble
+          ? TRANSPORT_DISABLED
           : bleActive
-            ? `${Math.max(connectedBlePeers.length, customPaths.filter(({ address }) => address.active).length)} active BLE peer${Math.max(connectedBlePeers.length, customPaths.filter(({ address }) => address.active).length) === 1 ? '' : 's'}.${pendingRelayOnlySuffix}`
-            : `Scanning; ${input.blePeers.length} peer${input.blePeers.length === 1 ? '' : 's'} retained.${pendingRelayOnlySuffix}`,
+            ? `${Math.max(connectedBlePeers.length, customPaths.filter(({ address }) => address.active).length)} active BLE peer${Math.max(connectedBlePeers.length, customPaths.filter(({ address }) => address.active).length) === 1 ? '' : 's'}.`
+            : `Scanning; ${input.blePeers.length} peer${input.blePeers.length === 1 ? '' : 's'} retained.`,
     groups: [
       {
         label: 'CAPABILITIES',
@@ -393,7 +390,7 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
       ? 'n/a'
       : input.nearby === null
         ? 'planned'
-        : radioStatus(nearbyAvailable, input.nearby.peerCount > 0, relayOnly, input.nodeReady),
+        : radioStatus(nearbyAvailable, input.nearby.peerCount > 0, true, input.nodeReady),
     detail: web
       ? 'Not available in the browser build.'
       : input.nearby === null
