@@ -17,14 +17,16 @@ const policy = createSamplingPolicy();
 const fullBattery: BatteryState = { level: 1, charging: false, lowPower: false };
 
 /** An EngineState carrying the decision the policy makes for `motion`. */
-function stateFor(motion: MotionState): EngineState {
+function stateFor(motion: MotionState, overrides: Partial<EngineState> = {}): EngineState {
   return {
     status: 'running',
     lastFixAt: 0,
+    lastFix: null,
     decision: policy.decide({ motion, battery: fullBattery }),
     motion,
     pending: 0,
     error: null,
+    ...overrides,
   };
 }
 
@@ -35,6 +37,7 @@ function cfgFor(motion: MotionState): BackgroundStartConfig {
 function fakeEngine() {
   const listeners = new Set<(s: EngineState) => void>();
   let reevaluateCount = 0;
+  const motions: MotionState[] = [];
   return {
     onState(cb: (s: EngineState) => void): () => void {
       listeners.add(cb);
@@ -43,23 +46,40 @@ function fakeEngine() {
     async reevaluate(): Promise<void> {
       reevaluateCount += 1;
     },
+    async setMotion(motion: MotionState): Promise<void> {
+      motions.push(motion);
+    },
     emit(state: EngineState): void {
       listeners.forEach((l) => l(state));
     },
     get reevaluateCount(): number {
       return reevaluateCount;
     },
-  } satisfies CadenceEngine & { emit(s: EngineState): void; reevaluateCount: number };
+    get motions(): MotionState[] {
+      return motions;
+    },
+  } satisfies CadenceEngine & {
+    emit(s: EngineState): void;
+    reevaluateCount: number;
+    motions: MotionState[];
+  };
 }
 
 function fakeProvider() {
   const calls: BackgroundStartConfig[] = [];
   let resolvers: (() => void)[] = [];
+  let stops = 0;
   return {
     calls,
     async reprogram(cfg: BackgroundStartConfig): Promise<void> {
       calls.push(cfg);
       await new Promise<void>((resolve) => resolvers.push(resolve));
+    },
+    async stopBackground(): Promise<void> {
+      stops += 1;
+    },
+    get stops(): number {
+      return stops;
     },
     /** Resolve the oldest in-flight reprogram. */
     release(): void {
@@ -70,6 +90,20 @@ function fakeProvider() {
       const pending = resolvers;
       resolvers = [];
       pending.forEach((r) => r());
+    },
+  };
+}
+
+/** Records anchor arm/disarm calls so transition ORDER can be asserted, not just counts. */
+function fakeAnchor() {
+  const events: string[] = [];
+  return {
+    events,
+    async arm(lat: number, lon: number, radiusM: number): Promise<void> {
+      events.push(`arm:${lat},${lon},${radiusM}`);
+    },
+    async disarm(): Promise<void> {
+      events.push('disarm');
     },
   };
 }
@@ -281,5 +315,174 @@ describe('cadence controller', () => {
 
     expect(provider.calls).toHaveLength(0);
     expect(engine.reevaluateCount).toBe(0);
+  });
+});
+
+describe('stationary anchoring', () => {
+  /** A policy with anchoring ON — the default config ships it off until device-validated. */
+  const anchoring = createSamplingPolicy({ anchorWhenStationary: true, anchorRadiusM: 150 });
+  const FIX = { lat: 47.62, lon: -122.32, accuracyM: 10, headingDeg: 0, ts: 1 };
+
+  function anchoredState(motion: MotionState, lastFix = FIX): EngineState {
+    return {
+      status: 'running',
+      lastFixAt: 0,
+      lastFix,
+      decision: anchoring.decide({ motion, battery: fullBattery }),
+      motion,
+      pending: 0,
+      error: null,
+    };
+  }
+
+  it('arms the geofence BEFORE stopping GPS, so there is no blind window', async () => {
+    const engine = fakeEngine();
+    const provider = fakeProvider();
+    const anchor = fakeAnchor();
+    const stop = createCadenceController({
+      engine,
+      provider,
+      battery: fakeBattery(),
+      notification: NOTIF,
+      anchor,
+    }).start();
+
+    engine.emit(anchoredState('stationary'));
+    await tick();
+
+    expect(anchor.events).toEqual(['arm:47.62,-122.32,150']);
+    expect(provider.stops).toBe(1);
+    await stop();
+  });
+
+  it('restores GPS BEFORE disarming, so a failed disarm never leaves us blind', async () => {
+    const engine = fakeEngine();
+    const provider = fakeProvider();
+    const anchor = fakeAnchor();
+    const stop = createCadenceController({
+      engine,
+      provider,
+      battery: fakeBattery(),
+      notification: NOTIF,
+      anchor,
+    }).start();
+
+    engine.emit(anchoredState('stationary'));
+    await tick();
+    engine.emit(anchoredState('walking'));
+    provider.releaseAll();
+    await tick();
+
+    expect(provider.calls).toHaveLength(1);
+    // arm (going anchored) → disarm only AFTER the reprogram that restored continuous sampling.
+    expect(anchor.events).toEqual(['arm:47.62,-122.32,150', 'disarm']);
+    await stop();
+  });
+
+  it('does not anchor without a fix to anchor at', async () => {
+    const engine = fakeEngine();
+    const provider = fakeProvider();
+    const anchor = fakeAnchor();
+    const stop = createCadenceController({
+      engine,
+      provider,
+      battery: fakeBattery(),
+      notification: NOTIF,
+      anchor,
+    }).start();
+
+    engine.emit(anchoredState('stationary', null as unknown as typeof FIX));
+    provider.releaseAll();
+    await tick();
+
+    expect(anchor.events).toEqual([]);
+    expect(provider.calls).toHaveLength(1);
+    await stop();
+  });
+
+  it('ignores anchor drift under tolerance but re-arms on a real move', async () => {
+    const engine = fakeEngine();
+    const provider = fakeProvider();
+    const anchor = fakeAnchor();
+    const stop = createCadenceController({
+      engine,
+      provider,
+      battery: fakeBattery(),
+      notification: NOTIF,
+      anchor,
+    }).start();
+
+    engine.emit(anchoredState('stationary'));
+    await tick();
+    // ~10 m of indoor jitter — must NOT re-arm.
+    engine.emit(anchoredState('stationary', { ...FIX, lat: 47.62009 }));
+    await tick();
+    expect(anchor.events).toHaveLength(1);
+
+    // ~500 m away — a genuinely different anchor.
+    engine.emit(anchoredState('stationary', { ...FIX, lat: 47.6245 }));
+    await tick();
+    expect(anchor.events).toHaveLength(2);
+    await stop();
+  });
+
+  it('anchor exit asserts movement rather than re-reading stationary', async () => {
+    const engine = fakeEngine();
+    const controller = createCadenceController({
+      engine,
+      provider: fakeProvider(),
+      battery: fakeBattery(),
+      notification: NOTIF,
+      anchor: fakeAnchor(),
+    });
+    const stop = controller.start();
+
+    await controller.onAnchorExit();
+
+    // setMotion, NOT reevaluate: reevaluate would return `stationary` again and re-anchor us.
+    expect(engine.motions).toEqual(['walking']);
+    expect(engine.reevaluateCount).toBe(0);
+    await stop();
+  });
+
+  it('disarms the geofence when sharing stops', async () => {
+    const engine = fakeEngine();
+    const anchor = fakeAnchor();
+    const stop = createCadenceController({
+      engine,
+      provider: fakeProvider(),
+      battery: fakeBattery(),
+      notification: NOTIF,
+      anchor,
+    }).start();
+
+    engine.emit(anchoredState('stationary'));
+    await tick();
+    await stop();
+
+    expect(anchor.events).toEqual(['arm:47.62,-122.32,150', 'disarm']);
+  });
+
+  it('never anchors while live tracking, even when stationary', async () => {
+    const engine = fakeEngine();
+    const anchor = fakeAnchor();
+    const provider = fakeProvider();
+    const stop = createCadenceController({
+      engine,
+      provider,
+      battery: fakeBattery(),
+      notification: NOTIF,
+      anchor,
+    }).start();
+
+    engine.emit({
+      ...anchoredState('stationary'),
+      decision: anchoring.decide({ motion: 'stationary', battery: fullBattery, live: true }),
+    });
+    provider.releaseAll();
+    await tick();
+
+    expect(anchor.events).toEqual([]);
+    await stop();
   });
 });

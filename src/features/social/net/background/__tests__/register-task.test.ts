@@ -2,9 +2,11 @@ import type { SpanContext } from '@/features/dev/telemetry';
 import type { LocationFix } from '../../../core/types';
 
 const mockDefineBackgroundLocationTask = jest.fn();
+const mockDefineAnchorGeofenceTask = jest.fn();
 
 jest.mock('../background-task', () => ({
   defineBackgroundLocationTask: mockDefineBackgroundLocationTask,
+  defineAnchorGeofenceTask: mockDefineAnchorGeofenceTask,
   isBackgroundLocationAvailable: () => true,
 }));
 
@@ -26,6 +28,7 @@ jest.mock('../../persistence', () => {
 describe('background task registration', () => {
   beforeEach(() => {
     mockDefineBackgroundLocationTask.mockClear();
+    mockDefineAnchorGeofenceTask.mockClear();
   });
 
   it('defines the Expo location task as soon as the module loads', () => {
@@ -35,6 +38,17 @@ describe('background task registration', () => {
     });
 
     expect(mockDefineBackgroundLocationTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('defines the stationary-anchor geofence task at module load too', () => {
+    // The OS can relaunch us headless to deliver a geofence exit, so the handler must exist before
+    // React mounts — same contract as the location task.
+    jest.isolateModules(() => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports -- module-load side effect under test
+      require('../register-task');
+    });
+
+    expect(mockDefineAnchorGeofenceTask).toHaveBeenCalledTimes(1);
   });
 
   it('forwards the wake span context to the active fix handler', async () => {

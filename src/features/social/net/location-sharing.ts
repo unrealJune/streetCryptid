@@ -338,6 +338,9 @@ export class LocationSharingService implements FixPublisher {
   private bgBackfillHandlerStop: (() => void) | null = null;
   private bgLifecycleStop: (() => void) | null = null;
   private bgCadenceStop: (() => Promise<void>) | null = null;
+  private bgAnchorHandlerStop: (() => void) | null = null;
+  private bgMotionStop: (() => void) | null = null;
+  private bgMotion: { stop(): void } | null = null;
   /** Auto-revert timer for a bounded live-tracking window; null when ambient. */
   private liveTrackingTimer: ReturnType<typeof setTimeout> | null = null;
   private backgroundSharing = false;
@@ -1329,9 +1332,15 @@ export class LocationSharingService implements FixPublisher {
         { createSamplingPolicy },
         { BackgroundLocationProvider: Provider },
         { createAppLifecycleController },
-        { backgroundOutbox, registerActiveBackgroundFixHandler, registerActiveBackfillHandler },
+        {
+          backgroundOutbox,
+          registerActiveBackgroundFixHandler,
+          registerActiveBackfillHandler,
+          registerActiveAnchorExitHandler,
+        },
         { createBatterySource },
         { createCadenceController, cfgFromDecision },
+        { createMotionSource },
       ] = await Promise.all([
         import('./background/location-engine'),
         import('./background/sampling-policy'),
@@ -1340,10 +1349,16 @@ export class LocationSharingService implements FixPublisher {
         import('./background/register-task'),
         import('./background/battery-source'),
         import('./background/cadence-controller'),
+        import('./background/motion-source'),
       ]);
 
       const battery = createBatterySource();
       const policy = createSamplingPolicy();
+      // The OS motion coprocessor, when it will talk to us. Best-effort: a denied Motion & Fitness
+      // permission or an older binary just leaves the engine on GPS-derived motion.
+      const motion = createMotionSource();
+      const motionAvailable = await motion.start();
+      this.bgMotion = motion;
       this.engine = createLocationEngine({
         publisher: this,
         outbox: backgroundOutbox,
@@ -1352,6 +1367,17 @@ export class LocationSharingService implements FixPublisher {
         // Real device power (charge level, charging state, Low-Power Mode) drives the policy's
         // battery-aware backoff — without this reader the engine assumes a perpetually full battery.
         battery: () => battery.read(),
+        // Coprocessor motion when fresh, else null ⇒ the engine falls back to GPS-derived motion.
+        // This is what lets the policy see `stationary` without spending a fix to prove it.
+        motion: () => motion.read(),
+      });
+      // A motion-class change must re-evaluate immediately. While stationary the next GPS fix may
+      // be minutes away (or, once anchored, never), so without this the cadence would not tighten
+      // until long after the user started moving.
+      this.bgMotionStop = motion.subscribe(() => {
+        void Promise.resolve(this.engine?.reevaluate()).catch(() => {
+          // best-effort; the next fix or power event re-evaluates anyway
+        });
       });
       await this.engine.start();
       this.bgTaskHandlerStop = registerActiveBackgroundFixHandler(async (fix, parent) => {
@@ -1388,15 +1414,38 @@ export class LocationSharingService implements FixPublisher {
       // After the initial arm, the cadence controller re-programs the OS whenever the decision
       // materially changes (motion class, battery, Low-Power Mode) and re-evaluates on power events —
       // so sampling actually follows the policy instead of staying pinned at the first cadence.
-      this.bgCadenceStop = createCadenceController({
+      // The stationary anchor: idles the location hardware behind a geofence and wakes on exit.
+      // Only offered to the controller when the coprocessor can actually classify motion — without
+      // a non-GPS movement signal we would be relying solely on the geofence to ever come back,
+      // and iOS needs ~200 m of travel to report an exit. Anchoring is additionally gated by
+      // `anchorWhenStationary` (off by default), so this seam stays dormant until that is enabled.
+      const anchor = motionAvailable
+        ? {
+            arm: async (lat: number, lon: number, radiusM: number): Promise<void> => {
+              const Location = await import('expo-location');
+              const { startAnchorGeofence } = await import('./background/background-task');
+              await startAnchorGeofence(Location, lat, lon, radiusM);
+            },
+            disarm: async (): Promise<void> => {
+              const Location = await import('expo-location');
+              const { stopAnchorGeofence } = await import('./background/background-task');
+              await stopAnchorGeofence(Location);
+            },
+          }
+        : undefined;
+
+      const cadence = createCadenceController({
         engine: this.engine,
         provider: this.bgProvider,
         battery,
         notification,
         overrides: config,
         seed: initialCfg,
+        anchor,
         onError: (error) => console.warn('[background-location] cadence re-arm failed', error),
-      }).start();
+      });
+      this.bgCadenceStop = cadence.start();
+      this.bgAnchorHandlerStop = registerActiveAnchorExitHandler(() => cadence.onAnchorExit());
 
       const firstFix = await this.bgProvider.getCurrent();
       this.recordLocalFix(firstFix);
@@ -1454,9 +1503,17 @@ export class LocationSharingService implements FixPublisher {
     this.bgTaskHandlerStop = null;
     this.bgBackfillHandlerStop?.();
     this.bgBackfillHandlerStop = null;
+    this.bgAnchorHandlerStop?.();
+    this.bgAnchorHandlerStop = null;
+    this.bgMotionStop?.();
+    this.bgMotionStop = null;
+    this.bgMotion?.stop();
+    this.bgMotion = null;
     this.bgLifecycleStop?.();
     this.bgLifecycleStop = null;
     try {
+      // Also disarms any stationary anchor, so we never leave a geofence monitoring the user
+      // after sharing stops.
       await stopCadence?.();
     } catch {
       // ignore
@@ -1532,6 +1589,10 @@ export class LocationSharingService implements FixPublisher {
     this.bgTaskHandlerStop = null;
     this.bgBackfillHandlerStop?.();
     this.bgBackfillHandlerStop = null;
+    this.bgAnchorHandlerStop?.();
+    this.bgAnchorHandlerStop = null;
+    this.bgMotionStop?.();
+    this.bgMotionStop = null;
     this.bgLifecycleStop?.();
     this.bgLifecycleStop = null;
     this.fixSub?.remove();

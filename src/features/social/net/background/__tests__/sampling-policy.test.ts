@@ -62,9 +62,14 @@ describe('createSamplingPolicy', () => {
     const policy = createSamplingPolicy();
     const d = policy.decide({ motion: 'stationary', battery: healthy });
     expect(d.timeIntervalMs).toBe(180_000);
-    expect(d.accuracy).toBe('balanced');
+    // A parked phone needs only enough precision to confirm it is still parked. This must NOT equal
+    // `movingAccuracy` — on iOS `timeIntervalMs` never reaches Core Location, so accuracy is the
+    // only lever the stationary branch has left and matching `balanced` made it a total no-op.
+    expect(d.accuracy).toBe('low');
     expect(d.distanceIntervalM).toBe(80);
     expect(d.deferredUpdatesIntervalMs).toBe(180_000);
+    // Anchoring ships off by default until validated on a device.
+    expect(d.sessionMode).toBe('continuous');
   });
 
   it('tightens cadence and keeps high accuracy while driving', () => {
@@ -141,5 +146,52 @@ describe('createSamplingPolicy', () => {
     });
     const d = policy.decide({ motion: 'stationary', battery: healthy });
     expect(d.timeIntervalMs).toBe(250_000);
+  });
+
+  it('low battery coarsens accuracy but keeps a MOVING trail usable', () => {
+    const policy = createSamplingPolicy();
+    const low: BatteryState = { level: 0.15, charging: false, lowPower: false };
+    // Dropping a walking trail to kilometre scale would mis-attribute res-9 exploration hexes,
+    // so the low-battery clamp bottoms out at `balanced` while moving...
+    expect(policy.decide({ motion: 'walking', battery: low }).accuracy).toBe('balanced');
+    expect(policy.decide({ motion: 'driving', battery: low }).accuracy).toBe('balanced');
+    // ...but never re-tightens the cheaper tier the stationary branch already picked.
+    expect(policy.decide({ motion: 'stationary', battery: low }).accuracy).toBe('low');
+  });
+});
+
+describe('stationary anchoring decisions', () => {
+  const anchoring = createSamplingPolicy({ anchorWhenStationary: true, anchorRadiusM: 150 });
+
+  it('anchors only once motion is confirmed stationary', () => {
+    expect(anchoring.decide({ motion: 'stationary', battery: healthy }).sessionMode).toBe(
+      'anchored'
+    );
+    expect(anchoring.decide({ motion: 'walking', battery: healthy }).sessionMode).toBe(
+      'continuous'
+    );
+    expect(anchoring.decide({ motion: 'driving', battery: healthy }).sessionMode).toBe(
+      'continuous'
+    );
+    // `unknown` is the startup state — anchoring there would idle the hardware before the first
+    // fix ever arrives, with no position to anchor at.
+    expect(anchoring.decide({ motion: 'unknown', battery: healthy }).sessionMode).toBe(
+      'continuous'
+    );
+  });
+
+  it('never anchors in live mode — a friend is watching the dot move', () => {
+    const d = anchoring.decide({ motion: 'stationary', battery: healthy, live: true });
+    expect(d.sessionMode).toBe('continuous');
+  });
+
+  it('carries the configured anchor radius on every decision', () => {
+    expect(anchoring.decide({ motion: 'stationary', battery: healthy }).anchorRadiusM).toBe(150);
+    expect(anchoring.decide({ motion: 'walking', battery: healthy }).anchorRadiusM).toBe(150);
+  });
+
+  it('stays continuous when anchoring is disabled, whatever the motion', () => {
+    const off = createSamplingPolicy();
+    expect(off.decide({ motion: 'stationary', battery: healthy }).sessionMode).toBe('continuous');
   });
 });

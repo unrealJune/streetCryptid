@@ -53,6 +53,11 @@ export interface SamplingConfig {
   drivingAccuracy: AccuracyTier;
   /** Accuracy tier while stationary / conserving. */
   restingAccuracy: AccuracyTier;
+  /**
+   * Accuracy ceiling under low battery / Low-Power Mode. Applied as a *coarsening* clamp, so it
+   * never re-tightens an already-cheaper tier chosen by the stationary branch.
+   */
+  lowBatteryAccuracy: AccuracyTier;
   /** Battery level (0..1) below which we stop sampling entirely when also stationary. */
   suspendBelowLevel: number;
   /**
@@ -64,15 +69,57 @@ export interface SamplingConfig {
   liveDistanceM: number;
   /** Accuracy tier in live mode. */
   liveAccuracy: AccuracyTier;
+  /**
+   * Drop to {@link SessionMode} `anchored` — location hardware fully idle behind a geofence — once
+   * motion has been `stationary`. This is the single biggest battery lever on iOS, where the
+   * time-based backoff never reaches the OS at all, but it changes background behaviour that has
+   * historically been fragile, so it ships **off** until validated on a device. See
+   * `anchor-controller.ts` for the state machine and how to turn it on.
+   */
+  anchorWhenStationary: boolean;
+  /**
+   * Radius (m) of the stationary anchor geofence. iOS will not reliably report an exit until the
+   * device has moved ~200 m regardless of a smaller configured radius (a documented Core Location
+   * behaviour), so anything below that buys nothing; 150 m keeps the *entry* boundary inside a
+   * res-9 exploration hex (~350 m across) while staying realistic about the exit latency.
+   */
+  anchorRadiusM: number;
 }
+
+/**
+ * How the OS location subsystem should be armed.
+ *
+ * - `continuous` — a running `startLocationUpdatesAsync` session delivering fixes.
+ * - `anchored`   — the session is STOPPED and a single geofence sits at the last known position.
+ *   The location hardware idles; leaving the geofence wakes us (even headless) and returns us to
+ *   `continuous`. This is the pattern every battery-efficient tracker converges on (Foursquare's
+ *   Movement SDK, transistorsoft's background-geolocation); see `cadence-controller.ts`.
+ */
+export type SessionMode = 'continuous' | 'anchored';
 
 /** The concrete sampling parameters the engine hands to the OS location subsystem. */
 export interface SamplingDecision {
   accuracy: AccuracyTier;
+  /**
+   * ⚠️ **ANDROID ONLY.** expo-location's `timeInterval` is not forwarded to Core Location — the iOS
+   * `LocationOptions` record carries only `accuracy` and `distanceInterval`, so every cadence this
+   * policy computes is silently discarded on iOS. Do not add battery logic that relies on this
+   * field alone taking effect; on iOS the levers that actually reach the OS are {@link accuracy},
+   * {@link distanceIntervalM} (a delivery filter, NOT a hardware duty-cycle) and, decisively,
+   * {@link sessionMode}.
+   */
   timeIntervalMs: number;
   distanceIntervalM: number;
-  /** iOS deferred-updates batching window (ms); 0 disables batching. */
+  /**
+   * Batching window (ms); 0 disables. NOTE: despite the name this is not Core Location's deferred
+   * updates (Apple deprecated `allowDeferredLocationUpdates` in iOS 13). expo-location implements
+   * it in userland by buffering callbacks, so it saves JS/CPU wakeups — not radio.
+   */
   deferredUpdatesIntervalMs: number;
   /** False ⇒ skip sampling/publishing this tick (e.g. stationary + critically low battery). */
   active: boolean;
+  /** Whether to run a continuous session or idle behind a stationary geofence. */
+  sessionMode: SessionMode;
+  /** Radius (m) of the stationary anchor geofence when {@link sessionMode} is `anchored`. */
+  anchorRadiusM: number;
 }

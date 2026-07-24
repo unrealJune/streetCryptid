@@ -39,6 +39,11 @@ export interface EngineState {
   status: EngineStatus;
   /** ms epoch of the last fix we ingested, or null. */
   lastFixAt: number | null;
+  /**
+   * The last fix ingested, or null. Carried on the state so the cadence controller can place the
+   * stationary anchor geofence without keeping its own copy of the position.
+   */
+  lastFix: LocationFix | null;
   /** Last sampling decision applied (so the UI/provider can reflect cadence). */
   decision: SamplingDecision | null;
   /** Motion class of the last decision (drives the iOS activity hint). */
@@ -55,6 +60,14 @@ export interface LocationEngineOptions {
   policy: SamplingPolicy;
   /** Reads current battery; the policy backs off when low. Default: full battery, not low-power. */
   battery?: () => Promise<BatteryState>;
+  /**
+   * Reads the OS motion coprocessor's classification, or `null` for "no opinion". When it has an
+   * opinion the engine trusts it over {@link deriveMotion}, which is derived from GPS displacement
+   * and therefore cannot report `stationary` without first burning a fix to prove it. Returning
+   * `null` (unavailable, stale, or low confidence) falls back to the GPS-derived value.
+   * See `motion-source.ts` — notably, this is FOREGROUND-ONLY on both platforms.
+   */
+  motion?: () => MotionState | null;
   /** Injectable clock. Default `Date.now`. */
   now?: () => number;
 }
@@ -83,6 +96,13 @@ export interface LocationEngine {
    * cadence controller re-programs the OS; returns the new decision.
    */
   setLiveMode(on: boolean): Promise<SamplingDecision>;
+  /**
+   * Force the engine's belief about motion and recompute. Used when something outside the fix
+   * stream proves the device moved — specifically a stationary-anchor geofence exit, which arrives
+   * with no accompanying fix and must NOT be answered by `reevaluate()` alone: that would re-read
+   * the same `stationary` value and immediately re-anchor, stranding us. See `cadence-controller.ts`.
+   */
+  setMotion(motion: MotionState): Promise<SamplingDecision>;
   /** Drain the outbox through the publisher (call on resume / node-ready / connectivity regained). */
   flush(parent?: SpanContext): Promise<number>;
   onState(cb: (s: EngineState) => void): () => void;
@@ -94,11 +114,13 @@ const DEFAULT_BATTERY: BatteryState = { level: 1, charging: false, lowPower: fal
 export function createLocationEngine(opts: LocationEngineOptions): LocationEngine {
   const { publisher, outbox, trail, policy } = opts;
   const battery = opts.battery ?? (async (): Promise<BatteryState> => ({ ...DEFAULT_BATTERY }));
+  const osMotion = opts.motion ?? ((): MotionState | null => null);
   const now = opts.now ?? Date.now;
 
   let state: EngineState = {
     status: 'idle',
     lastFixAt: null,
+    lastFix: null,
     decision: null,
     motion: 'unknown',
     pending: 0,
@@ -173,7 +195,12 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
 
     async ingest(fix: LocationFix, parent?: SpanContext): Promise<SamplingDecision> {
       const dtMs = lastFixAt === null ? 0 : now() - lastFixAt;
-      const motion = deriveMotion(lastFix, fix, dtMs);
+      const gpsMotion = deriveMotion(lastFix, fix, dtMs);
+      // Prefer the coprocessor: it can say "stationary" without spending a fix, which is what lets
+      // the policy back off (and, with anchoring on, idle the hardware) instead of sampling forever
+      // to re-confirm that nothing moved. Falls back to GPS-derived motion when it has no opinion.
+      const fromOs = osMotion();
+      const motion = fromOs ?? gpsMotion;
       const batt = await battery();
       const decision = policy.decide({ motion, battery: batt, live });
 
@@ -183,6 +210,8 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
         parent,
         attributes: {
           motion,
+          'motion.source': fromOs === null ? 'gps' : 'coprocessor',
+          'motion.gps': gpsMotion,
           live,
           'battery.level': Math.round(batt.level * 100) / 100,
           'battery.charging': batt.charging,
@@ -201,11 +230,11 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
       try {
         if (state.status !== 'running') {
           span.setAttribute('sc.drop_reason', 'engine-not-running');
-          setState({ decision, motion, lastFixAt });
+          setState({ decision, motion, lastFixAt, lastFix: fix });
           return decision;
         }
 
-        setState({ decision, motion, lastFixAt });
+        setState({ decision, motion, lastFixAt, lastFix: fix });
 
         try {
           if (decision.active) {
@@ -230,15 +259,29 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
     },
 
     async reevaluate(): Promise<SamplingDecision> {
-      const decision = policy.decide({ motion: lastMotion, battery: await battery(), live });
-      setState({ decision, motion: lastMotion });
+      // Re-read the coprocessor here, not just on ingest: this is the path a motion-change
+      // notification takes, and it is the ONLY way a stationary→walking transition can retighten
+      // cadence without a GPS fix — which is precisely the fix an anchored session cannot produce.
+      const motion = osMotion() ?? lastMotion;
+      lastMotion = motion;
+      const decision = policy.decide({ motion, battery: await battery(), live });
+      setState({ decision, motion });
+      return decision;
+    },
+
+    async setMotion(motion: MotionState): Promise<SamplingDecision> {
+      lastMotion = motion;
+      const decision = policy.decide({ motion, battery: await battery(), live });
+      setState({ decision, motion });
       return decision;
     },
 
     async setLiveMode(on: boolean): Promise<SamplingDecision> {
       live = on;
-      const decision = policy.decide({ motion: lastMotion, battery: await battery(), live });
-      setState({ decision, motion: lastMotion });
+      const motion = osMotion() ?? lastMotion;
+      lastMotion = motion;
+      const decision = policy.decide({ motion, battery: await battery(), live });
+      setState({ decision, motion });
       return decision;
     },
 

@@ -2,7 +2,11 @@ import { Platform } from 'react-native';
 
 import type { SpanContext } from '@/features/dev/telemetry';
 import { backgroundOutbox } from './background-outbox';
-import { defineBackgroundLocationTask, isBackgroundLocationAvailable } from './background-task';
+import {
+  defineAnchorGeofenceTask,
+  defineBackgroundLocationTask,
+  isBackgroundLocationAvailable,
+} from './background-task';
 import { defineBackgroundBackfillTask, isBackgroundBackfillAvailable } from './backfill-task';
 import {
   createBackgroundFixDispatcher,
@@ -72,8 +76,51 @@ export function getActiveBackfillHandler(): ((parent?: SpanContext) => Promise<v
   return activeBackfillHandler;
 }
 
+// The mounted runtime's stationary-anchor exit handler. The geofence can fire into a headless
+// context, but unlike the fix path there is nothing useful a headless launch can do on its own: the
+// decision to resume continuous sampling belongs to the engine + cadence controller, which only
+// exist while sharing is running. When no runtime is alive we simply re-arm location updates
+// directly (below) and let the next mounted start reconcile.
+let activeAnchorExitHandler: (() => Promise<void>) | null = null;
+
+/** Register the mounted runtime's anchor-exit runner. Returns an unregister fn (last writer wins). */
+export function registerActiveAnchorExitHandler(handler: () => Promise<void>): () => void {
+  activeAnchorExitHandler = handler;
+  return () => {
+    if (activeAnchorExitHandler === handler) activeAnchorExitHandler = null;
+  };
+}
+
 if (Platform.OS !== 'web' && isBackgroundLocationAvailable()) {
   ensureBackgroundTaskRegistered();
+
+  // The stationary-anchor geofence. Defined at module scope like the location task so the OS can
+  // relaunch us headless to deliver the exit. Inert unless `anchorWhenStationary` is enabled — with
+  // it off no region is ever armed, so this handler simply never fires.
+  defineAnchorGeofenceTask(async () => {
+    const handler = activeAnchorExitHandler;
+    if (handler) {
+      await handler();
+      return;
+    }
+    // No mounted runtime: the exit still proves the user moved, and leaving the hardware idle would
+    // strand sharing until the app is next opened — the exact failure this whole mechanism risks.
+    // Re-arm a plain moving cadence and let the next mounted start take over.
+    const { startBackgroundLocation } = await import('./background-task');
+    const { createSamplingPolicy } = await import('./sampling-policy');
+    const { cfgFromDecision } = await import('./cadence-controller');
+    const decision = createSamplingPolicy().decide({
+      motion: 'walking',
+      battery: { level: 1, charging: false, lowPower: false },
+    });
+    await startBackgroundLocation(
+      cfgFromDecision(decision, 'walking', {
+        title: 'streetCryptid',
+        body: "Keeping your friends' map current.",
+        color: '#C6791A',
+      })
+    );
+  });
 }
 
 if (Platform.OS !== 'web' && isBackgroundBackfillAvailable()) {

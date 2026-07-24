@@ -5,7 +5,25 @@ import type {
   MotionState,
   SamplingConfig,
   SamplingDecision,
+  SessionMode,
 } from './types';
+
+/**
+ * Accuracy tiers ordered cheapest → most expensive, so backoff rules can take the *coarser* of two
+ * candidates rather than letting a later rule accidentally re-tighten what an earlier one relaxed.
+ */
+const ACCURACY_RANK: Record<AccuracyTier, number> = {
+  lowest: 0,
+  low: 1,
+  balanced: 2,
+  high: 3,
+  highest: 4,
+};
+
+/** The cheaper (coarser) of two accuracy tiers. */
+function coarser(a: AccuracyTier, b: AccuracyTier): AccuracyTier {
+  return ACCURACY_RANK[a] <= ACCURACY_RANK[b] ? a : b;
+}
 
 /**
  * Battery- and motion-aware sampling policy. Pure and synchronous so it is fully unit-tested
@@ -53,11 +71,20 @@ export const DEFAULT_SAMPLING_CONFIG: SamplingConfig = {
   maxIntervalMs: 5 * 60_000,
   movingAccuracy: 'balanced',
   drivingAccuracy: 'high',
-  restingAccuracy: 'balanced',
+  // A parked phone needs only enough precision to notice it is still parked. This used to be
+  // `balanced`, identical to `movingAccuracy` — which on iOS made the whole stationary branch a
+  // no-op, since `timeIntervalMs` never reaches Core Location and accuracy was the only lever left.
+  restingAccuracy: 'low',
+  // Low battery coarsens but must stay usable while MOVING: dropping a walking trail to
+  // kilometre-scale would mis-attribute res-9 exploration hexes. Kept at the previous
+  // `restingAccuracy` value so low-battery behaviour is unchanged by the retune above.
+  lowBatteryAccuracy: 'balanced',
   suspendBelowLevel: 0.05,
   liveIntervalMs: 4_000,
   liveDistanceM: 5,
   liveAccuracy: 'high',
+  anchorWhenStationary: false,
+  anchorRadiusM: 150,
 };
 
 /** Great-circle distance between two fixes in metres. Private. */
@@ -105,6 +132,9 @@ export function createSamplingPolicy(config?: Partial<SamplingConfig>): Sampling
         distanceIntervalM: merged.liveDistanceM,
         deferredUpdatesIntervalMs: 0, // real-time: never batch/defer
         active: !criticallyLow(battery),
+        // Live means a friend is watching the dot move; never idle the hardware behind a geofence.
+        sessionMode: 'continuous',
+        anchorRadiusM: merged.anchorRadiusM,
       };
     }
 
@@ -127,7 +157,7 @@ export function createSamplingPolicy(config?: Partial<SamplingConfig>): Sampling
       !battery.charging && (battery.level <= merged.lowBatteryThreshold || battery.lowPower);
     if (lowBattery) {
       interval *= merged.lowBatteryMultiplier;
-      accuracy = merged.restingAccuracy;
+      accuracy = coarser(accuracy, merged.lowBatteryAccuracy);
     }
 
     const timeIntervalMs = Math.min(Math.round(interval), merged.maxIntervalMs);
@@ -141,12 +171,20 @@ export function createSamplingPolicy(config?: Partial<SamplingConfig>): Sampling
     const batchable = accuracy === 'balanced' || accuracy === 'low' || accuracy === 'lowest';
     const deferredUpdatesIntervalMs = batchable ? timeIntervalMs : 0;
 
+    // Anchoring is the only backoff that actually idles the location hardware on iOS. It requires a
+    // confirmed `stationary` classification — never `unknown`, which is the startup state and would
+    // otherwise anchor us before the first fix ever arrives.
+    const sessionMode: SessionMode =
+      merged.anchorWhenStationary && motion === 'stationary' ? 'anchored' : 'continuous';
+
     return {
       accuracy,
       timeIntervalMs,
       distanceIntervalM,
       deferredUpdatesIntervalMs,
       active,
+      sessionMode,
+      anchorRadiusM: merged.anchorRadiusM,
     };
   };
 

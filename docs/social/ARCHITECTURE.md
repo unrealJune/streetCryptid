@@ -192,14 +192,50 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
        re-arms OS on decision change
 ```
 
+> ⚠️ **iOS reality check — read before tuning cadence.** expo-location's `timeInterval` is
+> **Android-only**: the iOS `LocationOptions` record carries only `accuracy` and `distanceInterval`,
+> so every interval the policy computes is discarded before it reaches Core Location. On iOS the
+> only levers that actually land are `desiredAccuracy`, `distanceFilter` (a _delivery_ filter — it
+> does **not** duty-cycle the receiver) and whether a location session is running at all. Note also
+> that `deferredUpdatesInterval` is not Core Location's deferred updates (Apple deprecated
+> `allowDeferredLocationUpdates` in iOS 13); expo implements it in userland by buffering callbacks,
+> so it saves JS/CPU wakeups, not radio. Consequence: **`sessionMode` is the only meaningful
+> battery lever on iOS**, and a stationary phone with anchoring off is sampling exactly as hard as
+> a walking one apart from its accuracy tier.
+
 - **Sampling** (`sampling-policy.ts`): battery/motion-aware cadence tuned as an _ambient_ sharer
   (Life360 / Find-My class), not a navigator — ~45s walking at balanced (~100m) accuracy, ~18s +
-  high accuracy driving, stationary displacement-gated to near-zero, ×3 backoff under Low-Power
-  Mode / battery-saver (cancelled by charging), suspend on critically low battery. A bounded,
+  high accuracy driving, stationary backed off to `low` (~1km) accuracy, ×3 backoff under Low-Power
+  Mode / battery-saver (cancelled by charging, and applied as a _coarsening clamp_ so it never
+  re-tightens the stationary tier), suspend on critically low battery. A bounded,
   on-demand **live mode** (`SamplingInputs.live` → `LocationEngine.setLiveMode` →
   `LocationSharingService.setLiveTracking`, default 2-min auto-revert) swaps in a real-time ~4s/high
   cadence for the "a friend is actively watching" case, so the app never pays real-time GPS cost
   around the clock. The network trigger for it is a future phase (§9c).
+- **Motion signal** (`motion-source.ts`): a native-free seam over expo-location's motion-activity
+  API (iOS `CMMotionActivityManager` / Android Activity Recognition), running on the motion
+  coprocessor at near-zero power. It exists to break a circularity: `deriveMotion()` infers movement
+  by comparing two GPS fixes, so the policy had to keep the receiver running to discover it didn't
+  need the receiver. The engine prefers the coprocessor and falls back to `deriveMotion` whenever it
+  has no opinion (denied Motion & Fitness permission, low confidence, or a **stale** reading).
+  Staleness matters: the stream is **foreground-only** — "updates pause when the app is
+  backgrounded" — so a backgrounded reading freezes at whatever it was (usually `walking`, right
+  before the phone goes in a pocket) and is expired after `MOTION_STALE_AFTER_MS`. Never build a
+  background state transition on this source; that is what the anchor geofence is for.
+- **Stationary anchoring** (`sessionMode` + `cadence-controller.ts`): the pattern every
+  battery-efficient tracker converges on — Foursquare's Movement SDK (<0.5%/day) "sets a single iOS
+  geofence while the user is stationary to shut down background location usage"; transistorsoft's
+  background-geolocation runs the same stationary/moving state machine; RAPS (MobiSys 2010) measured
+  3.8× battery lifetime over always-on GPS. On a confirmed `stationary` classification the
+  controller **arms an exit-only geofence at the last fix, then stops location updates entirely**;
+  the exit wakes us (headless if need be) and restores continuous sampling. Ordering is deliberate
+  in both directions: arm before stopping, and reprogram before disarming, so no partial failure
+  ever leaves us both un-sampled and un-woken. Anchoring and cadence share ONE serialized
+  latest-wins queue — two controllers racing `start/stopLocationUpdatesAsync` on the same OS task is
+  the hazard that serialization exists to prevent. **Ships off** (`anchorWhenStationary: false`)
+  until validated on a device, and is additionally gated on the coprocessor being available, since
+  without a non-GPS movement signal the geofence is the only way back and iOS needs ~200 m of travel
+  to report an exit.
 - **Battery signal** (`battery-source.ts`): a native-free seam over `expo-battery` feeding the
   policy real charge level, charging state, and OS **Low-Power Mode / battery-saver**; `subscribe()`
   fires on power changes so cadence reacts immediately (web / Expo Go get a full-battery null source).

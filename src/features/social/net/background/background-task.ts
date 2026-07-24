@@ -64,6 +64,13 @@ function taskManager(): typeof import('expo-task-manager') {
 /** TaskManager task name. Must be stable across app launches. */
 export const BACKGROUND_LOCATION_TASK = 'streetcryptid.background-location';
 
+/**
+ * TaskManager task for the stationary anchor geofence. Must be stable across app launches — the OS
+ * keeps monitoring the region while the app is suspended and will relaunch us into a headless
+ * context to deliver the exit event. See `cadence-controller.ts`.
+ */
+export const BACKGROUND_ANCHOR_TASK = 'streetcryptid.anchor-geofence';
+
 /** Batch sink used by the globally registered TaskManager handler. */
 export interface BackgroundFixSink {
   onBackgroundFixes(fixes: readonly LocationFix[], parent?: SpanContext): Promise<void>;
@@ -132,6 +139,87 @@ export function defineBackgroundLocationTask(makeSink: () => BackgroundFixSink):
       }
     })
   );
+}
+
+/**
+ * Register the anchor-geofence handler. Like {@link defineBackgroundLocationTask} this must run at
+ * module scope so a headless relaunch can service the exit event. The callback fires when the
+ * device LEAVES the stationary anchor, which is the signal to resume continuous sampling.
+ *
+ * Only exit transitions are acted on: we arm the region with `notifyOnEnter: false`, but the OS
+ * still delivers an initial-state event on some platforms, so the type is checked here too.
+ */
+export function defineAnchorGeofenceTask(onExit: () => Promise<void>): void {
+  taskManager().defineTask(BACKGROUND_ANCHOR_TASK, ({ data, error }) =>
+    withEventLogLaunchContext('background', async () => {
+      const telemetry = getTelemetry();
+      if (error) {
+        console.warn('[anchor-geofence] task error', error);
+        telemetry.log('error', `anchor geofence task error: ${error.message}`);
+        await telemetry.flush();
+        return;
+      }
+      const payload = data as
+        { eventType?: Location.GeofencingEventType; region?: Location.LocationRegion } | undefined;
+      if (payload?.eventType !== Location.GeofencingEventType.Exit) return;
+
+      // The counterpart to `bg.wake`: this span is the anchor when debugging "we went stationary and
+      // never woke up again", the failure mode that makes anchoring risky.
+      const span = telemetry.startSpan('anchor.exit', {
+        attributes: { region: payload.region?.identifier ?? 'unknown' },
+      });
+      span.setAttributes(await getSystemSnapshot());
+      try {
+        await onExit();
+        span.setStatus('ok');
+      } catch (err) {
+        console.warn('[anchor-geofence] exit handler failed', err);
+        span.recordError(err);
+      } finally {
+        span.end();
+        await telemetry.flush();
+      }
+    })
+  );
+}
+
+/** The native seam the anchor controller drives; narrowed so tests can supply a fake. */
+export interface AnchorGeofenceApi {
+  startGeofencingAsync(taskName: string, regions: Location.LocationRegion[]): Promise<void>;
+  stopGeofencingAsync(taskName: string): Promise<void>;
+  hasStartedGeofencingAsync(taskName: string): Promise<boolean>;
+}
+
+/**
+ * Arm a single exit-only geofence at `lat`/`lon`. Replaces any region already armed for the task —
+ * expo-location's `startGeofencingAsync` overwrites the task's whole region set, so there is never
+ * more than one anchor and no need to stop first.
+ */
+export async function startAnchorGeofence(
+  api: AnchorGeofenceApi,
+  lat: number,
+  lon: number,
+  radiusM: number
+): Promise<void> {
+  await api.startGeofencingAsync(BACKGROUND_ANCHOR_TASK, [
+    {
+      identifier: 'stationary-anchor',
+      latitude: lat,
+      longitude: lon,
+      radius: radiusM,
+      // We only care about leaving. Entry would fire immediately on arming (we are, by
+      // construction, inside the region) and re-trigger the state machine for no reason.
+      notifyOnEnter: false,
+      notifyOnExit: true,
+    },
+  ]);
+}
+
+/** Tear the anchor down. Idempotent — safe when nothing is armed. */
+export async function stopAnchorGeofence(api: AnchorGeofenceApi): Promise<void> {
+  if (await api.hasStartedGeofencingAsync(BACKGROUND_ANCHOR_TASK)) {
+    await api.stopGeofencingAsync(BACKGROUND_ANCHOR_TASK);
+  }
 }
 
 export interface LocationPermissionResult {

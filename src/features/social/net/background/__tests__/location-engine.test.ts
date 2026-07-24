@@ -210,7 +210,8 @@ describe('location engine', () => {
     expect(engine.getState().motion).toBe('stationary'); // motion unchanged
     // stationary 180s × lowBatteryMultiplier 3 = 540s, clamped to maxIntervalMs 300s.
     expect(decision.timeIntervalMs).toBe(300_000);
-    expect(decision.accuracy).toBe('balanced');
+    // Stationary already chose `low`; the low-battery clamp coarsens but must never re-tighten it.
+    expect(decision.accuracy).toBe('low');
   });
 
   it('live mode overrides cadence and reverts when turned off', async () => {

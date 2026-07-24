@@ -25,12 +25,21 @@ import type { ActivityKind, MotionState, SamplingDecision } from './types';
 /** The provider seam: re-arm the running OS task without re-requesting permission. */
 export interface CadenceProvider {
   reprogram(cfg: BackgroundStartConfig): Promise<void>;
+  /** Stop OS location updates entirely — the `anchored` half of the state machine. */
+  stopBackground(): Promise<void>;
+}
+
+/** The stationary-anchor seam, so the controller can be unit-tested without expo-location. */
+export interface AnchorGeofenceSeam {
+  arm(lat: number, lon: number, radiusM: number): Promise<void>;
+  disarm(): Promise<void>;
 }
 
 /** The slice of the engine the controller observes. */
 export interface CadenceEngine {
   onState(cb: (state: EngineState) => void): () => void;
   reevaluate(): Promise<unknown>;
+  setMotion(motion: MotionState): Promise<unknown>;
 }
 
 /** Foreground-service notification carried through every re-arm (unchanged by cadence). */
@@ -49,12 +58,63 @@ export interface CadenceControllerOptions {
   overrides?: Partial<BackgroundStartConfig>;
   /** The cfg the OS was first armed with, so we don't redundantly re-arm on the first decision. */
   seed?: BackgroundStartConfig;
+  /**
+   * The stationary-anchor geofence. Omit to disable anchoring entirely — the controller then only
+   * ever drives `continuous` targets, exactly as before this seam existed.
+   */
+  anchor?: AnchorGeofenceSeam;
+  /** Optional motion source to stop while anchored (it is foreground-only and costs nothing idle). */
   onError?(error: unknown): void;
 }
 
 export interface CadenceController {
   /** Begin observing; returns an async stop fn that waits for any in-flight OS re-arm. */
   start(): () => Promise<void>;
+  /**
+   * Hand back control after a stationary-anchor geofence exit. Tells the engine the device moved
+   * (a bare `reevaluate` would re-read `stationary` and immediately re-anchor) and lets the normal
+   * decision flow restore continuous sampling.
+   */
+  onAnchorExit(): Promise<void>;
+}
+
+/**
+ * The controller's target state — a superset of the old "just a cfg", so anchoring and cadence
+ * re-arms share ONE serialized queue. Two independent controllers racing `startLocationUpdatesAsync`
+ * / `stopLocationUpdatesAsync` against the same OS task is exactly the hazard the latest-wins loop
+ * below exists to prevent.
+ */
+type CadenceTarget =
+  | { mode: 'continuous'; cfg: BackgroundStartConfig }
+  | { mode: 'anchored'; lat: number; lon: number; radiusM: number };
+
+/**
+ * How far the anchor centre may drift before we re-arm the geofence. A stationary phone still
+ * reports jittery fixes (tens of metres indoors); re-arming on each would defeat the point.
+ */
+const ANCHOR_DRIFT_TOLERANCE_M = 25;
+
+/** Whether two targets differ enough to warrant touching the OS. */
+export function targetDiffers(a: CadenceTarget, b: CadenceTarget): boolean {
+  if (a.mode !== b.mode) return true;
+  if (a.mode === 'continuous' && b.mode === 'continuous') return cadenceDiffers(a.cfg, b.cfg);
+  if (a.mode === 'anchored' && b.mode === 'anchored') {
+    if (a.radiusM !== b.radiusM) return true;
+    return metresBetween(a.lat, a.lon, b.lat, b.lon) > ANCHOR_DRIFT_TOLERANCE_M;
+  }
+  return false;
+}
+
+/** Great-circle distance in metres. Local copy so this module stays dependency-free. */
+function metresBetween(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6_371_000;
+  const toRad = (d: number): number => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
 /** iOS activity hint for a motion class — lets Core Location pace + auto-pause appropriately. */
@@ -107,14 +167,43 @@ export function cadenceDiffers(a: BackgroundStartConfig, b: BackgroundStartConfi
 }
 
 export function createCadenceController(opts: CadenceControllerOptions): CadenceController {
-  const { engine, provider, battery, notification, overrides, seed, onError } = opts;
+  const { engine, provider, battery, notification, overrides, seed, anchor, onError } = opts;
+
+  let stopped = false;
+
+  /**
+   * Apply one target to the OS. Ordering in each transition is chosen so a partial failure leaves
+   * us over-sampling rather than blind — being stuck at full cadence wastes battery, being stuck
+   * anchored with no geofence means location sharing silently dies until the app is reopened.
+   */
+  async function apply(target: CadenceTarget, from: CadenceTarget | null): Promise<void> {
+    if (target.mode === 'continuous') {
+      // Restore GPS FIRST, then drop the anchor. If the disarm fails we get at worst a spurious
+      // exit event later (harmless — it only nudges the engine); if we disarmed first and the
+      // re-arm failed, we would have neither a session nor a wake-up.
+      await provider.reprogram(target.cfg);
+      if (from?.mode === 'anchored' && anchor) await anchor.disarm();
+      return;
+    }
+
+    if (!anchor) return; // anchoring disabled; nothing to do
+    // Arm the wake-up BEFORE idling the hardware, so there is no window in which we are neither
+    // sampling nor monitoring a region.
+    await anchor.arm(target.lat, target.lon, target.radiusM);
+    await provider.stopBackground();
+  }
 
   return {
+    async onAnchorExit(): Promise<void> {
+      // The exit proves movement, but brings no fix. Assert motion directly so the next decision
+      // is `continuous`; `reevaluate()` alone would re-read `stationary` and re-anchor us.
+      await engine.setMotion('walking');
+    },
+
     start(): () => Promise<void> {
-      let armed: BackgroundStartConfig | null = seed ?? null;
-      let desired: BackgroundStartConfig | null = seed ?? null;
+      let armed: CadenceTarget | null = seed ? { mode: 'continuous', cfg: seed } : null;
+      let desired: CadenceTarget | null = armed;
       let driving = false;
-      let stopped = false;
       let drivePromise: Promise<void> | null = null;
 
       // Serialize re-arms; always converge to the newest `desired`, collapsing intermediate targets.
@@ -123,10 +212,11 @@ export function createCadenceController(opts: CadenceControllerOptions): Cadence
         driving = true;
         drivePromise = (async () => {
           try {
-            while (!stopped && desired && (!armed || cadenceDiffers(desired, armed))) {
+            while (!stopped && desired && (!armed || targetDiffers(desired, armed))) {
               const target = desired;
+              const from = armed;
               try {
-                await provider.reprogram(target);
+                await apply(target, from);
                 armed = target;
               } catch (error) {
                 onError?.(error);
@@ -141,11 +231,21 @@ export function createCadenceController(opts: CadenceControllerOptions): Cadence
 
       const offState = engine.onState((state) => {
         if (!state.decision) return;
-        const cfg = {
-          ...cfgFromDecision(state.decision, state.motion, notification),
-          ...overrides,
-        };
-        desired = cfg;
+        // Anchoring needs a position to anchor AT. Without a fix yet, stay continuous — that is
+        // also the startup path, where `motion` is `unknown` and anchoring would be wrong anyway.
+        if (state.decision.sessionMode === 'anchored' && anchor && state.lastFix) {
+          desired = {
+            mode: 'anchored',
+            lat: state.lastFix.lat,
+            lon: state.lastFix.lon,
+            radiusM: state.decision.anchorRadiusM,
+          };
+        } else {
+          desired = {
+            mode: 'continuous',
+            cfg: { ...cfgFromDecision(state.decision, state.motion, notification), ...overrides },
+          };
+        }
         drive();
       });
 
@@ -159,6 +259,8 @@ export function createCadenceController(opts: CadenceControllerOptions): Cadence
         offState();
         offBattery();
         await drivePromise;
+        // Never leave a geofence monitoring the user after sharing stops.
+        if (anchor) await anchor.disarm().catch((error: unknown) => onError?.(error));
       };
     },
   };
