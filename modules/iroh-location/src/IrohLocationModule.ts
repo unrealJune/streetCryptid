@@ -139,7 +139,7 @@ function withRelayConfig(raw: RawIrohLocationNativeModule): IrohLocationNativeMo
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
     },
-  }) as IrohLocationNativeModule;
+  }) as unknown as IrohLocationNativeModule;
 }
 
 /** Returns the native module, or `null` when it isn't available (web / Expo Go). */
