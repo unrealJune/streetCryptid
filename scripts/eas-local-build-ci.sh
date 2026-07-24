@@ -6,6 +6,12 @@ umask 077
 platform="${1:-}"
 profile="${2:-}"
 artifact="${3:-}"
+EAS_UPLOAD_RETRY_DELAY_SECONDS="${EAS_UPLOAD_RETRY_DELAY_SECONDS:-15}"
+if [[ ! "$EAS_UPLOAD_RETRY_DELAY_SECONDS" =~ ^[0-9]+$ ]]; then
+  echo "EAS_UPLOAD_RETRY_DELAY_SECONDS must be a non-negative integer." >&2
+  exit 2
+fi
+EAS_UPLOAD_RETRY_DELAY_SECONDS=$((10#$EAS_UPLOAD_RETRY_DELAY_SECONDS))
 
 case "$platform" in
   ios | android) ;;
@@ -77,14 +83,26 @@ if [[ ! -f "$artifact" ]]; then
   exit 1
 fi
 
-if ! upload_result="$(
-  run_eas_privately upload \
-    --platform "$platform" \
-    --build-path "$artifact" \
-    --non-interactive \
-    --json \
-    2>/dev/null
-)"; then
+upload_succeeded=0
+for attempt in 1 2 3; do
+  if upload_result="$(
+    run_eas_privately upload \
+      --platform "$platform" \
+      --build-path "$artifact" \
+      --non-interactive \
+      --json \
+      2>/dev/null
+  )"; then
+    upload_succeeded=1
+    break
+  fi
+  unset upload_result
+  if ((attempt < 3)); then
+    sleep "$((EAS_UPLOAD_RETRY_DELAY_SECONDS * attempt))"
+  fi
+done
+
+if ((upload_succeeded == 0)); then
   echo "EAS $platform upload failed. Expo output was withheld because it can contain signing credentials." >&2
   exit 1
 fi

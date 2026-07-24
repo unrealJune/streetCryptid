@@ -85,6 +85,18 @@ fi
 
 if [[ "$command" == "upload" ]]; then
   printf 'credential on upload stderr: %s\n' "$FAKE_SIGNING_CREDENTIAL" >&2
+  if [[ -n "${FAKE_EAS_UPLOAD_ATTEMPT_FILE:-}" ]]; then
+    attempt=0
+    if [[ -f "$FAKE_EAS_UPLOAD_ATTEMPT_FILE" ]]; then
+      attempt="$(cat "$FAKE_EAS_UPLOAD_ATTEMPT_FILE")"
+    fi
+    attempt=$((attempt + 1))
+    printf '%s\n' "$attempt" >"$FAKE_EAS_UPLOAD_ATTEMPT_FILE"
+    if ((attempt <= ${FAKE_EAS_UPLOAD_FAILURES:-0})); then
+      printf 'credential on failed upload stdout: %s\n' "$FAKE_SIGNING_CREDENTIAL"
+      exit 27
+    fi
+  fi
   if [[ "${FAKE_EAS_BAD_UPLOAD:-0}" == "1" ]]; then
     printf 'credential on upload stdout: %s\n' "$FAKE_SIGNING_CREDENTIAL"
   fi
@@ -97,12 +109,16 @@ EOF
 chmod 700 "$test_root/bin/eas"
 
 success_output="$test_root/success-output"
+upload_attempts="$test_root/upload-attempts"
 success_transcript="$(
   PATH="$test_root/bin:$PATH" \
     DEBUG=1 \
     EAS_DEBUG=1 \
+    EAS_UPLOAD_RETRY_DELAY_SECONDS=0 \
     EXPO_TOKEN=fake-token \
     EXPO_DEBUG=1 \
+    FAKE_EAS_UPLOAD_ATTEMPT_FILE="$upload_attempts" \
+    FAKE_EAS_UPLOAD_FAILURES=2 \
     FAKE_SIGNING_CREDENTIAL="$sentinel" \
     GITHUB_OUTPUT="$success_output" \
     RUNNER_TEMP="$test_root" \
@@ -115,9 +131,49 @@ if [[ "$success_transcript" == *"$sentinel"* ]]; then
   echo "The signing credential sentinel escaped into successful command output." >&2
   exit 1
 fi
+if [[ "$(cat "$upload_attempts")" != "3" ]]; then
+  echo "The upload did not recover after two transient failures." >&2
+  exit 1
+fi
 grep -Fxq \
   'url=https://expo.dev/accounts/streetcryptid/projects/streetCryptid/builds/12345678-1234-1234-1234-123456789abc' \
   "$success_output"
+
+exhausted_upload_output="$test_root/exhausted-upload-output"
+exhausted_upload_attempts="$test_root/exhausted-upload-attempts"
+set +e
+exhausted_upload_transcript="$(
+  PATH="$test_root/bin:$PATH" \
+    EAS_UPLOAD_RETRY_DELAY_SECONDS=0 \
+    EXPO_TOKEN=fake-token \
+    FAKE_EAS_UPLOAD_ATTEMPT_FILE="$exhausted_upload_attempts" \
+    FAKE_EAS_UPLOAD_FAILURES=3 \
+    FAKE_SIGNING_CREDENTIAL="$sentinel" \
+    GITHUB_OUTPUT="$exhausted_upload_output" \
+    RUNNER_TEMP="$test_root" \
+    bash "$repo_root/scripts/eas-local-build-ci.sh" \
+    android production-internal-android "$test_root/exhausted-upload.apk" \
+    2>&1
+)"
+exhausted_upload_status=$?
+set -e
+
+if [[ "$exhausted_upload_status" -eq 0 ]]; then
+  echo "The simulated permanently failing upload unexpectedly succeeded." >&2
+  exit 1
+fi
+if [[ "$(cat "$exhausted_upload_attempts")" != "3" ]]; then
+  echo "The upload did not stop after three failed attempts." >&2
+  exit 1
+fi
+if [[ "$exhausted_upload_transcript" == *"$sentinel"* ]]; then
+  echo "The signing credential sentinel escaped from failed upload attempts." >&2
+  exit 1
+fi
+if [[ "$exhausted_upload_transcript" != *"EAS android upload failed"* ]]; then
+  echo "The exhausted upload did not emit its fixed error." >&2
+  exit 1
+fi
 
 auth_failure_output="$test_root/auth-failure-output"
 set +e
