@@ -156,7 +156,8 @@ The build jobs use the `development-builds` GitHub environment. A repository adm
 configure that environment before enabling the workflow:
 
 1. In **Settings → Environments → development-builds**, add maintainers as required reviewers and
-   enable **Prevent self-review**. Do not allow administrators to bypass the protection rule.
+   enable **Prevent self-review**. Ensure **Allow administrators to bypass configured protection
+   rules** is unchecked.
 2. Add a Developer-role Expo robot-user token named `EXPO_TOKEN` as an environment secret. Do not
    duplicate it as a repository or organization secret.
 3. Approve each pending workflow run separately, including every run created after new commits.
