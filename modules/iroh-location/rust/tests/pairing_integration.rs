@@ -17,8 +17,6 @@ use std::sync::Arc;
 use iroh_location::{LocationNode, PairEventKind, PairState, SasRoleKind};
 
 const SIGIL: &str = "/\\_/\\\n(o.o)";
-const SYNC_TIMEOUT_SECS: u64 = 10;
-
 async fn start_node() -> Arc<LocationNode> {
     let node = LocationNode::new(None, None).expect("construct node");
     node.start(vec!["https://127.0.0.1:1".into()], "test-token".into())
@@ -81,21 +79,10 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
         .await
         .expect("phone explicitly reconciles with stash");
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(SYNC_TIMEOUT_SECS);
-    let recovered = loop {
-        let recovered = phone
-            .read_trail(author_id.clone(), 0)
-            .await
-            .expect("phone reads recovered friend trail");
-        if recovered.iter().any(|entry| entry.seq == 1) {
-            break recovered;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "phone did not recover the friend's fix before the deadline"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    };
+    let recovered = phone
+        .read_trail(author_id.clone(), 0)
+        .await
+        .expect("phone reads recovered friend trail");
     assert!(
         recovered.iter().any(|entry| entry.seq == 1),
         "phone must recover the friend's fix from the stash while the author is offline"
