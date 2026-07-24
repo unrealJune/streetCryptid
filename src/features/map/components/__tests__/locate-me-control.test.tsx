@@ -16,7 +16,7 @@ describe('LocateMeControl', () => {
     act(() => renderer?.unmount());
   });
 
-  it('invokes the locate action when a location is available', () => {
+  it('invokes the locate action when enabled', () => {
     const onPress = jest.fn();
     act(() => {
       renderer = create(
