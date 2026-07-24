@@ -24,6 +24,7 @@ import {
   loadLocationDisclosureChoice,
   saveLocationDisclosureChoice,
 } from '@/features/social/net/persistence';
+import { ExpoLocationProvider } from '@/features/social/net/expo-location-provider';
 import { buildTransportReport, type TransportReport } from '@/features/social/net/transports';
 import {
   ensureLocalNetworkPermission,
@@ -72,6 +73,8 @@ interface LocationSharingContextValue {
   setStashOptIn(optedIn: boolean): Promise<void>;
   /** Force (or unforce) relay-only transport. */
   setRelayOnly(relayOnly: boolean): Promise<void>;
+  /** Capture and publish a fresh GPS fix immediately, bypassing normal sampling. */
+  forceLocationPush(trigger?: 'manual' | 'scheduled'): Promise<number>;
   /** Honest, live diagnostic of every transport (for the Settings tab). */
   transportReport: TransportReport;
   acknowledgeDiscoveredFriend(): void;
@@ -126,6 +129,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   const { profile } = useCryptidProfile();
   const [initialProfile] = useState(profile);
   const serviceRef = useRef<LocationSharingService | null>(null);
+  const foregroundLocationProviderRef = useRef<ExpoLocationProvider | null>(null);
   const bluetoothPermissionGranted = useRef(false);
   const trailRefreshId = useRef(0);
   const publishedProfileSignature = useRef('');
@@ -449,6 +453,29 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     },
     [run]
   );
+  const forceLocationPush = useCallback(async (trigger: 'manual' | 'scheduled' = 'manual') => {
+    const service = serviceRef.current;
+    if (!service) {
+      const message = 'Friend sync is not ready. Try again.';
+      setServiceError(message);
+      throw new Error(message);
+    }
+    try {
+      const provider =
+        foregroundLocationProviderRef.current ??
+        (foregroundLocationProviderRef.current = new ExpoLocationProvider());
+      if (!(await provider.ensurePermission())) {
+        throw new Error('Location permission is required to force a location push.');
+      }
+      const fix = await provider.getCurrent();
+      const seq = await service.forceLocationPush(fix, trigger);
+      setServiceError(null);
+      return seq;
+    } catch (pushError: unknown) {
+      setServiceError(errorMessage(pushError));
+      throw pushError;
+    }
+  }, []);
   const toggleShare = useCallback(
     (endpointId: string, on: boolean) => {
       setServiceError(null);
@@ -550,6 +577,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       retryLocation,
       setStashOptIn,
       setRelayOnly,
+      forceLocationPush,
       transportReport,
       acknowledgeDiscoveredFriend,
       rejectDiscoveredFriend,
@@ -580,6 +608,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       retryLocation,
       setStashOptIn,
       setRelayOnly,
+      forceLocationPush,
       transportReport,
       acknowledgeDiscoveredFriend,
       rejectDiscoveredFriend,

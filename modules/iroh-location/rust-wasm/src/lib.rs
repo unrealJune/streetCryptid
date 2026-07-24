@@ -224,7 +224,10 @@ impl WasmLocationNode {
             .spawn();
 
         let trail = Arc::new(
-            TrailDocs::init(docs, (*blobs).clone())
+            // Wasm uses an in-memory docs store (`Docs::memory()`), so there is no persistent
+            // data dir: namespace persistence is a no-op here (fs reads yield None → a fresh
+            // namespace each load), which is correct for the ephemeral web store.
+            TrailDocs::init(docs, (*blobs).clone(), std::path::PathBuf::new())
                 .await
                 .map_err(to_js_err)?,
         );

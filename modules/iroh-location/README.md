@@ -188,6 +188,30 @@ carries over). Recovered fixes surface via `onFix` with `backfill: true`; sync p
 `onSync`. If a browser-persistent store is needed later, wire iroh-blobs/iroh-docs to an
 IndexedDB-backed store.
 
+## Trail-stash desktop debug client
+
+The host-side `trail-stash-client` uses the same `LocationNode`, envelope crypto, and mandatory
+visual SAS pairing as the app. It is intended for an ADB-connected Android phone and reads location
+fixes through trail-stash only:
+
+```bash
+just trail-stash-client status
+just trail-stash-client pair --adb
+just trail-stash-client watch
+just trail-stash-client watch --once --json
+```
+
+It loads relay, stash, PSK, and optional OTEL values from the existing `.env.local`. Pairing and
+watching use separate on-disk replicas. The watcher does not import the phone namespace into the
+live docs engine at all: it runs the lower-level range-reconciliation protocol directly against the
+configured stash endpoint, downloads blobs only from that same endpoint, and never joins the phone's
+gossip topic. The pairing command also registers the phone's read-ticket through
+`POST /v1/namespaces`, so the test does not depend on the phone's stash opt-in setting.
+
+Keys and pair metadata are stored outside the repository under the platform data directory
+(`%LOCALAPPDATA%\streetcryptid\trail-stash-client` on Windows), or an explicit `--state-dir`.
+Coordinates are printed or emitted as JSON but are not persisted in the CLI state.
+
 ## Proving the A→B gate
 
 1. Build the dev client on the iPhone (A) and the Android (B).

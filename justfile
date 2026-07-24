@@ -26,6 +26,22 @@ start:
 start-clear:
     bunx expo start --clear
 
+# Advertises this machine's Tailscale MagicDNS name so a `development`-profile
+# dev-client build reaches Metro over the tailnet. Shows a Tailscale QR code.
+# Serve Metro over Tailscale for a dev-client build (needs Tailscale + MagicDNS).
+start-with-tailscale port="8081":
+    #!/usr/bin/env sh
+    set -eu
+    ts=tailscale
+    command -v tailscale >/dev/null 2>&1 || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    name="$("$ts" status --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write((JSON.parse(s).Self?.DNSName||"").replace(/\.$/,""))}catch{}})')"
+    if [ -z "$name" ]; then
+      echo "No Tailscale MagicDNS name found — is Tailscale up with MagicDNS enabled? (use 'just start' for LAN)" >&2
+      exit 1
+    fi
+    echo "Metro over Tailscale -> http://$name:{{port}}"
+    EXPO_PACKAGER_PROXY_URL="http://$name:{{port}}" bun run start
+
 # Open the app on a connected Android device / emulator.
 android:
     bun run android
@@ -117,6 +133,14 @@ profile-mvt:
 # Compile the Rust crate against the pinned iroh/gossip/docs deps (no bindings generated).
 build-rust:
     cd modules/iroh-location/rust && cargo build
+
+# Pair/watch a phone through the trail stash with the host-side Rust debug client.
+# Examples:
+#   just trail-stash-client status
+#   just trail-stash-client pair --adb
+#   just trail-stash-client watch --once --json
+trail-stash-client *args:
+    cargo run --manifest-path modules/iroh-location/rust/Cargo.toml --features cli --bin trail-stash-client -- {{args}}
 
 # Verify tracked Swift/C and Kotlin UniFFI bindings match the Rust API.
 check-bindings:

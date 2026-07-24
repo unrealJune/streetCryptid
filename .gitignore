@@ -61,6 +61,11 @@ example
 /ios
 /android
 
+# local build artifacts (eas build --local writes build-<id>.ipa/.apk to the repo root)
+*.ipa
+*.apk
+*.aab
+
 # local Expo module build outputs
 modules/iroh-location/web/
 modules/iroh-location/android/.gradle/

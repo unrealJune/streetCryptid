@@ -207,6 +207,17 @@ describe('LocationSharingService — durable trail wiring', () => {
     expect(mockHolder.mod.calls.docsWrite[0][1]).toBe(seq);
   });
 
+  it('forces a supplied fix through the publish path without sampling', async () => {
+    const svc = new LocationSharingService();
+    Object.assign(svc, { mod: mockHolder.mod, status: 'ready' });
+    const fix = { lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 };
+    const publish = jest.spyOn(svc, 'publishFix').mockResolvedValue(9);
+
+    await expect(svc.forceLocationPush(fix, 'scheduled')).resolves.toBe(9);
+
+    expect(publish).toHaveBeenCalledWith(fix, expect.any(Object));
+  });
+
   it('passes the local publish trace context across the native boundary', async () => {
     const parent: SpanContext = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
     setTelemetryForTesting(
