@@ -303,4 +303,26 @@ if [[ "$cloud_failure_transcript" != *"Expo output was withheld"* ]]; then
   exit 1
 fi
 
+set +e
+escape_transcript="$(
+  PATH="$test_root/bin:$PATH" \
+    EXPO_TOKEN=fake-token \
+    EAS_PRIVATE_LOG="$test_root/../escaped-eas.log" \
+    FAKE_SIGNING_CREDENTIAL="$sentinel" \
+    RUNNER_TEMP="$test_root" \
+    bash "$repo_root/scripts/eas-cloud-submit-ci.sh" ios production \
+    2>&1
+)"
+escape_status=$?
+set -e
+
+if [[ "$escape_status" -eq 0 || -e "$test_root/../escaped-eas.log" ]]; then
+  echo "The cloud submission accepted a private log path outside RUNNER_TEMP." >&2
+  exit 1
+fi
+if [[ "$escape_transcript" != *"must be inside RUNNER_TEMP"* ]]; then
+  echo "The escaped private log path did not emit its fixed error." >&2
+  exit 1
+fi
+
 echo "EAS CI log isolation withheld simulated signing credentials on build, upload, and submission paths."

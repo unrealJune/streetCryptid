@@ -64,10 +64,9 @@ jobs:
           EAS_PRIVATE_LOG: ${{ runner.temp }}/eas-cloud-submit.log
         run: |
           set -euo pipefail
-          case "$EAS_PRIVATE_LOG" in
-            "$RUNNER_TEMP"/*) rm -f -- "$EAS_PRIVATE_LOG" ;;
-            *)
-              echo "Refusing to clean unexpected path: $EAS_PRIVATE_LOG" >&2
-              exit 1
-              ;;
-          esac
+          expected_log="$RUNNER_TEMP/eas-cloud-submit.log"
+          if [[ "$EAS_PRIVATE_LOG" != "$expected_log" ]]; then
+            echo "Refusing to clean unexpected path: $EAS_PRIVATE_LOG" >&2
+            exit 1
+          fi
+          rm -f -- "$expected_log"

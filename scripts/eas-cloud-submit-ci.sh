@@ -27,13 +27,16 @@ fi
 : "${RUNNER_TEMP:?RUNNER_TEMP must be set}"
 : "${EAS_PRIVATE_LOG:?EAS_PRIVATE_LOG must be set}"
 
-case "$EAS_PRIVATE_LOG" in
-  "$RUNNER_TEMP"/*) ;;
+runner_temp_path="$(realpath -e -- "$RUNNER_TEMP")"
+private_log_path="$(realpath -m -- "$EAS_PRIVATE_LOG")"
+case "$private_log_path" in
+  "$runner_temp_path"/*) ;;
   *)
     echo "The private EAS log must be inside RUNNER_TEMP." >&2
     exit 2
     ;;
 esac
+EAS_PRIVATE_LOG="$private_log_path"
 
 mkdir -p "$(dirname "$EAS_PRIVATE_LOG")"
 : >"$EAS_PRIVATE_LOG"
