@@ -273,8 +273,13 @@ public final class IrohLocationModule: Module {
       ]
     }
 
-    AsyncFunction("start") { (relayUrls: [String], relayAuthToken: String) async throws in
-      try await self.node?.start(relayUrls: relayUrls, relayAuthToken: relayAuthToken)
+    AsyncFunction("start") { (relayUrls: [String], relayAuthToken: String, relayEnabled: Bool, ipEnabled: Bool, bleEnabled: Bool) async throws in
+      try await self.node?.start(
+        relayUrls: relayUrls,
+        relayAuthToken: relayAuthToken,
+        relayEnabled: relayEnabled,
+        ipEnabled: ipEnabled,
+        bleEnabled: bleEnabled)
     }
 
     AsyncFunction("shutdown") { () async throws in

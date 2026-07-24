@@ -513,13 +513,20 @@ impl LocationNode {
         &self,
         relay_urls: Vec<String>,
         relay_auth_token: String,
+        relay_enabled: bool,
+        ip_enabled: bool,
+        ble_enabled: bool,
     ) -> Result<(), LocationError> {
         let mut guard = self.inner.lock().await;
         if guard.is_some() {
             return Ok(());
         }
-        let relay_mode = relay::custom_relay_mode(&relay_urls, &relay_auth_token)
-            .map_err(LocationError::Network)?;
+        let relay_mode = if relay_enabled {
+            relay::custom_relay_mode(&relay_urls, &relay_auth_token)
+                .map_err(LocationError::Network)?
+        } else {
+            iroh::RelayMode::Disabled
+        };
         let secret = SecretKey::from_bytes(&self.identity_seed);
         #[cfg(any(target_os = "android", target_vendor = "apple"))]
         let endpoint_id = secret.public();
@@ -538,15 +545,23 @@ impl LocationNode {
             .secret_key(secret)
             .relay_mode(relay_mode)
             .address_lookup(memory.clone());
+        if !ip_enabled {
+            builder = builder.clear_ip_transports();
+        }
 
         #[cfg(any(target_os = "android", target_vendor = "apple"))]
-        let ble = {
+        let ble = if ble_enabled {
             let (b, handle) = ble::attach(builder, endpoint_id).await;
             builder = b;
             handle
+        } else {
+            ble::disabled()
         };
         #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
-        let ble = ble::disabled();
+        let ble = {
+            let _ = ble_enabled;
+            ble::disabled()
+        };
 
         let endpoint = builder
             .bind()
@@ -561,13 +576,17 @@ impl LocationNode {
         // (On iOS/Android the OS may require a multicast entitlement / MulticastLock at runtime,
         // but that's a manifest concern, not a build-time one; if mDNS can't start we log and
         // continue on the relay path.)
-        match MdnsAddressLookup::builder().build(endpoint.id()) {
-            Ok(mdns) => {
-                if let Ok(services) = endpoint.address_lookup() {
-                    services.add(mdns);
+        if ip_enabled {
+            match MdnsAddressLookup::builder().build(endpoint.id()) {
+                Ok(mdns) => {
+                    if let Ok(services) = endpoint.address_lookup() {
+                        services.add(mdns);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("mDNS local discovery unavailable, using relay/DNS only: {e}")
                 }
             }
-            Err(e) => tracing::warn!("mDNS local discovery unavailable, using relay/DNS only: {e}"),
         }
 
         let gossip = Gossip::builder().spawn(endpoint.clone());

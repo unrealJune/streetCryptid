@@ -59,7 +59,7 @@ function baseInputs(overrides: Partial<TransportInputs> = {}): TransportInputs {
     pairingSessions: [],
     nearby: null,
     stash: { available: false, optedIn: false },
-    relayOnly: { enabled: false, enforced: false },
+    transportEnabled: { relay: true, ip: true, ble: true },
     friends: [{ endpointId: 'aa'.repeat(32), handle: 'moth', pairingMethod: 'nearby' }],
     background: { sharing: true, access: 'full' },
     ...overrides,
@@ -107,7 +107,7 @@ describe('buildTransportReport', () => {
     );
   });
 
-  it('disables radio and direct paths when relay-only is on', () => {
+  it('reports each disabled native transport as inactive', () => {
     const report = buildTransportReport(
       baseInputs({
         diagnostics: diagnostics([
@@ -116,25 +116,25 @@ describe('buildTransportReport', () => {
           address('ip', '192.168.1.20:443', true),
           address('custom', 'ble:device-1', true),
         ]),
-        relayOnly: { enabled: true, enforced: true },
+        transportEnabled: { relay: true, ip: false, ble: false },
       })
     );
     expect(row(report.rows, 'relay').status).toBe('active');
     for (const id of ['direct', 'lan', 'ble']) {
       expect(row(report.rows, id).status).toBe('inactive');
-      expect(row(report.rows, id).detail).toMatch(/relay-only/i);
+      expect(row(report.rows, id).detail).toMatch(/debug controls/i);
     }
   });
 
-  it('keeps observed paths honest while relay-only enforcement is pending', () => {
+  it('reports relay as inactive when it is disabled', () => {
     const report = buildTransportReport(
       baseInputs({
-        diagnostics: diagnostics([address('ip', '203.0.113.4:443', true)]),
-        relayOnly: { enabled: true, enforced: false },
+        diagnostics: diagnostics([address('relay', 'https://relay.example', true)]),
+        transportEnabled: { relay: false, ip: true, ble: true },
       })
     );
-    expect(row(report.rows, 'direct').status).toBe('active');
-    expect(row(report.rows, 'direct').detail).toMatch(/not enforced/i);
+    expect(row(report.rows, 'relay').status).toBe('inactive');
+    expect(row(report.rows, 'relay').detail).toMatch(/debug controls/i);
   });
 
   it('degrades local transports to n-a on web', () => {

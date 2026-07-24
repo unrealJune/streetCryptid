@@ -1181,7 +1181,7 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     /**
      * Bind the iroh endpoint + spawn the gossip router. Idempotent.
      */
-    func start(relayUrls: [String], relayAuthToken: String) async throws 
+    func start(relayUrls: [String], relayAuthToken: String, relayEnabled: Bool, ipEnabled: Bool, bleEnabled: Bool) async throws 
     
     /**
      * Picker action: submit the chosen figure index. A correct choice latches the local SAS and
@@ -2032,13 +2032,13 @@ open func shutdown()async throws   {
     /**
      * Bind the iroh endpoint + spawn the gossip router. Idempotent.
      */
-open func start(relayUrls: [String], relayAuthToken: String)async throws   {
+open func start(relayUrls: [String], relayAuthToken: String, relayEnabled: Bool, ipEnabled: Bool, bleEnabled: Bool)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_locationnode_start(
                     self.uniffiCloneHandle(),
-                    FfiConverterSequenceString.lower(relayUrls),FfiConverterString.lower(relayAuthToken)
+                    FfiConverterSequenceString.lower(relayUrls),FfiConverterString.lower(relayAuthToken),FfiConverterBool.lower(relayEnabled),FfiConverterBool.lower(ipEnabled),FfiConverterBool.lower(bleEnabled)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -4724,7 +4724,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_shutdown() != 37069) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_start() != 54155) {
+    if (uniffi_iroh_location_checksum_method_locationnode_start() != 8886) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_submit_pair_choice() != 8652) {

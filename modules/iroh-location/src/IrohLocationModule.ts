@@ -18,6 +18,7 @@ import type {
   ProfileView,
   SasChallenge,
   TransportDiagnostics,
+  TransportConfig,
 } from './IrohLocation.types';
 
 /**
@@ -32,7 +33,7 @@ export declare class IrohLocationNativeModule
   implements IrohLocationApi
 {
   createNode(identitySecretHex: string | null, recvSecretHex: string | null): Promise<NodeKeys>;
-  start(): Promise<void>;
+  start(config?: TransportConfig): Promise<void>;
   shutdown(): Promise<void>;
   ticket(): Promise<string>;
   deriveTopic(authorEndpointIdHex: string): Promise<string>;
@@ -110,8 +111,16 @@ export declare class IrohLocationNativeModule
 }
 
 type RawIrohLocationNativeModule = Omit<IrohLocationNativeModule, 'start'> & {
-  start(relayUrls: string[], relayAuthToken: string): Promise<void>;
+  start(
+    relayUrls: string[],
+    relayAuthToken: string,
+    relayEnabled: boolean,
+    ipEnabled: boolean,
+    bleEnabled: boolean
+  ): Promise<void>;
 };
+
+const DEFAULT_TRANSPORT_CONFIG: TransportConfig = { relay: true, ip: true, ble: true };
 
 let cached: IrohLocationNativeModule | null | undefined;
 
@@ -121,16 +130,16 @@ function withRelayConfig(raw: RawIrohLocationNativeModule): IrohLocationNativeMo
   return new Proxy(raw, {
     get(target, property) {
       if (property === 'start') {
-        return async () => {
+        return async (config: TransportConfig = DEFAULT_TRANSPORT_CONFIG) => {
           const { relayUrls, authToken } = requireIrohRelayRuntimeConfig();
-          await start(relayUrls, authToken);
+          await start(relayUrls, authToken, config.relay, config.ip, config.ble);
         };
       }
 
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
     },
-  }) as IrohLocationNativeModule;
+  }) as unknown as IrohLocationNativeModule;
 }
 
 /** Returns the native module, or `null` when it isn't available (web / Expo Go). */

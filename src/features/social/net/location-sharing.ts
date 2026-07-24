@@ -68,11 +68,13 @@ import {
   createPersistentKV,
   createPersistentTrailStorage,
   loadPool,
-  loadRelayOnly,
   loadStashOptIn,
+  loadTransportPreferences,
   savePool,
-  saveRelayOnly,
   saveStashOptIn,
+  saveTransportPreferences,
+  type TransportPreferences,
+  DEFAULT_TRANSPORT_PREFERENCES,
 } from './persistence';
 import { createDefaultStashClient, type StashClient } from './stash-client';
 import {
@@ -184,12 +186,8 @@ export interface SharingSnapshot {
     updatedAt: number | null;
     error: string | null;
   };
-  /**
-   * Transport preferences: whether the user forced relay-only, and whether that's actually
-   * enforced at the native endpoint yet (Phase 2). In Phase 1 `enforced` is always false — the
-   * flag is recorded and reflected in the diagnostic but does not yet re-bind the endpoint.
-   */
-  transports: { relayOnly: boolean; relayOnlyEnforced: boolean };
+  /** Native endpoint transports currently enabled for protocol-constrained debugging. */
+  transports: TransportPreferences;
   /** Bilateral-pairing / nearby-discovery state. */
   pairing: PairingSnapshot;
 }
@@ -298,12 +296,8 @@ export class LocationSharingService implements FixPublisher {
   private readonly stashTicket: string | null = getStashConfig()?.ticket ?? null;
   /** Per-user opt-in (persisted). Defaults false — the stash is never used unless turned on. */
   private stashOptIn = false;
-  /**
-   * User forced relay-only transport (persisted). Defaults false. Phase 1 records intent only;
-   * native enforcement (skip BLE/nearby/mDNS + relay-only mode) lands in Phase 2. Never enforced
-   * on web (no native endpoint to re-bind).
-   */
-  private relayOnly = false;
+  /** Persisted native endpoint transports. All paths are enabled by default. */
+  private transportPreferences: TransportPreferences = { ...DEFAULT_TRANSPORT_PREFERENCES };
   /** Native push-token source for stash wake-ups. */
   private readonly pushTokens: PushTokenProvider;
   /** Cached device push token (undefined = not yet attempted; null = unavailable/denied). */
@@ -373,22 +367,40 @@ export class LocationSharingService implements FixPublisher {
     return { available: this.stash.configured, optedIn: this.stashOptIn };
   }
 
-  /** Current relay-only preference + whether it's enforced natively yet (Phase 2). */
-  relayOnlyState(): { relayOnly: boolean; relayOnlyEnforced: boolean } {
-    // Phase 1: never enforced (no native re-bind wired yet).
-    return { relayOnly: this.relayOnly, relayOnlyEnforced: false };
+  /** Current endpoint transport set. */
+  transportState(): TransportPreferences {
+    return { ...this.transportPreferences };
   }
 
-  /**
-   * Force (or unforce) relay-only transport. Phase 1 persists the choice and reflects it in the
-   * diagnostic; the native endpoint is not yet re-bound, so BLE/nearby/direct/LAN keep running
-   * until Phase 2 wires enforcement (a node restart). Idempotent.
-   */
-  async setRelayOnly(relayOnly: boolean): Promise<void> {
-    if (this.relayOnly === relayOnly) return;
-    this.relayOnly = relayOnly;
-    await saveRelayOnly(this.kv, relayOnly);
-    this.emit();
+  /** Enable or disable one native transport and immediately rebuild the endpoint. */
+  async setTransportEnabled(
+    transport: keyof TransportPreferences,
+    enabled: boolean
+  ): Promise<void> {
+    if (this.transportPreferences[transport] === enabled) return;
+    const next = { ...this.transportPreferences, [transport]: enabled };
+    if (!next.relay && !next.ip && !next.ble) {
+      throw new Error('Keep at least one transport enabled.');
+    }
+    if (!this.mod || !this.isReady()) throw new Error('Friend sync is not ready yet.');
+    if (this.rebindInFlight || this.pairingOperations > 0 || this.hasActivePairingSession()) {
+      throw new Error('Finish the current pairing action before changing transports.');
+    }
+
+    const previous = this.transportPreferences;
+    this.transportPreferences = next;
+    this.rebindInFlight = true;
+    try {
+      await this.rebindNode();
+      await saveTransportPreferences(this.kv, next);
+      this.emit();
+    } catch (error) {
+      this.transportPreferences = previous;
+      await this.rebindNode().catch(() => undefined);
+      throw error;
+    } finally {
+      this.rebindInFlight = false;
+    }
   }
 
   /**
@@ -533,7 +545,8 @@ export class LocationSharingService implements FixPublisher {
     this.configureDevTelemetry();
     // Restore the monotonic seq before anything can publish, so we never hand out a reused seq.
     this.seq = await loadSeq();
-    await this.mod.start();
+    this.transportPreferences = await loadTransportPreferences(this.kv);
+    await this.mod.start(this.transportPreferences);
     if (interactive) {
       this.ticketStr = await this.mod.ticket();
       this.docTicketStr = await this.safeDocTicket();
@@ -546,7 +559,6 @@ export class LocationSharingService implements FixPublisher {
 
     await this.restorePool(interactive);
     this.stashOptIn = await loadStashOptIn(this.kv);
-    this.relayOnly = await loadRelayOnly(this.kv);
     if (interactive) {
       await this.importFriendProfiles();
       if (this.stashEnabled()) this.registerStashBackgroundSync();
@@ -851,7 +863,7 @@ export class LocationSharingService implements FixPublisher {
 
     await mod.shutdown();
     this.keys = await mod.createNode(keys.identitySecret, keys.recvSecret);
-    await mod.start();
+    await mod.start(this.transportPreferences);
     this.ticketStr = await mod.ticket();
     this.docTicketStr = await this.safeDocTicket();
     this.profileEpoch = await this.safePublishProfile();
@@ -1761,7 +1773,7 @@ export class LocationSharingService implements FixPublisher {
         updatedAt: this.transportDiagnosticsUpdatedAt,
         error: this.transportDiagnosticsError,
       },
-      transports: this.relayOnlyState(),
+      transports: this.transportState(),
       pairing: this.pairingSnapshot(),
     };
   }

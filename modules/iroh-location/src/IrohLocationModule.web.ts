@@ -24,6 +24,7 @@ import type {
   ProfileView,
   SasChallenge,
   TransportDiagnostics,
+  TransportConfig,
 } from './IrohLocation.types';
 
 const ID_KEY = 'sc.iroh.identitySecret';
@@ -104,7 +105,10 @@ export class IrohLocationNativeModule
     return keys;
   }
 
-  async start(): Promise<void> {
+  async start(config: TransportConfig = { relay: true, ip: true, ble: true }): Promise<void> {
+    if (!config.relay) {
+      throw new Error('The browser node requires the relay transport.');
+    }
     await ensureWasm();
     const { relayUrls, authToken } = requireIrohRelayRuntimeConfig();
     await this.requireNode().start(relayUrls, authToken);
