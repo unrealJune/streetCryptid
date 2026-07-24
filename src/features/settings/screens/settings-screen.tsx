@@ -9,6 +9,8 @@ import { StashSettingRow } from '@/features/social/components/stash-setting-row'
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 import { useTheme } from '@/hooks/use-theme';
 
+import { ProfileOnboardingPreview } from '@/features/account/components/profile-onboarding-preview';
+
 import { AppProvenanceDetails } from '../components/app-provenance';
 import { AuthorIdRow } from '../components/author-id-row';
 import { DebugLocationControls } from '../components/debug-location-controls';
@@ -91,6 +93,7 @@ export default function SettingsScreen() {
           warningColor={chrome.amber}
           onPush={forceLocationPush}
         />
+        <ProfileOnboardingPreview accent={chrome.green} />
         <EventLogPanel activeColor={chrome.green} warningColor={chrome.amber} />
       </View>
 

@@ -10,6 +10,7 @@ import { applyViewTransform, clampCamera, scaleFor, type ViewTransform } from '.
 import { makeViewLimits, type ViewLimits } from '../core/gesture';
 import { createH3Grid, realH3 } from '../core/h3-grid';
 import { createNativeH3Enumerator } from '../core/native-h3-enumerator';
+import { resForZoom } from '../core/cell-ladder';
 import { coverageInView, nearestPlaceName } from '../core/readout';
 import { coversView, shouldPrefetchRegion } from '../core/region';
 import type { CameraState, LatLon, Viewport, WorldPoint, WorldRect } from '../core/types';
@@ -59,6 +60,12 @@ export interface MapEngineState {
   readonly limits: ViewLimits | null;
   /** Explored fraction of fixed-resolution cells in view, or 0 when hidden. */
   readonly coverage: number;
+  /**
+   * Whether the exploration layer renders at the on-screen zoom. False below
+   * the render cutoff, where {@link coverage} is a meaningless 0 rather than a
+   * real "nothing explored" — chrome should hide the readout, not show 0%.
+   */
+  readonly sectorsVisible: boolean;
   /** Nearest prominent place name to the camera center, for the island. */
   readonly placeName: string | null;
   /**
@@ -311,6 +318,10 @@ export function useMapEngine(
     [exploration, explorationVersion, grid, camera, viewport]
   );
 
+  // The same cutoff `coverageInView` uses to bail — read it directly so the
+  // chrome can tell "0% explored" apart from "the layer isn't drawn here".
+  const sectorsVisible = useMemo(() => resForZoom(camera.zoom) !== null, [camera.zoom]);
+
   const placeName = useMemo(
     () => (region ? nearestPlaceName(region.places, camera.center) : null),
     [region, camera]
@@ -324,6 +335,7 @@ export function useMapEngine(
     anchor,
     limits,
     coverage,
+    sectorsVisible,
     placeName,
     commit,
     prefetchAt,

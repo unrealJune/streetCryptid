@@ -51,7 +51,7 @@ const AUTOSAVE_DELAY_MS = 450;
 const PROFILE_MAX_WIDTH = 640;
 const DEFAULT_CUSTOM_NAME = 'Custom Cryptid';
 
-type ActiveEditor = 'username' | 'icon' | 'signal' | null;
+type ActiveEditor = 'icon' | 'signal' | null;
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 interface QueuedProfile {
@@ -99,9 +99,9 @@ export function CryptidProfileEditor({
   const [customName, setCustomName] = useState(initialPreset ? '' : initialDraft.cryptidName);
   const [customArt, setCustomArt] = useState(initialPreset ? '' : initialDraft.sigil);
   const [color, setColor] = useState(initialColor);
-  const [activeEditor, setActiveEditor] = useState<ActiveEditor>(
-    mode === 'onboarding' ? 'username' : null
-  );
+  // Nothing opens by default: username is always visible now, and onboarding used
+  // to open it here.
+  const [activeEditor, setActiveEditor] = useState<ActiveEditor>(null);
   const [handleTouched, setHandleTouched] = useState(false);
   const [customNameTouched, setCustomNameTouched] = useState(false);
   const [customArtTouched, setCustomArtTouched] = useState(false);
@@ -134,6 +134,13 @@ export function CryptidProfileEditor({
   const colorName =
     colorOptions.find((option) => option.value.toLowerCase() === color.toLowerCase())?.name ??
     'Custom';
+
+  // The hero preview doubles as navigation into the fields it previews: tapping
+  // the @handle focuses the username input (always mounted, so a direct focus is
+  // enough), tapping the icon opens the icon picker.
+  const handleInputRef = useRef<TextInput>(null);
+  const focusHandle = useCallback(() => handleInputRef.current?.focus(), []);
+  const openIconFromHero = useCallback(() => setActiveEditor('icon'), []);
 
   const mountedRef = useRef(true);
   const onSaveRef = useRef(onSave);
@@ -377,75 +384,85 @@ export function CryptidProfileEditor({
             ]}
           >
             <View style={styles.preview}>
-              <CryptidAvatar
-                art={sigil || ' + '}
-                name={iconName}
-                color={color}
-                size="large"
-                style={styles.previewAvatar}
-              />
-              <ThemedText
-                adjustsFontSizeToFit
-                minimumFontScale={0.74}
-                numberOfLines={1}
-                style={[styles.handlePreview, { color: bareHandle ? color : theme.textSecondary }]}
+              <Pressable
+                accessibilityHint="Opens the profile icon picker"
+                accessibilityLabel={`Profile icon: ${iconName}`}
+                accessibilityRole="button"
+                onPress={openIconFromHero}
+                style={({ pressed }) => [styles.previewTarget, { opacity: pressed ? 0.62 : 1 }]}
               >
-                {bareHandle ? `@${bareHandle}` : 'Not set'}
-              </ThemedText>
+                <CryptidAvatar
+                  art={sigil || ' + '}
+                  name={iconName}
+                  color={color}
+                  size="large"
+                  style={styles.previewAvatar}
+                />
+              </Pressable>
+              <Pressable
+                accessibilityHint="Focuses the username field"
+                accessibilityLabel={`Username: ${bareHandle ? `@${bareHandle}` : 'not set'}`}
+                accessibilityRole="button"
+                onPress={focusHandle}
+                style={({ pressed }) => [styles.previewTarget, { opacity: pressed ? 0.62 : 1 }]}
+              >
+                <ThemedText
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.74}
+                  numberOfLines={1}
+                  style={[
+                    styles.handlePreview,
+                    { color: bareHandle ? color : theme.textSecondary },
+                  ]}
+                >
+                  {bareHandle ? `@${bareHandle}` : 'Not set'}
+                </ThemedText>
+              </Pressable>
             </View>
 
             <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
 
-            <SettingRow
-              active={activeEditor === 'username'}
-              label="Username"
-              value={bareHandle ? `@${bareHandle}` : 'Not set'}
-              onPress={() =>
-                setActiveEditor((current) => (current === 'username' ? null : 'username'))
-              }
-            />
-
-            {activeEditor === 'username' ? (
-              <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
-                <ThemedText style={styles.fieldLabel}>Username</ThemedText>
-                <View
-                  style={[
-                    styles.handleInputShell,
-                    {
-                      backgroundColor: theme.backgroundElement,
-                      borderColor:
-                        handleErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
-                    },
-                  ]}
-                >
-                  <ThemedText style={[styles.handlePrefix, { color }]}>@</ThemedText>
-                  <TextInput
-                    accessibilityLabel="Username"
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    maxLength={20}
-                    onBlur={() => setHandleTouched(true)}
-                    onChangeText={(value) => {
-                      setSaveError(null);
-                      setSaveStatus('idle');
-                      setHandleTouched(true);
-                      setHandle(value.replace(/^@+/, '').toLowerCase());
-                    }}
-                    placeholder="username"
-                    placeholderTextColor={theme.textSecondary}
-                    selectionColor={color}
-                    spellCheck={false}
-                    style={[styles.handleInput, { color: theme.text }]}
-                    value={handle}
-                  />
-                </View>
-                <FieldNote
-                  errorColor={chrome.amberDark}
-                  issues={handleErrors}
-                  hint="Use 2-20 lowercase letters, numbers, underscores, or dashes."
+            {/* Username is always open — it is the one field everybody sets, so
+                hiding it behind a disclosure row only adds a tap. */}
+            <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
+              <ThemedText style={styles.fieldLabel}>Username</ThemedText>
+              <View
+                style={[
+                  styles.handleInputShell,
+                  {
+                    backgroundColor: theme.backgroundElement,
+                    borderColor: handleErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
+                  },
+                ]}
+              >
+                <ThemedText style={[styles.handlePrefix, { color }]}>@</ThemedText>
+                <TextInput
+                  accessibilityLabel="Username"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  maxLength={20}
+                  ref={handleInputRef}
+                  onBlur={() => setHandleTouched(true)}
+                  onChangeText={(value) => {
+                    setSaveError(null);
+                    setSaveStatus('idle');
+                    setHandleTouched(true);
+                    setHandle(value.replace(/^@+/, '').toLowerCase());
+                  }}
+                  placeholder="username"
+                  placeholderTextColor={theme.textSecondary}
+                  selectionColor={color}
+                  spellCheck={false}
+                  style={[styles.handleInput, { color: theme.text }]}
+                  value={handle}
                 />
               </View>
-            ) : null}
+              <FieldNote
+                errorColor={chrome.amberDark}
+                issues={handleErrors}
+                hint="Use 2-20 lowercase letters, numbers, underscores, or dashes."
+              />
+            </View>
 
             <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
 
@@ -833,6 +850,12 @@ const styles = StyleSheet.create({
     minHeight: 224,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.five,
+  },
+  previewTarget: {
+    // Stretch (not shrink-wrap) so the handle's `maxWidth: '100%'` still resolves
+    // against the preview's content width and `adjustsFontSizeToFit` keeps working.
+    alignItems: 'center',
+    alignSelf: 'stretch',
   },
   previewAvatar: {
     minHeight: 126,
