@@ -276,6 +276,71 @@ update message="update":
 clean:
     rm -rf .expo dist web-build node_modules/.cache
 
+# Remove native caches: the generated ios/ and android/ projects, the
+# iroh-location cargo target dir, and this project's Xcode DerivedData.
+clean-native: clean
+    rm -rf ios android
+    rm -rf modules/iroh-location/rust/target
+    rm -rf ~/Library/Developer/Xcode/DerivedData/streetCryptid-*
+
 # Print key tool versions.
 versions:
     @bun --version && bunx expo --version
+
+# --- High-Specificity Recipes ------------------------------------------------------------
+
+# Build the iOS dev client locally through EAS and install it on a cable-connected iPhone.
+# Requires macOS + Xcode.
+#
+# Use this rather than `expo run:ios` when you do not personally hold the team's iOS
+# signing credentials: eas.json sets `credentialsSource: remote`, so EAS supplies the
+# ad hoc provisioning profile.
+#
+# `eas build --local` has no build cache of its own and copies the project to a temp
+# workdir, so Pods and Xcode start cold each run. CARGO_TARGET_DIR is pinned back to
+# the repo's own target dir (the path CI also pins) so the release build of iroh in
+# scripts/eas-build-pre-install.sh stays incremental instead of recompiling the whole
+# iroh/gossip/docs tree every time.
+#
+# To wipe this target dir use just clean-native.
+#
+# Before you run this, you might want to try just env-pull development;
+# This will set env vars to match expo's cloud builds.
+# If you were previously missing these, you need to force-quit the app on iOS and just start again.
+#
+# After you run this, next step is just start, start-clear, or start-with-tailscale,
+# depending what you need. 
+#
+# Installs on the first connected device unless you name one; `xcrun devicectl list
+# devices` prints the identifiers. Launches the app afterwards — start Metro first
+# (`just start` / `just start-with-tailscale`) or the dev client opens to its launcher.
+#   just ios-dev-install
+#   just ios-dev-install EC8C13BD-FD59-4041-92F6-F32EE2E5180E
+ios-dev-install device="":
+    #!/usr/bin/env sh
+    set -eu
+    root="$(pwd)"
+    ipa="$root/streetcryptid-development.ipa"
+    dev="{{device}}"
+    if [ -z "$dev" ]; then
+      json="$(mktemp)"
+      xcrun devicectl list devices --json-output "$json" >/dev/null
+      dev="$(node -e 'const fs=require("fs");const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const d=(r.result.devices||[]).find(x=>x.connectionProperties&&x.connectionProperties.tunnelState==="connected");process.stdout.write(d?d.identifier:"")' "$json")"
+      rm -f "$json"
+      if [ -z "$dev" ]; then
+        echo "No connected iPhone found. Plug one in, or pass an identifier from 'xcrun devicectl list devices'." >&2
+        exit 1
+      fi
+    fi
+    echo "Installing to device $dev"
+    export CARGO_TARGET_DIR="$root/modules/iroh-location/rust/target"
+    export EXPO_NO_TELEMETRY=1
+    bunx eas-cli build \
+      --local \
+      --platform ios \
+      --profile development \
+      --output "$ipa" \
+      --non-interactive \
+      --freeze-credentials
+    xcrun devicectl device install app --device "$dev" "$ipa"
+    xcrun devicectl device process launch --device "$dev" com.unrealjune.streetcryptid
