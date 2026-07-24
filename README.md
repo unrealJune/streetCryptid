@@ -172,6 +172,17 @@ subprocess environment and allow-lists the single Expo build-page URL written to
 CI exercises build success, build failure, and malformed upload output with a fake base64
 signing-key sentinel to ensure it cannot escape into command output.
 
+### Manual TestFlight submissions
+
+The **Submit iOS to TestFlight** GitHub Actions workflow can be run manually from the `main`
+branch. It starts a production EAS cloud build and automatically submits the completed build to
+TestFlight using the `production` build and submit profiles.
+
+Create an `app-store-submissions` GitHub environment, add an Expo access token as its
+`EXPO_TOKEN` secret, and configure any desired deployment reviewers on that environment. EAS must
+already have the iOS distribution certificate, provisioning profile, and App Store Connect API key
+needed for non-interactive production submissions.
+
 ## License
 
 The app is MIT-licensed; see [LICENSE](./LICENSE). The vendored experimental
