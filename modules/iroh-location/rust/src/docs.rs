@@ -369,40 +369,50 @@ impl TrailDocs {
         doc.start_sync(peers).await?;
 
         let mut recovered: u64 = 0;
+        let mut pending_entries = HashMap::new();
         // Bound the reconciliation: with no reachable peer (e.g. relay-only web where direct-IP
         // transmits are dropped) `SyncFinished` may never arrive, which would hang this call — and
         // therefore the `syncTrail` promise — forever. Break after an idle gap and report what we
         // recovered so the UI always gets a `completed` (with count), never a dead button.
         loop {
-            match timeout(Duration::from_secs(SYNC_IDLE_TIMEOUT_SECS), events.next()).await {
-                Ok(Some(Ok(LiveEvent::InsertRemote { from, entry, .. }))) => {
-                    let bytes = match self.blobs.blobs().get_bytes(entry.content_hash()).await {
-                        Ok(b) => b,
-                        Err(_) => continue,
-                    };
-                    if let Ok(opened) = crypto::open(recv_secret, &bytes) {
-                        if let Some((author_bytes, seq)) = decode_key(entry.key()) {
-                            if fix_ts_at_least(&opened.payload, since_ts) {
-                                recovered += 1;
-                                // Same short content hash the sender's publish span and the
-                                // stash's entry.received span carry — the cross-device join key.
-                                tracing::info!(
-                                    sc.entry_hash = %crate::telemetry::short_hex(entry.content_hash().as_bytes()),
-                                    sc.author = %crate::telemetry::short_hex(&author_bytes),
-                                    sc.seq = seq,
-                                    entry.origin = %from.fmt_short(),
-                                    "trail.backfill: recovered envelope via reconciliation"
-                                );
-                                sink.on_backfill(author_bytes, seq, opened.payload);
-                            }
+            let entry_to_process =
+                match timeout(Duration::from_secs(SYNC_IDLE_TIMEOUT_SECS), events.next()).await {
+                    Ok(Some(Ok(LiveEvent::InsertRemote { from, entry, .. }))) => {
+                        Some((from, entry))
+                    }
+                    Ok(Some(Ok(LiveEvent::ContentReady { hash }))) => pending_entries.remove(&hash),
+                    Ok(Some(Ok(LiveEvent::SyncFinished(_)))) => None,
+                    Ok(Some(Ok(LiveEvent::PendingContentReady))) => break,
+                    Ok(Some(Ok(_))) => None,
+                    Ok(Some(Err(_))) => break,
+                    Ok(None) => break, // stream ended
+                    Err(_) => break,   // idle timeout — stop waiting, report what we have
+                };
+            if let Some((from, entry)) = entry_to_process {
+                let bytes = match self.blobs.blobs().get_bytes(entry.content_hash()).await {
+                    Ok(b) => b,
+                    Err(_) => {
+                        pending_entries.insert(entry.content_hash(), (from, entry));
+                        continue;
+                    }
+                };
+                if let Ok(opened) = crypto::open(recv_secret, &bytes) {
+                    if let Some((author_bytes, seq)) = decode_key(entry.key()) {
+                        if fix_ts_at_least(&opened.payload, since_ts) {
+                            recovered += 1;
+                            // Same short content hash the sender's publish span and the
+                            // stash's entry.received span carry — the cross-device join key.
+                            tracing::info!(
+                                sc.entry_hash = %crate::telemetry::short_hex(entry.content_hash().as_bytes()),
+                                sc.author = %crate::telemetry::short_hex(&author_bytes),
+                                sc.seq = seq,
+                                entry.origin = %from.fmt_short(),
+                                "trail.backfill: recovered envelope via reconciliation"
+                            );
+                            sink.on_backfill(author_bytes, seq, opened.payload);
                         }
                     }
                 }
-                Ok(Some(Ok(LiveEvent::SyncFinished(_)))) => break,
-                Ok(Some(Ok(_))) => {}
-                Ok(Some(Err(_))) => break,
-                Ok(None) => break, // stream ended
-                Err(_) => break,   // idle timeout — stop waiting, report what we have
             }
         }
 
