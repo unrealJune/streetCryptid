@@ -72,6 +72,17 @@ if [[ "$command" == "build" ]]; then
   if [[ "${FAKE_EAS_FAIL_BUILD:-0}" == "1" ]]; then
     exit 23
   fi
+  if [[ "${FAKE_EAS_EXPECT_CLOUD:-0}" == "1" ]]; then
+    args=" $* "
+    if [[ "$args" != *" --platform ios "* ||
+      "$args" != *" --profile production "* ||
+      "$args" != *" --auto-submit-with-profile production "* ||
+      "$args" != *" --non-interactive "* ||
+      "$args" == *" --local "* ]]; then
+      exit 27
+    fi
+    exit 0
+  fi
   while (($#)); do
     if [[ "$1" == "--output" ]]; then
       shift
@@ -235,4 +246,61 @@ if [[ "$bad_upload_transcript" != *"Expo output was withheld"* ]]; then
   exit 1
 fi
 
-echo "EAS CI log isolation withheld simulated signing credentials on build and upload paths."
+cloud_log="$test_root/cloud-submit.log"
+cloud_transcript="$(
+  PATH="$test_root/bin:$PATH" \
+    DEBUG=1 \
+    EAS_DEBUG=1 \
+    EXPO_DEBUG=1 \
+    EXPO_TOKEN=fake-token \
+    EAS_PRIVATE_LOG="$cloud_log" \
+    FAKE_EAS_EXPECT_CLOUD=1 \
+    FAKE_SIGNING_CREDENTIAL="$sentinel" \
+    RUNNER_TEMP="$test_root" \
+    bash "$repo_root/scripts/eas-cloud-submit-ci.sh" ios production \
+    2>&1
+)"
+
+if [[ "$cloud_transcript" == *"$sentinel"* ]]; then
+  echo "The signing credential sentinel escaped into successful cloud submission output." >&2
+  exit 1
+fi
+if [[ "$cloud_transcript" != *"store submission was started"* ]]; then
+  echo "The cloud submission did not emit its fixed success message." >&2
+  exit 1
+fi
+if ! grep -Fq "$sentinel" "$cloud_log"; then
+  echo "The cloud submission test did not exercise private EAS output." >&2
+  exit 1
+fi
+
+cloud_failure_log="$test_root/cloud-submit-failure.log"
+set +e
+cloud_failure_transcript="$(
+  PATH="$test_root/bin:$PATH" \
+    EXPO_TOKEN=fake-token \
+    EAS_PRIVATE_LOG="$cloud_failure_log" \
+    FAKE_EAS_EXPECT_CLOUD=1 \
+    FAKE_EAS_FAIL_BUILD=1 \
+    FAKE_SIGNING_CREDENTIAL="$sentinel" \
+    RUNNER_TEMP="$test_root" \
+    bash "$repo_root/scripts/eas-cloud-submit-ci.sh" ios production \
+    2>&1
+)"
+cloud_failure_status=$?
+set -e
+
+if [[ "$cloud_failure_status" -eq 0 ]]; then
+  echo "The simulated failed cloud submission unexpectedly succeeded." >&2
+  exit 1
+fi
+if [[ "$cloud_failure_transcript" == *"$sentinel"* ]]; then
+  echo "The signing credential sentinel escaped from failed cloud submission output." >&2
+  exit 1
+fi
+if [[ "$cloud_failure_transcript" != *"Expo output was withheld"* ]]; then
+  echo "The failed cloud submission did not explain that private output was withheld." >&2
+  exit 1
+fi
+
+echo "EAS CI log isolation withheld simulated signing credentials on build, upload, and submission paths."

@@ -45,13 +45,29 @@ jobs:
       - name: Install project dependencies
         run: bun install --frozen-lockfile
 
+      - name: Install EAS CLI
+        run: bun add --global "eas-cli@$EAS_CLI_VERSION"
+
+      - name: Verify EAS log isolation
+        run: bash scripts/test-eas-ci-log-isolation.sh
+
       - name: Build and submit to TestFlight
         env:
+          EAS_PRIVATE_LOG: ${{ runner.temp }}/eas-cloud-submit.log
           EAS_BUILD_GIT_COMMIT_HASH: ${{ github.sha }}
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: >-
-          bunx eas-cli@$EAS_CLI_VERSION build
-          --platform ios
-          --profile production
-          --auto-submit-with-profile production
-          --non-interactive
+        run: bash scripts/eas-cloud-submit-ci.sh ios production
+
+      - name: Remove private EAS logs
+        if: always()
+        env:
+          EAS_PRIVATE_LOG: ${{ runner.temp }}/eas-cloud-submit.log
+        run: |
+          set -euo pipefail
+          case "$EAS_PRIVATE_LOG" in
+            "$RUNNER_TEMP"/*) rm -f -- "$EAS_PRIVATE_LOG" ;;
+            *)
+              echo "Refusing to clean unexpected path: $EAS_PRIVATE_LOG" >&2
+              exit 1
+              ;;
+          esac

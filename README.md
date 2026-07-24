@@ -183,6 +183,12 @@ Create an `app-store-submissions` GitHub environment, add an Expo access token a
 already have the iOS distribution certificate, provisioning profile, and App Store Connect API key
 needed for non-interactive production submissions.
 
+As with PR builds, all EAS authentication, build, and submission output is treated as sensitive.
+The workflow redirects it to a mode-`0600` file under `runner.temp`, emits only fixed success or
+failure messages, and deletes the private log in an `always()` cleanup step. CI sentinel tests
+exercise both successful and failed cloud-submission paths to prevent credential-bearing EAS output
+from reaching GitHub Actions logs.
+
 ## License
 
 The app is MIT-licensed; see [LICENSE](./LICENSE). The vendored experimental
