@@ -181,7 +181,7 @@ export async function rearmBackgroundLocationTask(
     distanceInterval: cfg.distanceIntervalM,
     deferredUpdatesInterval: cfg.deferredUpdatesIntervalMs ?? 0,
     activityType: mapActivity(cfg.activityType ?? 'other'),
-    showsBackgroundLocationIndicator: true,
+    showsBackgroundLocationIndicator: false,
     pausesUpdatesAutomatically: cfg.pausesUpdatesAutomatically ?? false,
     foregroundService: {
       notificationTitle: cfg.notificationTitle,
