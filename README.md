@@ -143,8 +143,9 @@ Build profiles live in `eas.json`: `development` (dev client), `preview`
 
 ### PR standalone Release builds
 
-PRs authored by `Cobular`, `ava-ankenbrandt`, or `unrealJune` from branches in this repository
-build installable iOS and Android internal Release apps on ephemeral GitHub-hosted runners.
+PRs authored by the allow-listed human accounts `Cobular`, `ava-ankenbrandt`, or `unrealJune` from
+branches in this repository build installable iOS and Android internal Release apps on ephemeral
+GitHub-hosted runners.
 Copilot coding agent PRs are also eligible only when the author is exactly
 `copilot-swe-agent[bot]`, the branch is in this repository, and its name starts with `copilot/`.
 Copilot generates the remainder of that branch name, so it is intentionally not allow-listed; the
@@ -158,12 +159,13 @@ The build jobs use the `development-builds` GitHub environment. A repository adm
 configure that environment before enabling the workflow:
 
 1. In **Settings → Environments → development-builds**, add maintainers as required reviewers and
-   enable **Prevent self-review**. Ensure **Allow administrators to bypass configured protection
-   rules** is unchecked.
+   enable **Prevent self-review**. **Critical:** uncheck **Allow administrators to bypass configured
+   protection rules**.
 2. Add a Developer-role Expo robot-user token named `EXPO_TOKEN` as an environment secret. Do not
    duplicate it as a repository or organization secret.
 3. Approve each pending workflow run separately, including every run created after new commits.
-   Do not substitute a persistent PR label for this per-run approval.
+   Do not substitute a persistent PR label for this per-run approval: a label persists when
+   unreviewed commits are added.
 
 Before approving, verify that the pending deployment's commit SHA is the exact revision reviewed.
 Pay particular attention to changes in GitHub Actions workflows, package lifecycle scripts, Expo
