@@ -49,6 +49,7 @@ class FakeNativeModule {
     pairResult: [] as string[],
     nearbyBlePeers: 0,
     bleCapabilities: 0,
+    resolveBumpPeer: 0,
     transportDiagnostics: 0,
     createNode: 0,
     start: 0,
@@ -77,6 +78,7 @@ class FakeNativeModule {
     peerCount: 0,
     detail: 'none',
   };
+  bumpResolutions: BumpResolution[] = [];
   bumpResolutionPromise: Promise<BumpResolution> | null = null;
   initiateNearbyPromise: Promise<string> | null = null;
   initiateNearbyError: Error | null = null;
@@ -215,7 +217,8 @@ class FakeNativeModule {
     return this.caps.available;
   }
   async resolveBumpPeer() {
-    return this.bumpResolutionPromise ?? this.bumpResolution;
+    this.calls.resolveBumpPeer += 1;
+    return this.bumpResolutionPromise ?? this.bumpResolutions.shift() ?? this.bumpResolution;
   }
 
   addListener(name: string, cb: (e: unknown) => void) {
@@ -943,6 +946,42 @@ describe('LocationSharingService — pairing / profile wiring', () => {
 
     expect(snap.current?.pairing.bump.stage).toBe('failed');
     expect(snap.current?.pairing.bump.error).toMatch(/handshake did not start/i);
+  });
+
+  it('retries one identity-probe failure before surfacing a Bump retry error', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    try {
+      await svc.init('@me', 'mothman');
+      mockHolder.mod.bumpResolutions = [
+        {
+          status: 'probeFailed',
+          endpointId: null,
+          deviceId: null,
+          rssi: null,
+          peerCount: 1,
+          detail: 'identity read failed',
+        },
+        {
+          status: 'resolved',
+          endpointId: 'peer-second-probe',
+          deviceId: 'ble-second-probe',
+          rssi: -34,
+          peerCount: 1,
+          detail: 'resolved',
+        },
+      ];
+
+      await svc.armBump();
+      await svc.commitBump();
+
+      expect(mockHolder.mod.calls.resolveBumpPeer).toBe(2);
+      expect(mockHolder.mod.calls.initiatePairNearby).toEqual(['peer-second-probe']);
+      expect(snap.current?.pairing.bump.stage).toBe('contact');
+      expect(snap.current?.pairing.bump.error).toBeNull();
+    } finally {
+      svc.shutdown();
+    }
   });
 
   it('tracks an inbound nearby request inside the Bump window without auto-accepting', async () => {

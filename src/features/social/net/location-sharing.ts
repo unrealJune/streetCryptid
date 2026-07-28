@@ -216,6 +216,7 @@ interface Removable {
 const PAIRING_POLL_INTERVAL_MS = 4000;
 const BUMP_POLL_INTERVAL_MS = 300;
 const BUMP_RESOLVE_TIMEOUT_MS = 12_000;
+const BUMP_PROBE_RETRY_ATTEMPTS = 2;
 /**
  * Slack added on top of {@link BUMP_RESOLVE_TIMEOUT_MS} when a commit is in flight, covering the
  * bridge hop plus the nearby `Hello`/`Reveal` round trips that follow a successful resolve.
@@ -774,7 +775,19 @@ export class LocationSharingService implements FixPublisher {
     this.setPairingActivity('finding the bumped phone');
 
     const run = this.runPairingOperation(async () => {
-      const result = await this.mod!.resolveBumpPeer(BUMP_RESOLVE_TIMEOUT_MS);
+      let result = await this.mod!.resolveBumpPeer(BUMP_RESOLVE_TIMEOUT_MS);
+      for (
+        let attempt = 1;
+        attempt < BUMP_PROBE_RETRY_ATTEMPTS &&
+        result.status === 'probeFailed' &&
+        generation === this.bumpGeneration;
+        attempt += 1
+      ) {
+        // The scan already saw a plausible peer; one more full resolve often succeeds after the
+        // native side's scan/probe restart settles, without making the user re-arm and tap again.
+        this.extendBumpWindow(BUMP_RESOLVE_TIMEOUT_MS + BUMP_RESOLVE_GRACE_MS);
+        result = await this.mod!.resolveBumpPeer(BUMP_RESOLVE_TIMEOUT_MS);
+      }
       // Only an explicit cancel / re-arm (which bumps the generation) invalidates the attempt.
       // A window that lapsed *during* the resolve must not discard a peer we actually found.
       if (generation !== this.bumpGeneration) return;
