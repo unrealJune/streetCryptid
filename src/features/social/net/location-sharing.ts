@@ -216,7 +216,7 @@ interface Removable {
 const PAIRING_POLL_INTERVAL_MS = 4000;
 const BUMP_POLL_INTERVAL_MS = 300;
 const BUMP_RESOLVE_TIMEOUT_MS = 12_000;
-const BUMP_PROBE_RETRY_ATTEMPTS = 2;
+const BUMP_PROBE_MAX_ATTEMPTS = 2;
 /**
  * Slack added on top of {@link BUMP_RESOLVE_TIMEOUT_MS} when a commit is in flight, covering the
  * bridge hop plus the nearby `Hello`/`Reveal` round trips that follow a successful resolve.
@@ -778,7 +778,7 @@ export class LocationSharingService implements FixPublisher {
       let result = await this.mod!.resolveBumpPeer(BUMP_RESOLVE_TIMEOUT_MS);
       for (
         let attempt = 1;
-        attempt < BUMP_PROBE_RETRY_ATTEMPTS &&
+        attempt < BUMP_PROBE_MAX_ATTEMPTS &&
         result.status === 'probeFailed' &&
         generation === this.bumpGeneration;
         attempt += 1
