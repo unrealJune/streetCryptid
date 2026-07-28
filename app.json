@@ -23,7 +23,13 @@
         "NSBluetoothAlwaysUsageDescription": "streetCryptid uses Bluetooth while you arm Bump to find the phone you tap and start an encrypted pairing.",
         "NSLocalNetworkUsageDescription": "streetCryptid finds friends' phones on the same Wi-Fi so it can share your location directly, without routing through a relay.",
         "NSBonjourServices": ["_irohv1._udp"],
-        "UIBackgroundModes": ["location", "remote-notification", "processing"]
+        "UIBackgroundModes": [
+          "location",
+          "remote-notification",
+          "processing",
+          "bluetooth-central",
+          "bluetooth-peripheral"
+        ]
       },
       "entitlements": {
         "com.apple.developer.networking.multicast": true

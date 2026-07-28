@@ -242,7 +242,7 @@ jest.mock('expo-secure-store', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { LocationSharingService, type SharingSnapshot } from '../location-sharing';
+import { BUMP_WINDOW_MS, LocationSharingService, type SharingSnapshot } from '../location-sharing';
 
 function profileView(overrides: Partial<ProfileView> & { endpointId: string }): ProfileView {
   return {
@@ -838,6 +838,87 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       await committing;
 
       expect(mockHolder.mod.calls.cancelPair).not.toContain('sess-after-window');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('arms Bump for longer than one full BLE resolve can take', () => {
+    // The arm window is also the peer's acceptance gate for our nearby `Hello`. If it is not
+    // comfortably longer than a resolve, the peer has already closed its gate by the time the
+    // handshake is dialed and the bump silently does nothing.
+    expect(BUMP_WINDOW_MS).toBeGreaterThanOrEqual(30_000);
+  });
+
+  it('still pairs from a Bump resolution that lands after the arm window lapsed', async () => {
+    jest.useFakeTimers();
+    try {
+      const svc = newService();
+      const snap = watch(svc);
+      await svc.init('@me', 'mothman');
+      let resolveBump!: (result: BumpResolution) => void;
+      mockHolder.mod.bumpResolutionPromise = new Promise((resolve) => {
+        resolveBump = resolve;
+      });
+
+      await svc.armBump(8000);
+      const committing = svc.commitBump();
+      await Promise.resolve();
+      // The BLE scan + identity probe outlives the countdown the user saw.
+      await jest.advanceTimersByTimeAsync(21_000);
+      resolveBump({
+        status: 'resolved',
+        endpointId: 'peer-slow-resolve',
+        deviceId: 'ble-slow-resolve',
+        rssi: -30,
+        peerCount: 1,
+        detail: 'resolved',
+      });
+      await committing;
+
+      // A peer we actually found must not be thrown away just because the timer ran out.
+      expect(mockHolder.mod.calls.initiatePairNearby).toEqual(['peer-slow-resolve']);
+      expect(snap.current?.pairing.bump.stage).not.toBe('failed');
+      svc.shutdown();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('keeps the nearby acceptance gate open while a Bump resolve is in flight', async () => {
+    jest.useFakeTimers();
+    try {
+      const svc = newService();
+      await svc.init('@me', 'mothman');
+      let resolveBump!: (result: BumpResolution) => void;
+      mockHolder.mod.bumpResolutionPromise = new Promise((resolve) => {
+        resolveBump = resolve;
+      });
+
+      await svc.armBump(8000);
+      expect(mockHolder.mod.calls.setPairingReady).toEqual([true]);
+      const committing = svc.commitBump();
+      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(21_000);
+
+      // Closing the gate here is what makes the peer reject our `Hello` with "not accepting
+      // nearby pair requests" — i.e. no setup prompt on either phone.
+      expect(mockHolder.mod.calls.setPairingReady).toEqual([true]);
+
+      resolveBump({
+        status: 'noPeers',
+        endpointId: null,
+        deviceId: null,
+        rssi: null,
+        peerCount: 0,
+        detail: 'none',
+      });
+      await committing;
+
+      // The window is only released once no resolve is in flight (one bump-poll tick later).
+      await jest.advanceTimersByTimeAsync(400);
+      expect(mockHolder.mod.calls.setPairingReady).toEqual([true, false]);
+      svc.shutdown();
     } finally {
       jest.useRealTimers();
     }

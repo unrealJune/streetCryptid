@@ -51,7 +51,7 @@
 //! unit-tested here. [`PairCore`] + [`PairProtocol`] wrap the live endpoint.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
@@ -115,9 +115,29 @@ const SAS_TIMEOUT_MS: u64 = 60_000;
 /// Maximum time for the automatic commit/reveal exchange to reach the visual SAS gate.
 const PAIR_HANDSHAKE_TIMEOUT_MS: u64 = 60_000;
 
-/// Once this side accepted on time, allow a small delivery grace for the peer's independently
-/// on-time `Accept` to arrive before expiring the still-incomplete session.
-const SAS_ACCEPTED_GRACE_MS: u64 = 10_000;
+/// Once this side accepted on time, allow a delivery grace for the peer's independently on-time
+/// `Accept` to arrive before expiring the still-incomplete session. Sized to cover several
+/// [`ACCEPT_REDELIVERY_INTERVAL_MS`] rounds of [`PairCore::redeliver_pending_accepts`], because a
+/// side that cannot dial out (e.g. a phone with no BLE scan hint for its peer) only learns the
+/// peer's stance when one of those retries lands.
+const SAS_ACCEPTED_GRACE_MS: u64 = 45_000;
+
+/// Minimum spacing between re-deliveries of a latched local `Accept` (see
+/// [`PairCore::redeliver_pending_accepts`]).
+const ACCEPT_REDELIVERY_INTERVAL_MS: u64 = 2_000;
+
+/// How many times an undelivered `Accept` is re-sent before we stop trying. Bounds the retries for
+/// a session that has already completed locally (those never expire) when the peer is simply gone.
+const MAX_ACCEPT_REDELIVERY_ATTEMPTS: u32 = 12;
+
+/// Upper bound on one accept re-delivery dial. Kept well under the grace window so a peer that
+/// went away can never pin the retry slot for the rest of the session, and reserved as headroom so
+/// a retry is only ever started when its round trip can also *finish* inside the window we
+/// ourselves honour — a response folded after our own deadline is discarded by
+/// [`PairSession::expire_if_needed`] instead of completing us.
+const ACCEPT_REDELIVERY_TIMEOUT_MS: u64 = 8_000;
+const ACCEPT_REDELIVERY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(ACCEPT_REDELIVERY_TIMEOUT_MS);
 
 /// Preferred minimum index separation between shuffled picker options — a best-effort visual
 /// spread that never overrides uniqueness/correctness.
@@ -735,6 +755,11 @@ pub struct PairResultData {
 #[derive(Clone, Debug)]
 struct PairSession {
     session_id: [u8; SESSION_ID_LEN],
+    /// Distinguishes this session object from any later one created under the same
+    /// `session_id`. Nearby ids are deterministic ([`derive_nearby_id`]) and a terminal session is
+    /// replaced in place on a human-triggered retry, so anything that reserved work against a
+    /// session must confirm it is still acting on the same instance before that work takes effect.
+    instance: u64,
     initiator: bool,
     /// Whether this is an invite-less nearby pair (vs invite-based). Set once at session
     /// creation and never mutated afterwards — later Accept/Reject messages must not change the
@@ -770,6 +795,17 @@ struct PairSession {
     /// `failed` so an on-time local `Accept` remains immutable while the incomplete session still
     /// expires cleanly.
     timed_out: bool,
+    /// A dial carrying our latched `Accept` reached the peer and came back with a response, so the
+    /// peer definitively knows our stance. Until then the `Accept` may have been silently dropped
+    /// (see [`PairCore::best_effort_notify`]).
+    accept_delivered: bool,
+    /// Earliest time at which our latched `Accept` may be re-delivered to the peer. See
+    /// [`PairCore::redeliver_pending_accepts`].
+    accept_retry_due_ms: u64,
+    /// Re-delivery attempts spent, bounding retries on a session that can no longer expire.
+    accept_retry_attempts: u32,
+    /// A re-delivery dial is currently outstanding, so another must not be started.
+    accept_retry_in_flight: bool,
 }
 
 impl PairSession {
@@ -784,7 +820,9 @@ impl PairSession {
         local_recv_pub: [u8; RECV_PUB_LEN],
         sas_nonce: [u8; SAS_NONCE_LEN],
     ) -> Self {
+        static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
         Self {
+            instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
             session_id,
             initiator,
             nearby,
@@ -808,6 +846,10 @@ impl PairSession {
             local_sas_confirmed: false,
             failed: false,
             timed_out: false,
+            accept_delivered: false,
+            accept_retry_due_ms: 0,
+            accept_retry_attempts: 0,
+            accept_retry_in_flight: false,
         }
     }
 
@@ -859,6 +901,53 @@ impl PairSession {
             || self.timed_out
             || self.local_decision == Some(false)
             || self.peer_decision == Some(false)
+    }
+
+    /// Whether putting an `Accept` on the wire for this session is still correct *right now*.
+    ///
+    /// [`Self::decide_local`] is the single choke point that reserves the human-gated decision
+    /// under the session lock before any network I/O. A re-delivery re-enters that I/O long after
+    /// the reservation, so it has to re-assert the same conditions: still accepted, not terminal
+    /// (a peer `Reject` is sticky and must never be answered with our tickets), and still inside
+    /// the window we ourselves will honour — sending past our own deadline would complete the peer
+    /// while [`Self::expire_if_needed`] fails us, recreating the one-sided pair from the other
+    /// direction.
+    fn may_send_accept(&self, now_ms: u64) -> bool {
+        self.local_decision == Some(true)
+            && !self.is_terminal_failure()
+            && now_ms <= self.timeout_deadline()
+    }
+
+    /// Whether our latched `Accept` should be (re)dialed to the peer.
+    ///
+    /// This is the recovery path for an asymmetric transport. Our `Accept` is delivered by a dial
+    /// *we* initiate and [`PairCore::best_effort_notify`] deliberately ignores dial failures, so a
+    /// phone that cannot currently reach its peer (no BLE scan hint, no usable published address)
+    /// silently strands the other side. The whole nearby handshake can succeed on one side's dials
+    /// alone — the responder only ever answers on the accepted stream — so the *first* time a
+    /// responder dials out is its `Accept`, and that is exactly where one phone gains a friend and
+    /// the other is left waiting.
+    ///
+    /// A dial serves two purposes, and either one outstanding is reason enough to retry:
+    /// * **push** — the peer has not acknowledged our `Accept` (`!accept_delivered`); and
+    /// * **pull** — we still do not know the peer's stance (`peer_decision.is_none()`), which a
+    ///   response answers via [`PairCore::build_stance_response`].
+    ///
+    /// Both matter: a successful round trip proves the peer heard *us*, not that it had decided
+    /// yet. Stopping there would leave the only dialable side silent for the rest of the session
+    /// while the other side retried down a link that never works — the original one-sided pair,
+    /// unchanged. Retrying until both halves are satisfied means one working direction genuinely
+    /// completes both sides, and it cannot manufacture a friendship: completion still requires the
+    /// peer's own signed, human-gated `Accept`.
+    ///
+    /// Retries stop [`ACCEPT_REDELIVERY_TIMEOUT_MS`] before the deadline so an admitted dial can
+    /// still land inside the window we honour.
+    fn wants_accept_redelivery(&self, now_ms: u64) -> bool {
+        self.may_send_accept(now_ms.saturating_add(ACCEPT_REDELIVERY_TIMEOUT_MS))
+            && (!self.accept_delivered || self.peer_decision.is_none())
+            && !self.accept_retry_in_flight
+            && self.accept_retry_attempts < MAX_ACCEPT_REDELIVERY_ATTEMPTS
+            && now_ms >= self.accept_retry_due_ms
     }
 
     fn is_untouched_handshake(&self) -> bool {
@@ -1357,6 +1446,56 @@ impl PairCore {
         self.notices.lock().await.drain(..).collect()
     }
 
+    /// Re-deliver any latched local `Accept` the peer may not have received, and pull the peer's
+    /// stance while we're there. Non-blocking: each due session is dialed on its own task so a
+    /// slow/unreachable peer never stalls the caller's poll.
+    ///
+    /// Without this, delivery of an `Accept` is one-shot and best-effort
+    /// ([`Self::best_effort_notify`]): the side whose dial happens to work completes, while the
+    /// side whose dial failed is stranded — one phone gains a friend and the other does not. See
+    /// [`PairSession::wants_accept_redelivery`] for why that asymmetry is the *normal* shape of a
+    /// nearby pair rather than an edge case. Re-delivery is idempotent (`ingest_decision` is
+    /// monotonic, `finalize` is guarded by `result_emitted`).
+    pub fn redeliver_pending_accepts(self: &Arc<Self>) {
+        let core = Arc::clone(self);
+        tokio::spawn(async move {
+            // Latch any elapsed deadline first: `timed_out` is pull-based, so without this a
+            // session past its window could still look retryable for one more poll.
+            core.expire_pair_sessions().await;
+            let now = now_ms();
+            let due = {
+                let mut sessions = core.sessions.lock().await;
+                sessions
+                    .values_mut()
+                    .filter(|s| s.wants_accept_redelivery(now))
+                    .map(|s| {
+                        s.accept_retry_in_flight = true;
+                        s.accept_retry_attempts = s.accept_retry_attempts.saturating_add(1);
+                        s.accept_retry_due_ms = now.saturating_add(ACCEPT_REDELIVERY_INTERVAL_MS);
+                        (s.session_id, s.instance)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for (session_id, instance) in due {
+                let core = Arc::clone(&core);
+                tokio::spawn(async move {
+                    let _ = tokio::time::timeout(
+                        ACCEPT_REDELIVERY_TIMEOUT,
+                        core.send_accept_and_finalize(&session_id),
+                    )
+                    .await;
+                    // Release the slot only on the session we actually reserved; a replacement
+                    // under the same deterministic nearby id owns its own retry state.
+                    if let Some(s) = core.sessions.lock().await.get_mut(&session_id) {
+                        if s.instance == instance {
+                            s.accept_retry_in_flight = false;
+                        }
+                    }
+                });
+            }
+        });
+    }
+
     pub async fn session_state(&self, session_id: &[u8; SESSION_ID_LEN]) -> Option<PairStateData> {
         self.expire_pair_sessions().await;
         self.sessions
@@ -1620,30 +1759,68 @@ impl PairCore {
     }
 
     /// Deliver our (already-latched) `Accept` to the peer and finalize if the pair is bilateral.
+    ///
+    /// Re-asserts [`PairSession::may_send_accept`] under the session lock immediately before the
+    /// message is built *and* again before it crosses the wire, and pins the session instance so a
+    /// dial reserved against a session that has since expired, been rejected, or been replaced by
+    /// a fresh attempt under the same deterministic nearby id can neither be sent nor credited.
+    /// Abandoning is a silent success: the local decision recorded by
+    /// [`PairSession::decide_local`] stays authoritative either way.
     async fn send_accept_and_finalize(&self, session_id: &[u8; SESSION_ID_LEN]) -> Result<()> {
-        let (peer_endpoint, peer_ticket, nearby) = {
-            let sessions = self.sessions.lock().await;
-            let s = sessions
-                .get(session_id)
-                .ok_or_else(|| anyhow!("no such pair session"))?;
-            (s.peer_endpoint, s.peer_endpoint_ticket.clone(), s.nearby)
+        let Some((instance, peer_endpoint, peer_ticket, nearby)) =
+            self.reserve_accept_send(session_id).await?
+        else {
+            return Ok(());
         };
         let msg = self
             .build_msg(Decision::Accept, *session_id, Vec::new())
             .await?;
-        self.best_effort_notify(peer_endpoint, peer_ticket, msg, session_id, nearby)
+        // `build_msg` awaits ticket lookups; re-check before anything is written to the peer.
+        match self.reserve_accept_send(session_id).await? {
+            Some((live, ..)) if live == instance => {}
+            _ => return Ok(()),
+        }
+        let delivered = self
+            .best_effort_notify(peer_endpoint, peer_ticket, msg, session_id, nearby)
             .await;
-        let complete = self
-            .sessions
-            .lock()
-            .await
-            .get(session_id)
-            .map(PairSession::is_complete)
-            .unwrap_or(false);
+        let complete = {
+            let mut sessions = self.sessions.lock().await;
+            match sessions.get_mut(session_id) {
+                Some(s) if s.instance == instance => {
+                    s.accept_delivered |= delivered;
+                    s.is_complete()
+                }
+                _ => false,
+            }
+        };
         if complete {
             self.finalize(session_id, peer_endpoint).await?;
         }
         Ok(())
+    }
+
+    /// Re-validate, under the session lock, that an `Accept` may still be sent, returning the
+    /// session instance plus what the dial needs. `Ok(None)` means the send must be abandoned;
+    /// `Err` means the session is gone entirely.
+    #[allow(clippy::type_complexity)]
+    async fn reserve_accept_send(
+        &self,
+        session_id: &[u8; SESSION_ID_LEN],
+    ) -> Result<Option<(u64, [u8; ENDPOINT_LEN], Option<String>, bool)>> {
+        let sessions = self.sessions.lock().await;
+        let s = sessions
+            .get(session_id)
+            .ok_or_else(|| anyhow!("no such pair session"))?;
+        if !s.may_send_accept(now_ms()) {
+            tracing::debug!("pair accept abandoned: the session no longer permits it");
+            return Ok(None);
+        }
+        Ok(Some((
+            s.instance,
+            s.peer_endpoint,
+            s.peer_endpoint_ticket.clone(),
+            s.nearby,
+        )))
     }
 
     /// Best-effort deliver our (already-latched) negative decision (`Reject`) to the peer and
@@ -1664,7 +1841,8 @@ impl PairCore {
         let msg = self
             .build_msg(Decision::Reject, *session_id, Vec::new())
             .await?;
-        self.best_effort_notify(peer_endpoint, peer_ticket, msg, session_id, nearby)
+        let _ = self
+            .best_effort_notify(peer_endpoint, peer_ticket, msg, session_id, nearby)
             .await;
         self.push_notice(signal, *session_id, peer_endpoint, nearby)
             .await;
@@ -1672,7 +1850,8 @@ impl PairCore {
     }
 
     /// Best-effort dial to deliver our decision; if the peer is unreachable we keep the recorded
-    /// local state (which stays authoritative).
+    /// local state (which stays authoritative). Returns whether the message actually reached the
+    /// peer — a completed round trip, which is what [`Self::redeliver_pending_accepts`] waits for.
     async fn best_effort_notify(
         &self,
         peer_endpoint: [u8; ENDPOINT_LEN],
@@ -1680,14 +1859,23 @@ impl PairCore {
         msg: PairMsg,
         session_id: &[u8; SESSION_ID_LEN],
         nearby: bool,
-    ) {
-        if let Ok(endpoint) = self.runtime_endpoint().await {
-            if let Ok(addr) = self.peer_addr(peer_endpoint, peer_ticket.as_deref()) {
-                if let Ok(resp) = dial_exchange(&endpoint, addr, &msg).await {
-                    let _ = self
-                        .fold_peer_msg(session_id, &peer_endpoint, resp, nearby)
-                        .await;
-                }
+    ) -> bool {
+        let Ok(endpoint) = self.runtime_endpoint().await else {
+            return false;
+        };
+        let Ok(addr) = self.peer_addr(peer_endpoint, peer_ticket.as_deref()) else {
+            return false;
+        };
+        match dial_exchange(&endpoint, addr, &msg).await {
+            Ok(resp) => {
+                let _ = self
+                    .fold_peer_msg(session_id, &peer_endpoint, resp, nearby)
+                    .await;
+                true
+            }
+            Err(error) => {
+                tracing::debug!(%error, "pair decision could not be delivered; will retry");
+                false
             }
         }
     }
@@ -2719,6 +2907,187 @@ mod tests {
         assert!(!s.expire_if_needed(deadline + SAS_ACCEPTED_GRACE_MS + 2));
     }
 
+    /// A session that has cleared its own SAS gate and is waiting on the peer's decision — the
+    /// exact state a phone is stranded in when its `Accept` never reached the peer.
+    fn locally_accepted_session() -> PairSession {
+        let sid = [9u8; SESSION_ID_LEN];
+        let (b_ep, b_recv, b_nonce) = (
+            [4u8; ENDPOINT_LEN],
+            [5u8; RECV_PUB_LEN],
+            [6u8; SAS_NONCE_LEN],
+        );
+        let mut s = primed_session(
+            sid,
+            true,
+            [1u8; ENDPOINT_LEN],
+            [2u8; RECV_PUB_LEN],
+            [3u8; SAS_NONCE_LEN],
+            b_ep,
+            b_recv,
+            b_nonce,
+        );
+        s.ingest_reveal(&reveal_msg(b_ep, b_recv, b_nonce, sid), 1_000)
+            .unwrap();
+        assert_eq!(
+            s.decide_local(LocalIntent::Accept, 1_001),
+            LocalDecision::Accept
+        );
+        assert_eq!(s.phase(), PairPhase::LocalAccepted);
+        s
+    }
+
+    #[test]
+    fn locally_accepted_session_wants_accept_redelivery() {
+        let s = locally_accepted_session();
+        // `best_effort_notify` swallows dial failures, so an accepted-but-undelivered session must
+        // keep asking until the peer's stance comes back — otherwise only one phone gains a friend.
+        assert!(s.wants_accept_redelivery(1_002));
+    }
+
+    #[test]
+    fn accept_redelivery_is_paced_and_never_overlaps() {
+        let mut s = locally_accepted_session();
+        s.accept_retry_in_flight = true;
+        assert!(
+            !s.wants_accept_redelivery(1_002),
+            "a dial already in flight must not be duplicated"
+        );
+
+        s.accept_retry_in_flight = false;
+        s.accept_retry_due_ms = 5_000;
+        assert!(!s.wants_accept_redelivery(4_999), "retries must be paced");
+        assert!(s.wants_accept_redelivery(5_000));
+
+        s.accept_retry_attempts = MAX_ACCEPT_REDELIVERY_ATTEMPTS;
+        assert!(
+            !s.wants_accept_redelivery(5_000),
+            "a complete session never expires, so the retries themselves must be bounded"
+        );
+    }
+
+    #[test]
+    fn accept_redelivery_stops_only_once_both_stances_are_known() {
+        let (seed, endpoint) = identity();
+
+        let mut delivered_only = locally_accepted_session();
+        delivered_only.accept_delivered = true;
+        assert!(
+            delivered_only.wants_accept_redelivery(1_002),
+            "our round trip proved the peer heard us, not that it had decided — the only dialable \
+             side must keep pulling the peer's stance or the pair stays one-sided"
+        );
+
+        let mut settled = locally_accepted_session();
+        settled.accept_delivered = true;
+        settled.ingest_decision(&sample_msg(&seed, &endpoint, Decision::Accept));
+        assert_eq!(settled.phase(), PairPhase::Complete);
+        assert!(
+            !settled.wants_accept_redelivery(1_002),
+            "delivered our accept AND know theirs: nothing left to dial for"
+        );
+
+        let mut rejected = locally_accepted_session();
+        rejected.peer_decision = Some(false);
+        assert!(!rejected.wants_accept_redelivery(1_002));
+
+        let mut expired = locally_accepted_session();
+        assert!(expired.expire_if_needed(expired.timeout_deadline() + 1));
+        assert!(
+            !expired.wants_accept_redelivery(expired.timeout_deadline() + 2),
+            "an expired session must not keep dialing"
+        );
+    }
+
+    #[test]
+    fn accept_redelivery_respects_the_deadline_before_it_is_latched() {
+        // `timed_out` is pull-based, so a session can be past its window without being terminal
+        // yet. Retrying there would complete the peer while we go on to fail ourselves — the same
+        // one-sided pair, just from the other direction. Retries also stop a full dial timeout
+        // early, so an admitted attempt can still land inside the window we honour.
+        let s = locally_accepted_session();
+        let deadline = s.timeout_deadline();
+        assert!(!s.timed_out, "nothing has swept this session yet");
+        assert!(s.wants_accept_redelivery(deadline - ACCEPT_REDELIVERY_TIMEOUT_MS));
+        assert!(!s.wants_accept_redelivery(deadline - ACCEPT_REDELIVERY_TIMEOUT_MS + 1));
+        assert!(s.may_send_accept(deadline));
+        assert!(!s.may_send_accept(deadline + 1));
+    }
+
+    #[test]
+    fn a_reserved_accept_is_abandoned_when_the_session_turns_terminal() {
+        // A retry re-enters network I/O long after `decide_local` reserved the decision, so the
+        // send path re-asserts the same conditions rather than trusting the reservation.
+        let mut s = locally_accepted_session();
+        assert!(s.may_send_accept(1_002));
+        s.peer_decision = Some(false);
+        assert!(
+            !s.may_send_accept(1_002),
+            "a sticky peer reject must never be answered with our read-tickets"
+        );
+    }
+
+    #[test]
+    fn replacing_a_session_under_the_same_id_yields_a_new_instance() {
+        // Nearby session ids are deterministic, and a terminal session is replaced in place on a
+        // human-triggered retry. An in-flight accept must not be credited to the replacement.
+        let first = locally_accepted_session();
+        let second = locally_accepted_session();
+        assert_eq!(first.session_id, second.session_id);
+        assert_ne!(first.instance, second.instance);
+    }
+
+    #[test]
+    fn a_completed_pair_still_redelivers_an_undelivered_accept() {
+        let (seed, endpoint) = identity();
+        let mut s = locally_accepted_session();
+        // We heard the peer's Accept (so we complete and gain the friend), but our own Accept went
+        // out on a dial that failed. Stopping here is exactly what leaves the peer friendless.
+        s.ingest_decision(&sample_msg(&seed, &endpoint, Decision::Accept));
+        s.result_emitted = true;
+        assert_eq!(s.phase(), PairPhase::Complete);
+        assert!(s.wants_accept_redelivery(1_002));
+    }
+
+    #[test]
+    fn undecided_session_never_redelivers_an_accept() {
+        let sid = [9u8; SESSION_ID_LEN];
+        let (b_ep, b_recv, b_nonce) = (
+            [4u8; ENDPOINT_LEN],
+            [5u8; RECV_PUB_LEN],
+            [6u8; SAS_NONCE_LEN],
+        );
+        let mut s = primed_session(
+            sid,
+            true,
+            [1u8; ENDPOINT_LEN],
+            [2u8; RECV_PUB_LEN],
+            [3u8; SAS_NONCE_LEN],
+            b_ep,
+            b_recv,
+            b_nonce,
+        );
+        s.ingest_reveal(&reveal_msg(b_ep, b_recv, b_nonce, sid), 1_000)
+            .unwrap();
+        // No human has cleared the visual gate here, so there is no latched Accept to re-send.
+        assert_eq!(s.local_decision, None);
+        assert!(!s.wants_accept_redelivery(1_001));
+    }
+
+    #[test]
+    fn accepted_session_survives_long_enough_to_retry_delivery() {
+        let s = locally_accepted_session();
+        // The grace has to outlast several redelivery rounds *after* the dial-timeout headroom is
+        // reserved; a peer that can't dial us only learns our stance from one of our retries.
+        const _: () = assert!(
+            SAS_ACCEPTED_GRACE_MS
+                >= ACCEPT_REDELIVERY_TIMEOUT_MS + ACCEPT_REDELIVERY_INTERVAL_MS * 4
+        );
+        assert_eq!(
+            s.timeout_deadline(),
+            s.verify_deadline() + SAS_ACCEPTED_GRACE_MS
+        );
+    }
+
     #[test]
     fn peer_rejection_prevents_a_late_local_accept() {
         let sid = [9u8; SESSION_ID_LEN];
@@ -3045,6 +3414,98 @@ mod tests {
             ts: 0,
             sig: Vec::new(),
         }
+    }
+
+    /// The mirror of [`an_undelivered_accept_keeps_retrying_even_after_we_complete`]: the side
+    /// whose dials *work* accepted first, so its `Accept` landed while the peer was still
+    /// undecided and it got back a bare `Hello` stance. It is the only side that can reach the
+    /// other, so if it stops dialing here the peer completes alone and this phone never does.
+    #[tokio::test]
+    async fn the_dialable_side_keeps_pulling_the_peer_stance_after_its_accept_landed() {
+        let (core, _our_ep, _recv) = test_core();
+        let peer_ep = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
+        let (sid, challenge) = insert_verifying(&core, peer_ep).await;
+
+        correct_action(&core, &sid, &challenge)
+            .await
+            .expect("correct SAS action latches our accept");
+        // Our dial reached the peer, but the peer had not decided yet, so we learned nothing.
+        {
+            let mut sessions = core.sessions.lock().await;
+            let s = sessions.get_mut(&sid).unwrap();
+            s.accept_delivered = true;
+            assert_eq!(s.peer_decision, None);
+            assert_eq!(s.phase(), PairPhase::LocalAccepted);
+        }
+
+        let sessions = core.sessions.lock().await;
+        let session = sessions.get(&sid).unwrap();
+        assert!(
+            session.wants_accept_redelivery(now_ms()),
+            "delivery is not the whole job — an unknown peer stance still needs a dial"
+        );
+    }
+
+    /// The exact shape of the reported iPhone↔Android failure: a nearby pair where only one phone
+    /// can dial. The responder answers the whole handshake on the accepted stream, so its `Accept`
+    /// is the first thing it ever has to dial out — and when that dial fails it completes locally
+    /// while the peer is left waiting for a stance that never arrives.
+    #[tokio::test]
+    async fn an_undelivered_accept_keeps_retrying_even_after_we_complete() {
+        let (core, _our_ep, _recv) = test_core();
+        let peer_sk = SigningKey::generate(&mut OsRng);
+        let peer_ep = peer_sk.verifying_key().to_bytes();
+        let peer_recv = [0x22u8; RECV_PUB_LEN];
+        let (sid, challenge) = insert_verifying(&core, peer_ep).await;
+
+        // The peer clears its gate first; its dial reaches us, so we learn its stance.
+        core.handle_incoming(
+            peer_ep,
+            sign_msg(
+                &peer_sk.to_bytes(),
+                decision_msg(Decision::Accept, peer_ep, peer_recv, sid, true),
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("peer accept handled");
+
+        // Our human clears the gate. `test_core` has no runtime endpoint, so every dial we make
+        // fails — exactly like a phone with no BLE scan hint and no usable address for its peer.
+        correct_action(&core, &sid, &challenge)
+            .await
+            .expect("correct SAS action latches our accept");
+
+        // We gain the friend...
+        assert!(
+            core.result_data(&sid).await.is_some(),
+            "a bilateral accept completes locally"
+        );
+        // ...but the peer never heard us, so we must keep trying rather than call it done.
+        {
+            let sessions = core.sessions.lock().await;
+            let s = sessions.get(&sid).unwrap();
+            assert!(!s.accept_delivered, "the dial failed");
+            assert!(s.wants_accept_redelivery(now_ms()));
+        }
+
+        core.redeliver_pending_accepts();
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+
+        let sessions = core.sessions.lock().await;
+        let s = sessions.get(&sid).unwrap();
+        assert_eq!(s.accept_retry_attempts, 1, "the poll drove one retry");
+        assert!(!s.accept_retry_in_flight, "the retry slot was released");
+        assert!(
+            !s.wants_accept_redelivery(now_ms()),
+            "retries stay paced after an attempt"
+        );
+        assert!(
+            s.wants_accept_redelivery(now_ms() + ACCEPT_REDELIVERY_INTERVAL_MS),
+            "and resume once the pacing interval elapses"
+        );
     }
 
     /// Two concurrent correct actions (a double-tap) must be idempotent: exactly one accept

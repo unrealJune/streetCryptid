@@ -138,10 +138,52 @@ impl ProbeCache {
     }
 }
 
+/// Rate limiter for [`BleHandle::refresh_discovery_if_due`].
+///
+/// The shared scan is started exactly once, when the transport is constructed. That is not enough
+/// on its own: CoreBluetooth reports each peripheral **once** per scan session
+/// (`allowDuplicates: false`), so a peer that was already advertising while the app was suspended,
+/// or whose registry entry has since been garbage-collected, is never re-surfaced — the phone
+/// simply sits at zero peers forever while its own advertisement is plainly visible to everyone
+/// else. Bump's own scan restarts can also leave the scanner stopped if a restart fails mid-probe.
+/// Restarting the scan when we see nothing recovers both cases.
+///
+/// The cooldown keeps this well inside Android's undocumented "5 scan starts per 30 s" throttle,
+/// which Bump already draws against.
+#[derive(Clone, Default)]
+#[allow(dead_code)]
+struct ScanRefreshGate {
+    last: Arc<Mutex<Option<std::time::Instant>>>,
+}
+
+#[allow(dead_code)]
+const SCAN_REFRESH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[allow(dead_code)]
+impl ScanRefreshGate {
+    /// Reserve a refresh slot, returning `false` when one was taken too recently.
+    fn claim(&self) -> bool {
+        let now = std::time::Instant::now();
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|at| now.duration_since(at) < SCAN_REFRESH_COOLDOWN) {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
+
+    /// Record that the scan was just (re)started by some other path, so the passive self-heal
+    /// doesn't immediately restart it again.
+    fn note(&self) {
+        *self.last.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+    }
+}
+
 #[cfg(any(target_os = "android", target_vendor = "apple"))]
 mod imp {
     use super::{
         parse_endpoint_hint, BleCaps, BlePeerView, BumpResolveError, BumpResolvedPeer, ProbeCache,
+        ScanRefreshGate,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -178,6 +220,7 @@ mod imp {
         peripheral: Option<Arc<Peripheral>>,
         probe_cache: ProbeCache,
         resolve_lock: Arc<tokio::sync::Mutex<()>>,
+        scan_refresh: ScanRefreshGate,
     }
 
     /// Construct one shared central + peripheral for iroh traffic and Bump rendezvous.
@@ -219,6 +262,7 @@ mod imp {
                         peripheral: Some(peripheral),
                         probe_cache: ProbeCache::default(),
                         resolve_lock: Arc::new(tokio::sync::Mutex::new(())),
+                        scan_refresh: ScanRefreshGate::default(),
                     },
                 )
             }
@@ -236,6 +280,7 @@ mod imp {
             peripheral: None,
             probe_cache: ProbeCache::default(),
             resolve_lock: Arc::new(tokio::sync::Mutex::new(())),
+            scan_refresh: ScanRefreshGate::default(),
         }
     }
 
@@ -273,6 +318,22 @@ mod imp {
             .iter()
             .find(|uuid| is_iroh_key_uuid(uuid))
             .copied()
+    }
+
+    /// Stop and restart the single shared scan, returning whether it is running afterwards.
+    ///
+    /// A restart is the only way to make a platform re-report peripherals it has already surfaced
+    /// once (CoreBluetooth scans with `allowDuplicates: false`), so it is both Bump's "give me a
+    /// fresh, rankable view" primitive and the recovery for a scanner that has gone quiet.
+    async fn restart_scan(central: &Central) -> bool {
+        let _ = central.stop_scan().await;
+        match central.start_scan(ScanFilter::default()).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "BLE scan restart failed; discovery is stalled");
+                false
+            }
+        }
     }
 
     fn matching_endpoint_hint(device: &BleDevice, value: &[u8]) -> Option<Vec<u8>> {
@@ -340,11 +401,9 @@ mod imp {
             return Err("identity probe disconnect did not complete".to_string());
         }
 
-        let _ = central.stop_scan().await;
-        central
-            .start_scan(ScanFilter::default())
-            .await
-            .map_err(|error| format!("scan restart failed: {error}"))?;
+        if !restart_scan(central).await {
+            return Err("scan restart failed".to_string());
+        }
         let rediscovered = tokio::time::timeout(REDISCOVERY_TIMEOUT, async {
             while let Some(event) = events.next().await {
                 if matches!(
@@ -374,8 +433,7 @@ mod imp {
 
     async fn collect_fresh_devices(central: &Central, budget: Duration) -> Vec<BleDevice> {
         let mut events = central.events();
-        let _ = central.stop_scan().await;
-        if central.start_scan(ScanFilter::default()).await.is_err() {
+        if !restart_scan(central).await {
             return Vec::new();
         }
 
@@ -415,6 +473,11 @@ mod imp {
 
         /// Snapshot the transport's peers. Passive polling never opens a surprise GATT connection;
         /// endpoint hints are populated only by an explicit Bump resolution.
+        ///
+        /// An empty snapshot is also the app's only symptom of a stalled scanner, so it doubles as
+        /// the trigger for the rate-limited scan self-heal (see [`ScanRefreshGate`]). The refresh
+        /// runs after the snapshot is taken, so this call stays a cheap read and the recovered
+        /// peers land on the next poll.
         pub async fn nearby_peers(&self) -> Vec<BlePeerView> {
             let Some(transport) = &self.transport else {
                 return Vec::new();
@@ -429,7 +492,27 @@ mod imp {
                 }
                 views.push(view);
             }
+            if views.is_empty() {
+                self.refresh_discovery_if_due().await;
+            }
             views
+        }
+
+        /// Restart the shared scan when nothing has been seen for a while. Skipped entirely while a
+        /// Bump resolution owns the scanner — that path already drives its own restarts, and
+        /// stealing the scan mid-probe would break its rediscovery check.
+        async fn refresh_discovery_if_due(&self) {
+            let Some(central) = self.central.clone() else {
+                return;
+            };
+            let Ok(_guard) = self.resolve_lock.try_lock() else {
+                return;
+            };
+            if !self.scan_refresh.claim() {
+                return;
+            }
+            tracing::debug!("no BLE peers in view; restarting the shared scan");
+            restart_scan(&central).await;
         }
 
         pub async fn resolve_bump_peer(
@@ -443,6 +526,9 @@ mod imp {
                 return Err(BumpResolveError::Unavailable);
             };
             let _resolve_guard = self.resolve_lock.lock().await;
+            // Bump drives its own scan restarts below; record them so the passive self-heal in
+            // `nearby_peers` doesn't immediately restart the scan again on top of them.
+            self.scan_refresh.note();
             let started = tokio::time::Instant::now();
             let mut devices = collect_fresh_devices(&central, timeout).await;
             if devices.is_empty() {
@@ -580,7 +666,7 @@ pub use imp::*;
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_endpoint_hint, ProbeCache};
+    use super::{parse_endpoint_hint, ProbeCache, ScanRefreshGate, SCAN_REFRESH_COOLDOWN};
 
     /// A real, valid 32-byte iroh endpoint id (public key) derived deterministically.
     fn valid_endpoint_bytes() -> Vec<u8> {
@@ -648,5 +734,37 @@ mod tests {
         let hint = valid_endpoint_bytes();
         cache.store("dev-a", hint.clone());
         assert_eq!(cache.cached("dev-a"), Some(hint));
+    }
+
+    #[test]
+    fn scan_refresh_gate_allows_the_first_heal() {
+        // A scanner that has never been refreshed is allowed to heal immediately.
+        let gate = ScanRefreshGate::default();
+        assert!(gate.claim());
+    }
+
+    #[test]
+    fn scan_refresh_gate_rate_limits_back_to_back_heals() {
+        let gate = ScanRefreshGate::default();
+        assert!(gate.claim());
+        // `nearby_peers` polls every few seconds and a stalled scanner reports empty every time;
+        // without this the app would hammer Android's "5 scan starts per 30 s" throttle.
+        assert!(!gate.claim());
+        assert!(!gate.claim());
+    }
+
+    #[test]
+    fn scan_refresh_gate_note_consumes_the_slot() {
+        let gate = ScanRefreshGate::default();
+        // Bump restarts the scan itself; recording that must suppress an immediate passive heal.
+        gate.note();
+        assert!(!gate.claim());
+    }
+
+    #[test]
+    fn scan_refresh_cooldown_is_slower_than_the_pairing_poll() {
+        // The self-heal is driven from the pairing poll (4 s) and the Bump poll (300 ms), so the
+        // cooldown is what keeps a stalled scanner from restarting on every single poll.
+        assert!(SCAN_REFRESH_COOLDOWN >= std::time::Duration::from_secs(10));
     }
 }

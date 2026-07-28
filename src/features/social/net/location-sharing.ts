@@ -216,7 +216,19 @@ interface Removable {
 const PAIRING_POLL_INTERVAL_MS = 4000;
 const BUMP_POLL_INTERVAL_MS = 300;
 const BUMP_RESOLVE_TIMEOUT_MS = 12_000;
-export const BUMP_WINDOW_MS = 15_000;
+/**
+ * Slack added on top of {@link BUMP_RESOLVE_TIMEOUT_MS} when a commit is in flight, covering the
+ * bridge hop plus the nearby `Hello`/`Reveal` round trips that follow a successful resolve.
+ */
+const BUMP_RESOLVE_GRACE_MS = 8_000;
+/**
+ * How long ARM BUMP stays live. This is also the window during which the peer accepts our nearby
+ * `Hello`, so it has to comfortably cover: both people arming (rarely simultaneous), the tap, and
+ * a full {@link BUMP_RESOLVE_TIMEOUT_MS} BLE scan + identity probe on the phone that resolves.
+ * A window at or below the resolve timeout means the peer's acceptance gate has already closed by
+ * the time the handshake is dialed, which reads as "the bump did nothing".
+ */
+export const BUMP_WINDOW_MS = 60_000;
 
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -755,11 +767,17 @@ export class LocationSharingService implements FixPublisher {
     const generation = this.bumpGeneration;
     this.bumpStage = 'searching';
     this.bumpError = null;
+    // The scan + identity probe can run for the whole resolve timeout, and the peer only accepts
+    // our nearby `Hello` while ITS window is open. Hold the window (and therefore the native
+    // pairing-ready gate) open across the attempt so the countdown can't kill work in flight.
+    this.extendBumpWindow(BUMP_RESOLVE_TIMEOUT_MS + BUMP_RESOLVE_GRACE_MS);
     this.setPairingActivity('finding the bumped phone');
 
     const run = this.runPairingOperation(async () => {
       const result = await this.mod!.resolveBumpPeer(BUMP_RESOLVE_TIMEOUT_MS);
-      if (generation !== this.bumpGeneration || !this.isBumpActive()) return;
+      // Only an explicit cancel / re-arm (which bumps the generation) invalidates the attempt.
+      // A window that lapsed *during* the resolve must not discard a peer we actually found.
+      if (generation !== this.bumpGeneration) return;
       this.bumpPeerCount = result.peerCount;
       this.bumpRssi = result.rssi;
       if (result.status === 'resolved' && result.endpointId) {
@@ -770,12 +788,13 @@ export class LocationSharingService implements FixPublisher {
           return;
         }
         this.bumpStage = 'contact';
+        this.extendBumpWindow(BUMP_RESOLVE_GRACE_MS);
         this.setPairingActivity('signal found');
         let sessionId: string;
         try {
           sessionId = await this.initiateNearbyPair(result.endpointId);
         } catch (error) {
-          if (generation === this.bumpGeneration && this.isBumpActive()) {
+          if (generation === this.bumpGeneration) {
             this.bumpStage = 'failed';
             this.bumpError =
               'The phones found each other, but the encrypted handshake did not start. Try again.';
@@ -1875,7 +1894,9 @@ export class LocationSharingService implements FixPublisher {
   private startBumpPolling(): void {
     if (this.bumpTimer) return;
     const timer = setInterval(() => {
-      if (!this.isBumpActive()) {
+      // Never tear the window down while a resolve is still running — the native scan/probe is
+      // mid-flight and `commitBump` is about to dial the peer with it.
+      if (!this.isBumpActive() && !this.bumpResolveInFlight) {
         this.stopBumpPolling(false);
         if (this.pairingReadyFlag) void this.setPairingReady(false);
         if (!this.discoveredFriend) this.setPairingActivity('bump idle');
@@ -1903,6 +1924,15 @@ export class LocationSharingService implements FixPublisher {
 
   private isBumpActive(): boolean {
     return this.bumpUntil > Date.now();
+  }
+
+  /**
+   * Hold the armed Bump window open for at least `ms` longer. The window gates BOTH the local
+   * commit path and the native pairing-ready flag the peer's inbound nearby `Hello` is checked
+   * against, so work already in flight must be able to push it out.
+   */
+  private extendBumpWindow(ms: number): void {
+    this.bumpUntil = Math.max(this.bumpUntil, Date.now() + ms);
   }
 
   /**

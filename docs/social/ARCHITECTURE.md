@@ -292,6 +292,17 @@ each human action latches that side's signed Accept
 - Pairing is bilateral and idempotent. A friend enters the local pool only after both human-gated
   `Accept` decisions, and only then does the app create reciprocal location grants. Either person
   can later pause their outbound grant from the friend's profile.
+- `Accept` delivery is retried until both stances are settled. Each side delivers its own decision
+  on a dial _it_ initiates, and a nearby handshake can complete on one side's dials alone (the
+  responder only ever answers on the accepted stream), so a phone that cannot reach its peer would
+  otherwise complete alone and leave the other person friendless. A dial both pushes our `Accept`
+  and pulls the peer's stance from the response, so retries continue while _either_ is outstanding
+  — including after this side has already completed. That way one working direction settles both
+  sides. Retries are paced, bounded, re-validated against the session under its lock before
+  anything crosses the wire, and stop a full dial timeout before the deadline so an admitted
+  attempt can still land inside the window we honour. Retrying cannot manufacture a friendship —
+  the peer still needs its own human-gated `Accept` — and the post-accept grace window is sized to
+  cover several retries.
 - Protocol v1 peers are intentionally incompatible and fail closed instead of bypassing the SAS
   gate. The 256-entry UI catalog in `pairing-figures.ts` is part of protocol v2 and must remain
   index-stable.
@@ -322,18 +333,30 @@ The Friends tab is the pairing surface; there is no separate pairing mode.
 
 - `iroh-ble-transport` is attached to the same endpoint as normal IP/relay transports. It acts as
   central and peripheral and routes authenticated iroh QUIC over GATT/L2CAP when a peer is nearby.
+- iOS declares the `bluetooth-central` / `bluetooth-peripheral` background modes. Without them iOS
+  suspends the central and peripheral as soon as the app leaves the foreground — which, combined
+  with a scan that only reports each peripheral once, leaves the phone showing zero peers after it
+  comes back even though its own advertisement is visible to everyone else.
 - The transport is experimental and AGPL-3.0-or-later; source and modification notices live under
   `modules/iroh-location/rust/third_party/iroh-ble-transport/`.
 - BLE uses one shared central/peripheral pair for transport and Bump discovery. The transport's
   primary GATT service exposes a static, read-only full EndpointId characteristic; the advertised
   key UUID still carries its 12-byte prefix. This identity service survives GATT-server rebuilds.
+- The shared scan self-heals. It is started once with the transport, and platforms report each
+  peripheral only once per scan session, so a peer missed while the app was suspended is never
+  re-surfaced on its own. Polling an empty peer list restarts the scan, rate-limited to stay inside
+  Android's scan-start throttle and skipped while a Bump resolution owns the scanner.
 - Nearby pairing is explicit. Both people tap **ARM BUMP**, then tap the phones together. One clear
   accelerometer impact commits the attempt; the same visible button remains a fallback if the
-  sensor misses. The acceptance gate is active only during the short armed window.
+  sensor misses. The acceptance gate is active only during the armed window, which is sized to
+  cover both people arming, the tap, and a full BLE resolve — the peer's gate must still be open
+  when the resolved handshake is dialed. A resolve already in flight holds that window open.
 - On commit, the shared scanner is restarted in low-latency mode. Fresh streetCryptid
   advertisements are ranked by RSSI, equally close candidates fail as ambiguous, and the strongest
   peer is connected long enough to read its full EndpointId. The read must match the advertised
-  prefix; Android GATT cache recovery and bounded retries run before the attempt fails.
+  prefix; Android GATT cache recovery and bounded retries run before the attempt fails. A peer the
+  scan actually resolved is never discarded because the countdown lapsed mid-resolve; only an
+  explicit cancel or re-arm invalidates the attempt.
 - Both phones may initiate the deterministic nearby session at once. The pairing core deduplicates
   that into one session with complementary SAS roles. Invite/code requests never inherit Bump
   consent.

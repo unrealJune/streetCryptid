@@ -1268,6 +1268,9 @@ impl LocationNode {
 
     /// Drain pairing events (pending requests, peer responses, ready, rejects) since the last poll.
     pub async fn poll_pair_events(&self) -> Vec<PairEvent> {
+        // Re-deliver any latched `Accept` the peer may not have received yet. Non-blocking: the
+        // retries run on their own tasks and land as `PeerResponded`/`Ready` on a later poll.
+        self.pair.redeliver_pending_accepts();
         self.pair
             .poll_notices()
             .await
