@@ -40,7 +40,21 @@ const GRAVITY_SMOOTHING = 0.08;
  * figure, so nothing is granted by a stray jolt. A missed bump, by contrast, is the user standing
  * there tapping phones together wondering why nothing happens.
  */
-export const ANDROID_BUMP_SENSITIVITY = 0.7;
+export const ANDROID_BUMP_SENSITIVITY = 0.5;
+
+/**
+ * Accelerometer sampling period. Android samples faster than the 50Hz default because the peak of
+ * a phone-to-phone tap lasts on the order of 10–30ms: at 20ms we routinely sample either side of it
+ * and measure a weaker bump than actually happened.
+ *
+ * This is the lever that does NOT trade against false positives — it makes the *same* physical tap
+ * read at its true strength, rather than lowering the bar for everything including near-misses.
+ * Lowering thresholds and sampling faster are complementary, and faster sampling is the one to
+ * reach for first.
+ */
+export function bumpSampleIntervalMs(os: string): number {
+  return os === 'android' ? 10 : 20;
+}
 
 /**
  * Detector tuning for `os` (pass `Platform.OS`). Pure and separate from the hook so the platform

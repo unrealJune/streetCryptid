@@ -1,6 +1,7 @@
 import {
   ANDROID_BUMP_SENSITIVITY,
   bumpOptionsForPlatform,
+  bumpSampleIntervalMs,
   createBumpDetector,
   type MotionSample,
 } from '../bump-detector';
@@ -66,7 +67,7 @@ describe('bump detector', () => {
 
       expect(options.impactThreshold).toBeCloseTo(0.55 * ANDROID_BUMP_SENSITIVITY, 6);
       expect(options.jerkThreshold).toBeCloseTo(0.35 * ANDROID_BUMP_SENSITIVITY, 6);
-      expect(ANDROID_BUMP_SENSITIVITY).toBeCloseTo(0.7, 6);
+      expect(ANDROID_BUMP_SENSITIVITY).toBeCloseTo(0.5, 6);
     });
 
     // The point of the whole change: a tap that Android's coarser sampling reports too weakly to
@@ -81,6 +82,13 @@ describe('bump detector', () => {
 
       expect(softTap(createBumpDetector())).toBe(false);
       expect(softTap(createBumpDetector(bumpOptionsForPlatform('android')))).toBe(true);
+    });
+
+    // The lever that costs nothing in false positives: a tap's peak lasts ~10-30ms, so 20ms
+    // sampling measures it weaker than it was.
+    it('samples faster on Android to catch the peak of a short tap', () => {
+      expect(bumpSampleIntervalMs('android')).toBeLessThan(bumpSampleIntervalMs('ios'));
+      expect(bumpSampleIntervalMs('ios')).toBe(20);
     });
 
     it('still rejects tilting and walking on the Android thresholds', () => {
