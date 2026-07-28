@@ -29,18 +29,27 @@ interface CoverageIslandProps {
    * back in restores whatever state they left it in.
    */
   readonly sectorsVisible: boolean;
+  /**
+   * Your chosen signal color. The flip-dot bar counts ground *you* covered, so
+   * it fills in your color rather than the canvas amber, which now belongs only
+   * to the frontier rim.
+   */
+  readonly signal: string;
 }
 
 /**
- * The bottom "where you are" island: hero place name, one mono sub line, one
- * flip-dot coverage bar, one percentage — and nothing else (declutter law).
- * Doubles as the screen-reader text model for the canvas (PRODUCT.md P0).
+ * The island's ME body: hero place name, one mono sub line, one flip-dot
+ * coverage bar, one percentage — and nothing else (declutter law). Doubles as
+ * the screen-reader text model for the canvas (PRODUCT.md P0).
+ *
+ * The card surface belongs to `MapIsland`; this only supplies its own padding.
  */
 export function CoverageIsland({
   theme,
   placeName,
   coverage,
   sectorsVisible,
+  signal,
 }: CoverageIslandProps) {
   const { chrome } = theme;
   const [isMinimized, setIsMinimized] = useState(false);
@@ -56,13 +65,7 @@ export function CoverageIsland({
     : `${hero}. Sector coverage is hidden at this zoom.`;
 
   return (
-    <View
-      style={[
-        styles.island,
-        showSectors ? styles.islandExpanded : styles.islandMinimized,
-        { backgroundColor: chrome.island, borderColor: chrome.islandBorder },
-      ]}
-    >
+    <View style={showSectors ? styles.bodyExpanded : styles.bodyMinimized}>
       <View style={styles.header}>
         <View
           accessible
@@ -117,7 +120,7 @@ export function CoverageIsland({
               {Array.from({ length: SEGMENTS }, (_, i) => (
                 <View
                   key={i}
-                  style={[styles.seg, { backgroundColor: i < lit ? chrome.amber : chrome.seg }]}
+                  style={[styles.seg, { backgroundColor: i < lit ? signal : chrome.seg }]}
                 />
               ))}
             </View>
@@ -130,17 +133,13 @@ export function CoverageIsland({
 }
 
 const styles = StyleSheet.create({
-  island: {
-    borderRadius: 26,
-    borderWidth: StyleSheet.hairlineWidth,
+  bodyExpanded: {
     paddingHorizontal: Spacing.four,
-  },
-  islandExpanded: {
     paddingVertical: Spacing.two,
   },
-  islandMinimized: {
-    paddingLeft: Spacing.three,
-    paddingRight: Spacing.two,
+  bodyMinimized: {
+    paddingLeft: Spacing.four,
+    paddingRight: Spacing.three,
     paddingVertical: Spacing.one,
   },
   header: {

@@ -1,4 +1,14 @@
-import { applyFog, clamp, luminance, mix, packRgba, ramp, rgbToHex, unpackRgba } from '../color';
+import {
+  applyFog,
+  clamp,
+  hexToRgb,
+  luminance,
+  mix,
+  packRgba,
+  ramp,
+  rgbToHex,
+  unpackRgba,
+} from '../color';
 import { CryptidThemes } from '@/constants/cryptid-theme';
 
 const daybreakTerr = CryptidThemes.daybreak.canvas.terr;
@@ -50,6 +60,25 @@ describe('rgbToHex', () => {
   it('rounds, clamps, and zero-pads channels', () => {
     expect(rgbToHex([0, 15.6, 255])).toBe('#0010ff');
     expect(rgbToHex([-1, 128, 300])).toBe('#0080ff');
+  });
+});
+
+describe('hexToRgb', () => {
+  const fallback = [1, 2, 3] as const;
+
+  it('parses a six-digit hex in either case', () => {
+    expect(hexToRgb('#2F9E6A', fallback)).toEqual([47, 158, 106]);
+    expect(hexToRgb('#2f9e6a', fallback)).toEqual([47, 158, 106]);
+  });
+
+  it('round-trips with rgbToHex', () => {
+    expect(hexToRgb(rgbToHex([47, 158, 106]), fallback)).toEqual([47, 158, 106]);
+  });
+
+  it('falls back on anything that is not a six-digit hex', () => {
+    for (const bad of ['', '#fff', '2f9e6a', '#2f9e6', '#2f9e6az', 'rgb(1,2,3)']) {
+      expect(hexToRgb(bad, fallback)).toBe(fallback);
+    }
   });
 });
 

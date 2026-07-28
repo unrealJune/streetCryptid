@@ -1,0 +1,808 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>streetCryptid — map-only chrome (no tab bar)</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+:root{
+  --void:#060c14; --navy:#0a1420; --panel:#0b1826;
+  --ink:#DCEBF0; --steel:#8AA6B2; --steeld:#5E7986; --line:#17293a;
+  --amber:#EDA23C; --amberd:#B9761E; --ok:#6FD08A;
+  --edge:rgba(6,12,20,.85); --scrim:rgba(6,12,20,.55);
+  --glass:rgba(11,21,32,.64); --glassbd:rgba(130,170,190,.16);
+  --island:rgba(10,20,31,.92); --islandbd:rgba(130,170,190,.16);
+  --shadow:rgba(0,0,0,.7); --seg:#15293a; --seghi:#fff2dd; --dot:#a8d0d9;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--void);}
+body{display:flex;align-items:center;justify-content:center;min-height:100vh;
+  font-family:'IBM Plex Mono',monospace;-webkit-font-smoothing:antialiased;}
+.stage{width:506px;height:960px;display:flex;align-items:center;justify-content:center;
+  background:radial-gradient(120% 90% at 50% 0%,#0b1420 0%,#070d15 60%,#05090f 100%);}
+.phone{width:420px;height:874px;border-radius:52px;background:#05090f;
+  padding:12px;box-shadow:0 0 0 2px #16222e,0 30px 80px rgba(0,0,0,.6),inset 0 0 0 6px #0a121b;}
+.screen{width:100%;height:100%;border-radius:42px;overflow:hidden;position:relative;
+  background:var(--navy);display:flex;flex-direction:column;}
+.statusbar{position:absolute;top:0;left:0;right:0;z-index:9;display:flex;align-items:center;justify-content:space-between;padding:14px 26px 4px;}
+.statusbar .time{font-family:'Rajdhani';font-weight:700;font-size:17px;color:var(--ink);letter-spacing:.5px;}
+.statusbar .ico{display:flex;gap:7px;align-items:center;color:var(--ink);}
+.notch{position:absolute;top:12px;left:50%;transform:translateX(-50%);width:120px;height:30px;background:#05090f;border-radius:0 0 18px 18px;z-index:6;}
+/* the OS gesture bar the island has to clear */
+.homebar{position:absolute;bottom:9px;left:50%;transform:translateX(-50%);width:140px;height:5px;
+  border-radius:3px;background:var(--ink);opacity:.5;z-index:9;}
+/* full-bleed map */
+.mapwrap{position:absolute;inset:0;overflow:hidden;background:var(--navy);}
+#map{position:absolute;inset:0;}
+.mapedge{position:absolute;inset:0;pointer-events:none;z-index:3;
+  box-shadow:inset 0 38px 46px -40px var(--edge),inset 0 -70px 60px -64px var(--edge);}
+.topscrim{position:absolute;top:0;left:0;right:0;height:108px;z-index:2;pointer-events:none;
+  background:linear-gradient(180deg,var(--scrim),transparent);}
+
+/* ===== top chrome: the ONLY thing above the map =====
+   attribution left, one settings gear right. No tab bar, no header. */
+.topchrome{position:absolute;top:44px;left:16px;right:15px;z-index:8;
+  display:flex;align-items:center;justify-content:space-between;gap:14px;}
+.attrib{font-family:'IBM Plex Mono';font-weight:500;font-size:10px;letter-spacing:1.2px;
+  color:var(--steel);opacity:.55;text-transform:uppercase;}
+.sfab{width:48px;height:48px;border-radius:24px;border:1px solid var(--islandbd);
+  background:var(--island);backdrop-filter:blur(18px) saturate(1.1);
+  display:flex;align-items:center;justify-content:center;color:var(--steel);
+  box-shadow:0 12px 28px -16px var(--shadow);}
+
+/* right floating map controls */
+.controls{position:absolute;right:15px;bottom:330px;z-index:8;display:flex;flex-direction:column;gap:11px;}
+.cbtn{width:46px;height:46px;border-radius:16px;border:1px solid var(--glassbd);
+  background:var(--glass);backdrop-filter:blur(14px) saturate(1.2);
+  display:flex;align-items:center;justify-content:center;color:var(--steel);
+  box-shadow:0 10px 24px -14px var(--shadow);}
+.cbtn.on{color:var(--amber);border-color:var(--amberd);}
+
+/* bottom island — one card: a body, then its own segmented bar.
+   `bottom` clears the system gesture bar (34px of safe-area inset) plus the
+   island's own 16px margin. The mock draws that gesture bar, because the app
+   shipped a version that sat right on top of it. */
+.island{position:absolute;left:14px;right:14px;bottom:50px;z-index:8;
+  background:var(--island);
+  backdrop-filter:blur(20px) saturate(1.1);
+  border:1px solid var(--islandbd);border-radius:26px;
+  box-shadow:0 18px 44px -22px var(--shadow);
+  overflow:hidden;}
+.ibody{padding:16px 22px 6px;}
+
+/* ===== the island's segmented bar: the app's ONLY navigation =====
+   Modelled on Find My — the sheet owns the switch, so the map's corners stay
+   free for map affordances. Contrast, not colour, carries selection; the one
+   exception is the glyph on ME, which wears your own signal colour so the tab
+   and your dot on the map read as the same thing. */
+.itabs{display:flex;gap:4px;padding:8px;border-top:1px solid var(--line);}
+.itab{flex:1;min-height:44px;border-radius:18px;display:flex;align-items:center;
+  justify-content:center;gap:8px;color:var(--steel);}
+.itab.on{background:var(--seg);color:var(--ink);}
+.itab .tl{font-family:'Rajdhani';font-weight:600;font-size:13px;letter-spacing:2px;
+  text-transform:uppercase;line-height:16px;}
+.itab.on .tl{font-weight:700;}
+.itab .ti{position:relative;display:flex;align-items:center;justify-content:center;}
+.itab.on.me .ti{color:var(--me);}
+.grab{width:38px;height:5px;border-radius:3px;background:rgba(138,166,178,.28);margin:2px auto 16px;}
+.st{font-family:'Rajdhani';font-weight:700;font-size:30px;color:var(--ink);letter-spacing:.2px;line-height:1;}
+.nb{font-family:'IBM Plex Mono';font-size:10.5px;letter-spacing:1.7px;color:var(--steel);margin-top:9px;text-transform:uppercase;}
+.cov{display:flex;align-items:center;gap:15px;margin-top:18px;}
+.covbar{flex:1;display:flex;gap:2px;height:7px;align-items:stretch;}
+.covbar i{flex:1;border-radius:1px;background:var(--seg);display:block;}
+.covbar i.on{background:var(--me);}
+.covnum{font-family:'Rajdhani';font-weight:700;font-size:20px;color:var(--ink);letter-spacing:.3px;line-height:1;}
+.covnum span{font-size:12px;color:var(--steel);margin-left:1px;}
+.detail{display:none;margin-top:17px;padding-top:15px;border-top:1px solid var(--line);}
+.island.expanded .detail{display:flex;align-items:center;justify-content:space-between;gap:18px;}
+.stats{display:flex;gap:26px;}
+.stat{font-family:'IBM Plex Mono';font-size:9.5px;letter-spacing:1.4px;color:var(--steeld);text-transform:uppercase;display:flex;align-items:baseline;gap:6px;}
+.stat b{font-family:'Rajdhani';font-weight:700;font-size:18px;color:var(--ink);letter-spacing:0;}
+
+/* ===== SOCIAL: friends roster body (bump pairing lives here) =====
+   No "FRIENDS" title: the lit tab below already names the view, so the header
+   leads with the one fact the tab cannot carry — how many are live. */
+.shd{display:flex;align-items:center;gap:8px;margin-bottom:2px;min-height:32px;}
+.shd h2{font-family:'Rajdhani';font-weight:700;font-size:24px;color:var(--ink);letter-spacing:3px;text-transform:uppercase;}
+.shd i{width:10px;height:10px;border-radius:50%;background:var(--ok);}
+.shd i.dim{background:var(--seg);}
+
+/* bump strip: arming is a deliberate tap, so idle always offers a button.
+   Deliberately NO pip - the header above already owns the one live dot. */
+.pair{display:flex;align-items:center;gap:14px;padding:9px 0 13px;border-bottom:1px solid var(--line);}
+.pair .pc{flex:1;min-width:0;}
+.pair .ps{font-family:'IBM Plex Mono';font-weight:600;font-size:10px;letter-spacing:1.2px;
+  color:var(--ok);text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.pair .ps.idle{color:var(--steel);}
+.pair .pd{font-family:'IBM Plex Mono';font-size:11px;line-height:1.36;color:var(--steel);margin-top:3px;}
+.pair .pb{border:1px solid var(--ok);border-radius:18px;padding:10px 14px;
+  font-family:'IBM Plex Mono';font-weight:600;font-size:10px;letter-spacing:1.2px;
+  color:var(--ok);text-transform:uppercase;white-space:nowrap;}
+
+.roster{display:flex;flex-direction:column;}
+.fr{display:grid;grid-template-columns:auto 1fr auto auto;align-items:center;column-gap:15px;padding:13px 2px;border-top:1px solid var(--line);}
+.fr:first-child{border-top:0;}
+.fr.off{opacity:.55;}
+.cav{display:flex;flex-direction:column;align-items:center;gap:4px;width:72px;}
+.cav pre{font-family:'IBM Plex Mono',monospace;font-size:8.5px;line-height:1.1;color:var(--ok);white-space:pre;margin:0;}
+.fr.off .cav pre{color:var(--steel);}
+.cav .cap{font-family:'IBM Plex Mono';font-size:7px;letter-spacing:1px;color:var(--steeld);text-transform:uppercase;}
+.fmid{min-width:0;}
+.fmid .h{font-family:'Rajdhani';font-weight:700;font-size:22px;line-height:25px;letter-spacing:.3px;}
+.fmid .l{font-family:'IBM Plex Mono';font-weight:500;font-size:9px;letter-spacing:1px;color:var(--steel);margin-top:2px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.frt .d{font-family:'Rajdhani';font-weight:600;font-size:16px;line-height:19px;color:var(--ink);white-space:nowrap;}
+.frt .d.dim{color:var(--steel);}
+/* The row asks "where are they". This asks "who are they, and what do I want to
+   do about it" — it opens the full-screen management sheet, where sharing, the
+   retained trail and REMOVE FRIEND live. A filled target, not a hairline
+   chevron: as a chevron it read as decoration and the remove action was
+   effectively invisible. */
+.manage{width:34px;height:34px;flex:none;margin-left:8px;border-radius:17px;background:var(--seg);
+  display:flex;align-items:center;justify-content:center;color:var(--ink);}
+
+/* ===== SETTINGS: a sheet pulled over the map, not a tab ===== */
+.sheetmodal{position:absolute;inset:0;z-index:11;display:none;border-radius:42px;overflow:hidden;}
+.sheetmodal.show{display:block;}
+.sm-scrim{position:absolute;inset:0;background:rgba(6,12,20,.42);}
+.sm-card{position:absolute;top:30px;left:0;right:0;bottom:0;background:var(--navy);
+  border-radius:22px 22px 42px 42px;box-shadow:0 -18px 44px -20px var(--shadow);
+  display:flex;flex-direction:column;overflow:hidden;}
+.sm-hd{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:26px 22px 6px;}
+.sm-hd h1{font-family:'Rajdhani';font-weight:700;font-size:34px;color:var(--ink);letter-spacing:2.4px;text-transform:uppercase;line-height:1;}
+.sm-x{width:44px;height:44px;border-radius:22px;border:1px solid var(--islandbd);
+  display:flex;align-items:center;justify-content:center;color:var(--steel);flex:none;}
+.sm-body{padding:14px 22px 0;overflow:hidden;}
+.sm-sec{font-family:'IBM Plex Mono';font-weight:600;font-size:9.5px;letter-spacing:1.8px;
+  color:var(--steeld);text-transform:uppercase;margin:24px 0 4px;}
+.sm-sec:first-child{margin-top:6px;}
+.sm-row{display:flex;align-items:center;gap:15px;padding:14px 0;border-top:1px solid var(--line);}
+.sm-row:first-of-type{border-top:0;}
+.sm-row pre{font-family:'IBM Plex Mono',monospace;font-size:8.5px;line-height:1.1;color:var(--me);white-space:pre;margin:0;width:72px;text-align:center;}
+.sm-row .rc{flex:1;min-width:0;}
+.sm-row .rt{font-family:'Rajdhani';font-weight:700;font-size:22px;line-height:25px;color:var(--ink);}
+.sm-row .rt.you{color:var(--me);}
+.sm-row .rs{font-family:'IBM Plex Mono';font-weight:500;font-size:9px;letter-spacing:1px;color:var(--steel);margin-top:2px;text-transform:uppercase;}
+.sm-row .rv{font-family:'Rajdhani';font-weight:600;font-size:16px;color:var(--steel);}
+.sm-row .go{color:var(--steeld);font-size:15px;}
+.sm-note{font-family:'IBM Plex Mono';font-size:11px;line-height:1.5;color:var(--steel);padding:6px 0 2px;}
+.sm-btn{margin-top:12px;padding:13px;border-radius:14px;border:1px solid var(--ok);
+  color:var(--ok);font-family:'IBM Plex Mono';font-weight:600;font-size:10px;
+  letter-spacing:1.6px;text-transform:uppercase;text-align:center;}
+</style>
+</head>
+<body>
+<div class="stage"><div class="phone"><div class="screen">
+  <div class="notch"></div>
+  <div class="statusbar">
+    <span class="time">09:41</span>
+    <span class="ico">
+      <svg width="20" height="12" viewBox="0 0 20 12"><g fill="currentColor"><rect x="0" y="7" width="3" height="5" rx="1"/><rect x="5" y="4.5" width="3" height="7.5" rx="1"/><rect x="10" y="2" width="3" height="10" rx="1"/><rect x="15" y="0" width="3" height="12" rx="1" opacity=".45"/></g></svg>
+      <svg width="18" height="13" viewBox="0 0 18 13"><path d="M9 12.2 1 4.4a11 11 0 0 1 16 0z" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="9" cy="10.4" r="1.3" fill="currentColor"/></svg>
+      <svg width="26" height="13" viewBox="0 0 26 13"><rect x="1" y="1" width="21" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".8"/><rect x="3" y="3" width="15" height="7" rx="1.5" fill="currentColor"/><rect x="23.5" y="4" width="2" height="5" rx="1" fill="currentColor"/></svg>
+    </span>
+  </div>
+  <div class="mapwrap" id="mapwrap">
+    <canvas id="map"></canvas>
+    <div class="mapedge"></div>
+  </div>
+  <div class="topscrim"></div>
+  <!-- The app's only top chrome. No tab bar, no header. -->
+  <div class="topchrome">
+    <span class="attrib">© OpenStreetMap</span>
+    <div class="sfab"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.6a1.6 1.6 0 0 0 .32 1.77l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-.97 1.47V21a2 2 0 1 1-4 0v-.11a1.6 1.6 0 0 0-1.05-1.47 1.6 1.6 0 0 0-1.77.32l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.47-.97H3a2 2 0 1 1 0-4h.11a1.6 1.6 0 0 0 1.47-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.6 1.6 0 0 0 1.77.32H9a1.6 1.6 0 0 0 .97-1.47V3a2 2 0 1 1 4 0v.11a1.6 1.6 0 0 0 .97 1.47 1.6 1.6 0 0 0 1.77-.32l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.6 1.6 0 0 0-.32 1.77V9a1.6 1.6 0 0 0 1.47.97H21a2 2 0 1 1 0 4h-.11a1.6 1.6 0 0 0-1.47.97Z"/></svg></div>
+  </div>
+  <!-- Only map affordances float: layers and locate. Switching what the island
+       is about belongs to the island's own segmented bar. -->
+  <div class="controls">
+    <div class="cbtn"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="M3 13l9 5 9-5"/><path d="M3 17.6l9 5 9-5"/></svg></div>
+    <div class="cbtn on"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3.6"/><path d="M12 2v3.4M12 18.6V22M2 12h3.4M18.6 12H22"/></svg></div>
+  </div>
+  <div class="island" id="sheet">
+    <div class="ibody" id="sheetbody"></div>
+    <div class="itabs" id="itabs"></div>
+  </div>
+  <div class="sheetmodal" id="settings">
+    <div class="sm-scrim"></div>
+    <div class="sm-card">
+      <div class="sm-hd">
+        <h1>Settings</h1>
+        <div class="sm-x"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 5l14 14M19 5 5 19"/></svg></div>
+      </div>
+      <div class="sm-body" id="settingsbody"></div>
+    </div>
+  </div>
+  <div class="homebar"></div>
+</div></div></div>
+
+<script src="mapdata.js"></script>
+<script src="zoomdata.js"></script>
+<script>
+// island meta populated in main()
+
+const cv=document.getElementById('map'),wrap=document.getElementById('mapwrap'),ctx=cv.getContext('2d');
+const DPR=window.devicePixelRatio||1;let W=0,H=0;
+const S=2.0;
+
+// ---- palette ----
+// ---- themes ----
+const THEMES={
+  deepsea:{
+    css:{'--void':'#060c14','--navy':'#0a1420','--panel':'#0b1826','--ink':'#DCEBF0','--steel':'#8AA6B2','--steeld':'#6E8A97','--line':'#17293a','--amber':'#EDA23C','--amberd':'#B9761E','--ok':'#6FD08A','--edge':'rgba(6,12,20,.85)','--scrim':'rgba(6,12,20,.55)','--glass':'rgba(11,21,32,.64)','--glassbd':'rgba(130,170,190,.16)','--island':'rgba(10,20,31,.92)','--islandbd':'rgba(130,170,190,.16)','--shadow':'rgba(0,0,0,.7)',    '--seg':'#15293a','--seghi':'#fff2dd','--dot':'#68d2ce'},
+        BG:[9,18,30],VEIL:[214,236,240],ACC:[240,166,64],contact:[111,208,138],
+    TERR:[[0,[34,66,74]],[.45,[46,120,130]],[.72,[120,196,198]],[1,[212,236,234]]],
+    WATER:[[0,[26,74,128]],[.5,[38,110,176]],[1,[86,168,232]]],
+    PARK:[[0,[30,84,58]],[.5,[54,140,86]],[1,[120,206,132]]],
+    labelBg:'rgba(9,17,27,.82)',streetLabel:[184,208,216],parkLabel:[132,198,150]
+  },
+  nocturne:{
+    css:{'--void':'#08081a','--navy':'#0e0e22','--panel':'#14142a','--ink':'#E7E9FB','--steel':'#9aa0c8','--steeld':'#7d82ac','--line':'#22224a','--amber':'#F0657F','--amberd':'#B23a52','--ok':'#63D0B0','--edge':'rgba(7,7,20,.85)','--scrim':'rgba(7,7,20,.55)','--glass':'rgba(16,16,34,.64)','--glassbd':'rgba(150,150,205,.18)','--island':'rgba(14,14,30,.92)','--islandbd':'rgba(150,150,210,.18)','--shadow':'rgba(0,0,0,.72)',    '--seg':'#22224a','--seghi':'#ffdfe7','--dot':'#5cc8e0'},
+        BG:[12,12,30],VEIL:[224,228,252],ACC:[244,110,136],contact:[99,208,176],
+    TERR:[[0,[44,42,78]],[.42,[96,100,168]],[.72,[168,176,220]],[1,[236,238,250]]],
+    WATER:[[0,[38,44,104]],[.5,[62,80,180]],[1,[104,132,236]]],
+    PARK:[[0,[36,64,78]],[.5,[58,124,132]],[1,[110,196,190]]],
+    labelBg:'rgba(12,12,28,.82)',streetLabel:[188,196,232],parkLabel:[150,200,200]
+  },
+  daybreak:{
+    css:{'--void':'#c9d3da','--navy':'#eef2f5','--panel':'#ffffff','--ink':'#152633','--steel':'#4d6675','--steeld':'#5b7480','--line':'#d6dee4','--amber':'#C6791A','--amberd':'#9a5c10','--ok':'#2f9e6a','--edge':'rgba(238,242,245,.9)','--scrim':'rgba(238,242,245,.6)','--glass':'rgba(255,255,255,.78)','--glassbd':'rgba(30,55,72,.14)','--island':'rgba(255,255,255,.9)','--islandbd':'rgba(30,55,72,.12)','--shadow':'rgba(40,60,80,.28)',    '--seg':'#d3dde3','--seghi':'#C6791A','--dot':'#1a848e'},
+        BG:[236,240,244],VEIL:[18,62,84],ACC:[214,124,26],contact:[38,150,100],
+    TERR:[[0,[176,190,200]],[.4,[108,132,148]],[.72,[52,84,106]],[1,[20,44,64]]],
+    WATER:[[0,[150,192,224]],[.5,[74,140,196]],[1,[30,104,170]]],
+    PARK:[[0,[158,200,168]],[.5,[80,164,110]],[1,[34,128,80]]],
+    labelBg:'rgba(255,255,255,.82)',streetLabel:[46,78,98],parkLabel:[30,110,78]
+  }
+};
+const params=new URLSearchParams(location.search);
+const themeName=params.get('theme')||'daybreak';
+const T=THEMES[themeName]||THEMES.deepsea;
+// Your signal colour: the one you pick in Settings, and the one friends already
+// see for your dot. `?me=<hex>` swaps it. Amber (ACC) is now the frontier rim only.
+const ME_HEX=(function(){const v=params.get('me');return /^#[0-9a-f]{6}$/i.test(v||'')?v:'#2F9E6A';})();
+const ME=[1,3,5].map((i)=>parseInt(ME_HEX.slice(i,i+2),16));
+(function(){const r=document.documentElement;for(const k in T.css)r.style.setProperty(k,T.css[k]);r.style.setProperty('--me',ME_HEX);})();
+const TERR=T.TERR,WATER=T.WATER,PARK=T.PARK,ACC=T.ACC,BG=T.BG,VEIL=T.VEIL,CT=T.contact||[111,208,138];
+// ---- dataset (geography + zoom) ----
+const META={
+  caphill:{street:'15th Ave E',        hood:'Capitol Hill · Seattle', cov:34, streets:128, km:'8.4', home:[0.52,0.585]},
+  union:  {street:'Fairview Ave N',     hood:'Lake Union · Seattle',   cov:23, streets:96,  km:'6.1', home:[0.50,0.72]},
+  greenlk:{street:'E Green Lake Way N',  hood:'Green Lake · Seattle',   cov:41, streets:74,  km:'9.7', home:[0.64,0.40]},
+  core:   {street:'Pike St',            hood:'Downtown · Seattle',     cov:29, streets:52,  km:'3.8', home:[0.50,0.55]},
+};
+const dataName=params.get('data')||'caphill';
+const M=META[dataName]||META.caphill;
+const OSM=(window.OSMSETS&&(window.OSMSETS[dataName]||window.OSMSETS.caphill));
+
+// ---- zoom tier: the bottom-bar (island) + map scope both change with zoom ----
+// coverage DECREASES as you zoom out (walked the block, barely scratched the state)
+const ZOOM=params.get('zoom')||'hood';                 // street | hood | city | region
+const ZTIERS={
+  street:{hero:'15th Ave E',  sub:'CAPITOL HILL · SEATTLE', cov:58, s1:['21','blocks'],   s2:['0.4','km²'], lg:['walked','frontier'],  mag:2.35},
+  hood:  {hero:'Capitol Hill',sub:'SEATTLE · DISTRICT 3',   cov:34, s1:['142','sectors'],  s2:['5.1','km²'], lg:['explored','frontier'], mag:1},
+  city:  {hero:'Seattle',     sub:'KING COUNTY · WA',       cov:12, s1:['9/21','hoods'],  s2:['58','km²'],  lg:['explored','frontier'], mag:1},
+  region:{hero:'Washington',  sub:'PACIFIC NORTHWEST',      cov:3,  s1:['4/39','cities'], s2:['1.4k','km²'],lg:['visited','planned'],   mag:1},
+};
+const ZT=ZTIERS[ZOOM]||ZTIERS.hood;
+
+// ---- SOCIAL: friends as other signals on the shared map ----
+// each friend carries an ASCII "cryptid" sigil (terminal-native identity, not a mascot to catch)
+const CRY={
+  moth: String.raw`  \.    ./
+   \(oo)/
+    )~~(
+   /_||_\ `,
+  jack: String.raw`  \Y/\Y/
+   (o.o)
+   (>w<)
+   /"  "\ `,
+  hound:String.raw`  /^--^\
+  ( o  o )
+   \ ~~ /
+  _/'  '\_`,
+};
+// pos = normalized [x,y] on the hood canvas; shared = % of streets you've both walked;
+// color = the friend's OWN chosen signal, exactly as the app resolves it
+const FRIENDS=[
+  {handle:'wanderer', species:'mothman',   glyph:CRY.moth,  color:'#5A8DEE', pos:[0.60,0.25], hood:'Volunteer Park', loc:'15th Ave E',  dist:'0.3 km', shared:41, online:true},
+  {handle:'nightowl', species:'jackalope', glyph:CRY.jack,  color:'#B06CE0', pos:[0.25,0.30], hood:'Fremont',        loc:'N 36th St',   dist:'2.1 km', shared:18, online:true},
+  {handle:'fog_dog',  species:'black shuck',glyph:CRY.hound, color:'#E0643C', pos:[0.80,0.82], hood:'Ballard',        loc:'Market St',   dist:'4.4 km', shared:27, online:false, seen:'4h ago'},
+];
+const hexRgb=(h)=>[1,3,5].map((i)=>parseInt(h.slice(i,i+2),16));
+// 'friends' | 'me'. coverage is kept as an alias for older render scripts.
+const socialView = (params.get('island') || 'friends') === 'coverage' ? 'me' : params.get('island') || 'friends';
+const showSettings = params.get('settings') === 'open';
+// Which bump stage the pairing strip is showing off.
+const bumpStage = params.get('bump') || 'idle'; // idle | armed | searching | failed | off
+
+const fogMode=(ZOOM==='city'||ZOOM==='region')?'hex':(params.get('fog')||'hex');   // 'soft' | 'hex' | 'grid'
+let CELL=+params.get('cell')||(fogMode==='grid'?64:42);
+if(ZOOM==='street')CELL=58; if(ZOOM==='city')CELL=56; if(ZOOM==='region')CELL=64;
+const MAG=ZT.mag||1, FOCUS=(OSM&&M.home)||[0.5,0.5];
+function clamp(v,a,b){return v<a?a:v>b?b:v;}
+function smooth(a,b,x){const t=clamp((x-a)/(b-a),0,1);return t*t*(3-2*t);}
+function hash(x,y){const s=Math.sin(x*12.9898+y*78.233)*43758.5453;return s-Math.floor(s);}
+function ramp(st,t){t=clamp(t,0,1);for(let i=0;i<st.length-1;i++){if(t<=st[i+1][0]){const a=st[i],b=st[i+1],k=(t-a[0])/((b[0]-a[0])||1);return[a[1][0]+(b[1][0]-a[1][0])*k,a[1][1]+(b[1][1]-a[1][1])*k,a[1][2]+(b[1][2]-a[1][2])*k];}}return st[st.length-1][1];}
+function mix(c,d,t){return[c[0]+(d[0]-c[0])*t,c[1]+(d[1]-c[1])*t,c[2]+(d[2]-c[2])*t];}
+function rgba(c,a){return`rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;}
+function distSeg(px,py,ax,ay,bx,by){const dx=bx-ax,dy=by-ay,l=dx*dx+dy*dy||1;let t=((px-ax)*dx+(py-ay)*dy)/l;t=clamp(t,0,1);return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));}
+function distPath(px,py,P){let d=1e9;for(let i=0;i<P.length-1;i++){const q=distSeg(px,py,P[i][0],P[i][1],P[i+1][0],P[i+1][1]);if(q<d)d=q;}return d;}
+// flat-top hex: pixel -> cube-rounded axial key; hex outline path
+function hexKey(x,y,R){let q=(2/3*x)/R,r=(-1/3*x+Math.sqrt(3)/3*y)/R,s=-q-r,rq=Math.round(q),rr=Math.round(r),rs=Math.round(s);const dq=Math.abs(rq-q),dr=Math.abs(rr-r),ds=Math.abs(rs-s);if(dq>dr&&dq>ds)rq=-rr-rs;else if(dr>ds)rr=-rq-rs;return rq+','+rr;}
+function hexPath(cx,cy,R){ctx.beginPath();for(let i=0;i<6;i++){const a=Math.PI/3*i,px=cx+R*Math.cos(a),py=cy+R*Math.sin(a);i?ctx.lineTo(px,py):ctx.moveTo(px,py);}ctx.closePath();}
+
+// ---- projection ----
+const [BS,BW,BN,BE]=OSM.bbox;
+const lat0=(BS+BN)/2, cosL=Math.cos(lat0*Math.PI/180);
+const PW=(BE-BW)*cosL, PH=(BN-BS);
+let scale,offx,offy;
+function setProj(){scale=Math.max(W/PW,H/PH);offx=(W-PW*scale)/2;offy=(H-PH*scale)/2;
+  if(MAG!==1){const fx=FOCUS[0]*W,fy=FOCUS[1]*H;offx=fx-(fx-offx)*MAG;offy=fy-(fy-offy)*MAG;scale*=MAG;}}
+function P(lat,lon){return[offx+(lon-BW)*cosL*scale, offy+(BN-lat)*scale];}
+
+const RGRAY=[128,170,205,225,245], RW=[2.2,3.0,4.2,5.4,7.0];
+
+function layout(){const r=wrap.getBoundingClientRect();W=Math.round(r.width);H=Math.round(r.height);
+  cv.width=W*DPR;cv.height=H*DPR;cv.style.width=W+'px';cv.style.height=H+'px';ctx.setTransform(DPR,0,0,DPR,0,0);}
+
+function maskCanvas(drawFn){const c=document.createElement('canvas');c.width=W;c.height=H;const x=c.getContext('2d');
+  x.fillStyle='#000';x.fillRect(0,0,W,H);drawFn(x);return x.getImageData(0,0,W,H).data;}
+
+let streetD,parkD,waterD, exPaths, opPt, streetLabels, discovered=new Set(), cells=[];
+
+function build(){
+  setProj();
+  const streets=OSM.ways.filter(w=>w.k==='s');
+  const parks=OSM.ways.filter(w=>w.k==='p');
+  const waters=OSM.ways.filter(w=>w.k==='w');
+  const rivers=OSM.ways.filter(w=>w.k==='r');
+
+  // street mask (draw low class first, high class on top)
+  const sorted=streets.slice().sort((a,b)=>a.c-b.c);
+  streetD=maskCanvas(x=>{x.lineCap='round';x.lineJoin='round';
+    for(const w of sorted){const gcol=RGRAY[w.c];x.strokeStyle=`rgb(${gcol},${gcol},${gcol})`;x.lineWidth=RW[w.c];
+      x.beginPath();for(let i=0;i<w.g.length;i++){const p=P(w.g[i][0],w.g[i][1]);i?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]);}x.stroke();}
+  });
+  parkD=maskCanvas(x=>{x.fillStyle='#fff';for(const w of parks){x.beginPath();for(let i=0;i<w.g.length;i++){const p=P(w.g[i][0],w.g[i][1]);i?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]);}x.closePath();x.fill();}});
+  waterD=maskCanvas(x=>{x.fillStyle='#fff';for(const w of waters){x.beginPath();for(let i=0;i<w.g.length;i++){const p=P(w.g[i][0],w.g[i][1]);i?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]);}x.closePath();x.fill();}
+    x.strokeStyle='#fff';x.lineWidth=5;x.lineCap='round';for(const w of rivers){x.beginPath();for(let i=0;i<w.g.length;i++){const p=P(w.g[i][0],w.g[i][1]);i?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]);}x.stroke();}});
+
+  // explored network: several real on-street branches from a home node
+  const coord=new Map(), adj=new Map();
+  for(const w of streets){if(w.c<1||!w.n)continue;for(let i=0;i<w.n.length;i++){const id=w.n[i],p=P(w.g[i][0],w.g[i][1]);coord.set(id,p);
+    if(i>0){const a=w.n[i-1],b=w.n[i];(adj.get(a)||adj.set(a,new Set()).get(a)).add(b);(adj.get(b)||adj.set(b,new Set()).get(b)).add(a);}}}
+  function nearest(pt){let bd=1e18,bn=null;for(const[id,c]of coord){const d=(c[0]-pt[0])**2+(c[1]-pt[1])**2;if(d<bd){bd=d;bn=id;}}return bn;}
+  function bfs(a,b){const prev=new Map();prev.set(a,a);const q=[a];let qi=0;while(qi<q.length){const u=q[qi++];if(u===b)break;const ns=adj.get(u);if(ns)for(const v of ns)if(!prev.has(v)){prev.set(v,u);q.push(v);}}if(!prev.has(b))return null;const path=[];let c=b;while(c!==a){path.push(coord.get(c));c=prev.get(c);}path.push(coord.get(a));return path.reverse();}
+  const home=[W*M.home[0],H*M.home[1]], homeN=nearest(home);
+  const ends=[[W*0.50,H*0.13],[W*0.83,H*0.30],[W*0.90,H*0.58],[W*0.66,H*0.93],[W*0.15,H*0.75],[W*0.20,H*0.40],[W*0.80,H*0.83],[W*0.40,H*0.72]];
+  exPaths=[];
+  for(const ep of ends){const en=nearest(ep);const pth=bfs(homeN,en);if(pth&&pth.length>2){
+    const MAX=90;let pp=pth;if(pp.length>MAX){const st=(pp.length-1)/(MAX-1),o=[];for(let i=0;i<MAX;i++)o.push(pp[Math.round(i*st)]);pp=o;}exPaths.push(pp);}}
+  opPt=coord.get(homeN)||home;
+
+  // chunked reveal: a sector is 'discovered' once the walked network enters it (one ping acquires it)
+  discovered=new Set();cells=[];
+  if(fogMode!=='soft'){
+    const R=CELL;
+    if(fogMode==='hex'){
+      for(let col=-1;;col++){const hx=R*1.5*col;if(hx>W+R)break;
+        for(let row=-1;;row++){const hy=R*Math.sqrt(3)*(row+((col&1)?0.5:0));if(hy>H+R)break;
+          const key=hexKey(hx,hy,R),pt=key.split(','),q=+pt[0],r=+pt[1];
+          const disc=distNet(hx,hy)<R*0.95;cells.push({q,r,x:hx,y:hy,disc});if(disc)discovered.add(key);}}
+    }else{
+      for(let gy=0;gy*R<H;gy++)for(let gx=0;gx*R<W;gx++){const hx=gx*R+R/2,hy=gy*R+R/2;
+        const disc=distNet(hx,hy)<R*0.62;cells.push({gx,gy,x:hx,y:hy,disc});if(disc)discovered.add(gx+','+gy);}
+    }
+  }
+
+  // ---- zoom-tiered street names (the shipped `core/map-labels.ts` rules) ----
+  // A road can be DRAWN long before it is worth NAMING. Motorways label from far
+  // out; residential streets and service alleys stay anonymous until you are
+  // actually in the neighbourhood. Class 4 = motorway … class 0 = service.
+  const NAME_MIN_CLASS = { street: 0, hood: 1, city: 3, region: 4 }; // per zoom tier
+  const minClass = NAME_MIN_CLASS[ZOOM] != null ? NAME_MIN_CLASS[ZOOM] : 1;
+  const byName = {};
+  for (const w of streets) {
+    if (!w.nm || w.c < minClass || w.g.length < 4) continue;
+    // One label per NAME, not per way: a road crossing four tiles is still one road.
+    const sc = w.g.length + w.c * 24;
+    const cur = byName[w.nm];
+    if (!cur || sc > cur.sc) byName[w.nm] = { w, sc };
+  }
+  const cap = ZOOM === 'street' ? 26 : 18;
+  const picks = Object.values(byName)
+    .sort((a, b) => b.sc - a.sc)
+    .map((o) => o.w);
+  // Labels never spill off the canvas or hide under the island; the budget goes
+  // to the part of the map you can actually see.
+  const TOP_LIMIT = 104;
+  const BOTTOM_LIMIT = H - (socialView === 'me' ? 286 : 446);
+  const inBox = (p) => p[0] > 8 && p[0] < W - 8 && p[1] > TOP_LIMIT && p[1] < BOTTOM_LIMIT;
+  const placed = [];
+  streetLabels = [];
+  for (const w of picks) {
+    if (streetLabels.length >= cap) break;
+    const nm = w.nm.toUpperCase();
+    const wpx = nm.length * 5.4 + 6;
+    const pts = w.g.map((q) => P(q[0], q[1]));
+    // Anchor on the longest CONTIGUOUS on-screen run, not the way's midpoint: a
+    // magnified arterial usually has its true midpoint off-canvas, and a name
+    // belongs on the piece of road you can actually see.
+    let best = null,
+      run = null;
+    for (let i = 0; i < pts.length; i++) {
+      if (inBox(pts[i])) {
+        if (!run) run = { a: i, b: i, len: 0 };
+        else {
+          run.len += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+          run.b = i;
+        }
+        if (!best || run.len > best.len) best = { ...run };
+      } else run = null;
+    }
+    // The name has to FIT along that run, so short stubs suppress themselves.
+    if (!best || best.len < wpx * 1.15) continue;
+    let acc = 0,
+      m = best.a;
+    for (let i = best.a; i < best.b; i++) {
+      const d = Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]);
+      if (acc + d >= best.len / 2) {
+        m = i;
+        break;
+      }
+      acc += d;
+    }
+    const a = pts[m],
+      b = pts[Math.min(best.b, m + 1)];
+    let ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+    if (ang > Math.PI / 2) ang -= Math.PI;
+    if (ang < -Math.PI / 2) ang += Math.PI;
+    const x = (a[0] + b[0]) / 2,
+      y = (a[1] + b[1]) / 2;
+    const ca = Math.abs(Math.cos(ang)),
+      sa = Math.abs(Math.sin(ang));
+    const hx = (ca * wpx) / 2 + sa * 7,
+      hy = (sa * wpx) / 2 + ca * 7;
+    if (x - hx < 8 || x + hx > W - 8 || y - hy < TOP_LIMIT || y + hy > BOTTOM_LIMIT) continue;
+    // Colliding labels are DROPPED, never stacked.
+    const box = { x0: x - hx - 3, x1: x + hx + 3, y0: y - hy - 3, y1: y + hy + 3 };
+    if (placed.some((q) => box.x0 < q.x1 && box.x1 > q.x0 && box.y0 < q.y1 && box.y1 > q.y0))
+      continue;
+    placed.push(box);
+    streetLabels.push({ nm, x, y, ang });
+  }
+  // park labels (largest parks with names)
+  window.__parkLabels=parks.map(w=>{let a=0,cx=0,cy=0,n=w.g.length;const pts=w.g.map(q=>P(q[0],q[1]));
+    for(let i=0;i<n;i++){const j=(i+1)%n;const cr=pts[i][0]*pts[j][1]-pts[j][0]*pts[i][1];a+=cr;cx+=(pts[i][0]+pts[j][0])*cr;cy+=(pts[i][1]+pts[j][1])*cr;}
+    a*=0.5;const ar=Math.abs(a);cx/=(6*a);cy/=(6*a);return{nm:(w.nm||'').toUpperCase(),x:cx,y:cy,ar};})
+    .filter(p=>p.nm&&p.ar>1400).sort((a,b)=>b.ar-a.ar).slice(0,5);
+}
+
+function sampleMax(D,x,y){let m=0;const o=[[0,0],[S*.4,0],[-S*.4,0],[0,S*.4],[0,-S*.4]];
+  for(const d of o){const xi=clamp(Math.round(x+d[0]),0,W-1),yi=clamp(Math.round(y+d[1]),0,H-1);const v=D[(yi*W+xi)*4];if(v>m)m=v;}return m;}
+function sample(D,x,y){const xi=clamp(Math.round(x),0,W-1),yi=clamp(Math.round(y),0,H-1);return D[(yi*W+xi)*4];}
+
+function distNet(px,py){let d=1e9;for(const Pp of exPaths){const q=distPath(px,py,Pp);if(q<d)d=q;}return d;}
+function draw(){
+  ctx.clearRect(0,0,W,H);ctx.fillStyle=rgba(BG,1);ctx.fillRect(0,0,W,H);
+  const Rexp=40,FADE=44;
+
+  ctx.shadowBlur=0;
+  const FL={s:0.46,p:0.44,w:0.54,b:0.12}, MX={s:1.0,p:0.95,w:0.90,b:0.70};
+  const COARSE=2;   // undiscovered sectors render at 1/COARSE resolution (low-res ghost)
+  let iy=0;
+  for(let y=S/2;y<H;y+=S,iy++){
+    let ix=0;
+    for(let x=S/2;x<W;x+=S,ix++){
+      const n=hash(ix,iy);
+      let e,dR=1e9;
+      if(fogMode==='soft'){dR=distNet(x,y);e=1-smooth(Rexp,Rexp+FADE,dR);}
+      else{
+        e=discovered.has(fogMode==='hex'?hexKey(x,y,CELL):(((x/CELL)|0)+','+((y/CELL)|0)))?1:0;
+        if(e<0.5&&(ix%COARSE!==0||iy%COARSE!==0))continue;   // low-res in the fog
+      }
+      const coarse=e<0.5&&fogMode!=='soft';
+      let col,val,k;
+      const wv=sample(waterD,x,y), pv=sample(parkD,x,y), sv=sampleMax(streetD,x,y);
+      if(wv>40){val=0.44+0.12*Math.sin(y*0.4+x*0.2);col=ramp(WATER,clamp(0.42+0.5*n,0,1));k='w';if(n<0.08)continue;}
+      else if(pv>40){val=0.58+0.28*n;col=ramp(PARK,clamp(0.48+0.5*n,0,1));k='p';}
+      else if(sv>28){val=clamp(sv/255,0,1);col=ramp(TERR,val);k='s';}
+      else{if(n<0.20+(1-e)*0.16)continue;val=clamp(0.24+0.13*n,0,1);col=ramp(TERR,val);k='b';}
+      // fog of war: explored shows TRUE saturated color; unexplored drains toward gray "ghost city".
+      // water + parkland keep most of their color (never fog out too far); fog is gentle overall.
+      const fog=1-e;
+      const area=(k==='w'||k==='p');
+      const fg=area?Math.min(fog,0.5):fog;
+      const lum=0.299*col[0]+0.587*col[1]+0.114*col[2];
+      let cc=mix(col,[lum,lum,lum],fg*0.74);
+      cc=mix(cc,BG,fg*0.24);
+      let a=FL[k]+(MX[k]-FL[k])*e;
+      let rad;
+      if(coarse){a*=(area?0.72:0.5);rad=(0.55+0.72*val)*1.5;}   // lighter + chunkier low-res
+      else rad=(0.30+0.85*val)*(0.6+0.55*e);                    // sharp hi-res
+      ctx.beginPath();ctx.fillStyle=rgba(cc,a);ctx.arc(x,y,rad,0,6.2832);ctx.fill();
+    }
+  }
+  ctx.shadowBlur=0;
+  drawSectors();
+
+  // street labels
+  ctx.textAlign='center';ctx.textBaseline='middle';ctx.font="600 9px 'IBM Plex Mono',monospace";
+  for(const L of streetLabels){
+    if(Math.hypot(L.x-opPt[0],L.y-opPt[1])<54)continue;
+    ctx.save();ctx.translate(L.x,L.y);ctx.rotate(L.ang);
+    const lw=L.nm.length*5.4+6;
+    ctx.fillStyle=T.labelBg;ctx.fillRect(-lw/2,-7,lw,14);
+    ctx.fillStyle=rgba(T.streetLabel,.92);ctx.fillText(L.nm,0,0);ctx.restore();}
+  // park labels
+  ctx.font="600 9px 'IBM Plex Mono',monospace";ctx.textAlign='center';
+  const PBOT=H-(socialView==='me'?286:446);
+  for(const p of (window.__parkLabels||[])){
+    const pw=p.nm.length*5.4;
+    if(p.x-pw/2<10||p.x+pw/2>W-10||p.y<110||p.y>PBOT)continue;
+    let ly=p.y;if(Math.abs(p.x-opPt[0])<90&&Math.abs(p.y-opPt[1])<40)ly=opPt[1]+52;
+    const wpx=p.nm.length*5.4;ctx.fillStyle=T.labelBg;ctx.fillRect(p.x-wpx/2-3,ly-7,wpx+6,14);
+    ctx.fillStyle=rgba(T.parkLabel,.96);ctx.fillText(p.nm,p.x,ly);}
+
+  // friends: other live signals on the shared map (contact-green, below YOU in z-order)
+  drawFriends();
+  // you-are-here locator: your own signal colour, not the canvas amber
+  ctx.save();ctx.translate(opPt[0],opPt[1]);
+  ctx.strokeStyle=rgba(ME,.16);ctx.lineWidth=1.2;ctx.beginPath();ctx.arc(0,0,22,0,6.2832);ctx.stroke();
+  ctx.strokeStyle=rgba(ME,.4);ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(0,0,12,0,6.2832);ctx.stroke();
+  ctx.fillStyle=rgba(ME,1);ctx.beginPath();ctx.arc(0,0,6,0,6.2832);ctx.fill();
+  ctx.fillStyle='rgba(255,251,244,1)';ctx.beginPath();ctx.arc(0,0,2.3,0,6.2832);ctx.fill();ctx.restore();
+  ctx.font="700 13px 'Rajdhani',sans-serif";ctx.textAlign='left';ctx.textBaseline='middle';
+  ctx.fillStyle=T.labelBg;ctx.fillRect(opPt[0]+16,opPt[1]-9,40,18);
+  ctx.fillStyle=rgba(ME,1);ctx.fillText('YOU',opPt[0]+22,opPt[1]);
+}
+
+function drawSectors(){
+  if(fogMode==='soft')return;
+  const NB=[[1,0],[1,-1],[0,-1],[-1,0],[-1,1],[0,1]], G4=[[1,0],[-1,0],[0,1],[0,-1]];
+  const outline=c=>{if(fogMode==='hex')hexPath(c.x,c.y,CELL);else{ctx.beginPath();ctx.rect(c.gx*CELL,c.gy*CELL,CELL,CELL);}};
+  // locked sectors: faint grid outline so undiscovered chunks read as a structured lattice
+  ctx.lineJoin='round';ctx.lineWidth=1;ctx.strokeStyle=rgba(T.streetLabel,.09);
+  for(const c of cells){if(c.disc)continue;outline(c);ctx.stroke();}
+  // acquired frontier: amber rim on discovered sectors bordering the unknown
+  ctx.lineWidth=1.5;ctx.strokeStyle=rgba(ACC,.42);
+  for(const c of cells){if(!c.disc)continue;let fr=false;
+    const nbs=fogMode==='hex'?NB:G4;
+    for(const n of nbs){const key=fogMode==='hex'?((c.q+n[0])+','+(c.r+n[1])):((c.gx+n[0])+','+(c.gy+n[1]));if(!discovered.has(key)){fr=true;break;}}
+    if(fr){outline(c);ctx.stroke();}}
+}
+
+// friends: contact-green live signals on the shared map + handle chips (hood/street tiers)
+function drawFriends(){
+  ctx.textAlign='left';ctx.textBaseline='middle';
+  for(const f of FRIENDS){
+    const x=W*f.pos[0], y=H*f.pos[1], on=f.online;
+    const sig=hexRgb(f.color);
+    const col=on?sig:T.streetLabel, aa=on?1:0.5;
+    // presence ring (online only) + core dot, in the friend's own signal colour
+    if(on){ctx.strokeStyle=rgba(sig,.14);ctx.lineWidth=1.2;ctx.beginPath();ctx.arc(x,y,16,0,6.2832);ctx.stroke();
+      ctx.strokeStyle=rgba(sig,.36);ctx.lineWidth=1.3;ctx.beginPath();ctx.arc(x,y,9.5,0,6.2832);ctx.stroke();}
+    ctx.fillStyle=rgba(col,aa);ctx.beginPath();ctx.arc(x,y,on?4.4:3.4,0,6.2832);ctx.fill();
+    ctx.fillStyle=rgba(BG,1);ctx.beginPath();ctx.arc(x,y,on?1.7:1.3,0,6.2832);ctx.fill();
+    // handle chip
+    const h='@'+f.handle;ctx.font="700 12px 'Rajdhani',sans-serif";
+    const tw=ctx.measureText(h).width;
+    ctx.fillStyle=T.labelBg;ctx.fillRect(x+13,y-9,tw+11,18);
+    ctx.fillStyle=rgba(col,aa);ctx.fillText(h,x+18,y);
+  }
+}
+
+// ==== ZOOM TIERS: city + region flip-dot fields (own projection, land-gated void) ====
+function drawYou(pt,label){
+  ctx.save();ctx.translate(pt[0],pt[1]);
+  ctx.strokeStyle=rgba(ME,.16);ctx.lineWidth=1.2;ctx.beginPath();ctx.arc(0,0,22,0,6.2832);ctx.stroke();
+  ctx.strokeStyle=rgba(ME,.4);ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(0,0,12,0,6.2832);ctx.stroke();
+  ctx.fillStyle=rgba(ME,1);ctx.beginPath();ctx.arc(0,0,6,0,6.2832);ctx.fill();
+  ctx.fillStyle='rgba(255,251,244,1)';ctx.beginPath();ctx.arc(0,0,2.3,0,6.2832);ctx.fill();ctx.restore();
+  if(label){ctx.font="700 13px 'Rajdhani',sans-serif";ctx.textAlign='left';ctx.textBaseline='middle';
+    ctx.fillStyle=T.labelBg;ctx.fillRect(pt[0]+16,pt[1]-9,label.length*8+14,18);
+    ctx.fillStyle=rgba(ME,1);ctx.fillText(label,pt[0]+22,pt[1]);}
+}
+function projFor(bbox,fit){const [bs,bw,bn,be]=bbox,l0=(bs+bn)/2,cl=Math.cos(l0*Math.PI/180),pw=(be-bw)*cl,ph=(bn-bs);
+  const sc=(fit==='contain'?Math.min(W/pw,H/ph):Math.max(W/pw,H/ph)),ox=(W-pw*sc)/2,oy=(H-ph*sc)/2;
+  return{P:(la,lo)=>[ox+(lo-bw)*cl*sc,oy+(bn-la)*sc]};}
+function fillMask(rings,PJ){return maskCanvas(x=>{x.fillStyle='#fff';for(const r of (rings||[])){const g=r.g||r;if(!g||g.length<3)continue;
+  x.beginPath();for(let i=0;i<g.length;i++){const p=PJ(g[i][0],g[i][1]);i?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]);}x.closePath();x.fill();}});}
+function hexCells(R,discFn){const cells=[],disc=new Set();
+  for(let col=-1;;col++){const hx=R*1.5*col;if(hx>W+R)break;
+    for(let row=-1;;row++){const hy=R*Math.sqrt(3)*(row+((col&1)?0.5:0));if(hy>H+R)break;
+      const key=hexKey(hx,hy,R),pt=key.split(','),q=+pt[0],r=+pt[1];const dd=discFn(hx,hy);cells.push({q,r,x:hx,y:hy,disc:dd});if(dd)disc.add(key);}}
+  return{cells,disc};}
+function labelChip(x,y,txt,colr,alpha){ctx.font="600 8.5px 'IBM Plex Mono',monospace";ctx.textAlign='center';ctx.textBaseline='middle';
+  const w=txt.length*5.1;ctx.fillStyle=T.labelBg;ctx.fillRect(x-w/2-3,y-7,w+6,14);ctx.fillStyle=rgba(colr,alpha);ctx.fillText(txt,x,y);}
+
+function dotFieldZoom(o){
+  const {landD,waterD,streetD,R,disc,cells}=o;
+  ctx.clearRect(0,0,W,H);ctx.fillStyle=rgba(BG,1);ctx.fillRect(0,0,W,H);
+  const FL={s:0.46,w:0.54,b:0.14},MX={s:1.0,w:0.90,b:0.66},COARSE=2;
+  let iy=0;for(let y=S/2;y<H;y+=S,iy++){let ix=0;for(let x=S/2;x<W;x+=S,ix++){const n=hash(ix,iy);
+    const e=disc.has(hexKey(x,y,R))?1:0;
+    if(e<0.5&&(ix%COARSE!==0||iy%COARSE!==0))continue;                 // low-res in the fog
+    const lv=landD?sample(landD,x,y):255, wv=waterD?sample(waterD,x,y):0, sv=streetD?sampleMax(streetD,x,y):0;
+    let col,val,k;
+    if(wv>40){val=0.44+0.12*Math.sin(y*0.4+x*0.2);col=ramp(WATER,clamp(0.42+0.5*n,0,1));k='w';if(n<0.08)continue;}
+    else if(lv>40){if(sv>26){val=clamp(sv/255,0,1);col=ramp(TERR,val);k='s';}
+      else{if(n<0.20+(1-e)*0.16)continue;val=clamp(0.24+0.13*n,0,1);col=ramp(TERR,val);k='b';}}
+    else continue;                                                     // void outside the land shape
+    const coarse=e<0.5,fog=1-e,area=(k==='w'),fg=area?Math.min(fog,0.5):fog;
+    const lum=0.299*col[0]+0.587*col[1]+0.114*col[2];let cc=mix(col,[lum,lum,lum],fg*0.74);cc=mix(cc,BG,fg*0.26);
+    let a=FL[k]+(MX[k]-FL[k])*e,rad;
+    if(coarse){a*=(area?0.72:0.5);rad=(0.55+0.72*val)*1.5;}else rad=(0.30+0.85*val)*(0.6+0.55*e);
+    ctx.beginPath();ctx.fillStyle=rgba(cc,a);ctx.arc(x,y,rad,0,6.2832);ctx.fill();}}
+  // sector outlines: faint locked lattice + amber frontier, clipped to land
+  ctx.lineJoin='round';ctx.lineWidth=1;ctx.strokeStyle=rgba(T.streetLabel,.08);
+  for(const c of cells){if(c.disc)continue;if(!o.latticeAll&&landD&&sample(landD,c.x,c.y)<28)continue;hexPath(c.x,c.y,R);ctx.stroke();}
+  ctx.lineWidth=1.5;ctx.strokeStyle=rgba(ACC,.42);const NB=[[1,0],[1,-1],[0,-1],[-1,0],[-1,1],[0,1]];
+  for(const c of cells){if(!c.disc)continue;let fr=false;for(const nn of NB){if(!disc.has((c.q+nn[0])+','+(c.r+nn[1]))){fr=true;break;}}if(fr){hexPath(c.x,c.y,R);ctx.stroke();}}
+}
+
+function renderCity(){
+  const Z=window.OSMZOOM&&OSMZOOM.seattle; if(!Z){build();draw();return;}
+  const {P:PJ}=projFor(Z.bbox);
+  const landD=fillMask(Z.land,PJ), waterD=fillMask(Z.water,PJ);
+  const arts=Z.ways.slice().sort((a,b)=>a.c-b.c);
+  const streetD=maskCanvas(x=>{x.lineCap='round';x.lineJoin='round';for(const w of arts){const g=RGRAY[w.c];x.strokeStyle=`rgb(${g},${g},${g})`;x.lineWidth=RW[w.c];
+    x.beginPath();for(let i=0;i<w.g.length;i++){const p=PJ(w.g[i][0],w.g[i][1]);i?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]);}x.stroke();}});
+  const core=PJ(47.618,-122.326);                                     // central Seattle (Capitol Hill)
+  const {cells,disc}=hexCells(CELL,(cx,cy)=>sample(landD,cx,cy)>40&&Math.hypot(cx-core[0],cy-core[1])<CELL*2.9);
+  dotFieldZoom({landD,waterD,streetD,R:CELL,disc,cells});
+  const HOODS=[[47.606,-122.334,'DOWNTOWN'],[47.623,-122.320,'CAPITOL HILL'],[47.668,-122.383,'BALLARD'],[47.651,-122.350,'FREMONT'],[47.660,-122.313,'U DISTRICT'],[47.576,-122.386,'WEST SEATTLE'],[47.681,-122.330,'GREEN LAKE'],[47.548,-122.268,'RAINIER']];
+  for(const h of HOODS){const p=PJ(h[0],h[1]);if(p[0]<20||p[0]>W-20||p[1]<44||p[1]>H-28)continue;
+    const inCore=Math.hypot(p[0]-core[0],p[1]-core[1])<CELL*2.9;labelChip(p[0],p[1],h[2],inCore?T.streetLabel:[112,142,156],inCore?0.95:0.68);}
+  drawYou(core,'YOU');
+}
+
+function renderRegion(){
+  const Z=window.OSMZOOM&&OSMZOOM.washington; if(!Z){build();draw();return;}
+  const {P:PJ}=projFor(Z.bbox,'contain');
+  const landD=fillMask(Z.land,PJ);
+  const sea=PJ(47.606,-122.332);
+  const {cells,disc}=hexCells(CELL,(cx,cy)=>sample(landD,cx,cy)>40&&Math.hypot(cx-sea[0],cy-sea[1])<CELL*1.7);
+  dotFieldZoom({landD,waterD:null,streetD:null,R:CELL,disc,cells,latticeAll:true});
+  for(const c of (Z.cities||[])){if(c.name==='SEATTLE')continue;const p=PJ(c.lat,c.lon);if(p[0]<10||p[0]>W-10||p[1]<34||p[1]>H-22)continue;
+    const nearSea=Math.hypot(p[0]-sea[0],p[1]-sea[1]);
+    if(c.visited){ctx.beginPath();ctx.fillStyle=rgba(ME,.9);ctx.arc(p[0],p[1],3.4,0,6.2832);ctx.fill();
+      ctx.beginPath();ctx.strokeStyle=rgba(ME,.32);ctx.lineWidth=1.2;ctx.arc(p[0],p[1],6.5,0,6.2832);ctx.stroke();
+      if(nearSea>26)labelChip(p[0],p[1]-12,c.name,T.streetLabel,0.92);}
+    else{ctx.beginPath();ctx.fillStyle=rgba([116,146,160],.55);ctx.arc(p[0],p[1],2.1,0,6.2832);ctx.fill();
+      if(nearSea>34)labelChip(p[0],p[1]-11,c.name,[112,142,156],0.6);}}
+  drawYou(sea,'SEATTLE');
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function segs(pct, N) {
+  let h = '';
+  const fill = Math.round((N * pct) / 100);
+  for (let i = 0; i < N; i++) h += `<i class="${i < fill ? 'on' : ''}"></i>`;
+  return h;
+}
+
+// Arming is a deliberate tap. Opening the island used to arm the radio, which
+// meant a declined Bluetooth prompt left the strip stuck saying "ARMING BUMP"
+// with nothing to press — idle now always offers a way back in.
+const BUMP = {
+  idle: {
+    s: 'Bump is off',
+    d: 'Arm both phones, then touch their top edges together.',
+    b: 'Arm bump',
+  },
+  armed: {
+    s: 'Ready for impact',
+    d: 'Touch the top edges of both phones together.',
+    b: 'Bump now',
+    live: true,
+  },
+  searching: { s: 'Reading 2 signals', d: 'Ranking the nearest phone and verifying it.', live: true },
+  failed: { s: 'Bump missed', d: 'Arm it again and touch the phones together.', b: 'Try again' },
+  off: { s: 'Bluetooth offline', d: 'Turn Bluetooth on to meet someone in person.' },
+};
+function renderRoster(host) {
+  const online = FRIENDS.filter((f) => f.online).length;
+  const bp = BUMP[bumpStage] || BUMP.idle;
+  let h = `<div class="shd"><i class="${online ? '' : 'dim'}"></i><h2>${online} nearby</h2></div>
+    <div class="pair">
+      <div class="pc">
+        <div class="ps ${bp.live ? '' : 'idle'}">${esc(bp.s)}</div>
+        <div class="pd">${esc(bp.d)}</div>
+      </div>
+      ${bp.b ? `<div class="pb">${esc(bp.b)}</div>` : ''}
+    </div><div class="roster">`;
+  for (const f of FRIENDS) {
+    const loc = f.online
+      ? `${esc(f.loc)} · ${esc(f.hood)}`
+      : `last seen ${esc(f.hood)} · ${f.seen}`;
+    const right = f.online
+      ? `<div class="d">${f.dist}</div>`
+      : `<div class="d dim">offline</div>`;
+    h += `<div class="fr ${f.online ? '' : 'off'}">
+      <div class="cav"><pre style="color:${f.color}">${esc(f.glyph)}</pre><span class="cap">${esc(f.species)}</span></div>
+      <div class="fmid">
+        <div class="h" style="color:${f.color}">@${esc(f.handle)}</div>
+        <div class="l">${loc}</div>
+      </div>
+      <div class="frt">${right}</div>
+      <div class="manage"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="5.5" cy="12" r="1.85"/><circle cx="12" cy="12" r="1.85"/><circle cx="18.5" cy="12" r="1.85"/></svg></div>
+    </div>`;
+  }
+  host.innerHTML = h + '</div>';
+}
+function renderCoverage(host) {
+  host.innerHTML = `<div class="st">${esc(ZT.hero)}</div>
+    <div class="nb">${esc(ZT.sub)}</div>
+    <div class="cov"><div class="covbar">${segs(ZT.cov, 24)}</div>
+      <div class="covnum">${ZT.cov}<span>%</span></div></div>`;
+}
+function renderSettings(host) {
+  host.innerHTML = `
+    <div class="sm-sec">Identity</div>
+    <div class="sm-row">
+      <pre>${esc(CRY.moth)}</pre>
+      <div class="rc"><div class="rt you">@you</div><div class="rs">Mothman · your signal</div></div>
+      <div class="go">›</div>
+    </div>
+    <div class="sm-sec">Pairing links</div>
+    <div class="sm-note">Bump is for meeting in person. Use a link when you cannot touch phones —
+      you will still compare the ASCII challenge out loud.</div>
+    <div class="sm-btn">Create a pair link</div>
+    <div class="sm-sec">Location</div>
+    <div class="sm-row"><div class="rc"><div class="rt">Sharing</div>
+      <div class="rs">Always · 2 friends</div></div><div class="rv">On</div></div>
+    <div class="sm-row"><div class="rc"><div class="rt">Transports</div>
+      <div class="rs">Relay · direct · BLE</div></div><div class="go">›</div></div>`;
+}
+const TAB_ICON = {
+  me: '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.6 20.1 7v10L12 21.4 3.9 17V7L12 2.6Z"/></svg>',
+  friends:
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="8" r="3.2"/><path d="M3.4 19.8a5.6 5.6 0 0 1 11.2 0Z"/><circle cx="17" cy="9.4" r="2.6"/><path d="M14.9 19.8a6.9 6.9 0 0 0-1.6-4.3 4.5 4.5 0 0 1 7.3 4.3Z"/></svg>',
+};
+// The bar carries no badge. Presence belongs to the roster header ("N NEARBY",
+// in words) and to the live dots on the map — a pip here would be a third voice
+// saying the same thing.
+function renderTabs(host) {
+  host.innerHTML = `
+    <div class="itab me ${socialView === 'me' ? 'on' : ''}">
+      <span class="ti">${TAB_ICON.me}</span><span class="tl">Me</span></div>
+    <div class="itab ${socialView === 'friends' ? 'on' : ''}">
+      <span class="ti">${TAB_ICON.friends}</span>
+      <span class="tl">Friends</span></div>`;
+}
+function populateSheet() {
+  const host = document.getElementById('sheetbody');
+  if (host) {
+    if (socialView === 'me') renderCoverage(host);
+    else renderRoster(host);
+  }
+  const tabs = document.getElementById('itabs');
+  if (tabs) renderTabs(tabs);
+  const modal = document.getElementById('settings');
+  if (modal && showSettings) {
+    renderSettings(document.getElementById('settingsbody'));
+    modal.classList.add('show');
+  }
+  // Controls ride on the island's top edge, whichever body is showing.
+  const island = document.getElementById('sheet'),
+    controls = document.querySelector('.controls');
+  if (island && controls) controls.style.bottom = island.offsetHeight + 50 + 14 + 'px';
+}
+async function main() {
+  layout();
+  try {
+    await document.fonts.ready;
+  } catch (e) {}
+  if (ZOOM === 'city') renderCity();
+  else if (ZOOM === 'region') renderRegion();
+  else {
+    build();
+    draw();
+  }
+  populateSheet();
+}
+window.addEventListener('load', main);
+</script>
+</body>
+</html>

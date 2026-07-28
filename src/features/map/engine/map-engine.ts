@@ -6,6 +6,7 @@ import {
 import { H3_DISPLAY_RES } from '../core/cell-ladder';
 import type { ExplorationIndex } from '../core/exploration-index';
 import type { H3Grid } from '../core/h3-grid';
+import { selectMapLabels, type MapLabel } from '../core/map-labels';
 import { computeRegionSpec, shouldPrefetchRegion, type RegionSpec } from '../core/region';
 import type { CameraState, Place, Viewport, WorldPoint, WorldRect } from '../core/types';
 import type { GeometrySource } from '../tiles/geometry-source';
@@ -42,6 +43,12 @@ export interface MapRegion {
   readonly cellField: RegionCellField;
   /** Named places inside the region (island headline lookup). */
   readonly places: readonly Place[];
+  /**
+   * Street/park name chips chosen for this region's build zoom. Selected once
+   * per build (never per frame) — a region only rebuilds when the camera leaves
+   * its zoom band, which is exactly the granularity the label LOD needs.
+   */
+  readonly labels: readonly MapLabel[];
   /** Exploration revision represented by the immutable cell field. */
   readonly explorationVersion: number;
   /** Phase-level timings captured when this immutable region was built. */
@@ -354,6 +361,7 @@ export class MapEngine {
       geometry,
       cellField,
       places: geometry.places,
+      labels: selectMapLabels(geometry, spec),
       explorationVersion: request.explorationVersion,
       timing,
     };

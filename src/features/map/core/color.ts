@@ -38,6 +38,20 @@ export function rgbToHex(color: Rgb): string {
 }
 
 /**
+ * `#rrggbb` → `Rgb`, for the one place a user-chosen signal color has to cross
+ * into the canvas (which works in numeric triples so it can mix and fog them).
+ * Returns `fallback` for anything that is not a six-digit hex.
+ */
+export function hexToRgb(hex: string, fallback: Rgb): Rgb {
+  if (!/^#[0-9a-f]{6}$/i.test(hex)) return fallback;
+  return [
+    Number.parseInt(hex.slice(1, 3), 16),
+    Number.parseInt(hex.slice(3, 5), 16),
+    Number.parseInt(hex.slice(5, 7), 16),
+  ];
+}
+
+/**
  * Fog-of-war color transform: explored (fog=0) keeps the true color; unexplored
  * drains 74% toward its own gray, then 24% toward the background. Area features
  * (water/park) cap fog at 0.5 so basins always read.

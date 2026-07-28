@@ -13,7 +13,12 @@ interface FriendHistoryIslandProps {
   onClose(): void;
 }
 
-/** Selected-location readout shown while a retained breadcrumb is on the map. */
+/**
+ * Selected-location readout shown while a retained breadcrumb is on the map.
+ * A drill-down inside the island: the segmented bar stays live below it, so
+ * either tab dismisses it, and the close button returns to whichever tab you
+ * came from.
+ */
 export function FriendHistoryIsland({
   friend,
   self = false,
@@ -25,15 +30,7 @@ export function FriendHistoryIsland({
   const ownerLabel = self ? 'Your' : friend.handle;
 
   return (
-    <View
-      style={[
-        styles.island,
-        {
-          backgroundColor: chrome.island,
-          borderColor: chrome.islandBorder,
-        },
-      ]}
-    >
+    <View style={styles.body}>
       <CryptidAvatar
         art={friend.sigil || '?'}
         color={friend.color}
@@ -89,10 +86,8 @@ export function FriendHistoryIsland({
 }
 
 const styles = StyleSheet.create({
-  island: {
+  body: {
     alignItems: 'center',
-    borderRadius: 26,
-    borderWidth: StyleSheet.hairlineWidth,
     flexDirection: 'row',
     gap: Spacing.three,
     minHeight: 108,

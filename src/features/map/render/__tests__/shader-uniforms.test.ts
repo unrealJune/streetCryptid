@@ -41,6 +41,7 @@ const region: MapRegion = {
   geometry: EMPTY_PACKED,
   cellField: { res: 9, cells: [] },
   places: [],
+  labels: [],
   explorationVersion: 0,
   timing: {
     tiles: 0,

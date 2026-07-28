@@ -12,6 +12,7 @@ jest.mock('@/global.css', () => ({}));
 
 describe('CoverageIsland', () => {
   let renderer: ReactTestRenderer;
+  const SIGNAL = '#2F9E6A';
 
   afterEach(() => {
     act(() => renderer?.unmount());
@@ -22,6 +23,7 @@ describe('CoverageIsland', () => {
       renderer = create(
         <CoverageIsland
           theme={CryptidThemes.daybreak}
+          signal={SIGNAL}
           placeName="Capitol Hill"
           coverage={0.42}
           sectorsVisible
@@ -56,6 +58,7 @@ describe('CoverageIsland', () => {
       renderer = create(
         <CoverageIsland
           theme={CryptidThemes.daybreak}
+          signal={SIGNAL}
           placeName="Capitol Hill"
           coverage={0}
           sectorsVisible={false}
@@ -78,6 +81,7 @@ describe('CoverageIsland', () => {
       renderer = create(
         <CoverageIsland
           theme={CryptidThemes.daybreak}
+          signal={SIGNAL}
           placeName="Capitol Hill"
           coverage={0.42}
           sectorsVisible
@@ -95,6 +99,7 @@ describe('CoverageIsland', () => {
       renderer.update(
         <CoverageIsland
           theme={CryptidThemes.daybreak}
+          signal={SIGNAL}
           placeName="Capitol Hill"
           coverage={0}
           sectorsVisible={false}
@@ -105,6 +110,7 @@ describe('CoverageIsland', () => {
       renderer.update(
         <CoverageIsland
           theme={CryptidThemes.daybreak}
+          signal={SIGNAL}
           placeName="Capitol Hill"
           coverage={0.42}
           sectorsVisible

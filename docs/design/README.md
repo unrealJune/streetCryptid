@@ -14,26 +14,50 @@ and [`../../DESIGN.md`](../../DESIGN.md) for the "why"; this README is the "how 
 No build step — open a file URL in Chrome and drive it with query params:
 
 ```
-file:///Z:/CopilotApp/streetCryptid/docs/design/mock_social.html?theme=daybreak&zoom=hood&social=roster
+file:///Z:/CopilotApp/streetCryptid/docs/design/mock_chrome.html?theme=daybreak&zoom=hood&island=friends
 ```
 
-`mock_social.html` is canonical (map + zoom tiers + themes + the social layer).
-`mock_real.html` is the same base map **without** friends.
+`mock_chrome.html` is **canonical**: it mirrors the shipped app chrome — no tab bar, a
+settings FAB top-right, street/park name labels gated by zoom, and one island over the map
+carrying its own ME / FRIENDS segmented bar (the app's only navigation). Only map
+affordances float: layers and locate.
+
+`mock_social.html` is the earlier tab-era study (kept for the shared-ground bar and the
+full-screen profile view). `mock_real.html` is the same base map **without** friends.
 
 ### Parameters
 
-| Param     | Values                                        | Default    | Notes                                        |
-| --------- | --------------------------------------------- | ---------- | -------------------------------------------- |
-| `theme`   | `daybreak` · `deepsea` · `nocturne`           | `daybreak` | Light is default. Drives chrome **and** canvas. |
-| `zoom`    | `street` · `hood` · `city` · `region`         | `hood`     | Scope + island retitle; coverage drops outward. |
-| `fog`     | `hex` · `soft` · `grid`                       | `hex`      | Reveal model. `hex` = sector chunks (canonical). |
-| `social`  | `roster` · `profile`                          | `roster`   | `mock_social.html` only.                     |
-| `who`     | `wanderer` · `nightowl` · `fog_dog`           | first      | Which friend the `profile` view shows.       |
-| `data`    | `caphill` · `greenlk` · `union` · `core`      | per-zoom   | Which OSM geography to render.               |
+| Param      | Values                                        | Default    | Notes                                        |
+| ---------- | --------------------------------------------- | ---------- | -------------------------------------------- |
+| `theme`    | `daybreak` · `deepsea` · `nocturne`           | `daybreak` | Light is default. Drives chrome **and** canvas. |
+| `zoom`     | `street` · `hood` · `city` · `region`         | `hood`     | Scope + island retitle; coverage drops outward. Also gates which **street names** are drawn. |
+| `fog`      | `hex` · `soft` · `grid`                       | `hex`      | Reveal model. `hex` = sector chunks (canonical). |
+| `data`     | `caphill` · `greenlk` · `union` · `core`      | per-zoom   | Which OSM geography to render.               |
+| `island`   | `me` · `friends`                              | `friends`  | `mock_chrome.html` only. Which tab of the island's segmented bar is lit (`coverage` is kept as an alias for `me`). |
+| `me`       | any `#rrggbb`                                 | `#2F9E6A`  | `mock_chrome.html` only. Your profile signal colour — drives the YOU locator, the coverage bar, the ME glyph and the identity row. |
+| `bump`     | `idle` · `armed` · `searching` · `failed` · `off` | `idle`     | `mock_chrome.html` only. Pairing strip state inside the FRIENDS tab. `idle` is the resting state and offers ARM BUMP. |
+| `settings` | `open`                                        | closed     | `mock_chrome.html` only. Pulls the settings sheet over the map. |
+| `social`   | `roster` · `profile`                          | `roster`   | `mock_social.html` only.                     |
+| `who`      | `wanderer` · `nightowl` · `fog_dog`           | first      | `mock_social.html` only — which friend `profile` shows. |
+
+### Label level-of-detail
+
+`mock_chrome.html` reproduces the app's three label gates so you can sanity-check them
+by eye: a **class tier** (`motorway → residential` each earn a name at a different zoom),
+a **fit** gate (the name must be shorter than the visible run of the way), and greedy
+**collision** rejection. Compare `zoom=street` (residential names appear) against
+`zoom=hood` (arterials only).
 
 ## Renders (`renders/`)
 
 The **`-light` (daybreak) set is primary**; `-dark` is the deep-sea alternate.
+
+**App chrome (current) — light:**
+
+![map](renders/chrome-1-map-light.png)
+![friends tab](renders/chrome-2-friends-light.png)
+![settings sheet](renders/chrome-3-settings-light.png)
+![street labels](renders/chrome-4-labels-street-light.png)
 
 **Zoom tiers — light (default):**
 
@@ -42,18 +66,19 @@ The **`-light` (daybreak) set is primary**; `-dark` is the deep-sea alternate.
 ![city](renders/zoom-3-city-light.png)
 ![region](renders/zoom-4-region-light.png)
 
-**Social — light (default):**
+**Social (tab-era study) — light (default):**
 
 ![roster](renders/social-roster-light.png)
 ![profile](renders/social-profile-light.png)
 
-Dark equivalents: `zoom-*-dark.png`, `social-*-dark.png`.
+Dark equivalents: `chrome-{1,2}-*-dark.png`, `zoom-*-dark.png`, `social-*-dark.png`.
 
 ## Files
 
 | File                       | What it is                                                        |
 | -------------------------- | ----------------------------------------------------------------- |
-| `mock_social.html`         | Canonical mockup: map engine, 4 zoom tiers, 3 themes, social layer. |
+| `mock_chrome.html`         | **Canonical**: the shipped chrome — no tab bar, settings FAB, zoom-gated street labels, one island with a ME / FRIENDS segmented bar and bump pairing. |
+| `mock_social.html`         | Tab-era study: map engine, 4 zoom tiers, 3 themes, social layer, shared-ground bar. |
 | `mock_real.html`           | Base map + zoom, no friends.                                       |
 | `mapdata.js`               | `window.OSMSETS` — baked multi-geography OSM (caphill/greenlk/union/core). |
 | `zoomdata.js`              | `window.OSMZOOM` — baked per-zoom-tier OSM.                        |
@@ -77,9 +102,12 @@ node build_zoom.mjs .   # -> zoomdata.js
 & "C:\Program Files\Google\Chrome\Application\chrome.exe" `
   --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=2 `
   --virtual-time-budget=22000 --user-data-dir="$env:TEMP\cr_$(Get-Random)" `
-  --window-size=506,960 --screenshot="renders\out.png" `
-  "file:///Z:/CopilotApp/streetCryptid/docs/design/mock_social.html?theme=daybreak&zoom=hood&social=roster"
+  --window-size=506,960 --screenshot="Z:\CopilotApp\streetCryptid\docs\design\renders\out.png" `
+  "file:///Z:/CopilotApp/streetCryptid/docs/design/mock_chrome.html?theme=daybreak&zoom=hood&island=friends"
 ```
+
+`--screenshot` must be an **absolute** path — Chrome silently writes nothing (exit 0)
+for a relative one.
 
 ## Next: translating to the Expo app
 

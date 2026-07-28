@@ -316,7 +316,11 @@ period.
 
 ## 9b. Nearby and remote exchange
 
-The Friends tab is the pairing surface; there is no separate pairing mode.
+The island's **FRIENDS tab** is the pairing surface; there is no separate pairing mode
+and no Friends route. Arming is an explicit tap on **ARM BUMP** inside that tab — leaving
+the tab, drilling into a friend's trace, or backgrounding the app disarms again. The tab
+itself does not arm: doing so raised the OS Bluetooth prompt from a view transition, and a
+declined prompt left the strip with no action to offer.
 
 ### Nearby: Bump over iroh BLE
 
@@ -352,10 +356,11 @@ The Friends tab is the pairing surface; there is no separate pairing mode.
 
 ### Remote: link or blind short code
 
-- A shareable `streetcryptid:///social?token=scpair1:…` link opens the existing Friends route and
-  carries the opaque native invite directly. Android native intents normalize both this canonical
-  form and legacy `streetcryptid://social` / `/pair` links.
-- Friends also provides a visible input for a full sharing link, raw token, or short code.
+- A shareable `streetcryptid:///social?token=scpair1:…` link opens the map with the friends
+  island showing and carries the opaque native invite directly. Android native intents
+  normalize both this canonical form and legacy `streetcryptid://social` / `/pair` links
+  into `/?pair=<token>`.
+- Settings also provides a visible input for a full sharing link, raw token, or short code.
 - Remote pairing still requires both people to compare the ASCII challenge over a trusted voice or
   video call. Possession of a link/code starts the authenticated transport exchange; it does not
   replace the human identity check.
