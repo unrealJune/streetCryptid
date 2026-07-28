@@ -66,7 +66,20 @@ Opt-in and wake registration. Presenting a read-ticket **is** the grant. When
 
 ### `GET /healthz`
 
-- **200 OK**, for liveness/readiness checks.
+- **200 OK**, for liveness/readiness checks, with a JSON body:
+
+```json
+{ "status": "ok", "content_missing": 0, "content_tracked": 128 }
+```
+
+- `content_tracked` — replicated entries whose ciphertext the stash is responsible for.
+- `content_missing` — how many of those it does **not** actually hold the bytes for.
+
+`content_missing` is the number to alert on. iroh-docs replicates entry *records*; the
+bytes they name are a separate transfer, so a stash can hold a full trail it cannot serve
+a single fix from — readers just get `Unable to download <hash>` while every other signal
+looks perfectly healthy. It spikes as entries arrive and should fall back to ~0 within
+seconds. **Persistently non-zero means offline delivery is broken.**
 
 ## Environment variables
 
@@ -74,8 +87,14 @@ Opt-in and wake registration. Presenting a read-ticket **is** the grant. When
 | --- | --- | --- |
 | `TRAIL_STASH_SECRET_KEY` | — | **Required.** 64 hex chars (32-byte ed25519 seed) giving the stash a stable dialable identity so its ticket survives restarts. A key, not user data — inject from a secret manager. Generate: `openssl rand -hex 32`. |
 | `PORT` | `8787` | Control-API port. |
-| `TRAIL_STASH_RETENTION_HOURS` | `48` | Prune entries older than this (clamped 1–336). Lower toward ~1h to minimize data-at-rest; match the app's 24–48h window for full catch-up. |
-| `TRAIL_STASH_PRUNE_INTERVAL_MIN` | `15` | How often the prune sweep runs (clamped 1–1440). |
+| `TRAIL_STASH_RETENTION_HOURS` | `48` | Stop holding the ciphertext of entries older than this (clamped 1–336). Lower toward ~1h to minimize data-at-rest; match the app's 24–48h window for full catch-up. |
+| `TRAIL_STASH_PRUNE_INTERVAL_MIN` | `15` | How often the retention sweep runs (clamped 1–1440). |
+
+Retention releases **content**, not entry records. The stash holds a *read* capability, so
+it cannot delete another author's entries — retiring those is the author's job, and their
+tombstones replicate here like any other write. The ciphertext is what actually occupies
+this RAM-only process, and dropping our reference to it (after which the blob GC sweep
+reclaims it) is a bound the stash can enforce on its own.
 | `TRAIL_STASH_RELAY_URLS` | — | Comma-separated custom iroh relay URLs. Unset uses the built-in n0 relay map. Use the same URLs as the app's `EXPO_PUBLIC_IROH_RELAY_URLS`. |
 | `TRAIL_STASH_RELAY_TOKEN` | — | Optional bearer token sent to every configured custom relay. |
 | `TRAIL_STASH_PSK` | — | Control-API pre-shared key. When set, `/v1/*` requires `Authorization: Bearer <psk>`. Must match the app's `EXPO_PUBLIC_TRAIL_STASH_PSK`. Unset ⇒ gate disabled (warned at startup). |
@@ -158,6 +177,7 @@ src/
   lib.rs           module wiring + security posture
   config.rs        env → StashConfig (clamped)                [pure, tested]
   retention.rs     RetentionPolicy (hours → cutoff/expiry)    [pure, tested]
+  content.rs       ContentIndex — which ciphertext we hold    [pure, tested]
   subscriptions.rs in-memory NamespaceRegistry                [pure, tested]
   mls.rs           DeliveryService seam + PassthroughDelivery [pure, tested]
   waker.rs         Waker seam + NoopWaker                     [pure, tested]

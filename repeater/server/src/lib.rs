@@ -32,6 +32,7 @@
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod content;
 pub mod log_redaction;
 pub mod mls;
 pub mod push;
