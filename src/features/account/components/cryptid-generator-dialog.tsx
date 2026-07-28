@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { useReducedMotion } from 'react-native-reanimated';
 
+import { ErrorNotice } from '@/components/error-notice';
 import { ThemedText } from '@/components/themed-text';
 import { signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Spacing } from '@/constants/theme';
@@ -163,18 +164,13 @@ export function CryptidGeneratorDialog({
             ) : null}
 
             {error ? (
-              <View
-                accessibilityLiveRegion="polite"
-                style={[
-                  styles.errorPanel,
-                  { backgroundColor: theme.background, borderColor: chrome.amber },
-                ]}
-              >
-                <ThemedText type="smallBold">Could not generate an icon</ThemedText>
-                <ThemedText type="small" themeColor="textSecondary">
-                  {error}
-                </ThemedText>
-              </View>
+              <ErrorNotice
+                accent={chrome.amber}
+                backgroundColor={theme.background}
+                title="Could not generate an icon"
+                message={error}
+                copyText={error}
+              />
             ) : null}
 
             {generated ? (
@@ -330,12 +326,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     lineHeight: 21,
-  },
-  errorPanel: {
-    borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    gap: Spacing.one,
-    padding: Spacing.three,
   },
   preview: {
     alignItems: 'center',

@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { ErrorNotice } from '@/components/error-notice';
 import { ThemedText } from '@/components/themed-text';
 import { SIGNAL_COLOR_OPTIONS, signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Fonts, Spacing } from '@/constants/theme';
@@ -363,18 +364,13 @@ export function CryptidProfileEditor({
           ) : null}
 
           {globalError ? (
-            <View
-              accessibilityLiveRegion="polite"
-              style={[
-                styles.notice,
-                { backgroundColor: theme.backgroundElement, borderColor: chrome.amber },
-              ]}
-            >
-              <ThemedText type="smallBold">Could not save profile changes</ThemedText>
-              <ThemedText type="small" themeColor="textSecondary">
-                {globalError}
-              </ThemedText>
-            </View>
+            <ErrorNotice
+              accent={chrome.amber}
+              backgroundColor={theme.backgroundElement}
+              title="Could not save profile changes"
+              message={globalError}
+              copyText={globalError}
+            />
           ) : null}
 
           <View
@@ -832,12 +828,6 @@ const styles = StyleSheet.create({
   saveStatus: {
     alignSelf: 'flex-end',
     marginTop: -Spacing.two,
-  },
-  notice: {
-    borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    gap: Spacing.one,
-    padding: Spacing.three,
   },
   overview: {
     borderRadius: 16,

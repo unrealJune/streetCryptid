@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { ErrorNotice } from '@/components/error-notice';
 import { ThemedText } from '@/components/themed-text';
 import { resolveSignalColor } from '@/constants/signal-colors';
 import { CryptidThemes, Spacing, TopTabInset } from '@/constants/theme';
@@ -176,33 +177,36 @@ export default function FriendsScreen() {
         ) : null}
 
         {error ? (
-          <View style={[styles.notice, { borderColor: chrome.amber }]}>
-            <View style={styles.noticeCopy}>
-              <ThemedText type="smallBold">
-                {locationStatus === 'permission-denied'
-                  ? 'Location access is off'
-                  : 'Friend sync needs attention'}
-              </ThemedText>
-              <ThemedText type="small" themeColor="textSecondary" numberOfLines={2}>
-                {locationStatus === 'permission-denied'
-                  ? 'Allow background location so your friends stay current.'
-                  : error}
-              </ThemedText>
-            </View>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() =>
-                void (locationStatus === 'permission-denied'
-                  ? Linking.openSettings()
-                  : retryLocation())
-              }
-              style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
-            >
-              <ThemedText type="code" style={{ color: chrome.amber }}>
-                {locationStatus === 'permission-denied' ? 'SETTINGS' : 'RETRY'}
-              </ThemedText>
-            </Pressable>
-          </View>
+          <ErrorNotice
+            accent={chrome.amber}
+            title={
+              locationStatus === 'permission-denied'
+                ? 'Location access is off'
+                : 'Friend sync needs attention'
+            }
+            message={
+              locationStatus === 'permission-denied'
+                ? 'Allow background location so your friends stay current.'
+                : error
+            }
+            copyText={error}
+            numberOfLines={2}
+            action={
+              <Pressable
+                accessibilityRole="button"
+                onPress={() =>
+                  void (locationStatus === 'permission-denied'
+                    ? Linking.openSettings()
+                    : retryLocation())
+                }
+                style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
+              >
+                <ThemedText type="code" style={{ color: chrome.amber }}>
+                  {locationStatus === 'permission-denied' ? 'SETTINGS' : 'RETRY'}
+                </ThemedText>
+              </Pressable>
+            }
+          />
         ) : null}
 
         {friends.length === 0 && !pairing?.verifications.length ? (
@@ -350,18 +354,6 @@ const styles = StyleSheet.create({
   selfAvatar: {
     maxHeight: 42,
     overflow: 'hidden',
-  },
-  notice: {
-    alignItems: 'center',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: Spacing.two,
-    flexDirection: 'row',
-    gap: Spacing.three,
-    padding: Spacing.three,
-  },
-  noticeCopy: {
-    flex: 1,
-    gap: Spacing.one,
   },
   empty: {
     alignItems: 'center',
