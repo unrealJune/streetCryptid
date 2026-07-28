@@ -111,6 +111,10 @@ pub struct StashNode {
 struct TrackedEntry {
     namespace: NsBytes,
     author: Vec<u8>,
+    /// The peer that handed us this record. Often *not* the author: a phone replicates its
+    /// friends' trails too, so it can serve content for an author that is long offline. Trying it
+    /// first is also strictly better odds than the author — it was connected moments ago.
+    delivered_by: iroh::EndpointId,
     seq: u64,
     first_seen_ms: u64,
     /// Whether the bytes are in the local store — i.e. whether this entry is servable.
@@ -339,7 +343,7 @@ impl StashNode {
             };
             while let Some(ev) = events.next().await {
                 match ev {
-                    Ok(LiveEvent::InsertRemote { entry, .. }) => {
+                    Ok(LiveEvent::InsertRemote { entry, from, .. }) => {
                         use tracing::Instrument;
                         // `sc.entry_hash` here is the iroh-blobs content hash — the same short
                         // hash the sender stamped on its publish span and the receiver stamps on
@@ -375,6 +379,7 @@ impl StashNode {
                             let entry = TrackedEntry {
                                 namespace: ns_bytes,
                                 author,
+                                delivered_by: from,
                                 seq,
                                 first_seen_ms: now_ms(),
                                 content_present: present,
@@ -469,7 +474,7 @@ impl StashNode {
         let mut wake = Vec::new();
         for (hash, entry) in outstanding {
             let present = self.blobs.blobs().has(hash).await.unwrap_or(false)
-                || (now >= entry.next_attempt_ms && self.fetch_from_author(hash, &entry).await);
+                || (now >= entry.next_attempt_ms && self.fetch_content(hash, &entry).await);
 
             let mut tracked = self.tracked.lock().await;
             let Some(live) = tracked.get_mut(&hash) else {
@@ -495,21 +500,29 @@ impl StashNode {
         wake
     }
 
-    /// Ask the entry's author for its bytes. The author's `EndpointId` is encoded in the docs key,
-    /// so no address book is needed — iroh resolves it over the relay.
+    /// Fetch an entry's bytes from anyone who might have them.
+    ///
+    /// Candidates are the peer that delivered the record and the entry's author (its `EndpointId`
+    /// is encoded in the docs key, so no address book is needed — iroh resolves it over the relay).
+    /// Both matter: a phone replicates its friends' trails, so it can serve content whose author
+    /// has been offline for days, and asking only the author would strand exactly the entries
+    /// offline delivery exists to carry.
     ///
     /// Failure is the normal case for a phone that has gone back to sleep; it is logged at debug
     /// and retried on the next pass, so a transient miss never orphans an entry.
-    async fn fetch_from_author(&self, hash: Hash, entry: &TrackedEntry) -> bool {
-        let Ok(author) = iroh::EndpointId::from_bytes(
-            &<[u8; 32]>::try_from(entry.author.as_slice()).unwrap_or([0u8; 32]),
-        ) else {
-            return false;
-        };
+    async fn fetch_content(&self, hash: Hash, entry: &TrackedEntry) -> bool {
+        let mut sources = vec![entry.delivered_by];
+        if let Ok(author) = <[u8; 32]>::try_from(entry.author.as_slice()) {
+            if let Ok(author) = iroh::EndpointId::from_bytes(&author) {
+                if author != entry.delivered_by {
+                    sources.push(author);
+                }
+            }
+        }
         let downloader = self.blobs.downloader(&self.endpoint);
         let attempt = tokio::time::timeout(
             tokio::time::Duration::from_secs(FETCH_TIMEOUT_SECS),
-            downloader.download(iroh_blobs::HashAndFormat::raw(hash), [author]),
+            downloader.download(iroh_blobs::HashAndFormat::raw(hash), sources),
         )
         .await;
         match attempt {
@@ -934,6 +947,17 @@ mod live_tests {
         spawn_writer_node_with(seed, Arc::new(std::sync::atomic::AtomicBool::new(true))).await
     }
 
+    /// A node holding a namespace whose entries are keyed to `author_hex` — modelling a phone that
+    /// relays a *friend's* trail, where the author is some other device entirely.
+    async fn spawn_writer_node_for_author(seed: u8, author_hex: &str) -> anyhow::Result<Writer> {
+        spawn_writer_inner(
+            seed,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            author_hex,
+        )
+        .await
+    }
+
     /// `awake = false` models the production reality: a phone that publishes from a headless
     /// background task and is frozen by the OS moments later. Its docs entry is already at the
     /// stash, but it can no longer answer a blob pull. Flip the flag to wake it back up.
@@ -943,6 +967,14 @@ mod live_tests {
     async fn spawn_writer_node_with(
         seed: u8,
         awake: Arc<std::sync::atomic::AtomicBool>,
+    ) -> anyhow::Result<Writer> {
+        spawn_writer_inner(seed, awake, &"0".repeat(64)).await
+    }
+
+    async fn spawn_writer_inner(
+        seed: u8,
+        awake: Arc<std::sync::atomic::AtomicBool>,
+        author_hex: &str,
     ) -> anyhow::Result<Writer> {
         let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
             .secret_key(SecretKey::from_bytes(&[seed; 32]))
@@ -967,7 +999,7 @@ mod live_tests {
 
         let author = docs.author_default().await?;
         let doc = docs.create().await?;
-        let key = format!("{}/{:020}", "0".repeat(64), 1u64).into_bytes();
+        let key = format!("{author_hex}/{:020}", 1u64).into_bytes();
         doc.set_bytes(author, key, b"opaque-sealed-envelope".to_vec())
             .await?;
         let ticket = doc
@@ -1278,6 +1310,50 @@ mod live_tests {
             "pruning the last entry referencing a blob must release it — while it is still \
              referenced the GC sweep will keep protecting it and memory never falls"
         );
+        Ok(())
+    }
+
+    /// Seen in production: a phone relays its **friends'** trails as well as its own, so the stash
+    /// receives entries whose author is a different device that may have been offline for days.
+    /// Fetching only from the author strands exactly those entries — the ones offline delivery
+    /// exists to carry. The peer that handed us the record is a valid source and must be tried.
+    #[tokio::test]
+    async fn content_is_fetched_from_the_relaying_peer_not_only_the_author() -> anyhow::Result<()> {
+        init_test_tracing();
+        // The relay holds a namespace whose entries are keyed to an author that never comes
+        // online at all (no endpoint for it exists in this test).
+        let absent_author = "ab".repeat(32);
+        let relay = spawn_writer_node_for_author(45, &absent_author).await?;
+
+        let stash = StashNode::spawn(
+            SecretKey::from_bytes(&[36u8; 32]),
+            RetentionPolicy::from_hours(48),
+            &[],
+            None,
+            default_delivery(),
+            Arc::new(NoopWaker),
+        )
+        .await?;
+
+        stash.register(&relay.ticket, None).await?;
+        relay.doc.start_sync(vec![stash.endpoint.addr()]).await?;
+
+        let hash = relay.entry_hash().await?;
+        let mut recovered = false;
+        for _ in 0..300 {
+            if stash.content_stats() == (0, 1) {
+                recovered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            recovered,
+            "the stash never fetched content whose author is unreachable, even though the peer \
+             that delivered the record was right there holding the bytes"
+        );
+        let bytes = stash.blobs.blobs().get_bytes(hash).await?;
+        assert_eq!(bytes.as_ref(), b"opaque-sealed-envelope");
         Ok(())
     }
 
