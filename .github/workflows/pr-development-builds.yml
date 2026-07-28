@@ -23,6 +23,113 @@ env:
   TS_TAILNET: ${{ secrets.TS_TAILNET }}
 
 jobs:
+  # Announces the run in the PR's Discord forum thread (creating it on the first
+  # commit) before the builds finish, so the team sees a "build started at ..."
+  # message right away. Runs in parallel with the build jobs.
+  notify_start:
+    name: Announce build start
+    if: >-
+      ${{
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (github.event.pull_request.user.login == 'Cobular' ||
+          github.event.pull_request.user.login == 'ava-ankenbrandt' ||
+          github.event.pull_request.user.login == 'unrealJune' ||
+          (github.event.pull_request.user.login == 'copilot-swe-agent[bot]' &&
+            startsWith(github.event.pull_request.head.ref, 'copilot/')))
+      }}
+    runs-on: ubuntu-24.04
+    # Required to read DISCORD_WEBHOOK_URL, which is an environment secret.
+    environment: development-builds
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    # The thread id is a channel snowflake, not a secret; handing it to the
+    # notify job keeps both messages in the same thread.
+    outputs:
+      thread_id: ${{ steps.announce.outputs.thread_id }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+      COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+    steps:
+      # The notify script (scripts/notify-discord-thread.sh) lives in the repo.
+      - name: Check out PR revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Announce the build start in the PR build thread
+        id: announce
+        run: |
+          set -euo pipefail
+
+          marker='<!-- streetcryptid-builds -->'
+
+          # Reuse the thread recorded on the existing status comment, if any.
+          comments="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100")"
+          comment_id="$(jq -r --arg m "$marker" 'map(select(.body | contains($m)))[0].id // empty' <<<"$comments")"
+          existing_thread="$(
+            jq -r --arg m "$marker" 'map(select(.body | contains($m)))[0].body // ""' <<<"$comments" |
+              sed -n 's/.*<!-- disc-thread:\([0-9]\{1,\}\) -->.*/\1/p'
+          )"
+
+          # Post to Discord with all output suppressed — no URL, host, or webhook
+          # may reach the public logs. The thread id comes back in a file, and a
+          # redacted diagnostic (HTTP code / stage only) in another for debugging.
+          tid_file="$RUNNER_TEMP/discord-thread-id"
+          diag_file="$RUNNER_TEMP/discord-diag"
+          : > "$tid_file"
+          : > "$diag_file"
+          discord_ok=1
+          if ! NOTIFY_MODE=start BUILD_STARTED_AT="$(date -u +%s)" \
+                DISCORD_THREAD_ID="$existing_thread" DISCORD_THREAD_ID_OUT="$tid_file" \
+                NOTIFY_DIAG_FILE="$diag_file" \
+                bash scripts/notify-discord-thread.sh >/dev/null 2>&1; then
+            discord_ok=0
+          fi
+          thread_id="$(cat "$tid_file" 2>/dev/null || true)"
+          [[ -z "$thread_id" ]] && thread_id="$existing_thread"
+          # Snowflakes only: never echo anything else into the job outputs.
+          if [[ ! "$thread_id" =~ ^[0-9]{1,32}$ ]]; then
+            thread_id=""
+          fi
+          echo "thread_id=$thread_id" >> "$GITHUB_OUTPUT"
+
+          # PR status comment: no links, no host — in-progress status plus the
+          # hidden thread marker so later commits reuse this thread.
+          body="$(
+            printf '%s<!-- disc-thread:%s -->\n' "$marker" "$thread_id"
+            printf '🏗️ **PR standalone Release builds**\n\n'
+            printf -- '- **iOS:** ⏳ building — [logs](%s)\n' "$RUN_URL"
+            printf -- '- **Android:** ⏳ building — [logs](%s)\n' "$RUN_URL"
+            printf '\nInstall links are posted to the private team channel thread for this PR and kept off this public repo.'
+            if [[ "$discord_ok" -ne 1 ]]; then
+              printf '\n\n_⚠️ Could not reach the Discord build thread this run._'
+            fi
+          )"
+
+          if [[ -n "$comment_id" ]]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" --raw-field body="$body" >/dev/null
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --raw-field body="$body" >/dev/null
+          fi
+
+          if [[ "$discord_ok" -ne 1 ]]; then
+            echo "Failed to notify the Discord build thread." >&2
+            # The diagnostic is redacted by construction (HTTP status + stage only,
+            # never a URL, host, webhook, or response body).
+            if [[ -s "$diag_file" ]]; then
+              echo "Diagnostic:" >&2
+              cat "$diag_file" >&2
+            fi
+            exit 1
+          fi
+
   build_ios:
     name: Build and upload iOS Release
     if: >-
@@ -299,6 +406,7 @@ jobs:
             startsWith(github.event.pull_request.head.ref, 'copilot/')))
       }}
     needs:
+      - notify_start
       - build_ios
       - build_android
     runs-on: ubuntu-24.04
@@ -309,6 +417,7 @@ jobs:
       pull-requests: write
     env:
       GH_TOKEN: ${{ github.token }}
+      START_THREAD_ID: ${{ needs.notify_start.outputs.thread_id }}
       IOS_RESULT: ${{ needs.build_ios.result }}
       ANDROID_RESULT: ${{ needs.build_android.result }}
       IOS_PATH: ${{ needs.build_ios.outputs.install_path }}
@@ -339,10 +448,13 @@ jobs:
 
           marker='<!-- streetcryptid-builds -->'
 
-          # Find our existing status comment and any thread id stored in it.
+          # Find our existing status comment and any thread id stored in it. The
+          # start announcement already created/reused the thread this run, so
+          # prefer the id it handed over.
           comments="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100")"
           comment_id="$(jq -r --arg m "$marker" 'map(select(.body | contains($m)))[0].id // empty' <<<"$comments")"
-          existing_thread="$(
+          existing_thread="${START_THREAD_ID:-}"
+          [[ -n "$existing_thread" ]] || existing_thread="$(
             jq -r --arg m "$marker" 'map(select(.body | contains($m)))[0].body // ""' <<<"$comments" |
               sed -n 's/.*<!-- disc-thread:\([0-9]\{1,\}\) -->.*/\1/p'
           )"

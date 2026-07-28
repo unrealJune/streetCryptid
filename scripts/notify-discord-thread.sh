@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 
-# Post one combined build notification for a PR into a per-PR Discord forum
-# thread. The build jobs upload each platform and hand their install URLs here
-# (masked); this runs once per commit in the notify job and posts a single
-# reply listing both platforms.
+# Post the build notifications for a PR into a per-PR Discord forum thread.
+# It runs twice per commit:
+#   - NOTIFY_MODE=start  -> posted as the builds kick off ("build started at ...").
+#   - NOTIFY_MODE=result -> posted once both platforms finish, listing each
+#     platform's install link (the build jobs hand their install URLs here,
+#     masked). This is the default.
 #
 # Thread lifecycle:
 #   - DISCORD_THREAD_ID empty  -> create the PR's forum thread (webhook
@@ -16,8 +18,10 @@
 # sent to Discord; nothing prints the URLs, the webhook, or the internal host.
 #
 # Required env: DISCORD_WEBHOOK_URL, PR_NUMBER
-# Optional env: DISCORD_THREAD_ID, DISCORD_THREAD_ID_OUT, PR_TITLE, PR_URL,
-#   COMMIT_SHA, IOS_RESULT, IOS_URL, ANDROID_RESULT, ANDROID_URL
+# Optional env: NOTIFY_MODE (start|result, default result), DISCORD_THREAD_ID,
+#   DISCORD_THREAD_ID_OUT, PR_TITLE, PR_URL, COMMIT_SHA, BUILD_STARTED_AT
+#   (unix seconds, defaults to now), IOS_RESULT, IOS_URL, ANDROID_RESULT,
+#   ANDROID_URL
 
 set -euo pipefail
 umask 077
@@ -66,16 +70,32 @@ platform_line() {
 }
 
 short_sha="${COMMIT_SHA:0:7}"
-reply="$(
-  if [[ -n "$short_sha" ]]; then
-    printf '**Build `%s`**\n' "$short_sha"
-  else
-    printf '**New build**\n'
-  fi
-  platform_line '🍎' 'iOS' "${IOS_RESULT:-}" "${IOS_URL:-}"
-  printf '\n'
-  platform_line '🤖' 'Android' "${ANDROID_RESULT:-}" "${ANDROID_URL:-}"
-)"
+notify_mode="${NOTIFY_MODE:-result}"
+
+if [[ "$notify_mode" == "start" ]]; then
+  # Unix seconds so Discord renders the time in each reader's own timezone.
+  started_at="${BUILD_STARTED_AT:-}"
+  [[ "$started_at" =~ ^[0-9]+$ ]] || started_at="$(date -u +%s)"
+  reply="$(
+    if [[ -n "$short_sha" ]]; then
+      printf '🏗️ **Build `%s` started** at <t:%s:F> (<t:%s:R>)' "$short_sha" "$started_at" "$started_at"
+    else
+      printf '🏗️ **Build started** at <t:%s:F> (<t:%s:R>)' "$started_at" "$started_at"
+    fi
+    printf '\n🍎 **iOS** — ⏳ building\n🤖 **Android** — ⏳ building'
+  )"
+else
+  reply="$(
+    if [[ -n "$short_sha" ]]; then
+      printf '**Build `%s`**\n' "$short_sha"
+    else
+      printf '**New build**\n'
+    fi
+    platform_line '🍎' 'iOS' "${IOS_RESULT:-}" "${IOS_URL:-}"
+    printf '\n'
+    platform_line '🤖' 'Android' "${ANDROID_RESULT:-}" "${ANDROID_URL:-}"
+  )"
+fi
 
 # Append a REDACTED diagnostic (HTTP status / stage only — never a URL, host,
 # webhook, or response body) for the caller to surface on failure.

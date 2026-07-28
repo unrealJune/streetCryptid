@@ -381,6 +381,43 @@ if [[ "$(cat "$thread_out")" != "$new_thread" ]]; then
   exit 1
 fi
 
+# The start announcement replies into the same thread with a "build started at"
+# message and no install links (the builds have not produced any yet).
+start_thread_out="$test_root/thread-id-out-start"
+: > "$start_thread_out"
+start_transcript="$(
+  PATH="$test_root/bin:$PATH" \
+    GITHUB_ACTIONS=true \
+    NOTIFY_MODE=start \
+    BUILD_STARTED_AT=1750000000 \
+    DISCORD_WEBHOOK_URL="$discord_url" \
+    PR_NUMBER=42 \
+    PR_TITLE="a test pr" \
+    PR_URL="https://github.com/o/r/pull/42" \
+    COMMIT_SHA=abcdef1234567890 \
+    DISCORD_THREAD_ID="$new_thread" \
+    DISCORD_THREAD_ID_OUT="$start_thread_out" \
+    bash "$repo_root/scripts/notify-discord-thread.sh" \
+    2>&1
+)"
+
+if [[ "$start_transcript" == *"$discord_url"* ]]; then
+  echo "notify-discord-thread.sh leaked the Discord webhook in start mode." >&2
+  exit 1
+fi
+if ! grep -Fq 'started' "$thread_body" || ! grep -Fq '1750000000' "$thread_body"; then
+  echo "notify-discord-thread.sh did not post a build-started message with its time." >&2
+  exit 1
+fi
+if grep -Fq "$internal_base" "$thread_body"; then
+  echo "notify-discord-thread.sh posted an install host in the start message." >&2
+  exit 1
+fi
+if [[ "$(cat "$start_thread_out")" != "$new_thread" ]]; then
+  echo "notify-discord-thread.sh did not reuse the existing thread id in start mode." >&2
+  exit 1
+fi
+
 release_output="$test_root/release-output"
 release_transcript="$(
   PATH="$test_root/bin:$PATH" \
