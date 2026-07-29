@@ -11,15 +11,19 @@ UNIFFI_KOTLIN_OUT_DIR="$temp_dir/android" \
   "$repo_root/scripts/generate-uniffi-bindings.sh" all
 
 status=0
+# Compare ignoring TRAILING CR only. uniffi always writes LF, but a Windows checkout with
+# core.autocrlf=true has CRLF on disk — so a byte-compare reports every one of the ~6000 lines as
+# changed and the real answer ("these are in sync") is buried. Only the line terminator is
+# forgiven; any actual content difference still fails.
 compare_binding() {
   local tracked="$1"
   local generated="$2"
-  if cmp -s "$tracked" "$generated"; then
+  if diff --strip-trailing-cr -q "$tracked" "$generated" >/dev/null 2>&1; then
     return
   fi
 
   echo "Stale UniFFI binding: ${tracked#"$repo_root/"}" >&2
-  diff -u "$tracked" "$generated" >&2 || true
+  diff -u --strip-trailing-cr "$tracked" "$generated" >&2 || true
   status=1
 }
 
