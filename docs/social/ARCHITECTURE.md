@@ -184,45 +184,105 @@ both the live (gossip) and durable (docs) paths. Design of the JS layer lives un
 
 ```
 GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ LocationSharingService.publishFix
-   expo-location            │ SamplingPolicy   │ durable queue,   ├─▶ gossip.broadcast   (live)
-   + TaskManager            │ (motion+battery) │ survives resume  └─▶ docs.write(a/seq)  (durable)
-   + Android FG service     │        ▲                ▼                        │ range reconciliation
-   ▲                        │   BatterySource    TrailStore (local, history) ◀─ backfill onFix (sync)
-   └── CadenceController ◀──┘   (expo-battery)
-       re-arms OS on decision change
+   expo-location            │ slot gate +      │ durable queue,   ├─▶ gossip.broadcast   (live)
+   + TaskManager            │ SamplingPolicy   │ survives resume  └─▶ docs.write(a/seq)  (durable)
+   + Android FG service     │ (fixed cadence)  ▼                        │ range reconciliation
+   ▲                        │        ▲    TrailStore (local, history) ◀─ backfill onFix (sync)
+   └── CadenceController ◀──┘   BatterySource
+       re-arms OS on decision change   (expo-battery)
 ```
 
-- **Sampling** (`sampling-policy.ts`): battery/motion-aware cadence tuned as an _ambient_ sharer
-  (Life360 / Find-My class), not a navigator — ~45s walking at balanced (~100m) accuracy, ~18s +
-  high accuracy driving, stationary displacement-gated to near-zero, ×3 backoff under Low-Power
-  Mode / battery-saver (cancelled by charging), suspend on critically low battery. A bounded,
-  on-demand **live mode** (`SamplingInputs.live` → `LocationEngine.setLiveMode` →
-  `LocationSharingService.setLiveTracking`, default 2-min auto-revert) swaps in a real-time ~4s/high
-  cadence for the "a friend is actively watching" case, so the app never pays real-time GPS cost
-  around the clock. The network trigger for it is a future phase (§9c).
+- **Fixed cadence is a security property, not a tuning choice.** Envelopes are E2E-encrypted, but
+  the trail-stash and any network observer still see when they arrive. The old ladder (~18s driving
+  / ~45s walking / ~180s stationary, ×3 under Low-Power Mode) therefore published _what the user was
+  doing_ in the clear alongside the ciphertext — inter-arrival timing alone separates driving from
+  walking from sitting still. Everything below follows from closing that channel: nothing about
+  movement, app state, or battery may change the publish rate.
+- **Sampling** (`sampling-policy.ts`): one fix per `intervalMs` — user-selectable 1/5/15 min,
+  default 5 — at balanced (~100m) accuracy, tuned as an _ambient_ sharer (Life360 / Find-My class),
+  not a navigator. Battery moves **accuracy only** (→ `low` under ≤20% or Low-Power Mode, cancelled
+  by charging) and, below 5% unplugged, suspends outright — a hard stop that reads as "the phone
+  died" rather than a slow-down that would encode the charge level in the cadence. There is
+  deliberately **no distance filter and no deferred-updates batching**: both gate delivery on
+  movement, which would re-open the leak at the platform layer. A bounded, on-demand **live mode**
+  (`SamplingInputs.live` → `LocationEngine.setLiveMode` → `LocationSharingService.setLiveTracking`,
+  default 2-min auto-revert) swaps in a real-time ~4s/high cadence for the "a friend is actively
+  watching" case. It is the one sanctioned exception, it _is_ visible on the wire as such, and it
+  must stay explicitly user-consented — never silently activated. Its network trigger is §9c.
+- **Confidence gate** (`fix-quality.ts`): Android's fused provider periodically reports fixes that
+  are simply wrong — kilometre-radius tower/Wi-Fi trilateration when GPS has no sky, a cached fix
+  replayed long after it was taken, or a lone sample that teleports and comes back. A fix is refused
+  if it is coarser than `maxAccuracyM` (150 m), older than `maxAgeMs` (10 min), or implies a ground
+  speed over `maxSpeedMps` (100 m/s) since the last accepted one — the last discounted by the two
+  fixes' combined error radii, so a stationary phone's jitter is not mistaken for a teleport. After
+  `acceptAnythingAfterMs` (15 min) with nothing accepted it takes what it can get, because a coarse
+  position beats a frozen trail. **A rejected fix must never silence a slot**: the gate sits before
+  `lastKnownFix`, never before the publish, so a stretch of bad GPS looks exactly like a stretch of
+  sitting still on the wire. Were it otherwise, "no envelope" would mean "this person is indoors /
+  underground", which is the same class of inference the fixed cadence exists to prevent. The
+  requested accuracy tier must never be coarser than `maxAccuracyM`, or we would spend battery on
+  fixes we then discard — which is why `lowBatteryAccuracy` is `balanced` and not `low`.
+- **Slot quantisation** (`location-engine.ts`): the engine publishes on wall-clock boundaries of
+  `intervalMs`, not on fix arrival. Extra fixes within a slot are absorbed into `lastKnownFix`; a
+  slot that produces no fix re-publishes `lastKnownFix` **verbatim, original `ts` intact**, so
+  silence never means "stationary" while friends still see a stale position as stale. Missed slots
+  are backfilled on the next wake up to `MAX_BACKFILL_MS` (30 min) — beyond that the arrival burst
+  reveals the outage anyway, so filling hours of duplicates buys nothing. `LocationEngine.heartbeat`
+  drives this from a timer at the interval and from every OS background wake. Note the outbox's
+  near-duplicate **coalescing is disabled** (`background-outbox.ts`): left on, it would collapse a
+  backfill replay into a single envelope.
+- **iOS/Android parity is a correctness requirement.** If a stationary iPhone went quiet while a
+  stationary Android kept emitting, silence would still mean "not moving" on iOS and the leak would
+  be only half closed. `timeInterval` is Android-only, so parity comes from `distanceInterval: 0`
+  plus `pausesUpdatesAutomatically: false` on both: the OS keeps delivering while stationary, the
+  process stays alive, and the JS slot gate produces the identical uniform series. What differs is
+  cost, not behaviour — Android's OS paces natively, iOS delivers continuously and we discard in JS.
+- **The visible indicators** are where the platforms genuinely diverge. iOS: we set
+  `showsBackgroundLocationIndicator: false`; per Apple QA1965 the blue pill is mandatory only for
+  _when-in-use_ apps, so an "Always"-authorized app can leave it off (we were opting in). Android:
+  the foreground-service notification and the ongoing-location indicator are both platform-mandated
+  for continuous background location and are _not_ interval-dependent — dropping the FGS would cap
+  us at "a few times each hour". Life360 ships the same notification; Find My and Maps sharing are
+  privileged system apps. On Android 13+ the notification is user-dismissible and the service
+  survives the swipe.
 - **Battery signal** (`battery-source.ts`): a native-free seam over `expo-battery` feeding the
   policy real charge level, charging state, and OS **Low-Power Mode / battery-saver**; `subscribe()`
-  fires on power changes so cadence reacts immediately (web / Expo Go get a full-battery null source).
+  fires on power changes so **accuracy** reacts immediately (web / Expo Go get a full-battery null
+  source). It no longer influences timing — see the fixed-cadence note above.
 - **Cadence control** (`cadence-controller.ts`): the OS location task is armed once at start and
-  would otherwise stay pinned at that cadence forever. The controller watches the engine's decisions
+  would otherwise stay pinned at that config forever. The controller watches the engine's decisions
   and **re-programs `startLocationUpdatesAsync` only on a material change** (accuracy, interval,
-  distance, deferred window, iOS activity/auto-pause), and asks the engine to re-evaluate on power
-  events. OS integration: iOS `activityType` tracks motion (fitness/automotive/other); we keep
+  distance, deferred window, iOS auto-pause), and asks the engine to re-evaluate on power events.
+  Now that the interval is fixed this fires for battery-driven accuracy changes and for a
+  user-chosen interval change, rather than continuously. OS integration: `activityType` is pinned to
+  `other` (it used to track the motion class, which we no longer derive); we keep
   `pausesUpdatesAutomatically` **off** so Core Location never auto-pauses background updates (it does
-  not reliably resume, which stops background sharing until the app is reopened); Android carries a
-  branded foreground-service notification color. Re-arms are serialized latest-wins so two
-  `startLocationUpdatesAsync` calls never race the same task.
+  not reliably resume, which stops background sharing until the app is reopened — and which would
+  also silence a stationary iPhone); Android carries a branded foreground-service notification color.
+  Re-arms are serialized latest-wins so two `startLocationUpdatesAsync` calls never race the task.
 - **Outbox** (`fix-outbox.ts`): durable, serialized queue so captures survive the node being unbound
   (offline / process death). A mounted runtime publishes TaskManager batches immediately; a fresh
   headless context restores the persisted profile, keys, sharing pool, and minimal iroh publisher
   before draining the queue.
+- **Push-to-stash is explicit** (`pushTrail` → native `trail.push`): `docsWrite` writes only the
+  LOCAL replica. iroh-docs broadcasts a `LocalInsert` **only** for namespaces its live engine has
+  marked as syncing, which happens on `start_sync` and nowhere else — so a context that publishes
+  without calling `pushTrail`/`syncTrail` strands every envelope on the device. Publish paths must
+  therefore **drain, then push** (`LocationEngine.flush`, `flushBackgroundOutboxHeadless`). Ordering
+  is load-bearing: syncing _before_ the drain leaves that wake's fixes for the next OS wake, which
+  is what produced hour-long gaps in friends' trails while both phones looked healthy.
+- **Headless must re-open friend namespaces** (`restorePool` → `importFriendTrails`): native
+  `syncTrail` reconciles the namespaces in its handle cache, and a fresh node starts with only our
+  own in it. Without re-importing each friend's `docTicket`, a background backfill runs, reports
+  success, and recovers nothing.
 - **Reconnect-on-resume** (`lifecycle.ts`): on foreground → drain outbox + `syncTrail`;
   monotonic `seq` persisted (`state-store.ts`) so `author/seq` keys never collide across restarts.
 - **Periodic backfill** (`backfill-task.ts` + `headless-runtime.ts`): the SEND task only fires on
   movement and only publishes, so a backgrounded phone never pulls peers' fixes. An
   `expo-background-task` (iOS `BGTaskScheduler` / Android `WorkManager`, ~15 min, OS-scheduled)
-  periodically wakes a short-lived headless node to `syncTrail` from the stash + drain any queued
-  outbox. Scheduled while background sharing is on; there is deliberately NO server push-wake.
+  periodically wakes a short-lived headless node to drain any queued outbox and then `syncTrail`
+  (bidirectional: one call both pushes what we just published and pulls what friends left at the
+  stash). Scheduled while background sharing is on; there is deliberately NO server push-wake.
 - **Config**: iOS `UIBackgroundModes: [location, processing]` + `NSLocationAlwaysAndWhenInUse…`; Android
   `ACCESS_BACKGROUND_LOCATION` + `FOREGROUND_SERVICE_LOCATION` + `POST_NOTIFICATIONS`
   (`app.json` / expo-location config plugin).

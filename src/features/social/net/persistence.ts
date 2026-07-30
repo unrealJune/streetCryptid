@@ -1,5 +1,6 @@
 import type { PoolState } from '../core/pool';
 import { InMemoryKV, type PersistentKV } from './background/fix-outbox';
+import { DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
 import { InMemoryTrailStorage, type TrailPoint, type TrailStorage } from './background/trail-store';
 
 /**
@@ -271,6 +272,36 @@ export async function saveLocationDisclosureChoice(
   choice: 'accepted' | 'declined'
 ): Promise<void> {
   await kv.set(LOCATION_DISCLOSURE_KEY, choice);
+}
+
+const SHARE_INTERVAL_KEY = 'sc.social.shareIntervalMs';
+
+/**
+ * The cadences offered in settings, in ms. A closed set rather than a free-form number, for two
+ * reasons: all three divide the hour, so the engine's wall-clock slot grid stays aligned and
+ * switching lands cleanly on a boundary; and the choice is visible to the trail-stash as a static
+ * per-user cadence, where three options is a couple of bits and an arbitrary integer would be close
+ * to a unique identifier. Order is fastest → slowest for display.
+ */
+export const SHARE_INTERVAL_OPTIONS_MS = [60_000, 5 * 60_000, 15 * 60_000] as const;
+
+/**
+ * How often location is published, in ms. Constant per user by design — it never varies with what
+ * the user is doing (see `background/sampling-policy.ts`). Defaults to 5 min; an unparseable or
+ * unrecognised stored value falls back rather than producing an interval off the slot grid.
+ */
+export async function loadShareIntervalMs(kv: PersistentKV): Promise<number> {
+  const raw = await kv.get(SHARE_INTERVAL_KEY);
+  const parsed = raw === null ? Number.NaN : Number(raw);
+  return SHARE_INTERVAL_OPTIONS_MS.some((option) => option === parsed)
+    ? parsed
+    : DEFAULT_SHARE_INTERVAL_MS;
+}
+
+/** Persist the chosen publish cadence. Ignores values outside {@link SHARE_INTERVAL_OPTIONS_MS}. */
+export async function saveShareIntervalMs(kv: PersistentKV, intervalMs: number): Promise<void> {
+  if (!SHARE_INTERVAL_OPTIONS_MS.some((option) => option === intervalMs)) return;
+  await kv.set(SHARE_INTERVAL_KEY, String(intervalMs));
 }
 
 const RELAY_ONLY_KEY = 'sc.social.relayOnly';

@@ -342,6 +342,19 @@ export interface IrohLocationApi {
    * stash; null retains peer-only reconciliation.
    */
   syncTrail(sinceTs: number, peerTicket: string | null, traceparent?: string | null): Promise<void>;
+  /**
+   * Push OUR trail namespace to `peerTicket` (the trail stash) and wait for the exchange to finish.
+   *
+   * **This is what actually gets a published fix off the phone.** {@link docsWrite} only writes the
+   * local replica; iroh-docs broadcasts a local insert only for namespaces that `start_sync` has
+   * marked as syncing, and nothing but this call (or {@link syncTrail}) does that. A context that
+   * publishes without it — every headless background wake — strands its envelopes on the device.
+   * Call it after draining a batch.
+   *
+   * OPTIONAL: absent on iOS bindings generated before this API existed (Swift bindings only
+   * regenerate on macOS), so callers must guard with `typeof mod.pushTrail === 'function'`.
+   */
+  pushTrail?(peerTicket: string | null, traceparent?: string | null): Promise<void>;
   /** Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >= sinceTs`. */
   readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]>;
   /** Explicitly drop durable entries older than `olderThanTs`. */

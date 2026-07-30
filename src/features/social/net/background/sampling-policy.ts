@@ -1,93 +1,65 @@
-import type { LocationFix } from '../../core/types';
-import type {
-  AccuracyTier,
-  BatteryState,
-  MotionState,
-  SamplingConfig,
-  SamplingDecision,
-} from './types';
+import type { AccuracyTier, BatteryState, SamplingConfig, SamplingDecision } from './types';
 
 /**
- * Battery- and motion-aware sampling policy. Pure and synchronous so it is fully unit-tested
- * with no native deps. The engine calls {@link SamplingPolicy.decide} whenever motion or
- * battery changes and re-programs the OS location updates accordingly.
+ * Fixed-cadence sampling policy. Pure and synchronous so it is fully unit-tested with no native
+ * deps. The engine calls {@link SamplingPolicy.decide} on each fix and on power events, and the
+ * cadence controller re-programs the OS when the result materially changes.
  *
  * Design contract (see docs/social/ARCHITECTURE.md §9 — "background execution"):
- *  - stationary ⇒ back off cadence by `stationaryMultiplier`, drop to `restingAccuracy`.
- *  - driving    ⇒ tighten cadence by `drivingMultiplier`, use `movingAccuracy`.
- *  - battery ≤ `lowBatteryThreshold` OR `lowPower`/battery-saver ⇒ multiply interval by
- *    `lowBatteryMultiplier` and prefer `restingAccuracy`. `charging` cancels the battery penalty.
- *  - battery < `suspendBelowLevel` AND stationary AND not charging ⇒ `active: false`.
- *  - the resulting interval is clamped to `maxIntervalMs`.
+ *  - the interval is `config.intervalMs`, **always**. It does not vary with movement, with
+ *    foreground/background state, or with battery. Timing is observable to the trail-stash even
+ *    though payloads are not, so a cadence that tracked activity would leak the activity.
+ *  - battery ≤ `lowBatteryThreshold` OR `lowPower`/battery-saver ⇒ degrade to `lowBatteryAccuracy`.
+ *    `charging` cancels the penalty. Accuracy is not timing, so this is safe to vary.
+ *  - battery < `suspendBelowLevel` AND not charging ⇒ `active: false` — a hard stop indistinguishable
+ *    from the phone dying, rather than a slow-down that would encode the battery level in the cadence.
+ *  - `distanceIntervalM` is 0 outside live mode: a distance filter is a motion filter.
  */
 export interface SamplingInputs {
-  motion: MotionState;
   battery: BatteryState;
   /**
-   * Live-tracking override: when true, use the real-time `live*` cadence regardless of motion, and
-   * bypass the stationary/low-battery backoff (only the critical-battery suspend still applies). Set
-   * on demand when a friend is actively watching; see `LocationSharingService.setLiveTracking`.
+   * Live-tracking override: when true, use the real-time `live*` cadence and bypass the low-battery
+   * accuracy degradation (only the critical-battery suspend still applies). Set on demand when a
+   * friend is actively watching; see `LocationSharingService.setLiveTracking`. Deliberately visible
+   * on the wire — see {@link SamplingConfig.liveIntervalMs}.
    */
   live?: boolean;
 }
 
 export interface SamplingPolicy {
   decide(inputs: SamplingInputs): SamplingDecision;
+  /**
+   * Change the fixed cadence at runtime (the user picked a different interval in settings).
+   * Mutates {@link config} in place so holders — notably the engine's slot grid — see one source of
+   * truth rather than caching a stale copy.
+   */
+  setIntervalMs(intervalMs: number): void;
   readonly config: SamplingConfig;
 }
 
+/** The default cadence, and the middle option offered in settings. */
+export const DEFAULT_SHARE_INTERVAL_MS = 5 * 60_000;
+
 /**
  * Defaults for an *ambient* "friends on a map" sharer (Life360 / Find-My class), not a turn-by-turn
- * navigator. Moving cadence is deliberately calm — ~45s walking at balanced (~100m) accuracy, which
- * a map dot reads fine — since the service runs indefinitely in the background. Driving tightens and
- * keeps high accuracy; stationary is displacement-gated to near-zero. A short, on-demand live mode
- * (see {@link SamplingInputs.live}) covers the real-time case without paying its battery cost 24/7.
+ * navigator. One fix every 5 minutes at balanced (~100m) accuracy, which a map dot reads fine, and
+ * which the service can sustain indefinitely in the background. A short, on-demand live mode (see
+ * {@link SamplingInputs.live}) covers the real-time case without paying its battery cost 24/7.
  */
 export const DEFAULT_SAMPLING_CONFIG: SamplingConfig = {
-  baseIntervalMs: 45_000,
-  baseDistanceM: 40,
-  stationaryMultiplier: 4,
-  drivingMultiplier: 0.4,
-  lowBatteryMultiplier: 3,
+  intervalMs: DEFAULT_SHARE_INTERVAL_MS,
   lowBatteryThreshold: 0.2,
-  maxIntervalMs: 5 * 60_000,
-  movingAccuracy: 'balanced',
-  drivingAccuracy: 'high',
-  restingAccuracy: 'balanced',
+  normalAccuracy: 'balanced',
+  // Not `low`. That tier is nominally accurate to the kilometre, which is both useless on a friend
+  // map and coarse enough that the confidence gate (`fix-quality.ts`, 150 m) would reject what it
+  // produced — we would burn battery sampling fixes we then threw away, and a low battery would
+  // manifest as the trail quietly freezing. Neither tier may be coarser than `maxAccuracyM`.
+  lowBatteryAccuracy: 'balanced',
   suspendBelowLevel: 0.05,
   liveIntervalMs: 4_000,
   liveDistanceM: 5,
   liveAccuracy: 'high',
 };
-
-/** Great-circle distance between two fixes in metres. Private. */
-function haversineMetres(a: LocationFix, b: LocationFix): number {
-  const R = 6_371_000;
-  const toRad = (d: number): number => (d * Math.PI) / 180;
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lon - a.lon);
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
-}
-
-/**
- * Classify motion from two successive fixes. Pure helper the engine uses to feed
- * {@link SamplingInputs.motion}. Thresholds: < ~0.5 m/s → stationary, < ~3 m/s → walking,
- * otherwise driving. Returns `unknown` when there is no previous fix or dt ≤ 0.
- */
-export function deriveMotion(
-  prev: LocationFix | null,
-  next: LocationFix,
-  dtMs: number
-): MotionState {
-  if (prev === null || dtMs <= 0) return 'unknown';
-  const speed = haversineMetres(prev, next) / (dtMs / 1000);
-  if (speed < 0.5) return 'stationary';
-  if (speed < 3.0) return 'walking';
-  return 'driving';
-}
 
 /** Build a policy from a (partial) config merged over {@link DEFAULT_SAMPLING_CONFIG}. */
 export function createSamplingPolicy(config?: Partial<SamplingConfig>): SamplingPolicy {
@@ -97,58 +69,39 @@ export function createSamplingPolicy(config?: Partial<SamplingConfig>): Sampling
   const criticallyLow = (battery: BatteryState): boolean =>
     battery.level < merged.suspendBelowLevel && !battery.charging;
 
-  const decide = ({ motion, battery, live }: SamplingInputs): SamplingDecision => {
+  const decide = ({ battery, live }: SamplingInputs): SamplingDecision => {
     if (live) {
       return {
         accuracy: merged.liveAccuracy,
-        timeIntervalMs: Math.min(merged.liveIntervalMs, merged.maxIntervalMs),
+        timeIntervalMs: merged.liveIntervalMs,
         distanceIntervalM: merged.liveDistanceM,
         deferredUpdatesIntervalMs: 0, // real-time: never batch/defer
         active: !criticallyLow(battery),
       };
     }
 
-    let interval = merged.baseIntervalMs;
-    let accuracy: AccuracyTier = merged.movingAccuracy;
-    let distanceIntervalM = merged.baseDistanceM;
-
-    if (motion === 'stationary') {
-      interval *= merged.stationaryMultiplier;
-      accuracy = merged.restingAccuracy;
-      distanceIntervalM = merged.baseDistanceM * 2;
-    } else if (motion === 'driving') {
-      interval *= merged.drivingMultiplier;
-      accuracy = merged.drivingAccuracy;
-    } else {
-      accuracy = merged.movingAccuracy;
-    }
-
     const lowBattery =
       !battery.charging && (battery.level <= merged.lowBatteryThreshold || battery.lowPower);
-    if (lowBattery) {
-      interval *= merged.lowBatteryMultiplier;
-      accuracy = merged.restingAccuracy;
-    }
-
-    const timeIntervalMs = Math.min(Math.round(interval), merged.maxIntervalMs);
-
-    const active = !(
-      battery.level < merged.suspendBelowLevel &&
-      motion === 'stationary' &&
-      !battery.charging
-    );
-
-    const batchable = accuracy === 'balanced' || accuracy === 'low' || accuracy === 'lowest';
-    const deferredUpdatesIntervalMs = batchable ? timeIntervalMs : 0;
+    const accuracy: AccuracyTier = lowBattery ? merged.lowBatteryAccuracy : merged.normalAccuracy;
 
     return {
       accuracy,
-      timeIntervalMs,
-      distanceIntervalM,
-      deferredUpdatesIntervalMs,
-      active,
+      // Constant, whatever the battery says. The only battery response is the accuracy tier above
+      // and the hard suspend below; stretching the interval would put the charge level on the wire.
+      timeIntervalMs: merged.intervalMs,
+      // No distance filter: it would gate delivery on movement, which is the leak we are closing.
+      distanceIntervalM: 0,
+      // No deferred batching either — it would coalesce quiet periods into bursts and re-introduce
+      // the same motion signal at the delivery layer.
+      deferredUpdatesIntervalMs: 0,
+      active: !criticallyLow(battery),
     };
   };
 
-  return { decide, config: merged };
+  const setIntervalMs = (intervalMs: number): void => {
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) return;
+    merged.intervalMs = intervalMs;
+  };
+
+  return { decide, setIntervalMs, config: merged };
 }

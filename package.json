@@ -1,7 +1,7 @@
 {
   "name": "streetcryptid",
   "main": "expo-router/entry",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "dependencies": {
     "@expo-google-fonts/ibm-plex-mono": "^0.4.1",
     "@expo-google-fonts/rajdhani": "^0.4.1",
@@ -12,6 +12,7 @@
     "expo-application": "~57.0.2",
     "expo-background-task": "~57.0.4",
     "expo-battery": "~57.0.1",
+    "expo-better-haptics": "^1.0.2",
     "expo-build-properties": "~57.0.5",
     "expo-clipboard": "~57.0.1",
     "expo-constants": "~57.0.5",

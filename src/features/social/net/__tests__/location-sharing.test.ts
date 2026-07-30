@@ -416,4 +416,44 @@ describe('LocationSharingService — durable trail wiring', () => {
     mockHolder.mod.emit('onSync', { author: 'bb22', status: 'completed', recovered: 3 });
     expect(recovered).toBe(3);
   });
+
+  describe('share interval', () => {
+    /** Latest snapshot seen by an observer — `snapshot()` itself is private to the service. */
+    function observe(svc: LocationSharingService): () => SharingSnapshot | undefined {
+      const snapshots: SharingSnapshot[] = [];
+      svc.onChange((snapshot) => snapshots.push(snapshot));
+      return () => snapshots.at(-1);
+    }
+
+    it('defaults to 5 minutes and surfaces it on the snapshot', async () => {
+      const svc = new LocationSharingService();
+      const latest = observe(svc);
+      await svc.init('@me', 'mothman');
+
+      expect(latest()?.shareIntervalMs).toBe(300_000);
+    });
+
+    it('persists a chosen interval and emits the change', async () => {
+      const svc = new LocationSharingService();
+      await svc.init('@me', 'mothman');
+      const latest = observe(svc);
+
+      await svc.setShareInterval(60_000);
+
+      expect(latest()?.shareIntervalMs).toBe(60_000);
+      // Surviving a restart is covered in share-interval.test.ts against the KV directly: under
+      // jest each service builds its own InMemoryKV (no SQLite), so two instances here cannot
+      // share a store.
+    });
+
+    it('ignores an off-grid interval, which would break slot alignment', async () => {
+      const svc = new LocationSharingService();
+      await svc.init('@me', 'mothman');
+      const latest = observe(svc);
+
+      await svc.setShareInterval(37_000);
+
+      expect(latest()?.shareIntervalMs).toBe(300_000);
+    });
+  });
 });

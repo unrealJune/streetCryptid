@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -18,7 +18,11 @@ import { ThemedText } from '@/components/themed-text';
 import { signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
-import { generateCryptid, type GeneratedCryptid } from '../core/cryptid-generator';
+import {
+  generateCryptid,
+  type CryptidGenerationProgress,
+  type GeneratedCryptid,
+} from '../core/cryptid-generator';
 import { CryptidAvatar } from './cryptid-avatar';
 
 type GenerationStatus = 'idle' | 'generating' | 'ready' | 'error';
@@ -36,6 +40,12 @@ function errorMessage(error: unknown): string {
     : 'The icon could not be generated. Try another description.';
 }
 
+function formatElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s elapsed`;
+  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s elapsed`;
+}
+
 export function CryptidGeneratorDialog({
   visible,
   color,
@@ -47,24 +57,45 @@ export function CryptidGeneratorDialog({
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
   const reducedMotion = useReducedMotion();
   const seedRef = useRef(0);
+  const startedAtRef = useRef(0);
   const [description, setDescription] = useState('');
   const [generated, setGenerated] = useState<GeneratedCryptid | null>(null);
   const [status, setStatus] = useState<GenerationStatus>('idle');
+  const [progress, setProgress] = useState<CryptidGenerationProgress | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
   const [error, setError] = useState<string | null>(null);
+
+  // Liveness: even when a phase is long (model download, first inference after a reboot) the
+  // ticking clock shows the pipeline is still moving.
+  useEffect(() => {
+    if (status !== 'generating') return;
+    const startedAt = startedAtRef.current;
+    const timer = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
+    return () => clearInterval(timer);
+  }, [status]);
 
   const runGeneration = async (): Promise<void> => {
     if (status === 'generating') return;
     seedRef.current += 1;
+    startedAtRef.current = Date.now();
+    setElapsedMs(0);
     setStatus('generating');
+    setProgress(null);
     setError(null);
 
     try {
-      const result = await generateCryptid(description, Date.now() + seedRef.current);
+      const result = await generateCryptid(description, Date.now() + seedRef.current, {
+        onProgress: (update) => {
+          if (update.phase !== 'done') setProgress(update);
+        },
+      });
       setGenerated(result);
       setStatus('ready');
     } catch (generationError: unknown) {
       setError(errorMessage(generationError));
       setStatus('error');
+    } finally {
+      setProgress(null);
     }
   };
 
@@ -155,10 +186,37 @@ export function CryptidGeneratorDialog({
               >
                 <View style={styles.statusRow}>
                   {reducedMotion ? null : <ActivityIndicator color={color} size="small" />}
-                  <ThemedText style={styles.statusTitle}>Generating on this phone...</ThemedText>
+                  <ThemedText style={styles.statusTitle}>
+                    {progress?.title ?? 'Starting up...'}
+                  </ThemedText>
                 </View>
+                {progress?.detail ? (
+                  <ThemedText type="small" themeColor="textSecondary">
+                    {progress.detail}
+                  </ThemedText>
+                ) : null}
+                {typeof progress?.ratio === 'number' ? (
+                  <View
+                    accessibilityLabel={`${Math.round(progress.ratio * 100)} percent downloaded`}
+                    accessibilityRole="progressbar"
+                    style={[styles.progressTrack, { backgroundColor: theme.backgroundSelected }]}
+                  >
+                    <View
+                      style={[
+                        styles.progressFill,
+                        {
+                          backgroundColor: color,
+                          width: `${Math.round(Math.min(1, Math.max(0, progress.ratio)) * 100)}%`,
+                        },
+                      ]}
+                    />
+                  </View>
+                ) : null}
                 <ThemedText type="small" themeColor="textSecondary">
-                  The first icon can take up to a minute while the system model gets ready.
+                  {formatElapsed(elapsedMs)}
+                  {progress?.phase === 'downloadingModel'
+                    ? ' — the one-time model download can take several minutes on slow Wi-Fi.'
+                    : ' — the first icon after a reboot can take up to a minute.'}
                 </ThemedText>
               </View>
             ) : null}
@@ -190,6 +248,11 @@ export function CryptidGeneratorDialog({
                     ? "Generated with this phone's on-device model."
                     : "Generated with streetCryptid's offline icon maker."}
                 </ThemedText>
+                {generated.fallbackReason ? (
+                  <ThemedText type="small" themeColor="textSecondary" style={styles.sourceNote}>
+                    {`The system model was skipped: ${generated.fallbackReason}`}
+                  </ThemedText>
+                ) : null}
               </View>
             ) : null}
 
@@ -326,6 +389,16 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     lineHeight: 21,
+  },
+  progressTrack: {
+    borderRadius: 999,
+    height: 6,
+    overflow: 'hidden',
+    width: '100%',
+  },
+  progressFill: {
+    borderRadius: 999,
+    height: '100%',
   },
   preview: {
     alignItems: 'center',

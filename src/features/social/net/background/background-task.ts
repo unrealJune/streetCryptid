@@ -178,10 +178,17 @@ export async function rearmBackgroundLocationTask(
   await api.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
     accuracy: mapAccuracy(cfg.accuracy),
     timeInterval: cfg.timeIntervalMs,
+    // 0 outside live mode, and load-bearing on iOS: `timeInterval` is Android-only, so a distance
+    // filter would be the ONLY gate Core Location applied — a stationary iPhone would stop being
+    // woken, stop emitting, and its silence would mean "not moving". 0 keeps delivery time-driven
+    // on both platforms, which is what makes the published cadence identical across them.
     distanceInterval: cfg.distanceIntervalM,
     deferredUpdatesInterval: cfg.deferredUpdatesIntervalMs ?? 0,
     activityType: mapActivity(cfg.activityType ?? 'other'),
-    showsBackgroundLocationIndicator: true,
+    // iOS only, and Expo's default is already false — we were opting IN to the blue status-bar
+    // pill. Per Apple QA1965 it is mandatory for when-in-use apps and optional for "Always" ones,
+    // which is why other sharing apps don't show it: they ask for Always and leave this off.
+    showsBackgroundLocationIndicator: false,
     pausesUpdatesAutomatically: cfg.pausesUpdatesAutomatically ?? false,
     foregroundService: {
       notificationTitle: cfg.notificationTitle,

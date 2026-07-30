@@ -18,6 +18,23 @@ const path = require('path');
  * fresh clone without the keystore) it no-ops and the default debug keystore is
  * used, so the build still succeeds.
  *
+ * THAT "one source of truth" ONLY HOLDS IF THE KEYSTORE EAS HOLDS IS THIS ONE.
+ * `eas.json` sets `credentialsSource: "remote"`, so EAS signs with the keystore
+ * stored server-side — which must therefore be the same keystore credentials.json
+ * points at (upload it via `eas credentials -p android`). If EAS is left holding
+ * its own auto-generated keystore, this plugin's guarantee silently inverts: local
+ * and EAS builds get DIFFERENT certificates, an EAS-built install refuses
+ * `adb install -r` of a local build (INSTALL_FAILED_UPDATE_INCOMPATIBLE), and
+ * crossing between them wipes app data.
+ *
+ * Do NOT "fix" a mismatch by flipping this to `credentialsSource: "local"`. CI runs
+ * `eas build --local` on GitHub-hosted runners whose only EAS secret is EXPO_TOKEN;
+ * credentials.json and credentials/ are git-ignored, so "local" leaves the runner
+ * with no keystore at all and every CI build fails. Keeping it "remote" is what
+ * lets EAS hand the key to the runner. Verify with:
+ *   keytool -list -v -keystore credentials/streetcryptid.keystore | grep SHA256
+ * and compare against a built APK's `apksigner verify --print-certs`.
+ *
  * The keystore here is the Play App Signing (on-device) key — Play was enrolled
  * with our own key, and the upload key is the same key, so signing local builds
  * with it makes them match the on-device signature and update in place over the

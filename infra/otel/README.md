@@ -70,12 +70,19 @@ bg.wake            (fixes, net/battery/app state)
   └ outbox.drain   (published/retained, publish.failed reason)
     └ publish.fix        (sc.seq)
       ├ gossip.publish*  (sc.entry_hash)   ─ live path ─────────►  gossip.receive (sc.entry_hash, outcome)
-      └ docs.write*      (sc.entry_hash)   ─ durable path ─►  stash.entry.received (sc.entry_hash)
+      └ docs.write*      (sc.entry_hash)   ─ LOCAL replica only
+  └ trail.push.app                         ─ durable path ─►  stash.entry.received (sc.entry_hash)
+    └ trail.push*        (entries_sent, finished)
                                             └ stash.wake.push ──►  push.wake (LINK to stash trace)
                                                                    └ trail.sync.app (recovered)
                                                                      └ trail.backfill logs (sc.entry_hash)
                                                                      └ fix.received.app (sc.seq, sc.drop_reason?)
 ```
+
+`docs.write` does **not** reach the stash on its own — it writes the local replica, and iroh-docs
+broadcasts a local insert only for namespaces `start_sync` has marked as syncing. `trail.push`
+(after a drain) or `trail.sync` is what actually moves the envelope. A `publish.fix` with no
+`trail.push.app` after it in the same wake is a fix that never left the phone.
 
 `*` Native spans are direct children of `publish.fix` on Android and iOS.
 
@@ -103,6 +110,15 @@ Wakes that published nothing (the classic "phone woke but the ping never left"):
 
 ```traceql
 { name = "outbox.drain" && span.published = 0 }
+```
+
+Pushes that never completed a reconciliation with the stash — the fixes are written locally but
+stranded (`finished=false` means no `SyncFinished` before the deadline: unreachable stash, no
+network, or the wake ended too early):
+
+```traceql
+{ name = "trail.push" && span.finished = false }
+{ name = "trail.push" && span.entries_sent > 0 }
 ```
 
 Stash-side activity for one namespace (arrivals and the pushes they triggered):
@@ -144,6 +160,10 @@ From any span, "Logs for this span" (trace→logs) jumps to that instance's logs
 4. **Did it reach the wire?** `publish.fix` → `gossip.publish` + `docs.write` give you the
    `sc.entry_hash`. From here, one `{ span.sc.entry_hash = … }` query shows every other party
    that ever saw the envelope.
+   4b. **Did it get OFF the phone?** `docs.write` is local-only. Look for `trail.push.app` /
+   `trail.push` in the same wake: absent means nothing pushed it, `finished=false` means the
+   stash was unreachable. Hour-long gaps in a friend's trail with healthy `publish.fix` spans
+   are the signature of a publish path that never pushes.
 5. **Did the stash see it?** `stash.entry.received` with the same hash; its `wake_targets` and
    child `stash.wake.push` (with HTTP status) tell you whether device B was nudged.
 6. **Did device B wake and recover it?** `push.wake` (linked to the stash trace) →

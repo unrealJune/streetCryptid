@@ -5,10 +5,13 @@
  * and engine logic stay unit-testable without expo-location / expo-battery.
  */
 
-/** Coarse movement class derived from successive fixes; drives cadence + accuracy. */
-export type MotionState = 'stationary' | 'walking' | 'driving' | 'unknown';
-
-/** A snapshot of device power, injected so the policy stays pure/testable. */
+/**
+ * A snapshot of device power, injected so the policy stays pure/testable.
+ *
+ * Note what this deliberately does NOT do any more: influence *timing*. Battery may degrade
+ * accuracy and, when critical, stop sampling outright, but it never changes the interval — see
+ * the {@link SamplingConfig} header for why.
+ */
 export interface BatteryState {
   /** Charge fraction, 0..1. */
   level: number;
@@ -31,33 +34,40 @@ export type AccuracyTier = 'lowest' | 'low' | 'balanced' | 'high' | 'highest';
  */
 export type ActivityKind = 'other' | 'fitness' | 'automotive' | 'navigation';
 
-/** Tunables for {@link SamplingPolicy}; all durations in ms, distances in metres. */
+/**
+ * Tunables for {@link SamplingPolicy}; all durations in ms, distances in metres.
+ *
+ * The cadence is a **constant**, and that is a security property rather than a simplification.
+ * Envelopes are E2E-encrypted, but the trail-stash and any network observer still see their
+ * arrival times, and an interval that tracked motion (the old 18s driving / 45s walking / 180s
+ * stationary ladder) published "what the user is doing" in the clear alongside the ciphertext.
+ * Nothing here may vary with movement; battery may only move {@link normalAccuracy} →
+ * {@link lowBatteryAccuracy} or, below {@link suspendBelowLevel}, stop sampling entirely — a hard
+ * stop that reads as "the phone died", not as an activity class.
+ */
 export interface SamplingConfig {
-  /** Cadence when moving normally. */
-  baseIntervalMs: number;
-  /** Minimum distance between fixes when moving. */
-  baseDistanceM: number;
-  /** Interval multiplier while stationary (back off to save battery). */
-  stationaryMultiplier: number;
-  /** Interval multiplier while driving (tighten so the trail isn't too coarse). */
-  drivingMultiplier: number;
-  /** Interval multiplier under low battery / low-power. */
-  lowBatteryMultiplier: number;
-  /** Battery level (0..1) at or below which we apply {@link lowBatteryMultiplier}. */
+  /** The fixed cadence. User-selectable; see `loadShareIntervalMs` in `../persistence.ts`. */
+  intervalMs: number;
+  /**
+   * Accuracy tier at normal battery.
+   *
+   * There is deliberately no distance filter to pair with this: distance-gated delivery is
+   * motion-gated delivery, so the OS would stop waking us the moment the user stopped moving —
+   * re-opening at the platform layer exactly the leak this policy closes. Time is the only gate.
+   */
+  normalAccuracy: AccuracyTier;
+  /** Accuracy tier under low battery / Low-Power Mode. */
+  lowBatteryAccuracy: AccuracyTier;
+  /** Battery level (0..1) at or below which we degrade to {@link lowBatteryAccuracy}. */
   lowBatteryThreshold: number;
-  /** Never sample slower than this. */
-  maxIntervalMs: number;
-  /** Accuracy tier while walking / moving normally. */
-  movingAccuracy: AccuracyTier;
-  /** Accuracy tier while driving — kept high so a fast-moving trail stays road-accurate. */
-  drivingAccuracy: AccuracyTier;
-  /** Accuracy tier while stationary / conserving. */
-  restingAccuracy: AccuracyTier;
-  /** Battery level (0..1) below which we stop sampling entirely when also stationary. */
+  /** Battery level (0..1) below which we stop sampling entirely. */
   suspendBelowLevel: number;
   /**
    * Live-tracking cadence (ms). When live mode is on (a friend is actively watching), this
-   * real-time interval replaces the motion/battery-derived one — see {@link SamplingInputs.live}.
+   * real-time interval replaces the fixed one — see {@link SamplingInputs.live}. This is the one
+   * sanctioned exception to the constant-cadence rule above, and it IS observable as such: a
+   * watcher of the wire can see live mode switch on. It must therefore stay explicitly
+   * user-consented and bounded, never silently activated.
    */
   liveIntervalMs: number;
   /** Minimum distance between fixes in live mode. */
@@ -73,6 +83,6 @@ export interface SamplingDecision {
   distanceIntervalM: number;
   /** iOS deferred-updates batching window (ms); 0 disables batching. */
   deferredUpdatesIntervalMs: number;
-  /** False ⇒ skip sampling/publishing this tick (e.g. stationary + critically low battery). */
+  /** False ⇒ stop sampling/publishing entirely (critically low battery). */
   active: boolean;
 }

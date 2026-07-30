@@ -1,7 +1,6 @@
 import type { BatterySource } from '../battery-source';
 import type { BackgroundStartConfig } from '../background-task';
 import {
-  activityForMotion,
   cadenceDiffers,
   cfgFromDecision,
   createCadenceController,
@@ -10,26 +9,36 @@ import {
 } from '../cadence-controller';
 import type { EngineState } from '../location-engine';
 import { createSamplingPolicy } from '../sampling-policy';
-import type { BatteryState, MotionState } from '../types';
+import type { BatteryState } from '../types';
 
 const NOTIF: CadenceNotification = { title: 'streetCryptid', body: 'body', color: '#C6791A' };
-const policy = createSamplingPolicy();
+// Tiers set explicitly so a battery change is observable here. The shipped defaults deliberately
+// use the same tier for both (nothing coarser than the confidence gate accepts), which would make
+// these tests assert nothing about the controller's re-arm logic.
+const policy = createSamplingPolicy({ normalAccuracy: 'balanced', lowBatteryAccuracy: 'low' });
 const fullBattery: BatteryState = { level: 1, charging: false, lowPower: false };
+const lowBattery: BatteryState = { level: 0.1, charging: false, lowPower: false };
 
-/** An EngineState carrying the decision the policy makes for `motion`. */
-function stateFor(motion: MotionState): EngineState {
+/**
+ * An EngineState carrying the decision the policy makes for `battery`. Battery is the only device
+ * signal left that can move the OS config — and it moves accuracy, never the interval.
+ */
+function stateFor(battery: BatteryState, intervalMs?: number): EngineState {
+  if (intervalMs !== undefined) policy.setIntervalMs(intervalMs);
   return {
     status: 'running',
     lastFixAt: 0,
-    decision: policy.decide({ motion, battery: fullBattery }),
-    motion,
+    lastAcceptedFix: null,
+    lastRejection: null,
+    decision: policy.decide({ battery }),
     pending: 0,
     error: null,
   };
 }
 
-function cfgFor(motion: MotionState): BackgroundStartConfig {
-  return cfgFromDecision(policy.decide({ motion, battery: fullBattery }), motion, NOTIF);
+function cfgFor(battery: BatteryState, intervalMs?: number): BackgroundStartConfig {
+  if (intervalMs !== undefined) policy.setIntervalMs(intervalMs);
+  return cfgFromDecision(policy.decide({ battery }), NOTIF);
 }
 
 function fakeEngine() {
@@ -92,29 +101,38 @@ function fakeBattery(): BatterySource & { fire(): void } {
 
 const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
-describe('cadence pure helpers', () => {
-  it('maps motion to an iOS activity hint', () => {
-    expect(activityForMotion('walking')).toBe('fitness');
-    expect(activityForMotion('driving')).toBe('automotive');
-    expect(activityForMotion('stationary')).toBe('other');
-    expect(activityForMotion('unknown')).toBe('other');
-  });
+beforeEach(() => {
+  policy.setIntervalMs(300_000);
+});
 
-  it('cfgFromDecision carries accuracy, cadence, activity, disabled auto-pause and notification', () => {
-    const cfg = cfgFor('walking');
+describe('cadence pure helpers', () => {
+  it('cfgFromDecision carries accuracy, cadence, disabled auto-pause and notification', () => {
+    const cfg = cfgFor(fullBattery);
     expect(cfg.accuracy).toBe('balanced');
-    expect(cfg.activityType).toBe('fitness');
+    expect(cfg.timeIntervalMs).toBe(300_000);
     // Auto-pause is always OFF so iOS keeps delivering background fixes (does not reliably resume).
     expect(cfg.pausesUpdatesAutomatically).toBe(false);
     expect(cfg.notificationTitle).toBe('streetCryptid');
     expect(cfg.notificationColor).toBe('#C6791A');
   });
 
-  it('cadenceDiffers ignores notification text but catches cadence + activity changes', () => {
-    expect(cadenceDiffers(cfgFor('walking'), cfgFor('walking'))).toBe(false);
-    expect(cadenceDiffers(cfgFor('walking'), cfgFor('stationary'))).toBe(true);
+  it('pins the iOS activity hint, which used to be derived from movement', () => {
+    expect(cfgFor(fullBattery).activityType).toBe('other');
+    expect(cfgFor(lowBattery).activityType).toBe('other');
+    expect(cfgFor(fullBattery, 60_000).activityType).toBe('other');
+  });
+
+  it('never asks the OS for a distance filter', () => {
+    expect(cfgFor(fullBattery).distanceIntervalM).toBe(0);
+    expect(cfgFor(lowBattery).distanceIntervalM).toBe(0);
+  });
+
+  it('cadenceDiffers ignores notification text but catches accuracy + interval changes', () => {
+    expect(cadenceDiffers(cfgFor(fullBattery), cfgFor(fullBattery))).toBe(false);
+    expect(cadenceDiffers(cfgFor(fullBattery), cfgFor(lowBattery))).toBe(true);
+    expect(cadenceDiffers(cfgFor(fullBattery, 300_000), cfgFor(fullBattery, 60_000))).toBe(true);
     expect(
-      cadenceDiffers(cfgFor('walking'), { ...cfgFor('walking'), notificationBody: 'different' })
+      cadenceDiffers(cfgFor(fullBattery), { ...cfgFor(fullBattery), notificationBody: 'other' })
     ).toBe(false);
   });
 });
@@ -130,15 +148,37 @@ describe('cadence controller', () => {
       notification: NOTIF,
     }).start();
 
-    engine.emit(stateFor('walking'));
+    engine.emit(stateFor(fullBattery));
     provider.releaseAll();
     await tick();
-    engine.emit(stateFor('stationary'));
+    engine.emit(stateFor(lowBattery));
     provider.releaseAll();
     await tick();
 
-    // Walking and stationary share balanced accuracy here, so the cadence change is the interval.
-    expect(provider.calls.map((c) => c.timeIntervalMs)).toEqual([45_000, 180_000]);
+    expect(provider.calls.map((c) => c.accuracy)).toEqual(['balanced', 'low']);
+    // ...and the battery change moved accuracy WITHOUT moving the cadence.
+    expect(provider.calls.map((c) => c.timeIntervalMs)).toEqual([300_000, 300_000]);
+    await stop();
+  });
+
+  it('re-arms the OS when the user picks a different interval', async () => {
+    const engine = fakeEngine();
+    const provider = fakeProvider();
+    const stop = createCadenceController({
+      engine,
+      provider,
+      battery: fakeBattery(),
+      notification: NOTIF,
+    }).start();
+
+    engine.emit(stateFor(fullBattery, 300_000));
+    provider.releaseAll();
+    await tick();
+    engine.emit(stateFor(fullBattery, 60_000));
+    provider.releaseAll();
+    await tick();
+
+    expect(provider.calls.map((c) => c.timeIntervalMs)).toEqual([300_000, 60_000]);
     await stop();
   });
 
@@ -152,10 +192,10 @@ describe('cadence controller', () => {
       notification: NOTIF,
     }).start();
 
-    engine.emit(stateFor('walking'));
+    engine.emit(stateFor(fullBattery));
     provider.releaseAll();
     await tick();
-    engine.emit(stateFor('walking')); // same cadence, e.g. only pending changed
+    engine.emit(stateFor(fullBattery)); // same cadence, e.g. only pending changed
     provider.releaseAll();
     await tick();
 
@@ -171,10 +211,10 @@ describe('cadence controller', () => {
       provider,
       battery: fakeBattery(),
       notification: NOTIF,
-      seed: cfgFor('walking'),
+      seed: cfgFor(fullBattery),
     }).start();
 
-    engine.emit(stateFor('walking'));
+    engine.emit(stateFor(fullBattery));
     await tick();
 
     expect(provider.calls).toHaveLength(0);
@@ -192,15 +232,15 @@ describe('cadence controller', () => {
       overrides: { timeIntervalMs: 60_000 },
     }).start();
 
-    engine.emit(stateFor('walking'));
+    engine.emit(stateFor(fullBattery));
     provider.releaseAll();
     await tick();
-    engine.emit(stateFor('driving'));
+    engine.emit(stateFor(lowBattery));
     provider.releaseAll();
     await tick();
 
     expect(provider.calls.map((c) => c.timeIntervalMs)).toEqual([60_000, 60_000]);
-    expect(provider.calls.map((c) => c.accuracy)).toEqual(['balanced', 'high']);
+    expect(provider.calls.map((c) => c.accuracy)).toEqual(['balanced', 'low']);
     await stop();
   });
 
@@ -214,16 +254,15 @@ describe('cadence controller', () => {
       notification: NOTIF,
     }).start();
 
-    engine.emit(stateFor('walking')); // starts reprogram(walking), now in flight
-    engine.emit(stateFor('stationary')); // queued
-    engine.emit(stateFor('driving')); // supersedes stationary as the desired target
-    provider.release(); // resolve walking → converge to driving, skipping stationary
+    engine.emit(stateFor(fullBattery, 300_000)); // starts reprogram, now in flight
+    engine.emit(stateFor(fullBattery, 900_000)); // queued
+    engine.emit(stateFor(fullBattery, 60_000)); // supersedes 900_000 as the desired target
+    provider.release(); // resolve the first → converge to 60_000, skipping 900_000
     await tick();
-    provider.release(); // resolve driving
+    provider.release();
     await tick();
 
-    expect(provider.calls.map((c) => c.accuracy)).toEqual(['balanced', 'high']); // walking, driving
-    expect(provider.calls.map((c) => c.timeIntervalMs)).toEqual([45_000, 18_000]); // stationary skipped
+    expect(provider.calls.map((c) => c.timeIntervalMs)).toEqual([300_000, 60_000]);
     await stop();
   });
 
@@ -237,13 +276,13 @@ describe('cadence controller', () => {
       notification: NOTIF,
     }).start();
 
-    engine.emit(stateFor('walking')); // in flight
-    engine.emit(stateFor('driving')); // queued
+    engine.emit(stateFor(fullBattery, 300_000)); // in flight
+    engine.emit(stateFor(fullBattery, 60_000)); // queued
     const stopped = stop();
     provider.release(); // let the in-flight arm finish
     await stopped;
 
-    expect(provider.calls.map((c) => c.timeIntervalMs)).toEqual([45_000]);
+    expect(provider.calls.map((c) => c.timeIntervalMs)).toEqual([300_000]);
   });
 
   it('re-evaluates the engine on a power event', async () => {
@@ -275,7 +314,7 @@ describe('cadence controller', () => {
     }).start();
     await stop();
 
-    engine.emit(stateFor('walking'));
+    engine.emit(stateFor(fullBattery));
     battery.fire();
     await tick();
 

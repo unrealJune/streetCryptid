@@ -8,6 +8,7 @@ import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes, MaxContentWidth, Spacing } from '@/constants/theme';
 import { StashSettingRow } from '@/features/social/components/stash-setting-row';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
+import { DEFAULT_SHARE_INTERVAL_MS } from '@/features/social/net/background/sampling-policy';
 import { useTheme } from '@/hooks/use-theme';
 
 import { ProfileOnboardingPreview } from '@/features/account/components/profile-onboarding-preview';
@@ -18,6 +19,7 @@ import { DebugLocationControls } from '../components/debug-location-controls';
 import { EventLogPanel } from '../components/event-log-panel';
 import { IdentityRow } from '../components/identity-row';
 import { LocationAccessRow } from '../components/location-access-row';
+import { ShareIntervalRow } from '../components/share-interval-row';
 import { TransportControls } from '../components/transport-controls';
 import { TransportDiagnostic } from '../components/transport-diagnostic';
 import { PairLinkAction } from '@/features/social/components/pair-link-action';
@@ -50,6 +52,7 @@ export default function SettingsScreen() {
     refreshTransportDiagnostics,
     setStashOptIn,
     setTransportEnabled,
+    setShareInterval,
     disclosureStatus,
     acknowledgeLocationDisclosure,
     forceLocationPush,
@@ -69,6 +72,7 @@ export default function SettingsScreen() {
 
   const stash = snapshot?.stash ?? { available: false, optedIn: false };
   const transports = snapshot?.transports ?? { relay: true, ip: true, ble: true };
+  const shareIntervalMs = snapshot?.shareIntervalMs ?? DEFAULT_SHARE_INTERVAL_MS;
 
   return (
     <ScrollView
@@ -188,6 +192,11 @@ export default function SettingsScreen() {
           accent={chrome.amber}
           status={disclosureStatus}
           onTurnOn={() => void acknowledgeLocationDisclosure(true)}
+        />
+        <ShareIntervalRow
+          accent={chrome.amber}
+          intervalMs={shareIntervalMs}
+          onSelect={(intervalMs) => void setShareInterval(intervalMs)}
         />
       </View>
 

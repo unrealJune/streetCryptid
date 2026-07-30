@@ -1,7 +1,12 @@
 import { Accelerometer } from 'expo-sensors';
 import { useEffect, useRef, useState } from 'react';
+import { Platform } from 'react-native';
 
-import { createBumpDetector } from '../core/bump-detector';
+import {
+  bumpOptionsForPlatform,
+  bumpSampleIntervalMs,
+  createBumpDetector,
+} from '../core/bump-detector';
 
 export type BumpSensorStatus = 'off' | 'checking' | 'ready' | 'unavailable' | 'denied' | 'error';
 
@@ -37,7 +42,7 @@ export function useBumpToPair(
 
     let active = true;
     let subscription: { remove(): void } | null = null;
-    const detector = createBumpDetector();
+    const detector = createBumpDetector(bumpOptionsForPlatform(Platform.OS));
 
     const start = async (): Promise<void> => {
       setState((current) => ({ ...current, status: 'checking', error: null }));
@@ -56,7 +61,7 @@ export function useBumpToPair(
       }
       if (!active) return;
 
-      Accelerometer.setUpdateInterval(20);
+      Accelerometer.setUpdateInterval(bumpSampleIntervalMs(Platform.OS));
       subscription = Accelerometer.addListener((measurement) => {
         if (!active) return;
         const result = detector.push({

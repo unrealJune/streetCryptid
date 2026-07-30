@@ -1,22 +1,20 @@
 import type { BatterySource } from './battery-source';
 import type { BackgroundStartConfig } from './background-task';
 import type { EngineState } from './location-engine';
-import type { ActivityKind, MotionState, SamplingDecision } from './types';
+import type { SamplingDecision } from './types';
 
 /**
  * Bridges the engine's sampling decisions to the OS location task. Without it, the engine computes
  * a fresh decision on every fix but nothing ever re-programs the GPS hardware, so the phone stays
- * pinned at the cadence it was first armed with — the "background too active" bug. See
- * docs/social/ARCHITECTURE.md §9.
+ * pinned at the cadence it was first armed with. See docs/social/ARCHITECTURE.md §9.
  *
  * Responsibilities:
- *  - On each engine decision, re-arm the OS task **only when the cadence materially changes**
- *    (accuracy, interval, distance, deferred window, iOS activity/auto-pause) — never on pending or
- *    status churn — so a stationary phone drops to the backed-off cadence and a moving/driving one
- *    tightens, instead of holding high-accuracy 15s sampling forever.
+ *  - On each engine decision, re-arm the OS task **only when the config materially changes**
+ *    (accuracy, interval, distance, deferred window, iOS auto-pause) — never on pending or status
+ *    churn. Now that the interval is fixed, in practice this fires for battery-driven accuracy
+ *    changes and for a user-chosen interval change, not continuously.
  *  - On a power event (Low-Power Mode toggled, charger un/plugged, level change) ask the engine to
- *    {@link CadenceEngine.reevaluate} immediately, so battery-saver backoff doesn't wait for the
- *    next fix (which, when stationary, may never come).
+ *    {@link CadenceEngine.reevaluate} immediately, rather than waiting for the next fix.
  *
  * Re-programs are serialized latest-wins: overlapping decisions collapse to the newest target so
  * two `startLocationUpdatesAsync` calls never race the same OS task.
@@ -57,23 +55,9 @@ export interface CadenceController {
   start(): () => Promise<void>;
 }
 
-/** iOS activity hint for a motion class — lets Core Location pace + auto-pause appropriately. */
-export function activityForMotion(motion: MotionState): ActivityKind {
-  switch (motion) {
-    case 'walking':
-      return 'fitness';
-    case 'driving':
-      return 'automotive';
-    case 'stationary':
-    case 'unknown':
-      return 'other';
-  }
-}
-
-/** Translate a sampling decision + motion into a full OS re-arm config. */
+/** Translate a sampling decision into a full OS re-arm config. */
 export function cfgFromDecision(
   decision: SamplingDecision,
-  motion: MotionState,
   notification: CadenceNotification
 ): BackgroundStartConfig {
   return {
@@ -81,7 +65,10 @@ export function cfgFromDecision(
     timeIntervalMs: decision.timeIntervalMs,
     distanceIntervalM: decision.distanceIntervalM,
     deferredUpdatesIntervalMs: decision.deferredUpdatesIntervalMs,
-    activityType: activityForMotion(motion),
+    // Pinned to `other`. This used to track the motion class (fitness/automotive), which let Core
+    // Location pace itself — but it is derived from movement, and we no longer classify movement at
+    // all. A constant hint also keeps the OS request identical whatever the user is doing.
+    activityType: 'other',
     // Never let iOS Core Location auto-pause. It suspends background updates when it decides the
     // device is stationary and does NOT reliably resume, silently stopping background location
     // sharing until the app is next foregrounded (the "pings only arrive when the app is opened"
@@ -142,7 +129,7 @@ export function createCadenceController(opts: CadenceControllerOptions): Cadence
       const offState = engine.onState((state) => {
         if (!state.decision) return;
         const cfg = {
-          ...cfgFromDecision(state.decision, state.motion, notification),
+          ...cfgFromDecision(state.decision, notification),
           ...overrides,
         };
         desired = cfg;

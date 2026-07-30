@@ -491,6 +491,16 @@ class IrohLocationModule : Module() {
         }
       }
 
+    AsyncFunction("pushTrail") Coroutine
+      { peerTicket: String?, traceparent: String? ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        if (traceparent != null) {
+          n.pushTrailTraced(peerTicket, traceparent)
+        } else {
+          n.pushTrail(peerTicket)
+        }
+      }
+
     AsyncFunction("readTrail") Coroutine
       { author: String, sinceTs: Double ->
         val n = node ?: throw IllegalStateException("call createNode first")

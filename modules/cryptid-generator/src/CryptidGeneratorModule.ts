@@ -1,16 +1,25 @@
 import { NativeModule, requireNativeModule } from 'expo-modules-core';
 
 import type {
+  CryptidGenerationProgressEvent,
   CryptidGeneratorApi,
   CryptidGeneratorAvailability,
+  CryptidGeneratorAvailabilityDetail,
   NativeGeneratedCryptid,
 } from './CryptidGenerator.types';
 
+/** Emitted while `generate` runs so the UI can name the current phase. */
+export type CryptidGeneratorEvents = {
+  onGenerationProgress: (event: CryptidGenerationProgressEvent) => void;
+};
+
 export declare class CryptidGeneratorNativeModule
-  extends NativeModule
+  extends NativeModule<CryptidGeneratorEvents>
   implements CryptidGeneratorApi
 {
   availability(): Promise<CryptidGeneratorAvailability>;
+  /** Optional: only present in builds that ship the detailed availability bridge. */
+  availabilityDetail?(): Promise<CryptidGeneratorAvailabilityDetail>;
   generate(description: string, seed: number): Promise<NativeGeneratedCryptid>;
 }
 

@@ -76,14 +76,24 @@ describe('BumpPairingStrip', () => {
     expect(renderer.root.findAllByProps({ accessibilityRole: 'button' })).toHaveLength(0);
   });
 
-  it('asks for Bluetooth when the radio is off', () => {
-    render(
+  // Arming is what requests Bluetooth permission, so the button has to survive the state that
+  // ungranted permission produces — otherwise a phone that was never asked can never be asked.
+  it('keeps an arm control when Bluetooth reports unavailable, since arming is what asks for it', async () => {
+    const { onArm } = render(
       snapshot({
         capabilities: { ...capable, available: false },
       })
     );
 
-    expect(text(renderer)).toContain('BLUETOOTH OFFLINE');
+    expect(text(renderer)).toContain('BLUETOOTH UNAVAILABLE');
+    const button = renderer.root.findByProps({
+      accessibilityLabel: 'Arm bump to meet a nearby friend',
+    });
+
+    await act(async () => {
+      button.props.onPress();
+    });
+    expect(onArm).toHaveBeenCalledTimes(1);
   });
 
   it('offers a manual bump only once the radio is armed', async () => {

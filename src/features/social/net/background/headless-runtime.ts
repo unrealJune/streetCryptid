@@ -66,10 +66,17 @@ export function flushBackgroundOutboxHeadless(parent?: SpanContext): Promise<num
   return runHeadless({
     precheck: async () => (await backgroundOutbox.pending()) > 0,
     fallback: 0,
-    run: (service) =>
-      backgroundOutbox.drain(async (fix, drainParent) => {
+    run: async (service) => {
+      const published = await backgroundOutbox.drain(async (fix, drainParent) => {
         await service.publishFix(fix, drainParent);
-      }, parent),
+      }, parent);
+      // `publishFix` only broadcasts live (to a swarm that is usually empty out here) and writes
+      // the LOCAL docs replica. Without this push the envelopes never leave the phone, so a friend
+      // who wasn't online at this exact moment never sees them — the whole reason the stash exists.
+      // Must happen before the `finally` in `session()` shuts the node down.
+      if (published > 0) await service.pushTrail(parent);
+      return published;
+    },
   });
 }
 
@@ -89,12 +96,16 @@ export function runBackgroundBackfillHeadless(parent?: SpanContext): Promise<voi
   return runHeadless<void>({
     fallback: undefined,
     run: async (service) => {
-      await service.syncTrail(0, parent);
+      // Drain FIRST, then sync. `syncTrail` is bidirectional, so the one call both pushes what we
+      // just published and pulls what friends left at the stash. Syncing first (as this did) meant
+      // every fix published here waited for the *next* OS wake to be pushed — ~15 min at best on
+      // Android, and on iOS potentially never.
       if ((await backgroundOutbox.pending()) > 0) {
         await backgroundOutbox.drain(async (fix, drainParent) => {
           await service.publishFix(fix, drainParent);
         }, parent);
       }
+      await service.syncTrail(0, parent);
     },
   });
 }

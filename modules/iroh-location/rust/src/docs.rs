@@ -55,6 +55,17 @@ use iroh_docs::{
 /// so `sync` always returns instead of hanging on a stalled connection.
 const SYNC_IDLE_TIMEOUT_SECS: u64 = 8;
 
+/// How long to wait for the *first* event of a reconciliation. Deliberately much longer than
+/// [`SYNC_IDLE_TIMEOUT_SECS`]: a cold headless node has to bring up its endpoint, run net_report,
+/// and either hole-punch or fall back to a relay before it can talk to the stash at all — on
+/// cellular that routinely exceeds 8s, and bailing there meant the periodic backfill gave up
+/// before the connection existed. Once events are flowing, the shorter idle gap applies.
+const SYNC_FIRST_EVENT_TIMEOUT_SECS: u64 = 25;
+
+/// Upper bound on a single namespace's push. `push` only needs `SyncFinished`, not a full drain,
+/// but a peer that connects and then stalls would otherwise hold a headless context open.
+const PUSH_TIMEOUT_SECS: u64 = 30;
+
 /// Key separator between the hex author and the zero-padded sequence number.
 pub const KEY_SEP: u8 = b'/';
 
@@ -370,24 +381,34 @@ impl TrailDocs {
 
         let mut recovered: u64 = 0;
         let mut pending_entries = HashMap::new();
+        let mut saw_event = false;
         // Bound the reconciliation: with no reachable peer (e.g. relay-only web where direct-IP
         // transmits are dropped) `SyncFinished` may never arrive, which would hang this call — and
         // therefore the `syncTrail` promise — forever. Break after an idle gap and report what we
         // recovered so the UI always gets a `completed` (with count), never a dead button.
+        //
+        // The first event gets a longer grace period than subsequent ones — see
+        // [`SYNC_FIRST_EVENT_TIMEOUT_SECS`]; a cold node's dial can outlast the idle gap.
         loop {
-            let entry_to_process =
-                match timeout(Duration::from_secs(SYNC_IDLE_TIMEOUT_SECS), events.next()).await {
-                    Ok(Some(Ok(LiveEvent::InsertRemote { from, entry, .. }))) => {
-                        Some((from, entry))
-                    }
-                    Ok(Some(Ok(LiveEvent::ContentReady { hash }))) => pending_entries.remove(&hash),
-                    Ok(Some(Ok(LiveEvent::SyncFinished(_)))) => None,
-                    Ok(Some(Ok(LiveEvent::PendingContentReady))) => break,
-                    Ok(Some(Ok(_))) => None,
-                    Ok(Some(Err(_))) => break,
-                    Ok(None) => break, // stream ended
-                    Err(_) => break,   // idle timeout — stop waiting, report what we have
-                };
+            let wait = if saw_event {
+                SYNC_IDLE_TIMEOUT_SECS
+            } else {
+                SYNC_FIRST_EVENT_TIMEOUT_SECS
+            };
+            let next = timeout(Duration::from_secs(wait), events.next()).await;
+            if matches!(next, Ok(Some(_))) {
+                saw_event = true;
+            }
+            let entry_to_process = match next {
+                Ok(Some(Ok(LiveEvent::InsertRemote { from, entry, .. }))) => Some((from, entry)),
+                Ok(Some(Ok(LiveEvent::ContentReady { hash }))) => pending_entries.remove(&hash),
+                Ok(Some(Ok(LiveEvent::SyncFinished(_)))) => None,
+                Ok(Some(Ok(LiveEvent::PendingContentReady))) => break,
+                Ok(Some(Ok(_))) => None,
+                Ok(Some(Err(_))) => break,
+                Ok(None) => break, // stream ended
+                Err(_) => break,   // idle timeout — stop waiting, report what we have
+            };
             if let Some((from, entry)) = entry_to_process {
                 let bytes = match self.blobs.blobs().get_bytes(entry.content_hash()).await {
                     Ok(b) => b,
@@ -418,6 +439,49 @@ impl TrailDocs {
 
         sink.on_sync_status(author_label, "completed".to_string(), Some(recovered));
         Ok(recovered)
+    }
+
+    /// Put `ns` into the iroh-docs live engine with `peers` and wait for one reconciliation to
+    /// finish. Returns the number of entries we sent, or `None` when no `SyncFinished` landed
+    /// before the deadline.
+    ///
+    /// This is the SEND half of the durable path and it is not optional: `write` only touches the
+    /// local replica, and the live engine broadcasts a `LocalInsert` **only** for namespaces that
+    /// `start_sync` has marked as syncing (`engine::live::on_replica_event`). A process that
+    /// publishes without ever calling this — every headless background wake — leaves its envelopes
+    /// on the phone forever, so an offline friend has nothing to reconcile from. Unlike [`Self::sync`]
+    /// this does not decrypt anything: our own envelopes are sealed for our recipients, not for us.
+    ///
+    /// Calling it repeatedly is cheap: `start_sync` is a no-op once the namespace is already
+    /// syncing, and the engine keeps broadcasting subsequent writes for the process's lifetime.
+    pub async fn push(&self, ns: NamespaceId, peers: Vec<EndpointAddr>) -> Result<Option<u64>> {
+        let doc = self.doc_for(ns).await?;
+        let mut events = doc.subscribe().await?;
+        doc.start_sync(peers).await?;
+
+        let deadline = Duration::from_secs(PUSH_TIMEOUT_SECS);
+        loop {
+            match timeout(deadline, events.next()).await {
+                Ok(Some(Ok(LiveEvent::SyncFinished(ev)))) => match &ev.result {
+                    Ok(details) => return Ok(Some(details.entries_sent as u64)),
+                    Err(err) => {
+                        // One unreachable peer isn't the end of the exchange — keep waiting for
+                        // another to finish rather than reporting the whole push as done.
+                        tracing::warn!(
+                            peer = %ev.peer.fmt_short(),
+                            error = %err,
+                            "trail.push: reconciliation with peer failed"
+                        );
+                        continue;
+                    }
+                },
+                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Err(err))) => return Err(err),
+                // Stream ended or nothing finished in time. The namespace is still marked syncing,
+                // so later writes in this process broadcast — we just can't confirm this one.
+                Ok(None) | Err(_) => return Ok(None),
+            }
+        }
     }
 
     /// Perform one direct range-reconciliation exchange with `peer` without opening the namespace
@@ -542,6 +606,10 @@ impl TrailDocs {
 
     /// Reconcile **every** known namespace (own + friends), surfacing backfill to `sink`.
     /// Returns the total number of recovered, decryptable fixes.
+    ///
+    /// A namespace that fails is logged and skipped rather than aborting the run: these are
+    /// independent replicas, and short-circuiting on the first error meant one friend whose doc
+    /// couldn't be opened silently blocked backfill for everyone after them in the map.
     pub async fn sync_all(
         &self,
         since_ts: u64,
@@ -549,11 +617,30 @@ impl TrailDocs {
         sink: &dyn TrailSink,
         recv_secret: &[u8],
     ) -> Result<u64> {
+        let namespaces = self.namespaces().await;
         let mut total = 0u64;
-        for ns in self.namespaces().await {
-            total += self
-                .sync(ns, since_ts, peers.clone(), sink, recv_secret)
-                .await?;
+        let mut failed = 0usize;
+        for ns in &namespaces {
+            match self
+                .sync(*ns, since_ts, peers.clone(), sink, recv_secret)
+                .await
+            {
+                Ok(recovered) => total += recovered,
+                Err(err) => {
+                    failed += 1;
+                    tracing::warn!(
+                        sc.namespace = %crate::telemetry::short_hex(&ns.to_bytes()),
+                        error = %err,
+                        "trail.sync: namespace failed; continuing with the rest"
+                    );
+                    sink.on_sync_status(ns.to_bytes().to_vec(), "error".to_string(), None);
+                }
+            }
+        }
+        // Only a total wipeout is an error worth failing the call for — otherwise the caller gets
+        // whatever was recoverable, which is the point of a best-effort backfill.
+        if failed > 0 && failed == namespaces.len() {
+            return Err(anyhow!("all {failed} trail namespaces failed to sync"));
         }
         Ok(total)
     }

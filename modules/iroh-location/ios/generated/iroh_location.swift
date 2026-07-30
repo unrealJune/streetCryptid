@@ -1126,6 +1126,25 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func publishProfile(handle: String, cryptidName: String, sigil: String, color: String) async throws  -> UInt64
     
     /**
+     * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
+     * to finish. **This is what actually gets a published fix off the phone.**
+     *
+     * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
+     * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
+     * and nowhere else. A short-lived headless publish context never called anything that did
+     * that, so its envelopes never reached the stash and an offline friend had nothing to
+     * reconcile from. Call this after draining a batch.
+     *
+     * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
+     * that the live gossip path or a later [`Self::sync_trail`] is broken.
+     */
+    func pushTrail(peerTicket: String?) async throws 
+    
+    func pushTrailInner(peerTicket: String?, traceparent: String?) async throws 
+    
+    func pushTrailTraced(peerTicket: String?, traceparent: String) async throws 
+    
+    /**
      * Read the newest verified profile for `endpoint_id` (self or a friend) from the local
      * replica. `None` if absent or not yet replicated.
      */
@@ -1878,6 +1897,70 @@ open func publishProfile(handle: String, cryptidName: String, sigil: String, col
             completeFunc: ffi_iroh_location_rust_future_complete_u64,
             freeFunc: ffi_iroh_location_rust_future_free_u64,
             liftFunc: FfiConverterUInt64.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
+     * to finish. **This is what actually gets a published fix off the phone.**
+     *
+     * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
+     * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
+     * and nowhere else. A short-lived headless publish context never called anything that did
+     * that, so its envelopes never reached the stash and an offline friend had nothing to
+     * reconcile from. Call this after draining a batch.
+     *
+     * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
+     * that the live gossip path or a later [`Self::sync_trail`] is broken.
+     */
+open func pushTrail(peerTicket: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_push_trail(
+                    self.uniffiCloneHandle(),
+                    FfiConverterOptionString.lower(peerTicket)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func pushTrailInner(peerTicket: String?, traceparent: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_push_trail_inner(
+                    self.uniffiCloneHandle(),
+                    FfiConverterOptionString.lower(peerTicket),FfiConverterOptionString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func pushTrailTraced(peerTicket: String?, traceparent: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_push_trail_traced(
+                    self.uniffiCloneHandle(),
+                    FfiConverterOptionString.lower(peerTicket),FfiConverterString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -4698,6 +4781,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_publish_profile() != 57330) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_push_trail() != 65355) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_push_trail_inner() != 60203) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_push_trail_traced() != 27419) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_read_profile() != 28632) {

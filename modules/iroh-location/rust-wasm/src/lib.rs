@@ -430,6 +430,32 @@ impl WasmLocationNode {
         Ok(())
     }
 
+    /// Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
+    /// to finish. `docs_write` only touches the local replica — iroh-docs broadcasts a local
+    /// insert only for namespaces `start_sync` has marked as syncing — so without this a published
+    /// fix never leaves this node. Best-effort: a failure only degrades offline delivery.
+    pub async fn push_trail(&self, peer_ticket: Option<String>) -> Result<(), JsError> {
+        let trail = {
+            let guard = self.started.lock().await;
+            let started = guard
+                .as_ref()
+                .ok_or_else(|| JsError::new("node not started"))?;
+            started.trail.clone()
+        };
+        let peers = peer_ticket
+            .map(|ticket| {
+                ticket
+                    .parse::<EndpointTicket>()
+                    .map(|ticket| vec![ticket.endpoint_addr().clone()])
+                    .map_err(|_| JsError::new("bad sync peer endpoint ticket"))
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let ns = trail.own_namespace();
+        trail.push(ns, peers).await.map_err(to_js_err)?;
+        Ok(())
+    }
+
     /// Read decrypted fixes for `author_hex` (self or a friend) from the local replica,
     /// `fix.ts >= since_ts`. Returns an array of `{ author, seq, fix }`.
     pub async fn read_trail(&self, author_hex: String, since_ts: f64) -> Result<JsValue, JsError> {

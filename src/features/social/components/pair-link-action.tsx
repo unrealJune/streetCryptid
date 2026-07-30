@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Pressable, Share, StyleSheet, TextInput, View } from 'react-native';
+import { Platform, Pressable, Share, StyleSheet, TextInput, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
@@ -18,6 +18,8 @@ interface PairLinkActionProps {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+const SHARE_SUBJECT = 'Find me on streetCryptid';
 
 export function PairLinkAction({
   pairing,
@@ -40,10 +42,15 @@ export function PairLinkAction({
     try {
       const link = await onCreateInvite();
       if (link) {
-        await Share.share({
-          message: `Find me on streetCryptid:\n${link}`,
-          url: link,
-        });
+        // The link must be the *only* shared text. iOS turns `message` and `url` into two
+        // separate activity items, and the Android sharesheet renders a link preview next to
+        // the text it is given, so any caption that also contains the link shows it twice.
+        // The prose rides along out-of-band instead: `subject` on iOS, EXTRA_SUBJECT (`title`)
+        // on Android.
+        await Share.share(
+          Platform.OS === 'ios' ? { url: link } : { message: link, title: SHARE_SUBJECT },
+          { subject: SHARE_SUBJECT, dialogTitle: SHARE_SUBJECT }
+        );
       }
     } finally {
       setSharing(false);

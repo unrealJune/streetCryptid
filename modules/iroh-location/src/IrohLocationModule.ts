@@ -56,6 +56,8 @@ export declare class IrohLocationNativeModule
     traceparent?: string | null
   ): Promise<void>;
   syncTrail(sinceTs: number, peerTicket: string | null, traceparent?: string | null): Promise<void>;
+  /** Optional for compatibility with installed iOS binaries built before the push API. */
+  pushTrail?(peerTicket: string | null, traceparent?: string | null): Promise<void>;
   readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]>;
   pruneTrail(olderThanTs: number): Promise<void>;
   docTicket(): Promise<string>;

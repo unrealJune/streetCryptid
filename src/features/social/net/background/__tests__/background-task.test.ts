@@ -5,9 +5,9 @@ import {
 } from '../background-task';
 
 const config: BackgroundStartConfig = {
-  accuracy: 'high',
-  timeIntervalMs: 15_000,
-  distanceIntervalM: 25,
+  accuracy: 'balanced',
+  timeIntervalMs: 300_000,
+  distanceIntervalM: 0,
   notificationTitle: 'streetCryptid',
   notificationBody: "Keeping your friends' map current.",
 };
@@ -28,9 +28,23 @@ describe('background location registration', () => {
     expect(api.startLocationUpdatesAsync).toHaveBeenCalledWith(
       BACKGROUND_LOCATION_TASK,
       expect.objectContaining({
-        timeInterval: 15_000,
-        distanceInterval: 25,
+        timeInterval: 300_000,
+        distanceInterval: 0,
       })
+    );
+  });
+
+  // Expo's default is already false; we were explicitly opting IN to the blue status-bar pill.
+  // Per Apple QA1965 an "Always"-authorized app can leave it off, which is what other location
+  // sharing apps do — hence the persistent indicator users noticed on iOS.
+  it('does not opt in to the iOS background location indicator', async () => {
+    const api = makeApi(false);
+
+    await rearmBackgroundLocationTask(api, config);
+
+    expect(api.startLocationUpdatesAsync).toHaveBeenCalledWith(
+      BACKGROUND_LOCATION_TASK,
+      expect.objectContaining({ showsBackgroundLocationIndicator: false })
     );
   });
 

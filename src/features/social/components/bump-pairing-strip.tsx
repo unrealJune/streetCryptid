@@ -143,10 +143,16 @@ function stripCopy(
     };
   }
   if (!pairing.capabilities.available) {
+    // Keep the control. The native layer reports one flat "unavailable" for three different
+    // causes — permission never granted, radio switched off, no BLE at all — and the first is
+    // both the most common and the only one the app can fix. Dropping the button here stranded
+    // exactly that case: arming is what asks for Bluetooth, so hiding it meant a phone that had
+    // never been asked could never be asked. Arm re-requests permission and rebinds the node, so
+    // a tap either fixes it or fails with an honest reason in `error`.
     return {
-      status: 'BLUETOOTH OFFLINE',
-      detail: 'Turn Bluetooth on to meet someone in person.',
-      action: null,
+      status: 'BLUETOOTH UNAVAILABLE',
+      detail: 'Allow Bluetooth to meet someone in person. If it is allowed, turn the radio on.',
+      action: 'arm',
       listening: false,
     };
   }

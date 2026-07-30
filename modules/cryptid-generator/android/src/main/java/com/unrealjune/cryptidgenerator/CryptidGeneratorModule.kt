@@ -55,15 +55,44 @@ private fun parseGeneration(raw: String): Map<String, String> {
 class CryptidGeneratorModule : Module() {
   private val generator by lazy { Generation.getClient() }
 
+  private fun emit(
+    phase: String,
+    detail: String? = null,
+    downloadedBytes: Long? = null,
+    totalBytes: Long? = null,
+  ) {
+    val payload = mutableMapOf<String, Any>("phase" to phase, "attempt" to 1)
+    detail?.let { payload["detail"] = it }
+    downloadedBytes?.let { payload["downloadedBytes"] = it }
+    totalBytes?.let { payload["totalBytes"] = it }
+    sendEvent("onGenerationProgress", payload)
+  }
+
   private suspend fun ensureAvailable() {
+    emit("checkingModel")
     when (generator.checkStatus()) {
       FeatureStatus.AVAILABLE -> Unit
       FeatureStatus.DOWNLOADABLE,
       FeatureStatus.DOWNLOADING -> {
         var completed = false
+        var totalBytes: Long? = null
+        emit("downloadingModel", detail = "Fetching the system model")
         generator.download().collect { status ->
           when (status) {
-            is DownloadStatus.DownloadCompleted -> completed = true
+            is DownloadStatus.DownloadStarted -> {
+              totalBytes = status.bytesToDownload
+              emit("downloadingModel", downloadedBytes = 0L, totalBytes = totalBytes)
+            }
+            is DownloadStatus.DownloadProgress ->
+              emit(
+                "downloadingModel",
+                downloadedBytes = status.totalBytesDownloaded,
+                totalBytes = totalBytes,
+              )
+            is DownloadStatus.DownloadCompleted -> {
+              completed = true
+              emit("downloadingModel", detail = "Model downloaded", totalBytes = totalBytes)
+            }
             is DownloadStatus.DownloadFailed -> throw status.e
             else -> Unit
           }
@@ -78,6 +107,7 @@ class CryptidGeneratorModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("CryptidGenerator")
+    Events("onGenerationProgress")
 
     AsyncFunction("availability") Coroutine
       { ->
@@ -89,9 +119,22 @@ class CryptidGeneratorModule : Module() {
         }
       }
 
+    AsyncFunction("availabilityDetail") Coroutine
+      { ->
+        when (val status = generator.checkStatus()) {
+          FeatureStatus.AVAILABLE -> mapOf("status" to "available")
+          FeatureStatus.DOWNLOADABLE ->
+            mapOf("status" to "downloadable", "reason" to "modelNotDownloaded")
+          FeatureStatus.DOWNLOADING ->
+            mapOf("status" to "downloadable", "reason" to "modelDownloading")
+          else -> mapOf("status" to "unavailable", "reason" to "featureStatus$status")
+        }
+      }
+
     AsyncFunction("generate") Coroutine
       { description: String, seed: Double ->
         ensureAvailable()
+        emit("preparingModel", detail = "Warming up the model")
         generator.warmup()
         val normalizedSeed = seed.toLong().coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
         val request =
@@ -101,7 +144,9 @@ class CryptidGeneratorModule : Module() {
             maxOutputTokens = MAX_OUTPUT_TOKENS
             this.seed = normalizedSeed
           }
+        emit("generating")
         val response = generator.generateContent(request)
+        emit("formatting")
         val raw = response.candidates.firstOrNull()?.text ?: throw InvalidGenerationException()
         parseGeneration(raw)
       }

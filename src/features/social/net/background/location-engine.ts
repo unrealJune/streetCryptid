@@ -1,17 +1,35 @@
 import { getTelemetry, type SpanContext } from '@/features/dev/telemetry';
 import type { LocationFix } from '../../core/types';
+import {
+  assessFix,
+  DEFAULT_FIX_QUALITY_CONFIG,
+  type FixQualityConfig,
+  type FixRejection,
+} from './fix-quality';
 import type { FixOutbox } from './fix-outbox';
-import { deriveMotion, type SamplingPolicy } from './sampling-policy';
+import type { SamplingPolicy } from './sampling-policy';
 import type { TrailStore } from './trail-store';
-import type { BatteryState, MotionState, SamplingDecision } from './types';
+import type { BatteryState, SamplingDecision } from './types';
 
 /**
  * The testable heart of the background service. It owns the loop:
  *
  *   fix (foreground watch OR background task)
- *     → deriveMotion + policy.decide  (gate/cadence)
- *     → if active: outbox.enqueue
+ *     → policy.decide  (accuracy / suspend)
+ *     → assessFix      (confidence gate)
+ *     → if accepted: remember as lastKnownFix
+ *     → for each whole interval slot that has elapsed: outbox.enqueue
  *     → if publisher.isReady: flush → for each: publisher.publishFix(fix) → trail.appendOwn(fix, seq)
+ *
+ * **Slot quantisation is the privacy mechanism.** Fixes arrive at whatever rate the OS feels like —
+ * every few seconds from the foreground watch, in batches from the background task, not at all when
+ * a phone is asleep. Publishing them as they arrive would put that rhythm on the wire, and the
+ * rhythm is a readout of what the user is doing (walking/driving/still/app-open). So the engine
+ * publishes on wall-clock boundaries of `policy.config.intervalMs` instead: exactly one envelope per
+ * slot, whatever happened during it. Extra fixes in a slot are absorbed into `lastKnownFix`; a slot
+ * with no fix at all re-publishes `lastKnownFix` verbatim as a heartbeat, so silence never means
+ * "stationary". Payload timestamps are untouched, so a stale heartbeat still reads as stale to
+ * friends — only the *cadence* is synthetic, and only the cadence is what an observer can see.
  *
  * Trail append happens at *publish* time (not capture) so our own trail uses the same `seq` that
  * goes on the wire — keeping it consistent with what friends receive/backfill. Offline captures
@@ -19,7 +37,20 @@ import type { BatteryState, MotionState, SamplingDecision } from './types';
  *
  * The engine takes only the minimal slice of {@link FixPublisher} it needs, so it can be unit-tested
  * with a fake publisher + ManualLocationProvider + in-memory outbox/trail + a fake clock — no native.
+ *
+ * The confidence gate (`fix-quality.ts`) sits *before* `lastKnownFix`, never before the publish: a
+ * junk fix is refused the right to become our position, but the slot it landed in still goes out
+ * carrying the last good one. Rejection must not read as silence — see that module's header.
  */
+
+/**
+ * How far back {@link LocationEngine.heartbeat} will fill in missed slots. Gaps shorter than this
+ * are the ones worth hiding — they are the difference between "sitting still" and "moving". A gap
+ * longer than this means the process was frozen or killed, which is going to be visible from the
+ * arrival burst no matter what we publish, so stuffing hours of duplicate points buys no privacy
+ * and only floods the trail.
+ */
+export const MAX_BACKFILL_MS = 30 * 60_000;
 
 /** The slice of LocationSharingService the engine depends on. */
 export interface FixPublisher {
@@ -31,18 +62,30 @@ export interface FixPublisher {
   publishFix(fix: LocationFix, parent?: SpanContext): Promise<number>;
   /** True once the node is bound and can publish. */
   isReady(): boolean;
+  /**
+   * Mirror what we just published to the durable stash. `publishFix` broadcasts live and writes the
+   * LOCAL docs replica only, so without this the batch reaches nobody who wasn't already online.
+   * Optional (and a no-op when the stash is off) so tests and web can leave it out.
+   */
+  pushTrail?(parent?: SpanContext): Promise<void>;
 }
 
 export type EngineStatus = 'idle' | 'running' | 'paused' | 'error';
 
 export interface EngineState {
   status: EngineStatus;
-  /** ms epoch of the last fix we ingested, or null. */
+  /** ms epoch of the last fix that passed the confidence gate, or null. */
   lastFixAt: number | null;
+  /**
+   * The last fix that passed the confidence gate — our current position as far as the app is
+   * concerned. The map's own-position dot should follow this rather than raw provider output, or a
+   * rejected fix still visibly throws the user's own marker across town.
+   */
+  lastAcceptedFix: LocationFix | null;
+  /** Why the most recent fix was refused, or null if it was accepted. Diagnostics only. */
+  lastRejection: FixRejection | null;
   /** Last sampling decision applied (so the UI/provider can reflect cadence). */
   decision: SamplingDecision | null;
-  /** Motion class of the last decision (drives the iOS activity hint). */
-  motion: MotionState;
   /** Fixes waiting in the outbox. */
   pending: number;
   error: string | null;
@@ -55,6 +98,8 @@ export interface LocationEngineOptions {
   policy: SamplingPolicy;
   /** Reads current battery; the policy backs off when low. Default: full battery, not low-power. */
   battery?: () => Promise<BatteryState>;
+  /** Confidence-gate thresholds, merged over {@link DEFAULT_FIX_QUALITY_CONFIG}. */
+  quality?: Partial<FixQualityConfig>;
   /** Injectable clock. Default `Date.now`. */
   now?: () => number;
 }
@@ -65,22 +110,40 @@ export interface LocationEngine {
   /** Stop accepting fixes; queued fixes remain in the outbox for the next start/flush. */
   stop(): Promise<void>;
   /**
-   * Feed a fix from any source. Applies the policy gate, appends to the outbox, and (if the
-   * publisher is ready) flushes. Returns the {@link SamplingDecision} used so the caller can
-   * re-program the OS location cadence.
+   * Feed a fix from any source. Records it as the latest known position, publishes any interval
+   * slots that have come due (see the module header), and flushes if the publisher is ready.
+   * Returns the {@link SamplingDecision} used so the caller can re-program the OS location cadence.
+   *
+   * Safe to call at any rate: fixes arriving faster than the interval are absorbed, not published.
    */
   ingest(fix: LocationFix, parent?: SpanContext): Promise<SamplingDecision>;
   /**
-   * Recompute the sampling decision from the last known motion and a *fresh* battery read, without
-   * ingesting a new fix. Call this on a power event (Low Power Mode toggled, charger un/plugged) so
-   * cadence backs off/tightens immediately instead of waiting for the next GPS fix. Emits state so a
-   * cadence controller can re-program the OS. No-op enqueue: it never publishes.
+   * Publish any due slots *without* a new fix, re-using the last known position. This is what keeps
+   * the cadence constant while the user is stationary — without it, standing still would stop the
+   * envelopes and silence would be as informative as movement. Call it on a timer at the sampling
+   * interval, and on every OS background wake.
+   *
+   * No-op before the first fix, when suspended, or when the current slot is already published.
+   * Returns the number of envelopes enqueued.
+   */
+  heartbeat(parent?: SpanContext): Promise<number>;
+  /**
+   * Re-grid to a new sampling interval (the user changed it in settings). Re-anchors the slot
+   * boundary to now so the change neither double-publishes the current slot nor skips one, and
+   * returns the fresh decision so the caller can re-program the OS.
+   */
+  setIntervalMs(intervalMs: number): Promise<SamplingDecision>;
+  /**
+   * Recompute the sampling decision from a *fresh* battery read, without ingesting a new fix. Call
+   * this on a power event (Low Power Mode toggled, charger un/plugged) so the accuracy tier follows
+   * immediately instead of waiting for the next GPS fix. Emits state so a cadence controller can
+   * re-program the OS. No-op enqueue: it never publishes, and it never moves the cadence.
    */
   reevaluate(): Promise<SamplingDecision>;
   /**
    * Turn real-time live tracking on/off (a friend is actively watching). While on, the policy uses
-   * its real-time `live*` cadence regardless of motion. Recomputes + emits immediately so the
-   * cadence controller re-programs the OS; returns the new decision.
+   * its real-time `live*` cadence and fixes publish per-arrival rather than per-slot. Recomputes +
+   * emits immediately so the cadence controller re-programs the OS; returns the new decision.
    */
   setLiveMode(on: boolean): Promise<SamplingDecision>;
   /** Drain the outbox through the publisher (call on resume / node-ready / connectivity regained). */
@@ -94,22 +157,33 @@ const DEFAULT_BATTERY: BatteryState = { level: 1, charging: false, lowPower: fal
 export function createLocationEngine(opts: LocationEngineOptions): LocationEngine {
   const { publisher, outbox, trail, policy } = opts;
   const battery = opts.battery ?? (async (): Promise<BatteryState> => ({ ...DEFAULT_BATTERY }));
+  const quality: FixQualityConfig = { ...DEFAULT_FIX_QUALITY_CONFIG, ...opts.quality };
   const now = opts.now ?? Date.now;
 
   let state: EngineState = {
     status: 'idle',
     lastFixAt: null,
+    lastAcceptedFix: null,
+    lastRejection: null,
     decision: null,
-    motion: 'unknown',
     pending: 0,
     error: null,
   };
 
-  let lastFix: LocationFix | null = null;
+  /**
+   * Latest position that passed the confidence gate, republished as a heartbeat for slots that
+   * produce no fix — and for slots whose only fixes were rejected.
+   */
+  let lastKnownFix: LocationFix | null = null;
   let lastFixAt: number | null = null;
-  let lastMotion: MotionState = 'unknown';
+  /** When we last accepted a fix; seeded at `start()` so the starvation escape hatch can arm. */
+  let lastAcceptedAt: number | null = null;
+  /** Index of the last wall-clock slot we put an envelope on the wire for; null before the first. */
+  let lastPublishedSlot: number | null = null;
   let live = false;
   const listeners = new Set<(s: EngineState) => void>();
+
+  const slotOf = (ts: number, intervalMs: number): number => Math.floor(ts / intervalMs);
 
   function emit(): void {
     const snapshot = getState();
@@ -145,6 +219,9 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
         const seq = await publisher.publishFix(fix, drainParent);
         await trail.appendOwn(fix, seq);
       }, parent);
+      // Get the batch off the device. Cheap to repeat — the namespace is already in the docs sync
+      // engine after the first call, so this is one reconciliation round-trip with the stash.
+      if (n > 0) await publisher.pushTrail?.(parent);
       const pending = await outbox.pending();
       setState({ pending, error: null });
       return n;
@@ -161,9 +238,49 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
     }
   }
 
+  /**
+   * Enqueue one envelope per interval slot that has elapsed since the last publish, each carrying
+   * `lastKnownFix`. The caller flushes. Returns how many were enqueued (0 when the current slot is
+   * already covered — the common case, since fixes arrive far faster than the interval).
+   */
+  async function enqueueDueSlots(parent?: SpanContext): Promise<number> {
+    const fix = lastKnownFix;
+    if (fix === null) return 0;
+
+    const intervalMs = policy.config.intervalMs;
+    const currentSlot = slotOf(now(), intervalMs);
+    // First publish of the session lands on the current slot rather than being deferred a full
+    // interval — a user who just enabled sharing should appear on their friends' maps now.
+    if (lastPublishedSlot === null) lastPublishedSlot = currentSlot - 1;
+    if (currentSlot <= lastPublishedSlot) return 0;
+
+    const maxSlots = Math.max(1, Math.ceil(MAX_BACKFILL_MS / intervalMs));
+    const from = Math.max(lastPublishedSlot + 1, currentSlot - maxSlots + 1);
+    const capped = from - (lastPublishedSlot + 1);
+
+    for (let slot = from; slot <= currentSlot; slot += 1) {
+      await outbox.enqueue(fix, parent);
+    }
+    lastPublishedSlot = currentSlot;
+
+    if (capped > 0) {
+      // Not a bug — see MAX_BACKFILL_MS — but it is a gap in the uniform series, so say so rather
+      // than letting a dropped-ping investigation infer a fault that isn't there.
+      getTelemetry().log('info', `heartbeat backfill capped: skipped ${capped} slot(s)`, {
+        skipped_slots: capped,
+        interval_ms: intervalMs,
+        'sc.drop_reason': 'backfill-capped',
+      });
+    }
+    return currentSlot - from + 1;
+  }
+
   return {
     async start(): Promise<void> {
       if (state.status === 'running') return;
+      // Arm the starvation escape hatch from now, so a phone that only ever sees coarse fixes
+      // starts publishing something within `acceptAnythingAfterMs` instead of never.
+      lastAcceptedAt ??= now();
       setState({ status: 'running', error: null });
     },
 
@@ -172,18 +289,23 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
     },
 
     async ingest(fix: LocationFix, parent?: SpanContext): Promise<SamplingDecision> {
-      const dtMs = lastFixAt === null ? 0 : now() - lastFixAt;
-      const motion = deriveMotion(lastFix, fix, dtMs);
       const batt = await battery();
-      const decision = policy.decide({ motion, battery: batt, live });
+      const decision = policy.decide({ battery: batt, live });
+      const rejection = assessFix(
+        fix,
+        { lastAccepted: lastKnownFix, lastAcceptedAt, now: now() },
+        quality
+      );
 
-      // The policy gate is the FIRST place a captured fix can die; the span says which knob
-      // (motion/battery/live) produced the decision and stamps a drop reason when it gated.
+      // The gate and the slot boundary are the two places a captured fix stops travelling; the span
+      // says which — refused as junk, absorbed into an already-covered slot, or suspended outright.
       const span = getTelemetry().startSpan('engine.ingest', {
         parent,
         attributes: {
-          motion,
           live,
+          'fix.accuracy_m': fix.accuracyM,
+          'fix.age_ms': now() - fix.ts,
+          'fix.rejection': rejection ?? 'none',
           'battery.level': Math.round(batt.level * 100) / 100,
           'battery.charging': batt.charging,
           'battery.low_power': batt.lowPower,
@@ -194,26 +316,48 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
         },
       });
 
-      lastFix = fix;
-      lastFixAt = now();
-      lastMotion = motion;
+      // A rejected fix never becomes our position — but it also never stops the clock. Execution
+      // falls through to the slot logic below, which republishes the last accepted position, so a
+      // stretch of bad GPS is indistinguishable on the wire from a stretch of sitting still.
+      if (rejection === null) {
+        lastKnownFix = fix;
+        lastFixAt = now();
+        lastAcceptedAt = now();
+      }
 
       try {
         if (state.status !== 'running') {
           span.setAttribute('sc.drop_reason', 'engine-not-running');
-          setState({ decision, motion, lastFixAt });
+          setState({
+            decision,
+            lastFixAt,
+            lastAcceptedFix: lastKnownFix,
+            lastRejection: rejection,
+          });
           return decision;
         }
 
-        setState({ decision, motion, lastFixAt });
+        setState({ decision, lastFixAt, lastAcceptedFix: lastKnownFix, lastRejection: rejection });
 
         try {
-          if (decision.active) {
-            await outbox.enqueue(fix, span.context);
-            if (publisher.isReady()) await flush(span.context);
-          } else {
+          if (!decision.active) {
             span.setAttribute('sc.drop_reason', 'sampling-suspended');
+          } else if (live) {
+            // Real-time mode bypasses the slot grid by design: the user has explicitly traded the
+            // uniform cadence for responsiveness, for a bounded window. It does NOT bypass the
+            // confidence gate — a friend watching in real time least of all wants junk.
+            if (rejection === null) await outbox.enqueue(fix, span.context);
+          } else {
+            const published = await enqueueDueSlots(span.context);
+            span.setAttribute('slots_published', published);
+            // Absorbed, not lost: an accepted fix updated lastKnownFix and goes out on the next slot
+            // boundary. Stamped so it is distinguishable from a real drop.
+            if (published === 0) span.setAttribute('sc.drop_reason', 'slot-already-published');
           }
+          // Last word: why this particular fix went nowhere is more useful than the slot state,
+          // which is the ordinary case and says nothing about the fix itself.
+          if (rejection !== null) span.setAttribute('sc.drop_reason', `fix-${rejection}`);
+          if (publisher.isReady()) await flush(span.context);
           const pending = await outbox.pending();
           span.setAttribute('pending', pending);
           setState({ pending });
@@ -229,16 +373,51 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
       }
     },
 
+    async heartbeat(parent?: SpanContext): Promise<number> {
+      // Live mode publishes per fix, so it needs no heartbeat and must not be re-gridded by one.
+      if (state.status !== 'running' || live) return 0;
+      const decision = policy.decide({ battery: await battery(), live });
+      setState({ decision });
+      if (!decision.active) return 0;
+      try {
+        const published = await enqueueDueSlots(parent);
+        if (publisher.isReady()) await flush(parent);
+        setState({ pending: await outbox.pending() });
+        return published;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setState({ status: 'error', error: message });
+        return 0;
+      }
+    },
+
+    async setIntervalMs(intervalMs: number): Promise<SamplingDecision> {
+      policy.setIntervalMs(intervalMs);
+      // Re-anchor to the new grid. Without this, the old slot index is meaningless against the new
+      // interval: shortening it would backfill a burst of slots that never elapsed, and lengthening
+      // it would stall until the old (much larger) index came around again.
+      if (lastPublishedSlot !== null) {
+        lastPublishedSlot = slotOf(now(), policy.config.intervalMs);
+      }
+      const decision = policy.decide({ battery: await battery(), live });
+      setState({ decision });
+      return decision;
+    },
+
     async reevaluate(): Promise<SamplingDecision> {
-      const decision = policy.decide({ motion: lastMotion, battery: await battery(), live });
-      setState({ decision, motion: lastMotion });
+      const decision = policy.decide({ battery: await battery(), live });
+      setState({ decision });
       return decision;
     },
 
     async setLiveMode(on: boolean): Promise<SamplingDecision> {
+      const was = live;
       live = on;
-      const decision = policy.decide({ motion: lastMotion, battery: await battery(), live });
-      setState({ decision, motion: lastMotion });
+      // Leaving live mode re-anchors the grid: while live we published per fix and left
+      // lastPublishedSlot behind, so resuming would otherwise backfill every slot since.
+      if (was && !on) lastPublishedSlot = slotOf(now(), policy.config.intervalMs);
+      const decision = policy.decide({ battery: await battery(), live });
+      setState({ decision });
       return decision;
     },
 

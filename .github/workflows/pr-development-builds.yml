@@ -288,15 +288,14 @@ jobs:
 
   notify:
     name: Notify build thread
+    # Same gate as the build jobs — anything they built gets reported. An author
+    # allowlist here silently dropped reports for PRs that did build (the Copilot
+    # agent reports `Copilot`, not `copilot-swe-agent[bot]`); the fork check is
+    # what actually keeps secrets away from untrusted heads.
     if: >-
       ${{
         always() &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        (github.event.pull_request.user.login == 'Cobular' ||
-          github.event.pull_request.user.login == 'ava-ankenbrandt' ||
-          github.event.pull_request.user.login == 'unrealJune' ||
-          (github.event.pull_request.user.login == 'copilot-swe-agent[bot]' &&
-            startsWith(github.event.pull_request.head.ref, 'copilot/')))
+        github.event.pull_request.head.repo.full_name == github.repository
       }}
     needs:
       - build_ios

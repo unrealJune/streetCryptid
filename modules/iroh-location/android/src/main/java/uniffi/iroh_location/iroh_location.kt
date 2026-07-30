@@ -767,6 +767,12 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_publish_profile(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_push_trail(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_push_trail_inner(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_push_trail_traced(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_read_profile(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_read_trail(
@@ -903,6 +909,12 @@ external fun uniffi_iroh_location_fn_method_locationnode_profile_ticket(`ptr`: L
 external fun uniffi_iroh_location_fn_method_locationnode_prune_trail(`ptr`: Long,`olderThanTs`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_publish_profile(`ptr`: Long,`handle`: RustBuffer.ByValue,`cryptidName`: RustBuffer.ByValue,`sigil`: RustBuffer.ByValue,`color`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_push_trail(`ptr`: Long,`peerTicket`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_push_trail_inner(`ptr`: Long,`peerTicket`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_push_trail_traced(`ptr`: Long,`peerTicket`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_read_profile(`ptr`: Long,`endpointId`: RustBuffer.ByValue,
 ): Long
@@ -1207,6 +1219,15 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_profile() != 57330) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail() != 65355) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail_inner() != 60203) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail_traced() != 27419) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_read_profile() != 28632) {
@@ -2419,6 +2440,25 @@ public interface LocationNodeInterface {
     suspend fun `publishProfile`(`handle`: kotlin.String, `cryptidName`: kotlin.String, `sigil`: kotlin.String, `color`: kotlin.String): kotlin.ULong
     
     /**
+     * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
+     * to finish. **This is what actually gets a published fix off the phone.**
+     *
+     * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
+     * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
+     * and nowhere else. A short-lived headless publish context never called anything that did
+     * that, so its envelopes never reached the stash and an offline friend had nothing to
+     * reconcile from. Call this after draining a batch.
+     *
+     * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
+     * that the live gossip path or a later [`Self::sync_trail`] is broken.
+     */
+    suspend fun `pushTrail`(`peerTicket`: kotlin.String?)
+    
+    suspend fun `pushTrailInner`(`peerTicket`: kotlin.String?, `traceparent`: kotlin.String?)
+    
+    suspend fun `pushTrailTraced`(`peerTicket`: kotlin.String?, `traceparent`: kotlin.String)
+    
+    /**
      * Read the newest verified profile for `endpoint_id` (self or a friend) from the local
      * replica. `None` if absent or not yet replicated.
      */
@@ -3326,6 +3366,85 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_u64(future) },
         // lift function
         { FfiConverterULong.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
+     * to finish. **This is what actually gets a published fix off the phone.**
+     *
+     * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
+     * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
+     * and nowhere else. A short-lived headless publish context never called anything that did
+     * that, so its envelopes never reached the stash and an offline friend had nothing to
+     * reconcile from. Call this after draining a batch.
+     *
+     * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
+     * that the live gossip path or a later [`Self::sync_trail`] is broken.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `pushTrail`(`peerTicket`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_push_trail(
+                uniffiHandle,
+                FfiConverterOptionalString.lower(`peerTicket`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `pushTrailInner`(`peerTicket`: kotlin.String?, `traceparent`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_push_trail_inner(
+                uniffiHandle,
+                FfiConverterOptionalString.lower(`peerTicket`),FfiConverterOptionalString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `pushTrailTraced`(`peerTicket`: kotlin.String?, `traceparent`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_push_trail_traced(
+                uniffiHandle,
+                FfiConverterOptionalString.lower(`peerTicket`),FfiConverterString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
         // Error FFI converter
         LocationException.ErrorHandler,
     )

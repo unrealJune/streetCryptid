@@ -193,6 +193,20 @@ export class IrohLocationNativeModule
     await this.requireNode().sync_trail(sinceTs, peerTicket ?? undefined);
   }
 
+  async pushTrail(peerTicket: string | null, _traceparent?: string | null): Promise<void> {
+    await ensureWasm();
+    const node = this.requireNode();
+    // `web/` is a generated build output (`just build-wasm`); a bundle built before `push_trail`
+    // existed still has `sync_trail`, which reconciles every namespace — including our own — and
+    // so performs the same `start_sync` that gets our entries to the stash, just less directly.
+    const push = (node as { push_trail?: (peerTicket?: string) => Promise<void> }).push_trail;
+    if (typeof push === 'function') {
+      await push.call(node, peerTicket ?? undefined);
+      return;
+    }
+    await node.sync_trail(0, peerTicket ?? undefined);
+  }
+
   async readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]> {
     await ensureWasm();
     return (await this.requireNode().read_trail(author, sinceTs)) as NativeIncomingFix[];

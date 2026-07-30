@@ -14,6 +14,7 @@
         "expo-application": "~57.0.2",
         "expo-background-task": "~57.0.4",
         "expo-battery": "~57.0.1",
+        "expo-better-haptics": "^1.0.2",
         "expo-build-properties": "~57.0.5",
         "expo-clipboard": "~57.0.1",
         "expo-constants": "~57.0.5",
@@ -969,6 +970,8 @@
     "expo-background-task": ["expo-background-task@57.0.5", "", { "dependencies": { "expo-task-manager": "~57.0.5" }, "peerDependencies": { "expo": "*" } }, "sha512-3uT/LDV3fcoZGY9FrzNEmC6xgDiWy03F0g2hBTbcvwIl2hfEPfJVTnCGGEEluPK7Qj14paXmSl6MCFWtWwVCLw=="],
 
     "expo-battery": ["expo-battery@57.0.1", "", { "peerDependencies": { "expo": "*", "react": "*" } }, "sha512-Q8WE1JedCs7XMFGLzShdtnGKC4ETjoV13DWXgN0lyWgicmIXOYN9+VlKm2g/lYzMObMP/r+psbPdnnOJhljZ/A=="],
+
+    "expo-better-haptics": ["expo-better-haptics@1.0.2", "", { "dependencies": { "eslint-config-prettier": "^10.0.2" }, "peerDependencies": { "expo": "*", "react": "*", "react-native": "*" } }, "sha512-uFOQclOiHIdMmC4cvLpLhZAzN1surgrXU2Ugr8ABNbYW7XcQcdNdtX5T3Bab0tbczY37y+jrOXChg5eyNOuauQ=="],
 
     "expo-build-properties": ["expo-build-properties@57.0.6", "", { "dependencies": { "@expo/schema-utils": "^57.0.2", "resolve-from": "^5.0.0", "semver": "^7.6.0" }, "peerDependencies": { "expo": "*" } }, "sha512-/iEpjjBgOc8twOqtaDdVcerBRbZGyOFhhpsBch2IfxNFazbrOIIPXc97s732Fia8HiNkhwaHk3GkBB7zi4WZ3g=="],
 

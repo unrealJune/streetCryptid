@@ -978,6 +978,75 @@ impl LocationNode {
         .await
     }
 
+    /// Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
+    /// to finish. **This is what actually gets a published fix off the phone.**
+    ///
+    /// [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
+    /// solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
+    /// and nowhere else. A short-lived headless publish context never called anything that did
+    /// that, so its envelopes never reached the stash and an offline friend had nothing to
+    /// reconcile from. Call this after draining a batch.
+    ///
+    /// Best-effort by design: a failure means offline delivery is degraded for those fixes, not
+    /// that the live gossip path or a later [`Self::sync_trail`] is broken.
+    pub async fn push_trail(&self, peer_ticket: Option<String>) -> Result<(), LocationError> {
+        self.push_trail_inner(peer_ticket, None).await
+    }
+
+    pub async fn push_trail_traced(
+        &self,
+        peer_ticket: Option<String>,
+        traceparent: String,
+    ) -> Result<(), LocationError> {
+        self.push_trail_inner(peer_ticket, Some(traceparent)).await
+    }
+
+    async fn push_trail_inner(
+        &self,
+        peer_ticket: Option<String>,
+        traceparent: Option<String>,
+    ) -> Result<(), LocationError> {
+        use tracing::Instrument;
+        let span = tracing::info_span!(
+            "trail.push",
+            sc.author = %telemetry::short_hex(&self.author),
+            explicit_peer = peer_ticket.is_some(),
+            entries_sent = tracing::field::Empty,
+            finished = tracing::field::Empty,
+        );
+        telemetry::set_parent(&span, traceparent.as_deref());
+        async move {
+            let guard = self.inner.lock().await;
+            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            let trail = started.trail.clone();
+            let ns = trail.own_namespace();
+            drop(guard);
+
+            let peers = peer_ticket
+                .map(|ticket| {
+                    ticket
+                        .parse::<EndpointTicket>()
+                        .map(|ticket| vec![ticket.endpoint_addr().clone()])
+                        .map_err(|_| LocationError::Decode("bad sync peer endpoint ticket".into()))
+                })
+                .transpose()?
+                .unwrap_or_default();
+
+            let sent = trail.push(ns, peers).await.map_err(|e| {
+                tracing::warn!(error = %e, "trail push failed");
+                LocationError::Network(e.to_string())
+            })?;
+            let current = tracing::Span::current();
+            current.record("finished", sent.is_some());
+            if let Some(sent) = sent {
+                current.record("entries_sent", sent);
+            }
+            Ok(())
+        }
+        .instrument(span)
+        .await
+    }
+
     /// Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >=
     /// since_ts`.
     pub async fn read_trail(

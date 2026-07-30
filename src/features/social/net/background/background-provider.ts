@@ -40,9 +40,18 @@ export class BackgroundLocationProvider implements LocationProvider {
     return toFix(pos);
   }
 
+  /**
+   * Foreground watch. This feeds the map's own-position dot and refreshes the engine's
+   * `lastKnownFix`; it does NOT set the publish rate — the engine's slot gate does, so a fast watch
+   * no longer means fast (and therefore app-state-revealing) publishing.
+   *
+   * Still deliberately calm at 30s. On Android the foreground service keeps this subscription
+   * delivering while backgrounded, so anything tighter burns GPS around the clock to refine a dot
+   * nobody is looking at.
+   */
   async watch(onFix: (fix: LocationFix) => void): Promise<() => void> {
     const sub = await Location.watchPositionAsync(
-      { accuracy: Location.Accuracy.Balanced, distanceInterval: 10, timeInterval: 5000 },
+      { accuracy: Location.Accuracy.Balanced, distanceInterval: 0, timeInterval: 30_000 },
       (pos) => onFix(toFix(pos))
     );
     return () => sub.remove();

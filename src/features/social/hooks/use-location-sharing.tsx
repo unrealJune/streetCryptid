@@ -30,7 +30,6 @@ import { buildTransportReport, type TransportReport } from '@/features/social/ne
 import {
   ensureLocalNetworkPermission,
   ensurePairingPermissions,
-  hasPairingPermissions,
 } from '@/features/social/net/pairing-permissions';
 
 export type LocationRuntimeStatus =
@@ -74,6 +73,8 @@ interface LocationSharingContextValue {
   setStashOptIn(optedIn: boolean): Promise<void>;
   /** Enable or disable one native endpoint transport. */
   setTransportEnabled(transport: keyof TransportPreferences, enabled: boolean): Promise<void>;
+  /** Change how often location is published. One of `SHARE_INTERVAL_OPTIONS_MS`. */
+  setShareInterval(intervalMs: number): Promise<void>;
   /** Capture and publish a fresh GPS fix immediately, bypassing normal sampling. */
   forceLocationPush(trigger?: 'manual' | 'scheduled'): Promise<number>;
   /** Honest, live diagnostic of every transport (for the Settings tab). */
@@ -269,7 +270,20 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
         if (!sharedServiceInit) {
           sharedServiceInit = (async () => {
             await ensureLocalNetworkPermission();
-            bluetoothPermissionGranted.current = await hasPairingPermissions();
+            // REQUEST Bluetooth here (not just check), for two reasons:
+            //
+            // 1. The BLE transport attaches when the native node is CONSTRUCTED, so a grant that
+            //    arrives later leaves BLE detached until an explicit `ensureBleReady()` rebind.
+            //    Asking before `init` means the common path needs no rebind at all.
+            // 2. It breaks a deadlock. The only other prompt lives behind the Bump button, and the
+            //    strip hides that button whenever BLE reports unavailable — which is exactly what
+            //    ungranted permissions cause. A phone that had never been asked could therefore
+            //    never reach the ask, and just showed "Bluetooth is not available on this device
+            //    or build" forever.
+            //
+            // Cheap to repeat: once decided, `requestMultiple` resolves from the stored grant
+            // without showing UI, same as the local-network request above.
+            bluetoothPermissionGranted.current = await ensurePairingPermissions();
             await service.init(
               initialProfile.handle,
               initialProfile.sigil,
@@ -454,6 +468,13 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     },
     [run]
   );
+  const setShareInterval = useCallback(
+    (intervalMs: number) => {
+      setServiceError(null);
+      return run((service) => service.setShareInterval(intervalMs));
+    },
+    [run]
+  );
   const forceLocationPush = useCallback(async (trigger: 'manual' | 'scheduled' = 'manual') => {
     const service = serviceRef.current;
     if (!service) {
@@ -575,6 +596,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       retryLocation,
       setStashOptIn,
       setTransportEnabled,
+      setShareInterval,
       forceLocationPush,
       transportReport,
       acknowledgeDiscoveredFriend,
@@ -606,6 +628,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       retryLocation,
       setStashOptIn,
       setTransportEnabled,
+      setShareInterval,
       forceLocationPush,
       transportReport,
       acknowledgeDiscoveredFriend,
