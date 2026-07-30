@@ -1,5 +1,22 @@
 import ExpoModulesCore
 
+/// One unit of work handed down from JS.
+///
+/// Prompting lives in `src/features/account/core/cryptid-prompt.ts` so prompt strategy can change
+/// without an iOS rebuild (which needs a Mac); this module only executes what it is given and
+/// bounds the output.
+struct GenerationRequest: Record {
+  @Field var instructions: String = ""
+  @Field var prompt: String = ""
+  @Field var seed: Int = 1
+  @Field var candidateCount: Int = 1
+  @Field var maxOutputTokens: Int = 200
+  @Field var temperature: Double = 0.8
+  @Field var maxLines: Int = 8
+  @Field var maxColumns: Int = 32
+  @Field var attempt: Int = 1
+}
+
 #if canImport(FoundationModels)
 import FoundationModels
 
@@ -20,41 +37,6 @@ private struct GeneratedCryptid {
     .maximumCount(8))
   var sigilLines: [String]
 }
-
-@available(iOS 26.0, *)
-private func generationInstructions(tight: Bool) -> String {
-  if tight {
-    return """
-      Draw tiny ASCII cryptid icons. Printable 7-bit ASCII only, no markdown, no commentary.
-      Answer with at most 5 short lines and stop immediately after the last line.
-      """
-  }
-  return """
-    Create compact, original ASCII cryptid profile icons. Keep every silhouette legible in a
-    small monospaced tile. Use only printable 7-bit ASCII and spaces. Never use markdown and never
-    add commentary. Keep names between 1 and 24 characters, use 4 to 8 lines of art, keep every
-    line under 28 columns, and stop as soon as the drawing is complete.
-    """
-}
-
-@available(iOS 26.0, *)
-private func generationPrompt(description: String, seed: Int, tight: Bool) -> String {
-  if tight {
-    return "One tiny cryptid for \"\(description)\". At most 5 lines. Seed \(seed)."
-  }
-  return """
-    Create one cryptid inspired by "\(description)".
-    Use variation seed \(seed) to make this attempt distinct.
-    """
-}
-
-@available(iOS 26.0, *)
-private func generationOptions(seed: Int, tight: Bool) -> GenerationOptions {
-  GenerationOptions(
-    sampling: .random(top: 20, seed: UInt64(max(1, seed))),
-    temperature: tight ? 0.5 : 0.7,
-    maximumResponseTokens: tight ? 180 : 320)
-}
 #endif
 
 private struct GenerationFailure: Error {
@@ -72,6 +54,80 @@ public final class CryptidGeneratorModule: Module {
     if let detail { payload["detail"] = detail }
     sendEvent("onGenerationProgress", payload)
   }
+
+  #if canImport(FoundationModels)
+  /// Draws `candidateCount` independent sketches.
+  ///
+  /// The system model has no candidate parameter, so each sketch is its own short session with its
+  /// own sampling seed. Several small answers cost about the same as one long one and give the JS
+  /// scorer something to choose between, and the per-answer token cap is what keeps every attempt
+  /// inside the context window.
+  @available(iOS 26.0, *)
+  private func draw(_ request: GenerationRequest) async throws -> [[String: String]] {
+    self.emit("checkingModel", attempt: request.attempt)
+    guard SystemLanguageModel.default.isAvailable else {
+      throw Exception(
+        name: "GeneratorUnavailable",
+        description: "The on-device model is unavailable on this phone.")
+    }
+
+    let rounds = min(max(request.candidateCount, 1), 4)
+    let baseSeed = UInt64(max(1, request.seed))
+    var drawings: [[String: String]] = []
+    var lastFailure: GenerationFailure?
+
+    self.emit("preparingModel", attempt: request.attempt)
+    let session = LanguageModelSession(instructions: request.instructions)
+    session.prewarm()
+
+    self.emit("generating", attempt: request.attempt)
+    for index in 0..<rounds {
+      let options = GenerationOptions(
+        sampling: .random(top: 20, seed: baseSeed &+ UInt64(index)),
+        temperature: request.temperature,
+        maximumResponseTokens: request.maxOutputTokens)
+      do {
+        // A fresh session per sketch: the transcript is not wanted here, and carrying it would
+        // grow every later attempt towards the context window for no benefit. Repair feedback
+        // arrives in the prompt instead, built by the JS scorer.
+        let attemptSession = index == 0
+          ? session
+          : LanguageModelSession(instructions: request.instructions)
+        let response = try await attemptSession.respond(
+          to: request.prompt,
+          generating: GeneratedCryptid.self,
+          options: options)
+        let sigil =
+          response.content.sigilLines
+          .prefix(max(1, request.maxLines))
+          .map { $0.replacingOccurrences(of: "\t", with: "  ") }
+          .joined(separator: "\n")
+        if !sigil.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          drawings.append(["name": response.content.name, "sigil": sigil])
+        }
+      } catch let error as LanguageModelSession.GenerationError {
+        lastFailure = describe(error)
+      } catch is CancellationError {
+        throw Exception(name: "GenerationCancelled", description: "Icon generation was cancelled.")
+      } catch {
+        lastFailure = GenerationFailure(
+          name: "GenerationFailed", message: error.localizedDescription)
+      }
+    }
+
+    // One bad draw must not sink the round; only a completely empty round is an error.
+    if drawings.isEmpty {
+      let failure =
+        lastFailure
+        ?? GenerationFailure(
+          name: "GenerationFailed", message: "The on-device model did not return an icon.")
+      throw Exception(name: failure.name, description: failure.message)
+    }
+
+    self.emit("formatting", attempt: request.attempt)
+    return drawings
+  }
+  #endif
 
   public func definition() -> ModuleDefinition {
     Name("CryptidGenerator")
@@ -113,65 +169,39 @@ public final class CryptidGeneratorModule: Module {
       return ["status": "unavailable", "reason": "osTooOld"]
     }
 
+    AsyncFunction("generateCandidates") {
+      (request: GenerationRequest) async throws -> [[String: String]] in
+      #if canImport(FoundationModels)
+      if #available(iOS 26.0, *) {
+        return try await self.draw(request)
+      }
+      #endif
+      throw Exception(
+        name: "GeneratorUnavailable",
+        description: "The on-device model is unavailable on this phone.")
+    }
+
+    // Legacy single-shot entry point, kept so JS that predates the best-of-N bridge still works.
     AsyncFunction("generate") {
       (description: String, seed: Double) async throws -> [String: String] in
       #if canImport(FoundationModels)
       if #available(iOS 26.0, *) {
-        self.emit("checkingModel")
-        guard SystemLanguageModel.default.isAvailable else {
+        var request = GenerationRequest()
+        request.instructions = """
+          Create compact, original ASCII cryptid profile icons. Use only printable 7-bit ASCII and
+          spaces. Never use markdown and never add commentary. Keep names between 1 and 24
+          characters, use 4 to 8 lines of art, and keep every line under 28 columns.
+          """
+        request.prompt = "Create one cryptid inspired by \"\(description)\"."
+        request.seed = Int(seed.magnitude.truncatingRemainder(dividingBy: 2_147_483_647)) + 1
+        request.candidateCount = 1
+        request.temperature = 0.7
+        guard let first = try await self.draw(request).first else {
           throw Exception(
-            name: "GeneratorUnavailable",
-            description: "The on-device model is unavailable on this phone.")
+            name: "GenerationFailed",
+            description: "The on-device model did not return an icon.")
         }
-
-        let normalizedSeed = Int(seed.magnitude.truncatingRemainder(dividingBy: 2_147_483_647)) + 1
-        var lastFailure: GenerationFailure?
-
-        // Attempt 1 is the roomy prompt; attempt 2 is a tighter prompt with a smaller token
-        // budget, which is the recovery path when the model runs away and fills the window.
-        for attempt in 1...2 {
-          let tight = attempt > 1
-          self.emit(
-            "preparingModel",
-            detail: tight ? "Reloading the model for a tighter retry" : nil,
-            attempt: attempt)
-          let session = LanguageModelSession(instructions: generationInstructions(tight: tight))
-          session.prewarm()
-
-          self.emit(
-            "generating",
-            detail: lastFailure.map { "Retrying after: \($0.message)" },
-            attempt: attempt)
-          do {
-            let response = try await session.respond(
-              to: generationPrompt(
-                description: description, seed: normalizedSeed + attempt, tight: tight),
-              generating: GeneratedCryptid.self,
-              options: generationOptions(seed: normalizedSeed + attempt, tight: tight))
-
-            self.emit("formatting", attempt: attempt)
-            let sigil =
-              response.content.sigilLines
-              .prefix(8)
-              .map { $0.replacingOccurrences(of: "\t", with: "  ") }
-              .joined(separator: "\n")
-            return ["name": response.content.name, "sigil": sigil]
-          } catch let error as LanguageModelSession.GenerationError {
-            lastFailure = describe(error)
-          } catch is CancellationError {
-            throw Exception(
-              name: "GenerationCancelled", description: "Icon generation was cancelled.")
-          } catch {
-            lastFailure = GenerationFailure(
-              name: "GenerationFailed", message: error.localizedDescription)
-          }
-        }
-
-        let failure =
-          lastFailure
-          ?? GenerationFailure(
-            name: "GenerationFailed", message: "The on-device model did not return an icon.")
-        throw Exception(name: failure.name, description: failure.message)
+        return first
       }
       #endif
 

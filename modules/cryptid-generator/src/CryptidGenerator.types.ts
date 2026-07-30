@@ -2,11 +2,7 @@ export type CryptidGeneratorAvailability = 'available' | 'downloadable' | 'unava
 
 /** Phases the native side reports while it works towards an icon. */
 export type NativeGenerationPhase =
-  | 'checkingModel'
-  | 'downloadingModel'
-  | 'preparingModel'
-  | 'generating'
-  | 'formatting';
+  'checkingModel' | 'downloadingModel' | 'preparingModel' | 'generating' | 'formatting';
 
 export interface CryptidGenerationProgressEvent {
   phase: NativeGenerationPhase;

@@ -62,7 +62,9 @@ function withCandidates(
   rounds: NativeGeneratedCryptid[][]
 ): FakeGenerator {
   let round = 0;
-  generator.generateCandidates = jest.fn(async () => rounds[Math.min(round++, rounds.length - 1)]);
+  generator.generateCandidates = jest.fn(
+    async (_request: NativeGenerationRequest) => rounds[Math.min(round++, rounds.length - 1)]
+  );
   return generator;
 }
 
@@ -170,9 +172,11 @@ describe('cryptid generation progress', () => {
 
   it('falls back to the offline maker and surfaces why the model failed', async () => {
     const generator = makeGenerator();
-    generator.generateCandidates = jest.fn().mockRejectedValue(
-      new Error('The system model wrote past its context window before finishing the icon.')
-    );
+    generator.generateCandidates = jest
+      .fn()
+      .mockRejectedValue(
+        new Error('The system model wrote past its context window before finishing the icon.')
+      );
     holder.mod = generator;
 
     const phases: CryptidGenerationPhase[] = [];

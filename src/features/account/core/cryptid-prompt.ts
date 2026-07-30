@@ -13,7 +13,13 @@
  */
 
 import { MAX_SIGIL_COLUMNS } from './profile';
-import { ARCHETYPES, exemplarRender, hashString, matchingArchetype, pick } from './cryptid-archetypes';
+import {
+  ARCHETYPES,
+  exemplarRender,
+  hashString,
+  matchingArchetype,
+  pick,
+} from './cryptid-archetypes';
 
 export const MIN_SIGIL_ART_LINES = 4;
 export const MAX_SIGIL_ART_LINES = 8;

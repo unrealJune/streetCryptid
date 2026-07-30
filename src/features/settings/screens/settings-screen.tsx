@@ -15,6 +15,7 @@ import { ProfileOnboardingPreview } from '@/features/account/components/profile-
 
 import { AppProvenanceDetails } from '../components/app-provenance';
 import { AuthorIdRow } from '../components/author-id-row';
+import { CryptidBenchPanel } from '../components/cryptid-bench-panel';
 import { DebugLocationControls } from '../components/debug-location-controls';
 import { EventLogPanel } from '../components/event-log-panel';
 import { IdentityRow } from '../components/identity-row';
@@ -163,6 +164,7 @@ export default function SettingsScreen() {
           onPush={forceLocationPush}
         />
         <ProfileOnboardingPreview accent={chrome.green} />
+        {__DEV__ ? <CryptidBenchPanel accent={chrome.green} /> : null}
         <EventLogPanel activeColor={chrome.green} warningColor={chrome.amber} />
       </View>
 

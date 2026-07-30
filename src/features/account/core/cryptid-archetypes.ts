@@ -135,7 +135,16 @@ export const ARCHETYPES: readonly CryptidArchetype[] = [
 
 export const EYES = ['oo', 'OO', '..', '^^', '**', '++'] as const;
 export const MOUTHS = ['^', '~', '-', 'v', '_'] as const;
-export const PREFIXES = ['Quiet', 'Fog', 'Moss', 'Night', 'Rain', 'Alley', 'Signal', 'Ash'] as const;
+export const PREFIXES = [
+  'Quiet',
+  'Fog',
+  'Moss',
+  'Night',
+  'Rain',
+  'Alley',
+  'Signal',
+  'Ash',
+] as const;
 
 const PREFIX_KEYWORDS: readonly [readonly string[], string][] = [
   [['rain', 'storm', 'wet'], 'Rain'],

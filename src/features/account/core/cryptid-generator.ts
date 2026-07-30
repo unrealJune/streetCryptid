@@ -66,7 +66,10 @@ export function generateLocalCryptid(
 ): GeneratedCryptid {
   const normalizedDescription = normalizeCryptidDescription(description).toLowerCase();
   const rendered = renderLocalCryptid(normalizedDescription, normalizeSeed(seed));
-  const generated = validateGeneratedCryptid({ name: rendered.name, sigil: rendered.sigil }, 'local');
+  const generated = validateGeneratedCryptid(
+    { name: rendered.name, sigil: rendered.sigil },
+    'local'
+  );
   return fallbackReason ? { ...generated, fallbackReason } : generated;
 }
 
@@ -211,7 +214,8 @@ export interface ScoredCandidate {
 
 function scoreCandidate(candidate: NativeGeneratedCryptid): ScoredCandidate {
   const report = scoreSigilShape(candidate?.sigil ?? '');
-  const repeated = report.sigil.length > 0 && RECENT_SIGIL_HASHES.includes(hashString(report.sigil));
+  const repeated =
+    report.sigil.length > 0 && RECENT_SIGIL_HASHES.includes(hashString(report.sigil));
   return {
     name: (candidate?.name ?? '').trim(),
     report,
