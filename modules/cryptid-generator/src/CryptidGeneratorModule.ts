@@ -6,6 +6,7 @@ import type {
   CryptidGeneratorAvailability,
   CryptidGeneratorAvailabilityDetail,
   NativeGeneratedCryptid,
+  NativeGenerationRequest,
 } from './CryptidGenerator.types';
 
 /** Emitted while `generate` runs so the UI can name the current phase. */
@@ -21,6 +22,11 @@ export declare class CryptidGeneratorNativeModule
   /** Optional: only present in builds that ship the detailed availability bridge. */
   availabilityDetail?(): Promise<CryptidGeneratorAvailabilityDetail>;
   generate(description: string, seed: number): Promise<NativeGeneratedCryptid>;
+  /**
+   * Optional: only present in builds that ship the best-of-N bridge. Older binaries fall back to
+   * `generate`, so this must always be feature-detected before use.
+   */
+  generateCandidates?(request: NativeGenerationRequest): Promise<NativeGeneratedCryptid[]>;
 }
 
 let cached: CryptidGeneratorNativeModule | null | undefined;

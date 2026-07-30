@@ -10,4 +10,5 @@ export type {
   CryptidGeneratorAvailabilityDetail,
   NativeGeneratedCryptid,
   NativeGenerationPhase,
+  NativeGenerationRequest,
 } from './src/CryptidGenerator.types';
