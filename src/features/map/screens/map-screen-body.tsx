@@ -84,6 +84,7 @@ export default function MapScreenBody() {
   }
   const selectedEndpoint = selection.selectedId;
   const [explorationEnabled, setExplorationEnabled] = useState(true);
+  const [transitEnabled, setTransitEnabled] = useState(false);
   const [islandTab, setIslandTab] = useState<IslandTab>('me');
   const [profileEndpoint, setProfileEndpoint] = useState<string | null>(null);
   const [locateTarget, setLocateTarget] = useState<{
@@ -297,7 +298,7 @@ export default function MapScreenBody() {
   const mapAccessibilityLabel = readout.placeName
     ? `Map near ${readout.placeName}. ${pct} percent of visible sectors explored. ${
         explorationEnabled ? 'Exploration overlay on.' : 'Exploration overlay off.'
-      } ${locationCopy} ${
+      } ${transitEnabled ? 'Transit overlay on.' : 'Transit overlay off.'} ${locationCopy} ${
         mapFriends.length > 0
           ? `${mapFriends.length} friend${mapFriends.length === 1 ? '' : 's'} on the map: ${friendNames}.`
           : 'No friend locations are available.'
@@ -336,6 +337,7 @@ export default function MapScreenBody() {
         <MapSession
           accessibilityLabel={mapAccessibilityLabel}
           explorationEnabled={explorationEnabled}
+          transitEnabled={transitEnabled}
           key={mapSessionKey}
           onReadout={onReadout}
           initialCenter={initialCenter}
@@ -374,7 +376,9 @@ export default function MapScreenBody() {
           <MapLayersControl
             enabled={explorationEnabled}
             onChange={setExplorationEnabled}
+            onTransitChange={setTransitEnabled}
             theme={theme}
+            transitEnabled={transitEnabled}
           />
           <LocateMeControl
             disabled={!hasLiveSelfFix || !selfFix}
@@ -478,6 +482,7 @@ function MapSession({
   friends,
   selectedFriendId,
   explorationEnabled,
+  transitEnabled,
   onReadout,
   onSelectFriend,
   onSelectSelf,
@@ -493,6 +498,7 @@ function MapSession({
   friends: readonly MapFriendLocation[];
   selectedFriendId: string | null;
   explorationEnabled: boolean;
+  transitEnabled: boolean;
   onReadout(readout: MapReadout): void;
   onSelectFriend(friendId: string): void;
   onSelectSelf(): void;
@@ -506,6 +512,7 @@ function MapSession({
     <MapView
       accessibilityLabel={accessibilityLabel}
       explorationEnabled={explorationEnabled}
+      transitEnabled={transitEnabled}
       onReadout={onReadout}
       initialCenter={sessionCenter}
       locateTarget={locateTarget}

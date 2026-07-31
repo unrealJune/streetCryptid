@@ -50,6 +50,34 @@ export interface StreetWay {
   readonly points: readonly WorldPoint[];
 }
 
+/**
+ * Fixed-rail transit mode, from the OMT `transportation` layer's rail/transit/
+ * ferry classes. Ordered coarse→fine so the numeric code (the index in
+ * {@link TRANSIT_MODES}) is what the packed geometry and the SCG1 buffer carry.
+ *
+ * Buses are deliberately absent: OMT ships physical infrastructure only, so a
+ * bus *route* has no geometry in these tiles (`busway` is a bus lane and stays a
+ * road). Adding them means baking GTFS shapes into the tileset.
+ */
+export const TRANSIT_MODES = [
+  'rail',
+  'subway',
+  'light_rail',
+  'tram',
+  'monorail',
+  'funicular',
+  'ferry',
+] as const;
+
+export type TransitMode = (typeof TRANSIT_MODES)[number];
+
+/** A transit line, rendered as a stroked polyline over the dot field. */
+export interface TransitWay {
+  readonly mode: TransitMode;
+  readonly name?: string;
+  readonly points: readonly WorldPoint[];
+}
+
 /** A river/stream centerline, rendered as a stroked polyline into the water mask. */
 export interface RiverWay {
   readonly points: readonly WorldPoint[];
@@ -78,6 +106,7 @@ export interface Place {
 /** Everything the renderer needs to draw one patch of the world. */
 export interface MapGeometry {
   readonly streets: readonly StreetWay[];
+  readonly transit: readonly TransitWay[];
   readonly rivers: readonly RiverWay[];
   readonly water: readonly AreaFeature[];
   readonly parks: readonly AreaFeature[];
@@ -128,6 +157,8 @@ export interface MapPalette {
   readonly water: readonly RampStop[];
   /** Park ramp, faded→lush. */
   readonly park: readonly RampStop[];
+  /** Transit-line ink — its own accent, never the amber reserved for YOU/frontier. */
+  readonly transit: Rgb;
   /** Hex-lattice / street-label ink. */
   readonly streetLabel: Rgb;
   readonly parkLabel: Rgb;

@@ -26,6 +26,7 @@ interface CacheEntry<Value> {
   readonly region: MapRegion;
   readonly themeKey: unknown;
   readonly explorationEnabled: boolean;
+  readonly transitEnabled: boolean;
   readonly value: Value;
 }
 
@@ -34,11 +35,17 @@ export class RegionRenderCache<Value> {
 
   constructor(private readonly capacity: number) {}
 
-  get(region: MapRegion, themeKey: unknown, explorationEnabled: boolean): Value | undefined {
+  get(
+    region: MapRegion,
+    themeKey: unknown,
+    explorationEnabled: boolean,
+    transitEnabled: boolean
+  ): Value | undefined {
     const index = this.entries.findIndex(
       (entry) =>
         entry.themeKey === themeKey &&
         entry.explorationEnabled === explorationEnabled &&
+        entry.transitEnabled === transitEnabled &&
         sameRegionRenderInput(entry.region, region)
     );
     if (index < 0) return undefined;
@@ -47,8 +54,14 @@ export class RegionRenderCache<Value> {
     return entry.value;
   }
 
-  set(region: MapRegion, themeKey: unknown, explorationEnabled: boolean, value: Value): void {
-    this.entries.push({ region, themeKey, explorationEnabled, value });
+  set(
+    region: MapRegion,
+    themeKey: unknown,
+    explorationEnabled: boolean,
+    transitEnabled: boolean,
+    value: Value
+  ): void {
+    this.entries.push({ region, themeKey, explorationEnabled, transitEnabled, value });
     if (this.entries.length > this.capacity) this.entries.shift();
   }
 }

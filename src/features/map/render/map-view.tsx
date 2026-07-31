@@ -188,6 +188,7 @@ export function MapView({
   friends = [],
   selectedFriendId = null,
   explorationEnabled = true,
+  transitEnabled = false,
   accessibilityLabel,
   onSelectSelf,
   onSelectFriend,
@@ -210,6 +211,7 @@ export function MapView({
   friends?: readonly MapFriendLocation[];
   selectedFriendId?: string | null;
   explorationEnabled?: boolean;
+  transitEnabled?: boolean;
   accessibilityLabel?: string;
   onSelectSelf?: () => void;
   onSelectFriend?: (friendId: string) => void;
@@ -284,7 +286,7 @@ export function MapView({
   const curBundle = useMemo<RegionBundle | null>(() => {
     if (!region) return null;
     const renderExploration = explorationEnabled && region.spec.cellRes !== null;
-    const cached = regionRenderCache.get(region, lutImage, renderExploration);
+    const cached = regionRenderCache.get(region, lutImage, renderExploration, transitEnabled);
     if (cached) {
       const timing: RegionRenderTiming = {
         cacheHit: true,
@@ -319,6 +321,7 @@ export function MapView({
             cellImage,
             lutImage,
             explorationEnabled: renderExploration,
+            transitEnabled,
           })
         : null;
     const rasterMs = measure ? perfNow() - rasterStarted : 0;
@@ -337,10 +340,13 @@ export function MapView({
     });
     const bundle = { region, image, cellImage, timing };
     if (image && cellImage && lutImage) {
-      regionRenderCache.set(region, lutImage, renderExploration, { image, cellImage });
+      regionRenderCache.set(region, lutImage, renderExploration, transitEnabled, {
+        image,
+        cellImage,
+      });
     }
     return bundle;
-  }, [region, theme, lutImage, explorationEnabled, regionRenderCache]);
+  }, [region, theme, lutImage, explorationEnabled, transitEnabled, regionRenderCache]);
 
   const animateProfileCamera = useCallback(
     (

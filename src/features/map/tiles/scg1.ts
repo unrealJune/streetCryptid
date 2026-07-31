@@ -11,7 +11,14 @@
  */
 
 import type { Place } from '../core/types';
-import type { PackedAreas, PackedLines, PackedStreets, PackedTile } from './packed-geometry';
+import type {
+  PackedAreas,
+  PackedLines,
+  PackedStreets,
+  PackedTile,
+  PackedTransit,
+} from './packed-geometry';
+import { EMPTY_PACKED_TRANSIT } from './packed-geometry';
 import { addMapPerfMetric, type MapPerfMetricScope } from '../perf/map-perf';
 
 const SCG1_MAGIC = 0x31474353; // "SCG1" little-endian
@@ -125,6 +132,24 @@ export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null)
   const name = (ref: number): string | undefined => (ref >= 0 ? strings[ref] : undefined);
   const resolveNames = (refs: Int32Array) => Array.from(refs, name);
 
+  // ---- TRANSIT (appended after the string table) --------------------------
+  // Deliberately last so a pre-transit buffer — what an already-installed
+  // native binary emits (and iOS until `just bindgen-ios` runs) — simply ends
+  // here and degrades to "no transit" instead of throwing.
+  const transit = p + 8 <= buf.byteLength ? readTransit() : EMPTY_PACKED_TRANSIT;
+
+  function readTransit(): PackedTransit {
+    const count = u32();
+    const total = u32();
+    const mode = viewU8(count);
+    align4();
+    const nameRef = readI32(count);
+    const pointOff = viewU32(count + 1);
+    align4();
+    const coords = viewF32(total * 2);
+    return { count, mode, names: resolveNames(nameRef), pointOff, coords };
+  }
+
   const streets: PackedStreets = {
     count: sCount,
     roadClass,
@@ -155,6 +180,7 @@ export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null)
     originX,
     originY,
     streets,
+    transit,
     rivers,
     water: toAreas(water),
     parks: toAreas(parks),

@@ -3,7 +3,7 @@ import type { FeatureCollection, Feature, LineString, Polygon, Point } from 'geo
 import geojsonvt from 'geojson-vt';
 import vtpbf from 'vt-pbf';
 
-import { decodeMvtTile, roadClassOf } from '../mvt-mapping';
+import { decodeMvtTile, roadClassOf, transitModeOf } from '../mvt-mapping';
 import { tileWorldRect } from '../tile-math';
 
 // ─── roadClassOf ───────────────────────────────────────────────────────────────
@@ -27,6 +27,33 @@ describe('roadClassOf', () => {
 
   it.each([['rail'], ['ferry'], ['transit'], ['aerialway'], ['']])('%s → null', (omtClass) => {
     expect(roadClassOf(omtClass)).toBeNull();
+  });
+});
+
+// ─── transitModeOf ─────────────────────────────────────────────────────────────
+
+describe('transitModeOf', () => {
+  it.each([
+    ['rail', '', 'rail'],
+    ['rail', 'narrow_gauge', 'rail'],
+    ['rail', 'preserved', 'rail'],
+    ['transit', 'subway', 'subway'],
+    ['rail', 'light_rail', 'light_rail'],
+    ['transit', 'tram', 'tram'],
+    ['rail', 'monorail', 'monorail'],
+    ['transit', 'funicular', 'funicular'],
+    ['ferry', '', 'ferry'],
+  ] as const)('%s/%s → %s', (omtClass, subclass, expected) => {
+    expect(transitModeOf(omtClass, subclass)).toBe(expected);
+  });
+
+  it.each([
+    ['aerialway', 'gondola'],
+    ['motorway', ''],
+    ['minor', ''],
+    ['', ''],
+  ] as const)('%s/%s → null', (omtClass, subclass) => {
+    expect(transitModeOf(omtClass, subclass)).toBeNull();
   });
 });
 
@@ -91,7 +118,7 @@ describe('decodeMvtTile round-trip', () => {
       } satisfies LineString,
       properties: { class: 'motorway', name: 'I-5' },
     },
-    // rail → should be skipped
+    // rail → a transit line, not a street
     {
       type: 'Feature',
       geometry: {
@@ -102,6 +129,30 @@ describe('decodeMvtTile round-trip', () => {
         ],
       } satisfies LineString,
       properties: { class: 'rail' },
+    },
+    // light rail → a transit line with a name
+    {
+      type: 'Feature',
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [LON - d, LAT + d * 0.5],
+          [LON + d, LAT + d * 0.5],
+        ],
+      } satisfies LineString,
+      properties: { class: 'transit', subclass: 'light_rail', name: '1 Line' },
+    },
+    // aerialway → skipped entirely (neither street nor transit)
+    {
+      type: 'Feature',
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [LON - d, LAT + d * 0.7],
+          [LON + d, LAT + d * 0.7],
+        ],
+      } satisfies LineString,
+      properties: { class: 'aerialway', subclass: 'gondola' },
     },
   ];
 
@@ -262,11 +313,19 @@ describe('decodeMvtTile round-trip', () => {
     );
   });
 
-  it('decodes exactly one motorway street named I-5 (rail skipped)', () => {
+  it('decodes exactly one motorway street named I-5 (rail is not a street)', () => {
     const motorways = decoded.streets.filter((s) => s.roadClass === 4);
     expect(motorways).toHaveLength(1);
     expect(motorways[0].name).toBe('I-5');
     expect(motorways[0].roadClass).toBe(4);
+    expect(decoded.streets).toHaveLength(1);
+  });
+
+  it('decodes rail + light rail as transit lines and skips the aerialway', () => {
+    expect(decoded.transit.map((t) => t.mode).sort()).toEqual(['light_rail', 'rail']);
+    const line = decoded.transit.find((t) => t.mode === 'light_rail');
+    expect(line?.name).toBe('1 Line');
+    expect(line?.points.length).toBeGreaterThanOrEqual(2);
   });
 
   it('decodes exactly one river from waterway', () => {
@@ -323,6 +382,7 @@ describe('decodeMvtTile empty tile', () => {
     const emptyBuf = vtpbf.fromGeojsonVt({}, { version: 2 });
     const geom = decodeMvtTile(new Uint8Array(emptyBuf), { z: 14, x: 0, y: 0 });
     expect(geom.streets).toHaveLength(0);
+    expect(geom.transit).toHaveLength(0);
     expect(geom.rivers).toHaveLength(0);
     expect(geom.water).toHaveLength(0);
     expect(geom.parks).toHaveLength(0);

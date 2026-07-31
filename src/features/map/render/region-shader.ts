@@ -6,19 +6,23 @@ import {
   MipmapMode,
   PaintStyle,
   Skia,
+  StrokeCap,
   StrokeJoin,
   TileMode,
   type SkCanvas,
   type SkImage,
+  type SkPaint,
 } from '@shopify/react-native-skia';
 
 import { buildPaletteLut } from '../core/region';
-import type { MapPalette } from '../core/types';
+import type { MapPalette, TransitMode } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
 import { buildCellStateImage } from './cell-state-image';
 import { cellLatticePath, cellRimPath } from './cell-overlay-paths';
 import { getDotFieldEffect } from './dot-field-shader';
 import { buildMaskImage } from './mask-image';
+import { buildTransitPaths } from './transit-paths';
+import { FERRY_DASH, transitWidthFor } from '../core/transit-lod';
 import {
   DOT_FIELD_UNIFORM_FLOATS,
   lodForZoom,
@@ -36,6 +40,21 @@ const LATTICE_WIDTH = 1.0;
 const LATTICE_ALPHA = 0.09;
 const RIM_WIDTH = 1.25;
 const RIM_ALPHA = 0.42;
+
+/**
+ * Transit-line opacity per mode. Rapid transit (subway/light rail/monorail) is
+ * the spine people navigate by, so it reads strongest; heavy rail, trams and
+ * ferries sit back a step so the layer never competes with the dot field.
+ */
+const TRANSIT_ALPHA: Record<TransitMode, number> = {
+  rail: 0.5,
+  subway: 0.82,
+  light_rail: 0.82,
+  tram: 0.58,
+  monorail: 0.72,
+  funicular: 0.58,
+  ferry: 0.5,
+};
 
 /** Wrap a tightly-packed opaque RGBA8888 buffer as an SkImage. */
 function imageFromRgba(data: Uint8Array, width: number, height: number): SkImage | null {
@@ -74,6 +93,8 @@ export interface RegionImageInput {
   readonly reveal?: number;
   /** Show the explored/unexplored fog treatment (default true). */
   readonly explorationEnabled?: boolean;
+  /** Stroke the transit lines over the dot field (default false). */
+  readonly transitEnabled?: boolean;
   /**
    * Resolution multiplier (default 1). Intermediate reveal frames pass < 1 so the
    * heavy 45-tap dot shader rasterizes fewer pixels during the ~320ms wipe; the
@@ -106,6 +127,7 @@ export function renderRegionImage({
   lutImage,
   reveal = 1,
   explorationEnabled = true,
+  transitEnabled = false,
   quality = 1,
 }: RegionImageInput): SkImage | null {
   const effect = getDotFieldEffect();
@@ -159,6 +181,9 @@ export function renderRegionImage({
   if (explorationEnabled) {
     drawCellOverlays(canvas, region, palette, pixelRatio, reveal);
   }
+  if (transitEnabled) {
+    drawTransitLines(canvas, region, palette, pixelRatio, reveal);
+  }
   const recorded = picture.finishRecordingAsPicture();
 
   const image = drawAsImageFromPicture(recorded, { width, height });
@@ -198,7 +223,47 @@ function drawCellOverlays(
   canvas.restore();
 }
 
-function strokePaint(rgb: readonly [number, number, number], width: number, alpha: number) {
+/**
+ * Transit lines over the dot field, in region-logical coords (the canvas scale
+ * maps them to device px). Vectors rather than mask coverage on purpose: the
+ * dot lattice would break a continuous rail line into an unreadable dotted
+ * trail. Fades with `reveal` alongside the cell overlays.
+ */
+function drawTransitLines(
+  canvas: SkCanvas,
+  region: MapRegion,
+  palette: MapPalette,
+  pixelRatio: number,
+  reveal: number
+): void {
+  if (reveal <= 0) return;
+  const paths = buildTransitPaths(region.geometry, region.spec);
+
+  canvas.save();
+  canvas.scale(pixelRatio, pixelRatio);
+  for (const [mode, svg] of Object.entries(paths) as [TransitMode, string][]) {
+    const width = transitWidthFor(mode, region.spec.zoom);
+    if (width === null || !svg) continue;
+    const path = Skia.Path.MakeFromSVGString(svg);
+    if (!path) continue;
+    const paint = strokePaint(palette.transit, width, TRANSIT_ALPHA[mode] * reveal);
+    // Ferries are a route over open water, not track — dash them so they read
+    // as a crossing rather than a rail line.
+    if (mode === 'ferry') {
+      const effect = Skia.PathEffect.MakeDash([FERRY_DASH[0], FERRY_DASH[1]]);
+      if (effect) paint.setPathEffect(effect);
+    }
+    paint.setStrokeCap(StrokeCap.Round);
+    canvas.drawPath(path, paint);
+  }
+  canvas.restore();
+}
+
+function strokePaint(
+  rgb: readonly [number, number, number],
+  width: number,
+  alpha: number
+): SkPaint {
   const paint = Skia.Paint();
   paint.setColor(Skia.Color(`rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`));
   paint.setStyle(PaintStyle.Stroke);

@@ -57,4 +57,45 @@ describe('wrapScg1 parity with the JS decoder', () => {
     const named = js.streets.findIndex((s) => s.name);
     if (named >= 0) expect(native.streets[named].name).toBe(js.streets[named].name);
   });
+
+  it('matches the transit section (modes, counts, coordinates)', () => {
+    expect(js.transit.length).toBeGreaterThan(0);
+    expect(native.transit).toHaveLength(js.transit.length);
+    expect(linePts(native.transit)).toBe(linePts(js.transit));
+    expect(native.transit.map((t) => t.mode)).toEqual(js.transit.map((t) => t.mode));
+    const [nx, ny] = native.transit[0].points[0];
+    const [jx, jy] = js.transit[0].points[0];
+    expect(nx).toBeCloseTo(jx, 5);
+    expect(ny).toBeCloseTo(jy, 5);
+  });
+
+  it('preserves transit line names', () => {
+    const named = js.transit.findIndex((t) => t.name);
+    if (named >= 0) expect(native.transit[named].name).toBe(js.transit[named].name);
+  });
+});
+
+/**
+ * A buffer from an older native binary (an already-installed dev build, or iOS
+ * before `just bindgen-ios`) ends at the string table. The reader must degrade
+ * to "no transit" rather than throw — everything else still decodes.
+ */
+describe('wrapScg1 on a pre-transit buffer', () => {
+  const scg1 = new Uint8Array(readFileSync(join(DIR, 'z10_164_357.scg1')));
+  const full = wrapScg1(scg1);
+  // The transit section is last, so dropping it is a plain truncation: rewind
+  // to the byte where readTransit() started (its coords end the buffer).
+  const transitBytes = 8 + align4(full.transit.count) + full.transit.count * 8 + 4;
+  const truncated = scg1.slice(0, scg1.byteLength - transitBytes - full.transit.coords.length * 4);
+
+  function align4(n: number): number {
+    return (n + 3) & ~3;
+  }
+
+  it('decodes the rest of the tile and reports no transit', () => {
+    const tile = wrapScg1(truncated);
+    expect(tile.transit.count).toBe(0);
+    expect(tile.streets.count).toBe(full.streets.count);
+    expect(tile.places).toHaveLength(full.places.length);
+  });
 });

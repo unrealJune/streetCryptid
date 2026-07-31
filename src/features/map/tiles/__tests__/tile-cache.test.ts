@@ -232,6 +232,7 @@ describe('mergeGeometry', () => {
 
     const g1: PackedGeometry = packGeometry({
       streets: [street],
+      transit: [],
       rivers: [river],
       water: [],
       parks: [area],
@@ -239,6 +240,7 @@ describe('mergeGeometry', () => {
     });
     const g2: PackedGeometry = packGeometry({
       streets: [],
+      transit: [],
       rivers: [],
       water: [area],
       parks: [],

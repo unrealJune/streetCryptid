@@ -21,8 +21,11 @@ import type {
   RiverWay,
   RoadClass,
   StreetWay,
+  TransitMode,
+  TransitWay,
   WorldPoint,
 } from '../core/types';
+import { TRANSIT_MODES } from '../core/types';
 
 /** Struct-of-arrays polylines (streets add road class + names). */
 export interface PackedLines {
@@ -37,6 +40,21 @@ export interface PackedStreets extends PackedLines {
   readonly roadClass: Uint8Array;
   readonly names: readonly (string | undefined)[];
 }
+
+/** Transit polylines: `mode` holds the {@link TRANSIT_MODES} index per feature. */
+export interface PackedTransit extends PackedLines {
+  readonly mode: Uint8Array;
+  readonly names: readonly (string | undefined)[];
+}
+
+/** The empty transit section a pre-transit SCG1 buffer decodes to. */
+export const EMPTY_PACKED_TRANSIT: PackedTransit = {
+  count: 0,
+  mode: new Uint8Array(0),
+  names: [],
+  pointOff: new Uint32Array(1),
+  coords: new Float32Array(0),
+};
 
 /** Struct-of-arrays even-odd fill features (water, parks) with rings. */
 export interface PackedAreas {
@@ -54,6 +72,7 @@ export interface PackedTile {
   readonly originX: number;
   readonly originY: number;
   readonly streets: PackedStreets;
+  readonly transit: PackedTransit;
   readonly rivers: PackedLines;
   readonly water: PackedAreas;
   readonly parks: PackedAreas;
@@ -81,6 +100,7 @@ export function mergePacked(parts: readonly PackedGeometry[]): PackedGeometry {
 export function packedTileToGeometry(tile: PackedTile): PackedGeometry {
   const empty =
     tile.streets.count === 0 &&
+    tile.transit.count === 0 &&
     tile.rivers.count === 0 &&
     tile.water.count === 0 &&
     tile.parks.count === 0 &&
@@ -117,6 +137,29 @@ export function packGeometry(g: MapGeometry): PackedGeometry {
         coords[k++] = y;
       }
     return { count, roadClass, names, pointOff, coords };
+  })();
+
+  const transit = (() => {
+    const count = g.transit.length;
+    const mode = new Uint8Array(count);
+    const names: (string | undefined)[] = new Array(count);
+    const pointOff = new Uint32Array(count + 1);
+    let total = 0;
+    for (let i = 0; i < count; i++) {
+      mode[i] = TRANSIT_MODES.indexOf(g.transit[i].mode);
+      names[i] = g.transit[i].name;
+      pointOff[i] = total;
+      total += g.transit[i].points.length;
+    }
+    pointOff[count] = total;
+    const coords = new Float32Array(total * 2);
+    let k = 0;
+    for (const t of g.transit)
+      for (const [x, y] of t.points) {
+        coords[k++] = x;
+        coords[k++] = y;
+      }
+    return { count, mode, names, pointOff, coords };
   })();
 
   const packLines = (
@@ -175,6 +218,7 @@ export function packGeometry(g: MapGeometry): PackedGeometry {
     originX: 0,
     originY: 0,
     streets,
+    transit,
     rivers: packLines(g.rivers),
     water: packAreas(g.water),
     parks: packAreas(g.parks),
@@ -188,6 +232,11 @@ export function asRoadClass(v: number): RoadClass {
   return (v > 4 ? 4 : v) as RoadClass;
 }
 
+/** Narrow a raw mode byte to the {@link TransitMode} union for callers. */
+export function asTransitMode(v: number): TransitMode {
+  return TRANSIT_MODES[v] ?? 'rail';
+}
+
 /**
  * Materialize a {@link PackedGeometry} back into {@link MapGeometry} (tuples).
  * The inverse of {@link packGeometry} — for tests and diagnostic scripts that
@@ -195,6 +244,7 @@ export function asRoadClass(v: number): RoadClass {
  */
 export function unpackPacked(g: PackedGeometry): MapGeometry {
   const streets: StreetWay[] = [];
+  const transit: TransitWay[] = [];
   const rivers: RiverWay[] = [];
   const water: AreaFeature[] = [];
   const parks: AreaFeature[] = [];
@@ -216,6 +266,14 @@ export function unpackPacked(g: PackedGeometry): MapGeometry {
         points: pts(s.coords, s.pointOff[i], s.pointOff[i + 1]),
       });
     }
+    const t = part.transit;
+    for (let i = 0; i < t.count; i++) {
+      transit.push({
+        mode: asTransitMode(t.mode[i]),
+        name: t.names[i],
+        points: pts(t.coords, t.pointOff[i], t.pointOff[i + 1]),
+      });
+    }
     const r = part.rivers;
     for (let i = 0; i < r.count; i++)
       rivers.push({ points: pts(r.coords, r.pointOff[i], r.pointOff[i + 1]) });
@@ -234,5 +292,5 @@ export function unpackPacked(g: PackedGeometry): MapGeometry {
     }
   }
 
-  return { streets, rivers, water, parks, places: [...g.places] };
+  return { streets, transit, rivers, water, parks, places: [...g.places] };
 }

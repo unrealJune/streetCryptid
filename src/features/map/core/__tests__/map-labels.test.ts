@@ -52,7 +52,7 @@ function park(name: string, sidePx: number, zoom: number, center: WorldPoint): A
 }
 
 function geometry(parts: Partial<MapGeometry>): MapGeometry {
-  return { streets: [], rivers: [], water: [], parks: [], places: [], ...parts };
+  return { streets: [], transit: [], rivers: [], water: [], parks: [], places: [], ...parts };
 }
 
 function labelsAt(zoom: number, parts: Partial<MapGeometry>) {
