@@ -1,15 +1,22 @@
 import { clamp } from './color';
 
-/** Base stroke widths per road class 0–4, logical px — the mock's RW. */
-export const ROAD_WIDTHS = [2.2, 3.0, 4.2, 5.4, 7.0] as const;
+/**
+ * Base stroke widths per road class 0–4, logical px. Deliberately thinner than
+ * a road's real footprint: the dot field samples this mask, so a stroke wide
+ * enough to swallow the gap between two parallel residential streets turns the
+ * whole block into a lit surface (the "grey-out").
+ */
+export const ROAD_WIDTHS = [1.5, 2.0, 2.9, 3.8, 5.0] as const;
 
 /**
  * Below this build zoom, a road class is omitted entirely (declutters city /
  * region / global views). Index = road class 0..4: service/path off below
- * z13.5, residential below z12, secondary/tertiary below z9, primary below z7,
- * motorways always draw (they're the only roads that read at globe zooms).
+ * z15, residential below z13.5, secondary/tertiary below z11, primary below
+ * z8.5, motorways always draw (they're the only roads that read at globe
+ * zooms). Each class leaves before its grid spacing shrinks below its own
+ * stroke width, so the classes below never merge into a solid field.
  */
-export const CLASS_MIN_ZOOM = [13.5, 12.0, 9.0, 7.0, 0] as const;
+export const CLASS_MIN_ZOOM = [15.0, 13.5, 11.0, 8.5, 0] as const;
 
 /**
  * Road class of motorways / trunk roads — the widest, brightest strokes in the
@@ -29,9 +36,13 @@ export function roadClassVisible(roadClass: number, options?: RoadLayerOptions):
   return options?.highways === false ? roadClass !== HIGHWAY_CLASS : true;
 }
 
-/** Global stroke-width multiplier: full detail at z>=14, tapering to 0.6 by z<=11. */
+/**
+ * Global stroke-width multiplier: full detail at z>=15, tapering to 0.4 by
+ * z<=11. Zooming out thins every stroke rather than letting a fixed width eat
+ * the shrinking space between roads.
+ */
 export function roadWidthScale(zoom: number): number {
-  return clamp(0.6 + (0.4 * (zoom - 11)) / 3, 0.6, 1);
+  return clamp(0.4 + (0.6 * (zoom - 11)) / 4, 0.4, 1);
 }
 
 /**
