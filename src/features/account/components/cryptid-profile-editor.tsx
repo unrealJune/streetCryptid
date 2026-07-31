@@ -15,9 +15,10 @@ import { ThemedText } from '@/components/themed-text';
 import { SIGNAL_COLOR_OPTIONS, signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Fonts, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import type { GeneratedCryptid } from '../core/cryptid-generator';
 import {
-  CRYPTID_PRESETS,
   createCryptidProfile,
+  CRYPTID_PRESETS,
   DEFAULT_SIGNAL_COLOR,
   defaultCryptidProfileDraft,
   findCryptidPreset,
@@ -32,7 +33,6 @@ import {
   type CryptidProfile,
   type CryptidProfileDraft,
 } from '../core/profile';
-import type { GeneratedCryptid } from '../core/cryptid-generator';
 import { CryptidAvatar } from './cryptid-avatar';
 import { CryptidGeneratorDialog } from './cryptid-generator-dialog';
 
@@ -305,7 +305,7 @@ export function CryptidProfileEditor({
 
   return (
     <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'position'}
       style={[styles.root, { backgroundColor: theme.background }]}
     >
       <ScrollView
