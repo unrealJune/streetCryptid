@@ -11,11 +11,14 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import kotlin.coroutines.cancellation.CancellationException
 
-// ASCII art tokenizes at roughly one token per punctuation character, so eight lines of drawing
-// plus the name and the format scaffolding needs far more headroom than prose of the same length.
-// Too small a budget truncates the drawing mid-line, which reads as "the model drew garbage".
-private const val MAX_OUTPUT_TOKENS = 384
-private const val TIGHT_OUTPUT_TOKENS = 256
+// ML Kit's prompt API rejects anything outside 1..256 with
+// `IllegalArgumentException: maxOutputTokens must be between 1 and 256`, so 256 is the whole
+// budget we get. ASCII art tokenizes at roughly one token per punctuation character, which is why
+// the roomy prompt asks for at most six lines of 26 characters: a longer drawing would be
+// truncated mid-line by the ceiling, which reads as "the model drew garbage".
+private const val MODEL_MAX_OUTPUT_TOKENS = 256
+private const val MAX_OUTPUT_TOKENS = MODEL_MAX_OUTPUT_TOKENS
+private const val TIGHT_OUTPUT_TOKENS = 192
 
 private const val ART_CHARSET =
   "letters, digits, spaces, and / \\ | _ - ( ) [ ] < > ^ ~ * . , ' \" : ; = + o O @ #"
@@ -61,7 +64,7 @@ private fun generationPrompt(description: String, seed: Int, tight: Boolean): St
     END
 
     Rules:
-    - Between 4 and 8 art lines. Never more than 28 characters on a line.
+    - Between 4 and 6 art lines. Never more than 26 characters on a line.
     - Use only $ART_CHARSET.
     - Write the art literally, one line per line. Do not escape anything.
     - Keep the silhouette legible in a small monospaced profile tile.
@@ -239,16 +242,19 @@ class CryptidGeneratorModule : Module() {
         attempt = attempt,
       )
 
-      val request =
-        generateContentRequest(TextPart(generationPrompt(description, attemptSeed, tight))) {
-          temperature = if (tight) 0.5f else 0.75f
-          topK = 20
-          maxOutputTokens = if (tight) TIGHT_OUTPUT_TOKENS else MAX_OUTPUT_TOKENS
-          this.seed = attemptSeed
-        }
-
       emit("generating", detail = lastError?.message, attempt = attempt)
       try {
+        // Built inside the try: the config builder validates eagerly and throws
+        // IllegalArgumentException, which would otherwise escape past the retry loop.
+        val request =
+          generateContentRequest(TextPart(generationPrompt(description, attemptSeed, tight))) {
+            temperature = if (tight) 0.5f else 0.75f
+            topK = 20
+            maxOutputTokens =
+              (if (tight) TIGHT_OUTPUT_TOKENS else MAX_OUTPUT_TOKENS)
+                .coerceIn(1, MODEL_MAX_OUTPUT_TOKENS)
+            this.seed = attemptSeed
+          }
         generator.warmup()
         val response = generator.generateContent(request)
         emit("formatting", attempt = attempt)
