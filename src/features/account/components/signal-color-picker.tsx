@@ -7,8 +7,10 @@ import {
   SweepGradient,
   vec,
 } from '@shopify/react-native-skia';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
+  KeyboardAvoidingView,
+  Platform,
   StyleSheet,
   View,
   type AccessibilityActionEvent,
@@ -16,7 +18,8 @@ import {
 } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
-import { signalColorInk } from '@/constants/signal-colors';
+import { ThemedTextInput } from '@/components/themed-text-input';
+import { isSignalColor, signalColorInk } from '@/constants/signal-colors';
 import { Fonts, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import {
@@ -46,9 +49,15 @@ function changedHsv(hsv: HsvColor, changes: Partial<HsvColor>): string {
 
 export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
   const theme = useTheme();
+  const normalizedColor = color.toUpperCase();
+  const [hexInput, setHexInput] = useState({ color: normalizedColor, value: normalizedColor });
   const hsv = useMemo(() => hexToHsv(color), [color]);
   const marker = colorWheelPosition(hsv, WHEEL_SIZE);
   const fullBrightnessColor = hsvToHex({ ...hsv, value: 1 });
+
+  if (hexInput.color !== normalizedColor) {
+    setHexInput({ color: normalizedColor, value: normalizedColor });
+  }
 
   const changeWheel = (event: GestureResponderEvent): void => {
     const { locationX, locationY } = event.nativeEvent;
@@ -82,7 +91,10 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
   };
 
   return (
-    <View style={styles.container}>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : 'position'}
+      style={styles.container}
+    >
       <View
         accessibilityActions={[
           { name: 'increment', label: 'Next hue' },
@@ -192,11 +204,32 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
           { backgroundColor: color, borderColor: theme.backgroundSelected },
         ]}
       >
-        <ThemedText type="code" style={[styles.hex, { color: signalColorInk(color) }]}>
-          {color.toUpperCase()}
-        </ThemedText>
+        <ThemedTextInput
+          accessibilityLabel="Signal color hex value"
+          autoCapitalize="characters"
+          autoCorrect={false}
+          maxLength={7}
+          onBlur={() => {
+            if (!isSignalColor(hexInput.value)) {
+              setHexInput({ color: normalizedColor, value: normalizedColor });
+            }
+          }}
+          onChangeText={(value) => {
+            const next = `#${value
+              .replace(/^#/, '')
+              .replace(/[^0-9a-f]/gi, '')
+              .slice(0, 6)}`.toUpperCase();
+            setHexInput({ color: normalizedColor, value: next });
+            if (isSignalColor(next)) onChange(next);
+          }}
+          selectTextOnFocus
+          spellCheck={false}
+          style={[styles.hex, { color: signalColorInk(color) }]}
+          type="code"
+          value={hexInput.value}
+        />
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
