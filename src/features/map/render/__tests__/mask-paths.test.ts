@@ -10,7 +10,14 @@ const { minX, minY, maxX, maxY } = spec.rect;
 const lx = (t: number): number => minX + (maxX - minX) * t;
 const ly = (t: number): number => minY + (maxY - minY) * t;
 
-const EMPTY: MapGeometry = { streets: [], rivers: [], water: [], parks: [], places: [] };
+const EMPTY: MapGeometry = {
+  streets: [],
+  transit: [],
+  rivers: [],
+  water: [],
+  parks: [],
+  places: [],
+};
 
 describe('buildMaskPaths', () => {
   it('returns all-empty strings for empty geometry', () => {

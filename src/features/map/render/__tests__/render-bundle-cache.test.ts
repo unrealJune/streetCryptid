@@ -28,6 +28,7 @@ const changedGeometry = packGeometry({
       ],
     },
   ],
+  transit: [],
   rivers: [],
   water: [],
   parks: [],
@@ -62,14 +63,27 @@ describe('sameRegionRenderInput', () => {
       const second = { ...region, spec: { ...region.spec, zoom: 14 } };
       const third = { ...region, spec: { ...region.spec, zoom: 13 } };
 
-      cache.set(region, theme, true, 'first');
-      cache.set(second, theme, true, 'second');
-      expect(cache.get(region, theme, true)).toBe('first');
-      cache.set(third, theme, true, 'third');
+      cache.set(region, theme, true, false, 'first');
+      cache.set(second, theme, true, false, 'second');
+      expect(cache.get(region, theme, true, false)).toBe('first');
+      cache.set(third, theme, true, false, 'third');
 
-      expect(cache.get(second, theme, true)).toBeUndefined();
-      expect(cache.get(region, theme, true)).toBe('first');
-      expect(cache.get(third, theme, true)).toBe('third');
+      expect(cache.get(second, theme, true, false)).toBeUndefined();
+      expect(cache.get(region, theme, true, false)).toBe('first');
+      expect(cache.get(third, theme, true, false)).toBe('third');
+    });
+
+    it('treats the layer toggles as part of the key', () => {
+      const cache = new RegionRenderCache<string>(2);
+      const theme = {};
+
+      cache.set(region, theme, true, false, 'no-transit');
+      expect(cache.get(region, theme, true, true)).toBeUndefined();
+      expect(cache.get(region, theme, false, false)).toBeUndefined();
+
+      cache.set(region, theme, true, true, 'transit');
+      expect(cache.get(region, theme, true, true)).toBe('transit');
+      expect(cache.get(region, theme, true, false)).toBe('no-transit');
     });
   });
 
