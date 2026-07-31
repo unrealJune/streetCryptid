@@ -57,6 +57,34 @@ describe('buildMaskPaths', () => {
     expect(p.streets[4]).toBe('');
   });
 
+  it('omits highways when the highways layer is off, keeping other classes', () => {
+    const geometry: MapGeometry = {
+      ...EMPTY,
+      streets: [
+        {
+          roadClass: 4,
+          points: [
+            [lx(0.1), ly(0.1)],
+            [lx(0.9), ly(0.1)],
+          ] as WorldPoint[],
+        },
+        {
+          roadClass: 3,
+          points: [
+            [lx(0.1), ly(0.3)],
+            [lx(0.9), ly(0.3)],
+          ] as WorldPoint[],
+        },
+      ],
+    };
+    const packed = packGeometry(geometry);
+    expect(buildMaskPaths(packed, spec).streets[4]).not.toBe('');
+
+    const hidden = buildMaskPaths(packed, spec, { highways: false });
+    expect(hidden.streets[4]).toBe('');
+    expect(hidden.streets[3]).not.toBe('');
+  });
+
   it('closes ring fills with Z (even-odd sub-paths)', () => {
     const ring: WorldPoint[] = [
       [lx(0.2), ly(0.2)],

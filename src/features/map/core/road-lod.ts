@@ -11,6 +11,24 @@ export const ROAD_WIDTHS = [2.2, 3.0, 4.2, 5.4, 7.0] as const;
  */
 export const CLASS_MIN_ZOOM = [13.5, 12.0, 9.0, 7.0, 0] as const;
 
+/**
+ * Road class of motorways / trunk roads — the widest, brightest strokes in the
+ * mask. They read as thick bars across a city view, so the map layers control
+ * lets them be switched off; see {@link RoadLayerOptions}.
+ */
+export const HIGHWAY_CLASS = 4;
+
+/** Per-render road layer switches (user-facing map layer toggles). */
+export interface RoadLayerOptions {
+  /** When false, motorway/trunk roads are omitted from the mask entirely. */
+  readonly highways?: boolean;
+}
+
+/** True when a road class should be drawn at all, given the layer toggles. */
+export function roadClassVisible(roadClass: number, options?: RoadLayerOptions): boolean {
+  return options?.highways === false ? roadClass !== HIGHWAY_CLASS : true;
+}
+
 /** Global stroke-width multiplier: full detail at z>=14, tapering to 0.6 by z<=11. */
 export function roadWidthScale(zoom: number): number {
   return clamp(0.6 + (0.4 * (zoom - 11)) / 3, 0.6, 1);

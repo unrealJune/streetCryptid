@@ -25,7 +25,8 @@ export function sameRegionRenderInput(a: MapRegion, b: MapRegion): boolean {
 interface CacheEntry<Value> {
   readonly region: MapRegion;
   readonly themeKey: unknown;
-  readonly explorationEnabled: boolean;
+  /** Identity of every non-geometry render switch (exploration, map layers…). */
+  readonly layerKey: string;
   readonly value: Value;
 }
 
@@ -34,11 +35,11 @@ export class RegionRenderCache<Value> {
 
   constructor(private readonly capacity: number) {}
 
-  get(region: MapRegion, themeKey: unknown, explorationEnabled: boolean): Value | undefined {
+  get(region: MapRegion, themeKey: unknown, layerKey: string): Value | undefined {
     const index = this.entries.findIndex(
       (entry) =>
         entry.themeKey === themeKey &&
-        entry.explorationEnabled === explorationEnabled &&
+        entry.layerKey === layerKey &&
         sameRegionRenderInput(entry.region, region)
     );
     if (index < 0) return undefined;
@@ -47,8 +48,8 @@ export class RegionRenderCache<Value> {
     return entry.value;
   }
 
-  set(region: MapRegion, themeKey: unknown, explorationEnabled: boolean, value: Value): void {
-    this.entries.push({ region, themeKey, explorationEnabled, value });
+  set(region: MapRegion, themeKey: unknown, layerKey: string, value: Value): void {
+    this.entries.push({ region, themeKey, layerKey, value });
     if (this.entries.length > this.capacity) this.entries.shift();
   }
 }

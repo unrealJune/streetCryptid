@@ -37,6 +37,9 @@ export interface MapLabel {
   readonly world: WorldPoint;
   /** Baseline rotation in radians, clamped to ±90° so text is never upside down. */
   readonly angle: number;
+  /** Road class 0–4 for street labels; undefined for areas. Lets the render
+   *  layer hide a class's chips with its roads (the highways layer toggle). */
+  readonly roadClass?: number;
 }
 
 /**
@@ -122,6 +125,7 @@ export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): Map
       text: candidate.text,
       world: candidate.world,
       angle: candidate.angle,
+      ...(candidate.kind === 'street' ? { roadClass: candidate.priority } : {}),
     });
     return true;
   };

@@ -97,6 +97,19 @@ describe('selectMapLabels — class tiers', () => {
   });
 });
 
+describe('selectMapLabels — road class', () => {
+  it('tags street labels with their road class and leaves areas untagged', () => {
+    const zoom = 15;
+    const found = labelsAt(zoom, {
+      streets: [street({ name: 'Interstate 5', roadClass: 4, lengthPx: 900, zoom })],
+      parks: [park('Volunteer Park', 300, zoom, [0.5, 0.6])],
+    });
+
+    expect(found.find((l) => l.kind === 'street')?.roadClass).toBe(4);
+    expect(found.find((l) => l.kind === 'area')?.roadClass).toBeUndefined();
+  });
+});
+
 describe('selectMapLabels — fit gate', () => {
   it('drops a name longer than the road it sits on', () => {
     const zoom = 15;

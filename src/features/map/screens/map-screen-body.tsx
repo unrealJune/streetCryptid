@@ -21,6 +21,8 @@ import {
   type IslandTab,
   type MapFriendLocation,
   type MapReadout,
+  type MapLayerId,
+  type MapLayerToggles,
   type MapRosterFriend,
   type Rgb,
 } from '@/features/map';
@@ -83,7 +85,11 @@ export default function MapScreenBody() {
     });
   }
   const selectedEndpoint = selection.selectedId;
-  const [explorationEnabled, setExplorationEnabled] = useState(true);
+  const [layers, setLayers] = useState<MapLayerToggles>({ exploration: true, highways: true });
+  const explorationEnabled = layers.exploration;
+  const setLayer = useCallback((layer: MapLayerId, enabled: boolean) => {
+    setLayers((current) => ({ ...current, [layer]: enabled }));
+  }, []);
   const [islandTab, setIslandTab] = useState<IslandTab>('me');
   const [profileEndpoint, setProfileEndpoint] = useState<string | null>(null);
   const [locateTarget, setLocateTarget] = useState<{
@@ -297,7 +303,7 @@ export default function MapScreenBody() {
   const mapAccessibilityLabel = readout.placeName
     ? `Map near ${readout.placeName}. ${pct} percent of visible sectors explored. ${
         explorationEnabled ? 'Exploration overlay on.' : 'Exploration overlay off.'
-      } ${locationCopy} ${
+      } ${layers.highways ? 'Highways shown.' : 'Highways hidden.'} ${locationCopy} ${
         mapFriends.length > 0
           ? `${mapFriends.length} friend${mapFriends.length === 1 ? '' : 's'} on the map: ${friendNames}.`
           : 'No friend locations are available.'
@@ -336,6 +342,7 @@ export default function MapScreenBody() {
         <MapSession
           accessibilityLabel={mapAccessibilityLabel}
           explorationEnabled={explorationEnabled}
+          highwaysEnabled={layers.highways}
           key={mapSessionKey}
           onReadout={onReadout}
           initialCenter={initialCenter}
@@ -371,11 +378,7 @@ export default function MapScreenBody() {
         style={[styles.islandLayer, { paddingBottom: islandBottomPadding }]}
       >
         <View pointerEvents="box-none" style={styles.controls}>
-          <MapLayersControl
-            enabled={explorationEnabled}
-            onChange={setExplorationEnabled}
-            theme={theme}
-          />
+          <MapLayersControl layers={layers} onChange={setLayer} theme={theme} />
           <LocateMeControl
             disabled={!hasLiveSelfFix || !selfFix}
             onPress={locateSelf}
@@ -478,6 +481,7 @@ function MapSession({
   friends,
   selectedFriendId,
   explorationEnabled,
+  highwaysEnabled,
   onReadout,
   onSelectFriend,
   onSelectSelf,
@@ -493,6 +497,7 @@ function MapSession({
   friends: readonly MapFriendLocation[];
   selectedFriendId: string | null;
   explorationEnabled: boolean;
+  highwaysEnabled: boolean;
   onReadout(readout: MapReadout): void;
   onSelectFriend(friendId: string): void;
   onSelectSelf(): void;
@@ -506,6 +511,7 @@ function MapSession({
     <MapView
       accessibilityLabel={accessibilityLabel}
       explorationEnabled={explorationEnabled}
+      highwaysEnabled={highwaysEnabled}
       onReadout={onReadout}
       initialCenter={sessionCenter}
       locateTarget={locateTarget}

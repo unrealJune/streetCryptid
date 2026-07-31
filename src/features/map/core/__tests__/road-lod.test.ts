@@ -1,5 +1,11 @@
 import { ROAD_WIDTHS } from '../masks';
-import { CLASS_MIN_ZOOM, roadWidthFor, roadWidthScale } from '../road-lod';
+import {
+  CLASS_MIN_ZOOM,
+  HIGHWAY_CLASS,
+  roadClassVisible,
+  roadWidthFor,
+  roadWidthScale,
+} from '../road-lod';
 
 describe('roadWidthScale', () => {
   it('is 1.0 at full detail (z >= 14)', () => {
@@ -66,5 +72,22 @@ describe('roadWidthFor', () => {
   it('draws the smallest classes at high zoom (z15)', () => {
     expect(roadWidthFor(0, 15)).toBeCloseTo(ROAD_WIDTHS[0] * roadWidthScale(15), 12);
     expect(roadWidthFor(1, 15)).toBeCloseTo(ROAD_WIDTHS[1] * roadWidthScale(15), 12);
+  });
+});
+
+describe('roadClassVisible', () => {
+  it('shows every class when no layer toggles are given', () => {
+    for (let cls = 0; cls <= HIGHWAY_CLASS; cls++) {
+      expect(roadClassVisible(cls)).toBe(true);
+      expect(roadClassVisible(cls, {})).toBe(true);
+      expect(roadClassVisible(cls, { highways: true })).toBe(true);
+    }
+  });
+
+  it('hides only the highway class when highways are off', () => {
+    for (let cls = 0; cls < HIGHWAY_CLASS; cls++) {
+      expect(roadClassVisible(cls, { highways: false })).toBe(true);
+    }
+    expect(roadClassVisible(HIGHWAY_CLASS, { highways: false })).toBe(false);
   });
 });
