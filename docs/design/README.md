@@ -22,6 +22,8 @@ settings FAB top-right, street/park name labels gated by zoom, and one island ov
 carrying its own ME / FRIENDS segmented bar (the app's only navigation). Only map
 affordances float: layers and locate.
 
+`mock_roads.html` is a **road-width lab** — see [Road width lab](#road-width-lab) below.
+
 `mock_social.html` is the earlier tab-era study (kept for the shared-ground bar and the
 full-screen profile view). `mock_real.html` is the same base map **without** friends.
 
@@ -47,6 +49,34 @@ by eye: a **class tier** (`motorway → residential` each earn a name at a diffe
 a **fit** gate (the name must be shorter than the visible run of the way), and greedy
 **collision** rejection. Compare `zoom=street` (residential names appear) against
 `zoom=hood` (arterials only).
+
+## Road width lab
+
+`mock_roads.html` exists to answer one question: *why does the map go grey at some zooms,
+and which stroke-width policy fixes it?* It renders the same real OSM geography through a
+faithful copy of the shipped pipeline — `core/road-lod.ts` widths/taper/cut-offs,
+`core/masks.ts` brightness ladder, round-capped max-blended strokes from
+`render/mask-image.ts`, and the dot field's `DOT_STEP = 2`, 5-tap `sampleMax` and
+`sv > 28` street test from `render/dot-field-shader.ts` — once per policy per zoom.
+
+Each panel carries a **COV** badge: the share of lattice dots the mask classifies as road.
+That is the grey-out number. Roughly: under 40% reads as streets on ground, ~40–55% reads
+as a dense but legible grid, and over 55% the field has merged into a lit surface.
+
+```
+mock_roads.html?theme=daybreak&data=caphill&zooms=12,13,14,15
+mock_roads.html?theme=deepsea&data=union&zooms=11,12,13,14&tweak=on
+```
+
+| Param   | Values                                      | Default       | Notes                                              |
+| ------- | ------------------------------------------- | ------------- | -------------------------------------------------- |
+| `theme` | `daybreak` · `deepsea` · `nocturne`         | `daybreak`    | Same palettes as the other mocks.                   |
+| `data`  | `caphill` · `union` · `greenlk` · `core`    | `caphill`     | `caphill`/`union` carry all five road classes.      |
+| `zooms` | comma-separated build zooms                  | `12,13,14,15` | One column per zoom. Below z14 panels are magnified nearest-neighbour, never re-scaled. |
+| `tweak` | `off` · `on`                                | `off`         | Adds a live row driven by sliders, with a copy-paste `road-lod.ts` block underneath. |
+
+![road width lab — caphill, light](renders/roads-lab-caphill-light.png)
+![road width lab — lake union, dark](renders/roads-lab-union-dark.png)
 
 ## Renders (`renders/`)
 
@@ -80,6 +110,7 @@ Dark equivalents: `chrome-{1,2}-*-dark.png`, `zoom-*-dark.png`, `social-*-dark.p
 | `mock_chrome.html`         | **Canonical**: the shipped chrome — no tab bar, settings FAB, zoom-gated street labels, one island with a ME / FRIENDS segmented bar and bump pairing. |
 | `mock_social.html`         | Tab-era study: map engine, 4 zoom tiers, 3 themes, social layer, shared-ground bar. |
 | `mock_real.html`           | Base map + zoom, no friends.                                       |
+| `mock_roads.html`          | Road width lab: stroke-width policies × build zooms, with a COV (grey-out) score and live sliders. |
 | `mapdata.js`               | `window.OSMSETS` — baked multi-geography OSM (caphill/greenlk/union/core). |
 | `zoomdata.js`              | `window.OSMZOOM` — baked per-zoom-tier OSM.                        |
 | `build_sets.mjs`           | Regenerates `mapdata.js` (Overpass fetch + transform + relation ring-stitch). |
