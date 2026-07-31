@@ -68,6 +68,19 @@ just env-pull development
 just start
 ```
 
+### Local Android Development
+
+```bash
+# use recommended android studio java (linux)
+# add these to your .*rc file
+export JAVA_HOME=/opt/android-studio/jbr
+export PATH="$JAVA_HOME/bin:$PATH"
+
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+just bindgen-android
+just run-android
+```
+
 ## Common tasks
 
 Run `just` (or `just --list`) to see everything. Highlights:

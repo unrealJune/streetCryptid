@@ -101,19 +101,19 @@ float4 dotAt(float ix, float iy, float2 frag) {
                  maskAt(center + float2(0.0, -o)).r)))) * 255.0;
 
   float3 color; float val; float isArea; int kind;    // 0 street 1 park 2 water 3 bg
-  if (wv > 40.0) {
-    if (n < 0.08 * (1.0 - uLod)) return float4(0.0);   // zoomed out: water fills solid, no holes
-    val = 0.44 + 0.12 * sin(center.y * 0.4 + center.x * 0.2);
-    color = rampLut(0.42 + 0.5 * n, 1.0);
-    isArea = 1.0; kind = 2;
+  if (sv > 28.0) {
+    val = clamp(sv / 255.0, 0.0, 1.0);
+    color = rampLut(val, 0.0);
+    isArea = 0.0; kind = 0;
   } else if (pv > 40.0) {
     val = 0.58 + 0.28 * n;
     color = rampLut(0.48 + 0.5 * n, 2.0);
     isArea = 1.0; kind = 1;
-  } else if (sv > 28.0) {
-    val = clamp(sv / 255.0, 0.0, 1.0);
-    color = rampLut(val, 0.0);
-    isArea = 0.0; kind = 0;
+  } else if (wv > 40.0) {
+    if (n < 0.08 * (1.0 - uLod)) return float4(0.0);   // zoomed out: water fills solid, no holes
+    val = 0.44 + 0.12 * sin(center.y * 0.4 + center.x * 0.2);
+    color = rampLut(0.42 + 0.5 * n, 1.0);
+    isArea = 1.0; kind = 2;
   } else {
     // Background/building noise thins out as you zoom out, so the city field
     // reads calm instead of a wall of dots.
