@@ -11,7 +11,7 @@ import { tileWorldRect } from '../tile-math';
 describe('roadClassOf', () => {
   it.each([
     ['motorway', 4],
-    ['trunk', 4],
+    ['trunk', 3],
     ['primary', 3],
     ['secondary', 2],
     ['tertiary', 2],

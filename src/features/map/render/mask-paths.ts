@@ -42,7 +42,7 @@ export function buildMaskPaths(
   // so skip building their paths entirely — at city zoom that's the majority of
   // streets (service/residential), the bulk of the per-region-swap projection
   // and string cost.
-  // The highways layer toggle drops motorways/trunks the same way — no paths
+  // The highways layer toggle drops motorways the same way — no paths
   // built, so switching them off costs nothing extra to render.
   const classActive = [0, 1, 2, 3, 4].map(
     (cls) => roadWidthFor(cls, spec.zoom) !== null && roadClassVisible(cls, layers)

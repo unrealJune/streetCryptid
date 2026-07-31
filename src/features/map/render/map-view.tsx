@@ -212,7 +212,7 @@ export function MapView({
   friends?: readonly MapFriendLocation[];
   selectedFriendId?: string | null;
   explorationEnabled?: boolean;
-  /** Draw motorways/trunk roads (default true) — the widest strokes on the map. */
+  /** Draw motorways (default true) — the widest strokes on the map. */
   highwaysEnabled?: boolean;
   accessibilityLabel?: string;
   onSelectSelf?: () => void;

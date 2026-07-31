@@ -38,7 +38,7 @@ export interface Viewport {
 
 /**
  * Road class, matching the mock's 0–4 scale: 0 = service/path, 1 = residential,
- * 2 = secondary/tertiary, 3 = primary, 4 = motorway/trunk. Higher classes draw
+ * 2 = secondary/tertiary, 3 = primary/trunk, 4 = motorway. Higher classes draw
  * wider and brighter.
  */
 export type RoadClass = 0 | 1 | 2 | 3 | 4;

@@ -9,7 +9,7 @@ import { Spacing } from '@/constants/theme';
 export interface MapLayerToggles {
   /** The explored/unexplored fog treatment. */
   readonly exploration: boolean;
-  /** Motorways and trunk roads — the widest strokes in the dot field. */
+  /** Motorways — the widest strokes in the dot field. */
   readonly highways: boolean;
 }
 

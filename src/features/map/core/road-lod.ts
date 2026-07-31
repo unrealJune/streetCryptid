@@ -19,15 +19,17 @@ export const ROAD_WIDTHS = [1.5, 2.0, 2.9, 3.8, 5.0] as const;
 export const CLASS_MIN_ZOOM = [15.0, 13.5, 11.0, 8.5, 0] as const;
 
 /**
- * Road class of motorways / trunk roads — the widest, brightest strokes in the
- * mask. They read as thick bars across a city view, so the map layers control
- * lets them be switched off; see {@link RoadLayerOptions}.
+ * Road class of motorways — the widest, brightest strokes in the mask. They
+ * read as thick bars across a city view, so the map layers control lets them be
+ * switched off; see {@link RoadLayerOptions}. Trunk roads are deliberately NOT
+ * in this class (see `tiles/mvt-mapping.ts`): OMT tags ordinary divided city
+ * arterials `trunk`, so they ride with primary.
  */
 export const HIGHWAY_CLASS = 4;
 
 /** Per-render road layer switches (user-facing map layer toggles). */
 export interface RoadLayerOptions {
-  /** When false, motorway/trunk roads are omitted from the mask entirely. */
+  /** When false, motorways are omitted from the mask entirely. */
   readonly highways?: boolean;
 }
 
