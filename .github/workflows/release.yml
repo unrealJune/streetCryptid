@@ -1,9 +1,13 @@
 name: Release
 
 # Every push to `main` that passes CI and carries a releasable commit cuts a version, builds both
-# store archives on GitHub-hosted runners with `eas build --local`, and hands them to EAS Submit
-# (iOS -> TestFlight, Android -> Google Play internal track). No EAS cloud build quota is used;
-# Expo only receives the finished archives and forwards them to the stores.
+# store archives on GitHub-hosted runners with `eas build --local`, and uploads them to the stores
+# from the same runner (iOS -> TestFlight via fastlane pilot, Android -> Google Play internal track
+# via the Play Developer API).
+#
+# Expo's role is limited to the build: no cloud build quota is used, and since submission moved off
+# `eas submit`, no app binary and no store credential passes through Expo at all. The store
+# credentials live in this repository's `production-release` environment.
 
 on:
   # Gated on CI rather than on `push` directly: a release that ships a commit whose tests are red is
@@ -188,12 +192,24 @@ jobs:
       EAS_LOCAL_BUILD_SKIP_CLEANUP: '0'
       EXPO_NO_KEYCHAIN: '1'
     steps:
-      - name: Require Expo token
+      # Checked before a 40-minute build rather than after it: a release that builds and then
+      # cannot be delivered has burned a tag for nothing.
+      - name: Require the build and App Store Connect credentials
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8_BASE64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
         run: |
-          if [[ -z "$EXPO_TOKEN" ]]; then
-            echo "The production-release environment is missing EXPO_TOKEN." >&2
+          set -euo pipefail
+          missing=()
+          for name in EXPO_TOKEN ASC_API_KEY_ID ASC_API_ISSUER_ID ASC_API_KEY_P8_BASE64; do
+            if [[ -z "${!name}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if ((${#missing[@]})); then
+            echo "The production-release environment is missing: ${missing[*]}" >&2
             exit 1
           fi
 
@@ -226,19 +242,27 @@ jobs:
       - name: Verify EAS log isolation
         run: bash scripts/test-eas-ci-log-isolation.sh
 
-      - name: Build locally and submit to App Store Connect
-        id: release
+      - name: Build the store archive locally
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-          SC_WHAT_TO_TEST: ${{ needs.version.outputs.what_to_test }}
         run: |
           set -euo pipefail
           mkdir -p "$EAS_LOCAL_BUILD_ARTIFACTS_DIR" "$EAS_LOCAL_BUILD_WORKINGDIR"
-          bash scripts/eas-local-release-ci.sh \
+          bash scripts/eas-local-build-ci.sh \
             ios \
             production \
-            production \
-            "$BUILD_ARTIFACT"
+            "$BUILD_ARTIFACT" \
+            production-release
+
+      # Straight from this runner to App Store Connect -- the .ipa never goes to Expo.
+      - name: Upload to TestFlight
+        id: release
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8_BASE64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+          SC_WHAT_TO_TEST: ${{ needs.version.outputs.what_to_test }}
+        run: bash scripts/submit-testflight.sh "$BUILD_ARTIFACT"
 
       - name: Save CocoaPods download cache
         if: "!cancelled() && steps.setup.outputs.native-cache-hit != 'true'"
@@ -265,6 +289,13 @@ jobs:
               find "$path" -depth -delete
             fi
           done
+          # The submitters delete their own work directories -- holding the decoded store key --
+          # through an exit trap. This covers the one case a trap cannot: a hard kill.
+          for path in "$RUNNER_TEMP"/testflight.* "$RUNNER_TEMP"/play.*; do
+            if [[ -d "$path" ]]; then
+              find "$path" -depth -delete
+            fi
+          done
           if [[ -n "${BUILD_ARTIFACT:-}" ]]; then
             rm -f -- "$BUILD_ARTIFACT"
           fi
@@ -284,12 +315,22 @@ jobs:
       EAS_BUILD_GIT_COMMIT_HASH: ${{ needs.version.outputs.sha }}
       EAS_LOCAL_BUILD_SKIP_CLEANUP: '0'
     steps:
-      - name: Require Expo token
+      # Checked before a 40-minute build rather than after it: a release that builds and then
+      # cannot be delivered has burned a tag for nothing.
+      - name: Require the build and Google Play credentials
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          PLAY_SERVICE_ACCOUNT_JSON_BASE64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
         run: |
-          if [[ -z "$EXPO_TOKEN" ]]; then
-            echo "The production-release environment is missing EXPO_TOKEN." >&2
+          set -euo pipefail
+          missing=()
+          for name in EXPO_TOKEN PLAY_SERVICE_ACCOUNT_JSON_BASE64; do
+            if [[ -z "${!name}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if ((${#missing[@]})); then
+            echo "The production-release environment is missing: ${missing[*]}" >&2
             exit 1
           fi
 
@@ -322,18 +363,25 @@ jobs:
       - name: Verify EAS log isolation
         run: bash scripts/test-eas-ci-log-isolation.sh
 
-      - name: Build locally and submit to Google Play
-        id: release
+      - name: Build the store bundle locally
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p "$EAS_LOCAL_BUILD_ARTIFACTS_DIR" "$EAS_LOCAL_BUILD_WORKINGDIR"
-          bash scripts/eas-local-release-ci.sh \
+          bash scripts/eas-local-build-ci.sh \
             android \
             production \
-            production \
-            "$BUILD_ARTIFACT"
+            "$BUILD_ARTIFACT" \
+            production-release
+
+      # Straight from this runner to the Play Developer API -- the .aab never goes to Expo.
+      - name: Upload to the Google Play internal track
+        id: release
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON_BASE64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
+          SC_WHAT_TO_TEST: ${{ needs.version.outputs.what_to_test }}
+        run: bash scripts/submit-play.sh "$BUILD_ARTIFACT"
 
       - name: Save Gradle dependency cache
         if: "!cancelled() && steps.setup.outputs.native-cache-hit != 'true'"
@@ -360,6 +408,13 @@ jobs:
               echo "Refusing to clean unexpected path: $path" >&2
               exit 1
             fi
+            if [[ -d "$path" ]]; then
+              find "$path" -depth -delete
+            fi
+          done
+          # The submitters delete their own work directories -- holding the decoded store key --
+          # through an exit trap. This covers the one case a trap cannot: a hard kill.
+          for path in "$RUNNER_TEMP"/testflight.* "$RUNNER_TEMP"/play.*; do
             if [[ -d "$path" ]]; then
               find "$path" -depth -delete
             fi

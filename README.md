@@ -106,7 +106,7 @@ just bindgen-android # rebuild the Android Rust libraries + Kotlin bindings
 just build ios              # EAS build (defaults: android / preview)
 just build android production
 just build-dev             # installable development client
-just submit ios            # submit latest build to the store
+just submit ios app.ipa    # send a built archive to the store (no EAS Submit)
 just update "message"      # publish an OTA update
 ```
 
@@ -157,10 +157,16 @@ Build profiles live in `eas.json`: `development` (dev client), `preview`
 ### Automatic releases
 
 Every push to `main` that passes CI runs `.github/workflows/release.yml`, which cuts a version,
-builds both store archives on GitHub-hosted runners, and submits them — iOS to TestFlight, Android
+builds both store archives on GitHub-hosted runners, and uploads them — iOS to TestFlight, Android
 to the Google Play internal track. Nothing is built on EAS infrastructure: the jobs run `eas build
---local`, so no cloud build quota is consumed, and only the finished archive reaches Expo, where
-`eas submit --path` forwards it to the store.
+--local`, so no cloud build quota is consumed.
+
+Submission does not go through EAS either. The iOS job hands the `.ipa` to App Store Connect with
+`fastlane pilot` (`scripts/submit-testflight.sh`), which also writes the "What to Test" notes once
+Apple finishes processing; the Android job drives the Play Developer API directly with curl and a
+service-account JWT (`scripts/submit-play.sh`). Neither binary and neither store credential passes
+through Expo — the credentials are GitHub environment secrets. `just submit <platform> <artifact>`
+runs the same two scripts by hand.
 
 The release is gated on CI rather than triggered by the push itself: it starts from a successful
 `CI` workflow run and refuses to ship if `main` has moved on since that run, leaving the newer
@@ -192,12 +198,21 @@ A repository administrator must configure the `production-release` GitHub enviro
 first release:
 
 1. Add `EXPO_TOKEN` as an environment secret. Do not add required reviewers unless you want every
-   release to block on a human.
-2. Upload the App Store Connect API key and the Google Play service account key to the project's
-   EAS credentials (`eas credentials`) — EAS Submit reads them from there, so no store credential
-   ever enters GitHub.
-3. Only if a branch protection rule rejects pushes authenticated with `GITHUB_TOKEN`, add a
+   release to block on a human. This is the only Expo credential the pipeline needs: it fetches the
+   signing credentials for `eas build --local`.
+2. Create an App Store Connect API key (Users and Access → Integrations → App Store Connect API,
+   role **App Manager**) and add three environment secrets: `ASC_API_KEY_ID`, `ASC_API_ISSUER_ID`,
+   and `ASC_API_KEY_P8_BASE64` (`base64 < AuthKey_XXXXXXXX.p8`, whitespace does not matter). Apple
+   lets you download the `.p8` exactly once.
+3. Create a Google Cloud service account, grant it access in **Play Console → Users and
+   permissions** with _Release to testing tracks_ on this app, download its JSON key, and add it as
+   `PLAY_SERVICE_ACCOUNT_JSON_BASE64` (`base64 < key.json`). The Play Developer API refuses the
+   first-ever bundle for an app, so the app must already have one release uploaded by hand.
+4. Only if a branch protection rule rejects pushes authenticated with `GITHUB_TOKEN`, add a
    `RELEASE_TOKEN` repository secret that is allowed to push the release commit and tag to `main`.
+
+Both jobs check their credentials before starting the build, so a missing secret fails in seconds
+rather than after forty minutes of compiling.
 
 If a submission fails, the version commit and tag still stand; fix the problem and the next push
 releases the following patch. To reship the same code, dispatch the workflow with an explicit
@@ -263,12 +278,38 @@ release only happens when something ships.
 
 EAS CLI serializes the local build job, including signing credentials, into a base64 child-process
 argument. Debug/error output can therefore be sensitive. The CI wrapper never forwards any
-`eas build` output to GitHub or disk, and it captures `eas upload` and `eas submit` output only in
-memory. Failures emit only a fixed message. The wrapper removes GitHub command-file variables from
-the EAS subprocess environment and allow-lists the single Expo build-page or submission URL written
-to the job output. CI exercises build success, build failure, malformed upload output, submission
-failure, and an off-host submission URL with a fake base64 signing-key sentinel to ensure it cannot
-escape into command output.
+`eas build` output to GitHub or disk, and it removes the GitHub command-file variables from the EAS
+subprocess environment. Failures emit only a fixed message.
+
+The two submitters follow the same rule for the store credentials, in two independent layers.
+
+**Masking.** GitHub scrubs the exact value of every secret it injects, but nothing _derived_ from
+one — a base64 secret decoded back to a PEM, the JWT signed with it, and the access token that JWT
+buys are all different strings that would otherwise print in the clear. Each submitter therefore
+registers those derived values with `::add-mask::` the moment they exist, before anything can print
+them, so the runner scrubs them even out of output the scripts never see. (A PEM is registered a
+line at a time, since `::add-mask::` is line-oriented; that also covers its single-line JSON form,
+because the scrubber matches substrings.)
+
+**Withholding.** On failure the tool's full output is withheld and only a short redacted tail is
+echoed — PEM bodies, long base64-ish runs, and query-string values substituted out — which is
+enough to tell a permissions error from a rejected binary without replaying whatever the tool
+decided to print.
+
+Neither key is ever passed on a command line: the App Store Connect key reaches fastlane through a
+JSON descriptor, and the Google assertion and bearer token reach curl through a file and a config
+file, so nothing lands on a process table readable by the rest of the runner. Each key is decoded
+into a `runner.temp` directory created with `umask 077` and removed by a trap that also fires on
+`INT`/`TERM`, so a cancelled release does not leave one behind; the jobs' `always()` cleanup sweeps
+the same paths in case of a hard kill.
+
+`scripts/test-eas-ci-log-isolation.sh` (`just test-release`) exercises all of it against fake
+`eas`, `fastlane` and `curl` binaries: build success and failure, upload success and failure, a
+malformed distribution response, and a Play API rejection — each with a credential sentinel that
+must appear in the transcript only inside an `::add-mask::` directive, and nowhere else. The fake
+Google token endpoint records the assertion it was actually sent and the test asserts that exact
+value was masked, rather than recomputing the signature and reimplementing the code under test.
+Both fakes reject the call outright if a credential arrives on argv.
 
 ## License
 

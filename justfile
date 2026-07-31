@@ -270,19 +270,36 @@ build-dev platform="android":
 build-prod platform="android":
     bunx eas-cli build --platform {{platform}} --profile production
 
-# Submit the latest build to the store. Example: `just submit ios`.
-submit platform="android":
-    bunx eas-cli submit --platform {{platform}}
+# Send an already-built store archive to the store, over the same EAS-free path CI uses.
+# Example: `just submit ios ./streetcryptid.ipa` / `just submit android ./streetcryptid.aab`.
+# iOS needs ASC_API_KEY_ID, ASC_API_ISSUER_ID and ASC_API_KEY_P8_BASE64 in the environment;
+# Android needs PLAY_SERVICE_ACCOUNT_JSON_BASE64. (The same values CI holds in `production-release`.)
+submit platform="android" artifact="":
+    #!/usr/bin/env sh
+    set -eu
+    if [ -z "{{artifact}}" ]; then
+      echo "Usage: just submit <ios|android> <path to the .ipa/.aab>" >&2
+      exit 2
+    fi
+    case "{{platform}}" in
+      ios) bash scripts/submit-testflight.sh "{{artifact}}" ;;
+      android) bash scripts/submit-play.sh "{{artifact}}" ;;
+      *) echo "Expected platform ios or android." >&2; exit 2 ;;
+    esac
 
-# Build a production binary and auto-submit it (iOS→TestFlight, Android→Play internal track).
+# Build a production binary on EAS and auto-submit it (iOS→TestFlight, Android→Play internal).
 # Example: `just release android` or `just release ios`.
-# CI does this for you on every push to main (see README "Automatic releases"); reach for this
-# only when you need an out-of-band build.
+# CI does this for you on every push to main (see README "Automatic releases"); reach for this only
+# when you need an out-of-band build.
+# NOTE: this is the EAS *cloud* path -- it spends build quota and relies on EAS Submit, which the
+# release pipeline no longer uses. For a local build plus a direct store upload, run
+# `just build-prod <platform>` (or `eas build --local`) and then `just submit <platform> <artifact>`.
 release platform="android":
     bunx eas-cli build --platform {{platform}} --profile production --auto-submit
 
 # Remote-build BOTH iOS and Android and auto-submit each to its internal track
 # (iOS→TestFlight, Android→Google Play internal). One command, one release.
+# Same EAS cloud caveat as `release` above.
 release-all:
     bunx eas-cli build --platform all --profile production --auto-submit
 

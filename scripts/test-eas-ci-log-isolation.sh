@@ -10,8 +10,12 @@
 #      onward only via $GITHUB_OUTPUT (never a plain log line).
 #   3. notify-discord-thread.sh must never print the install URLs, the internal
 #      host, or the Discord webhook; it posts the links only into the thread.
-#   4. eas-local-release-ci.sh must withhold all `eas build`/`eas submit` output
-#      and emit only an allow-listed expo.dev submission URL.
+#   4. submit-testflight.sh must withhold fastlane's output, keep the App Store
+#      Connect API key out of the logs even when the upload fails, and emit only
+#      an allow-listed App Store Connect URL.
+#   5. submit-play.sh must keep the service-account key and the access token it
+#      buys out of the logs, mask the token, and pass the bearer through a curl
+#      config file rather than argv.
 
 set -euo pipefail
 
@@ -381,80 +385,283 @@ if [[ "$(cat "$thread_out")" != "$new_thread" ]]; then
   exit 1
 fi
 
-release_output="$test_root/release-output"
-release_transcript="$(
+# --- 4. submit-testflight.sh withholds fastlane output and the ASC API key ----
+
+asc_key_sentinel='ASC_P8_SENTINEL_9f2c1b7ae4d0'
+asc_key_base64="$(
+  printf -- '-----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----\n' "$asc_key_sentinel" |
+    openssl base64 -A
+)"
+printf 'placeholder ipa\n' > "$test_root/release.ipa"
+
+# Fake pilot: proves the key arrived through a file descriptor rather than argv, then echoes it
+# on both streams the way a verbose fastlane failure would.
+cat > "$test_root/bin/fastlane" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+key_path=''
+prev=''
+for arg in "$@"; do
+  if [[ "$prev" == "--api_key_path" ]]; then
+    key_path="$arg"
+  fi
+  prev="$arg"
+done
+
+if [[ -z "$key_path" || ! -f "$key_path" ]]; then
+  echo "pilot was not given an API key descriptor." >&2
+  exit 30
+fi
+
+cat "$key_path"
+cat "$key_path" >&2
+echo "[!] Could not upload the build: the app record is missing." >&2
+
+if [[ "${FAKE_PILOT_FAIL:-0}" == "1" ]]; then
+  exit 31
+fi
+exit 0
+EOF
+chmod 700 "$test_root/bin/fastlane"
+
+testflight_output="$test_root/testflight-output"
+: > "$testflight_output"
+testflight_transcript="$(
   PATH="$test_root/bin:$PATH" \
-    DEBUG=1 \
-    EAS_DEBUG=1 \
-    EXPO_DEBUG=1 \
-    EXPO_TOKEN=fake-token \
-    FAKE_SIGNING_CREDENTIAL="$sentinel" \
-    SC_WHAT_TO_TEST="release notes" \
-    GITHUB_OUTPUT="$release_output" \
+    GITHUB_ACTIONS=true \
     RUNNER_TEMP="$test_root" \
-    bash "$repo_root/scripts/eas-local-release-ci.sh" \
-    ios production production "$test_root/release.ipa" \
+    GITHUB_OUTPUT="$testflight_output" \
+    ASC_API_KEY_ID=FAKEKEYID01 \
+    ASC_API_ISSUER_ID=11111111-2222-3333-4444-555555555555 \
+    ASC_API_KEY_P8_BASE64="$asc_key_base64" \
+    SC_WHAT_TO_TEST="release notes" \
+    bash "$repo_root/scripts/submit-testflight.sh" "$test_root/release.ipa" \
     2>&1
 )"
 
-if [[ "$release_transcript" == *"$sentinel"* ]]; then
-  echo "The signing credential sentinel escaped from the release submission." >&2
+# The decoded key is derived from a secret, so the runner does not mask it on its own: the script
+# has to register it. Everything downstream -- including the JSON descriptor, which carries the
+# same body lines -- is scrubbed by that registration.
+if [[ "$testflight_transcript" != *"::add-mask::$asc_key_sentinel"* ]]; then
+  echo "submit-testflight.sh did not mask the decoded App Store Connect key." >&2
   exit 1
 fi
-grep -Fxq \
-  'submission_url=https://expo.dev/accounts/streetcryptid/projects/streetCryptid/submissions/abcdef01-2345-6789-abcd-ef0123456789' \
-  "$release_output"
+assert_masked_only "$testflight_transcript" "submit-testflight.sh" "$asc_key_sentinel"
+if ! grep -Fxq \
+  'submission_url=https://appstoreconnect.apple.com/apps/6790192277/testflight/ios' \
+  "$testflight_output"; then
+  echo "submit-testflight.sh did not report the TestFlight URL." >&2
+  exit 1
+fi
 
-submit_failure_output="$test_root/submit-failure-output"
+# The decoded .p8 and the descriptor built around it must not outlive the script.
+if compgen -G "$test_root/testflight.*" >/dev/null; then
+  echo "submit-testflight.sh left the API key on disk." >&2
+  exit 1
+fi
+
 set +e
-submit_failure_transcript="$(
+pilot_failure_transcript="$(
   PATH="$test_root/bin:$PATH" \
-    EXPO_TOKEN=fake-token \
-    FAKE_SIGNING_CREDENTIAL="$sentinel" \
-    FAKE_EAS_FAIL_SUBMIT=1 \
-    GITHUB_OUTPUT="$submit_failure_output" \
+    FAKE_PILOT_FAIL=1 \
+    GITHUB_ACTIONS=true \
     RUNNER_TEMP="$test_root" \
-    bash "$repo_root/scripts/eas-local-release-ci.sh" \
-    android production production "$test_root/submit-failure.aab" \
+    GITHUB_OUTPUT="$testflight_output" \
+    ASC_API_KEY_ID=FAKEKEYID01 \
+    ASC_API_ISSUER_ID=11111111-2222-3333-4444-555555555555 \
+    ASC_API_KEY_P8_BASE64="$asc_key_base64" \
+    bash "$repo_root/scripts/submit-testflight.sh" "$test_root/release.ipa" \
     2>&1
 )"
-submit_failure_status=$?
+pilot_failure_status=$?
 set -e
 
-if [[ "$submit_failure_status" -eq 0 ]]; then
-  echo "The simulated failed EAS submission unexpectedly succeeded." >&2
+if [[ "$pilot_failure_status" -eq 0 ]]; then
+  echo "The simulated failed TestFlight upload unexpectedly succeeded." >&2
   exit 1
 fi
-if [[ "$submit_failure_transcript" == *"$sentinel"* ]]; then
-  echo "The signing credential sentinel escaped from failed submission output." >&2
+# The failure path is the one that prints tool output, so it is the one that has to redact: the
+# key is echoed by the fake pilot on both streams and must still not reach the transcript.
+assert_masked_only "$pilot_failure_transcript" "submit-testflight.sh" "$asc_key_sentinel"
+if [[ "$pilot_failure_transcript" != *"withheld"* ]]; then
+  echo "The failed TestFlight upload did not explain that fastlane output was withheld." >&2
   exit 1
 fi
-if [[ "$submit_failure_transcript" != *"Expo output was withheld"* ]]; then
-  echo "The failed submission did not explain that private output was withheld." >&2
+# ...while still saying enough to act on. A submission that fails with no diagnosis at all is the
+# failure mode this pipeline was rebuilt to get rid of.
+if [[ "$pilot_failure_transcript" != *"Could not upload the build"* ]]; then
+  echo "The failed TestFlight upload reported no actionable diagnostic." >&2
+  exit 1
+fi
+if compgen -G "$test_root/testflight.*" >/dev/null; then
+  echo "submit-testflight.sh left the API key on disk after a failure." >&2
   exit 1
 fi
 
-bad_submit_output="$test_root/bad-submit-output"
-: > "$bad_submit_output"
-bad_submit_transcript="$(
+# --- 5. submit-play.sh hides the service-account key and the token it buys ----
+
+play_key="$test_root/play-key.pem"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$play_key" 2>/dev/null
+# A middle line of the PEM body: unmistakable if any of the key reaches a log.
+play_key_sentinel="$(sed -n '3p' "$play_key")"
+play_token_sentinel='PLAY_TOKEN_SENTINEL_5c8d1e'
+play_service_account="$(
+  jq -n \
+    --arg email 'release-bot@example.iam.gserviceaccount.com' \
+    --rawfile key "$play_key" \
+    '{type: "service_account", client_email: $email, private_key: $key}' |
+    openssl base64 -A
+)"
+printf 'placeholder aab\n' > "$test_root/release.aab"
+
+# Fake Play Developer API. Rejects any authenticated call whose bearer was passed on argv.
+cat > "$test_root/bin/curl" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+url=""
+for a in "\$@"; do url="\$a"; done
+
+case "\$url" in
+  *oauth2.googleapis.com/token*)
+    # Record the assertion exactly as sent, so the test can prove that value was masked. curl
+    # reads it from a file via --data-urlencode "assertion@<path>"; anything else means the
+    # credential was passed on argv.
+    prev=''
+    for a in "\$@"; do
+      case "\$prev" in
+        --data-urlencode)
+          case "\$a" in
+            assertion@*) cat "\${a#assertion@}" > "$test_root/play-assertion" ;;
+            assertion=*) echo "the assertion was passed on argv" >&2; exit 97 ;;
+          esac
+          ;;
+      esac
+      prev="\$a"
+    done
+    printf '{"access_token":"$play_token_sentinel","expires_in":3600}\n200'
+    exit 0
+    ;;
+esac
+
+case " \$* " in
+  *" --config "*) ;;
+  *)
+    echo "a Play API call carried its bearer outside the curl config" >&2
+    exit 98
+    ;;
+esac
+
+case "\$url" in
+  */edits)
+    if [[ "\${FAKE_PLAY_FAIL_EDIT:-0}" == "1" ]]; then
+      printf '{"error":{"status":"PERMISSION_DENIED","code":403,"message":"The caller does not have permission"}}\n403'
+      exit 0
+    fi
+    printf '{"id":"edit-1"}\n200'
+    exit 0
+    ;;
+  *bundles?uploadType=media)
+    printf '{"versionCode":4242}\n200'
+    exit 0
+    ;;
+  */tracks/internal)
+    printf '{"track":"internal"}\n200'
+    exit 0
+    ;;
+  *:commit)
+    printf '{"id":"edit-1"}\n200'
+    exit 0
+    ;;
+  */edits/*)
+    printf '\n204'
+    exit 0
+    ;;
+esac
+echo "unexpected curl invocation: \$url" >&2
+exit 99
+EOF
+chmod 700 "$test_root/bin/curl"
+
+play_transcript="$(
   PATH="$test_root/bin:$PATH" \
-    EXPO_TOKEN=fake-token \
-    FAKE_SIGNING_CREDENTIAL="$sentinel" \
-    FAKE_EAS_BAD_SUBMIT_URL=1 \
-    GITHUB_OUTPUT="$bad_submit_output" \
+    GITHUB_ACTIONS=true \
     RUNNER_TEMP="$test_root" \
-    bash "$repo_root/scripts/eas-local-release-ci.sh" \
-    android production production "$test_root/bad-submit.aab" \
+    PLAY_SERVICE_ACCOUNT_JSON_BASE64="$play_service_account" \
+    SC_WHAT_TO_TEST="release notes" \
+    bash "$repo_root/scripts/submit-play.sh" "$test_root/release.aab" \
     2>&1
 )"
 
-if [[ "$bad_submit_transcript" == *"$sentinel"* ]]; then
-  echo "The signing credential sentinel escaped from an off-host submission URL." >&2
+# Both the decoded key and the token it buys are derived from a secret, so the runner does not mask
+# either on its own -- the script has to register both.
+if [[ "$play_transcript" != *"::add-mask::$play_key_sentinel"* ]]; then
+  echo "submit-play.sh did not mask the decoded service-account key." >&2
   exit 1
 fi
-if grep -q 'submission_url=' "$bad_submit_output"; then
-  echo "A submission URL outside expo.dev reached the job output." >&2
+if [[ "$play_transcript" != *"::add-mask::$play_token_sentinel"* ]]; then
+  echo "submit-play.sh did not mask the Google Play access token." >&2
+  exit 1
+fi
+assert_masked_only "$play_transcript" "submit-play.sh" "$play_token_sentinel" "$play_key_sentinel"
+if [[ "$play_transcript" != *"version code 4242"* ]]; then
+  echo "submit-play.sh did not report the uploaded version code." >&2
+  exit 1
+fi
+if compgen -G "$test_root/play.*" >/dev/null; then
+  echo "submit-play.sh left the service-account key on disk." >&2
   exit 1
 fi
 
-echo "CI log isolation withheld signing credentials on the build and submit paths and masked the internal host, install URLs, and Discord webhook."
+# The signed assertion is a bearer credential in its own right for the next hour, so it has to be
+# masked like the token it buys. Its signature depends on the generated key, so rather than
+# recomputing it here -- which would reimplement the code under test -- the fake token endpoint
+# recorded the assertion it was actually sent, and that exact value must have been registered.
+if [[ ! -s "$test_root/play-assertion" ]]; then
+  echo "The fake Google token endpoint never received a signed assertion." >&2
+  exit 1
+fi
+play_assertion_signature="$(cut -d. -f3 < "$test_root/play-assertion")"
+if [[ -z "$play_assertion_signature" ]]; then
+  echo "submit-play.sh sent an unsigned assertion to the token endpoint." >&2
+  exit 1
+fi
+if [[ "$play_transcript" != *"::add-mask::$play_assertion_signature"* ]]; then
+  echo "submit-play.sh did not mask the signed service-account assertion." >&2
+  exit 1
+fi
+
+set +e
+play_failure_transcript="$(
+  PATH="$test_root/bin:$PATH" \
+    GITHUB_ACTIONS=true \
+    FAKE_PLAY_FAIL_EDIT=1 \
+    RUNNER_TEMP="$test_root" \
+    PLAY_SERVICE_ACCOUNT_JSON_BASE64="$play_service_account" \
+    bash "$repo_root/scripts/submit-play.sh" "$test_root/release.aab" \
+    2>&1
+)"
+play_failure_status=$?
+set -e
+
+if [[ "$play_failure_status" -eq 0 ]]; then
+  echo "The simulated failed Google Play upload unexpectedly succeeded." >&2
+  exit 1
+fi
+assert_masked_only "$play_failure_transcript" "submit-play.sh" \
+  "$play_token_sentinel" "$play_key_sentinel"
+if [[ "$play_failure_transcript" != *"withheld"* ]]; then
+  echo "The failed Google Play upload did not explain that API output was withheld." >&2
+  exit 1
+fi
+if [[ "$play_failure_transcript" != *"PERMISSION_DENIED"* ]]; then
+  echo "The failed Google Play upload reported no actionable diagnostic." >&2
+  exit 1
+fi
+if compgen -G "$test_root/play.*" >/dev/null; then
+  echo "submit-play.sh left the service-account key on disk after a failure." >&2
+  exit 1
+fi
+
+echo "CI log isolation withheld signing credentials on the build path, kept the store credentials out of both submitters, and masked the internal host, install URLs, and Discord webhook."
