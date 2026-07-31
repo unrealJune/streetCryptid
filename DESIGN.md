@@ -46,6 +46,7 @@ frontier rim on acquired territory, and as the fallback for YOU before a profile
 | street ramp (unexplored→explored)                    | light `[176,190,200]` → dark navy `[20,44,64]` |
 | water (shallow→deep)                                 | `[150,192,224]` → `[30,104,170]`               |
 | park (faded→lush)                                    | `[158,200,168]` → `[34,128,80]`                |
+| transit lines (off by default)                       | `[124,74,176]`                                 |
 
 On the pale bg, **explored streets render dark** ("blueprint console"); unexplored
 drains toward the paper.
@@ -75,6 +76,12 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
 - **Flip-dot halftone on `<canvas>`:** a fine dot field (step `S≈2.0`). Each dot is
   colored by feature (teal ramp = street, blue = water, green = park) and sized /
   brightened by road class. **The dot field _is_ the city.**
+- **Transit is line work, not dots.** Rail / subway / light rail / tram / monorail /
+  funicular / ferry come out of the same tiles and are stroked as vectors over the dot
+  field in their own ink (never the amber, which stays reserved for YOU and the frontier
+  rim) — the lattice would break a continuous line into an unreadable dotted trail.
+  Ferries dash. Off by default; the layers control turns it on. Buses are absent because
+  the tileset carries infrastructure, not routes.
 - **Real geometry:** OpenStreetMap (Overpass) streets / parks / water, multi-geography
   and multi-zoom, baked into `docs/design/mapdata.js` + `zoomdata.js`.
 - **Fog = hex-sector reveal (default).** A background ping "acquires" the whole hex you're

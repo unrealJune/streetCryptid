@@ -85,7 +85,11 @@ export default function MapScreenBody() {
     });
   }
   const selectedEndpoint = selection.selectedId;
-  const [layers, setLayers] = useState<MapLayerToggles>({ exploration: true, highways: true });
+  const [layers, setLayers] = useState<MapLayerToggles>({
+    exploration: true,
+    highways: true,
+    transit: false,
+  });
   const explorationEnabled = layers.exploration;
   const setLayer = useCallback((layer: MapLayerId, enabled: boolean) => {
     setLayers((current) => ({ ...current, [layer]: enabled }));
@@ -303,7 +307,9 @@ export default function MapScreenBody() {
   const mapAccessibilityLabel = readout.placeName
     ? `Map near ${readout.placeName}. ${pct} percent of visible sectors explored. ${
         explorationEnabled ? 'Exploration overlay on.' : 'Exploration overlay off.'
-      } ${layers.highways ? 'Highways shown.' : 'Highways hidden.'} ${locationCopy} ${
+      } ${layers.highways ? 'Highways shown.' : 'Highways hidden.'} ${
+        layers.transit ? 'Transit overlay on.' : 'Transit overlay off.'
+      } ${locationCopy} ${
         mapFriends.length > 0
           ? `${mapFriends.length} friend${mapFriends.length === 1 ? '' : 's'} on the map: ${friendNames}.`
           : 'No friend locations are available.'
@@ -343,6 +349,7 @@ export default function MapScreenBody() {
           accessibilityLabel={mapAccessibilityLabel}
           explorationEnabled={explorationEnabled}
           highwaysEnabled={layers.highways}
+          transitEnabled={layers.transit}
           key={mapSessionKey}
           onReadout={onReadout}
           initialCenter={initialCenter}
@@ -482,6 +489,7 @@ function MapSession({
   selectedFriendId,
   explorationEnabled,
   highwaysEnabled,
+  transitEnabled,
   onReadout,
   onSelectFriend,
   onSelectSelf,
@@ -498,6 +506,7 @@ function MapSession({
   selectedFriendId: string | null;
   explorationEnabled: boolean;
   highwaysEnabled: boolean;
+  transitEnabled: boolean;
   onReadout(readout: MapReadout): void;
   onSelectFriend(friendId: string): void;
   onSelectSelf(): void;
@@ -512,6 +521,7 @@ function MapSession({
       accessibilityLabel={accessibilityLabel}
       explorationEnabled={explorationEnabled}
       highwaysEnabled={highwaysEnabled}
+      transitEnabled={transitEnabled}
       onReadout={onReadout}
       initialCenter={sessionCenter}
       locateTarget={locateTarget}

@@ -25,6 +25,7 @@ const palette: MapPalette = {
     { t: 0, rgb: [0, 0, 0] },
     { t: 1, rgb: [0, 255, 0] },
   ],
+  transit: [120, 80, 200],
   streetLabel: [40, 80, 120],
   parkLabel: [0, 0, 0],
 };

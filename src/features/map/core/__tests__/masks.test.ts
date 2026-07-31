@@ -15,7 +15,7 @@ const zoom = Math.log2(1000 / 256); // scaleFor(zoom) === 1000
 const camera: CameraState = { center: [0.5, 0.5], zoom };
 
 function emptyGeo(): MapGeometry {
-  return { streets: [], rivers: [], water: [], parks: [], places: [] };
+  return { streets: [], transit: [], rivers: [], water: [], parks: [], places: [] };
 }
 
 /** Project a world point to verify expected screen coordinates in tests. */

@@ -15,6 +15,8 @@ import type {
   RiverWay,
   RoadClass,
   StreetWay,
+  TransitMode,
+  TransitWay,
   WorldPoint,
 } from '../core/types';
 import type { TileCoord } from './tile-math';
@@ -51,6 +53,36 @@ export function roadClassOf(omtClass: string): RoadClass | null {
   }
 }
 
+/**
+ * OMT `transportation.class`/`subclass` → a transit mode, for the lines
+ * `roadClassOf` rejects. `class` is the coarse bucket (`rail` for heavy rail,
+ * `transit` for urban rail, `ferry` for boats); `subclass` carries the OSM
+ * railway/route value. Anything that isn't rail-or-boat (roads, aerialways)
+ * returns null.
+ *
+ * Mirrored exactly by `transit_mode_of` in
+ * `modules/iroh-location/rust/src/mvt.rs` — change both together.
+ */
+export function transitModeOf(omtClass: string, subclass: string): TransitMode | null {
+  if (omtClass === 'ferry') return 'ferry';
+  if (omtClass !== 'rail' && omtClass !== 'transit') return null;
+  switch (subclass) {
+    case 'subway':
+      return 'subway';
+    case 'light_rail':
+      return 'light_rail';
+    case 'tram':
+      return 'tram';
+    case 'monorail':
+      return 'monorail';
+    case 'funicular':
+      return 'funicular';
+    default:
+      // rail / narrow_gauge / preserved / service / missing: heavy rail.
+      return 'rail';
+  }
+}
+
 /** Landcover/landuse classes that read as parkland in the dot field. */
 const PARK_LANDCOVER = new Set(['grass', 'wood']);
 const PARK_LANDUSE = new Set(['cemetery', 'grass', 'recreation_ground', 'stadium', 'pitch']);
@@ -65,6 +97,7 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
   const spanY = rect.maxY - rect.minY;
 
   const streets: StreetWay[] = [];
+  const transit: TransitWay[] = [];
   const rivers: RiverWay[] = [];
   const water: AreaFeature[] = [];
   const parks: AreaFeature[] = [];
@@ -86,9 +119,17 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
 
   eachFeature('transportation', (f, layer) => {
     if (f.type !== GEOM_LINE) return;
-    const roadClass = roadClassOf(String(f.properties.class ?? ''));
-    if (roadClass === null) return;
+    const omtClass = String(f.properties.class ?? '');
     const name = typeof f.properties.name === 'string' ? f.properties.name : undefined;
+    const roadClass = roadClassOf(omtClass);
+    if (roadClass === null) {
+      const mode = transitModeOf(omtClass, String(f.properties.subclass ?? ''));
+      if (mode === null) return;
+      for (const points of lines(layer, f)) {
+        if (points.length >= 2) transit.push({ mode, name, points });
+      }
+      return;
+    }
     for (const points of lines(layer, f)) {
       if (points.length >= 2) streets.push({ roadClass, name, points });
     }
@@ -138,5 +179,5 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
     });
   });
 
-  return { streets, rivers, water, parks, places };
+  return { streets, transit, rivers, water, parks, places };
 }

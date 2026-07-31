@@ -11,6 +11,8 @@ export interface MapLayerToggles {
   readonly exploration: boolean;
   /** Motorways — the widest strokes in the dot field. */
   readonly highways: boolean;
+  /** Rail / tram / subway / ferry lines drawn over the dot field. */
+  readonly transit: boolean;
 }
 
 export type MapLayerId = keyof MapLayerToggles;
@@ -24,6 +26,7 @@ interface MapLayersControlProps {
 const LAYERS: { readonly id: MapLayerId; readonly title: string }[] = [
   { id: 'exploration', title: 'Exploration' },
   { id: 'highways', title: 'Highways' },
+  { id: 'transit', title: 'Transit' },
 ];
 
 /** A compact map-layer control that expands in place instead of opening a modal. */
@@ -40,47 +43,15 @@ export function MapLayersControl({ layers, theme, onChange }: MapLayersControlPr
           off-screen behind the island. */}
       {expanded ? (
         <View style={styles.panel}>
-          {LAYERS.map((layer) => {
-            const enabled = layers[layer.id];
-            return (
-              // The whole row is the checkbox target — the label needs no separate
-              // hit area, and one self-evident title replaces title + description.
-              <Pressable
-                accessibilityLabel={`${layer.title} layer`}
-                accessibilityRole="checkbox"
-                accessibilityState={{ checked: enabled }}
-                key={layer.id}
-                onPress={() => onChange(layer.id, !enabled)}
-                style={({ pressed }) => [
-                  styles.row,
-                  {
-                    backgroundColor: chrome.island,
-                    borderColor: chrome.islandBorder,
-                    opacity: pressed ? 0.68 : 1,
-                  },
-                ]}
-              >
-                <Text style={[styles.title, { color: chrome.ink }]}>{layer.title}</Text>
-                <View
-                  style={[
-                    styles.checkbox,
-                    {
-                      backgroundColor: enabled ? chrome.amber : 'transparent',
-                      borderColor: enabled ? chrome.amber : chrome.steel,
-                    },
-                  ]}
-                >
-                  {enabled ? (
-                    <SymbolView
-                      name={{ ios: 'checkmark', android: 'check', web: 'check' }}
-                      size={13}
-                      tintColor={chrome.island}
-                    />
-                  ) : null}
-                </View>
-              </Pressable>
-            );
-          })}
+          {LAYERS.map((layer) => (
+            <LayerToggle
+              checked={layers[layer.id]}
+              key={layer.id}
+              label={layer.title}
+              onChange={(enabled) => onChange(layer.id, enabled)}
+              theme={theme}
+            />
+          ))}
         </View>
       ) : null}
 
@@ -105,6 +76,59 @@ export function MapLayersControl({ layers, theme, onChange }: MapLayersControlPr
         />
       </Pressable>
     </View>
+  );
+}
+
+/**
+ * One layer row. The whole row is the checkbox target — the label needs no
+ * separate hit area, and one self-evident title replaces a title + description.
+ */
+function LayerToggle({
+  checked,
+  label,
+  onChange,
+  theme,
+}: {
+  readonly checked: boolean;
+  readonly label: string;
+  readonly theme: CryptidTheme;
+  onChange(enabled: boolean): void;
+}) {
+  const { chrome } = theme;
+  return (
+    <Pressable
+      accessibilityLabel={`${label} layer`}
+      accessibilityRole="checkbox"
+      accessibilityState={{ checked }}
+      onPress={() => onChange(!checked)}
+      style={({ pressed }) => [
+        styles.row,
+        {
+          backgroundColor: chrome.island,
+          borderColor: chrome.islandBorder,
+          opacity: pressed ? 0.68 : 1,
+        },
+      ]}
+    >
+      <Text style={[styles.title, { color: chrome.ink }]}>{label}</Text>
+      <View
+        style={[
+          styles.checkbox,
+          {
+            backgroundColor: checked ? chrome.amber : 'transparent',
+            borderColor: checked ? chrome.amber : chrome.steel,
+          },
+        ]}
+      >
+        {checked ? (
+          <SymbolView
+            name={{ ios: 'checkmark', android: 'check', web: 'check' }}
+            size={13}
+            tintColor={chrome.island}
+          />
+        ) : null}
+      </View>
+    </Pressable>
   );
 }
 

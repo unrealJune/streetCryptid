@@ -166,6 +166,7 @@ describe('packMaskTexture', () => {
       water: [],
       parks: [],
       places: [],
+      transit: [],
     };
     const spec = computeRegionSpec(camera, viewport, { dataZooms, pad: 0.25 });
     const { camera: maskCam, viewport: maskVp } = regionMaskCamera(spec);

@@ -28,6 +28,7 @@ const changedGeometry = packGeometry({
       ],
     },
   ],
+  transit: [],
   rivers: [],
   water: [],
   parks: [],
@@ -62,23 +63,27 @@ describe('sameRegionRenderInput', () => {
       const second = { ...region, spec: { ...region.spec, zoom: 14 } };
       const third = { ...region, spec: { ...region.spec, zoom: 13 } };
 
-      cache.set(region, theme, 'xh', 'first');
-      cache.set(second, theme, 'xh', 'second');
-      expect(cache.get(region, theme, 'xh')).toBe('first');
-      cache.set(third, theme, 'xh', 'third');
+      cache.set(region, theme, 'xh-', 'first');
+      cache.set(second, theme, 'xh-', 'second');
+      expect(cache.get(region, theme, 'xh-')).toBe('first');
+      cache.set(third, theme, 'xh-', 'third');
 
-      expect(cache.get(second, theme, 'xh')).toBeUndefined();
-      expect(cache.get(region, theme, 'xh')).toBe('first');
-      expect(cache.get(third, theme, 'xh')).toBe('third');
+      expect(cache.get(second, theme, 'xh-')).toBeUndefined();
+      expect(cache.get(region, theme, 'xh-')).toBe('first');
+      expect(cache.get(third, theme, 'xh-')).toBe('third');
     });
 
     it('treats a different layer key as a different entry', () => {
       const cache = new RegionRenderCache<string>(2);
       const theme = {};
 
-      cache.set(region, theme, 'xh', 'highways on');
-      expect(cache.get(region, theme, 'x-')).toBeUndefined();
-      expect(cache.get(region, theme, 'xh')).toBe('highways on');
+      cache.set(region, theme, 'xh-', 'no transit');
+      expect(cache.get(region, theme, 'xht')).toBeUndefined();
+      expect(cache.get(region, theme, 'x--')).toBeUndefined();
+
+      cache.set(region, theme, 'xht', 'transit');
+      expect(cache.get(region, theme, 'xht')).toBe('transit');
+      expect(cache.get(region, theme, 'xh-')).toBe('no transit');
     });
   });
 

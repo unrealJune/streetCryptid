@@ -39,7 +39,17 @@
 //! -- places --  count u32, nameRef[count] i32, kindRef[count] i32, rank[count] i32 (-1 absent),
 //!               x[count] f32, y[count] f32
 //! -- string table --  count u32, then per string: len u32 + utf8 bytes (pad→4 after each)
+//! -- transit (stroked polylines; APPENDED AFTER the string table) --
+//!   count u32, totalPoints u32
+//!   mode[count]       u8   (index into TRANSIT_MODES in core/types.ts)  (pad→4)
+//!   nameRef[count]    i32  (-1 = none)
+//!   pointOff[count+1] u32
+//!   coords[2*totalPoints] f32  (dx,dy)
 //! ```
+//! Transit is last on purpose: a JS reader that knows about it can detect the
+//! section by "there are bytes left", so buffers from an older native binary
+//! (an installed dev build, or iOS before `just bindgen-ios`) still parse and
+//! simply carry no transit lines.
 //! An "areas section" (rings grouped per feature): count u32, totalRings u32,
 //! totalPoints u32, nameRef[count] i32, ringOff[count+1] u32, pointOff[totalRings+1]
 //! u32, coords[2*totalPoints] f32.
@@ -163,6 +173,28 @@ fn road_class_of(class: &str) -> Option<u8> {
     }
 }
 
+/// OMT `transportation.class`/`subclass` → transit mode code (index into
+/// `TRANSIT_MODES` in `src/features/map/core/types.ts`), for the lines
+/// `road_class_of` rejects. Mirrors `transitModeOf` in mvt-mapping.ts exactly.
+fn transit_mode_of(class: &str, subclass: &str) -> Option<u8> {
+    match class {
+        "ferry" => Some(TRANSIT_FERRY),
+        "rail" | "transit" => Some(match subclass {
+            "subway" => 1,
+            "light_rail" => 2,
+            "tram" => 3,
+            "monorail" => 4,
+            "funicular" => 5,
+            // rail / narrow_gauge / preserved / service / missing: heavy rail.
+            _ => 0,
+        }),
+        _ => None,
+    }
+}
+
+/// `TRANSIT_MODES` index of 'ferry' (the list's last entry).
+const TRANSIT_FERRY: u8 = 6;
+
 fn is_park_landcover(class: &str) -> bool {
     matches!(class, "grass" | "wood")
 }
@@ -180,6 +212,7 @@ fn is_park_landuse(class: &str) -> bool {
 #[derive(Default)]
 struct Geometry {
     streets: Vec<Street>,
+    transit: Vec<Transit>,
     rivers: Vec<Line>,
     water: Vec<Area>,
     parks: Vec<Area>,
@@ -189,6 +222,11 @@ struct Geometry {
 
 struct Street {
     road_class: u8,
+    name: i32,
+    points: Vec<[f32; 2]>,
+}
+struct Transit {
+    mode: u8,
     name: i32,
     points: Vec<[f32; 2]>,
 }
@@ -520,9 +558,22 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                 if f.geom_type != GEOM_LINE {
                     continue;
                 }
-                let class = layer.prop(f, "class").and_then(|v| v.as_str()).unwrap_or("");
-                let Some(rc) = road_class_of(class) else {
-                    continue;
+                let class = layer
+                    .prop(f, "class")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let road_class = road_class_of(class);
+                let mode = if road_class.is_none() {
+                    let subclass = layer
+                        .prop(f, "subclass")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    match transit_mode_of(class, subclass) {
+                        Some(m) => Some(m),
+                        None => continue,
+                    }
+                } else {
+                    None
                 };
                 let name = layer
                     .prop(f, "name")
@@ -530,12 +581,21 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                     .map(|s| geo.strings.intern(s))
                     .unwrap_or(-1);
                 for line in decode_geometry(&f.geometry, proj) {
-                    if line.len() >= 2 {
-                        geo.streets.push(Street {
+                    if line.len() < 2 {
+                        continue;
+                    }
+                    match (road_class, mode) {
+                        (Some(rc), _) => geo.streets.push(Street {
                             road_class: rc,
                             name,
                             points: line,
-                        });
+                        }),
+                        (None, Some(m)) => geo.transit.push(Transit {
+                            mode: m,
+                            name,
+                            points: line,
+                        }),
+                        (None, None) => {}
                     }
                 }
             }
@@ -573,7 +633,10 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
         "landcover" => {
             for f in &layer.features {
                 if f.geom_type == GEOM_POLYGON {
-                    let class = layer.prop(f, "class").and_then(|v| v.as_str()).unwrap_or("");
+                    let class = layer
+                        .prop(f, "class")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     if is_park_landcover(class) {
                         push_park(layer, f, proj, geo);
                     }
@@ -583,7 +646,10 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
         "landuse" => {
             for f in &layer.features {
                 if f.geom_type == GEOM_POLYGON {
-                    let class = layer.prop(f, "class").and_then(|v| v.as_str()).unwrap_or("");
+                    let class = layer
+                        .prop(f, "class")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     if is_park_landuse(class) {
                         push_park(layer, f, proj, geo);
                     }
@@ -603,7 +669,10 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                     continue;
                 };
                 let name_ref = geo.strings.intern(name);
-                let kind = layer.prop(f, "class").and_then(|v| v.as_str()).unwrap_or("");
+                let kind = layer
+                    .prop(f, "class")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let kind_ref = geo.strings.intern(kind);
                 let rank = layer
                     .prop(f, "rank")
@@ -806,6 +875,33 @@ fn encode(geo: &Geometry, origin: (f64, f64)) -> Vec<u8> {
         w.align4();
     }
 
+    // transit ----------------------------------------------------------------
+    // After the string table (name refs are already resolvable) so older JS
+    // readers stop at the table and newer ones detect this by trailing bytes.
+    let transit_pts: u32 = geo.transit.iter().map(|t| t.points.len() as u32).sum();
+    w.u32(geo.transit.len() as u32);
+    w.u32(transit_pts);
+    for t in &geo.transit {
+        w.u8(t.mode);
+    }
+    w.align4();
+    for t in &geo.transit {
+        w.i32(t.name);
+    }
+    let mut acc = 0u32;
+    for t in &geo.transit {
+        w.u32(acc);
+        acc += t.points.len() as u32;
+    }
+    w.u32(acc); // count+1
+    w.align4();
+    for t in &geo.transit {
+        for p in &t.points {
+            w.f32(p[0]);
+            w.f32(p[1]);
+        }
+    }
+
     w.buf
 }
 
@@ -969,7 +1065,12 @@ mod tests {
     }
 
     /// Build a one-layer tile with a set of features. Each feature: (geom_type, tags, geometry).
-    fn build_layer(name: &str, keys: &[&str], values: &[Vec<u8>], feats: &[(u64, Vec<u32>, Vec<u32>)]) -> Vec<u8> {
+    fn build_layer(
+        name: &str,
+        keys: &[&str],
+        values: &[Vec<u8>],
+        feats: &[(u64, Vec<u32>, Vec<u32>)],
+    ) -> Vec<u8> {
         let mut layer = Vec::new();
         tagged_varint(&mut layer, 15, 2); // version
         tagged_bytes(&mut layer, 1, name.as_bytes());
@@ -1031,7 +1132,11 @@ mod tests {
             "transportation",
             &["class", "name"],
             &[value_str("primary"), value_str("Main St")],
-            &[(GEOM_LINE, vec![0, 0, 1, 1], geom_cmds(&[(0, 0), (100, 200)], false))],
+            &[(
+                GEOM_LINE,
+                vec![0, 0, 1, 1],
+                geom_cmds(&[(0, 0), (100, 200)], false),
+            )],
         );
         let mut geo = Geometry::default();
         let o = tile_min(14, 100, 200);
@@ -1049,13 +1154,56 @@ mod tests {
         let layer = build_layer(
             "transportation",
             &["class"],
-            &[value_str("rail")],
+            &[value_str("aerialway")],
             &[(GEOM_LINE, vec![0, 0], geom_cmds(&[(0, 0), (10, 10)], false))],
         );
         let mut geo = Geometry::default();
         let o = tile_min(14, 0, 0);
         decode_tile_into(&layer, 14, 0, 0, (o.0, o.1), &mut geo);
         assert_eq!(geo.streets.len(), 0);
+        assert_eq!(geo.transit.len(), 0);
+    }
+
+    #[test]
+    fn transit_mode_mapping_matches_ts() {
+        assert_eq!(transit_mode_of("rail", ""), Some(0));
+        assert_eq!(transit_mode_of("rail", "narrow_gauge"), Some(0));
+        assert_eq!(transit_mode_of("transit", "subway"), Some(1));
+        assert_eq!(transit_mode_of("rail", "light_rail"), Some(2));
+        assert_eq!(transit_mode_of("transit", "tram"), Some(3));
+        assert_eq!(transit_mode_of("rail", "monorail"), Some(4));
+        assert_eq!(transit_mode_of("transit", "funicular"), Some(5));
+        assert_eq!(transit_mode_of("ferry", ""), Some(TRANSIT_FERRY));
+        assert_eq!(transit_mode_of("aerialway", "gondola"), None);
+        assert_eq!(transit_mode_of("motorway", ""), None);
+        assert_eq!(transit_mode_of("", ""), None);
+    }
+
+    #[test]
+    fn decodes_transit_lines_out_of_the_transportation_layer() {
+        // keys: class(0), subclass(1), name(2)
+        let layer = build_layer(
+            "transportation",
+            &["class", "subclass", "name"],
+            &[
+                value_str("transit"),
+                value_str("light_rail"),
+                value_str("1 Line"),
+            ],
+            &[(
+                GEOM_LINE,
+                vec![0, 0, 1, 1, 2, 2],
+                geom_cmds(&[(0, 0), (100, 200)], false),
+            )],
+        );
+        let mut geo = Geometry::default();
+        let o = tile_min(14, 100, 200);
+        decode_tile_into(&layer, 14, 100, 200, (o.0, o.1), &mut geo);
+        assert_eq!(geo.streets.len(), 0);
+        assert_eq!(geo.transit.len(), 1);
+        assert_eq!(geo.transit[0].mode, 2);
+        assert_eq!(geo.transit[0].points.len(), 2);
+        assert_eq!(geo.strings.list[geo.transit[0].name as usize], "1 Line");
     }
 
     #[test]
@@ -1064,7 +1212,11 @@ mod tests {
             "water",
             &[],
             &[],
-            &[(GEOM_POLYGON, vec![], geom_cmds(&[(0, 0), (100, 0), (100, 100), (0, 100)], true))],
+            &[(
+                GEOM_POLYGON,
+                vec![],
+                geom_cmds(&[(0, 0), (100, 0), (100, 100), (0, 100)], true),
+            )],
         );
         let mut geo = Geometry::default();
         let o = tile_min(10, 5, 6);
@@ -1125,6 +1277,9 @@ mod tests {
         assert_eq!(geo.parks.len(), 108, "parks");
         assert_eq!(park_pts, 9000, "parkPts");
         assert_eq!(geo.places.len(), 94, "places");
+        // Transit rides the same layer the roads come from; the JS decoder's
+        // counts for this tile are asserted in scg1.test.ts / mvt-mapping.test.ts.
+        assert!(!geo.transit.is_empty(), "transit");
 
         // first street: roadClass 4, world coord matches JS to f32 precision
         assert_eq!(geo.streets[0].road_class, 4);
@@ -1158,11 +1313,18 @@ mod tests {
             "transportation",
             &["class"],
             &[value_str("motorway")],
-            &[(GEOM_LINE, vec![0, 0], geom_cmds(&[(0, 0), (50, 50), (100, 0)], false))],
+            &[(
+                GEOM_LINE,
+                vec![0, 0],
+                geom_cmds(&[(0, 0), (50, 50), (100, 0)], false),
+            )],
         );
         let buf = decode_tile(&layer, 12, 1, 1);
         // magic
-        assert_eq!(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]), SCG1_MAGIC);
+        assert_eq!(
+            u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]),
+            SCG1_MAGIC
+        );
         // origin at bytes 4..20 (after align4, magic already 4-aligned)
         let ox = f64::from_le_bytes(buf[4..12].try_into().unwrap());
         let (tox, _, _) = tile_min(12, 1, 1);

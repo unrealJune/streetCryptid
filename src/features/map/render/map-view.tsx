@@ -190,6 +190,7 @@ export function MapView({
   selectedFriendId = null,
   explorationEnabled = true,
   highwaysEnabled = true,
+  transitEnabled = false,
   accessibilityLabel,
   onSelectSelf,
   onSelectFriend,
@@ -214,6 +215,7 @@ export function MapView({
   explorationEnabled?: boolean;
   /** Draw motorways (default true) — the widest strokes on the map. */
   highwaysEnabled?: boolean;
+  transitEnabled?: boolean;
   accessibilityLabel?: string;
   onSelectSelf?: () => void;
   onSelectFriend?: (friendId: string) => void;
@@ -288,7 +290,9 @@ export function MapView({
   const curBundle = useMemo<RegionBundle | null>(() => {
     if (!region) return null;
     const renderExploration = explorationEnabled && region.spec.cellRes !== null;
-    const layerKey = `${renderExploration ? 'x' : '-'}${highwaysEnabled ? 'h' : '-'}`;
+    const layerKey = `${renderExploration ? 'x' : '-'}${highwaysEnabled ? 'h' : '-'}${
+      transitEnabled ? 't' : '-'
+    }`;
     const cached = regionRenderCache.get(region, lutImage, layerKey);
     if (cached) {
       const timing: RegionRenderTiming = {
@@ -324,6 +328,7 @@ export function MapView({
             cellImage,
             lutImage,
             explorationEnabled: renderExploration,
+            transitEnabled,
           })
         : null;
     const rasterMs = measure ? perfNow() - rasterStarted : 0;
@@ -345,7 +350,15 @@ export function MapView({
       regionRenderCache.set(region, lutImage, layerKey, { image, cellImage });
     }
     return bundle;
-  }, [region, theme, lutImage, explorationEnabled, highwaysEnabled, regionRenderCache]);
+  }, [
+    region,
+    theme,
+    lutImage,
+    explorationEnabled,
+    highwaysEnabled,
+    transitEnabled,
+    regionRenderCache,
+  ]);
 
   // Highway name chips belong to highway geometry: hiding one hides the other.
   const visibleLabels = useMemo(

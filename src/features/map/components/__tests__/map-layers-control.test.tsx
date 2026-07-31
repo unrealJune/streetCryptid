@@ -9,7 +9,7 @@ jest.mock('expo-symbols', () => ({
 }));
 jest.mock('@/global.css', () => ({}));
 
-const layers = { exploration: true, highways: true };
+const layers = { exploration: true, highways: true, transit: false };
 
 describe('MapLayersControl', () => {
   let renderer: ReactTestRenderer;
@@ -18,7 +18,9 @@ describe('MapLayersControl', () => {
     act(() => renderer?.unmount());
   });
 
-  const expand = (onChange: (layer: 'exploration' | 'highways', enabled: boolean) => void) => {
+  const expand = (
+    onChange: (layer: 'exploration' | 'highways' | 'transit', enabled: boolean) => void
+  ) => {
     act(() => {
       renderer = create(
         <MapLayersControl layers={layers} onChange={onChange} theme={CryptidThemes.daybreak} />
@@ -56,5 +58,16 @@ describe('MapLayersControl', () => {
       renderer.root.findByProps({ accessibilityLabel: 'Exploration layer' }).props.onPress()
     );
     expect(onChange).toHaveBeenCalledWith('exploration', false);
+  });
+
+  it('toggles the transit layer on', () => {
+    const onChange = jest.fn();
+    expand(onChange);
+
+    const row = renderer.root.findByProps({ accessibilityLabel: 'Transit layer' });
+    expect(row.props.accessibilityState).toEqual({ checked: false });
+
+    act(() => row.props.onPress());
+    expect(onChange).toHaveBeenCalledWith('transit', true);
   });
 });
