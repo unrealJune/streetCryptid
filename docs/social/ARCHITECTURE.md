@@ -368,6 +368,14 @@ each human action latches that side's signed Accept
   index-stable.
 - New pair links contain only a random invite id/secret, endpoint id, endpoint ticket, version, and
   expiry. Mutable profile data and docs capabilities travel over the authenticated iroh channel.
+- An invite is the only pairing path that routinely spans two networks, so the ticket it carries
+  must be dialable off-LAN. `Endpoint::addr()` reports the relay only once the home-relay handshake
+  has completed, and a link is minted or redeemed right after a cold start (tapping it launches the
+  app), so both `create_invite` and the invite-based handshake wait — briefly and with a bound — for
+  a relay address before they snapshot or dial one. Nearby pairs never wait: BLE and mDNS resolve
+  the peer without a relay. Invite-path dials (both handshake rounds and the outbound decision) get
+  one bounded retry, since a cold relay path routinely drops the first attempt and every round is
+  idempotent for the peer.
 - Legacy `streetcryptid://contact?…` cards remain importable as one-way contacts.
 
 Profiles use a dedicated, single-writer iroh-docs namespace separate from the rolling trail:

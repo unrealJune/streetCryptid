@@ -53,6 +53,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -122,6 +123,24 @@ const SAS_ACCEPTED_GRACE_MS: u64 = 10_000;
 /// Preferred minimum index separation between shuffled picker options — a best-effort visual
 /// spread that never overrides uniqueness/correctness.
 const SAS_MIN_SEPARATION: u16 = 8;
+
+/// Bounded wait for the endpoint's home-relay handshake before an *invite* ticket is minted or
+/// dialed.
+///
+/// [`Endpoint::addr`] only reports the relay once that handshake has completed, so a ticket
+/// snapshotted moments after `start()` carries nothing but private LAN addresses. That is fine for
+/// the nearby paths (BLE and mDNS resolve the peer themselves) but leaves an invite link with no
+/// route at all between two phones on different networks — which is exactly when a link is used,
+/// and the app mints/redeems one right after a cold start (tapping the link launches it). Waiting
+/// here is bounded so a genuinely offline or relay-less device still proceeds on its other
+/// transports instead of hanging.
+const ENDPOINT_ONLINE_WAIT_MS: u64 = 5_000;
+
+/// Dial attempts per invite-based handshake round, and the pause between them. Kept small so two
+/// rounds still fit comfortably inside [`PAIR_HANDSHAKE_TIMEOUT_MS`]. Nearby rounds are not
+/// retried: their peer is in the room, and a retry would only stretch the Bump window.
+const PAIR_INVITE_DIAL_ATTEMPTS: u32 = 2;
+const PAIR_DIAL_RETRY_DELAY_MS: u64 = 1_000;
 
 /// Opaque token prefix for an encoded invite.
 const INVITE_PREFIX: &str = "scpair1:";
@@ -1403,6 +1422,11 @@ impl PairCore {
         let mut secret = [0u8; INVITE_SECRET_LEN];
         OsRng.fill_bytes(&mut invite_id);
         OsRng.fill_bytes(&mut secret);
+        // An invite is redeemed off-network, so its ticket must carry a relay path — wait for one
+        // (bounded) instead of publishing a LAN-only dial hint.
+        if let Ok(endpoint) = self.runtime_endpoint().await {
+            wait_for_relay_addr(&endpoint).await;
+        }
         let endpoint_ticket = self.our_endpoint_ticket().await;
         if endpoint_ticket.is_empty() {
             bail!("node not started: no endpoint ticket for invite");
@@ -1509,13 +1533,23 @@ impl PairCore {
     ) -> Result<()> {
         let outcome = async {
             let endpoint = self.runtime_endpoint().await?;
+            // An invite-based pair is the only path that routinely spans two networks, and the
+            // link that starts it usually cold-launches the app: give the relay handshake a
+            // bounded moment so both the ticket we disclose and the path we dial exist. Nearby
+            // pairs are never delayed — BLE/mDNS resolve the peer without a relay.
+            let attempts = if nearby {
+                1
+            } else {
+                wait_for_relay_addr(&endpoint).await;
+                PAIR_INVITE_DIAL_ATTEMPTS
+            };
 
             // Round 1 — Hello / commitment exchange.
             let hello = self
                 .build_msg(Decision::Hello, session_id, invite_secret)
                 .await?;
             let addr = self.peer_addr(peer_endpoint, ticket.as_deref())?;
-            let resp = dial_exchange(&endpoint, addr, &hello).await?;
+            let resp = dial_exchange_retrying(&endpoint, addr, &hello, attempts).await?;
             self.fold_peer_msg(&session_id, &peer_endpoint, resp, nearby)
                 .await?;
 
@@ -1524,7 +1558,7 @@ impl PairCore {
                 .build_msg(Decision::Reveal, session_id, Vec::new())
                 .await?;
             let addr = self.peer_addr(peer_endpoint, ticket.as_deref())?;
-            let resp = dial_exchange(&endpoint, addr, &reveal).await?;
+            let resp = dial_exchange_retrying(&endpoint, addr, &reveal, attempts).await?;
             self.fold_peer_msg(&session_id, &peer_endpoint, resp, nearby)
                 .await?;
             Ok(())
@@ -1683,7 +1717,11 @@ impl PairCore {
     ) {
         if let Ok(endpoint) = self.runtime_endpoint().await {
             if let Ok(addr) = self.peer_addr(peer_endpoint, peer_ticket.as_deref()) {
-                if let Ok(resp) = dial_exchange(&endpoint, addr, &msg).await {
+                // Our decision is the first thing an invite responder ever dials out; retry it on
+                // the same terms as the handshake rounds so a cold internet path doesn't silently
+                // strand the peer.
+                let attempts = if nearby { 1 } else { PAIR_INVITE_DIAL_ATTEMPTS };
+                if let Ok(resp) = dial_exchange_retrying(&endpoint, addr, &msg, attempts).await {
                     let _ = self
                         .fold_peer_msg(session_id, &peer_endpoint, resp, nearby)
                         .await;
@@ -2100,6 +2138,30 @@ impl PairCore {
     }
 }
 
+/// True when `addr` carries no relay path, i.e. nothing a peer on another network can dial.
+/// Direct addresses alone are almost always private LAN ones on a phone.
+fn lacks_relay_addr(addr: &EndpointAddr) -> bool {
+    !addr.addrs.iter().any(|address| address.is_relay())
+}
+
+/// Bounded wait (see [`ENDPOINT_ONLINE_WAIT_MS`]) for this endpoint to pick up a relay address, so
+/// an invite ticket we mint — or dial with — is usable from another network. Returns immediately
+/// once a relay path is advertised, and gives up quietly when there is none.
+async fn wait_for_relay_addr(endpoint: &Endpoint) {
+    if !lacks_relay_addr(&endpoint.addr()) {
+        return;
+    }
+    let _ = tokio::time::timeout(Duration::from_millis(ENDPOINT_ONLINE_WAIT_MS), async {
+        endpoint.online().await;
+        // `online()` resolves on the relay handshake; the advertised address picks the relay
+        // up a moment later, so let the address watcher catch up before we snapshot it.
+        while lacks_relay_addr(&endpoint.addr()) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+}
+
 /// Open a fresh bi-stream, send our framed message, and read the framed response.
 async fn dial_exchange(endpoint: &Endpoint, addr: EndpointAddr, msg: &PairMsg) -> Result<PairMsg> {
     let conn = endpoint
@@ -2112,6 +2174,31 @@ async fn dial_exchange(endpoint: &Endpoint, addr: EndpointAddr, msg: &PairMsg) -
     let resp = decode_msg(&resp_bytes)?;
     conn.close(0u32.into(), b"pair-done");
     Ok(resp)
+}
+
+/// [`dial_exchange`] with a bounded retry, used for the invite-based handshake rounds. Both
+/// rounds are idempotent for the peer (a repeated `Hello` reuses the live session; a repeated
+/// `Reveal` re-checks the same commitment), so a lost first dial — routine while a relay path is
+/// still warming up on a just-launched app — costs a retry rather than the whole pairing.
+async fn dial_exchange_retrying(
+    endpoint: &Endpoint,
+    addr: EndpointAddr,
+    msg: &PairMsg,
+    attempts: u32,
+) -> Result<PairMsg> {
+    let mut last = anyhow!("pair dial: no attempt was made");
+    for attempt in 0..attempts.max(1) {
+        match dial_exchange(endpoint, addr.clone(), msg).await {
+            Ok(resp) => return Ok(resp),
+            Err(error) => {
+                last = error;
+                if attempt + 1 < attempts {
+                    tokio::time::sleep(Duration::from_millis(PAIR_DIAL_RETRY_DELAY_MS)).await;
+                }
+            }
+        }
+    }
+    Err(last)
 }
 
 /// The inbound `streetcryptid/pair/2` protocol handler.
@@ -2209,6 +2296,27 @@ mod tests {
             [0xBBu8; RECV_PUB_LEN],
             [0xCCu8; SAS_NONCE_LEN],
         )
+    }
+
+    #[test]
+    fn relay_addr_predicate_tracks_off_network_dialability() {
+        let (_, endpoint) = identity();
+        let id = EndpointId::from_bytes(&endpoint).unwrap();
+        let lan: std::net::SocketAddr = "192.168.1.20:41234".parse().unwrap();
+
+        // Freshly bound: LAN addresses only, so nothing a peer on another network can dial.
+        let lan_only = EndpointAddr::from_parts(id, [iroh::TransportAddr::Ip(lan)]);
+        assert!(lacks_relay_addr(&lan_only));
+
+        let relay: iroh::RelayUrl = "https://relay.example.com".parse().unwrap();
+        let with_relay = EndpointAddr::from_parts(
+            id,
+            [
+                iroh::TransportAddr::Ip(lan),
+                iroh::TransportAddr::Relay(relay),
+            ],
+        );
+        assert!(!lacks_relay_addr(&with_relay));
     }
 
     #[test]
