@@ -15,14 +15,14 @@ export function ThemedText({ style, type = 'default', themeColor, ...rest }: The
     <Text
       style={[
         { color: theme[themeColor ?? 'text'] },
-        type === 'default' && styles.default,
-        type === 'title' && styles.title,
-        type === 'small' && styles.small,
-        type === 'smallBold' && styles.smallBold,
-        type === 'subtitle' && styles.subtitle,
-        type === 'link' && styles.link,
-        type === 'linkPrimary' && styles.linkPrimary,
-        type === 'code' && styles.code,
+        type === 'default' && themedTextStyles.default,
+        type === 'title' && themedTextStyles.title,
+        type === 'small' && themedTextStyles.small,
+        type === 'smallBold' && themedTextStyles.smallBold,
+        type === 'subtitle' && themedTextStyles.subtitle,
+        type === 'link' && themedTextStyles.link,
+        type === 'linkPrimary' && themedTextStyles.linkPrimary,
+        type === 'code' && themedTextStyles.code,
         style,
       ]}
       {...rest}
@@ -30,7 +30,7 @@ export function ThemedText({ style, type = 'default', themeColor, ...rest }: The
   );
 }
 
-const styles = StyleSheet.create({
+export const themedTextStyles = StyleSheet.create({
   small: {
     fontSize: 14,
     lineHeight: 20,
