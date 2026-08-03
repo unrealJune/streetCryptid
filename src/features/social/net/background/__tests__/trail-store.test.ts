@@ -29,7 +29,49 @@ describe('trail store', () => {
     await store.appendFriend(incoming);
 
     const points = await store.rangeFor('friend-1', 0);
-    expect(points).toEqual([{ author: 'friend-1', seq: 3, fix: fix(600), receivedAt: 1234 }]);
+    expect(points).toEqual([
+      { author: 'friend-1', seq: 3, fix: fix(600), receivedAt: 1234, via: 'live' },
+    ]);
+  });
+
+  it('labels a backfilled fix as synced and keeps a native transport label when present', async () => {
+    const storage = new InMemoryTrailStorage();
+    const store = createTrailStore({ storage });
+    await store.appendFriend({ author: 'f', seq: 1, fix: fix(100), receivedAt: 0, backfill: true });
+    await store.appendFriend({ author: 'f', seq: 2, fix: fix(200), receivedAt: 0, via: 'relay' });
+
+    const points = await store.rangeFor('f', 0);
+    expect(points.map((p) => p.via)).toEqual(['sync', 'relay']);
+  });
+
+  it('keeps the original provenance when a live fix is re-seen during sync', async () => {
+    const storage = new InMemoryTrailStorage();
+    const store = createTrailStore({ storage });
+    await store.appendFriend({ author: 'f', seq: 1, fix: fix(100), receivedAt: 0, via: 'relay' });
+    await store.appendFriend({ author: 'f', seq: 1, fix: fix(100), receivedAt: 5, backfill: true });
+
+    const points = await store.rangeFor('f', 0);
+    expect(points).toHaveLength(1);
+    expect(points[0].via).toBe('relay');
+    // Everything else still reflects the newer write.
+    expect(points[0].receivedAt).toBe(5);
+  });
+
+  it('adopts a provenance for rows stored before it was recorded', async () => {
+    const storage = new InMemoryTrailStorage();
+    await storage.put({ author: 'f', seq: 1, fix: fix(100), receivedAt: 0 });
+    const store = createTrailStore({ storage });
+    await store.appendFriend({ author: 'f', seq: 1, fix: fix(100), receivedAt: 1, via: 'stash' });
+
+    expect((await store.rangeFor('f', 0))[0].via).toBe('stash');
+  });
+
+  it('leaves our own points unlabelled', async () => {
+    const storage = new InMemoryTrailStorage();
+    const store = createTrailStore({ storage });
+    await store.appendOwn(fix(100), 1);
+
+    expect((await store.rangeFor(SELF_AUTHOR, 0))[0].via).toBeUndefined();
   });
 
   it('appendFriend falls back to now() when receivedAt is missing', async () => {

@@ -1,4 +1,4 @@
-import type { IncomingFix, LocationFix } from '../../core/types';
+import type { FixTransport, IncomingFix, LocationFix } from '../../core/types';
 
 /**
  * Local history of location fixes — the app-side mirror of the durable iroh-docs
@@ -19,10 +19,22 @@ export interface TrailPoint {
   fix: LocationFix;
   /** ms epoch this device stored the point. */
   receivedAt: number;
+  /**
+   * How the point reached this device (friend points only; our own are unlabelled). Absent on rows
+   * stored before provenance was recorded.
+   *
+   * First writer wins: a fix received live and later re-seen during reconciliation keeps its live
+   * label, because that is how it actually got here.
+   */
+  via?: FixTransport;
 }
 
 /** Storage port. Real impl: expo-sqlite. Tests use {@link InMemoryTrailStorage}. */
 export interface TrailStorage {
+  /**
+   * Upsert by `(author, seq)`. An existing point's {@link TrailPoint.via} is kept: re-delivery
+   * through a slower path must not rewrite how the fix originally arrived.
+   */
   put(point: TrailPoint): Promise<void>;
   /** Points for `author` with `fix.ts >= sinceTs`, ascending by seq. */
   range(author: string, sinceTs: number): Promise<TrailPoint[]>;
@@ -38,9 +50,10 @@ export interface TrailStorage {
 export class InMemoryTrailStorage implements TrailStorage {
   private readonly points: TrailPoint[] = [];
   async put(point: TrailPoint): Promise<void> {
-    // Upsert by (author, seq): a re-delivered fix must not duplicate.
+    // Upsert by (author, seq): a re-delivered fix must not duplicate, and must not relabel how the
+    // fix first arrived (`refreshTrailFromReplica` re-reads every entry on every sync).
     const i = this.points.findIndex((p) => p.author === point.author && p.seq === point.seq);
-    if (i >= 0) this.points[i] = point;
+    if (i >= 0) this.points[i] = { ...point, via: this.points[i].via ?? point.via };
     else this.points.push(point);
   }
   async range(author: string, sinceTs: number): Promise<TrailPoint[]> {
@@ -107,6 +120,7 @@ export function createTrailStore(opts: TrailStoreOptions): TrailStore {
         seq: incoming.seq,
         fix: incoming.fix,
         receivedAt: incoming.receivedAt ?? now(),
+        via: incoming.via ?? (incoming.backfill ? 'sync' : 'live'),
       });
     },
     async rangeFor(author: string, sinceTs: number): Promise<TrailPoint[]> {

@@ -10,7 +10,7 @@ import { InMemoryTrailStorage, type TrailPoint, type TrailStorage } from './back
  * opened lazily and every access is guarded, so a build without the native module (or web/Expo Go)
  * transparently falls back to in-memory instead of crashing — matching the lazy-native pattern in
  * secure-keys.ts / background-task.ts. Two tables: `kv(key,value)` and
- * `trail(author,seq,fix,received_at,fix_ts)` keyed by `(author,seq)`.
+ * `trail(author,seq,fix,received_at,fix_ts,via)` keyed by `(author,seq)`.
  */
 
 const DB_NAME = 'streetcryptid.social.db';
@@ -59,6 +59,10 @@ function getDb(): Promise<SqliteDb | null> {
          );
          CREATE INDEX IF NOT EXISTS trail_author_ts ON trail (author, fix_ts);`
       );
+      // Added after the table shipped, and there is no schema version to branch on, so add the
+      // column unconditionally and swallow the "duplicate column name" error on installs that
+      // already have it. Rows written before this read back as NULL → provenance unknown.
+      await db.execAsync('ALTER TABLE trail ADD COLUMN via TEXT').catch(() => {});
       return db;
     } catch {
       return null;
@@ -120,6 +124,7 @@ interface TrailRow {
   seq: number;
   fix: string;
   received_at: number;
+  via: string | null;
 }
 
 function rowToPoint(row: TrailRow): TrailPoint {
@@ -128,6 +133,7 @@ function rowToPoint(row: TrailRow): TrailPoint {
     seq: Number(row.seq),
     fix: JSON.parse(row.fix) as TrailPoint['fix'],
     receivedAt: Number(row.received_at),
+    ...(row.via ? { via: row.via as NonNullable<TrailPoint['via']> } : {}),
   };
 }
 
@@ -140,14 +146,16 @@ class SqliteTrailStorage implements TrailStorage {
     if (!db) return this.fallback.put(point);
     try {
       await db.runAsync(
-        `INSERT INTO trail (author, seq, fix, received_at, fix_ts) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO trail (author, seq, fix, received_at, fix_ts, via) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(author, seq) DO UPDATE SET
-           fix = excluded.fix, received_at = excluded.received_at, fix_ts = excluded.fix_ts`,
+           fix = excluded.fix, received_at = excluded.received_at, fix_ts = excluded.fix_ts,
+           via = COALESCE(trail.via, excluded.via)`,
         point.author,
         point.seq,
         JSON.stringify(point.fix),
         point.receivedAt,
-        point.fix.ts
+        point.fix.ts,
+        point.via ?? null
       );
     } catch {
       await this.fallback.put(point);
@@ -159,7 +167,8 @@ class SqliteTrailStorage implements TrailStorage {
     if (!db) return this.fallback.range(author, sinceTs);
     try {
       const rows = await db.getAllAsync<TrailRow>(
-        'SELECT author, seq, fix, received_at FROM trail WHERE author = ? AND fix_ts >= ? ORDER BY seq ASC',
+        `SELECT author, seq, fix, received_at, via FROM trail
+         WHERE author = ? AND fix_ts >= ? ORDER BY seq ASC`,
         author,
         sinceTs
       );
@@ -174,7 +183,7 @@ class SqliteTrailStorage implements TrailStorage {
     if (!db) return this.fallback.latest();
     try {
       const rows = await db.getAllAsync<TrailRow>(
-        `SELECT t.author, t.seq, t.fix, t.received_at FROM trail t
+        `SELECT t.author, t.seq, t.fix, t.received_at, t.via FROM trail t
          JOIN (SELECT author, MAX(fix_ts) AS mt FROM trail GROUP BY author) m
            ON t.author = m.author AND t.fix_ts = m.mt
          GROUP BY t.author`
