@@ -174,7 +174,10 @@ pub struct IncomingFix {
 pub trait FixListener: Send + Sync + 'static {
     /// A fix we could decrypt (someone shared with us). `backfill` is `true` when the fix arrived
     /// via durable range-reconciliation (iroh-docs catch-up) rather than the live gossip path.
-    fn on_fix(&self, author: Vec<u8>, seq: u64, fix: LocationFix, backfill: bool);
+    ///
+    /// `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
+    /// the stash is a mirror, so it never claims a direct link to the fix's author.
+    fn on_fix(&self, author: Vec<u8>, seq: u64, fix: LocationFix, backfill: bool, via: String);
     /// A fix we received but could NOT decrypt (not addressed to us / revoked). Useful
     /// for presence metrics without leaking content.
     fn on_opaque(&self, author: Vec<u8>, seq: u64);
@@ -775,6 +778,9 @@ impl LocationNode {
             .await
             .map_err(|e| LocationError::Network(e.to_string()))?
             .split();
+        // Kept for the receive loop: classifying the path an envelope arrived over needs the
+        // endpoint's remote-address table, and the loop must not take the node lock per message.
+        let delivery_endpoint = started.endpoint.clone();
         drop(guard);
 
         let recv_secret = self.recv_secret.clone();
@@ -798,21 +804,34 @@ impl LocationNode {
                             sc.entry_hash = %telemetry::envelope_hash(&msg.content),
                             sc.author = tracing::field::Empty,
                             sc.seq = tracing::field::Empty,
+                            sc.via = tracing::field::Empty,
                             outcome = tracing::field::Empty,
                         );
+                        let opened = {
+                            let _guard = span.enter();
+                            crypto::open(&recv_secret, &msg.content)
+                        };
+                        // The path lookup is awaited OUTSIDE the span guard: holding a
+                        // `tracing` span entered across an await would leak it into whatever
+                        // task the executor polls next.
+                        let via = match &opened {
+                            Ok(_) => delivery_label(&delivery_endpoint, msg.delivered_from).await,
+                            Err(_) => "live".to_string(),
+                        };
                         let _guard = span.enter();
-                        match crypto::open(&recv_secret, &msg.content) {
+                        match opened {
                             Ok(opened) => {
                                 span.record(
                                     "sc.author",
                                     tracing::field::display(telemetry::short_hex(&opened.author)),
                                 );
                                 span.record("sc.seq", opened.seq);
+                                span.record("sc.via", via.as_str());
                                 if let Ok(fix) =
                                     postcard::from_bytes::<LocationFix>(&opened.payload)
                                 {
                                     span.record("outcome", "delivered");
-                                    cb.on_fix(opened.author.to_vec(), opened.seq, fix, false);
+                                    cb.on_fix(opened.author.to_vec(), opened.seq, fix, false, via);
                                 } else {
                                     span.record("outcome", "payload-decode-failed");
                                 }
@@ -1067,7 +1086,10 @@ impl LocationNode {
                 .transpose()?
                 .unwrap_or_default();
             let listener = self.listener.lock().await.clone();
-            let sink = ListenerSink { listener };
+            let sink = ListenerSink {
+                listener,
+                stash_peer: peers.first().map(|peer| peer.id),
+            };
             let recovered = trail
                 .sync_all(since_ts, peers, &sink, &self.recv_secret)
                 .await
@@ -1900,6 +1922,54 @@ fn transport_address_diagnostic(
     }
 }
 
+/// Whether an IP address is private / link-local — i.e. a LAN path rather than a routable one.
+///
+/// Mirrors `isLanIp` in `src/features/social/net/transports.ts`; keep the two in step so the
+/// per-fix label and the transport debug panel never disagree about the same address.
+fn is_lan_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            // Loopback, link-local (fe80::/10), unique-local (fc00::/7).
+            v6.is_loopback() || (first & 0xffc0) == 0xfe80 || (first & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+/// The label for one transport path, matching the transport rows the debug panel shows:
+/// `relay` | `direct` | `lan` | `ble` (the only custom transport this app binds).
+fn transport_label(address: &iroh::TransportAddr) -> &'static str {
+    match address {
+        iroh::TransportAddr::Relay(_) => "relay",
+        iroh::TransportAddr::Ip(socket) => {
+            if is_lan_ip(socket.ip()) {
+                "lan"
+            } else {
+                "direct"
+            }
+        }
+        _ => "ble",
+    }
+}
+
+/// Classify the path a gossip message came in over, by asking the endpoint which of the delivering
+/// neighbour's addresses is active. Falls back to `live` (arrived, path unknown) rather than
+/// guessing: `remote_info` is a point-in-time snapshot and may have nothing active to report.
+async fn delivery_label(endpoint: &Endpoint, delivered_from: EndpointId) -> String {
+    let info = match endpoint.remote_info(delivered_from).await {
+        Some(info) => info,
+        None => return "live".to_string(),
+    };
+    let active = info
+        .addrs()
+        .find(|address| matches!(address.usage(), iroh::endpoint::TransportAddrUsage::Active));
+    match active {
+        Some(address) => transport_label(address.addr()).to_string(),
+        None => "live".to_string(),
+    }
+}
+
 fn ble_peer(p: &ble::BlePeerView) -> BlePeer {
     BlePeer {
         device_id: p.device_id.clone(),
@@ -1938,13 +2008,20 @@ fn trail_fix_to_incoming(tf: TrailFix) -> Option<IncomingFix> {
 /// Bridges [`docs::TrailSink`] callbacks to the foreign [`FixListener`] for durable-trail events.
 struct ListenerSink {
     listener: Option<Arc<dyn FixListener>>,
+    /// The explicit sync peer for this run (the trail stash), when one was given. Entries that came
+    /// from it are labelled `stash`; anything else reconciled with a friend's own node is `docs`.
+    stash_peer: Option<EndpointId>,
 }
 
 impl TrailSink for ListenerSink {
-    fn on_backfill(&self, author: Vec<u8>, seq: u64, payload: Vec<u8>) {
+    fn on_backfill(&self, author: Vec<u8>, seq: u64, payload: Vec<u8>, from: Vec<u8>) {
         if let Some(listener) = &self.listener {
             if let Ok(fix) = postcard::from_bytes::<LocationFix>(&payload) {
-                listener.on_fix(author, seq, fix, true);
+                let from_stash = self
+                    .stash_peer
+                    .is_some_and(|stash| stash.as_bytes().as_slice() == from.as_slice());
+                let via = if from_stash { "stash" } else { "docs" };
+                listener.on_fix(author, seq, fix, true, via.to_string());
             }
         }
     }
@@ -2055,5 +2132,56 @@ impl Subscription {
         }
         .instrument(span)
         .await
+    }
+}
+
+#[cfg(test)]
+mod transport_label_tests {
+    use super::{is_lan_ip, transport_label};
+    use iroh::TransportAddr;
+
+    fn ip(addr: &str) -> TransportAddr {
+        TransportAddr::Ip(addr.parse().expect("socket addr"))
+    }
+
+    #[test]
+    fn relay_paths_are_labelled_relay() {
+        let relay = TransportAddr::Relay("https://relay.example.com".parse().expect("relay url"));
+        assert_eq!(transport_label(&relay), "relay");
+    }
+
+    #[test]
+    fn private_and_link_local_ips_are_lan() {
+        for addr in [
+            "192.168.1.10:4433",
+            "10.1.10.82:4433",
+            "172.16.0.1:4433",
+            "172.31.255.255:4433",
+            "127.0.0.1:4433",
+            "169.254.1.1:4433",
+            "[::1]:4433",
+            "[fe80::1]:4433",
+            "[fd00::1]:4433",
+        ] {
+            assert_eq!(transport_label(&ip(addr)), "lan", "{addr}");
+        }
+    }
+
+    #[test]
+    fn routable_ips_are_direct() {
+        for addr in [
+            "203.0.113.7:4433",
+            "172.32.0.1:4433",
+            "172.15.0.1:4433",
+            "[2001:db8::1]:4433",
+        ] {
+            assert_eq!(transport_label(&ip(addr)), "direct", "{addr}");
+        }
+    }
+
+    #[test]
+    fn lan_check_matches_the_transport_panel_ranges() {
+        assert!(is_lan_ip("192.168.0.1".parse().expect("ip")));
+        assert!(!is_lan_ip("8.8.8.8".parse().expect("ip")));
     }
 }

@@ -225,8 +225,10 @@ pub struct TrailFix {
 /// Sink for reconciliation progress + backfilled fixes. Implemented in lib.rs to forward to the
 /// foreign [`crate::FixListener`]. Kept here so [`TrailDocs::sync`] owns the decrypt loop.
 pub trait TrailSink: Send + Sync {
-    /// A missed envelope, reconciled and decrypted for us. `payload` = encoded `LocationFix`.
-    fn on_backfill(&self, author: Vec<u8>, seq: u64, payload: Vec<u8>);
+    /// A missed envelope, reconciled and decrypted for us. `payload` = encoded `LocationFix`;
+    /// `from` is the endpoint that served the entry (the stash or a friend's own node), which is
+    /// what lets the app say where a backfilled fix actually came from.
+    fn on_backfill(&self, author: Vec<u8>, seq: u64, payload: Vec<u8>, from: Vec<u8>);
     /// Progress for a namespace sync: `started` | `completed` | `error` (+ recovered count).
     fn on_sync_status(&self, author: Vec<u8>, status: String, recovered: Option<u64>);
 }
@@ -514,7 +516,12 @@ impl TrailDocs {
                                 entry.origin = %from.fmt_short(),
                                 "trail.backfill: recovered envelope via reconciliation"
                             );
-                            sink.on_backfill(author_bytes, seq, opened.payload);
+                            sink.on_backfill(
+                                author_bytes,
+                                seq,
+                                opened.payload,
+                                from.as_bytes().to_vec(),
+                            );
                         }
                     }
                 }

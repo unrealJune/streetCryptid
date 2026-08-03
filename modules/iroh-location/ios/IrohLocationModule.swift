@@ -225,8 +225,9 @@ private final class EventBridge: FixListener {
     self.subscriptionId = subscriptionId
   }
   // `backfill` is `true` when the fix arrived via durable range-reconciliation (iroh-docs
-  // catch-up) rather than the live gossip path.
-  func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool) {
+  // catch-up) rather than the live gossip path. `via` names the last hop into this device
+  // (`relay` | `direct` | `lan` | `ble` | `live` | `docs` | `stash`).
+  func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String) {
     module?.sendEvent(
       "onFix",
       [
@@ -237,6 +238,7 @@ private final class EventBridge: FixListener {
           "headingDeg": fix.headingDeg, "ts": fix.ts,
         ],
         "backfill": backfill,
+        "via": via,
       ])
   }
   func onOpaque(author: Data, seq: UInt64) {
