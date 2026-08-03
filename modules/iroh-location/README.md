@@ -188,6 +188,13 @@ carries over). Recovered fixes surface via `onFix` with `backfill: true`; sync p
 `onSync`. If a browser-persistent store is needed later, wire iroh-blobs/iroh-docs to an
 IndexedDB-backed store.
 
+Every `onFix` also carries `via`: the LAST HOP the envelope took into this device — `relay` |
+`direct` | `lan` | `ble` for live gossip (classified from the delivering neighbour's active
+transport address), `live` when no active path can be read, and `docs` | `stash` for fixes
+recovered from the durable trail. It is deliberately not a claim about the author's own link:
+gossip is epidemic, so a live fix may have been forwarded by any neighbour in the swarm, and a
+`stash` fix was served by the mirror rather than by the friend. The browser build omits `via`.
+
 ## Trail-stash desktop debug client
 
 The host-side `trail-stash-client` uses the same `LocationNode`, envelope crypto, and mandatory
