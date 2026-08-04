@@ -1,4 +1,4 @@
-import { AppState, Platform } from 'react-native';
+import { AppState, Platform, type AppStateStatus } from 'react-native';
 
 import { getTelemetry, type SpanContext } from '@/features/dev/telemetry';
 import { createCryptidProfileStore } from '@/features/account/storage/profile-store';
@@ -17,6 +17,57 @@ import { createSamplingPolicy } from './sampling-policy';
 // would tear each other's node down mid-flight. One chained lock keeps them strictly sequential.
 let sessionChain: Promise<void> = Promise.resolve();
 
+/**
+ * How long to wait for `AppState` to settle before assuming a launch is a foreground one. Paid at
+ * most once per cold launch, and only while the state is genuinely ambiguous.
+ */
+const APP_STATE_SETTLE_MS = 2_000;
+
+/**
+ * Resolve whether this process is a background wake or a foreground launch.
+ *
+ * `AppState.currentState` on its own cannot answer that at launch. RN seeds it from
+ * `initialAppState`, captured while `UIApplication.applicationState` is still `.inactive` in
+ * `didFinishLaunching` — so for the first moments of every cold launch it reads `'inactive'`, never
+ * `'active'`. And a cold launch is exactly when the location task fires: `EXTaskService` restores
+ * the task in `didFinishLaunchingWithOptions`, and every event queued before `defineTask` ran is
+ * replayed the moment JS starts observing, which is module-eval time — before React has mounted, so
+ * the dispatcher's `activeHandler` is null as well. Both signals therefore say "headless" while the
+ * app is in fact booting into the foreground.
+ *
+ * That combination is the force-quit-then-relaunch freeze. A second {@link LocationSharingService}
+ * was constructed here, its `createNode` called `IrohLocationModule.clearRuntime()` and its
+ * `finally` called `shutdownAsync()` → `node = nil`, tearing down the node
+ * `LocationSharingProvider` was concurrently building — and pointing a second iroh store at the same
+ * `data_dir`. The provider's init then never settled, so `CryptidAccountGate` /
+ * `LocationDisclosureGate` stayed on their blank loading view: no map, no controls, nothing to tap.
+ * It reproduces only from a cold start because a resume re-evaluates no module scope, replays no
+ * queued events, and already reads `'active'`.
+ *
+ * A real background wake is unambiguous — iOS reports `.background` when it relaunches or resumes a
+ * terminated app for a location or geofence event, and Android's headless context likewise — so only
+ * the launch transition needs waiting out, and it resolves itself within a tick or two. Timing out
+ * resolves to `'active'` deliberately: skipping the work costs a delayed publish (the batch is
+ * already durable in the outbox, and the mounted runtime drains it on its first fix), while guessing
+ * wrong in the other direction costs the whole app.
+ */
+function settledAppState(): Promise<AppStateStatus> {
+  const current = AppState.currentState;
+  if (current === 'active' || current === 'background') return Promise.resolve(current);
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (next: AppStateStatus): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      subscription.remove();
+      resolve(next);
+    };
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next === 'active' || next === 'background') settle(next);
+    });
+    timer = setTimeout(() => settle('active'), APP_STATE_SETTLE_MS);
+  });
+}
+
 interface HeadlessSession<T> {
   /** Cheap precondition checked BEFORE a node is spun up; `false` ⇒ skip and return `fallback`. */
   precheck?: () => Promise<boolean>;
@@ -25,12 +76,13 @@ interface HeadlessSession<T> {
 }
 
 async function session<T>(opts: HeadlessSession<T>): Promise<T> {
-  // Never run headless while the app is active: the mounted runtime owns the shared native node and
-  // does this work itself. Spinning up a second node would call createNode → clearRuntime and tear
-  // down the FOREGROUND node mid-flight (breaking its gossip subscription and pairing poll). The
-  // batch is already persisted (senders enqueue before calling us), so nothing is lost — the
-  // foreground engine flushes/syncs on its next cycle.
-  if (AppState.currentState === 'active') return opts.fallback;
+  // Only ever run from a genuine background wake: the mounted runtime owns the shared native node
+  // and does this work itself. Spinning up a second node would call createNode → clearRuntime and
+  // tear down the FOREGROUND node mid-flight (breaking its gossip subscription and pairing poll).
+  // The batch is already persisted (senders enqueue before calling us), so nothing is lost — the
+  // foreground engine flushes/syncs on its next cycle. `settledAppState` rather than
+  // `AppState.currentState`, because at cold launch the latter has not answered the question yet.
+  if ((await settledAppState()) !== 'background') return opts.fallback;
   if (opts.precheck && !(await opts.precheck())) return opts.fallback;
 
   const profile = await createCryptidProfileStore().load();

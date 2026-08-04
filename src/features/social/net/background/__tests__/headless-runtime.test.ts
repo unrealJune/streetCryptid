@@ -76,6 +76,26 @@ function setAppState(state: string): void {
   (AppState as unknown as { currentState: string }).currentState = state;
 }
 
+/**
+ * Take over `AppState.addEventListener` and hand back a setter that drives the transition. Models a
+ * cold launch, where `currentState` is seeded from `initialAppState` — captured while iOS is still
+ * `.inactive` — and only becomes meaningful once the app finishes launching.
+ */
+function captureAppStateTransition(): (next: string) => void {
+  let listener: ((next: string) => void) | null = null;
+  jest.spyOn(AppState, 'addEventListener').mockImplementation(((
+    _event: string,
+    handler: (next: string) => void
+  ) => {
+    listener = handler;
+    return { remove: jest.fn() };
+  }) as unknown as typeof AppState.addEventListener);
+  return (next: string) => {
+    setAppState(next);
+    listener?.(next);
+  };
+}
+
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- mocked module, needs the handle
 const { backgroundOutbox } = require('../background-outbox') as {
   backgroundOutbox: { pending: jest.Mock; drain: jest.Mock };
@@ -115,7 +135,64 @@ describe('headless-runtime', () => {
     unregister?.();
     unregister = null;
     setAppState(originalAppState);
+    jest.restoreAllMocks();
     jest.clearAllMocks();
+  });
+
+  // The force-quit-then-relaunch freeze. `EXTaskService` restores the location task in
+  // `didFinishLaunchingWithOptions` and replays the events queued before `defineTask` ran as soon as
+  // JS starts observing — module-eval time, before React mounts. At that point `activeHandler` is
+  // null AND `AppState.currentState` is `'inactive'` (RN seeds it from `initialAppState`, captured
+  // while iOS is still `.inactive`), so a point sample of either signal concludes "headless" while
+  // the app is really booting into the foreground. The session that used to start here tore down the
+  // node `LocationSharingProvider` was concurrently building, leaving the app on its blank gate.
+  describe('cold launch', () => {
+    it('does not spin up a headless node when the launch settles into the foreground', async () => {
+      setAppState('inactive');
+      const transitionTo = captureAppStateTransition();
+      queueFixes(2);
+
+      const pending = flushBackgroundOutboxHeadless();
+      await Promise.resolve();
+      transitionTo('active');
+
+      await expect(pending).resolves.toBe(0);
+      expect(mockServiceCtor).not.toHaveBeenCalled();
+      // Nothing is lost: the fixes stay durable in the outbox and the mounted runtime drains them.
+      expect(backgroundOutbox.drain).not.toHaveBeenCalled();
+    });
+
+    it('still runs when the launch settles into the background (a real OS wake)', async () => {
+      setAppState('inactive');
+      const transitionTo = captureAppStateTransition();
+      queueFixes(2);
+
+      const pending = flushBackgroundOutboxHeadless();
+      await Promise.resolve();
+      transitionTo('background');
+
+      await expect(pending).resolves.toBe(2);
+      expect(mockServiceCtor).toHaveBeenCalledTimes(1);
+    });
+
+    // Fail safe: a delayed publish costs a ping, tearing down the foreground node costs the app.
+    it('assumes foreground when the app state never settles', async () => {
+      jest.useFakeTimers();
+      try {
+        setAppState('inactive');
+        captureAppStateTransition();
+        queueFixes(1);
+
+        const pending = flushBackgroundOutboxHeadless();
+        await Promise.resolve();
+        jest.runOnlyPendingTimers();
+
+        await expect(pending).resolves.toBe(0);
+        expect(mockServiceCtor).not.toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
   });
 
   describe('runBackgroundBackfillHeadless', () => {
