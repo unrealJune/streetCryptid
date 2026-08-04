@@ -186,6 +186,28 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
   let lastLivePublishFix: LocationFix | null = null;
   let lastLivePublishAt: number | null = null;
   const listeners = new Set<(s: EngineState) => void>();
+  /**
+   * Ambient fixes absorbed by the fast path since the last span. Reported on the next real
+   * `engine.ingest` so the absorbed majority stays visible as a count, rather than as one span each
+   * (`sc.drop_reason: slot-already-published` used to be ~99% of all spans on iOS).
+   */
+  let absorbed = 0;
+
+  /**
+   * `battery()` is a native bridge round-trip. Ambient `ingest` runs at the OS fix rate — ~1 Hz on a
+   * moving iPhone, see the fast path in `ingest` — so reading it per fix was one native call per
+   * second for a value that moves over minutes. Power *events* bypass this via `reevaluate()`.
+   */
+  const BATTERY_TTL_MS = 30_000;
+  let batteryCache: { at: number; value: BatteryState } | null = null;
+
+  async function batteryCached(): Promise<BatteryState> {
+    const at = now();
+    if (batteryCache !== null && at - batteryCache.at < BATTERY_TTL_MS) return batteryCache.value;
+    const value = await battery();
+    batteryCache = { at, value };
+    return value;
+  }
 
   const slotOf = (ts: number, intervalMs: number): number => Math.floor(ts / intervalMs);
 
@@ -226,6 +248,15 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
   function setState(patch: Partial<EngineState>): void {
     state = { ...state, ...patch };
     emit();
+  }
+
+  /**
+   * Update state without notifying listeners. For the ambient fast path only: `getState()` stays
+   * accurate for anyone who reads it, but an absorbed fix — which by definition changed nothing that
+   * goes on the wire — no longer drives a listener fan-out (and React re-render) at the OS fix rate.
+   */
+  function setStateQuiet(patch: Partial<EngineState>): void {
+    state = { ...state, ...patch };
   }
 
   function getState(): EngineState {
@@ -322,13 +353,54 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
     },
 
     async ingest(fix: LocationFix, parent?: SpanContext): Promise<SamplingDecision> {
-      const batt = await battery();
+      const batt = await batteryCached();
       const decision = policy.decide({ battery: batt, live });
       const rejection = assessFix(
         fix,
         { lastAccepted: lastKnownFix, lastAcceptedAt, now: now() },
         quality
       );
+
+      // ── Ambient fast path ────────────────────────────────────────────────────────────────────
+      // How often the OS hands us a fix is not something we control, and on iOS it is not something
+      // the policy controls either: `timeInterval` is Android-only and ambient sets
+      // `distanceIntervalM: 0` on purpose (a distance filter is a motion filter — see
+      // sampling-policy.ts), so Core Location delivers at the accuracy tier's natural rate, ~1 Hz
+      // while moving, against a 5-minute publish interval. That is ~300 ingests per slot on iOS
+      // versus one on Android, and every one of them was doing a native battery read, a span, an
+      // outbox drain + pending query (two SQLite round-trips) and two listener fan-outs — to then
+      // publish nothing, because the slot was already covered.
+      //
+      // So: when the slot is already published and nothing is waiting in the outbox, `enqueueDueSlots`
+      // provably returns 0 and `flush` has nothing to drain. Absorb the fix and get out. This changes
+      // no wire behaviour whatsoever — the slot grid is wall-clock, `heartbeat()` still covers slots
+      // that see no fix, and `lastKnownFix` is still updated here, which is the value a heartbeat
+      // republishes. It only stops us paying for work whose result is discarded.
+      const slotCovered =
+        !live &&
+        lastPublishedSlot !== null &&
+        slotOf(now(), policy.config.intervalMs) <= lastPublishedSlot;
+
+      // A backlog is only worth breaking the fast path for if it can actually drain: when the node
+      // is not ready `flush()` no-ops, so paying for a `pending` query per fix buys nothing. The
+      // backlog still goes out — `flush` is called on node-ready, on resume, and every heartbeat.
+      const drainable = state.pending > 0 && publisher.isReady();
+
+      if (slotCovered && state.status === 'running' && decision.active && !drainable) {
+        if (rejection === null) {
+          lastKnownFix = fix;
+          lastFixAt = now();
+          lastAcceptedAt = now();
+        }
+        absorbed += 1;
+        setStateQuiet({
+          decision,
+          lastFixAt,
+          lastAcceptedFix: lastKnownFix,
+          lastRejection: rejection,
+        });
+        return decision;
+      }
 
       // The gate and the slot boundary are the two places a captured fix stops travelling; the span
       // says which — refused as junk, absorbed into an already-covered slot, or suspended outright.
@@ -346,8 +418,12 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
           'decision.interval_ms': decision.timeIntervalMs,
           'decision.accuracy': decision.accuracy,
           'publisher.ready': publisher.isReady(),
+          // Fixes the fast path above swallowed since the last span. Non-zero is normal and is the
+          // headline iOS/Android difference; it replaces the per-fix spans that used to say it.
+          fixes_absorbed: absorbed,
         },
       });
+      absorbed = 0;
 
       // A rejected fix never becomes our position — but it also never stops the clock. Execution
       // falls through to the slot logic below, which republishes the last accepted position, so a
@@ -471,7 +547,9 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
     },
 
     async reevaluate(): Promise<SamplingDecision> {
-      const decision = policy.decide({ battery: await battery(), live });
+      // Explicitly a power event, which is the one thing the cached read must not lag behind.
+      batteryCache = null;
+      const decision = policy.decide({ battery: await batteryCached(), live });
       setState({ decision });
       return decision;
     },

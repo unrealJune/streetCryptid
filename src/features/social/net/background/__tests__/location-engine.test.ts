@@ -700,4 +700,125 @@ describe('location engine', () => {
       expect(engine.getState().decision?.timeIntervalMs).toBe(60_000);
     });
   });
+
+  /**
+   * On iOS `timeInterval` is ignored and ambient sets `distanceIntervalM: 0` deliberately, so Core
+   * Location delivers at its own rate (~1 Hz moving) against a 5-minute slot — ~300 ingests per
+   * publish. These pin that the surplus costs nothing per fix, and that absorbing them changes
+   * nothing observable.
+   */
+  describe('ambient churn', () => {
+    function countingHarness() {
+      let batteryReads = 0;
+      let pendingQueries = 0;
+      const publisher = fakePublisher();
+      publisher.setReady(true);
+      const inner = fakeOutbox();
+      const outbox: FixOutbox & { items: LocationFix[] } = {
+        ...inner,
+        async pending(): Promise<number> {
+          pendingQueries += 1;
+          return inner.pending();
+        },
+      };
+      const clock = { t: 0 };
+      const engine = createLocationEngine({
+        publisher,
+        outbox,
+        trail: createTrailStore({ storage: new InMemoryTrailStorage(), now: () => 1000 }),
+        policy: createSamplingPolicy(),
+        battery: async () => {
+          batteryReads += 1;
+          return { level: 1, charging: false, lowPower: false };
+        },
+        now: () => clock.t,
+      });
+      return {
+        publisher,
+        outbox,
+        clock,
+        engine,
+        counts: {
+          get battery() {
+            return batteryReads;
+          },
+          get pending() {
+            return pendingQueries;
+          },
+        },
+      };
+    }
+
+    it('absorbs intra-slot fixes without a native battery read or SQLite query each', async () => {
+      const { publisher, clock, engine, counts } = countingHarness();
+      await engine.start();
+
+      await engine.ingest(fix(0));
+      expect(publisher.published).toHaveLength(1);
+      const afterFirst = { battery: counts.battery, pending: counts.pending };
+
+      // 60 more fixes inside the same slot — an iPhone walking down the street for a minute.
+      for (let i = 1; i <= 60; i += 1) {
+        clock.t = i * 500;
+        await engine.ingest(north(clock.t, 10));
+      }
+
+      expect(publisher.published).toHaveLength(1); // cadence untouched
+      expect(counts.pending).toBe(afterFirst.pending); // zero extra SQLite round-trips
+      // Only the 30s battery TTL expiring, not one read per fix.
+      expect(counts.battery - afterFirst.battery).toBeLessThanOrEqual(2);
+    });
+
+    it('still publishes the absorbed position on the next slot boundary', async () => {
+      const { publisher, clock, engine } = countingHarness();
+      await engine.start();
+      await engine.ingest(fix(0));
+
+      for (let i = 1; i <= 20; i += 1) {
+        clock.t = i * 500;
+        await engine.ingest(north(clock.t, 10));
+      }
+
+      clock.t = SLOT;
+      await engine.heartbeat();
+
+      // The absorbed fixes were not discarded: the heartbeat carries the latest one's position.
+      expect(publisher.published).toHaveLength(2);
+      expect(publisher.published[1].lat).toBeCloseTo(latNorth(10), 9);
+    });
+
+    it('does not absorb while a ready publisher has a backlog to drain', async () => {
+      const { publisher, outbox, clock, engine, counts } = countingHarness();
+      publisher.setReady(false);
+      await engine.start();
+
+      await engine.ingest(fix(0));
+      expect(outbox.items).toHaveLength(1); // queued, nothing published
+
+      publisher.setReady(true);
+      const before = counts.pending;
+      clock.t = 1_000;
+      await engine.ingest(north(clock.t, 10));
+
+      // Slot is already covered, but the backlog can drain now — so this fix takes the slow path.
+      expect(counts.pending).toBeGreaterThan(before);
+      expect(outbox.items).toHaveLength(0);
+      expect(publisher.published).toHaveLength(1);
+    });
+
+    it('leaves live mode on the per-fix path', async () => {
+      const { publisher, clock, engine } = countingHarness();
+      await engine.start();
+      await engine.ingest(fix(0));
+      await engine.setLiveMode(true);
+
+      // Far enough apart to clear liveMinDistanceM, spaced past liveMinPublishMs.
+      for (let i = 1; i <= 3; i += 1) {
+        clock.t = i * 5_000;
+        await engine.ingest(north(clock.t, i * 40));
+      }
+
+      expect(publisher.published).toHaveLength(4);
+    });
+  });
 });
