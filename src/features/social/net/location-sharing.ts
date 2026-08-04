@@ -530,7 +530,11 @@ export class LocationSharingService implements FixPublisher {
     const config = getOtelConfig();
     if (!config || !this.mod || typeof this.mod.configureTelemetry !== 'function') return;
     try {
-      void this.mod.configureTelemetry(config.endpoint, instanceId);
+      // Deliberately not awaited — telemetry setup must never gate node init. It IS async on both
+      // platforms now (iOS used to declare it a sync `Function`, which ran the provider shutdown
+      // inside it on the JS thread and froze the UI for the duration), so a rejection here is a
+      // promise rejection, not a throw.
+      void this.mod.configureTelemetry(config.endpoint, instanceId)?.catch(() => undefined);
     } catch {
       // Older binding without the export, or a build with otel compiled out — JS telemetry alone.
     }

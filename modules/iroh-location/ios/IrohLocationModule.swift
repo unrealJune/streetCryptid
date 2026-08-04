@@ -440,7 +440,16 @@ public final class IrohLocationModule: Module {
       try await node.importDocTicket(ticket: ticket)
     }
 
-    Function("configureTelemetry") { (endpoint: String, instanceId: String) -> Bool in
+    // MUST be async — `Function` runs synchronously on the JS thread, and this body does not
+    // return promptly. `configure_telemetry` shuts the PREVIOUS batch span/log providers down
+    // before installing new ones, and an OTLP batch-processor shutdown blocks until the queue
+    // drains or its timeout expires — seconds, per provider, whenever the collector is slow or
+    // unreachable. On the JS thread that is a frozen UI: React cannot process touches or lay the
+    // map out until it returns. It is reached from `LocationSharingService.init`, i.e. once per
+    // cold launch. Android already declares this `AsyncFunction ... Coroutine`, and the TS surface
+    // has always typed it `Promise<boolean>` — iOS was the odd one out. Same reasoning that made
+    // `flushTelemetry` async below (see the note on `flush_telemetry` in rust/src/telemetry.rs).
+    AsyncFunction("configureTelemetry") { (endpoint: String, instanceId: String) -> Bool in
       configureTelemetry(endpoint: endpoint, instanceId: instanceId)
     }
 
