@@ -8,14 +8,9 @@ import { backgroundOutbox } from './background-outbox';
 import { isBackgroundLocationRunning, startBackgroundLocation } from './background-task';
 import { createBatterySource } from './battery-source';
 import { cfgFromDecision } from './cadence-controller';
+import { isNativeRuntimeClaimed, withNativeRuntimeSession } from './native-runtime-owner';
 import { getActiveBackfillHandler } from './register-task';
 import { createSamplingPolicy } from './sampling-policy';
-
-// Serialize ALL headless node usage. expo-task-manager delivers each OS callback to a fresh,
-// short-lived JS context, and the native iroh runtime is a process-wide singleton (createNode →
-// clearRuntime), so two overlapping headless sessions — a send-drain and a periodic backfill —
-// would tear each other's node down mid-flight. One chained lock keeps them strictly sequential.
-let sessionChain: Promise<void> = Promise.resolve();
 
 interface HeadlessSession<T> {
   /** Cheap precondition checked BEFORE a node is spun up; `false` ⇒ skip and return `fallback`. */
@@ -24,13 +19,44 @@ interface HeadlessSession<T> {
   run: (service: LocationSharingService) => Promise<T>;
 }
 
+/**
+ * Decide whether this process may build a second native node right now, and say why not when it
+ * may not. Recorded on a span because a wrongly-permitted session is silent and terminal (see
+ * `native-runtime-owner.ts`) and a wrongly-refused one just defers work to the next wake.
+ */
+function refusalReason(): string | null {
+  // A mounted runtime owns the node from before its `createNode` until its shutdown. This is the
+  // authoritative signal; `AppState` below is only a backstop for the window before the claim.
+  if (isNativeRuntimeClaimed()) return 'runtime-claimed';
+  // Foreground-ish. NOTE the explicit 'inactive': the old test here was `=== 'active'`, and iOS
+  // reports 'inactive' both during a cold launch into the foreground and for as long as a system
+  // permission alert is up — the two windows where the mounted runtime is most likely to be
+  // building the very node we would tear down. 'background' (and an uninitialised 'unknown'/null,
+  // which is what a genuine background launch can report before RCTAppState settles) still passes,
+  // so the real headless pipeline is untouched.
+  const appState = AppState.currentState;
+  if (appState === 'active' || appState === 'inactive') return 'app-foreground';
+  return null;
+}
+
 async function session<T>(opts: HeadlessSession<T>): Promise<T> {
-  // Never run headless while the app is active: the mounted runtime owns the shared native node and
-  // does this work itself. Spinning up a second node would call createNode → clearRuntime and tear
-  // down the FOREGROUND node mid-flight (breaking its gossip subscription and pairing poll). The
-  // batch is already persisted (senders enqueue before calling us), so nothing is lost — the
-  // foreground engine flushes/syncs on its next cycle.
-  if (AppState.currentState === 'active') return opts.fallback;
+  // Never run headless while a mounted runtime owns the node: it does this work itself. Spinning up
+  // a second node would call createNode → clearRuntime and tear down the FOREGROUND node mid-flight
+  // (breaking its gossip subscription and pairing poll). The batch is already persisted (senders
+  // enqueue before calling us), so nothing is lost — the foreground engine flushes/syncs on its
+  // next cycle.
+  const refusedBefore = refusalReason();
+  if (refusedBefore) {
+    getTelemetry()
+      .startSpan('bg.session', {
+        attributes: {
+          app_state: String(AppState.currentState),
+          'sc.drop_reason': refusedBefore,
+        },
+      })
+      .end();
+    return opts.fallback;
+  }
   if (opts.precheck && !(await opts.precheck())) return opts.fallback;
 
   const profile = await createCryptidProfileStore().load();
@@ -38,15 +64,36 @@ async function session<T>(opts: HeadlessSession<T>): Promise<T> {
     throw new Error('Cannot run background location work before a cryptid profile is configured.');
   }
 
+  // Re-check immediately before `createNode`. Everything above awaited — a precheck hitting SQLite,
+  // a profile load — and the app can have been foregrounded, or the mounted runtime can have staked
+  // its claim, in that gap. This is the last point at which refusing is still free.
+  const refusedAfter = refusalReason();
+  const span = getTelemetry().startSpan('bg.session', {
+    attributes: {
+      app_state: String(AppState.currentState),
+      ...(refusedAfter ? { 'sc.drop_reason': refusedAfter } : {}),
+    },
+  });
+  if (refusedAfter) {
+    span.end();
+    return opts.fallback;
+  }
+
   const service = new LocationSharingService();
   try {
     await service.init(profile.handle, profile.sigil, profile.cryptidName, profile.color, {
       mode: 'headless',
     });
-    return await opts.run(service);
+    const result = await opts.run(service);
+    span.setStatus('ok');
+    return result;
+  } catch (err) {
+    span.recordError(err);
+    throw err;
   } finally {
     // Drain telemetry before the node goes away — this short-lived context is exactly the one
     // whose batches die unexported if we skip it.
+    span.end();
     await service.flushDevTelemetry();
     await service.shutdownAsync();
   }
@@ -54,12 +101,7 @@ async function session<T>(opts: HeadlessSession<T>): Promise<T> {
 
 /** Chain onto the shared lock so send-drain and backfill never spin up two native nodes at once. */
 function runHeadless<T>(opts: HeadlessSession<T>): Promise<T> {
-  const result = sessionChain.then(() => session(opts));
-  sessionChain = result.then(
-    () => undefined,
-    () => undefined
-  );
-  return result;
+  return withNativeRuntimeSession(() => session(opts));
 }
 
 /** What woke us. Recorded on the span, because the trigger decides whether we are even allowed. */

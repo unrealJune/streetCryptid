@@ -312,6 +312,28 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   > the handler acts **only** on `GeofencingEventType.Exit`, and `armReviveFence` enforces a
   > `REVIVE_FENCE_MIN_REARM_MS` floor (bypassed only by `startBackground`, which may have no fence
   > standing yet). Android is unaffected: its consumer builds `transitionTypes` from the flags.
+- **Who owns the native node.** There is exactly one iroh node per process: `self.node` in
+  `IrohLocationModule.swift`, which **both** `createNode` and `shutdown` nil via `clearRuntime()`.
+  Every other native export guards on it and throws `NoNode: call createNode first` once it is gone.
+  So a second `LocationSharingService` — the short-lived one a TaskManager callback spins up — is
+  never merely wasteful; it is destructive to whatever node the mounted runtime holds.
+  `native-runtime-owner.ts` is the arbiter: the mounted service claims the runtime **before** its
+  `createNode` and releases it in `performShutdown`, headless sessions refuse while a claim stands
+  (and serialize against each other), and a mounted `init` awaits any in-flight session rather than
+  clobbering it.
+  > **iOS trap — `AppState` is not an ownership signal.** The guard here used to be
+  > `AppState.currentState === 'active'`. iOS reports **`'inactive'`**, not `'active'`, during a cold
+  > launch into the foreground and for as long as a system permission alert is up ("Allow Once /
+  > While Using / Always") — precisely the two windows in which the mounted runtime is building its
+  > node and in which expo-task-manager is replaying the persisted location/geofence tasks it
+  > restored at module scope, before React mounts. A session admitted there calls `createNode`
+  > (clearing the node being built) and then `shutdown` in its `finally` (clearing it again). Nothing
+  > throws where anyone can see it: the mounted service keeps `status: 'ready'` and a non-null
+  > `mod`, while `readTrail` `.catch`es to `[]`, `syncTrail` logs a warning and returns, and
+  > `safeDocTicket` returns null. The app renders, the map still pans on the UI thread, and every
+  > control is dead — through relaunches, because the same race re-runs each launch, until the user
+  > reinstalls and clears the persisted tasks. Refusals are recorded on a `bg.session` span with
+  > `sc.drop_reason` (`runtime-claimed` / `app-foreground`) and the observed `app_state`.
 - **Config**: iOS `UIBackgroundModes: [location, processing]` + `NSLocationAlwaysAndWhenInUse…`; Android
   `ACCESS_BACKGROUND_LOCATION` + `FOREGROUND_SERVICE_LOCATION` + `POST_NOTIFICATIONS`
   (`app.json` / expo-location config plugin).

@@ -84,6 +84,11 @@ import {
   DEFAULT_TRANSPORT_PREFERENCES,
 } from './persistence';
 import { createAppLifecycleController } from './background/lifecycle';
+import {
+  awaitNativeRuntimeIdle,
+  claimNativeRuntime,
+  releaseNativeRuntime,
+} from './background/native-runtime-owner';
 import { DEFAULT_SAMPLING_CONFIG, DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
 import { createDefaultStashClient, type StashClient } from './stash-client';
 import {
@@ -424,6 +429,8 @@ export class LocationSharingService implements FixPublisher {
   private liveWatchPullInFlight: Promise<void> | null = null;
   /** Cleans up outstanding live requests when we stop being able to watch (app backgrounded). */
   private watcherLifecycleStop: (() => void) | null = null;
+  /** True on the MOUNTED service only — the one that owns the process-wide native node. */
+  private ownsNativeRuntime = false;
   /** Injectable CSPRNG for control nonces; tests supply a deterministic one. */
   private readonly randomBytes: RandomBytesFn;
   /**
@@ -602,6 +609,17 @@ export class LocationSharingService implements FixPublisher {
 
     this.mod = getIrohLocation();
     const persisted = await loadKeys();
+    if (interactive) {
+      // Stake the claim BEFORE `createNode`, not after `init` resolves: the node-building window is
+      // exactly when a restored OS task callback lands (expo-task-manager restores the persisted
+      // location/geofence tasks at module scope, before React mounts), and a headless session that
+      // starts in it will `clearRuntime()` the node we are building. See `native-runtime-owner.ts`.
+      claimNativeRuntime();
+      this.ownsNativeRuntime = true;
+      // And if a session is already in flight, let it finish — including its own `shutdown` — so it
+      // cannot nil our node out from under us a moment after we create it.
+      await awaitNativeRuntimeIdle();
+    }
     this.keys = await this.mod.createNode(persisted.identitySecret, persisted.recvSecret);
     await saveKeys({
       identitySecret: this.keys.identitySecret,
@@ -2029,6 +2047,12 @@ export class LocationSharingService implements FixPublisher {
   }
 
   private async performShutdown(): Promise<void> {
+    // Hand the node back first: from here on we are tearing it down, so a headless session waking
+    // mid-teardown is free to build its own. Only the mounted service ever held the claim.
+    if (this.ownsNativeRuntime) {
+      this.ownsNativeRuntime = false;
+      releaseNativeRuntime();
+    }
     // Stop callbacks synchronously before awaiting native teardown.
     this.stopPairingPolling();
     this.stopBumpPolling();
