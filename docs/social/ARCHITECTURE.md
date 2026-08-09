@@ -294,6 +294,24 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   against namespaces let the stash operator work out which namespace was ours. The cost is
   accepted and real: a friend's fixes now land on our next poll or periodic backfill rather than
   seconds after they publish. Live mode's request channel polls for the same reason (§9c).
+- **The revive tripwire** (`background/revive-task.ts`) is a single 200 m exit-only geofence that
+  re-centers on the user as they move. Core Location's standard location service keeps a _suspended_
+  app awake but never relaunches a _terminated_ one; region monitoring is the only mechanism
+  expo-location exposes that does, and silent push was given up with the push token (§10). On
+  Android it cannot resurrect anything, but a geofence transition is a documented exemption to the
+  Android 12+ ban on starting a foreground service from the background, which is the only way
+  `ensureSharingArmedHeadless` can legally re-arm.
+  > **iOS trap — do not "simplify" this away.** Arming is self-triggering. `startGeofencingAsync`
+  > re-registers the whole region set, and expo-location's `EXGeofencingTaskConsumer` resets the
+  > region's cached state to `CLRegionStateUnknown` and calls `requestStateForRegion`; the resulting
+  > `didDetermineState:` fires the task whenever the determined state differs from the cached one —
+  > always, after that reset — and picks the event type from the state alone, consulting **neither**
+  > `notifyOnEnter` nor `notifyOnExit`. Those flags only filter genuine transitions. So a handler
+  > that re-centers the fence recurses: measured at 60–125 wakes/second, persisted across cold
+  > launches by expo-task-manager and clearable only by uninstalling. Two guards keep it closed —
+  > the handler acts **only** on `GeofencingEventType.Exit`, and `armReviveFence` enforces a
+  > `REVIVE_FENCE_MIN_REARM_MS` floor (bypassed only by `startBackground`, which may have no fence
+  > standing yet). Android is unaffected: its consumer builds `transitionTypes` from the flags.
 - **Config**: iOS `UIBackgroundModes: [location, processing]` + `NSLocationAlwaysAndWhenInUse…`; Android
   `ACCESS_BACKGROUND_LOCATION` + `FOREGROUND_SERVICE_LOCATION` + `POST_NOTIFICATIONS`
   (`app.json` / expo-location config plugin).

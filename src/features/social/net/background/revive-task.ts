@@ -6,6 +6,8 @@ import {
   withEventLogLaunchContext,
 } from '@/features/dev/telemetry';
 import type { LocationFix } from '../../core/types';
+import { createPersistentKV } from '../persistence';
+import type { PersistentKV } from './fix-outbox';
 
 /**
  * iOS revive tripwire — a single self-recentering geofence whose only job is to get a *terminated*
@@ -51,7 +53,9 @@ import type { LocationFix } from '../../core/types';
  * rule in `sampling-policy.ts`.
  *
  * Both native modules are lazily + individually guarded (same pattern as `backfill-task.ts`), so
- * merely importing this file is side-effect-free and it degrades gracefully without them.
+ * merely importing this file is side-effect-free and it degrades gracefully without them. The one
+ * static import, `../persistence`, is already in this module's graph via
+ * `register-task` → `background-outbox`, and its KV is still built on first use, not at load.
  */
 
 let taskManagerMod: typeof import('expo-task-manager') | null | undefined;
@@ -82,6 +86,68 @@ function tryLocation(): typeof import('expo-location') | null {
 /** TaskManager task name for the revive fence. Must be stable across app launches. */
 export const REVIVE_FENCE_TASK = 'streetcryptid.revive-fence';
 
+/**
+ * `LocationGeofencingEventType.Exit`. Inlined rather than imported so the gate in
+ * {@link defineReviveTask} works on a cold headless launch without pulling expo-location in.
+ * Cross-checked against the live enum when the module happens to be loaded already.
+ */
+const GEOFENCING_EVENT_EXIT = 2;
+
+/**
+ * Minimum spacing between two arms of the fence **that land in the same place**.
+ *
+ * Arming is self-triggering (see {@link defineReviveTask}), so an unthrottled re-arm inside the
+ * handler is a loop by construction. The event-type gate stops the *enter* storm outright; this
+ * floor covers the one case the gate cannot — a fence we keep re-centering on a position we are
+ * genuinely outside of, which re-fires a real `Exit` every time.
+ *
+ * It is deliberately paired with the distance test below rather than applied on time alone. A plain
+ * time floor would strand the tripwire for the user who needs it most: at 30 mph a 200 m radius is
+ * crossed in ~15 s, so a driver's second exit would be refused and the fence left behind them.
+ */
+export const REVIVE_FENCE_MIN_REARM_MS = 60_000;
+
+/**
+ * How stale a cached position may be and still be trusted as a fence centre. Re-centering on a
+ * long-dead fix plants the fence somewhere we are not, which is precisely the state that keeps a
+ * real exit firing. Better to leave the old fence standing — it still covers the old location, so
+ * the tripwire survives either way.
+ */
+export const REVIVE_FENCE_MAX_FIX_AGE_MS = 5 * 60_000;
+
+/**
+ * KV key holding the last successful arm as `ms:lat:lon`; survives the cold launches the fence
+ * causes, which an in-process variable would not.
+ */
+const LAST_ARM_KEY = 'sc.social.reviveFenceArmedAt';
+
+interface LastArm {
+  at: number;
+  lat: number;
+  lon: number;
+}
+
+function parseLastArm(raw: string | null): LastArm | null {
+  if (raw === null) return null;
+  const [at, lat, lon] = raw.split(':').map(Number);
+  return [at, lat, lon].every(Number.isFinite) ? { at, lat, lon } : null;
+}
+
+/**
+ * Great-circle distance in metres. A local copy, as in `fix-outbox.ts` / `fix-quality.ts` — the
+ * alternative is exporting one of those and dragging its module into the cold-launch graph.
+ */
+function metresBetween(aLat: number, aLon: number, bLat: number, bLon: number): number {
+  const R = 6_371_000;
+  const toRad = (d: number): number => (d * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat);
+  const dLon = toRad(bLon - aLon);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
 /** Stable region id, so re-arming replaces the fence rather than accumulating fences. */
 export const REVIVE_FENCE_REGION_ID = 'streetcryptid.revive';
 
@@ -93,6 +159,25 @@ export const REVIVE_FENCE_REGION_ID = 'streetcryptid.revive';
  */
 export const REVIVE_FENCE_RADIUS_M = 200;
 
+let armKv: PersistentKV | null | undefined;
+
+/**
+ * The persistent KV backing the arm throttle. Constructed on first use rather than at import, so
+ * this module stays side-effect-free to load on a cold headless launch — but imported statically,
+ * because `register-task` already pulls `../persistence` in through `background-outbox` (which
+ * builds a KV at module scope), so there is nothing left to defer. Null when SQLite is unavailable,
+ * which costs the throttle its memory but never the fence itself.
+ */
+function tryKv(): PersistentKV | null {
+  if (armKv !== undefined) return armKv;
+  try {
+    armKv = createPersistentKV();
+  } catch {
+    armKv = null;
+  }
+  return armKv;
+}
+
 /** True when this platform + build can actually host the revive fence. */
 export function isReviveFenceAvailable(): boolean {
   return Platform.OS !== 'web' && tryTaskManager() !== null && tryLocation() !== null;
@@ -102,11 +187,30 @@ export function isReviveFenceAvailable(): boolean {
  * Register the revive handler. Call once at module load (top level) so a **cold, headless** launch —
  * the entire point of this file — can service the event. The runner must be headless-safe and must
  * flush telemetry before returning, or the OS freezes the process with the batch unexported.
+ *
+ * ## Only `Exit` may run the handler, and the region flags do not enforce that on iOS
+ * The fence is registered `notifyOnEnter: false`, which reads like it settles the question. It does
+ * not. `startGeofencingAsync` re-registers the whole region set, and expo-location's iOS consumer
+ * (`EXGeofencingTaskConsumer.startMonitoringRegionsForTask`) resets the region's cached state to
+ * `CLRegionStateUnknown` and then calls `requestStateForRegion`. The resulting `didDetermineState:`
+ * fires the task whenever the determined state differs from the cached one — always, after that
+ * reset — and it derives the event type from the state alone, consulting neither `notifyOnEnter` nor
+ * `notifyOnExit`. Those flags only filter the genuine `didEnterRegion` / `didExitRegion` transitions.
+ *
+ * So on iOS *every* arm delivers one synthetic event back to this handler, and the handler re-arms:
+ * unbounded recursion, bounded only by how fast Core Location can answer (measured at 60–125 Hz,
+ * with the OS eventually logging "Supported CoreLocation API call rate exceeded"). Because the fence
+ * lives in expo-task-manager's persisted task configuration, the loop restarted on every cold launch
+ * and survived force-quit — only an uninstall cleared it. Android is unaffected: its consumer builds
+ * `transitionTypes` from the notify flags, so an unrequested enter is never delivered.
+ *
+ * Hence the gate below. It is what makes re-arming from inside the handler safe at all; the
+ * {@link REVIVE_FENCE_MIN_REARM_MS} floor in {@link armReviveFence} backs it up for real exits.
  */
 export function defineReviveTask(run: (parent?: SpanContext) => Promise<void>): void {
   const taskManager = tryTaskManager();
   if (!taskManager || Platform.OS === 'web') return;
-  taskManager.defineTask(REVIVE_FENCE_TASK, ({ error }) =>
+  taskManager.defineTask(REVIVE_FENCE_TASK, ({ data, error }) =>
     withEventLogLaunchContext('background', async () => {
       const telemetry = getTelemetry();
       const span = telemetry.startSpan('bg.revive');
@@ -114,6 +218,14 @@ export function defineReviveTask(run: (parent?: SpanContext) => Promise<void>): 
         if (error) {
           span.setAttribute('sc.drop_reason', 'geofence-error');
           span.recordError(error);
+          return;
+        }
+        const eventType = (data as { eventType?: number } | null | undefined)?.eventType;
+        const exitType = locationMod?.GeofencingEventType?.Exit ?? GEOFENCING_EVENT_EXIT;
+        if (eventType !== exitType) {
+          // The synthetic state-determination callback described above, or a genuine enter. Neither
+          // means the phone moved, so there is nothing to revive and nothing to re-centre.
+          span.setAttributes({ event_type: eventType, 'sc.drop_reason': 'geofence-not-exit' });
           return;
         }
         await run(span.context);
@@ -128,20 +240,65 @@ export function defineReviveTask(run: (parent?: SpanContext) => Promise<void>): 
   );
 }
 
+export interface ArmReviveFenceOptions {
+  /**
+   * Skip the {@link REVIVE_FENCE_MIN_REARM_MS} floor. For the one caller that must not be throttled:
+   * `startBackground`, where there may be no fence at all yet and "keep the existing one" is not a
+   * safe outcome. Re-centering callers must never set this — the floor is what bounds them.
+   */
+  force?: boolean;
+  /** Injectable clock for tests. Default `Date.now`. */
+  now?: () => number;
+}
+
 /**
  * Arm (or re-center) the fence on `fix`. Idempotent: `startGeofencingAsync` replaces the task's
  * whole region set, so repeated calls move the one fence rather than stacking them.
  *
+ * Rate-limited to one arm per {@link REVIVE_FENCE_MIN_REARM_MS} unless `force` is set, because each
+ * arm feeds one event back into {@link defineReviveTask} — see the loop described there. A throttled
+ * call resolves `false` and leaves the standing fence untouched, which is a working tripwire either
+ * way.
+ *
  * Best-effort by design — a phone that has not granted `Always` simply cannot host this, and that
  * must not be an error at the call site.
  */
-export async function armReviveFence(fix: LocationFix): Promise<boolean> {
+export async function armReviveFence(
+  fix: LocationFix,
+  options: ArmReviveFenceOptions = {}
+): Promise<boolean> {
   if (!isReviveFenceAvailable()) return false;
   const location = tryLocation();
   const taskManager = tryTaskManager();
   if (!location || !taskManager) return false;
   // Registering a geofence for a task the OS cannot deliver to is a silent no-op that looks armed.
   if (!taskManager.isTaskDefined(REVIVE_FENCE_TASK)) return false;
+  const now = options.now ?? Date.now;
+  const armedAt = now();
+  // Persisted, not in-memory: every arm can wake a fresh process, so an in-process timestamp would
+  // reset exactly when the throttle is needed most.
+  const kv = tryKv();
+  if (!options.force && kv) {
+    const last = parseLastArm(await kv.get(LAST_ARM_KEY).catch(() => null));
+    if (last !== null && armedAt - last.at < REVIVE_FENCE_MIN_REARM_MS) {
+      // Only refuse a re-arm that would put the fence back where it already is. A centre that has
+      // moved clear of the standing fence is a real crossing, and refusing it would leave the
+      // tripwire behind the user — the exact failure the fence exists to prevent.
+      const moved = metresBetween(last.lat, last.lon, fix.lat, fix.lon);
+      if (moved < REVIVE_FENCE_RADIUS_M) {
+        getTelemetry()
+          .startSpan('revive.arm.throttled', {
+            attributes: {
+              since_last_ms: armedAt - last.at,
+              moved_m: Math.round(moved),
+              'sc.drop_reason': 'revive-rearm-throttled',
+            },
+          })
+          .end();
+        return false;
+      }
+    }
+  }
   try {
     await location.startGeofencingAsync(REVIVE_FENCE_TASK, [
       {
@@ -149,12 +306,18 @@ export async function armReviveFence(fix: LocationFix): Promise<boolean> {
         latitude: fix.lat,
         longitude: fix.lon,
         radius: REVIVE_FENCE_RADIUS_M,
-        // Exit only. Entry would fire immediately on arming (we are, by construction, inside it) and
-        // every time the user came home, waking the app to do nothing.
+        // Exit only. Entry would fire every time the user came home, waking the app to do nothing.
+        //
+        // On iOS this is necessary but NOT sufficient: the flags are ignored by the state-
+        // determination callback that every arm triggers, which is what made the handler recurse.
+        // The authoritative filter is the event-type gate in `defineReviveTask` — do not remove it
+        // on the strength of this line.
         notifyOnEnter: false,
         notifyOnExit: true,
       },
     ]);
+    // Only a real arm advances the floor, so a failed attempt can be retried immediately.
+    await kv?.set(LAST_ARM_KEY, `${armedAt}:${fix.lat}:${fix.lon}`).catch(() => undefined);
     return true;
   } catch (err) {
     console.warn('[revive-fence] arm failed', err);

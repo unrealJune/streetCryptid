@@ -1595,7 +1595,9 @@ export class LocationSharingService implements FixPublisher {
       // is the only way the self-heal can legally re-arm. See `revive-task.ts`.
       try {
         const { armReviveFence } = await import('./background/revive-task');
-        await armReviveFence(firstFix);
+        // The one call that bypasses the re-arm floor: sharing is starting and there may be no
+        // fence standing at all, so "keep whatever is already armed" is not a safe outcome here.
+        await armReviveFence(firstFix, { force: true });
       } catch (error) {
         console.warn('[revive-fence] arm failed', error);
       }
