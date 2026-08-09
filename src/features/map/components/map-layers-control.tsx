@@ -5,25 +5,36 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import type { CryptidTheme } from '@/constants/cryptid-theme';
 import { Spacing } from '@/constants/theme';
 
-interface MapLayersControlProps {
-  readonly enabled: boolean;
-  readonly transitEnabled: boolean;
-  readonly theme: CryptidTheme;
-  onChange(enabled: boolean): void;
-  onTransitChange(enabled: boolean): void;
+/** The map layers this control switches. */
+export interface MapLayerToggles {
+  /** The explored/unexplored fog treatment. */
+  readonly exploration: boolean;
+  /** Motorways — the widest strokes in the dot field. */
+  readonly highways: boolean;
+  /** Rail / tram / subway / ferry lines drawn over the dot field. */
+  readonly transit: boolean;
 }
 
+export type MapLayerId = keyof MapLayerToggles;
+
+interface MapLayersControlProps {
+  readonly layers: MapLayerToggles;
+  readonly theme: CryptidTheme;
+  onChange(layer: MapLayerId, enabled: boolean): void;
+}
+
+const LAYERS: { readonly id: MapLayerId; readonly title: string }[] = [
+  { id: 'exploration', title: 'Exploration' },
+  { id: 'highways', title: 'Highways' },
+  { id: 'transit', title: 'Transit' },
+];
+
 /** A compact map-layer control that expands in place instead of opening a modal. */
-export function MapLayersControl({
-  enabled,
-  transitEnabled,
-  theme,
-  onChange,
-  onTransitChange,
-}: MapLayersControlProps) {
+export function MapLayersControl({ layers, theme, onChange }: MapLayersControlProps) {
   const [expanded, setExpanded] = useState(false);
   const { chrome } = theme;
-  const anyLayer = enabled || transitEnabled;
+  // The FAB reads lit while anything the panel can switch off is still on.
+  const anyEnabled = LAYERS.some((layer) => layers[layer.id]);
 
   return (
     <View pointerEvents="box-none" style={styles.control}>
@@ -32,13 +43,15 @@ export function MapLayersControl({
           off-screen behind the island. */}
       {expanded ? (
         <View style={styles.panel}>
-          <LayerToggle checked={enabled} label="Exploration" onChange={onChange} theme={theme} />
-          <LayerToggle
-            checked={transitEnabled}
-            label="Transit"
-            onChange={onTransitChange}
-            theme={theme}
-          />
+          {LAYERS.map((layer) => (
+            <LayerToggle
+              checked={layers[layer.id]}
+              key={layer.id}
+              label={layer.title}
+              onChange={(enabled) => onChange(layer.id, enabled)}
+              theme={theme}
+            />
+          ))}
         </View>
       ) : null}
 
@@ -59,7 +72,7 @@ export function MapLayersControl({
         <SymbolView
           name={{ ios: 'square.3.layers.3d', android: 'layers', web: 'layers' }}
           size={21}
-          tintColor={anyLayer ? chrome.amber : chrome.steel}
+          tintColor={anyEnabled ? chrome.amber : chrome.steel}
         />
       </Pressable>
     </View>
@@ -84,7 +97,7 @@ function LayerToggle({
   const { chrome } = theme;
   return (
     <Pressable
-      accessibilityLabel={`${label} overlay`}
+      accessibilityLabel={`${label} layer`}
       accessibilityRole="checkbox"
       accessibilityState={{ checked }}
       onPress={() => onChange(!checked)}

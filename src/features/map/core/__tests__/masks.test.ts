@@ -49,8 +49,8 @@ describe('streets mask', () => {
   });
 
   it('omits the smallest road classes (0 and 1) at a zoomed-out (city) camera', () => {
-    // This camera's zoom (~1.97) is well below CLASS_MIN_ZOOM for classes 0 (13.5)
-    // and 1 (12.0), so the LOD drops them entirely to declutter city-wide views.
+    // This camera's zoom (~1.97) is well below CLASS_MIN_ZOOM for classes 0 (15.0)
+    // and 1 (13.5), so the LOD drops them entirely to declutter city-wide views.
     const geo: MapGeometry = {
       ...emptyGeo(),
       streets: [
@@ -81,7 +81,7 @@ describe('streets mask – class layering', () => {
   it('overlapping streets keep the higher class value at the intersection', () => {
     // class 2 (value 205) horizontal + class 3 (value 225) vertical crossing at
     // (50,50). Run at a street-zoom camera so both classes clear CLASS_MIN_ZOOM
-    // (2 needs z≥9, 3 needs z≥7); same 100×100 screen window, just a finer world.
+    // (2 needs z≥11, 3 needs z≥8.5); same 100×100 screen window, just a finer world.
     const hiZoom = Math.log2(4_096_000 / 256); // scaleFor ≈ 4.1e6 px/world → z≈14
     const hiCamera: CameraState = { center: [0.5, 0.5], zoom: hiZoom };
     const half = 50 / 4_096_000; // world half-span of the 100 px window

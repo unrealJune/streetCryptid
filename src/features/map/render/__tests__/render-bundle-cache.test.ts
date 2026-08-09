@@ -63,27 +63,27 @@ describe('sameRegionRenderInput', () => {
       const second = { ...region, spec: { ...region.spec, zoom: 14 } };
       const third = { ...region, spec: { ...region.spec, zoom: 13 } };
 
-      cache.set(region, theme, true, false, 'first');
-      cache.set(second, theme, true, false, 'second');
-      expect(cache.get(region, theme, true, false)).toBe('first');
-      cache.set(third, theme, true, false, 'third');
+      cache.set(region, theme, 'xh-', 'first');
+      cache.set(second, theme, 'xh-', 'second');
+      expect(cache.get(region, theme, 'xh-')).toBe('first');
+      cache.set(third, theme, 'xh-', 'third');
 
-      expect(cache.get(second, theme, true, false)).toBeUndefined();
-      expect(cache.get(region, theme, true, false)).toBe('first');
-      expect(cache.get(third, theme, true, false)).toBe('third');
+      expect(cache.get(second, theme, 'xh-')).toBeUndefined();
+      expect(cache.get(region, theme, 'xh-')).toBe('first');
+      expect(cache.get(third, theme, 'xh-')).toBe('third');
     });
 
-    it('treats the layer toggles as part of the key', () => {
+    it('treats a different layer key as a different entry', () => {
       const cache = new RegionRenderCache<string>(2);
       const theme = {};
 
-      cache.set(region, theme, true, false, 'no-transit');
-      expect(cache.get(region, theme, true, true)).toBeUndefined();
-      expect(cache.get(region, theme, false, false)).toBeUndefined();
+      cache.set(region, theme, 'xh-', 'no transit');
+      expect(cache.get(region, theme, 'xht')).toBeUndefined();
+      expect(cache.get(region, theme, 'x--')).toBeUndefined();
 
-      cache.set(region, theme, true, true, 'transit');
-      expect(cache.get(region, theme, true, true)).toBe('transit');
-      expect(cache.get(region, theme, true, false)).toBe('no-transit');
+      cache.set(region, theme, 'xht', 'transit');
+      expect(cache.get(region, theme, 'xht')).toBe('transit');
+      expect(cache.get(region, theme, 'xh-')).toBe('no transit');
     });
   });
 

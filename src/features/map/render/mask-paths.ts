@@ -1,6 +1,6 @@
 import { worldToScreen } from '../core/camera';
 import { regionMaskCamera, type RegionSpec } from '../core/region';
-import { roadWidthFor } from '../core/road-lod';
+import { roadClassVisible, roadWidthFor, type RoadLayerOptions } from '../core/road-lod';
 import type { ScreenPoint } from '../core/types';
 import type { PackedAreas, PackedGeometry } from '../tiles/packed-geometry';
 
@@ -31,14 +31,22 @@ export interface MaskPaths {
 
 type Project = (x: number, y: number) => ScreenPoint;
 
-export function buildMaskPaths(geometry: PackedGeometry, spec: RegionSpec): MaskPaths {
+export function buildMaskPaths(
+  geometry: PackedGeometry,
+  spec: RegionSpec,
+  layers?: RoadLayerOptions
+): MaskPaths {
   const { camera, viewport } = regionMaskCamera(spec);
 
   // Zoom-aware LOD: mask-image drops the smallest road classes when zoomed out,
   // so skip building their paths entirely — at city zoom that's the majority of
   // streets (service/residential), the bulk of the per-region-swap projection
   // and string cost.
-  const classActive = [0, 1, 2, 3, 4].map((cls) => roadWidthFor(cls, spec.zoom) !== null);
+  // The highways layer toggle drops motorways the same way — no paths
+  // built, so switching them off costs nothing extra to render.
+  const classActive = [0, 1, 2, 3, 4].map(
+    (cls) => roadWidthFor(cls, spec.zoom) !== null && roadClassVisible(cls, layers)
+  );
 
   const streets: string[][] = [[], [], [], [], []];
   const parkFills: string[] = [];

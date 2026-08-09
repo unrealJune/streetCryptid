@@ -15,6 +15,7 @@ import {
 } from '@shopify/react-native-skia';
 
 import { buildPaletteLut } from '../core/region';
+import type { RoadLayerOptions } from '../core/road-lod';
 import type { MapPalette, TransitMode } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
 import { buildCellStateImage } from './cell-state-image';
@@ -69,8 +70,8 @@ function imageFromRgba(data: Uint8Array, width: number, height: number): SkImage
 }
 
 /** The region's feature mask as a texture (R=street G=park B=water), built on GPU. */
-export function makeMaskImage(region: MapRegion): SkImage | null {
-  return buildMaskImage(region.geometry, region.spec);
+export function makeMaskImage(region: MapRegion, layers?: RoadLayerOptions): SkImage | null {
+  return buildMaskImage(region.geometry, region.spec, layers);
 }
 
 /** The region's cell field baked as a texture (R=fraction G=jitter B=reveal order). */

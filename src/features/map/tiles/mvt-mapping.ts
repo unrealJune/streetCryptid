@@ -30,8 +30,11 @@ import { Utf8PbfReader } from './utf8-pbf-reader';
 export function roadClassOf(omtClass: string): RoadClass | null {
   switch (omtClass) {
     case 'motorway':
-    case 'trunk':
       return 4;
+    // Trunk roads are arterials, not freeways: OMT tags plenty of ordinary
+    // divided city streets `trunk`, and at class 4 they drew as thick bars
+    // through the middle of a neighbourhood. They ride with primary instead.
+    case 'trunk':
     case 'primary':
       return 3;
     case 'secondary':

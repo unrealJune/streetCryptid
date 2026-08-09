@@ -61,6 +61,7 @@ import { clusterMarkers } from '../core/marker-clusters';
 import type { MapRegion } from '../engine/map-engine';
 import { useMapEngine } from '../hooks/use-map-engine';
 import { latLonToWorld } from '../core/mercator';
+import { HIGHWAY_CLASS } from '../core/road-lod';
 import {
   emitMapPerfEvent,
   isMapPerfRunEnabled,
@@ -188,6 +189,7 @@ export function MapView({
   friends = [],
   selectedFriendId = null,
   explorationEnabled = true,
+  highwaysEnabled = true,
   transitEnabled = false,
   accessibilityLabel,
   onSelectSelf,
@@ -211,6 +213,8 @@ export function MapView({
   friends?: readonly MapFriendLocation[];
   selectedFriendId?: string | null;
   explorationEnabled?: boolean;
+  /** Draw motorways (default true) — the widest strokes on the map. */
+  highwaysEnabled?: boolean;
   transitEnabled?: boolean;
   accessibilityLabel?: string;
   onSelectSelf?: () => void;
@@ -286,7 +290,10 @@ export function MapView({
   const curBundle = useMemo<RegionBundle | null>(() => {
     if (!region) return null;
     const renderExploration = explorationEnabled && region.spec.cellRes !== null;
-    const cached = regionRenderCache.get(region, lutImage, renderExploration, transitEnabled);
+    const layerKey = `${renderExploration ? 'x' : '-'}${highwaysEnabled ? 'h' : '-'}${
+      transitEnabled ? 't' : '-'
+    }`;
+    const cached = regionRenderCache.get(region, lutImage, layerKey);
     if (cached) {
       const timing: RegionRenderTiming = {
         cacheHit: true,
@@ -306,7 +313,7 @@ export function MapView({
     const measure = isMapPerfRunEnabled();
     const started = measure ? perfNow() : 0;
     const maskStarted = measure ? perfNow() : 0;
-    const maskImage = makeMaskImage(region);
+    const maskImage = makeMaskImage(region, { highways: highwaysEnabled });
     const maskMs = measure ? perfNow() - maskStarted : 0;
     const cellStarted = measure ? perfNow() : 0;
     const cellImage = makeCellStateImage(region);
@@ -340,13 +347,27 @@ export function MapView({
     });
     const bundle = { region, image, cellImage, timing };
     if (image && cellImage && lutImage) {
-      regionRenderCache.set(region, lutImage, renderExploration, transitEnabled, {
-        image,
-        cellImage,
-      });
+      regionRenderCache.set(region, lutImage, layerKey, { image, cellImage });
     }
     return bundle;
-  }, [region, theme, lutImage, explorationEnabled, transitEnabled, regionRenderCache]);
+  }, [
+    region,
+    theme,
+    lutImage,
+    explorationEnabled,
+    highwaysEnabled,
+    transitEnabled,
+    regionRenderCache,
+  ]);
+
+  // Highway name chips belong to highway geometry: hiding one hides the other.
+  const visibleLabels = useMemo(
+    () =>
+      highwaysEnabled
+        ? (region?.labels ?? [])
+        : (region?.labels ?? []).filter((label) => label.roadClass !== HIGHWAY_CLASS),
+    [region, highwaysEnabled]
+  );
 
   const animateProfileCamera = useCallback(
     (
@@ -920,7 +941,7 @@ export function MapView({
             <MapLabelLayer
               anchor={anchor}
               chipColor={theme.chrome.island}
-              labels={region.labels}
+              labels={visibleLabels}
               palette={theme.canvas}
               scale={k}
               translateX={tx}
