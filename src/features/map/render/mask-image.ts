@@ -29,6 +29,15 @@ import { buildMaskPaths } from './mask-paths';
  * rivers. `BlendMode.Lighten` is max() per channel over opaque colors, which
  * reproduces the software mask's max-blend for overlapping features. The result
  * is sampled by the dot-field shader as `maskTex` — no shader change.
+ *
+ * Area fills use NON-ZERO winding, not even-odd. Every park/water ring in the
+ * region is one batched path, and area features genuinely overlap: neighbouring
+ * MVT tiles share a clip buffer (64/4096 of a tile), and a city park routinely
+ * arrives as a `park` polygon plus a `landcover` one covering the same ground.
+ * Even-odd XORs those overlaps away — that is what put straight blank seams on
+ * every tile boundary in the water and punched holes through parks. MVT requires
+ * exterior rings clockwise and holes counter-clockwise, so non-zero unions the
+ * overlaps while still cutting the holes.
  */
 export function buildMaskImage(
   geometry: PackedGeometry,
@@ -69,7 +78,7 @@ function drawFill(canvas: SkCanvas, svg: string, color: string): void {
   if (!svg) return;
   const path = Skia.Path.MakeFromSVGString(svg);
   if (!path) return;
-  path.setFillType(FillType.EvenOdd);
+  path.setFillType(FillType.Winding);
   canvas.drawPath(path, fillPaint(color));
 }
 

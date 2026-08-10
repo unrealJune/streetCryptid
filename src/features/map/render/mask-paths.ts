@@ -9,10 +9,15 @@ import type { PackedAreas, PackedGeometry } from '../tiles/packed-geometry';
  *
  * Pure (no Skia): projects the region geometry through the same synthetic mask
  * camera the software rasterizer uses, then batches it into a handful of SVG
- * `M…L…` strings — one stroked path per road class, one even-odd fill for parks,
+ * `M…L…` strings — one stroked path per road class, one non-zero fill for parks,
  * one for water, and one stroked path for rivers. The render layer feeds these to
  * `Skia.Path.MakeFromSVGString` (one parse per class) and strokes/fills them on
  * the GPU.
+ *
+ * Ring order is preserved exactly as decoded, because the fill relies on it:
+ * MVT gives exterior rings clockwise and holes counter-clockwise, and the
+ * batched path is filled non-zero so overlapping features union instead of
+ * cancelling (see `mask-image.ts`).
  *
  * Walks {@link PackedGeometry} coordinate pools directly — points are read from
  * `Float32Array`s (delta + tile origin) and projected on the fly, never
@@ -21,9 +26,9 @@ import type { PackedAreas, PackedGeometry } from '../tiles/packed-geometry';
 export interface MaskPaths {
   /** One SVG polyline per road class (index = RoadClass 0..4); '' when empty. */
   readonly streets: readonly string[];
-  /** Even-odd closed sub-paths for park fills; '' when empty. */
+  /** Closed sub-paths for park fills (non-zero winding); '' when empty. */
   readonly park: string;
-  /** Even-odd closed sub-paths for water fills; '' when empty. */
+  /** Closed sub-paths for water fills (non-zero winding); '' when empty. */
   readonly water: string;
   /** SVG polyline for river centerlines; '' when empty. */
   readonly rivers: string;
@@ -94,7 +99,7 @@ export function polyline(coords: Float32Array, from: number, to: number, project
   return out;
 }
 
-/** Append one even-odd closed sub-path per ring of every area feature. */
+/** Append one closed sub-path per ring of every area feature (filled non-zero). */
 function pushFills(dst: string[], areas: PackedAreas, project: Project): void {
   for (let i = 0; i < areas.count; i++) {
     for (let r = areas.ringOff[i]; r < areas.ringOff[i + 1]; r++) {

@@ -92,7 +92,7 @@ describe('buildMaskPaths', () => {
     expect(hidden.streets[3]).not.toBe('');
   });
 
-  it('closes ring fills with Z (even-odd sub-paths)', () => {
+  it('closes ring fills with Z (one sub-path per ring)', () => {
     const ring: WorldPoint[] = [
       [lx(0.2), ly(0.2)],
       [lx(0.4), ly(0.2)],
