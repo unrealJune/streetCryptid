@@ -26,6 +26,9 @@ import { Skia, type SkRuntimeEffect } from '@shopify/react-native-skia';
  *   - `maskTex`  RGBA feature mask, R=street G=park B=water (nearest).
  *   - `cellTex`  RGBA cell state, R=fraction G=jitter B=reveal order (nearest).
  *   - `lut`      256×3 palette LUT, rows 0=terr 1=water 2=park (linear).
+ *
+ * The mask records every feature that covers a point, so a dot that is both
+ * park and water has to pick one. Precedence is street > water > park > ground.
  */
 export const DOT_FIELD_SKSL = `
 uniform float  uPixelRatio;   // render (device) px per region-logical px
@@ -105,15 +108,18 @@ float4 dotAt(float ix, float iy, float2 frag) {
     val = clamp(sv / 255.0, 0.0, 1.0);
     color = rampLut(val, 0.0);
     isArea = 0.0; kind = 0;
-  } else if (pv > 40.0) {
-    val = 0.58 + 0.28 * n;
-    color = rampLut(0.48 + 0.5 * n, 2.0);
-    isArea = 1.0; kind = 1;
   } else if (wv > 40.0) {
+    // Water outranks park: protected areas routinely cover open water (marine
+    // sanctuaries, marine state parks, offshore refuges) and lakes sit inside
+    // national parks, so a park polygon is no evidence the ground is dry.
     if (n < 0.08 * (1.0 - uLod)) return float4(0.0);   // zoomed out: water fills solid, no holes
     val = 0.44 + 0.12 * sin(center.y * 0.4 + center.x * 0.2);
     color = rampLut(0.42 + 0.5 * n, 1.0);
     isArea = 1.0; kind = 2;
+  } else if (pv > 40.0) {
+    val = 0.58 + 0.28 * n;
+    color = rampLut(0.48 + 0.5 * n, 2.0);
+    isArea = 1.0; kind = 1;
   } else {
     // Background/building noise thins out as you zoom out, so the city field
     // reads calm instead of a wall of dots.
