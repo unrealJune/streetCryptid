@@ -26,7 +26,14 @@ env:
   # stay installable over one another regardless of which PR they came from;
   # run_attempt keeps a re-run of the same run distinct from its first attempt.
   # Set at the workflow level so both platform jobs stamp the identical version.
-  SC_PR_BUILD_VERSION: '1.${{ github.run_number }}.${{ github.run_attempt }}'
+  #
+  # run_number leads rather than a fixed `1.`, so the first component alone clears
+  # BOTH values a device might be holding: the installed CFBundleShortVersionString
+  # (1.3.x) and the installed CFBundleVersion, which EAS has frozen at 45 for every
+  # build ever shipped through this workflow. `1.97.1` loses to 45 on the first
+  # component; `97.1.0` beats it. See app.config.ts for why that comparison is
+  # ambiguous and why this sidesteps having to resolve it.
+  SC_PR_BUILD_VERSION: '${{ github.run_number }}.${{ github.run_attempt }}.0'
   # Registered only so GitHub redacts the tailnet name that the Tailscale action
   # prints while configuring MagicDNS on the macOS runner. Not a credential.
   TS_TAILNET: ${{ secrets.TS_TAILNET }}

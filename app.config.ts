@@ -26,12 +26,23 @@ const IS_DEV_CLIENT = process.env.EAS_BUILD_PROFILE === 'development';
  *
  * Leaving `expo.version` at its app.json value therefore stamps every PR build
  * with the same version, and testers can install exactly one of them.
- * `pr-development-builds.yml` sets this to `1.<run_number>.<run_attempt>`, which
+ * `pr-development-builds.yml` sets this to `<run_number>.<run_attempt>.0`, which
  * never repeats and never decreases across PRs. It is unset everywhere else, so
  * release builds keep the real version app.json carries.
  *
+ * The run number leads deliberately. Which installed key iOS compares the
+ * manifest's `bundle-version` against is not something Apple documents clearly:
+ * the field name matches `CFBundleVersion`, while the value this server puts
+ * there comes from `CFBundleShortVersionString`. That distinction bites because
+ * `appVersionSource: "remote"` plus `autoIncrement: false` on the
+ * `production-internal-*` profiles has pinned `CFBundleVersion` at 45 for every
+ * build this workflow has ever produced. A `1.<run_number>.<run_attempt>` scheme
+ * loses to that 45 on the first component and installs nothing; leading with the
+ * run number clears 45 and the installed `1.3.x` marketing version at once, so
+ * the comparison resolves the same way whichever key iOS actually reads.
+ *
  * Consequence, accepted deliberately: a device holding a PR build cannot upgrade
- * in place to an App Store release, because `1.<run_number>.x` outranks any real
+ * in place to an App Store release, because `<run_number>.x.0` outranks any real
  * version. That crossing already required a delete — the two are signed with
  * different keys.
  */
