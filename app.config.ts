@@ -13,6 +13,44 @@ import type { ConfigContext, ExpoConfig } from 'expo/config';
  */
 const IS_DEV_CLIENT = process.env.EAS_BUILD_PROFILE === 'development';
 
+/**
+ * PR builds override the marketing version so each upload is strictly newer than
+ * the last one a tester installed.
+ *
+ * iOS silently declines an `itms-services` OTA install whose manifest
+ * `bundle-version` is not greater than the copy already on the device — no
+ * prompt, no error, the Install button just does nothing until the app is
+ * deleted. The internal distribution server fills that manifest field from
+ * `CFBundleShortVersionString` (the marketing version), not `CFBundleVersion`,
+ * so bumping `ios.buildNumber` does not help: the manifest comes out byte-identical.
+ *
+ * Leaving `expo.version` at its app.json value therefore stamps every PR build
+ * with the same version, and testers can install exactly one of them.
+ * `pr-development-builds.yml` sets this to `1.<run_number>.<run_attempt>`, which
+ * never repeats and never decreases across PRs. It is unset everywhere else, so
+ * release builds keep the real version app.json carries.
+ *
+ * Consequence, accepted deliberately: a device holding a PR build cannot upgrade
+ * in place to an App Store release, because `1.<run_number>.x` outranks any real
+ * version. That crossing already required a delete — the two are signed with
+ * different keys.
+ */
+function prBuildVersion(): string | undefined {
+  const version = process.env.SC_PR_BUILD_VERSION;
+  if (!version) {
+    return undefined;
+  }
+
+  if (!/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new Error(
+      `SC_PR_BUILD_VERSION must be MAJOR.MINOR.PATCH, got "${version}". ` +
+        'iOS only accepts period-separated integers in CFBundleShortVersionString.'
+    );
+  }
+
+  return version;
+}
+
 function gitCommit(): string | undefined {
   if (process.env.EAS_BUILD_GIT_COMMIT_HASH) {
     return process.env.EAS_BUILD_GIT_COMMIT_HASH;
@@ -29,6 +67,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: config.name ?? 'streetCryptid',
   slug: config.slug ?? 'streetCryptid',
+  version: prBuildVersion() ?? config.version,
   ios: {
     ...config.ios,
     infoPlist: {

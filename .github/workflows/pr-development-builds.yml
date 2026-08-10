@@ -18,6 +18,15 @@ env:
   CI: '1'
   EXPO_NO_TELEMETRY: '1'
   EAS_CLI_VERSION: 21.0.3
+  # Marketing version stamped into these builds, replacing the app.json value.
+  # iOS OTA installs are a silent no-op unless the manifest advertises a version
+  # strictly greater than the copy already installed, and the distribution server
+  # reads that from CFBundleShortVersionString -- see app.config.ts for the full
+  # story. run_number is monotonic across every PR and is never reused, so builds
+  # stay installable over one another regardless of which PR they came from;
+  # run_attempt keeps a re-run of the same run distinct from its first attempt.
+  # Set at the workflow level so both platform jobs stamp the identical version.
+  SC_PR_BUILD_VERSION: '1.${{ github.run_number }}.${{ github.run_attempt }}'
   # Registered only so GitHub redacts the tailnet name that the Tailscale action
   # prints while configuring MagicDNS on the macOS runner. Not a credential.
   TS_TAILNET: ${{ secrets.TS_TAILNET }}
@@ -90,6 +99,12 @@ jobs:
             ios \
             production-internal-ios \
             "$BUILD_ARTIFACT"
+
+      # The build is withheld from the logs, so a prebuild that ignored
+      # SC_PR_BUILD_VERSION would otherwise surface only as testers reporting that
+      # the Install button does nothing. Check the archive before it is uploaded.
+      - name: Verify the archive carries the PR build version
+        run: bash scripts/verify-ipa-version.sh "$BUILD_ARTIFACT" "$SC_PR_BUILD_VERSION"
 
       # actions/cache's own post step is `post-if: success()`, so a 40-minute build that fails
       # would otherwise discard the pod downloads it just made and leave the retry cold.
