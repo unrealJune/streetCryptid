@@ -156,6 +156,8 @@ class SqliteTrailStorage implements TrailStorage {
            fix = excluded.fix, received_at = excluded.received_at, fix_ts = excluded.fix_ts,
            via = CASE WHEN trail.via IS NULL OR trail.via = ?
                       THEN COALESCE(excluded.via, trail.via) ELSE trail.via END`,
+        // Bound positionally, left-to-right across the whole statement: the six VALUES first,
+        // then the CASE's comparison value.
         point.author,
         point.seq,
         JSON.stringify(point.fix),
