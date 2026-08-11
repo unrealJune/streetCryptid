@@ -2,7 +2,12 @@ import type { PoolState } from '../core/pool';
 import { InMemoryKV, type PersistentKV } from './background/fix-outbox';
 import type { HandledNonce } from './live-requests';
 import { DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
-import { InMemoryTrailStorage, type TrailPoint, type TrailStorage } from './background/trail-store';
+import {
+  InMemoryTrailStorage,
+  UNRESOLVED_VIA,
+  type TrailPoint,
+  type TrailStorage,
+} from './background/trail-store';
 
 /**
  * On-device persistence so the social feature survives JS reloads and app restarts. Backs the
@@ -149,13 +154,15 @@ class SqliteTrailStorage implements TrailStorage {
         `INSERT INTO trail (author, seq, fix, received_at, fix_ts, via) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(author, seq) DO UPDATE SET
            fix = excluded.fix, received_at = excluded.received_at, fix_ts = excluded.fix_ts,
-           via = COALESCE(trail.via, excluded.via)`,
+           via = CASE WHEN trail.via IS NULL OR trail.via = ?
+                      THEN COALESCE(excluded.via, trail.via) ELSE trail.via END`,
         point.author,
         point.seq,
         JSON.stringify(point.fix),
         point.receivedAt,
         point.fix.ts,
-        point.via ?? null
+        point.via ?? null,
+        UNRESOLVED_VIA
       );
     } catch {
       await this.fallback.put(point);

@@ -24,16 +24,41 @@ export interface TrailPoint {
    * stored before provenance was recorded.
    *
    * First writer wins: a fix received live and later re-seen during reconciliation keeps its live
-   * label, because that is how it actually got here.
+   * label, because that is how it actually got here. The one exception is
+   * {@link UNRESOLVED_VIA} — see {@link mergeVia}.
    */
   via?: FixTransport;
+}
+
+/**
+ * The label derived from the `backfill` flag alone, when the delivery carried none: "read back out
+ * of the durable replica, serving peer unknown".
+ *
+ * It is deliberately weaker than every label the native layer supplies, because
+ * `refreshTrailFromReplica` re-reads the whole replica after each sync and can beat the backfill
+ * callback that carries the precise one (`stash` vs `docs`) to the store.
+ */
+export const UNRESOLVED_VIA: FixTransport = 'sync';
+
+/**
+ * Provenance kept on upsert: first writer wins, except that {@link UNRESOLVED_VIA} yields to any
+ * label that actually names the serving peer or link. Mirrored in the SQLite `ON CONFLICT` clause.
+ */
+export function mergeVia(
+  existing: FixTransport | undefined,
+  incoming: FixTransport | undefined
+): FixTransport | undefined {
+  if (!existing) return incoming;
+  if (existing === UNRESOLVED_VIA && incoming && incoming !== UNRESOLVED_VIA) return incoming;
+  return existing;
 }
 
 /** Storage port. Real impl: expo-sqlite. Tests use {@link InMemoryTrailStorage}. */
 export interface TrailStorage {
   /**
    * Upsert by `(author, seq)`. An existing point's {@link TrailPoint.via} is kept: re-delivery
-   * through a slower path must not rewrite how the fix originally arrived.
+   * through a slower path must not rewrite how the fix originally arrived. See {@link mergeVia}
+   * for the one exception.
    */
   put(point: TrailPoint): Promise<void>;
   /** Points for `author` with `fix.ts >= sinceTs`, ascending by seq. */
@@ -53,7 +78,7 @@ export class InMemoryTrailStorage implements TrailStorage {
     // Upsert by (author, seq): a re-delivered fix must not duplicate, and must not relabel how the
     // fix first arrived (`refreshTrailFromReplica` re-reads every entry on every sync).
     const i = this.points.findIndex((p) => p.author === point.author && p.seq === point.seq);
-    if (i >= 0) this.points[i] = { ...point, via: this.points[i].via ?? point.via };
+    if (i >= 0) this.points[i] = { ...point, via: mergeVia(this.points[i].via, point.via) };
     else this.points.push(point);
   }
   async range(author: string, sinceTs: number): Promise<TrailPoint[]> {

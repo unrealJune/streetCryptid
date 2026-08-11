@@ -57,6 +57,24 @@ describe('trail store', () => {
     expect(points[0].receivedAt).toBe(5);
   });
 
+  it('upgrades the coarse synced label when the serving peer is identified later', async () => {
+    const storage = new InMemoryTrailStorage();
+    const store = createTrailStore({ storage });
+    // `refreshTrailFromReplica` re-reads the replica and can beat the backfill callback that
+    // carries the precise label to the store.
+    await store.appendFriend({ author: 'f', seq: 1, fix: fix(100), receivedAt: 0, backfill: true });
+    await store.appendFriend({
+      author: 'f',
+      seq: 1,
+      fix: fix(100),
+      receivedAt: 1,
+      backfill: true,
+      via: 'stash',
+    });
+
+    expect((await store.rangeFor('f', 0))[0].via).toBe('stash');
+  });
+
   it('adopts a provenance for rows stored before it was recorded', async () => {
     const storage = new InMemoryTrailStorage();
     await storage.put({ author: 'f', seq: 1, fix: fix(100), receivedAt: 0 });
