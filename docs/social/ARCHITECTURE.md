@@ -294,6 +294,46 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   against namespaces let the stash operator work out which namespace was ours. The cost is
   accepted and real: a friend's fixes now land on our next poll or periodic backfill rather than
   seconds after they publish. Live mode's request channel polls for the same reason (§9c).
+- **The revive tripwire** (`background/revive-task.ts`) is a single 200 m exit-only geofence that
+  re-centers on the user as they move. Core Location's standard location service keeps a _suspended_
+  app awake but never relaunches a _terminated_ one; region monitoring is the only mechanism
+  expo-location exposes that does, and silent push was given up with the push token (§10). On
+  Android it cannot resurrect anything, but a geofence transition is a documented exemption to the
+  Android 12+ ban on starting a foreground service from the background, which is the only way
+  `ensureSharingArmedHeadless` can legally re-arm.
+  > **iOS trap — do not "simplify" this away.** Arming is self-triggering. `startGeofencingAsync`
+  > re-registers the whole region set, and expo-location's `EXGeofencingTaskConsumer` resets the
+  > region's cached state to `CLRegionStateUnknown` and calls `requestStateForRegion`; the resulting
+  > `didDetermineState:` fires the task whenever the determined state differs from the cached one —
+  > always, after that reset — and picks the event type from the state alone, consulting **neither**
+  > `notifyOnEnter` nor `notifyOnExit`. Those flags only filter genuine transitions. So a handler
+  > that re-centers the fence recurses: measured at 60–125 wakes/second, persisted across cold
+  > launches by expo-task-manager and clearable only by uninstalling. Two guards keep it closed —
+  > the handler acts **only** on `GeofencingEventType.Exit`, and `armReviveFence` enforces a
+  > `REVIVE_FENCE_MIN_REARM_MS` floor (bypassed only by `startBackground`, which may have no fence
+  > standing yet). Android is unaffected: its consumer builds `transitionTypes` from the flags.
+- **Who owns the native node.** There is exactly one iroh node per process: `self.node` in
+  `IrohLocationModule.swift`, which **both** `createNode` and `shutdown` nil via `clearRuntime()`.
+  Every other native export guards on it and throws `NoNode: call createNode first` once it is gone.
+  So a second `LocationSharingService` — the short-lived one a TaskManager callback spins up — is
+  never merely wasteful; it is destructive to whatever node the mounted runtime holds.
+  `native-runtime-owner.ts` is the arbiter: the mounted service claims the runtime **before** its
+  `createNode` and releases it in `performShutdown`, headless sessions refuse while a claim stands
+  (and serialize against each other), and a mounted `init` awaits any in-flight session rather than
+  clobbering it.
+  > **iOS trap — `AppState` is not an ownership signal.** The guard here used to be
+  > `AppState.currentState === 'active'`. iOS reports **`'inactive'`**, not `'active'`, during a cold
+  > launch into the foreground and for as long as a system permission alert is up ("Allow Once /
+  > While Using / Always") — precisely the two windows in which the mounted runtime is building its
+  > node and in which expo-task-manager is replaying the persisted location/geofence tasks it
+  > restored at module scope, before React mounts. A session admitted there calls `createNode`
+  > (clearing the node being built) and then `shutdown` in its `finally` (clearing it again). Nothing
+  > throws where anyone can see it: the mounted service keeps `status: 'ready'` and a non-null
+  > `mod`, while `readTrail` `.catch`es to `[]`, `syncTrail` logs a warning and returns, and
+  > `safeDocTicket` returns null. The app renders, the map still pans on the UI thread, and every
+  > control is dead — through relaunches, because the same race re-runs each launch, until the user
+  > reinstalls and clears the persisted tasks. Refusals are recorded on a `bg.session` span with
+  > `sc.drop_reason` (`runtime-claimed` / `app-foreground`) and the observed `app_state`.
 - **Config**: iOS `UIBackgroundModes: [location, processing]` + `NSLocationAlwaysAndWhenInUse…`; Android
   `ACCESS_BACKGROUND_LOCATION` + `FOREGROUND_SERVICE_LOCATION` + `POST_NOTIFICATIONS`
   (`app.json` / expo-location config plugin).

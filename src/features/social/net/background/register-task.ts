@@ -93,13 +93,21 @@ if (isReviveFenceAvailable()) {
   // in the app has run yet. Crossing the fence means the phone moved a couple of blocks since we
   // last armed: re-arm location updates if we were killed, then re-center the fence on where we are
   // now so it keeps following the user.
+  // Only genuine `Exit` events reach this runner — `defineReviveTask` drops the synthetic
+  // state-determination callback that every arm produces on iOS, which is what previously turned
+  // "re-center at the end of the handler" into unbounded recursion.
   defineReviveTask(async (parent) => {
     const { ensureSharingArmedHeadless } = await import('./headless-runtime');
     await ensureSharingArmedHeadless('geofence', parent);
     try {
-      const { armReviveFence } = await import('./revive-task');
+      const { armReviveFence, REVIVE_FENCE_MAX_FIX_AGE_MS } = await import('./revive-task');
       const Location = await import('expo-location');
-      const pos = await Location.getLastKnownPositionAsync();
+      // `maxAge` matters: an unconstrained read hands back whatever Core Location last cached,
+      // however old. Re-centering on a dead fix plants the fence where we are not, and being
+      // permanently outside it is the one thing that still re-fires a real exit on every arm.
+      const pos = await Location.getLastKnownPositionAsync({
+        maxAge: REVIVE_FENCE_MAX_FIX_AGE_MS,
+      });
       if (pos) {
         await armReviveFence({
           lat: pos.coords.latitude,

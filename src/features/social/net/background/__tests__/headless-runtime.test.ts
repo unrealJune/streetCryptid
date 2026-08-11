@@ -1,6 +1,12 @@
 import { AppState } from 'react-native';
 
 import {
+  claimNativeRuntime,
+  releaseNativeRuntime,
+  resetNativeRuntimeOwnerForTesting,
+} from '../native-runtime-owner';
+
+import {
   ensureSharingArmedHeadless,
   flushBackgroundOutboxHeadless,
   runBackgroundBackfillHeadless,
@@ -100,6 +106,7 @@ describe('headless-runtime', () => {
   const originalAppState = AppState.currentState;
 
   beforeEach(() => {
+    resetNativeRuntimeOwnerForTesting();
     calls.length = 0;
     mockSyncTrail.mockImplementation(async () => {
       calls.push('syncTrail');
@@ -180,6 +187,51 @@ describe('headless-runtime', () => {
 
     // publishFix broadcasts live and writes the LOCAL docs replica only. Without the push the
     // envelopes never leave the phone, so an offline friend has nothing to reconcile from.
+    // The regression test for the silent-death bug. iOS reports 'inactive' — NOT 'active' — during a
+    // cold launch into the foreground and for as long as a system permission alert is up ("Allow
+    // While Using / Always"). The old guard only refused on 'active', so a restored location task
+    // firing in either window spun up a second service whose `createNode` (and whose `shutdown` in
+    // the session `finally`) calls `clearRuntime()`, nil'ing the node the mounted runtime was
+    // building. Every later native call then throws `NoNode` into a `.catch` and the app renders
+    // but does nothing, through relaunches, until reinstall.
+    it('is a no-op while the app is merely inactive (cold launch / permission alert)', async () => {
+      // Queued work, so the precheck passes and the guard is the ONLY thing that can refuse.
+      backgroundOutbox.pending.mockImplementation(async () => 3);
+      setAppState('inactive');
+
+      const published = await flushBackgroundOutboxHeadless();
+
+      expect(published).toBe(0);
+      expect(mockServiceCtor).not.toHaveBeenCalled();
+    });
+
+    it('is a no-op while a mounted runtime holds the native-runtime claim', async () => {
+      // Backgrounded, so the AppState guard alone would wave this through — but the mounted runtime
+      // is alive and owns the node (iOS keeps it alive when the user backgrounds the app).
+      backgroundOutbox.pending.mockImplementation(async () => 3);
+      setAppState('background');
+      claimNativeRuntime();
+      try {
+        const published = await flushBackgroundOutboxHeadless();
+
+        expect(published).toBe(0);
+        expect(mockServiceCtor).not.toHaveBeenCalled();
+      } finally {
+        releaseNativeRuntime();
+      }
+    });
+
+    // Guards the other half: with the app genuinely backgrounded and no claim standing, the session
+    // MUST still run, or the whole background pipeline silently stops delivering.
+    it('still runs a session when the app is backgrounded and nothing holds the claim', async () => {
+      backgroundOutbox.pending.mockImplementation(async () => 3);
+      setAppState('background');
+
+      await flushBackgroundOutboxHeadless();
+
+      expect(mockServiceCtor).toHaveBeenCalledTimes(1);
+    });
+
     it('pushes the durable trail to the stash after draining, before the node shuts down', async () => {
       setAppState('background');
       queueFixes(3);
