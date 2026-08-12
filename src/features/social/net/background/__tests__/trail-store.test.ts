@@ -34,14 +34,25 @@ describe('trail store', () => {
     ]);
   });
 
-  it('labels a backfilled fix as synced and keeps a native transport label when present', async () => {
+  it('labels a backfilled fix as synced', async () => {
+    const storage = new InMemoryTrailStorage();
+    const store = createTrailStore({ storage });
+    await store.appendFriend({ author: 'f', seq: 1, fix: fix(100), receivedAt: 0, backfill: true });
+
+    expect((await store.rangeFor('f', 0)).map((p) => p.via)).toEqual(['sync']);
+  });
+
+  it('keeps only the newest fix per friend, with its own transport label', async () => {
     const storage = new InMemoryTrailStorage();
     const store = createTrailStore({ storage });
     await store.appendFriend({ author: 'f', seq: 1, fix: fix(100), receivedAt: 0, backfill: true });
     await store.appendFriend({ author: 'f', seq: 2, fix: fix(200), receivedAt: 0, via: 'relay' });
 
+    // Friends' history is deliberately not retained, so the earlier `sync`-labelled fix is gone
+    // rather than kept alongside. The survivor keeps the label it actually arrived with.
     const points = await store.rangeFor('f', 0);
-    expect(points.map((p) => p.via)).toEqual(['sync', 'relay']);
+    expect(points.map((p) => p.seq)).toEqual([2]);
+    expect(points.map((p) => p.via)).toEqual(['relay']);
   });
 
   it('keeps the original provenance when a live fix is re-seen during sync', async () => {
@@ -141,7 +152,8 @@ describe('trail store', () => {
     await store.appendFriend({ author: 'f', seq: 1, fix: fix(200), receivedAt: 0 });
     await store.appendFriend({ author: 'f', seq: 2, fix: fix(300), receivedAt: 0 });
 
-    expect(await store.removeAuthor('f')).toBe(2);
+    // Only the newest of the two friend fixes was ever kept.
+    expect(await store.removeAuthor('f')).toBe(1);
     expect(await store.rangeFor('f', 0)).toEqual([]);
     expect(await store.rangeFor(SELF_AUTHOR, 0)).toHaveLength(1);
   });

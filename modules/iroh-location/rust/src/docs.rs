@@ -210,6 +210,33 @@ pub fn keys_to_prune(entries: &[(Vec<u8>, u64)], older_than_ts: u64) -> Vec<Vec<
         .collect()
 }
 
+/// Latest-only selection: from `keys`, return the ones belonging to `author` whose seq is **below**
+/// `keep_seq` — i.e. every fix of ours that a newer fix has superseded.
+///
+/// We publish a fix and then immediately drop the one before it, so our namespace holds exactly one
+/// location entry. That is the whole point of the change: iroh-docs reconciliation does not
+/// trickle, so a peer that has been offline used to receive our entire back-catalogue in a single
+/// burst the moment it caught up — 956 entries in ten seconds on the device this was diagnosed
+/// from, enough to pin the receiver's JS thread and stall its map. One entry cannot burst.
+///
+/// The key format deliberately stays `hex(author)/{seq:020}` rather than collapsing to a single
+/// per-author slot like [`encode_ctl_key`] does. A separator-less key would not match
+/// [`author_prefix`], so peers on older builds would range-query our namespace and find nothing at
+/// all. Keeping the format means they just find one entry where they used to find many.
+///
+/// Selection is by *key*, not by entry timestamp, and only for keys that [`decode_key`] accepts:
+/// control entries (`ctl/…`) are load-bearing live-mode state and are rejected by construction,
+/// and another author's entries are not ours to delete.
+pub fn superseded_keys(keys: &[Vec<u8>], author: &[u8], keep_seq: u64) -> Vec<Vec<u8>> {
+    keys.iter()
+        .filter(|key| match decode_key(key) {
+            Some((key_author, seq)) => key_author == author && seq < keep_seq,
+            None => false,
+        })
+        .cloned()
+        .collect()
+}
+
 // ── Live-node wrapper ───────────────────────────────────────────────────────────────────
 
 /// A decrypted fix read back from (or reconciled into) the durable replica. `payload` is the
@@ -322,6 +349,11 @@ impl TrailDocs {
 
     /// Write a sealed envelope to `ns` under key `author/seq` (ARCHITECTURE §5). `envelope` must
     /// be the identical bytes broadcast on gossip so revocation carries over.
+    ///
+    /// Immediately drops our own now-superseded entries, so our namespace holds exactly one
+    /// location fix — see [`superseded_keys`] for why that matters and why the key format did not
+    /// change. Best-effort: a failed prune leaves a stale entry that the next write will clear, so
+    /// it must not fail the publish that already succeeded.
     pub async fn write(
         &self,
         ns: NamespaceId,
@@ -332,7 +364,30 @@ impl TrailDocs {
         let doc = self.doc_for(ns).await?;
         doc.set_bytes(self.author, encode_key(author, seq), envelope)
             .await?;
+        if let Err(err) = self.prune_superseded(&doc, author, seq).await {
+            tracing::debug!(?err, "trail prune after publish failed; next write will retry");
+        }
         Ok(())
+    }
+
+    /// Delete our own fixes in this doc with a seq below `keep_seq`.
+    ///
+    /// Scoped to `author_prefix(author)` rather than scanning the namespace so a friend's entries
+    /// and the `ctl/` control slot are never even enumerated, and re-checked per key by
+    /// [`superseded_keys`].
+    async fn prune_superseded(&self, doc: &Doc, author: &[u8], keep_seq: u64) -> Result<u64> {
+        let query = Query::key_prefix(author_prefix(author)).build();
+        let stream = doc.get_many(query).await?;
+        tokio::pin!(stream);
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        while let Some(entry) = stream.next().await {
+            keys.push(entry?.key().to_vec());
+        }
+        let mut removed = 0u64;
+        for key in superseded_keys(&keys, author, keep_seq) {
+            removed += doc.del(self.author, key).await? as u64;
+        }
+        Ok(removed)
     }
 
     /// Read + decrypt entries for `author` in `ns` with `fix.ts >= since_ts`. Entries we can't
@@ -841,6 +896,45 @@ mod tests {
         let b = [4u8; 32];
         assert_eq!(encode_ctl_key(&a), encode_ctl_key(&a));
         assert_ne!(encode_ctl_key(&a), encode_ctl_key(&b));
+    }
+
+    // ── latest-only selection ─────────────────────────────────────────────────────────────
+    #[test]
+    fn superseded_keeps_only_the_newest_fix() {
+        let author = vec![0xAAu8; 4];
+        let keys: Vec<Vec<u8>> = (1..=5).map(|seq| encode_key(&author, seq)).collect();
+
+        let pruned = superseded_keys(&keys, &author, 5);
+
+        assert_eq!(pruned.len(), 4);
+        assert!(!pruned.contains(&encode_key(&author, 5)));
+        assert!(pruned.contains(&encode_key(&author, 1)));
+    }
+
+    #[test]
+    fn superseded_is_empty_for_a_lone_entry() {
+        let author = vec![0xAAu8; 4];
+        let keys = vec![encode_key(&author, 7)];
+        assert!(superseded_keys(&keys, &author, 7).is_empty());
+    }
+
+    #[test]
+    fn superseded_never_selects_control_or_foreign_keys() {
+        let author = vec![0xAAu8; 4];
+        let other = vec![0xBBu8; 4];
+        let keys = vec![
+            encode_ctl_key(&author),
+            encode_ctl_key(&other),
+            encode_key(&other, 1),
+            encode_key(&author, 1),
+            b"garbage".to_vec(),
+        ];
+
+        // Control entries carry live-mode state and are overwritten in place, not superseded; a
+        // friend's entries are not ours to delete.
+        let pruned = superseded_keys(&keys, &author, 9);
+
+        assert_eq!(pruned, vec![encode_key(&author, 1)]);
     }
 
     // ── prune-threshold selection ────────────────────────────────────────────────────────

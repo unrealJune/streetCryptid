@@ -139,8 +139,6 @@ export interface MapFriendLocation {
   cryptidName?: string;
   color: string;
   location: LatLon;
-  history: readonly MapTrailLocation[];
-  historyCount: number;
   latestTs: number;
   stale?: boolean;
 }
@@ -566,20 +564,12 @@ export function MapView({
         : [],
     [anchor, selfHistory, viewport]
   );
+  // Only YOUR trail is ever drawn. A friend is a single dot at their last known position: we no
+  // longer receive, retain, or render anyone else's history.
   const selectedTrail = useMemo(() => {
-    if (!viewport) return null;
-    if (selfSelected) {
-      return buildTrail(selfTrailPoints, `rgb(${selfInk.join(', ')})`);
-    }
-    if (!selectedFriendId) return null;
-    const friend = friends.find((candidate) => candidate.id === selectedFriendId);
-    if (!friend) return null;
-    const points = friend.history.map(({ id, location }) => ({
-      id,
-      screen: worldToScreen(anchor, viewport, latLonToWorld(location)),
-    }));
-    return buildTrail(points, friend.color);
-  }, [anchor, friends, selectedFriendId, selfInk, selfSelected, selfTrailPoints, viewport]);
+    if (!viewport || !selfSelected) return null;
+    return buildTrail(selfTrailPoints, `rgb(${selfInk.join(', ')})`);
+  }, [selfInk, selfSelected, selfTrailPoints, viewport]);
   useEffect(() => {
     const path = selectedTrail?.path;
     return () => path?.dispose();

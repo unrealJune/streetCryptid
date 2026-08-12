@@ -410,7 +410,7 @@ describe('LocationSharingService — durable trail wiring', () => {
     expect(latest.some((p) => p.author === 'bb22' && p.seq === 5)).toBe(true);
   });
 
-  it('exposes the full retained trail for known friends', async () => {
+  it('keeps only the newest fix per friend in the trail cache', async () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
     await svc.addFriend(friend);
@@ -429,10 +429,9 @@ describe('LocationSharingService — durable trail wiring', () => {
     });
     await flush();
 
+    // A friend collapses to their newest fix — their history is not retained.
     const full = await svc.trailAll();
-    expect(
-      full.filter((point) => point.author === 'bb22' && point.seq >= 51).map((point) => point.seq)
-    ).toEqual([51, 52]);
+    expect(full.filter((point) => point.author === 'bb22').map((point) => point.seq)).toEqual([52]);
   });
 
   it('surfaces the recovered count from onSync into the snapshot', async () => {

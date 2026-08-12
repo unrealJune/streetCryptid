@@ -2,10 +2,15 @@ import type { FixTransport, IncomingFix, LocationFix } from '../../core/types';
 
 /**
  * Local history of location fixes — the app-side mirror of the durable iroh-docs
- * trail. Holds our own trail (what we published) plus friends' trails (live + backfilled from
- * docs range-reconciliation). The same complete history powers a selected friend's map breadcrumb
- * and profile timeline while still letting a rejoining peer recover what it missed.
- * See docs/social/ARCHITECTURE.md §5–6, §9.
+ * trail. Holds our own full trail (what we published) plus, for each friend, **only their most
+ * recent fix**. See docs/social/ARCHITECTURE.md §5–6, §9.
+ *
+ * Friends' history is deliberately not retained. The map shows a friend as a single dot at their
+ * latest position, so keeping the rest bought nothing and cost a great deal: docs reconciliation
+ * delivers a friend's entire back-catalogue in one burst the moment it catches up, and every point
+ * in it used to be decrypted, inserted, and fanned out to the UI — which re-read the whole table
+ * per point. Storing only the newest fix makes that burst O(1) work, and means a friend's
+ * movements are never sitting on this device in the first place.
  */
 
 /** Sentinel author id for our own trail points. */
@@ -61,14 +66,36 @@ export interface TrailStorage {
    * for the one exception.
    */
   put(point: TrailPoint): Promise<void>;
+  /**
+   * Store `point` and drop every other point by the same author, so exactly one — the newest —
+   * survives. Used for friends, whose history is deliberately not retained.
+   *
+   * "Newest" is decided by `(fix.ts, seq)`, not by arrival: reconciliation routinely delivers old
+   * entries after new ones, and a late-arriving stale fix must not become a friend's displayed
+   * position.
+   */
+  putLatest(point: TrailPoint): Promise<void>;
   /** Points for `author` with `fix.ts >= sinceTs`, ascending by seq. */
   range(author: string, sinceTs: number): Promise<TrailPoint[]>;
   /** The most recent point per author (by fix.ts). */
   latest(): Promise<TrailPoint[]>;
   /** Delete every cached point for one author; returns the count removed. */
   removeAuthor(author: string): Promise<number>;
+  /**
+   * Collapse every author except `exceptAuthor` to their single newest point; returns the count
+   * removed. One-shot migration for devices that retained friends' history before it was dropped.
+   */
+  collapseToLatest(exceptAuthor: string): Promise<number>;
   /** Delete points with `fix.ts < olderThanTs`; returns the count removed. */
   prune(olderThanTs: number): Promise<number>;
+}
+
+/** Order two points newest-first. Ties on `fix.ts` break by `seq`, which is monotonic per author. */
+function isNewer(candidate: TrailPoint, incumbent: TrailPoint): boolean {
+  return (
+    candidate.fix.ts > incumbent.fix.ts ||
+    (candidate.fix.ts === incumbent.fix.ts && candidate.seq > incumbent.seq)
+  );
 }
 
 /** In-memory {@link TrailStorage} for unit tests / no-native fallback. */
@@ -80,6 +107,31 @@ export class InMemoryTrailStorage implements TrailStorage {
     const i = this.points.findIndex((p) => p.author === point.author && p.seq === point.seq);
     if (i >= 0) this.points[i] = { ...point, via: mergeVia(this.points[i].via, point.via) };
     else this.points.push(point);
+  }
+  async putLatest(point: TrailPoint): Promise<void> {
+    await this.put(point);
+    const newest = this.points
+      .filter((p) => p.author === point.author)
+      .reduce((best, p) => (isNewer(p, best) ? p : best));
+    for (let i = this.points.length - 1; i >= 0; i--) {
+      if (this.points[i].author === point.author && this.points[i] !== newest) {
+        this.points.splice(i, 1);
+      }
+    }
+  }
+  async collapseToLatest(exceptAuthor: string): Promise<number> {
+    const before = this.points.length;
+    const newestByAuthor = new Map<string, TrailPoint>();
+    for (const p of this.points) {
+      if (p.author === exceptAuthor) continue;
+      const current = newestByAuthor.get(p.author);
+      if (!current || isNewer(p, current)) newestByAuthor.set(p.author, p);
+    }
+    for (let i = this.points.length - 1; i >= 0; i--) {
+      const p = this.points[i];
+      if (p.author !== exceptAuthor && newestByAuthor.get(p.author) !== p) this.points.splice(i, 1);
+    }
+    return before - this.points.length;
   }
   async range(author: string, sinceTs: number): Promise<TrailPoint[]> {
     return this.points
@@ -113,7 +165,10 @@ export class InMemoryTrailStorage implements TrailStorage {
 export interface TrailStore {
   /** Record one of our own published fixes (seq = the value put on the wire). */
   appendOwn(fix: LocationFix, seq: number): Promise<void>;
-  /** Record a decrypted fix received from a friend (live or backfill). */
+  /**
+   * Record a decrypted fix received from a friend (live or backfill), keeping ONLY their newest.
+   * See the module header for why a friend's history is not retained.
+   */
   appendFriend(incoming: IncomingFix): Promise<void>;
   /** Ascending-by-seq points for an author at or after `sinceTs`. */
   rangeFor(author: string, sinceTs: number): Promise<TrailPoint[]>;
@@ -121,6 +176,8 @@ export interface TrailStore {
   latestPerAuthor(): Promise<TrailPoint[]>;
   /** Remove every cached point for one author. */
   removeAuthor(author: string): Promise<number>;
+  /** Drop friends' retained history, keeping each friend's newest point. Returns points removed. */
+  collapseFriendHistory(): Promise<number>;
   /** Explicitly delete points older than `olderThanTs`; returns points removed. */
   prune(olderThanTs: number): Promise<number>;
 }
@@ -140,13 +197,16 @@ export function createTrailStore(opts: TrailStoreOptions): TrailStore {
       await storage.put({ author: SELF_AUTHOR, seq, fix, receivedAt: now() });
     },
     async appendFriend(incoming: IncomingFix): Promise<void> {
-      await storage.put({
+      await storage.putLatest({
         author: incoming.author,
         seq: incoming.seq,
         fix: incoming.fix,
         receivedAt: incoming.receivedAt ?? now(),
         via: incoming.via ?? (incoming.backfill ? 'sync' : 'live'),
       });
+    },
+    async collapseFriendHistory(): Promise<number> {
+      return storage.collapseToLatest(SELF_AUTHOR);
     },
     async rangeFor(author: string, sinceTs: number): Promise<TrailPoint[]> {
       return storage.range(author, sinceTs);

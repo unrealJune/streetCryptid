@@ -171,6 +171,47 @@ class SqliteTrailStorage implements TrailStorage {
     }
   }
 
+  async putLatest(point: TrailPoint): Promise<void> {
+    const db = await getDb();
+    if (!db) return this.fallback.putLatest(point);
+    try {
+      await this.put(point);
+      // Keep exactly one row for this author — the newest by (fix_ts, seq). Deciding it in SQL
+      // rather than from `point` is deliberate: reconciliation delivers old entries after new
+      // ones, so the point we just wrote is often NOT the newest.
+      await db.runAsync(
+        `DELETE FROM trail WHERE author = ? AND rowid NOT IN (
+           SELECT rowid FROM trail WHERE author = ? ORDER BY fix_ts DESC, seq DESC LIMIT 1
+         )`,
+        point.author,
+        point.author
+      );
+    } catch {
+      await this.fallback.putLatest(point);
+    }
+  }
+
+  async collapseToLatest(exceptAuthor: string): Promise<number> {
+    const db = await getDb();
+    if (!db) return this.fallback.collapseToLatest(exceptAuthor);
+    try {
+      const res = await db.runAsync(
+        `DELETE FROM trail WHERE author <> ? AND rowid NOT IN (
+           SELECT rowid FROM (
+             SELECT rowid, ROW_NUMBER() OVER (
+               PARTITION BY author ORDER BY fix_ts DESC, seq DESC
+             ) AS rank FROM trail WHERE author <> ?
+           ) WHERE rank = 1
+         )`,
+        exceptAuthor,
+        exceptAuthor
+      );
+      return res.changes;
+    } catch {
+      return this.fallback.collapseToLatest(exceptAuthor);
+    }
+  }
+
   async range(author: string, sinceTs: number): Promise<TrailPoint[]> {
     const db = await getDb();
     if (!db) return this.fallback.range(author, sinceTs);

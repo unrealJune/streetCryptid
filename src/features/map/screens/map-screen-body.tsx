@@ -20,6 +20,7 @@ import {
   useMapTheme,
   type IslandTab,
   type MapFriendLocation,
+  type MapTrailLocation,
   type MapReadout,
   type MapLayerId,
   type MapLayerToggles,
@@ -28,7 +29,7 @@ import {
 } from '@/features/map';
 import { BumpPairingStrip } from '@/features/social/components/bump-pairing-strip';
 import { FriendProfileSheet } from '@/features/social/components/friend-profile-sheet';
-import { sampleTrailForMap, selectFriendTrail } from '@/features/social/core/history';
+import { sampleTrailForMap, selectAuthorTrail } from '@/features/social/core/history';
 import { formatPresenceAge } from '@/features/social/core/presence';
 import type { LocationFix } from '@/features/social/core/types';
 import { useArmedBump } from '@/features/social/hooks/use-armed-bump';
@@ -128,8 +129,6 @@ export default function MapScreenBody() {
     () =>
       friends.flatMap((presence) => {
         if (!presence.fix) return [];
-        const history = selectFriendTrail(trail, presence.friend.endpointId);
-        const sampled = sampleTrailForMap(history);
         return [
           {
             id: presence.friend.endpointId,
@@ -138,14 +137,12 @@ export default function MapScreenBody() {
             cryptidName: presence.friend.cryptidName,
             color: resolveSignalColor(presence.friend.color, theme.chrome.green),
             location: { lat: presence.fix.lat, lon: presence.fix.lon },
-            history: trailLocations(sampled),
-            historyCount: history.length,
             latestTs: presence.fix.ts,
             stale: presence.freshness === 'stale',
           },
         ];
       }),
-    [friends, theme.chrome.green, trail]
+    [friends, theme.chrome.green]
   );
   const selectedFriend = useMemo(
     () => mapFriends.find((friend) => friend.id === selectedEndpoint) ?? null,
@@ -180,10 +177,10 @@ export default function MapScreenBody() {
     [selfSignal, theme.canvas.accent]
   );
   const selfHistory = useMemo(() => {
-    const history = selectFriendTrail(trail, SELF_AUTHOR);
+    const history = selectAuthorTrail(trail, SELF_AUTHOR);
     const sampled = sampleTrailForMap(history);
     return {
-      history,
+      count: history.length,
       sampled: trailLocations(sampled),
     };
   }, [trail]);
@@ -196,11 +193,9 @@ export default function MapScreenBody() {
       cryptidName: profile.cryptidName,
       color: selfSignal,
       location: { lat: selfFix.lat, lon: selfFix.lon },
-      history: selfHistory.sampled,
-      historyCount: selfHistory.history.length,
       latestTs: selfFix.ts,
     };
-  }, [profile, selfFix, selfHistory, selfSignal]);
+  }, [profile, selfFix, selfSignal]);
   const selectedHistory = selectedEndpoint === SELF_AUTHOR ? selfMapLocation : selectedFriend;
   // A selected trace is a drill-down *inside* the FRIENDS tab, not a third tab:
   // the roster is only actually on screen when nothing is drilled into. This is
@@ -274,11 +269,6 @@ export default function MapScreenBody() {
     () => friends.find((presence) => presence.friend.endpointId === profileEndpoint) ?? null,
     [friends, profileEndpoint]
   );
-  const profileHistory = useMemo(
-    () => (profilePresence ? selectFriendTrail(trail, profilePresence.friend.endpointId) : []),
-    [profilePresence, trail]
-  );
-
   // A `streetcryptid://…?token=` invite lands here now that the Friends route is
   // gone. Redeem it once, show the roster so the handshake has somewhere to land,
   // then drop the token from the URL so a re-render cannot replay it.
@@ -398,6 +388,7 @@ export default function MapScreenBody() {
               friend={selectedHistory}
               onClose={closeHistory}
               self={selectedEndpoint === SELF_AUTHOR}
+              signalCount={selfHistory.count}
               theme={theme}
             />
           ) : rosterOpen ? (
@@ -430,7 +421,6 @@ export default function MapScreenBody() {
       </View>
 
       <FriendProfileSheet
-        history={profileHistory}
         presence={profilePresence}
         visible={profilePresence !== null}
         sharing={
@@ -510,7 +500,7 @@ function MapSession({
   onReadout(readout: MapReadout): void;
   onSelectFriend(friendId: string): void;
   onSelectSelf(): void;
-  selfHistory: MapFriendLocation['history'];
+  selfHistory: readonly MapTrailLocation[];
   selfSelected: boolean;
   selfColor: Rgb;
 }) {
@@ -538,7 +528,7 @@ function MapSession({
   );
 }
 
-function trailLocations(points: readonly TrailPoint[]): MapFriendLocation['history'] {
+function trailLocations(points: readonly TrailPoint[]): MapTrailLocation[] {
   return points.map((point) => ({
     id: `${point.author}:${point.seq}`,
     location: { lat: point.fix.lat, lon: point.fix.lon },

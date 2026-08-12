@@ -1,4 +1,4 @@
-import type { Friend, LocationFix } from './types';
+import type { FixTransport, Friend, LocationFix } from './types';
 
 export const LIVE_PRESENCE_WINDOW_MS = 15 * 60 * 1000;
 export const RECENT_PRESENCE_WINDOW_MS = 6 * 60 * 60 * 1000;
@@ -9,6 +9,8 @@ export interface LatestLocationPoint {
   author: string;
   fix: LocationFix;
   receivedAt: number;
+  /** How the fix reached this device. Absent on rows stored before provenance was recorded. */
+  via?: FixTransport;
 }
 
 export interface FriendPresence {
@@ -17,6 +19,11 @@ export interface FriendPresence {
   distanceM: number | null;
   ageMs: number | null;
   freshness: PresenceFreshness;
+  /**
+   * How {@link fix} reached this device. Since only the newest fix per friend is retained, this is
+   * the sole surviving surface for transport provenance.
+   */
+  via?: FixTransport;
 }
 
 interface FriendPresenceInput {
@@ -87,6 +94,7 @@ export function buildFriendPresence(input: FriendPresenceInput): FriendPresence[
         fix,
         ageMs,
         freshness: freshnessFor(ageMs),
+        via: fix ? point?.via : undefined,
         distanceM:
           fix && input.selfFix && isValidFix(input.selfFix)
             ? distanceBetweenFixes(input.selfFix, fix)
