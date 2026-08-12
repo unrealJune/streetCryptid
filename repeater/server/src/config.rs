@@ -7,11 +7,12 @@ use crate::retention::RetentionPolicy;
 /// Control-API port.
 pub const DEFAULT_PORT: u16 = 8787;
 
-/// Default retention window. Matches the app's 24–48h view for full offline catch-up.
+/// Default latest-fix backstop. Superseded fixes are released regardless of age; this bounds the
+/// last fix from an author who goes silent forever.
 pub const DEFAULT_RETENTION_HOURS: u64 = 48;
-/// Floor: below an hour, a phone that backgrounds briefly could miss its own gap.
+/// Floor: below an hour, a briefly offline reader could miss even the latest dot.
 pub const MIN_RETENTION_HOURS: u64 = 1;
-/// Ceiling: keeps the in-memory footprint bounded (two weeks).
+/// Ceiling: keeps stale latest dots from becoming effectively forever state (two weeks).
 pub const MAX_RETENTION_HOURS: u64 = 24 * 14;
 
 /// How often the prune sweep runs.

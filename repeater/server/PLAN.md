@@ -141,16 +141,31 @@ capability, no other auth needed to replicate.
 Registration is renewed opportunistically (push tokens rotate; tickets refresh
 addrs). Exact renewal cadence TBD in Phase 1.
 
-### Retention (configurable — per Phase 0 decision)
+### Retention (latest-only, with a configurable stale-author backstop)
 
-The stash runs the same rolling-window `prune` as the app, driven by a config
-value rather than a hard-coded window. A phone offline longer than the window
-loses the gap that was pruned — so the window is the knob that trades
-data-at-rest against how long an offline phone can catch up.
+The stash releases the ciphertext for superseded location fixes instead of
+holding each friend's whole rolling trail. Within each namespace it parses the
+app's `hex(author)/{seq:020}` fix keys and keeps only the highest sequence for
+each key-encoded author. That matches the current product contract: friends are
+rendered as a single latest dot, so their back-catalogue only creates a bursty
+reconciliation cost.
+
+`TRAIL_STASH_RETENTION_HOURS` is still present, but it is no longer a "full
+catch-up history" window. It is a backstop for the one latest fix from an author
+who goes silent forever: one blob per author is small, but a RAM-only process
+should not hold it without any bound. Control keys (`ctl/hex(author)`) are never
+treated as superseded — they are overwritten-in-place current live-mode
+requests, not trail history — but they remain subject to the window, as does any
+key the stash cannot parse. Exempting a key class from the window would hand
+anything able to write an unrecognised key an unbounded memory hole.
+
+As before, this releases **content**, not docs entry records. The stash imports
+read capabilities and cannot delete phone-authored docs entries; dropping blob
+references is the memory bound it can enforce unilaterally.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `TRAIL_STASH_RETENTION_HOURS` | `48` | Prune entries older than this. Match the app's 24–48h view for full catch-up, or lower toward ~1h to minimize server data-at-rest. |
+| `TRAIL_STASH_RETENTION_HOURS` | `48` | Release a latest fix after this many silent hours; superseded fixes are released on the next prune regardless of age. |
 | `TRAIL_STASH_PRUNE_INTERVAL_MIN` | `15` | How often the prune sweep runs. |
 | `PORT` | `8787` | Control-API port. |
 | `APNS_*` / `FCM_*` | — | Push provider credentials (kept out of the repo, per §7). |
@@ -191,7 +206,7 @@ infra/trail-stash/
     src/
       lib.rs              # module wiring + docs
       config.rs           # env → StashConfig (retention hours, prune interval, port); clamped
-      retention.rs        # RetentionPolicy: hours → cutoff/expiry (injectable clock)  [pure]
+      retention.rs        # RetentionPolicy + latest-fix release rules                 [pure]
       subscriptions.rs    # in-memory NamespaceRegistry (namespace → push subs)        [pure]
       mls.rs              # DeliveryService seam + PassthroughDelivery stub            [pure]
       waker.rs            # Waker seam + NoopWaker stub (APNs/FCM later)               [pure]
@@ -217,9 +232,10 @@ MLS delivery-service seam stubbed.
   registry. Registration never dials ticket bootstrap nodes: the phone already has the stash
   endpoint and drives reconciliation, avoiding registration-time `AlreadySyncing` collisions.
 - Prune loop on `TRAIL_STASH_RETENTION_HOURS` / `TRAIL_STASH_PRUNE_INTERVAL_MIN`.
-  Note: because entries are authored by the phones, cross-author eviction from an
-  in-memory replica is best-effort; the hard memory bound is the retention window
-  × fix rate × granted namespaces, plus the fact that a restart clears everything.
+  Because entries are authored by the phones, the stash prunes blob references
+  rather than docs records: it releases superseded fixes immediately, keeps at
+  most one latest fix per author per namespace while fresh, and uses the window
+  only as a stale-author backstop. A restart still clears everything.
 - Client (later this phase): a user **opt-in** toggle; when on, `POST
   /v1/namespaces` for its own + each friend's namespace; add
   `EXPO_PUBLIC_TRAIL_STASH_TICKET` to the `sync`/`sync_all` peer list. Verify B

@@ -67,7 +67,7 @@ secret:
 # ---------------------------------------------------------------------------
 config:
   port: 8787
-  retentionHours: 48       # prune entries older than this (clamped 1–336 by the app)
+  retentionHours: 48       # stale-author backstop for latest fixes (clamped 1–336 by the server)
   pruneIntervalMin: 15      # prune sweep cadence (clamped 1–1440)
   logLevel: info            # RUST_LOG / tracing env-filter (e.g. info, trail_stash=debug)
   # Custom iroh relay URLs. Empty uses the built-in n0 relay map. Configure the same

@@ -87,14 +87,8 @@ seconds. **Persistently non-zero means offline delivery is broken.**
 | --- | --- | --- |
 | `TRAIL_STASH_SECRET_KEY` | — | **Required.** 64 hex chars (32-byte ed25519 seed) giving the stash a stable dialable identity so its ticket survives restarts. A key, not user data — inject from a secret manager. Generate: `openssl rand -hex 32`. |
 | `PORT` | `8787` | Control-API port. |
-| `TRAIL_STASH_RETENTION_HOURS` | `48` | Stop holding the ciphertext of entries older than this (clamped 1–336). Lower toward ~1h to minimize data-at-rest; match the app's 24–48h window for full catch-up. |
+| `TRAIL_STASH_RETENTION_HOURS` | `48` | Backstop for each author's latest fix (clamped 1–336). Superseded fixes are released on the next prune regardless of age; this window only decides how long to keep the final dot from an author who goes silent. |
 | `TRAIL_STASH_PRUNE_INTERVAL_MIN` | `15` | How often the retention sweep runs (clamped 1–1440). |
-
-Retention releases **content**, not entry records. The stash holds a *read* capability, so
-it cannot delete another author's entries — retiring those is the author's job, and their
-tombstones replicate here like any other write. The ciphertext is what actually occupies
-this RAM-only process, and dropping our reference to it (after which the blob GC sweep
-reclaims it) is a bound the stash can enforce on its own.
 | `TRAIL_STASH_RELAY_URLS` | — | Comma-separated custom iroh relay URLs. Unset uses the built-in n0 relay map. Use the same URLs as the app's `EXPO_PUBLIC_IROH_RELAY_URLS`. |
 | `TRAIL_STASH_RELAY_TOKEN` | — | Optional bearer token sent to every configured custom relay. |
 | `TRAIL_STASH_PSK` | — | Control-API pre-shared key. When set, `/v1/*` requires `Authorization: Bearer <psk>`. Must match the app's `EXPO_PUBLIC_TRAIL_STASH_PSK`. Unset ⇒ gate disabled (warned at startup). |
@@ -103,6 +97,24 @@ reclaims it) is a bound the stash can enforce on its own.
 | `APNS_BEARER` / `FCM_BEARER` | — | **Placeholder** static push credentials (`EnvCredentials`) until real APNs-JWT / FCM-OAuth minting lands. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Developer telemetry (`otel` builds, which the published image is): OTLP/HTTP collector base URL (e.g. `http://otel-collector:4318`; see the streetCryptid repo's `infra/otel/`). Unset ⇒ telemetry fully dormant. Exports traces + logs; log bodies pass the same redaction as console output, but span/log *attributes* from dependencies do not — point it only at a developer-controlled collector, never a hosted log store. |
 | `OTEL_SERVICE_NAME` | `trail-stash` | Telemetry service name. |
+
+Retention releases **content**, not entry records. The stash holds a *read* capability, so
+it cannot delete another author's entries — retiring those is the author's job, and their
+tombstones replicate here like any other write. The ciphertext is what actually occupies
+this RAM-only process, and dropping our reference to it (after which the blob GC sweep
+reclaims it) is a bound the stash can enforce on its own.
+
+The stash now keeps only the latest location-fix ciphertext per key-encoded author in each
+namespace. Older `hex(author)/{seq:020}` fixes are released as soon as a newer sequence for that
+author exists, because the app renders friends as a single latest dot and no longer needs their
+back-catalogue. `TRAIL_STASH_RETENTION_HOURS` remains as a stale-author backstop for that one
+latest fix.
+
+`ctl/hex(author)` control entries are never treated as *superseded* — they are one
+overwritten-in-place slot per author carrying current live-mode requests, not history — but they
+are still subject to the retention window, and so is any key the stash cannot parse. Nothing is
+exempt from the window: in a RAM-only process, declining to release what you do not understand is
+not caution, it is unbounded memory growth.
 
 The waker builds correct silent-push payloads (tested) and sends them when a push
 route is configured; the credential-minting is the remaining piece. With no push
@@ -176,7 +188,7 @@ The service does not emit or persist its dial ticket. Provision
 src/
   lib.rs           module wiring + security posture
   config.rs        env → StashConfig (clamped)                [pure, tested]
-  retention.rs     RetentionPolicy (hours → cutoff/expiry)    [pure, tested]
+  retention.rs     RetentionPolicy + latest-fix release rules  [pure, tested]
   content.rs       ContentIndex — which ciphertext we hold    [pure, tested]
   subscriptions.rs in-memory NamespaceRegistry                [pure, tested]
   mls.rs           DeliveryService seam + PassthroughDelivery [pure, tested]

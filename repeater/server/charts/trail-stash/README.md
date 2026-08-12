@@ -51,7 +51,7 @@ helm install trail-stash oci://ghcr.io/<owner>/charts/trail-stash \
 | `secret.secretKey` | `""` | Inline `TRAIL_STASH_SECRET_KEY` (only when `existingSecret` empty). Required then. |
 | `secret.psk` | `""` | Inline `TRAIL_STASH_PSK` (control-API bearer). Unset ⇒ open API (warned). |
 | `secret.keys.*` | `TRAIL_STASH_*` etc. | Rename to match the keys in your `existingSecret`. |
-| `config.retentionHours` | `48` | Prune window (app clamps 1–336). |
+| `config.retentionHours` | `48` | Stale-author backstop for latest fixes (server clamps 1–336); superseded fixes release on the next prune regardless of age. |
 | `config.pruneIntervalMin` | `15` | Prune sweep cadence. |
 | `config.relayUrls` | `[]` | Custom iroh relay URLs; empty uses the built-in n0 relay map. |
 | `secret.relayToken` | `""` | Optional bearer token for every custom relay. Prefer an existing Secret. |

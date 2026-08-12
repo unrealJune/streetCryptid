@@ -8,7 +8,7 @@
 //!   restarts. It is a key, not user data — inject it from a secret manager, never commit it.
 //!   Generate one with `openssl rand -hex 32`.
 //! * `PORT`                             — control-API port (default 8787).
-//! * `TRAIL_STASH_RETENTION_HOURS`      — retention window (default 48, clamped 1–336).
+//! * `TRAIL_STASH_RETENTION_HOURS`      — latest-fix backstop (default 48, clamped 1–336).
 //! * `TRAIL_STASH_PRUNE_INTERVAL_MIN`   — prune cadence (default 15).
 //! * `TRAIL_STASH_RELAY_URLS`           — comma-separated custom iroh relay URLs.
 //! * `TRAIL_STASH_RELAY_TOKEN`          — optional bearer token for the custom relays.
@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
     .context("spawn stash node")?;
 
     tracing::info!(
-        "stash up — retention {}h, prune every {}m",
+        "stash up — latest-fix backstop {}h, prune every {}m",
         config.retention.retention_ms() / trail_stash::retention::MS_PER_HOUR,
         config.prune_interval_min,
     );

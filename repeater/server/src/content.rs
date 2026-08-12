@@ -14,8 +14,9 @@
 //!
 //! * **Convergence.** Anything still `Wanted` is work the settle loop retries, so a fetch that
 //!   missed while the author slept succeeds the moment it is reachable again.
-//! * **Memory.** `referenced` is the blob-GC liveness set. Retention drops references; the sweep
-//!   then reclaims the ciphertext, which is the only thing here big enough to matter.
+//! * **Memory.** `referenced` is the blob-GC liveness set. The release policy drops references
+//!   for superseded or backstop-expired fixes; the sweep then reclaims the ciphertext, which is
+//!   the only thing here big enough to matter.
 //! * **Visibility.** `missing_count` is the health signal whose absence let a blobless stash look
 //!   perfectly healthy for weeks: entries replicated, wakes fired, logs clean, zero payloads.
 //!
@@ -77,15 +78,29 @@ impl ContentIndex {
         matches!(self.state.get(hash), Some(State::Present))
     }
 
-    /// Drop `hash` from `ns` (retention expired the entry). The hash stays referenced while any
-    /// other namespace still names it. Returns true when the last reference went away, i.e. the
-    /// bytes are now collectable.
+    /// Drop `hash` from `ns` (the release policy made every entry in that namespace naming it
+    /// releasable). The hash stays referenced while any other namespace still names it. Returns
+    /// true when **this call** dropped the last reference, i.e. the bytes just became collectable.
+    ///
+    /// "This call" is load-bearing. The stash holds only a read capability, so a released entry is
+    /// still in the doc and every later sweep re-derives the same release decision for it. An
+    /// unconditional `!still_referenced` therefore reported a fresh release on every sweep,
+    /// forever: `released` in the `stash.prune` span and the "released content for N entries" log
+    /// line both became permanent fiction, showing steady reclamation on a stash that had nothing
+    /// left to reclaim. Reporting only an actual state transition makes the sweep idempotent.
     pub fn forget(&mut self, ns: &NamespaceId, hash: &ContentHash) -> bool {
-        if let Some(hashes) = self.by_namespace.get_mut(ns) {
-            hashes.remove(hash);
-            if hashes.is_empty() {
-                self.by_namespace.remove(ns);
+        let removed = match self.by_namespace.get_mut(ns) {
+            Some(hashes) => {
+                let removed = hashes.remove(hash);
+                if hashes.is_empty() {
+                    self.by_namespace.remove(ns);
+                }
+                removed
             }
+            None => false,
+        };
+        if !removed {
+            return false;
         }
         let still_referenced = self
             .by_namespace
@@ -220,9 +235,13 @@ mod tests {
         index.want(NS_A, OTHER);
         assert!(index.forget(&NS_A, &HASH));
         assert!(
-            index.forget(&NS_A, &HASH),
-            "double prune must stay deletable"
+            !index.forget(&NS_A, &HASH),
+            "a repeat prune must be harmless but must NOT re-report a release: the stash only \
+             holds a read capability, so the docs entry survives and every later sweep re-derives \
+             the same decision. Counting it each time made the prune metrics report perpetual \
+             reclamation on a stash with nothing left to reclaim."
         );
+        assert!(!index.is_tracked(&HASH), "the repeat prune changed nothing");
         assert!(index.is_tracked(&OTHER), "pruning one entry kept the other");
         assert_eq!(index.tracked_count(), 1);
     }

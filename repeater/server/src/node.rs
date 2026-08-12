@@ -22,7 +22,7 @@
 //! frozen-author recovery path, and retention releasing ciphertext. The pure modules this wires
 //! together are fully unit-tested.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,7 +47,7 @@ use crate::api::{parse_namespace_hex, parse_platform, validate_register, Registe
 use crate::auth::{authorize, bearer_token};
 use crate::content::ContentIndex;
 use crate::mls::{Admission, DeliveryService, EnvelopeRef, PassthroughDelivery};
-use crate::retention::RetentionPolicy;
+use crate::retention::{release_decisions, RetentionEntry, RetentionPolicy};
 use crate::subscriptions::{NamespaceId as NsBytes, NamespaceRegistry, PushSubscription};
 use crate::waker::{NoopWaker, Waker};
 
@@ -100,8 +100,9 @@ pub struct StashNode {
     /// and backs the missing-content health signal. `std::sync::Mutex`: every critical section is
     /// a few map operations with no `.await` inside.
     content: Arc<std::sync::Mutex<ContentIndex>>,
-    /// Replicated entries and what the settle loop still owes them. Entries live here until
-    /// retention prunes them, so a fetch is retried for as long as the entry is worth serving.
+    /// Replicated entries and what the settle loop still owes them. Entries live here until the
+    /// release policy decides no unreleased docs entry still needs the hash, so a fetch is retried
+    /// for as long as the entry is worth serving.
     tracked: Mutex<HashMap<Hash, TrackedEntry>>,
     _router: Router,
 }
@@ -138,6 +139,13 @@ impl TrackedEntry {
             .saturating_mul(1u64 << attempts.min(7))
             .min(CEILING_MS)
     }
+}
+
+/// A docs entry reduced to the fields the prune sweep needs after the live stream is drained.
+struct PruneCandidate {
+    hash: Hash,
+    key: Vec<u8>,
+    written_ms: u64,
 }
 
 impl StashNode {
@@ -605,8 +613,8 @@ impl StashNode {
     }
 
     /// One retention sweep across every granted namespace: stop holding the **ciphertext** of
-    /// entries older than the window, and let the GC sweep reclaim it. Returns the number of blobs
-    /// released.
+    /// releasable location-fix entries, and let the GC sweep reclaim it. Returns the number of
+    /// blobs released.
     ///
     /// This deliberately does not try to delete the docs entries. The stash holds a *read*
     /// capability, and `Doc::del` only removes entries by the author you pass — so the old
@@ -615,42 +623,102 @@ impl StashNode {
     /// replicate to us like any other write); the ciphertext is what actually consumes this
     /// RAM-only process, and dropping our reference to it is a bound we can enforce unilaterally.
     ///
-    /// A blob is released only when the last entry referencing it has expired, so two namespaces
-    /// holding identical ciphertext can't have one's sweep pull the rug from the other.
+    /// The primary release rule is latest-per-author-per-namespace: once a newer
+    /// `hex(author)/{seq:020}` fix exists, the older fix's blob is no longer useful to the app
+    /// (friends render as one latest dot, not history). The time window remains as a backstop for
+    /// a latest fix whose author goes silent forever. That costs at most one blob per author while
+    /// fresh, but "one forever" is still the wrong bound for a RAM-only, restart-clears service.
+    ///
+    /// Control keys (`ctl/hex(author)`) are never treated as *superseded*. They are one-slot,
+    /// overwritten-in-place live-mode requests, not location history, and dropping their content
+    /// because an unrelated fix superseded it would turn retention into a control-plane data-loss
+    /// bug. They are still subject to the window, exactly as they were before latest-only
+    /// retention existed — and so is every key this process cannot parse, because a key class
+    /// exempt from the window is an unbounded memory hole in a RAM-only service. See
+    /// [`release_decisions`] for the full argument.
+    ///
+    /// A blob is released only when the last unreleased entry referencing it is gone, so two
+    /// namespaces — or a fix plus a control entry in the same namespace — holding identical
+    /// ciphertext can't have one's sweep pull the rug from the other. `self.tracked` is removed
+    /// only after the content index reports that last reference, because a still-referenced
+    /// missing blob must keep being fetched.
     #[tracing::instrument(
         name = "stash.prune",
         skip_all,
         fields(
             released = tracing::field::Empty,
             content_missing = tracing::field::Empty,
+            superseded = tracing::field::Empty,
+            expired = tracing::field::Empty,
         )
     )]
     pub async fn prune_once(&self, now_ms: u64) -> Result<u64> {
-        let cutoff = self.retention.cutoff(now_ms);
         let mut released = 0u64;
+        let mut superseded = 0u64;
+        let mut expired = 0u64;
         for ns in self.registry.known_namespaces() {
             let Some(doc) = self.handle(ns).await else {
                 continue;
             };
             let stream = doc.get_many(Query::all().build()).await?;
             tokio::pin!(stream);
-            let mut expired = Vec::new();
+            let mut candidates = Vec::new();
             while let Some(entry) = stream.next().await {
                 let entry = entry?;
-                if entry_written_ms(&entry) < cutoff {
-                    expired.push(entry.content_hash());
-                }
+                candidates.push(PruneCandidate {
+                    hash: entry.content_hash(),
+                    key: entry.key().to_vec(),
+                    written_ms: entry_written_ms(&entry),
+                });
             }
-            for hash in expired {
-                // Stop chasing content for an entry past its window...
-                self.tracked.lock().await.remove(&hash);
-                // ...and drop our reference so the sweep can free the ciphertext.
+
+            let entries = candidates
+                .iter()
+                .map(|candidate| RetentionEntry {
+                    key: &candidate.key,
+                    written_ms: candidate.written_ms,
+                })
+                .collect::<Vec<_>>();
+            let decisions = release_decisions(&entries, self.retention, now_ms);
+            drop(entries);
+
+            let kept_hashes = candidates
+                .iter()
+                .zip(decisions.iter())
+                .filter_map(|(candidate, decision)| decision.is_none().then_some(candidate.hash))
+                .collect::<HashSet<_>>();
+
+            let mut forget_hashes = HashSet::new();
+            for (candidate, decision) in candidates.into_iter().zip(decisions) {
+                let Some(reason) = decision else {
+                    continue;
+                };
+                if reason.is_superseded() {
+                    superseded += 1;
+                }
+                if reason.is_expired() {
+                    expired += 1;
+                }
+                // Sets, not linear scans: a namespace that has not been swept since before
+                // latest-only retention shipped can still hold thousands of entries, and this ran
+                // once per candidate.
+                if kept_hashes.contains(&candidate.hash) {
+                    continue;
+                }
+                forget_hashes.insert(candidate.hash);
+            }
+
+            for hash in forget_hashes {
+                // Drop our reference so the sweep can free the ciphertext once nobody else in the
+                // content index still names it.
                 let last_reference = self
                     .content
                     .lock()
                     .expect("content index poisoned")
                     .forget(&ns, hash.as_bytes());
                 if last_reference {
+                    // Stop chasing content only when no unreleased entry still needs this hash.
+                    self.tracked.lock().await.remove(&hash);
                     released += 1;
                 }
             }
@@ -658,6 +726,8 @@ impl StashNode {
         let span = tracing::Span::current();
         span.record("released", released);
         span.record("content_missing", self.content_stats().0);
+        span.record("superseded", superseded);
+        span.record("expired", expired);
         Ok(released)
     }
 
@@ -668,7 +738,7 @@ impl StashNode {
             ticker.tick().await;
             match self.prune_once(now_ms()).await {
                 Ok(n) if n > 0 => {
-                    tracing::info!("stash: released content for {n} expired entries")
+                    tracing::info!("stash: released content for {n} releasable entries")
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!("stash: prune sweep error: {e}"),
@@ -801,34 +871,9 @@ async fn unsubscribe_handler(
 /// On any parse hiccup returns `(empty, 0)` — the passthrough delivery service ignores these
 /// fields, and a future MLS impl can treat an undecodable key as reject.
 fn decode_author_seq(key: &[u8]) -> (Vec<u8>, u64) {
-    let Some(pos) = key.iter().position(|&b| b == b'/') else {
-        return (Vec::new(), 0);
-    };
-    let author = std::str::from_utf8(&key[..pos])
-        .ok()
-        .and_then(hex_decode)
-        .unwrap_or_default();
-    let seq = std::str::from_utf8(&key[pos + 1..])
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
-    (author, seq)
-}
-
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let mut i = 0;
-    while i < b.len() {
-        let hi = (b[i] as char).to_digit(16)?;
-        let lo = (b[i + 1] as char).to_digit(16)?;
-        out.push(((hi << 4) | lo) as u8);
-        i += 2;
-    }
-    Some(out)
+    crate::retention::decode_fix_key(key)
+        .map(|key| (key.author, key.seq))
+        .unwrap_or_else(|| (Vec::new(), 0))
 }
 
 // ── two-node integration test (real iroh nodes) ───────────────────────────────────────────
@@ -945,6 +990,61 @@ mod live_tests {
     /// `start_sync` outbound exactly the way `docs.rs::sync` does.
     async fn spawn_writer_node(seed: u8) -> anyhow::Result<Writer> {
         spawn_writer_node_with(seed, Arc::new(std::sync::atomic::AtomicBool::new(true))).await
+    }
+
+    /// A writer holding a whole **trail** rather than a single entry: `fixes` sequenced location
+    /// entries under one author, plus the author's live-mode control slot. This is what a phone
+    /// that has been running for a while actually looks like, and it is the shape latest-only
+    /// retention exists to collapse.
+    ///
+    /// Fix payloads are distinct per seq — real envelopes are — with one deliberate exception: the
+    /// control entry reuses fix 1's bytes so the test covers two docs entries sharing a single
+    /// content hash. That is the case where a naive "superseded ⇒ forget the hash" sweep would
+    /// pull the ciphertext out from under a live control message.
+    async fn spawn_trail_writer(seed: u8, author_hex: &str, fixes: u64) -> anyhow::Result<Writer> {
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(SecretKey::from_bytes(&[seed; 32]))
+            .bind()
+            .await?;
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let mem = MemStore::new();
+        let docs = Docs::memory()
+            .spawn(endpoint.clone(), (*mem).clone(), gossip.clone())
+            .await?;
+        let router = Router::builder(endpoint.clone())
+            .accept(iroh_gossip::ALPN, gossip.clone())
+            .accept(iroh_docs::ALPN, docs.clone())
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&mem, None))
+            .spawn();
+
+        let author = docs.author_default().await?;
+        let doc = docs.create().await?;
+        for seq in 1..=fixes {
+            let key = format!("{author_hex}/{seq:020}").into_bytes();
+            doc.set_bytes(author, key, shared_or_unique_payload(seq))
+                .await?;
+        }
+        doc.set_bytes(
+            author,
+            format!("ctl/{author_hex}").into_bytes(),
+            shared_or_unique_payload(1),
+        )
+        .await?;
+
+        let ticket = doc
+            .share(ShareMode::Read, AddrInfoOptions::RelayAndAddresses)
+            .await?
+            .to_string();
+        Ok(Writer {
+            ticket,
+            doc,
+            _router: router,
+        })
+    }
+
+    /// Envelope bytes for a fix; seq 1's are also used by the control entry (see caller).
+    fn shared_or_unique_payload(seq: u64) -> Vec<u8> {
+        format!("sealed-envelope-{seq}").into_bytes()
     }
 
     /// A node holding a namespace whose entries are keyed to `author_hex` — modelling a phone that
@@ -1354,6 +1454,146 @@ mod live_tests {
         );
         let bytes = stash.blobs.blobs().get_bytes(hash).await?;
         assert_eq!(bytes.as_ref(), b"opaque-sealed-envelope");
+        Ok(())
+    }
+
+    /// End-to-end proof of latest-only retention over a real two-node replication, which is the
+    /// behaviour the whole change exists for: a phone must be able to catch up to a friend's
+    /// current dot from the stash, while the stash stops paying to hold that friend's history.
+    ///
+    /// Covers, in one sweep over one real namespace:
+    ///
+    /// * superseded fixes lose their ciphertext even though nothing is anywhere near the window,
+    /// * the newest fix survives **and is still servable** — the product guarantee; releasing it
+    ///   would make the stash a blobless index again, which is the exact failure `content_missing`
+    ///   was added to catch,
+    /// * the live-mode control slot survives, including when it shares a content hash with a
+    ///   superseded fix, and
+    /// * `tracked` does not leak: hashes nobody references are dropped, hashes somebody still
+    ///   references are kept so the settle loop keeps fetching them.
+    #[tokio::test]
+    async fn prune_collapses_a_trail_to_its_latest_fix_and_still_serves_it() -> anyhow::Result<()> {
+        init_test_tracing();
+        let author_hex = "cd".repeat(32);
+        // Five fixes + one control entry, all fresh: nothing here can be released by the window,
+        // so anything that IS released was released by the latest-per-author rule.
+        let writer = spawn_trail_writer(46, &author_hex, 5).await?;
+
+        let stash = StashNode::spawn(
+            SecretKey::from_bytes(&[37u8; 32]),
+            RetentionPolicy::from_hours(48),
+            &[],
+            None,
+            default_delivery(),
+            Arc::new(NoopWaker),
+        )
+        .await?;
+
+        stash.register(&writer.ticket, None).await?;
+        writer.doc.start_sync(vec![stash.endpoint.addr()]).await?;
+
+        // Six entries, but fix 1 and the control entry share bytes ⇒ five distinct blobs.
+        let mut settled = false;
+        for _ in 0..300 {
+            if stash.content_stats() == (0, 5) {
+                settled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            settled,
+            "the trail never fully replicated with content: {:?}",
+            stash.content_stats()
+        );
+
+        let released = stash.prune_once(now_ms()).await?;
+        assert_eq!(
+            released, 3,
+            "fixes 2-4 are superseded and uniquely referenced, so exactly their three blobs go; \
+             fix 1's blob stays because the control entry still names it"
+        );
+
+        assert_eq!(
+            stash.content_stats(),
+            (0, 2),
+            "the latest fix and the still-shared control blob must remain tracked and present"
+        );
+
+        let latest = stash
+            .blobs
+            .blobs()
+            .get_bytes(Hash::new(shared_or_unique_payload(5)))
+            .await?;
+        assert_eq!(
+            latest.as_ref(),
+            shared_or_unique_payload(5).as_slice(),
+            "a reader catching up must still get the friend's current position"
+        );
+        let control = stash
+            .blobs
+            .blobs()
+            .get_bytes(Hash::new(shared_or_unique_payload(1)))
+            .await?;
+        assert_eq!(
+            control.as_ref(),
+            shared_or_unique_payload(1).as_slice(),
+            "a superseded fix must not drag a live control message's ciphertext out with it"
+        );
+
+        // Idempotent: a second sweep with nothing new to collapse must not double-count or
+        // release what the first sweep decided to keep.
+        assert_eq!(stash.prune_once(now_ms()).await?, 0);
+        assert_eq!(stash.content_stats(), (0, 2));
+        Ok(())
+    }
+
+    /// Retention's backstop must not have holes. A key the stash cannot parse — a future format, a
+    /// buggy client, anything with a write capability into a granted namespace — must still age
+    /// out, because this process is RAM-only and "we do not understand it, so we keep it forever"
+    /// is an unbounded memory hole reached by sounding cautious.
+    #[tokio::test]
+    async fn unparseable_keys_do_not_escape_retention() -> anyhow::Result<()> {
+        init_test_tracing();
+        let writer = spawn_writer_node_for_author(47, "not-hex-and-not-a-fix-key").await?;
+
+        let stash = StashNode::spawn(
+            SecretKey::from_bytes(&[38u8; 32]),
+            RetentionPolicy::from_hours(1),
+            &[],
+            None,
+            default_delivery(),
+            Arc::new(NoopWaker),
+        )
+        .await?;
+
+        stash.register(&writer.ticket, None).await?;
+        writer.doc.start_sync(vec![stash.endpoint.addr()]).await?;
+
+        let mut settled = false;
+        for _ in 0..300 {
+            if stash.content_stats() == (0, 1) {
+                settled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(settled, "entry never replicated with content");
+
+        // Fresh: held, because the window is the only rule that can apply to it.
+        assert_eq!(stash.prune_once(now_ms()).await?, 0);
+        assert_eq!(stash.content_stats(), (0, 1));
+
+        // Past the window: released like anything else.
+        let released = stash
+            .prune_once(now_ms() + 2 * crate::retention::MS_PER_HOUR)
+            .await?;
+        assert_eq!(
+            released, 1,
+            "an unrecognised key outlived the retention window — unbounded growth in a RAM-only \
+             service"
+        );
+        assert_eq!(stash.content_stats(), (0, 0));
         Ok(())
     }
 
