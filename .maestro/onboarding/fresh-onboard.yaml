@@ -1,0 +1,27 @@
+appId: com.unrealjune.streetcryptid
+---
+# Wipes the app's local state (equivalent to uninstall+reinstall) so onboarding
+# starts from a genuinely fresh profile, then drives the username step and the
+# location-disclosure gate through to the live map. Run per-device with --udid
+# so each simulator gets its own clean identity, e.g.:
+#   maestro --udid <UDID> test -e USERNAME=alice .maestro/onboarding/fresh-onboard.yaml
+#
+# NOTE: text/label-based tapOn works fine for Pressable buttons in this app, but
+# does NOT reliably focus TextInputs under Maestro's synthetic iOS taps (button
+# taps go through fine; TextInput focus silently no-ops with no keyboard, no
+# cursor, no typed text, and no error). Selecting by `id:` (testID -> UIKit
+# accessibilityIdentifier) fixes it. If you add a new fillable field, give it a
+# testID and select it by id, not by label/placeholder text.
+- launchApp:
+    clearState: true
+- assertVisible:
+    id: 'username-input'
+- tapOn:
+    id: 'username-input'
+- inputText: '${USERNAME}'
+- hideKeyboard
+- tapOn:
+    id: 'onboarding-continue'
+- tapOn: 'Turn on location'
+- assertVisible:
+    id: 'map-view'

@@ -438,6 +438,7 @@ export function CryptidProfileEditor({
                 <ThemedText style={[styles.handlePrefix, { color }]}>@</ThemedText>
                 <TextInput
                   accessibilityLabel="Username"
+                  testID="username-input"
                   autoCapitalize="none"
                   autoCorrect={false}
                   maxLength={20}
@@ -700,6 +701,7 @@ export function CryptidProfileEditor({
           {mode === 'onboarding' && onDone ? (
             <Pressable
               accessibilityRole="button"
+              testID="onboarding-continue"
               disabled={hasIssues || finishing}
               onPress={() => void finish()}
               style={({ pressed }) => [

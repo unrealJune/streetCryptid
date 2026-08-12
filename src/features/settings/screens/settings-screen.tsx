@@ -164,6 +164,16 @@ export default function SettingsScreen() {
         />
         <ProfileOnboardingPreview accent={chrome.green} />
         <EventLogPanel activeColor={chrome.green} warningColor={chrome.amber} />
+        {pairing?.inviteLink ? (
+          // Plain-text mirror of the most recently created invite link. The Share
+          // Sheet's "Copy" action doesn't reliably surface on the iOS Simulator's
+          // pasteboard for `simctl pbpaste`/E2E tooling to read back, so this gives
+          // Maestro (and anyone debugging by hand) a way to read the exact token
+          // straight out of the accessibility tree instead.
+          <ThemedText testID="debug-invite-link" type="small" themeColor="textSecondary" selectable>
+            {pairing.inviteLink}
+          </ThemedText>
+        ) : null}
       </View>
 
       <View style={styles.section}>

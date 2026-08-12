@@ -1,0 +1,9 @@
+appId: com.unrealjune.streetcryptid
+---
+# Run on the "displayer" side of a live SAS challenge (the "Show them this figure"
+# screen). Confirms the picker chose correctly. Only valid to run after the picker
+# has actually made their choice — see pairing-e2e.sh for ordering.
+#
+# No `launchApp`: see pick-figure.yaml — it would tear down the live session.
+- tapOn:
+    id: 'pairing-confirm-matched'
