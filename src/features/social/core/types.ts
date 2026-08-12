@@ -81,6 +81,21 @@ export interface SelfIdentity {
   recvPublic: Hex;
 }
 
+/**
+ * How a fix reached THIS device — the last hop in, not a claim about the author's own link.
+ * Gossip is epidemic, so a live fix may have been forwarded by any neighbour in the swarm.
+ *
+ * - `relay`  — live, arrived over an iroh relay path.
+ * - `direct` — live, arrived over a direct (routable IP) path.
+ * - `lan`    — live, arrived over a private/link-local IP path.
+ * - `ble`    — live, arrived over the BLE (custom) transport.
+ * - `live`   — live gossip, last hop unknown (older binaries; no path info).
+ * - `docs`   — recovered by range-reconciliation with a peer's durable trail.
+ * - `stash`  — recovered from the trail stash mirror.
+ * - `sync`   — recovered from the durable trail, source unknown.
+ */
+export type FixTransport = 'relay' | 'direct' | 'lan' | 'ble' | 'live' | 'docs' | 'stash' | 'sync';
+
 /** An inbound decrypted fix from a friend. */
 export interface IncomingFix {
   author: Hex;
@@ -89,4 +104,9 @@ export interface IncomingFix {
   receivedAt: number;
   /** True when recovered via durable range-reconciliation (iroh-docs) rather than live gossip. */
   backfill?: boolean;
+  /**
+   * The last hop this fix took into this device. Absent ⇒ unknown, and the trail store falls back
+   * to the coarse live/sync split implied by {@link backfill}.
+   */
+  via?: FixTransport;
 }

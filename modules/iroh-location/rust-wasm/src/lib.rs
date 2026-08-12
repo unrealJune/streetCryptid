@@ -549,7 +549,9 @@ struct ChannelSink {
 }
 
 impl TrailSink for ChannelSink {
-    fn on_backfill(&self, author: Vec<u8>, seq: u64, payload: Vec<u8>) {
+    // `_from` (the endpoint that served the entry) is unused here: the browser build has no
+    // per-fix transport label, so the TS side falls back to the coarse live/sync split.
+    fn on_backfill(&self, author: Vec<u8>, seq: u64, payload: Vec<u8>, _from: Vec<u8>) {
         if let Some(tx) = &self.tx {
             if let Ok(fix) = postcard::from_bytes::<WireLocationFix>(&payload) {
                 let _ = tx.try_send(JsLocationEvent::Fix {

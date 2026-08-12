@@ -621,7 +621,7 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
     fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultVoid.UniffiByValue,)
 }
 internal interface UniffiCallbackInterfaceFixListenerMethod0 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`via`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceFixListenerMethod1 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
@@ -842,7 +842,7 @@ external fun uniffi_iroh_location_fn_free_fixlistener(`handle`: Long,uniffi_out_
 ): Unit
 external fun uniffi_iroh_location_fn_init_callback_vtable_fixlistener(`vtable`: UniffiVTableCallbackInterfaceFixListener,
 ): Unit
-external fun uniffi_iroh_location_fn_method_fixlistener_on_fix(`ptr`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+external fun uniffi_iroh_location_fn_method_fixlistener_on_fix(`ptr`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`via`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_iroh_location_fn_method_fixlistener_on_opaque(`ptr`: Long,`author`: RustBuffer.ByValue,`seq`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1130,7 +1130,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 60711) {
+    if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 21245) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_opaque() != 14800) {
@@ -1854,8 +1854,11 @@ public interface FixListener {
     /**
      * A fix we could decrypt (someone shared with us). `backfill` is `true` when the fix arrived
      * via durable range-reconciliation (iroh-docs catch-up) rather than the live gossip path.
+     *
+     * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
+     * the stash is a mirror, so it never claims a direct link to the fix's author.
      */
-    fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean)
+    fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean, `via`: kotlin.String)
     
     /**
      * A fix we received but could NOT decrypt (not addressed to us / revoked). Useful
@@ -1980,13 +1983,16 @@ open class FixListenerImpl: Disposable, AutoCloseable, FixListener
     /**
      * A fix we could decrypt (someone shared with us). `backfill` is `true` when the fix arrived
      * via durable range-reconciliation (iroh-docs catch-up) rather than the live gossip path.
-     */override fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean)
+     *
+     * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
+     * the stash is a mirror, so it never claims a direct link to the fix's author.
+     */override fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean, `via`: kotlin.String)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_iroh_location_fn_method_fixlistener_on_fix(
         it,
-        FfiConverterByteArray.lower(`author`),FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterBoolean.lower(`backfill`),_status)
+        FfiConverterByteArray.lower(`author`),FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterBoolean.lower(`backfill`),FfiConverterString.lower(`via`),_status)
 }
     }
     
@@ -2058,7 +2064,7 @@ open class FixListenerImpl: Disposable, AutoCloseable, FixListener
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceFixListener {
     internal object `onFix`: UniffiCallbackInterfaceFixListenerMethod0 {
-        override fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+        override fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`via`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeFixListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
                 uniffiObj.`onFix`(
@@ -2066,6 +2072,7 @@ internal object uniffiCallbackInterfaceFixListener {
                     FfiConverterULong.lift(`seq`),
                     FfiConverterTypeLocationFix.lift(`fix`),
                     FfiConverterBoolean.lift(`backfill`),
+                    FfiConverterString.lift(`via`),
                 )
             }
             val writeReturn = { _: Unit -> Unit }

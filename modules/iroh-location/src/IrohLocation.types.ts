@@ -33,6 +33,15 @@ export interface TransportConfig {
   ble: boolean;
 }
 
+/**
+ * The last hop a fix took INTO this device — never a claim about the author's own link, because
+ * gossip is epidemic and the stash is a mirror.
+ *
+ * `relay` | `direct` | `lan` | `ble` are live gossip paths; `live` means live but with no active
+ * path to report; `docs` / `stash` mean the fix was recovered from the durable trail.
+ */
+export type FixVia = 'relay' | 'direct' | 'lan' | 'ble' | 'live' | 'docs' | 'stash';
+
 export interface OnFixEvent {
   author: string;
   seq: number;
@@ -42,6 +51,8 @@ export interface OnFixEvent {
    * the live gossip path — lets the app distinguish backfill from live updates. Absent ⇒ live.
    */
   backfill?: boolean;
+  /** How the fix reached this device. Absent on binaries built before per-fix transport labels. */
+  via?: FixVia;
 }
 
 export interface OnOpaqueEvent {

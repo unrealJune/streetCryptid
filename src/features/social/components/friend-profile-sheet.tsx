@@ -7,6 +7,7 @@ import { resolveSignalColor, signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Spacing } from '@/constants/theme';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import { useTheme } from '@/hooks/use-theme';
+import { fixTransportBadge, fixTransportDescription } from '../core/fix-transport';
 import { formatDistance, formatPresenceAge, type FriendPresence } from '../core/presence';
 import type { TrailPoint } from '../net/background/trail-store';
 
@@ -181,7 +182,7 @@ export function FriendProfileSheet({
             visibleHistory.map((point, index) => (
               <View
                 accessible
-                accessibilityLabel={`${formatHistoryTime(point.fix.ts)} at ${formatCoordinates(point)}`}
+                accessibilityLabel={`${formatHistoryTime(point.fix.ts)} at ${formatCoordinates(point)}, ${fixTransportDescription(point.via)}`}
                 key={`${point.author}-${point.seq}`}
                 style={[
                   styles.historyRow,
@@ -194,6 +195,9 @@ export function FriendProfileSheet({
                 <View style={[styles.historyDot, { backgroundColor: signalColor }]} />
                 <ThemedText type="smallBold" style={styles.historyTime}>
                   {formatHistoryTime(point.fix.ts)}
+                </ThemedText>
+                <ThemedText type="code" themeColor="textSecondary" style={styles.historyVia}>
+                  {fixTransportBadge(point.via)}
                 </ThemedText>
                 <ThemedText type="code" themeColor="textSecondary" style={styles.coordinates}>
                   {formatCoordinates(point)}
@@ -425,6 +429,9 @@ const styles = StyleSheet.create({
   },
   historyTime: {
     minWidth: 106,
+  },
+  historyVia: {
+    minWidth: 52,
   },
   coordinates: {
     flex: 1,

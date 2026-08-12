@@ -601,8 +601,11 @@ public protocol FixListener: AnyObject, Sendable {
     /**
      * A fix we could decrypt (someone shared with us). `backfill` is `true` when the fix arrived
      * via durable range-reconciliation (iroh-docs catch-up) rather than the live gossip path.
+     *
+     * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
+     * the stash is a mirror, so it never claims a direct link to the fix's author.
      */
-    func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool) 
+    func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String) 
     
     /**
      * A fix we received but could NOT decrypt (not addressed to us / revoked). Useful
@@ -681,14 +684,18 @@ open class FixListenerImpl: FixListener, @unchecked Sendable {
     /**
      * A fix we could decrypt (someone shared with us). `backfill` is `true` when the fix arrived
      * via durable range-reconciliation (iroh-docs catch-up) rather than the live gossip path.
+     *
+     * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
+     * the stash is a mirror, so it never claims a direct link to the fix's author.
      */
-open func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool)  {try! rustCall() {
+open func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String)  {try! rustCall() {
     uniffi_iroh_location_fn_method_fixlistener_on_fix(
             self.uniffiCloneHandle(),
         FfiConverterData.lower(author),
         FfiConverterUInt64.lower(seq),
         FfiConverterTypeLocationFix_lower(fix),
-        FfiConverterBool.lower(backfill),$0
+        FfiConverterBool.lower(backfill),
+        FfiConverterString.lower(via),$0
     )
 }
 }
@@ -765,6 +772,7 @@ fileprivate struct UniffiCallbackInterfaceFixListener {
             seq: UInt64,
             fix: RustBuffer,
             backfill: Int8,
+            via: RustBuffer,
             uniffiOutReturn: UnsafeMutableRawPointer,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -777,7 +785,8 @@ fileprivate struct UniffiCallbackInterfaceFixListener {
                      author: try FfiConverterData.lift(author),
                      seq: try FfiConverterUInt64.lift(seq),
                      fix: try FfiConverterTypeLocationFix_lift(fix),
-                     backfill: try FfiConverterBool.lift(backfill)
+                     backfill: try FfiConverterBool.lift(backfill),
+                     via: try FfiConverterString.lift(via)
                 )
             }
 
@@ -4892,7 +4901,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 60711) {
+    if (uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 21245) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_fixlistener_on_opaque() != 14800) {

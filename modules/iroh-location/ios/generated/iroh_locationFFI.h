@@ -245,7 +245,7 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_FIX_LISTENER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_FIX_LISTENER_METHOD0
-typedef void (*UniffiCallbackInterfaceFixListenerMethod0)(uint64_t, RustBuffer, uint64_t, RustBuffer, int8_t, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceFixListenerMethod0)(uint64_t, RustBuffer, uint64_t, RustBuffer, int8_t, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -300,7 +300,7 @@ void uniffi_iroh_location_fn_init_callback_vtable_fixlistener(const UniffiVTable
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_FIXLISTENER_ON_FIX
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_FIXLISTENER_ON_FIX
-void uniffi_iroh_location_fn_method_fixlistener_on_fix(uint64_t ptr, RustBuffer author, uint64_t seq, RustBuffer fix, int8_t backfill, RustCallStatus *_Nonnull out_status
+void uniffi_iroh_location_fn_method_fixlistener_on_fix(uint64_t ptr, RustBuffer author, uint64_t seq, RustBuffer fix, int8_t backfill, RustBuffer via, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_FIXLISTENER_ON_OPAQUE

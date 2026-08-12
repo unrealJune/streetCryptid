@@ -2247,7 +2247,7 @@ export class LocationSharingService implements FixPublisher {
         payload_ts: event.fix.ts,
         payload_accuracy_m: event.fix.accuracyM,
         payload_heading_deg: event.fix.headingDeg,
-        transport_path: event.backfill ? 'durable-trail' : 'live-gossip',
+        transport_path: event.via ?? (event.backfill ? 'durable-trail' : 'live-gossip'),
         ...(known ? {} : { 'sc.drop_reason': 'unknown-or-removing-author' }),
       },
     });
@@ -2266,6 +2266,7 @@ export class LocationSharingService implements FixPublisher {
       },
       receivedAt: Date.now(),
       ...(event.backfill ? { backfill: true } : {}),
+      ...(event.via ? { via: event.via } : {}),
     };
     void this.trail
       .appendFriend(fix)
