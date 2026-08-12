@@ -1,0 +1,15 @@
+appId: com.unrealjune.streetcryptid
+---
+# Run on the "picker" side of a live SAS challenge (the "Which figure is on their
+# phone?" screen). Taps the option whose name matches ${TARGET_NAME}, read off the
+# "displayer" device's screen first (see pairing-e2e.sh). The option's
+# accessibilityLabel is "Pairing figure: <name>", which is unique enough per
+# challenge to select by text — unlike TextInputs, Pressables here focus/tap fine
+# under Maestro's synthetic taps without needing a testID (see fresh-onboard.yaml
+# for the case where that wasn't true).
+#
+# Deliberately no `launchApp` here: a live pairing session's SAS state lives in
+# the native module's in-memory PairCore, and Maestro's launchApp appears to force
+# a terminate+relaunch on iOS even with clearState: false — which would tear that
+# session down mid-handshake. Connect to the already-foregrounded app instead.
+- tapOn: 'Pairing figure: ${TARGET_NAME}'

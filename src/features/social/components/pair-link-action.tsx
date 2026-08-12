@@ -114,6 +114,7 @@ export function PairLinkAction({
         <View style={styles.inputRow}>
           <TextInput
             accessibilityLabel="Pairing link or code"
+            testID="pairing-input"
             autoCapitalize="none"
             autoCorrect={false}
             editable={pairing.available && !submitting}
@@ -137,6 +138,7 @@ export function PairLinkAction({
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Pair using this link or code"
+            testID="pairing-submit"
             disabled={!pairing.available || submitting}
             onPress={() => void submitPairInput()}
             style={({ pressed }) => [

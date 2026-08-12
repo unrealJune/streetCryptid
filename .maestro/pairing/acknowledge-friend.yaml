@@ -1,0 +1,11 @@
+appId: com.unrealjune.streetcryptid
+---
+# Run on either device once pairing completes: asserts the "CRYPTID DISCOVERED"
+# celebration appeared (the actual proof pairing succeeded — both sides mint a
+# friend record and fire this) and dismisses it.
+#
+# No `launchApp`: harmless by this point (pairing is done, not mid-handshake), but
+# kept consistent with the rest of the pairing/ flows — see pick-figure.yaml.
+- assertVisible: 'CRYPTID DISCOVERED'
+- tapOn:
+    id: 'pairing-acknowledge-friend'

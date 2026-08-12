@@ -168,6 +168,7 @@ export function PairingVerificationPanel({
               key={figure.index}
               accessibilityRole="radio"
               accessibilityLabel={`Pairing figure: ${figure.name}`}
+              testID={`pairing-figure-option-${figure.index}`}
               accessibilityState={{ checked: false, disabled }}
               disabled={disabled}
               onPress={() => void run(() => onChoose(verification.sessionId, figure.index))}
@@ -190,6 +191,7 @@ export function PairingVerificationPanel({
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="The other person picked a different figure"
+              testID="pairing-confirm-different"
               disabled={disabled}
               onPress={() => void run(() => onConfirm(verification.sessionId, false))}
               style={({ pressed }) => [
@@ -208,6 +210,7 @@ export function PairingVerificationPanel({
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="The other person picked this figure"
+              testID="pairing-confirm-matched"
               disabled={disabled}
               onPress={() => void run(() => onConfirm(verification.sessionId, true))}
               style={({ pressed }) => [
@@ -249,6 +252,7 @@ function PairingFigureView({
       accessible={large}
       accessibilityLabel={large ? `${figure.name} ASCII pairing figure` : undefined}
       accessibilityRole={large ? 'text' : undefined}
+      testID={large ? 'pairing-target-figure' : undefined}
       style={styles.figure}
     >
       <Text

@@ -109,6 +109,14 @@ format-check:
 test:
     bun run test
 
+# Two-device Maestro E2E: onboards both simulators if needed, pairs them over an
+# invite link, and asserts both sides mint a friend record. Needs `maestro`
+# (https://maestro.mobile.dev) on PATH and two booted simulators with the app
+# already installed. See .maestro/README.md for what this works around.
+# Example: `just e2e-pairing 5834FA5F-... 37D03B5C-...`
+e2e-pairing device-a device-b:
+    bash scripts/e2e/pairing-e2e.sh {{device-a}} {{device-b}}
+
 # Profile the deterministic launch/zoom/pan region-build sequence (fixture by default).
 profile-map source="":
     bun scripts/profile-scene.ts {{source}}

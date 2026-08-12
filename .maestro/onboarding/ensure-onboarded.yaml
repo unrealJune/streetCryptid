@@ -1,0 +1,27 @@
+appId: com.unrealjune.streetcryptid
+---
+# Idempotent: brings whatever profile state the app is in the rest of the way to
+# the live map, without wiping existing data. Safe to run on a device that's
+# already fully onboarded (both runFlow blocks below just no-op) or one that's
+# mid-onboarding (e.g. username set but location disclosure not yet accepted).
+# For a guaranteed-fresh profile instead, use fresh-onboard.yaml.
+- launchApp:
+    clearState: false
+- runFlow:
+    when:
+      visible:
+        id: 'username-input'
+    commands:
+      - tapOn:
+          id: 'username-input'
+      - inputText: '${USERNAME}'
+      - hideKeyboard
+      - tapOn:
+          id: 'onboarding-continue'
+- runFlow:
+    when:
+      visible: 'Turn on location'
+    commands:
+      - tapOn: 'Turn on location'
+- assertVisible:
+    id: 'map-view'

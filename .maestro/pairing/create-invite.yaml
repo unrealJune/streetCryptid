@@ -1,0 +1,20 @@
+appId: com.unrealjune.streetcryptid
+---
+# Creates a one-time pairing invite and scrolls to the DEBUG "current invite link"
+# text, leaving Settings open. Read the real token via `maestro hierarchy` (id:
+# debug-invite-link) right after this flow completes, THEN run close-settings.yaml
+# separately — closing while the token is still unread loses it.
+- launchApp:
+    clearState: false
+- tapOn: 'Settings'
+- scrollUntilVisible:
+    element: 'Share a one-time pairing link'
+    direction: DOWN
+- tapOn: 'Share a one-time pairing link'
+- tapOn: 'Copy'
+- scrollUntilVisible:
+    element:
+      id: 'debug-invite-link'
+    direction: DOWN
+- assertVisible:
+    id: 'debug-invite-link'

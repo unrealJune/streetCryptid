@@ -1,0 +1,13 @@
+appId: com.unrealjune.streetcryptid
+---
+# Closes Settings via the real Close button. Deliberately does NOT call launchApp:
+# on iOS, Maestro's launchApp appears to force a terminate+relaunch even with
+# clearState: false, which tears down and rebuilds the native LocationNode —
+# wiping any in-memory issued-invite record before it can be redeemed. Run this
+# immediately after create-invite.yaml in the same session, with no launchApp
+# in between.
+- scrollUntilVisible:
+    element: 'Close settings'
+    direction: UP
+    timeout: 30000
+- tapOn: 'Close settings'

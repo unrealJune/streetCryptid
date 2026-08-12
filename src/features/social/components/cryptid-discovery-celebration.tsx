@@ -1,5 +1,13 @@
 import { useEffect, useState } from 'react';
-import { Animated, Easing, Modal, Pressable, StyleSheet, useColorScheme, View } from 'react-native';
+import {
+  Animated,
+  Easing,
+  Pressable,
+  StyleSheet,
+  useColorScheme,
+  useWindowDimensions,
+  View,
+} from 'react-native';
 import { useReducedMotion } from 'react-native-reanimated';
 
 import { ThemedText } from '@/components/themed-text';
@@ -21,6 +29,7 @@ export function CryptidDiscoveryCelebration({
 }: CryptidDiscoveryCelebrationProps) {
   const scheme = useColorScheme();
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
+  const { width, height } = useWindowDimensions();
   const reducedMotion = useReducedMotion();
   const [entrance] = useState(() => new Animated.Value(0));
   const [dance] = useState(() => new Animated.Value(0));
@@ -84,109 +93,112 @@ export function CryptidDiscoveryCelebration({
   });
 
   return (
-    <Modal animationType="fade" onRequestClose={() => undefined} transparent visible>
-      <View
-        accessibilityViewIsModal
-        style={[styles.scrim, { backgroundColor: `${chrome.void}F5` }]}
+    <View
+      accessibilityViewIsModal
+      style={[styles.scrim, { backgroundColor: `${chrome.void}F5`, width, height }]}
+    >
+      <Animated.View
+        style={[
+          styles.burst,
+          {
+            borderColor: color,
+            opacity: entrance,
+            transform: [{ scale: entrance }],
+          },
+        ]}
+      />
+      <Animated.View
+        style={[
+          styles.card,
+          {
+            borderColor: color,
+            opacity: entrance,
+            transform: [
+              {
+                scale: entrance.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0.55, 1],
+                }),
+              },
+            ],
+          },
+        ]}
       >
+        <ThemedText type="code" style={[styles.eyebrow, { color }]}>
+          FRIEND FOUND
+        </ThemedText>
+        <ThemedText accessibilityRole="header" style={styles.title}>
+          CRYPTID DISCOVERED
+        </ThemedText>
         <Animated.View
-          style={[
-            styles.burst,
-            {
-              borderColor: color,
-              opacity: entrance,
-              transform: [{ scale: entrance }],
-            },
-          ]}
-        />
-        <Animated.View
-          style={[
-            styles.card,
-            {
-              borderColor: color,
-              opacity: entrance,
-              transform: [
-                {
-                  scale: entrance.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [0.55, 1],
-                  }),
-                },
-              ],
-            },
-          ]}
+          style={{
+            transform: [{ translateY: hop }, { rotate }, { scale: entrance }],
+          }}
         >
-          <ThemedText type="code" style={[styles.eyebrow, { color }]}>
-            FRIEND FOUND
-          </ThemedText>
-          <ThemedText accessibilityRole="header" style={styles.title}>
-            CRYPTID DISCOVERED
-          </ThemedText>
-          <Animated.View
-            style={{
-              transform: [{ translateY: hop }, { rotate }, { scale: entrance }],
-            }}
-          >
-            <CryptidAvatar
-              art={friend.sigil}
-              color={color}
-              name={friend.cryptidName ?? 'Unknown form'}
-              size="large"
-              style={styles.avatar}
-            />
-          </Animated.View>
-          <ThemedText style={[styles.handle, { color }]}>{friend.handle}</ThemedText>
-          <ThemedText type="code" themeColor="textSecondary" style={styles.caption}>
-            {friend.cryptidName?.toUpperCase() ?? 'UNKNOWN FORM'} · LOCATION SHARING ACTIVE
-          </ThemedText>
-          <View style={styles.actions}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Reject ${friend.handle} and stop sharing`}
-              onPress={() => void onReject()}
-              style={({ pressed }) => [
-                styles.action,
-                styles.rejectAction,
-                {
-                  borderColor: chrome.steel,
-                  opacity: pressed ? 0.55 : 1,
-                },
-              ]}
-            >
-              <ThemedText type="code" themeColor="textSecondary" style={styles.actionLabel}>
-                REJECT
-              </ThemedText>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Acknowledge ${friend.handle} as a friend`}
-              onPress={onAcknowledge}
-              style={({ pressed }) => [
-                styles.action,
-                {
-                  backgroundColor: color,
-                  opacity: pressed ? 0.72 : 1,
-                },
-              ]}
-            >
-              <ThemedText type="code" style={[styles.actionLabel, styles.onGreen]}>
-                ACKNOWLEDGE
-              </ThemedText>
-            </Pressable>
-          </View>
+          <CryptidAvatar
+            art={friend.sigil}
+            color={color}
+            name={friend.cryptidName ?? 'Unknown form'}
+            size="large"
+            style={styles.avatar}
+          />
         </Animated.View>
-      </View>
-    </Modal>
+        <ThemedText style={[styles.handle, { color }]}>{friend.handle}</ThemedText>
+        <ThemedText type="code" themeColor="textSecondary" style={styles.caption}>
+          {friend.cryptidName?.toUpperCase() ?? 'UNKNOWN FORM'} · LOCATION SHARING ACTIVE
+        </ThemedText>
+        <View style={styles.actions}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Reject ${friend.handle} and stop sharing`}
+            onPress={() => void onReject()}
+            style={({ pressed }) => [
+              styles.action,
+              styles.rejectAction,
+              {
+                borderColor: chrome.steel,
+                opacity: pressed ? 0.55 : 1,
+              },
+            ]}
+          >
+            <ThemedText type="code" themeColor="textSecondary" style={styles.actionLabel}>
+              REJECT
+            </ThemedText>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Acknowledge ${friend.handle} as a friend`}
+            testID="pairing-acknowledge-friend"
+            onPress={onAcknowledge}
+            style={({ pressed }) => [
+              styles.action,
+              {
+                backgroundColor: color,
+                opacity: pressed ? 0.72 : 1,
+              },
+            ]}
+          >
+            <ThemedText type="code" style={[styles.actionLabel, styles.onGreen]}>
+              ACKNOWLEDGE
+            </ThemedText>
+          </Pressable>
+        </View>
+      </Animated.View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   scrim: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
     alignItems: 'center',
-    flex: 1,
     justifyContent: 'center',
     overflow: 'hidden',
     padding: Spacing.four,
+    zIndex: 1000,
+    elevation: 1000,
   },
   burst: {
     borderRadius: 280,
