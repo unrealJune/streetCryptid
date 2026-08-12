@@ -9,25 +9,38 @@ import type { MapFriendLocation } from '../render/map-view';
 interface FriendHistoryIslandProps {
   readonly friend: MapFriendLocation;
   readonly self?: boolean;
+  /** Retained points in YOUR trail. Omitted for friends — their history is not retained. */
+  readonly signalCount?: number;
   readonly theme: CryptidTheme;
   onClose(): void;
 }
 
 /**
- * Selected-location readout shown while a retained breadcrumb is on the map.
- * A drill-down inside the island: the segmented bar stays live below it, so
- * either tab dismisses it, and the close button returns to whichever tab you
- * came from.
+ * Selected-location readout. A drill-down inside the island: the segmented bar stays live below
+ * it, so either tab dismisses it, and the close button returns to whichever tab you came from.
+ *
+ * Asymmetric by design. Your own selection is a *trail* — the retained breadcrumb the map draws
+ * behind you. A friend's selection is a single point, because we no longer receive or keep
+ * anyone else's history; showing a signal count or a trail motif for them would imply a
+ * back-catalogue that does not exist.
  */
 export function FriendHistoryIsland({
   friend,
   self = false,
+  signalCount = 0,
   theme,
   onClose,
 }: FriendHistoryIslandProps) {
   const { chrome } = theme;
-  const signalLabel = `${friend.historyCount} signal${friend.historyCount === 1 ? '' : 's'}`;
-  const ownerLabel = self ? 'Your' : friend.handle;
+  const signalLabel = `${signalCount} signal${signalCount === 1 ? '' : 's'}`;
+  const summary = self
+    ? `Your location history. ${signalLabel} retained. The latest retained location is shown.`
+    : `${friend.handle}'s last known location${friend.stale ? ', signal stale' : ''}.`;
+  const meta = self
+    ? `${signalLabel.toUpperCase()} · YOUR TRAIL`
+    : friend.stale
+      ? 'LAST KNOWN · SIGNAL STALE'
+      : 'LAST KNOWN POSITION';
 
   return (
     <View style={styles.body}>
@@ -38,32 +51,29 @@ export function FriendHistoryIsland({
         name={friend.cryptidName ?? 'Unknown form'}
         style={styles.avatar}
       />
-      <View
-        accessible
-        accessibilityRole="summary"
-        accessibilityLabel={`${ownerLabel} location history. ${signalLabel} retained over 48 hours. The latest retained location is shown.`}
-        style={styles.copy}
-      >
+      <View accessible accessibilityRole="summary" accessibilityLabel={summary} style={styles.copy}>
         <Text numberOfLines={1} style={[styles.handle, { color: friend.color }]}>
           {friend.handle}
         </Text>
         <Text numberOfLines={1} style={[styles.meta, { color: chrome.steel }]}>
-          {signalLabel.toUpperCase()} · RETAINED 48H
+          {meta}
         </Text>
-        <View accessibilityElementsHidden style={styles.trail}>
-          {Array.from({ length: 7 }, (_, index) => (
-            <View
-              key={index}
-              style={[
-                index === 6 ? styles.trailHead : styles.trailDot,
-                { backgroundColor: friend.color, opacity: 0.28 + index * 0.11 },
-              ]}
-            />
-          ))}
-        </View>
+        {self ? (
+          <View accessibilityElementsHidden style={styles.trail}>
+            {Array.from({ length: 7 }, (_, index) => (
+              <View
+                key={index}
+                style={[
+                  index === 6 ? styles.trailHead : styles.trailDot,
+                  { backgroundColor: friend.color, opacity: 0.28 + index * 0.11 },
+                ]}
+              />
+            ))}
+          </View>
+        ) : null}
       </View>
       <Pressable
-        accessibilityLabel={`Close ${self ? 'your' : `${friend.handle}'s`} location history`}
+        accessibilityLabel={`Close ${self ? 'your location history' : `${friend.handle}'s location`}`}
         accessibilityRole="button"
         hitSlop={6}
         onPress={onClose}

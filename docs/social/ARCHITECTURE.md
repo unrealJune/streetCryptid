@@ -111,10 +111,28 @@ Per fix, A:
 2. **broadcasts** it on `topicId` (gossip) → live update for online friends, and
 3. **writes** it to the docs namespace under key `author/seq` → durable, replicated.
 
-**Retention:** location entries are retained indefinitely. They are removed only through an
-explicit deletion action, such as removing a friend or deliberately pruning history. Low background
-ping ⇒ per-fix entries are cheap; if ping frequency ever rises, batch fixes into periodic
-**snapshot** entries to limit iroh-blobs per-entry overhead.
+**Retention:** asymmetric, and deliberately so.
+
+- **Your own trail** is retained locally in full. It is yours, it never leaves the device except as
+  ciphertext, and the map draws it behind you.
+- **A friend's trail is not retained.** Only their newest fix is kept — in the local cache, and on
+  the stash. A received fix supersedes the previous one instead of appending to it.
+
+The publisher also prunes its own docs namespace down to its newest entry after each write, so a
+peer catching up reconciles one entry rather than a back-catalogue. The key format stays
+`author/seq` for compatibility with peers on older builds; they simply find one entry where they
+used to find many.
+
+Each retained fix keeps a `via` label recording how it reached this device (see
+`modules/iroh-location/README.md`). Since a friend's history is gone, that label surfaces once — as
+the profile sheet's SIGNAL PATH row for their current fix — rather than per row of a timeline.
+
+This is a privacy decision first — nobody needs a searchable movement history of their friends —
+but it also fixed a severe performance bug. iroh-docs reconciliation does not trickle: when it
+caught up with a friend it delivered that friend's _entire_ retained trail in one burst (956
+entries in ten seconds on the device this was diagnosed from), and processing them per-entry pinned
+the JS thread, stalled tile loading, and drained the battery. See
+`src/features/social/net/__tests__/backfill-storm.test.ts` for the regression that guards this.
 
 ## 6. Sharing, recovery, and revocation
 
@@ -339,10 +357,10 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   (`app.json` / expo-location config plugin).
 - **web**: relay-only iroh WASM implements the same interface, including an **in-memory**
   iroh-docs replica (ephemeral across reloads, interoperable with native's persistent replica).
-- The complete friend **trail** serves both offline recovery and the history view. The map normally
-  shows only the latest point; selecting a friend connects a sampled set of retained fixes in that
-  friend's chosen profile color. Amber
-  stays "YOU" only, and contact-green remains the legacy/default friend signal.
+- Friends render as a **single dot** at their last known position, in their chosen profile color —
+  there is no friend trail to draw, and selecting one shows only that point. Only **your own**
+  retained fixes are connected into a sampled polyline. Amber stays "YOU" only, and contact-green
+  remains the legacy/default friend signal.
 
 > Android background execution still follows platform limits: force-stopping the app prevents
 > delivery until the user launches it again. Normal backgrounding uses Expo Location's foreground

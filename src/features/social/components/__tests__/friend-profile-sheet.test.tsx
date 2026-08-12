@@ -1,7 +1,7 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
+import type { FixTransport } from '../../core/types';
 import type { FriendPresence } from '../../core/presence';
-import type { TrailPoint } from '../../net/background/trail-store';
 import { FriendProfileSheet } from '../friend-profile-sheet';
 
 jest.mock('@/global.css', () => ({}));
@@ -19,20 +19,13 @@ const friend: FriendPresence['friend'] = {
   ticket: 'ticket',
 };
 
-const presence: FriendPresence = {
-  friend,
-  fix: { lat: 40.1, lon: -80.2, accuracyM: 10, headingDeg: 0, ts: 1_700_000_000_000 },
-  distanceM: 120,
-  ageMs: 60_000,
-  freshness: 'live',
-};
-
-function point(seq: number, via?: TrailPoint['via']): TrailPoint {
+function presenceWith(via?: FixTransport): FriendPresence {
   return {
-    author: friend.endpointId,
-    seq,
-    fix: { lat: 40.1, lon: -80.2, accuracyM: 10, headingDeg: 0, ts: 1_700_000_000_000 + seq },
-    receivedAt: 1_700_000_000_000 + seq,
+    friend,
+    fix: { lat: 40.1, lon: -80.2, accuracyM: 10, headingDeg: 0, ts: 1_700_000_000_000 },
+    distanceM: 120,
+    ageMs: 60_000,
+    freshness: 'live',
     ...(via ? { via } : {}),
   };
 }
@@ -41,12 +34,11 @@ function noop(): Promise<void> {
   return Promise.resolve();
 }
 
-function renderSheet(history: readonly TrailPoint[]): ReactTestRenderer {
+function renderSheet(presence: FriendPresence): ReactTestRenderer {
   let renderer!: ReactTestRenderer;
   act(() => {
     renderer = create(
       <FriendProfileSheet
-        history={history}
         presence={presence}
         visible
         sharing
@@ -64,14 +56,21 @@ function renderSheet(history: readonly TrailPoint[]): ReactTestRenderer {
   return renderer;
 }
 
-function historyLabels(renderer: ReactTestRenderer): string[] {
+function strings(renderer: ReactTestRenderer): string[] {
   return renderer.root
-    .findAll((node) => typeof node.props.accessibilityLabel === 'string')
-    .map((node) => node.props.accessibilityLabel as string)
-    .filter((label) => label.includes(','));
+    .findAll((node) => typeof node.props.children === 'string')
+    .map((node) => node.props.children as string);
 }
 
-describe('FriendProfileSheet history transport', () => {
+function labels(renderer: ReactTestRenderer): string[] {
+  return renderer.root
+    .findAll((node) => typeof node.props.accessibilityLabel === 'string')
+    .map((node) => node.props.accessibilityLabel as string);
+}
+
+// Friends' history is deliberately not retained (only the newest fix survives), so the transport
+// label rides on that one fix rather than on a per-row timeline.
+describe('FriendProfileSheet signal path', () => {
   let renderer: ReactTestRenderer | undefined;
 
   afterEach(() => {
@@ -79,30 +78,24 @@ describe('FriendProfileSheet history transport', () => {
     renderer = undefined;
   });
 
-  it('badges each retained fix with how it reached this device', () => {
-    renderer = renderSheet([point(1, 'relay'), point(2, 'stash')]);
-    const rendered = renderer.root
-      .findAll((node) => typeof node.props.children === 'string')
-      .map((node) => node.props.children as string);
-
-    expect(rendered).toContain('RELAY');
-    expect(rendered).toContain('STASH');
+  it('badges the retained fix with how it reached this device', () => {
+    renderer = renderSheet(presenceWith('stash'));
+    expect(strings(renderer)).toContain('STASH');
   });
 
-  it('names the transport in the row accessibility label', () => {
-    renderer = renderSheet([point(1, 'relay')]);
-    expect(historyLabels(renderer).some((l) => l.endsWith('received live over a relay'))).toBe(
-      true
-    );
+  it('names the transport in the accessibility label', () => {
+    renderer = renderSheet(presenceWith('relay'));
+    expect(labels(renderer)).toContain('SIGNAL PATH: received live over a relay');
   });
 
-  it('falls back to an unknown marker for points stored before provenance existed', () => {
-    renderer = renderSheet([point(1)]);
-    const rendered = renderer.root
-      .findAll((node) => typeof node.props.children === 'string')
-      .map((node) => node.props.children as string);
+  it('falls back to an unknown marker for a fix stored before provenance existed', () => {
+    renderer = renderSheet(presenceWith());
+    expect(strings(renderer)).toContain('—');
+    expect(labels(renderer)).toContain('SIGNAL PATH: transport unknown');
+  });
 
-    expect(rendered).toContain('—');
-    expect(historyLabels(renderer).some((l) => l.endsWith('transport unknown'))).toBe(true);
+  it('omits the signal path entirely when no fix has ever arrived', () => {
+    renderer = renderSheet({ ...presenceWith('relay'), fix: null, distanceM: null, ageMs: null });
+    expect(strings(renderer)).not.toContain('SIGNAL PATH');
   });
 });

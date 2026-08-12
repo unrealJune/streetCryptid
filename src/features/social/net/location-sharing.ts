@@ -289,8 +289,43 @@ const BUMP_POLL_INTERVAL_MS = 300;
 const BUMP_RESOLVE_TIMEOUT_MS = 12_000;
 export const BUMP_WINDOW_MS = 15_000;
 
+/**
+ * How long trail-change notifications are gathered before the fan-out fires.
+ *
+ * Docs reconciliation does not trickle: catching up with a friend delivers their whole retained
+ * trail as one burst of `onFix` events (956 in ~10s on the device this was diagnosed from). Every
+ * listener answers a notification by re-reading the entire trail, so a per-fix fan-out is O(n²) in
+ * the trail size and pins the JS thread for minutes — the app stops responding to everything except
+ * the map gesture, which the native side drives.
+ *
+ * Coalescing makes that burst one refresh. The window is short enough to stay imperceptible for the
+ * ordinary case of a single fix arriving on its own.
+ */
+export const TRAIL_CHANGE_COALESCE_MS = 250;
+
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * `JSON.stringify` with object keys emitted in sorted order, so two structurally equal values
+ * always produce the same string.
+ *
+ * Needed because transport diagnostics arrive across the UniFFI boundary as freshly built records
+ * whose key insertion order is not stable between calls. Comparing them with plain
+ * `JSON.stringify` reported a change on nearly every 4-second poll: on the device this bug was
+ * diagnosed from, 391 of 410 consecutive snapshots were byte-identical once key-sorted, yet each
+ * one wrote a fat `transport.status.changed` record (the full diagnostics blob *and* the previous
+ * blob — 823 KB of `details` JSON across those 410 rows) plus an OTLP export.
+ */
+function stableStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, val: unknown) => {
+    if (val === null || typeof val !== 'object' || Array.isArray(val)) return val;
+    const source = val as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(source).sort()) sorted[key] = source[key];
+    return sorted;
+  });
 }
 
 /**
@@ -329,6 +364,18 @@ export class LocationSharingService implements FixPublisher {
   private readonly fixListeners = new Set<FixListener>();
   private readonly localFixListeners = new Set<LocalFixListener>();
   private readonly trailChangeListeners = new Set<TrailChangeListener>();
+  /** Pending coalesced trail-change fan-out; see {@link TRAIL_CHANGE_COALESCE_MS}. */
+  private trailChangeTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Highest `fix.ts` already pulled out of the durable replica, per author.
+   *
+   * Without it `refreshTrailFromReplica` re-read and re-wrote every entry a friend has ever
+   * published on every single sync — and live mode runs a sync every
+   * {@link LIVE_WATCH_PULL_INTERVAL_MS}, so the whole trail was decrypted and re-inserted into
+   * SQLite eight seconds apart for as long as anyone was watching. Cleared per author whenever
+   * their cached points are dropped, or a re-added friend would never be re-read.
+   */
+  private readonly replicaWatermarks = new Map<string, number>();
   private readonly errorListeners = new Set<ErrorListener>();
   private fixSub: Removable | null = null;
   private syncSub: Removable | null = null;
@@ -342,6 +389,8 @@ export class LocationSharingService implements FixPublisher {
   private transportDiagnosticsUpdatedAt: number | null = null;
   private transportDiagnosticsError: string | null = null;
   private transportDiagnosticsInFlight: Promise<void> | null = null;
+  /** Count of polls that saw a genuine change; asserted by tests to catch comparison regressions. */
+  private transportDiagnosticsChangeCount = 0;
   private pendingPairRequests: PairEvent[] = [];
   private verifications: PairingVerification[] = [];
   private bumpUntil = 0;
@@ -768,6 +817,10 @@ export class LocationSharingService implements FixPublisher {
     if (wasSharing) cleanup.push(this.ensureMySubscription());
     cleanup.push(
       this.trail.removeAuthor(endpointId).then(() => {
+        // Their cached points are gone, so the watermark must go with them — otherwise re-adding
+        // this friend later would resume from a timestamp whose fixes we no longer hold, and their
+        // dot would never reappear.
+        this.replicaWatermarks.delete(endpointId);
         this.notifyTrailChanged();
       })
     );
@@ -1401,7 +1454,16 @@ export class LocationSharingService implements FixPublisher {
 
   /**
    * Read decrypted fixes for self + friends out of the durable replica and merge them into the
-   * trail cache (idempotent — upsert by author/seq). Returns how many friend fixes are present.
+   * trail cache. Returns how many friend fixes are present.
+   *
+   * Two things keep this cheap, and both matter — live mode runs one of these every
+   * {@link LIVE_WATCH_PULL_INTERVAL_MS}:
+   *
+   * - each author is read from {@link replicaWatermarks}, not from `sinceTs`, so a sync re-reads
+   *   only what it has not already seen instead of decrypting the author's whole namespace again;
+   * - a friend's batch collapses to its newest fix before it is stored, because their history is
+   *   not retained (see `trail-store.ts`). A friend who has been away for a week reconciles into
+   *   exactly one row, not a week of rows.
    */
   private async refreshTrailFromReplica(sinceTs: number): Promise<number> {
     if (!this.mod) return 0;
@@ -1412,28 +1474,45 @@ export class LocationSharingService implements FixPublisher {
 
     let recoveredFriendFixes = 0;
     for (const author of authors) {
-      const fixes = await this.mod.readTrail(author, sinceTs).catch(() => []);
-      for (const nf of fixes) {
-        const fix: LocationFix = {
-          lat: nf.fix.lat,
-          lon: nf.fix.lon,
-          accuracyM: nf.fix.accuracyM,
-          headingDeg: nf.fix.headingDeg,
-          ts: nf.fix.ts,
-        };
-        if (selfId && nf.author === selfId) {
-          await this.trail.appendOwn(fix, nf.seq);
-        } else {
-          await this.trail.appendFriend({
-            author: nf.author,
-            seq: nf.seq,
-            fix,
-            receivedAt: Date.now(),
-            backfill: true,
-          });
-          recoveredFriendFixes += 1;
+      const from = Math.max(sinceTs, this.replicaWatermarks.get(author) ?? 0);
+      const fixes = await this.mod.readTrail(author, from).catch(() => []);
+      if (fixes.length === 0) continue;
+      const highWater = fixes.reduce((max, nf) => Math.max(max, nf.fix.ts), from);
+
+      if (selfId && author === selfId) {
+        for (const nf of fixes) {
+          await this.trail.appendOwn(
+            {
+              lat: nf.fix.lat,
+              lon: nf.fix.lon,
+              accuracyM: nf.fix.accuracyM,
+              headingDeg: nf.fix.headingDeg,
+              ts: nf.fix.ts,
+            },
+            nf.seq
+          );
         }
+      } else {
+        // Only the newest survives storage anyway; picking it here avoids writing the rest at all.
+        const newest = fixes.reduce((best, nf) =>
+          nf.fix.ts > best.fix.ts || (nf.fix.ts === best.fix.ts && nf.seq > best.seq) ? nf : best
+        );
+        await this.trail.appendFriend({
+          author: newest.author,
+          seq: newest.seq,
+          fix: {
+            lat: newest.fix.lat,
+            lon: newest.fix.lon,
+            accuracyM: newest.fix.accuracyM,
+            headingDeg: newest.fix.headingDeg,
+            ts: newest.fix.ts,
+          },
+          receivedAt: Date.now(),
+          backfill: true,
+        });
+        recoveredFriendFixes += fixes.length;
       }
+      this.replicaWatermarks.set(author, highWater);
     }
     return recoveredFriendFixes;
   }
@@ -2064,6 +2143,10 @@ export class LocationSharingService implements FixPublisher {
       clearInterval(this.liveWatchPullTimer);
       this.liveWatchPullTimer = null;
     }
+    if (this.trailChangeTimer) {
+      clearTimeout(this.trailChangeTimer);
+      this.trailChangeTimer = null;
+    }
     if (this.liveTrackingTimer) {
       clearTimeout(this.liveTrackingTimer);
       this.liveTrackingTimer = null;
@@ -2147,6 +2230,12 @@ export class LocationSharingService implements FixPublisher {
   private async importFriendTrails(): Promise<void> {
     if (!this.mod) return;
     const span = getTelemetry().startSpan('trail.rehydrate');
+    // One-shot on every start: devices that ran a build which retained friends' history are still
+    // carrying it (980 points for a single friend on the device this was diagnosed from). Nothing
+    // reads it any more, so drop it here rather than waiting for each friend's next fix to
+    // collapse their rows one at a time.
+    const dropped = await this.trail.collapseFriendHistory().catch(() => 0);
+    if (dropped > 0) span.setAttribute('history_dropped', dropped);
     let imported = 0;
     for (const friend of pool.friendList(this.state)) {
       if (!friend.docTicket) continue;
@@ -2296,8 +2385,18 @@ export class LocationSharingService implements FixPublisher {
     this.localFixListeners.forEach((listener) => listener(fix));
   }
 
+  /**
+   * Announce that the retained trail changed, coalescing bursts into a single fan-out.
+   * See {@link TRAIL_CHANGE_COALESCE_MS} for why this must never be per-fix.
+   */
   private notifyTrailChanged(): void {
-    this.trailChangeListeners.forEach((listener) => listener());
+    if (this.trailChangeTimer) return;
+    const timer = setTimeout(() => {
+      this.trailChangeTimer = null;
+      this.trailChangeListeners.forEach((listener) => listener());
+    }, TRAIL_CHANGE_COALESCE_MS);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    this.trailChangeTimer = timer;
   }
 
   private reportError(error: unknown): void {
@@ -2562,6 +2661,11 @@ export class LocationSharingService implements FixPublisher {
     }
   }
 
+  /** @internal Number of polls that observed a real transport change. Test-only accessor. */
+  get transportDiagnosticsChangeCountForTesting(): number {
+    return this.transportDiagnosticsChangeCount;
+  }
+
   private pollTransportDiagnosticsOnce(): Promise<void> {
     if (this.transportDiagnosticsInFlight) return this.transportDiagnosticsInFlight;
     this.transportDiagnosticsInFlight = this.doPollTransportDiagnosticsOnce().finally(() => {
@@ -2592,7 +2696,8 @@ export class LocationSharingService implements FixPublisher {
       this.transportDiagnostics = current;
       this.transportDiagnosticsUpdatedAt = Date.now();
       this.transportDiagnosticsError = null;
-      const changed = JSON.stringify(previous) !== JSON.stringify(current);
+      const changed = stableStringify(previous) !== stableStringify(current);
+      if (changed) this.transportDiagnosticsChangeCount += 1;
       const activePaths = current.peers.flatMap((peer) =>
         peer.addresses.filter((address) => address.active).map((address) => address.kind)
       );

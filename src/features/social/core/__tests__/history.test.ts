@@ -1,5 +1,5 @@
 import type { TrailPoint } from '../../net/background/trail-store';
-import { sampleTrailForMap, selectFriendTrail } from '../history';
+import { sampleTrailForMap, selectAuthorTrail } from '../history';
 
 function point(author: string, seq: number, ts = seq, receivedAt = ts): TrailPoint {
   return {
@@ -10,13 +10,13 @@ function point(author: string, seq: number, ts = seq, receivedAt = ts): TrailPoi
   };
 }
 
-describe('selectFriendTrail', () => {
+describe('selectAuthorTrail', () => {
   it('filters case-insensitively, de-duplicates, validates, and sorts fixes', () => {
     const invalid = point('friend-a', 4, 400);
     invalid.fix.lat = 100;
 
     expect(
-      selectFriendTrail(
+      selectAuthorTrail(
         [
           point('other', 1, 100),
           point('FRIEND-A', 2, 300, 300),

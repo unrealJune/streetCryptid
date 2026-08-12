@@ -17,8 +17,14 @@ function hasValidCoordinates(point: TrailPoint): boolean {
   );
 }
 
-/** A friend's retained fixes in chronological order, de-duplicated by publish sequence. */
-export function selectFriendTrail(trail: readonly TrailPoint[], endpointId: string): TrailPoint[] {
+/**
+ * One author's retained fixes in chronological order, de-duplicated by publish sequence.
+ *
+ * In practice this is only ever called with {@link SELF_AUTHOR}: a friend's history is not
+ * retained, so their "trail" is a single point. It stays author-generic because the trail cache
+ * is keyed by author and dropping the filter would let a friend's dot leak into your polyline.
+ */
+export function selectAuthorTrail(trail: readonly TrailPoint[], endpointId: string): TrailPoint[] {
   const author = endpointKey(endpointId);
   const bySequence = new Map<number, TrailPoint>();
 

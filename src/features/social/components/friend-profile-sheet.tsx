@@ -9,10 +9,8 @@ import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import { useTheme } from '@/hooks/use-theme';
 import { fixTransportBadge, fixTransportDescription } from '../core/fix-transport';
 import { formatDistance, formatPresenceAge, type FriendPresence } from '../core/presence';
-import type { TrailPoint } from '../net/background/trail-store';
 
 interface FriendProfileSheetProps {
-  history: readonly TrailPoint[];
   presence: FriendPresence | null;
   visible: boolean;
   sharing: boolean;
@@ -54,7 +52,6 @@ function pairingLabel(method: FriendPresence['friend']['pairingMethod']): string
 }
 
 export function FriendProfileSheet({
-  history,
   presence,
   visible,
   sharing,
@@ -87,7 +84,6 @@ export function FriendProfileSheet({
   const removeError = removeFailure?.endpointId === endpointId ? removeFailure.message : null;
   const distance = formatDistance(presence.distanceM);
   const locationLine = distance ?? (presence.fix ? 'Location received' : 'Waiting for location');
-  const visibleHistory = history.slice(-12).reverse();
 
   function closeSheet(): void {
     setConfirmingEndpoint(null);
@@ -161,55 +157,15 @@ export function FriendProfileSheet({
         <View style={[styles.details, { borderColor: theme.backgroundSelected }]}>
           <DetailRow label="LOCATION" value={locationLine} />
           <DetailRow label="LAST SIGNAL" value={formatPresenceAge(presence.ageMs)} />
+          {presence.fix ? (
+            <DetailRow
+              accessibilityLabel={fixTransportDescription(presence.via)}
+              label="SIGNAL PATH"
+              value={fixTransportBadge(presence.via)}
+            />
+          ) : null}
           <DetailRow label="CONNECTION" value={pairingLabel(presence.friend.pairingMethod)} />
           <DetailRow label="YOUR LOCATION" value={sharing ? 'Shared' : 'Paused'} />
-        </View>
-
-        <View style={styles.history}>
-          <View style={styles.historyHeader}>
-            <ThemedText type="code" themeColor="textSecondary">
-              LOCATION HISTORY
-            </ThemedText>
-            <ThemedText type="code" themeColor="textSecondary">
-              {history.length} SIGNAL{history.length === 1 ? '' : 'S'} · 48H
-            </ThemedText>
-          </View>
-          {visibleHistory.length === 0 ? (
-            <ThemedText type="small" themeColor="textSecondary" style={styles.historyEmpty}>
-              No retained locations yet.
-            </ThemedText>
-          ) : (
-            visibleHistory.map((point, index) => (
-              <View
-                accessible
-                accessibilityLabel={`${formatHistoryTime(point.fix.ts)} at ${formatCoordinates(point)}, ${fixTransportDescription(point.via)}`}
-                key={`${point.author}-${point.seq}`}
-                style={[
-                  styles.historyRow,
-                  {
-                    borderTopColor: index === 0 ? theme.backgroundSelected : 'transparent',
-                    borderBottomColor: theme.backgroundSelected,
-                  },
-                ]}
-              >
-                <View style={[styles.historyDot, { backgroundColor: signalColor }]} />
-                <ThemedText type="smallBold" style={styles.historyTime}>
-                  {formatHistoryTime(point.fix.ts)}
-                </ThemedText>
-                <ThemedText type="code" themeColor="textSecondary" style={styles.historyVia}>
-                  {fixTransportBadge(point.via)}
-                </ThemedText>
-                <ThemedText type="code" themeColor="textSecondary" style={styles.coordinates}>
-                  {formatCoordinates(point)}
-                </ThemedText>
-              </View>
-            ))
-          )}
-          {history.length > visibleHistory.length ? (
-            <ThemedText type="small" themeColor="textSecondary" style={styles.historyMore}>
-              Showing the 12 newest of {history.length} retained signals.
-            </ThemedText>
-          ) : null}
         </View>
 
         {presence.fix ? (
@@ -222,7 +178,7 @@ export function FriendProfileSheet({
             ]}
           >
             <ThemedText type="smallBold" style={{ color: signalColorInk(signalColor) }}>
-              {history.length > 1 ? 'View trail on map' : 'View on map'}
+              View on map
             </ThemedText>
           </Pressable>
         ) : null}
@@ -346,22 +302,23 @@ export function FriendProfileSheet({
   );
 }
 
-function formatHistoryTime(timestamp: number): string {
-  return new Intl.DateTimeFormat(undefined, {
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    month: 'short',
-  }).format(new Date(timestamp));
-}
-
-function formatCoordinates(point: TrailPoint): string {
-  return `${point.fix.lat.toFixed(4)}, ${point.fix.lon.toFixed(4)}`;
-}
-
-function DetailRow({ label, value }: { label: string; value: string }) {
+function DetailRow({
+  accessibilityLabel,
+  label,
+  value,
+}: {
+  accessibilityLabel?: string;
+  label: string;
+  value: string;
+}) {
   return (
-    <View style={styles.detailRow}>
+    <View
+      accessible={accessibilityLabel !== undefined}
+      accessibilityLabel={
+        accessibilityLabel === undefined ? undefined : `${label}: ${accessibilityLabel}`
+      }
+      style={styles.detailRow}
+    >
       <ThemedText type="code" themeColor="textSecondary">
         {label}
       </ThemedText>
@@ -401,44 +358,6 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderTopWidth: StyleSheet.hairlineWidth,
     marginBottom: Spacing.four,
-  },
-  history: {
-    marginBottom: Spacing.four,
-  },
-  historyHeader: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: Spacing.two,
-  },
-  historyEmpty: {
-    paddingVertical: Spacing.three,
-  },
-  historyRow: {
-    alignItems: 'center',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    flexDirection: 'row',
-    gap: Spacing.two,
-    minHeight: 48,
-  },
-  historyDot: {
-    borderRadius: 4,
-    height: 8,
-    width: 8,
-  },
-  historyTime: {
-    minWidth: 106,
-  },
-  historyVia: {
-    minWidth: 52,
-  },
-  coordinates: {
-    flex: 1,
-    textAlign: 'right',
-  },
-  historyMore: {
-    paddingTop: Spacing.two,
   },
   detailRow: {
     alignItems: 'center',
