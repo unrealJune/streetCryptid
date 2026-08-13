@@ -177,6 +177,9 @@ pub trait FixListener: Send + Sync + 'static {
     ///
     /// `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
     /// the stash is a mirror, so it never claims a direct link to the fix's author.
+    ///
+    /// On the live path it is the CLOSEST open path to the delivering neighbour rather than the
+    /// carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
     fn on_fix(&self, author: Vec<u8>, seq: u64, fix: LocationFix, backfill: bool, via: String);
     /// A fix we received but could NOT decrypt (not addressed to us / revoked). Useful
     /// for presence metrics without leaking content.
@@ -1946,6 +1949,11 @@ fn is_lan_ip(ip: std::net::IpAddr) -> bool {
 
 /// The label for one transport path, matching the transport rows the debug panel shows:
 /// `relay` | `direct` | `lan` | `ble` (the only custom transport this app binds).
+///
+/// The `Custom` arm collapses to `ble` because BLE is the sole custom transport today. When Wi-Fi
+/// Aware / Multipeer lands it will bind a SECOND custom transport, and this arm has to start
+/// discriminating on the `CustomAddr` scheme — otherwise nearby high-bandwidth deliveries will
+/// silently report as Bluetooth. [`transport_rank`] needs the new label at the same time.
 fn transport_label(address: &iroh::TransportAddr) -> &'static str {
     match address {
         iroh::TransportAddr::Relay(_) => "relay",
@@ -1960,19 +1968,49 @@ fn transport_label(address: &iroh::TransportAddr) -> &'static str {
     }
 }
 
+/// Network distance of one transport label, closest first: nearby radio, then same network, then
+/// hole-punched internet, then the relay of last resort. Lower sorts closer.
+///
+/// `stash` is deliberately absent: offline delivery is not an iroh path at all and is labelled on
+/// the backfill side (see the `from_stash` branch in `sync_trail`), so it never competes here.
+fn transport_rank(label: &str) -> u8 {
+    match label {
+        "ble" => 0,
+        "lan" => 1,
+        "direct" => 2,
+        "relay" => 3,
+        _ => u8::MAX,
+    }
+}
+
 /// Classify the path a gossip message came in over, by asking the endpoint which of the delivering
-/// neighbour's addresses is active. Falls back to `live` (arrived, path unknown) rather than
-/// guessing: `remote_info` is a point-in-time snapshot and may have nothing active to report.
+/// neighbour's addresses are active and naming the CLOSEST one.
+///
+/// Closest, not "the one this datagram traversed": iroh keeps every usable path `Open`
+/// simultaneously — a hole-punched direct path never demotes the relay path, which stays up as a
+/// standing fallback — and [`iroh::endpoint::RemoteInfo`] exposes only the *set* of open paths. The
+/// real answer lives in iroh's internal `selected_path`, reachable only through a `Connection`,
+/// which iroh-gossip owns rather than us.
+///
+/// Ranking rather than taking the first active match is the whole point. `RemoteInfo::addrs()`
+/// iterates an `FxHashMap`, so "first active" is arbitrary — and, because that hasher has a fixed
+/// seed, *stably* arbitrary per device. That is what made one phone label every fix `relay` while
+/// its peer labelled the very same link `direct`.
+///
+/// Falls back to `live` (arrived, path unknown) rather than guessing: `remote_info` is a
+/// point-in-time snapshot and may have nothing active to report.
 async fn delivery_label(endpoint: &Endpoint, delivered_from: EndpointId) -> String {
     let info = match endpoint.remote_info(delivered_from).await {
         Some(info) => info,
         None => return "live".to_string(),
     };
-    let active = info
+    let closest = info
         .addrs()
-        .find(|address| matches!(address.usage(), iroh::endpoint::TransportAddrUsage::Active));
-    match active {
-        Some(address) => transport_label(address.addr()).to_string(),
+        .filter(|address| matches!(address.usage(), iroh::endpoint::TransportAddrUsage::Active))
+        .map(|address| transport_label(address.addr()))
+        .min_by_key(|label| transport_rank(label));
+    match closest {
+        Some(label) => label.to_string(),
         None => "live".to_string(),
     }
 }
@@ -2144,11 +2182,22 @@ impl Subscription {
 
 #[cfg(test)]
 mod transport_label_tests {
-    use super::{is_lan_ip, transport_label};
+    use super::{is_lan_ip, transport_label, transport_rank};
     use iroh::TransportAddr;
 
     fn ip(addr: &str) -> TransportAddr {
         TransportAddr::Ip(addr.parse().expect("socket addr"))
+    }
+
+    /// The selection `delivery_label` performs over the active paths, minus the async endpoint
+    /// lookup: rank the labels and keep the closest. Kept in step with `delivery_label` by hand —
+    /// `RemoteInfo`/`TransportAddrInfo` cannot be constructed outside iroh, so the real function
+    /// is only reachable with two live endpoints.
+    fn closest(labels: &[&'static str]) -> Option<&'static str> {
+        labels
+            .iter()
+            .copied()
+            .min_by_key(|label| transport_rank(label))
     }
 
     #[test]
@@ -2190,5 +2239,51 @@ mod transport_label_tests {
     fn lan_check_matches_the_transport_panel_ranges() {
         assert!(is_lan_ip("192.168.0.1".parse().expect("ip")));
         assert!(!is_lan_ip("8.8.8.8".parse().expect("ip")));
+    }
+
+    #[test]
+    fn rank_orders_labels_closest_to_furthest() {
+        let mut labels = ["relay", "direct", "lan", "ble"];
+        labels.sort_by_key(|label| transport_rank(label));
+        assert_eq!(labels, ["ble", "lan", "direct", "relay"]);
+    }
+
+    /// The regression this whole ranking exists for: iroh keeps the relay path open alongside a
+    /// hole-punched one, so a delivery with both active must NOT be labelled `relay`.
+    #[test]
+    fn relay_never_wins_while_a_closer_path_is_open() {
+        assert_eq!(closest(&["relay", "direct"]), Some("direct"));
+        assert_eq!(closest(&["relay", "lan"]), Some("lan"));
+        assert_eq!(closest(&["relay", "ble"]), Some("ble"));
+        assert_eq!(closest(&["relay", "direct", "lan", "ble"]), Some("ble"));
+    }
+
+    /// Hash order must not decide the label: the same open paths in any order label identically.
+    /// Before ranking, `RemoteInfo::addrs()` iteration order picked the winner, which is why two
+    /// phones reported different transports for one link.
+    #[test]
+    fn label_is_independent_of_path_order() {
+        assert_eq!(closest(&["relay", "lan", "direct"]), Some("lan"));
+        assert_eq!(closest(&["direct", "relay", "lan"]), Some("lan"));
+        assert_eq!(closest(&["lan", "direct", "relay"]), Some("lan"));
+    }
+
+    #[test]
+    fn relay_still_wins_when_it_is_the_only_open_path() {
+        assert_eq!(closest(&["relay"]), Some("relay"));
+    }
+
+    /// No active path at all is `delivery_label`'s `live` fallback, not a guessed transport.
+    #[test]
+    fn no_active_path_selects_nothing() {
+        assert_eq!(closest(&[]), None);
+    }
+
+    /// An unranked label (a future custom transport added to `transport_label` but not to
+    /// `transport_rank`) must lose to every known one rather than silently outranking BLE.
+    #[test]
+    fn unknown_labels_sort_furthest() {
+        assert_eq!(transport_rank("multipeer"), u8::MAX);
+        assert_eq!(closest(&["multipeer", "relay"]), Some("relay"));
     }
 }
