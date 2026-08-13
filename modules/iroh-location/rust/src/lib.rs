@@ -27,6 +27,7 @@ pub mod mvt;
 mod pairing;
 mod profile;
 pub mod ratchet;
+pub mod session_store;
 
 /// The `mesh_epoch` every DOCS-path envelope carries.
 ///
