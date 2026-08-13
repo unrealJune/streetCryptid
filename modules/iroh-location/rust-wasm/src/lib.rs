@@ -22,6 +22,8 @@ use wasm_streams::ReadableStream;
 mod crypto;
 #[path = "../../rust/src/docs.rs"]
 mod docs;
+#[path = "../../rust/src/pad.rs"]
+mod pad;
 #[path = "../../rust/src/relay.rs"]
 mod relay;
 
@@ -276,8 +278,11 @@ impl WasmLocationNode {
         let stream = receiver.map(move |event| match event {
             Ok(Event::Received(message)) => match crypto::open(&recv_secret, &message.content) {
                 Ok(opened) => {
-                    let payload = postcard::from_bytes::<WireLocationFix>(&opened.payload)
-                        .map_err(|err| JsValue::from_str(&err.to_string()))?;
+                    let payload = decode_fix_payload(&opened.payload)
+                        .map_err(|err| JsValue::from_str(&err))?
+                        // A null fix (§4.1) carries no position. The browser build has no
+                        // watcher cadence of its own, but it must still tolerate a peer's.
+                        .ok_or_else(|| JsValue::from_str("null fix"))?;
                     serde_wasm_bindgen::to_value(&JsLocationEvent::Fix {
                         author: hex::encode(opened.author),
                         seq: opened.seq as f64,
@@ -354,7 +359,7 @@ impl WasmLocationNode {
             heading_deg: fix.heading_deg,
             ts: fix.ts as u64,
         };
-        let payload = postcard::to_allocvec(&wire_fix)
+        let payload = pad_encoded(&wire_fix)
             .context("encode fix")
             .map_err(to_js_err)?;
         let envelope = crypto::seal(
@@ -501,9 +506,27 @@ struct JsIncomingFix {
     fix: JsLocationFix,
 }
 
+/// Encode a fix and wrap it in the constant-length frame every sealed payload uses (§4.1).
+fn pad_encoded(wire_fix: &WireLocationFix) -> Result<Vec<u8>> {
+    let encoded = postcard::to_allocvec(wire_fix)?;
+    pad::pad(&encoded).map_err(|e| anyhow!(e.to_string()))
+}
+
+/// Unpad and decode a sealed fix payload. `Ok(None)` is a null fix — a watcher publishing on
+/// cadence so the ratchet has a return contribution (§4.1); it carries no position.
+fn decode_fix_payload(payload: &[u8]) -> std::result::Result<Option<WireLocationFix>, String> {
+    let inner = pad::unpad(payload).map_err(|e| e.to_string())?;
+    if inner.is_empty() {
+        return Ok(None);
+    }
+    postcard::from_bytes::<WireLocationFix>(inner)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
 /// Convert a decrypted [`LatestFix`] into [`JsIncomingFix`], decoding the payload.
 fn latest_fix_to_incoming(lf: LatestFix) -> Option<JsIncomingFix> {
-    let payload = postcard::from_bytes::<WireLocationFix>(&lf.payload).ok()?;
+    let payload = decode_fix_payload(&lf.payload).ok().flatten()?;
     Some(JsIncomingFix {
         author: hex::encode(&lf.author),
         seq: lf.seq as f64,
@@ -551,7 +574,7 @@ impl WasmLocationSubscription {
             heading_deg: fix.heading_deg,
             ts: fix.ts as u64,
         };
-        let payload = postcard::to_allocvec(&wire_fix)
+        let payload = pad_encoded(&wire_fix)
             .context("encode fix")
             .map_err(to_js_err)?;
         let envelope = crypto::seal(

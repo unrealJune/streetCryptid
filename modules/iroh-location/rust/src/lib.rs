@@ -26,6 +26,7 @@ pub mod mesh;
 pub mod mvt;
 mod pairing;
 mod profile;
+pub mod pad;
 pub mod ratchet;
 pub mod session_store;
 
@@ -438,8 +439,10 @@ pub fn mesh_seal_fix(
     );
     let _guard = span.enter();
 
-    let payload =
-        postcard::to_allocvec(&fix).map_err(|_| LocationError::Decode("encode fix".into()))?;
+    let payload = pad::pad(
+        &postcard::to_allocvec(&fix).map_err(|_| LocationError::Decode("encode fix".into()))?,
+    )
+    .map_err(|e| LocationError::Decode(e.to_string()))?;
     let mut capsules = Vec::with_capacity(recipients.len());
     for recipient in &recipients {
         let envelope = crypto::seal(
@@ -505,8 +508,18 @@ pub fn mesh_open_fix(
             "mesh envelope rejected"
         );
     })?;
-    let fix: LocationFix = postcard::from_bytes(&opened.payload)
-        .map_err(|_| LocationError::Decode("decode fix".into()))?;
+    // A null fix has no position to hand back, and this signature has no way to say "healthy but
+    // empty" — so it is an error here. The mesh path does not publish them today (§8.1 leaves
+    // mesh forward secrecy open); if it ever does, this needs an Option-shaped return.
+    let fix = decode_fix_payload(&opened.payload)?.ok_or_else(|| {
+        tracing::debug!(
+            sc.author = %telemetry::short_hex(&author.endpoint_id),
+            sc.capsule_hash = %capsule_hash,
+            sc.drop_reason = "null_fix",
+            "mesh capsule carried a null fix"
+        );
+        LocationError::Decode("null fix".into())
+    })?;
     Ok(IncomingFix {
         author: opened.author.to_vec(),
         seq: opened.seq,
@@ -1218,13 +1231,27 @@ impl LocationNode {
                                 );
                                 span.record("sc.seq", opened.seq);
                                 span.record("sc.via", via.as_str());
-                                if let Ok(fix) =
-                                    postcard::from_bytes::<LocationFix>(&opened.payload)
-                                {
-                                    span.record("outcome", "delivered");
-                                    cb.on_fix(opened.author.to_vec(), opened.seq, fix, false, via);
-                                } else {
-                                    span.record("outcome", "payload-decode-failed");
+                                match decode_fix_payload(&opened.payload) {
+                                    Ok(Some(fix)) => {
+                                        span.record("outcome", "delivered");
+                                        cb.on_fix(
+                                            opened.author.to_vec(),
+                                            opened.seq,
+                                            fix,
+                                            false,
+                                            via,
+                                        );
+                                    }
+                                    // A null fix is a watcher publishing on cadence so the
+                                    // ratchet has a return contribution (§4.1). It carries no
+                                    // position, so nothing is delivered — but it is a healthy
+                                    // envelope, not a failure.
+                                    Ok(None) => {
+                                        span.record("outcome", "null-fix");
+                                    }
+                                    Err(_) => {
+                                        span.record("outcome", "payload-decode-failed");
+                                    }
                                 }
                             }
                             Err(crypto::CryptoError::NotARecipient) => {
@@ -1308,8 +1335,11 @@ impl LocationNode {
         async move {
             let guard = self.inner.lock().await;
             let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
-            let payload = postcard::to_allocvec(&fix)
-                .map_err(|_| LocationError::Decode("encode fix".into()))?;
+            let payload = pad::pad(
+                &postcard::to_allocvec(&fix)
+                    .map_err(|_| LocationError::Decode("encode fix".into()))?,
+            )
+            .map_err(|e| LocationError::Decode(e.to_string()))?;
             let envelope = crypto::seal(
                 &self.identity_seed,
                 &self.author,
@@ -2393,12 +2423,27 @@ pub fn decode_pair_invite(token: String) -> Result<PairInvite, LocationError> {
 
 /// Convert a decrypted [`LatestFix`] into the UniFFI [`IncomingFix`], decoding the payload.
 fn latest_fix_to_incoming(lf: LatestFix) -> Option<IncomingFix> {
-    let fix = postcard::from_bytes::<LocationFix>(&lf.payload).ok()?;
+    // `None` covers both a null fix and an undecodable payload. They are not the same thing, but
+    // they have the same consequence here — there is no position to surface — and this function
+    // has no channel to report the difference on. The gossip path, which does, separates them.
+    let fix = decode_fix_payload(&lf.payload).ok().flatten()?;
     Some(IncomingFix {
         author: lf.author,
         seq: lf.seq,
         fix,
     })
+}
+
+/// Unpad and decode a sealed fix payload. `Ok(None)` is a null fix (§4.1) — a watcher's cadence
+/// keep-alive, which carries no position and is not an error.
+fn decode_fix_payload(payload: &[u8]) -> Result<Option<LocationFix>, LocationError> {
+    let inner = pad::unpad(payload).map_err(|e| LocationError::Decode(e.to_string()))?;
+    if inner.is_empty() {
+        return Ok(None);
+    }
+    postcard::from_bytes::<LocationFix>(inner)
+        .map(Some)
+        .map_err(|_| LocationError::Decode("decode fix".into()))
 }
 
 /// Derive the X25519 public key from a stored receiving secret (round-trips a seal to
@@ -2473,8 +2518,11 @@ impl Subscription {
         );
         telemetry::set_parent(&span, traceparent.as_deref());
         async move {
-            let payload = postcard::to_allocvec(&fix)
-                .map_err(|_| LocationError::Decode("encode fix".into()))?;
+            let payload = pad::pad(
+                &postcard::to_allocvec(&fix)
+                    .map_err(|_| LocationError::Decode("encode fix".into()))?,
+            )
+            .map_err(|e| LocationError::Decode(e.to_string()))?;
             let envelope = crypto::seal(
                 &self.node.identity_seed,
                 &self.node.author,
