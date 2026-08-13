@@ -69,9 +69,13 @@ export function distanceBetweenFixes(a: LocationFix, b: LocationFix): number {
 }
 
 /**
- * Joins decrypted trail authors to verified friends. Unknown authors are
- * intentionally ignored; an inbound location can only become UI presence after
- * the matching endpoint is in the friend pool.
+ * Joins each friend to their current fix. `input.latest` is already one point per author — the
+ * store keeps a single current fix per friend and no history (FORWARD-SECRECY.md §4.4) — but the
+ * newest-wins fold is kept as a cheap invariant guard rather than a trusted precondition: a
+ * duplicate here would silently render a friend at a stale position.
+ *
+ * Unknown authors are intentionally ignored; an inbound location can only become UI presence
+ * after the matching endpoint is in the friend pool.
  */
 export function buildFriendPresence(input: FriendPresenceInput): FriendPresence[] {
   const now = input.now ?? Date.now();

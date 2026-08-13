@@ -9,7 +9,7 @@ import { isBackgroundLocationRunning, startBackgroundLocation } from './backgrou
 import { createBatterySource } from './battery-source';
 import { cfgFromDecision } from './cadence-controller';
 import { isNativeRuntimeClaimed, withNativeRuntimeSession } from './native-runtime-owner';
-import { getActiveBackfillHandler } from './register-task';
+import { getActiveRefreshHandler } from './register-task';
 import { createSamplingPolicy } from './sampling-policy';
 
 interface HeadlessSession<T> {
@@ -99,13 +99,13 @@ async function session<T>(opts: HeadlessSession<T>): Promise<T> {
   }
 }
 
-/** Chain onto the shared lock so send-drain and backfill never spin up two native nodes at once. */
+/** Chain onto the shared lock so send-drain and refresh never spin up two native nodes at once. */
 function runHeadless<T>(opts: HeadlessSession<T>): Promise<T> {
   return withNativeRuntimeSession(() => session(opts));
 }
 
 /** What woke us. Recorded on the span, because the trigger decides whether we are even allowed. */
-export type SelfHealTrigger = 'backfill' | 'geofence';
+export type SelfHealTrigger = 'refresh' | 'geofence';
 
 /**
  * Re-arm OS background location updates if the user wants sharing on but the OS task is not running.
@@ -113,7 +113,7 @@ export type SelfHealTrigger = 'backfill' | 'geofence';
  * This is the self-heal, and it exists because the ordinary re-arm path is unreachable from here:
  * `rearmBackgroundLocationTask` is only called via `startBackground`, which is driven by a React
  * hook, so it needs the UI to mount. A phone that was terminated can therefore be woken repeatedly —
- * for a backfill, for a geofence exit — sync happily, and still never restart its own location
+ * for a refresh, for a geofence exit — sync happily, and still never restart its own location
  * reporting. That is exactly what kept an iPhone dark for hours after a live-mode test killed it.
  *
  * ## It is a safety net, not the primary mechanism — especially on Android
@@ -132,7 +132,7 @@ export type SelfHealTrigger = 'backfill' | 'geofence';
  * So on Android this only covers the residue: sharing enabled in our own persisted state while the
  * OS task is somehow not running. It is still worth attempting — if the user has turned off battery
  * optimisation it simply succeeds — but a `fgs-start-blocked` here is an expected outcome on a
- * `backfill` trigger, not an alarm. From a `geofence` trigger it should succeed, because a geofence
+ * `refresh` trigger, not an alarm. From a `geofence` trigger it should succeed, because a geofence
  * transition is on Android's exemption list for starting a foreground service from the background.
  *
  * Deliberately NOT wrapped in {@link runHeadless}: it touches only the OS location task, needs no
@@ -173,12 +173,12 @@ export async function ensureSharingArmedHeadless(
     return true;
   } catch (err) {
     // Android 12+ forbids starting a foreground service from the background, and
-    // `startLocationUpdatesAsync` starts one. Distinguish it from a genuine failure: on a `backfill`
+    // `startLocationUpdatesAsync` starts one. Distinguish it from a genuine failure: on a `refresh`
     // trigger this is the documented, expected outcome and the platform's own restore paths (boot
     // receiver, START_REDELIVER_INTENT) are what actually cover that case. On a `geofence` trigger
     // it is NOT expected — a geofence transition is on Android's exemption list — so seeing it there
     // means the exemption is not applying and is worth investigating. Never rethrow: a failed
-    // self-heal must not fail its caller, which is usually a backfill with real work still to do.
+    // self-heal must not fail its caller, which is usually a refresh with real work still to do.
     const message = err instanceof Error ? err.message : String(err);
     const blocked = /ForegroundServiceStartNotAllowed|not allowed to start service/i.test(message);
     span.setAttribute('sc.drop_reason', blocked ? 'fgs-start-blocked' : 'selfheal-failed');
@@ -216,23 +216,24 @@ export function flushBackgroundOutboxHeadless(parent?: SpanContext): Promise<num
 }
 
 /**
- * Periodic RECEIVE path: backfill fixes missed while backgrounded (from the trail-stash + peers),
+ * Periodic refresh path: heartbeat, drain the outbox, and reconcile each friend's CURRENT fix
+ * (from the trail-stash + peers),
  * then publish anything still queued. Driven by the `expo-background-task` scheduler — see
- * `backfill-task.ts`. No-op while the app is active (the foreground lifecycle already syncs).
+ * `refresh-task.ts`. No-op while the app is active (the foreground lifecycle already syncs).
  */
-export function runBackgroundBackfillHeadless(parent?: SpanContext): Promise<void> {
+export function runBackgroundRefreshHeadless(parent?: SpanContext): Promise<void> {
   // If a mounted runtime is alive it owns the process-wide native node. On Android that runtime
   // stays alive while backgrounded (the location foreground service), so `AppState` is NOT 'active'
   // and the `session()` guard alone would let us spin up a SECOND node here — whose `createNode`
   // calls `clearRuntime()` and tears the live node's subscriptions down, silently killing outgoing
-  // publishes and live receive until relaunch. Route the backfill to the live runtime instead.
+  // publishes and live receive until relaunch. Route the refresh to the live runtime instead.
   // Self-heal BEFORE anything else, and regardless of whether a runtime is mounted. On iOS this
   // periodic wake is a regular opportunity to notice that the location task died with a previous
   // process. On Android it is only a backstop — boot and process-kill are already covered by the
   // platform (see `ensureSharingArmedHeadless`) — and is expected to be refused when it does fire.
-  void ensureSharingArmedHeadless('backfill', parent);
+  void ensureSharingArmedHeadless('refresh', parent);
 
-  const runMounted = getActiveBackfillHandler();
+  const runMounted = getActiveRefreshHandler();
   if (runMounted) return runMounted(parent);
   return runHeadless<void>({
     fallback: undefined,

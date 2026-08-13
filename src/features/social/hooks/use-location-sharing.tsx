@@ -13,7 +13,7 @@ import { AppState, Platform } from 'react-native';
 import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
 import { buildFriendPresence, type FriendPresence } from '@/features/social/core/presence';
 import type { IncomingFix, LocationFix } from '@/features/social/core/types';
-import { SELF_AUTHOR, type TrailPoint } from '@/features/social/net/background/trail-store';
+import { type TrailPoint } from '@/features/social/net/background/trail-store';
 import {
   LocationSharingService,
   type PairingSnapshot,
@@ -141,7 +141,9 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   const publishedProfileSignature = useRef('');
   const [kv] = useState(() => createPersistentKV());
   const [snapshot, setSnapshot] = useState<SharingSnapshot | null>(null);
+  // Two reads, not one filtered list: our own trail is history, a friend is a single current fix.
   const [trail, setTrail] = useState<TrailPoint[]>([]);
+  const [friendFixes, setFriendFixes] = useState<TrailPoint[]>([]);
   const [persistedSelfFix, setPersistedSelfFix] = useState<LocationFix | null>(null);
   const [liveSelfFix, setLiveSelfFix] = useState<LocationFix | null>(null);
   const [locationStatus, setLocationStatus] = useState<LocationRuntimeStatus>('starting');
@@ -173,14 +175,15 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
 
   const refreshTrail = useCallback(async (service: LocationSharingService): Promise<void> => {
     const requestId = ++trailRefreshId.current;
-    const latest = await service.trailAll();
+    const [selfTrail, friendLatest] = await Promise.all([
+      service.selfTrail(),
+      service.friendLatest(),
+    ]);
     if (requestId !== trailRefreshId.current) return;
-    setTrail(latest);
-    const persistedSelf = latest.reduce<LocationFix | null>(
-      (current, point) =>
-        point.author === SELF_AUTHOR && (!current || point.fix.ts > current.ts)
-          ? point.fix
-          : current,
+    setTrail(selfTrail);
+    setFriendFixes(friendLatest);
+    const persistedSelf = selfTrail.reduce<LocationFix | null>(
+      (current, point) => (!current || point.fix.ts > current.ts ? point.fix : current),
       null
     );
     if (persistedSelf) {
@@ -558,10 +561,10 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     () =>
       buildFriendPresence({
         friends: snapshot?.friends ?? [],
-        latest: trail.filter((point) => point.author !== SELF_AUTHOR),
+        latest: friendFixes,
         selfFix: hasLiveSelfFix ? selfFix : null,
       }),
-    [snapshot?.friends, trail, hasLiveSelfFix, selfFix]
+    [snapshot?.friends, friendFixes, hasLiveSelfFix, selfFix]
   );
   const error = locationError ?? serviceError;
 

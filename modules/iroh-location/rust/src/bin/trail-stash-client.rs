@@ -20,7 +20,6 @@ const STATE_VERSION: u8 = 1;
 const APP_PACKAGE: &str = "com.unrealjune.streetcryptid";
 const DEFAULT_PAIR_TTL_SECONDS: u64 = 900;
 const DEFAULT_WATCH_INTERVAL_SECONDS: u64 = 10;
-const DEFAULT_SINCE_MINUTES: u64 = 60;
 const HTTP_TIMEOUT_SECONDS: u64 = 10;
 const ONCE_RETRY_SECONDS: u64 = 2;
 const ONCE_MAX_ATTEMPTS: u64 = 15;
@@ -73,10 +72,6 @@ enum ClientCommand {
         /// Poll interval for continuous watch mode.
         #[arg(long, default_value_t = DEFAULT_WATCH_INTERVAL_SECONDS)]
         interval_seconds: u64,
-
-        /// Initial history window. Subsequent runs resume by sequence number.
-        #[arg(long, default_value_t = DEFAULT_SINCE_MINUTES)]
-        since_minutes: u64,
     },
 
     /// Show local pairing state, configured endpoints, and stash health.
@@ -200,18 +195,7 @@ async fn run(cli: Cli) -> Result<()> {
             once,
             json,
             interval_seconds,
-            since_minutes,
-        } => {
-            run_watch(
-                &state_dir,
-                &config,
-                once,
-                json,
-                interval_seconds,
-                since_minutes,
-            )
-            .await
-        }
+        } => run_watch(&state_dir, &config, once, json, interval_seconds).await,
         ClientCommand::Status => run_status(&state_dir, &config).await,
     }
 }
@@ -337,7 +321,6 @@ async fn run_watch(
     once: bool,
     json: bool,
     interval_seconds: u64,
-    since_minutes: u64,
 ) -> Result<()> {
     if !once && interval_seconds == 0 {
         bail!("watch interval must be greater than zero");
@@ -368,12 +351,6 @@ async fn run_watch(
         stash_endpoint
     );
 
-    let initial_since = if peer.last_seq == 0 && since_minutes > 0 {
-        now_ms().saturating_sub(since_minutes.saturating_mul(60_000))
-    } else {
-        0
-    };
-
     let mut sync_attempt = 0u64;
     loop {
         // iroh-docs extends explicit peers with useful peers remembered in its replica DB. A fresh
@@ -394,11 +371,7 @@ async fn run_watch(
 
         let attempt = async {
             let fixes = node
-                .sync_trail_via_only(
-                    initial_since,
-                    peer.trail_ticket.clone(),
-                    config.stash_ticket.clone(),
-                )
+                .sync_latest_via_only(peer.trail_ticket.clone(), config.stash_ticket.clone())
                 .await
                 .context("direct stash-only trail reconciliation")?;
             if fixes

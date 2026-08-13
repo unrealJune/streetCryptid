@@ -697,6 +697,22 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_func_h3_cells_for_polygon(
     ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_capsule_header(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_capsule_open(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_capsule_seal(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_constants(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_epoch(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_expected_tags(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_open_fix(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_seal_fix(
+    ): Int
     external fun uniffi_iroh_location_checksum_func_configure_telemetry(
     ): Int
     external fun uniffi_iroh_location_checksum_func_flush_telemetry(
@@ -809,6 +825,18 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_deliver(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_have(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_insert(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_latest(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_prune(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_stats(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_subscription_publish(
     ): Int
     external fun uniffi_iroh_location_checksum_method_subscription_publish_inner(
@@ -816,6 +844,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_iroh_location_checksum_method_subscription_publish_traced(
     ): Int
     external fun uniffi_iroh_location_checksum_constructor_locationnode_new(
+    ): Int
+    external fun uniffi_iroh_location_checksum_constructor_meshcapsulestore_new(
     ): Int
     external fun ffi_iroh_location_uniffi_contract_version(
     ): Int
@@ -956,6 +986,24 @@ external fun uniffi_iroh_location_fn_method_locationnode_ticket(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_transport_diagnostics(`ptr`: Long,`peerEndpointIds`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_clone_meshcapsulestore(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_iroh_location_fn_free_meshcapsulestore(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_iroh_location_fn_constructor_meshcapsulestore_new(`capacity`: Int,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_iroh_location_fn_method_meshcapsulestore_deliver(`ptr`: Long,`tags`: RustBuffer.ByValue,`have`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_meshcapsulestore_have(`ptr`: Long,`tags`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_meshcapsulestore_insert(`ptr`: Long,`capsule`: RustBuffer.ByValue,`nowSecs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_meshcapsulestore_latest(`ptr`: Long,`tag`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_meshcapsulestore_prune(`ptr`: Long,`nowSecs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_iroh_location_fn_method_meshcapsulestore_stats(`ptr`: Long,`nowSecs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_clone_subscription(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_iroh_location_fn_free_subscription(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -979,6 +1027,22 @@ external fun uniffi_iroh_location_fn_func_encode_pair_invite(`invite`: RustBuffe
 external fun uniffi_iroh_location_fn_func_generate_recv_keypair(uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_h3_cells_for_polygon(`coordinates`: RustBuffer.ByValue,`resolution`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_capsule_header(`capsule`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_capsule_open(`recvSecret`: RustBuffer.ByValue,`author`: RustBuffer.ByValue,`capsule`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_capsule_seal(`recvSecret`: RustBuffer.ByValue,`authorEndpointId`: RustBuffer.ByValue,`recipientRecvPublic`: RustBuffer.ByValue,`envelope`: RustBuffer.ByValue,`epoch`: Int,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_constants(uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_epoch(`nowSecs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Int
+external fun uniffi_iroh_location_fn_func_mesh_expected_tags(`recvSecret`: RustBuffer.ByValue,`peers`: RustBuffer.ByValue,`nowSecs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_open_fix(`recvSecret`: RustBuffer.ByValue,`author`: RustBuffer.ByValue,`capsule`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_seal_fix(`identitySecret`: RustBuffer.ByValue,`recvSecret`: RustBuffer.ByValue,`authorEndpointId`: RustBuffer.ByValue,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_configure_telemetry(`endpoint`: RustBuffer.ByValue,`instanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
@@ -1122,6 +1186,30 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_h3_cells_for_polygon() != 51742) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_capsule_header() != 56669) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_capsule_open() != 22247) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_capsule_seal() != 18327) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_constants() != 6729) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_epoch() != 9095) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_expected_tags() != 41685) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_open_fix() != 58136) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_seal_fix() != 54504) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {
@@ -1292,6 +1380,24 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics() != 23251) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_deliver() != 47836) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_have() != 26291) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_insert() != 1404) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_latest() != 19517) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_prune() != 57364) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_subscription_publish() != 60528) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1302,6 +1408,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_constructor_locationnode_new() != 52316) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_constructor_meshcapsulestore_new() != 52560) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -4078,6 +4187,387 @@ public object FfiConverterTypeLocationNode: FfiConverter<LocationNode, Long> {
 
 
 /**
+ * A mailbox: capsules indexed by rotating tag, newest-first, bounded per tag and overall.
+ *
+ * Held by the phone (what it has fetched, so a Query can carry a `have` set) and — once W4
+ * lands — by a smart node. Capsule interiors are opaque here, exactly as in firmware.
+ */
+public interface MeshCapsuleStoreInterface {
+    
+    /**
+     * Capsules matching `tags` minus everything in `have` — the Deliver set a node would send.
+     */
+    fun `deliver`(`tags`: List<kotlin.ByteArray>, `have`: List<kotlin.ByteArray>): List<kotlin.ByteArray>
+    
+    /**
+     * Dedup keys already held for `tags` — the `have` set sent with a BLE Query.
+     */
+    fun `have`(`tags`: List<kotlin.ByteArray>): List<kotlin.ByteArray>
+    
+    /**
+     * Offer a capsule. A drop here is a drop-decision point: the returned `reason` is the
+     * `sc.drop_reason` value to stamp.
+     */
+    fun `insert`(`capsule`: kotlin.ByteArray, `nowSecs`: kotlin.ULong): MeshInsert
+    
+    /**
+     * The live position for a tag — the most recently arrived capsule.
+     */
+    fun `latest`(`tag`: kotlin.ByteArray): kotlin.ByteArray?
+    
+    /**
+     * Drop everything that has fallen out of the acceptance window. Returns the count removed.
+     */
+    fun `prune`(`nowSecs`: kotlin.ULong): kotlin.ULong
+    
+    fun `stats`(`nowSecs`: kotlin.ULong): MeshStats
+    
+    companion object
+}
+
+/**
+ * A mailbox: capsules indexed by rotating tag, newest-first, bounded per tag and overall.
+ *
+ * Held by the phone (what it has fetched, so a Query can carry a `have` set) and — once W4
+ * lands — by a smart node. Capsule interiors are opaque here, exactly as in firmware.
+ */
+open class MeshCapsuleStore: Disposable, AutoCloseable, MeshCapsuleStoreInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+    /**
+     * `capacity` bounds the number of distinct tags held; each holds up to `ring_depth`
+     * capsules. This is the PSRAM/RAM knob (DESIGN Q6).
+     */
+    constructor(`capacity`: kotlin.UInt) :
+        this(UniffiWithHandle, 
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_constructor_meshcapsulestore_new(
+    
+        FfiConverterUInt.lower(`capacity`),_status)
+}
+    )
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_iroh_location_fn_free_meshcapsulestore(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_iroh_location_fn_clone_meshcapsulestore(handle, status)
+        }
+    }
+
+    
+    /**
+     * Capsules matching `tags` minus everything in `have` — the Deliver set a node would send.
+     */override fun `deliver`(`tags`: List<kotlin.ByteArray>, `have`: List<kotlin.ByteArray>): List<kotlin.ByteArray> {
+            return FfiConverterSequenceByteArray.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_meshcapsulestore_deliver(
+        it,
+        FfiConverterSequenceByteArray.lower(`tags`),FfiConverterSequenceByteArray.lower(`have`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Dedup keys already held for `tags` — the `have` set sent with a BLE Query.
+     */override fun `have`(`tags`: List<kotlin.ByteArray>): List<kotlin.ByteArray> {
+            return FfiConverterSequenceByteArray.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_meshcapsulestore_have(
+        it,
+        FfiConverterSequenceByteArray.lower(`tags`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Offer a capsule. A drop here is a drop-decision point: the returned `reason` is the
+     * `sc.drop_reason` value to stamp.
+     */override fun `insert`(`capsule`: kotlin.ByteArray, `nowSecs`: kotlin.ULong): MeshInsert {
+            return FfiConverterTypeMeshInsert.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_meshcapsulestore_insert(
+        it,
+        FfiConverterByteArray.lower(`capsule`),FfiConverterULong.lower(`nowSecs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The live position for a tag — the most recently arrived capsule.
+     */override fun `latest`(`tag`: kotlin.ByteArray): kotlin.ByteArray? {
+            return FfiConverterOptionalByteArray.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_meshcapsulestore_latest(
+        it,
+        FfiConverterByteArray.lower(`tag`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Drop everything that has fallen out of the acceptance window. Returns the count removed.
+     */override fun `prune`(`nowSecs`: kotlin.ULong): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_meshcapsulestore_prune(
+        it,
+        FfiConverterULong.lower(`nowSecs`),_status)
+}
+    }
+    )
+    }
+    
+
+    override fun `stats`(`nowSecs`: kotlin.ULong): MeshStats {
+            return FfiConverterTypeMeshStats.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_meshcapsulestore_stats(
+        it,
+        FfiConverterULong.lower(`nowSecs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshCapsuleStore: FfiConverter<MeshCapsuleStore, Long> {
+    override fun lower(value: MeshCapsuleStore): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): MeshCapsuleStore {
+        return MeshCapsuleStore(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): MeshCapsuleStore {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: MeshCapsuleStore) = 8UL
+
+    override fun write(value: MeshCapsuleStore, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
  * A live topic subscription; publish fixes through it.
  */
 public interface SubscriptionInterface {
@@ -4681,6 +5171,330 @@ public object FfiConverterTypeLocationFix: FfiConverterRustBuffer<LocationFix> {
             FfiConverterDouble.write(value.`accuracyM`, buf)
             FfiConverterDouble.write(value.`headingDeg`, buf)
             FfiConverterULong.write(value.`ts`, buf)
+    }
+}
+
+
+
+/**
+ * Wire + policy constants for the mesh, so the TS orchestration layer never hardcodes them.
+ */
+data class MeshConstants (
+    /**
+     * Capsule wire version currently emitted.
+     */
+    var `capsuleV`: kotlin.UByte
+    , 
+    /**
+     * Epoch length in seconds (900 = 15 min).
+     */
+    var `epochSecs`: kotlin.ULong
+    , 
+    var `tagLen`: kotlin.UInt
+    , 
+    var `dedupLen`: kotlin.UInt
+    , 
+    /**
+     * Bytes of plaintext header (`v || epoch || tag`) — all a bare antenna parses.
+     */
+    var `headerLen`: kotlin.UInt
+    , 
+    /**
+     * Capsules retained per tag by a mailbox.
+     */
+    var `ringDepth`: kotlin.UInt
+    , 
+    /**
+     * Cap on tags in one BLE Query message (§4.1).
+     */
+    var `maxQueryTags`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshConstants: FfiConverterRustBuffer<MeshConstants> {
+    override fun read(buf: ByteBuffer): MeshConstants {
+        return MeshConstants(
+            FfiConverterUByte.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshConstants) = (
+            FfiConverterUByte.allocationSize(value.`capsuleV`) +
+            FfiConverterULong.allocationSize(value.`epochSecs`) +
+            FfiConverterUInt.allocationSize(value.`tagLen`) +
+            FfiConverterUInt.allocationSize(value.`dedupLen`) +
+            FfiConverterUInt.allocationSize(value.`headerLen`) +
+            FfiConverterUInt.allocationSize(value.`ringDepth`) +
+            FfiConverterUInt.allocationSize(value.`maxQueryTags`)
+    )
+
+    override fun write(value: MeshConstants, buf: ByteBuffer) {
+            FfiConverterUByte.write(value.`capsuleV`, buf)
+            FfiConverterULong.write(value.`epochSecs`, buf)
+            FfiConverterUInt.write(value.`tagLen`, buf)
+            FfiConverterUInt.write(value.`dedupLen`, buf)
+            FfiConverterUInt.write(value.`headerLen`, buf)
+            FfiConverterUInt.write(value.`ringDepth`, buf)
+            FfiConverterUInt.write(value.`maxQueryTags`, buf)
+    }
+}
+
+
+
+/**
+ * The plaintext prefix of a capsule.
+ */
+data class MeshHeader (
+    var `v`: kotlin.UByte
+    , 
+    var `epoch`: kotlin.UInt
+    , 
+    var `tag`: kotlin.ByteArray
+    , 
+    /**
+     * `blake3(capsule)[..16]` — the dedup key every relay tier keys on.
+     */
+    var `dedupKey`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshHeader: FfiConverterRustBuffer<MeshHeader> {
+    override fun read(buf: ByteBuffer): MeshHeader {
+        return MeshHeader(
+            FfiConverterUByte.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshHeader) = (
+            FfiConverterUByte.allocationSize(value.`v`) +
+            FfiConverterUInt.allocationSize(value.`epoch`) +
+            FfiConverterByteArray.allocationSize(value.`tag`) +
+            FfiConverterByteArray.allocationSize(value.`dedupKey`)
+    )
+
+    override fun write(value: MeshHeader, buf: ByteBuffer) {
+            FfiConverterUByte.write(value.`v`, buf)
+            FfiConverterUInt.write(value.`epoch`, buf)
+            FfiConverterByteArray.write(value.`tag`, buf)
+            FfiConverterByteArray.write(value.`dedupKey`, buf)
+    }
+}
+
+
+
+/**
+ * Outcome of offering a capsule to a [`MeshCapsuleStore`].
+ */
+data class MeshInsert (
+    var `accepted`: kotlin.Boolean
+    , 
+    /**
+     * `accepted` | `malformed` | `bad_version` | `stale_epoch` | `future_epoch` | `duplicate`.
+     * Stamp this as `sc.drop_reason` on the caller's span (`infra/otel/README.md`).
+     */
+    var `reason`: kotlin.String
+    , 
+    var `dedupKey`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshInsert: FfiConverterRustBuffer<MeshInsert> {
+    override fun read(buf: ByteBuffer): MeshInsert {
+        return MeshInsert(
+            FfiConverterBoolean.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshInsert) = (
+            FfiConverterBoolean.allocationSize(value.`accepted`) +
+            FfiConverterString.allocationSize(value.`reason`) +
+            FfiConverterByteArray.allocationSize(value.`dedupKey`)
+    )
+
+    override fun write(value: MeshInsert, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`accepted`, buf)
+            FfiConverterString.write(value.`reason`, buf)
+            FfiConverterByteArray.write(value.`dedupKey`, buf)
+    }
+}
+
+
+
+/**
+ * A friend as the mesh needs them: the two public halves of their contact card.
+ */
+data class MeshPeer (
+    /**
+     * 32-byte ed25519 EndpointId (the envelope author id).
+     */
+    var `endpointId`: kotlin.ByteArray
+    , 
+    /**
+     * 32-byte X25519 receiving public key.
+     */
+    var `recvPublic`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshPeer: FfiConverterRustBuffer<MeshPeer> {
+    override fun read(buf: ByteBuffer): MeshPeer {
+        return MeshPeer(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshPeer) = (
+            FfiConverterByteArray.allocationSize(value.`endpointId`) +
+            FfiConverterByteArray.allocationSize(value.`recvPublic`)
+    )
+
+    override fun write(value: MeshPeer, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`endpointId`, buf)
+            FfiConverterByteArray.write(value.`recvPublic`, buf)
+    }
+}
+
+
+
+/**
+ * Mailbox occupancy, for the dev screen and the BLE Node Info characteristic.
+ */
+data class MeshStats (
+    var `capsules`: kotlin.ULong
+    , 
+    var `tags`: kotlin.ULong
+    , 
+    var `epoch`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshStats: FfiConverterRustBuffer<MeshStats> {
+    override fun read(buf: ByteBuffer): MeshStats {
+        return MeshStats(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshStats) = (
+            FfiConverterULong.allocationSize(value.`capsules`) +
+            FfiConverterULong.allocationSize(value.`tags`) +
+            FfiConverterUInt.allocationSize(value.`epoch`)
+    )
+
+    override fun write(value: MeshStats, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`capsules`, buf)
+            FfiConverterULong.write(value.`tags`, buf)
+            FfiConverterUInt.write(value.`epoch`, buf)
+    }
+}
+
+
+
+/**
+ * A mailbox address we expect traffic on, plus who/when it belongs to.
+ */
+data class MeshTag (
+    var `tag`: kotlin.ByteArray
+    , 
+    var `author`: kotlin.ByteArray
+    , 
+    var `epoch`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshTag: FfiConverterRustBuffer<MeshTag> {
+    override fun read(buf: ByteBuffer): MeshTag {
+        return MeshTag(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshTag) = (
+            FfiConverterByteArray.allocationSize(value.`tag`) +
+            FfiConverterByteArray.allocationSize(value.`author`) +
+            FfiConverterUInt.allocationSize(value.`epoch`)
+    )
+
+    override fun write(value: MeshTag, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`tag`, buf)
+            FfiConverterByteArray.write(value.`author`, buf)
+            FfiConverterUInt.write(value.`epoch`, buf)
     }
 }
 
@@ -5990,6 +6804,62 @@ public object FfiConverterSequenceTypeIncomingFix: FfiConverterRustBuffer<List<I
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeMeshPeer: FfiConverterRustBuffer<List<MeshPeer>> {
+    override fun read(buf: ByteBuffer): List<MeshPeer> {
+        val len = buf.getInt()
+        return List<MeshPeer>(len) {
+            FfiConverterTypeMeshPeer.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<MeshPeer>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeMeshPeer.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<MeshPeer>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeMeshPeer.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeMeshTag: FfiConverterRustBuffer<List<MeshTag>> {
+    override fun read(buf: ByteBuffer): List<MeshTag> {
+        val len = buf.getInt()
+        return List<MeshTag>(len) {
+            FfiConverterTypeMeshTag.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<MeshTag>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeMeshTag.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<MeshTag>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeMeshTag.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypePairEvent: FfiConverterRustBuffer<List<PairEvent>> {
     override fun read(buf: ByteBuffer): List<PairEvent> {
         val len = buf.getInt()
@@ -6223,6 +7093,122 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
     UniffiLib.uniffi_iroh_location_fn_func_h3_cells_for_polygon(
     
         FfiConverterSequenceDouble.lower(`coordinates`),FfiConverterUByte.lower(`resolution`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Parse `{v, epoch, tag}` + dedup key from a capsule. No key material involved — this is
+         * exactly what a bare antenna does.
+         */
+    @Throws(LocationException::class) fun `meshCapsuleHeader`(`capsule`: kotlin.ByteArray): MeshHeader {
+            return FfiConverterTypeMeshHeader.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_capsule_header(
+    
+        FfiConverterByteArray.lower(`capsule`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Unwrap a capsule to the inner envelope bytes. The envelope's ed25519 signature is **not**
+         * checked here — that happens in `crypto::open`, i.e. in [`mesh_open_fix`].
+         */
+    @Throws(LocationException::class) fun `meshCapsuleOpen`(`recvSecret`: kotlin.ByteArray, `author`: MeshPeer, `capsule`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_capsule_open(
+    
+        FfiConverterByteArray.lower(`recvSecret`),FfiConverterTypeMeshPeer.lower(`author`),FfiConverterByteArray.lower(`capsule`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Wrap one already-sealed envelope for one recipient.
+         */
+    @Throws(LocationException::class) fun `meshCapsuleSeal`(`recvSecret`: kotlin.ByteArray, `authorEndpointId`: kotlin.ByteArray, `recipientRecvPublic`: kotlin.ByteArray, `envelope`: kotlin.ByteArray, `epoch`: kotlin.UInt): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_capsule_seal(
+    
+        FfiConverterByteArray.lower(`recvSecret`),FfiConverterByteArray.lower(`authorEndpointId`),FfiConverterByteArray.lower(`recipientRecvPublic`),FfiConverterByteArray.lower(`envelope`),FfiConverterUInt.lower(`epoch`),_status)
+}
+    )
+    }
+    
+ fun `meshConstants`(): MeshConstants {
+            return FfiConverterTypeMeshConstants.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_constants(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * Which 15-minute epoch a unix timestamp (seconds) falls in.
+         */ fun `meshEpoch`(`nowSecs`: kotlin.ULong): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_epoch(
+    
+        FfiConverterULong.lower(`nowSecs`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Every mailbox address addressed **to me** across `{e-1, e, e+1}` — the BLE Query set.
+         *
+         * Peers whose card fails key-length validation are skipped rather than failing the sweep. The
+         * caller chunks the result to [`MeshConstants::max_query_tags`] per Query message.
+         */ fun `meshExpectedTags`(`recvSecret`: kotlin.ByteArray, `peers`: List<MeshPeer>, `nowSecs`: kotlin.ULong): List<MeshTag> {
+            return FfiConverterSequenceTypeMeshTag.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_expected_tags(
+    
+        FfiConverterByteArray.lower(`recvSecret`),FfiConverterSequenceTypeMeshPeer.lower(`peers`),FfiConverterULong.lower(`nowSecs`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Capsule -> envelope -> verified, decrypted fix. The inverse of [`mesh_seal_fix`] for one
+         * capsule; feeds the **existing** friend-presence path, so the map needs no mesh awareness.
+         */
+    @Throws(LocationException::class) fun `meshOpenFix`(`recvSecret`: kotlin.ByteArray, `author`: MeshPeer, `capsule`: kotlin.ByteArray): IncomingFix {
+            return FfiConverterTypeIncomingFix.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_open_fix(
+    
+        FfiConverterByteArray.lower(`recvSecret`),FfiConverterTypeMeshPeer.lower(`author`),FfiConverterByteArray.lower(`capsule`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Seal one fix into **one capsule per recipient**, ready for Submit over BLE.
+         *
+         * Each capsule carries its own envelope wrapped for that recipient alone (DESIGN §3.2): smaller
+         * frames, and group membership never leaves the device. Going through this function rather than
+         * [`mesh_capsule_seal`] is what makes that structural instead of a convention.
+         */
+    @Throws(LocationException::class) fun `meshSealFix`(`identitySecret`: kotlin.ByteArray, `recvSecret`: kotlin.ByteArray, `authorEndpointId`: kotlin.ByteArray, `seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<MeshPeer>): List<kotlin.ByteArray> {
+            return FfiConverterSequenceByteArray.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_seal_fix(
+    
+        FfiConverterByteArray.lower(`identitySecret`),FfiConverterByteArray.lower(`recvSecret`),FfiConverterByteArray.lower(`authorEndpointId`),FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`epoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceTypeMeshPeer.lower(`recipients`),_status)
 }
     )
     }

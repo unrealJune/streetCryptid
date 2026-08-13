@@ -1,0 +1,140 @@
+{
+  "$comment": "NORMATIVE festival-mesh capsule vectors — see docs/mesh/DESIGN.md §3.2 and modules/iroh-location/rust/tests/mesh_vectors.rs. Generated; do not hand-edit.",
+  "base_epoch": 1947783,
+  "capsules": [
+    {
+      "author_endpoint_id": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "capsule": "0187b81d00b62c89aae233404391bf185633f77245000102030405060708090a0b74e2e840ffdf791aacd7a59b450aac78afed6c1924d6e8c1fdd1c40b7eba6dd8206ccefbb450342f696d46d8468efd5120736f0d3256d95c367b30b7426b9133ef8dcf1d475ddad96d773ea58242ee5f0264033fb76382cb5a19ca5f47f6a7afa534aea6597a49fe540ea2781bcd13abc1f2003f7a8a15c63bdb6587c6c9d6beee94071d3e9907b1ea69dcc7b4ae271e05d7f4db5a0871c36504797bba921c6adb09aa3e16a4864e1aa9b03dfbf838ae02774bad5f1c7e4108ccc491e69e46c8d0c66e1b5f445052f784a8946bbfd7c5dd311a91cd67f545aa32fffc9b7a43817fe94a88b76884dff5af82afc25427dddc279d1c10e5b74f4797f34d5939f4211befdcdaf44ae9af697fa79436fc3e19b97cd84df58bbc3480930033fe81a0016cc2f6faee3dd082bedd03feeaf7a615b3c5bbeacbff77fd7be7b0dc798dbc13e4efa596a810cec38ff51b81f737d145",
+      "dedup_key": "1aff59291e0fe61b7311f4c338dc968a",
+      "epoch": 1947783,
+      "name": "a-to-b-current-epoch",
+      "nonce": "000102030405060708090a0b",
+      "tag": "b62c89aae233404391bf185633f77245"
+    },
+    {
+      "author_endpoint_id": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "capsule": "0188b81d00c1c4c3a19a65f6ab6fee889bfc2692f50b0a090807060504030201002e8c394fa94af5c6c0ecafbd18c9e37b71f78f62ce83a5f3c1910e9f2e01f5d08077dfe5fedc42b4328fd5763db7acaaab477da4648c5b65438bc99b40dfebc23c8c8410f20d24b0352ddcaf8f8fa1fe5be9e80681faae345b935d16ab8fb117da6a81f97a68573075e1a4dfd360ff6403aeff43293a03a64e99bac2d76c7772c7be5f7c55cea571887621f4c4f29554d5c3d048676a5ac9ee80247828f87cef88b82d4fe7d021d8d2a2e1d61854efd5da0a06d81b71a19f61f234341d0bab2d28553f1c5756e31c1faef7f4260154245aa2bc9896b80c64956ec22476c2b30a2e775563dea8fdb7772d4d2089c8d204bb22c3c51e59d248b84e1f2b9411ad2f9ea0137c3c003e804bfe28b5deba867dafa02681285eb68baf3bb8871c60d6c937d4b3549fb180f470b531685f01365d899b7819537474106a94c6ede00a3c78ac44a7367d7cbadc3d82076fc80d78f0",
+      "dedup_key": "86faac4244bd83c777f2120f728980a6",
+      "epoch": 1947784,
+      "name": "a-to-b-next-epoch",
+      "nonce": "0b0a09080706050403020100",
+      "tag": "c1c4c3a19a65f6ab6fee889bfc2692f5"
+    },
+    {
+      "author_endpoint_id": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "capsule": "0187b81d00d3150eb9cd1797f51f8774346c82f8cc000102030405060708090a0b9339a2385587dd0ad9e85d77e2ff171372e1b0c7433e3c08ae7b213d4e28694825b9f2efdefdf964c5269e63e552d5aecf16836d6d77c848bae0bd66bdeb929602e3934afd2c893b888732c1d51ec2e7032d9afdc07331a1743b98cd9415c649af0f32600b05ba87e190205745bd5fcf49b58d14a59d4cb69933fd489794f2897510cfb14e5d0666f48bef821a41b262ec74ae756ebf1498d92dec5252028fb2daf7554a46fb2530a55d494abd61c41ad0cf7e15fef2216fa16425a9636761e916718789fc85b153edff35fd730e9a8b9f4138277378d41d70f756d6240f727f0cd0a582d96c9c25ee5da071658b20aa2a99edd5117a60e30f61f45820eaa9994631dfcfcebd08f50e4197eef23286288dd610e1a06a10eb061735285d699ede6d93e816da349448090401d3365dfa6cbdb3ffd1ca303c9d44e1e9d800cdbcd0ff00a9dca8e8a1729ca39f86fa6323a4",
+      "dedup_key": "3f2b52040009999d97c738df0c09ee1a",
+      "epoch": 1947783,
+      "name": "c-to-b-current-epoch",
+      "nonce": "000102030405060708090a0b",
+      "tag": "d3150eb9cd1797f51f8774346c82f8cc"
+    }
+  ],
+  "constants": {
+    "capsule_v": 1,
+    "dedup_len": 16,
+    "epoch_secs": 900,
+    "header_len": 21,
+    "key_context": "sc-mesh-key/v1",
+    "max_query_tags": 64,
+    "nonce_len": 12,
+    "ring_depth": 4,
+    "tag_context": "sc-mesh-tag/v1",
+    "tag_len": 16
+  },
+  "derivations": [
+    {
+      "author_endpoint_id": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "capsule_key": "58dfdf9ba4cd3a3ea0bbfbfa30f991b956a1429415823618e285e7cd50ee7936",
+      "epoch": 1947783,
+      "name": "a-to-b-current-epoch",
+      "peer_recv_public": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "recv_secret": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "shared_secret": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+      "tag": "b62c89aae233404391bf185633f77245"
+    },
+    {
+      "author_endpoint_id": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "capsule_key": "43a3f36f0565c3b202ec61c48760b6e95ae8b56e49715956e8023ae74d128729",
+      "epoch": 1947784,
+      "name": "a-to-b-next-epoch",
+      "peer_recv_public": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "recv_secret": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "shared_secret": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+      "tag": "c1c4c3a19a65f6ab6fee889bfc2692f5"
+    },
+    {
+      "author_endpoint_id": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "capsule_key": "cb030fe6579545c414081dcc5ec7ccc079d08dc39a3cea4f7e95a6f49ad3a456",
+      "epoch": 1947783,
+      "name": "c-to-b-current-epoch",
+      "peer_recv_public": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "recv_secret": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "shared_secret": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+      "tag": "d3150eb9cd1797f51f8774346c82f8cc"
+    }
+  ],
+  "envelope": "fbefd0848d49e3a5ad6e875c6742f2bebbaeed2455fafd5c7d849015fbc951f5fa6ccf89ba2ba9b7ab3aabf5b538a25b28b9f2c086aafabbe959420e392b042d75e84caced95bca54dc57d6c49df8c6707458a8364f6e518153b8d0d29f8d6000d1b92ac01f2a01cc5ac4244a2ec0df544cba11e84036130b2c3acbfa056bc1fa1623245f6078dabbb4d0ab41fca8630c1035ad4a3bac170cb112816e1e6fdf70ec48978fe2bf72a945e36c7154cd748adbc5aac291288beb6dd3e4a5b4c52bb2a0edcb8d5f7e215a3e169e9f628c0e555d6ebb2bcf87018f01f8156a7287877dcc42308c81526adcf6f21bca543ee6a736768fb96b3c5eeaa2d991331292e546cf149ebcd01bf9b5076cc3f6e8496211037cde828cd55b00b91779b722799d3f385a3a0d59bf5f46e825e4bcb6961e73060fb5caff98c5454cf22f16587d141",
+  "epochs": [
+    {
+      "epoch": 0,
+      "unix_secs": 0,
+      "window": [
+        0,
+        1
+      ]
+    },
+    {
+      "epoch": 0,
+      "unix_secs": 899,
+      "window": [
+        0,
+        1
+      ]
+    },
+    {
+      "epoch": 1,
+      "unix_secs": 900,
+      "window": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "epoch": 1947783,
+      "unix_secs": 1753004800,
+      "window": [
+        1947782,
+        1947783,
+        1947784
+      ]
+    }
+  ],
+  "keys": {
+    "$comment": "RFC 7748 §6.1 Alice/Bob, so the shared secret is independently checkable.",
+    "a_recv_public": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+    "a_recv_secret": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+    "b_recv_public": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+    "b_recv_secret": "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
+    "rfc_7748_shared_secret": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+  },
+  "now_secs": 1753004800,
+  "rejects": [
+    {
+      "capsule": "0287b81d00b62c89aae233404391bf185633f77245000102030405060708090a0b74e2e840ffdf791aacd7a59b450aac78afed6c1924d6e8c1fdd1c40b7eba6dd8206ccefbb450342f696d46d8468efd5120736f0d3256d95c367b30b7426b9133ef8dcf1d475ddad96d773ea58242ee5f0264033fb76382cb5a19ca5f47f6a7afa534aea6597a49fe540ea2781bcd13abc1f2003f7a8a15c63bdb6587c6c9d6beee94071d3e9907b1ea69dcc7b4ae271e05d7f4db5a0871c36504797bba921c6adb09aa3e16a4864e1aa9b03dfbf838ae02774bad5f1c7e4108ccc491e69e46c8d0c66e1b5f445052f784a8946bbfd7c5dd311a91cd67f545aa32fffc9b7a43817fe94a88b76884dff5af82afc25427dddc279d1c10e5b74f4797f34d5939f4211befdcdaf44ae9af697fa79436fc3e19b97cd84df58bbc3480930033fe81a0016cc2f6faee3dd082bedd03feeaf7a615b3c5bbeacbff77fd7be7b0dc798dbc13e4efa596a810cec38ff51b81f737d145",
+      "name": "unknown-version",
+      "reason": "bad_version"
+    },
+    {
+      "capsule": "0187b81d00b62c89aae233404391bf185633f7724500010203",
+      "name": "truncated-header",
+      "reason": "malformed"
+    },
+    {
+      "capsule": "",
+      "name": "empty",
+      "reason": "malformed"
+    }
+  ]
+}

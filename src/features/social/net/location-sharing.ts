@@ -12,7 +12,6 @@ import {
   type NativeLocationFix,
   type NodeKeys,
   type OnFixEvent,
-  type OnSyncEvent,
   type PairEvent,
   type PairResult,
   type PairStateRecord,
@@ -395,7 +394,6 @@ export class LocationSharingService implements FixPublisher {
   private readonly replicaWatermarks = new Map<string, number>();
   private readonly errorListeners = new Set<ErrorListener>();
   private fixSub: Removable | null = null;
-  private syncSub: Removable | null = null;
 
   // Bilateral pairing / nearby discovery runtime.
   private pairingReadyFlag = false;
@@ -716,7 +714,6 @@ export class LocationSharingService implements FixPublisher {
       this.profileEpoch = await this.safePublishProfile();
       this.profileTicketStr = await this.safeProfileTicket();
       this.fixSub = this.mod.addListener('onFix', (event: OnFixEvent) => this.handleFix(event));
-      this.syncSub = this.mod.addListener('onSync', (event: OnSyncEvent) => this.handleSync(event));
     }
 
     await this.restorePool(interactive);
@@ -848,10 +845,10 @@ export class LocationSharingService implements FixPublisher {
     }
     if (wasSharing) cleanup.push(this.ensureMySubscription());
     cleanup.push(
-      this.trail.removeAuthor(endpointId).then(() => {
-        // Their cached points are gone, so the watermark must go with them — otherwise re-adding
-        // this friend later would resume from a timestamp whose fixes we no longer hold, and their
-        // dot would never reappear.
+      this.trail.removeFriend(endpointId).then(() => {
+        // Their cached fix is gone, so the watermark must go with them — otherwise re-adding this
+        // friend later would resume from a timestamp whose fixes we no longer hold, and their dot
+        // would never reappear.
         this.replicaWatermarks.delete(endpointId);
         this.notifyTrailChanged();
       })
@@ -1018,8 +1015,6 @@ export class LocationSharingService implements FixPublisher {
     this.stopPairingPolling();
     this.fixSub?.remove();
     this.fixSub = null;
-    this.syncSub?.remove();
-    this.syncSub = null;
 
     const subscriptionIds = [...(this.mySubId ? [this.mySubId] : []), ...this.friendSubs.values()];
     await Promise.allSettled(
@@ -1043,7 +1038,6 @@ export class LocationSharingService implements FixPublisher {
     this.profileEpoch = await this.safePublishProfile();
     this.profileTicketStr = await this.safeProfileTicket();
     this.fixSub = mod.addListener('onFix', (event: OnFixEvent) => this.handleFix(event));
-    this.syncSub = mod.addListener('onSync', (event: OnSyncEvent) => this.handleSync(event));
 
     await this.importFriendProfiles();
     for (const friend of pool.friendList(this.state)) await this.subscribeToFriend(friend);
@@ -1531,7 +1525,7 @@ export class LocationSharingService implements FixPublisher {
         const newest = fixes.reduce((best, nf) =>
           nf.fix.ts > best.fix.ts || (nf.fix.ts === best.fix.ts && nf.seq > best.seq) ? nf : best
         );
-        await this.trail.appendFriend({
+        await this.trail.recordFriendLatest({
           author: newest.author,
           seq: newest.seq,
           fix: {
@@ -1551,24 +1545,18 @@ export class LocationSharingService implements FixPublisher {
     return recoveredFriendFixes;
   }
 
-  /** The latest trail point per author (self + friends). */
-  trailLatest(): Promise<TrailPoint[]> {
-    return this.trail.latestPerAuthor();
+  /**
+   * Our OWN retained trail, ascending by seq, at or after `sinceTs`. This is the only history
+   * there is: a friend has a current fix and nothing behind it (FORWARD-SECRECY.md §4.4), which
+   * is why the two reads are separate methods rather than one author-keyed query.
+   */
+  selfTrail(sinceTs = 0): Promise<TrailPoint[]> {
+    return this.trail.selfTrail(sinceTs);
   }
 
-  /** The ascending-by-seq trail for one author at or after `sinceTs`. */
-  trailFor(author: string, sinceTs = 0): Promise<TrailPoint[]> {
-    return this.trail.rangeFor(author, sinceTs);
-  }
-
-  /** All known authors' retained trails, ordered chronologically for the UI. */
-  async trailAll(sinceTs = 0): Promise<TrailPoint[]> {
-    const authors = [
-      SELF_AUTHOR,
-      ...pool.friendList(this.state).map((friend) => friend.endpointId),
-    ];
-    const ranges = await Promise.all(authors.map((author) => this.trail.rangeFor(author, sinceTs)));
-    return ranges.flat().sort((a, b) => a.fix.ts - b.fix.ts || a.seq - b.seq);
+  /** Every friend's current fix — at most one per friend, and never any older one. */
+  friendLatest(): Promise<TrailPoint[]> {
+    return this.trail.friendLatest();
   }
 
   /**
@@ -2199,8 +2187,6 @@ export class LocationSharingService implements FixPublisher {
     this.bgLifecycleStop = null;
     this.fixSub?.remove();
     this.fixSub = null;
-    this.syncSub?.remove();
-    this.syncSub = null;
     const mod = this.mod;
     const subscriptionIds = [...(this.mySubId ? [this.mySubId] : []), ...this.friendSubs.values()];
     this.mod = null;
@@ -2264,12 +2250,11 @@ export class LocationSharingService implements FixPublisher {
   private async importFriendTrails(): Promise<void> {
     if (!this.mod) return;
     const span = getTelemetry().startSpan('trail.rehydrate');
-    // One-shot on every start: devices that ran a build which retained friends' history are still
-    // carrying it (980 points for a single friend on the device this was diagnosed from). Nothing
-    // reads it any more, so drop it here rather than waiting for each friend's next fix to
-    // collapse their rows one at a time.
-    const dropped = await this.trail.collapseFriendHistory().catch(() => 0);
-    if (dropped > 0) span.setAttribute('history_dropped', dropped);
+    // Devices that ran a build which retained friends' history are still carrying it (980 points
+    // for a single friend on the device this was diagnosed from). That is no longer collapsed
+    // here: the schema migration in `persistence.ts` drops the whole legacy `trail` table on first
+    // open, which erases those rows outright instead of pruning around them — the difference
+    // FORWARD-SECRECY.md §5.3 turns on.
     let imported = 0;
     for (const friend of pool.friendList(this.state)) {
       if (!friend.docTicket) continue;
@@ -2357,15 +2342,14 @@ export class LocationSharingService implements FixPublisher {
 
   private handleFix(event: OnFixEvent): void {
     const telemetry = getTelemetry();
-    // App-level delivery marker: the native `gossip.receive`/`trail.backfill` span says the
-    // envelope arrived and decrypted; this one says the app actually surfaced it (or that a
-    // non-friend/removing gate ate it — the last place a ping can silently die).
+    // App-level delivery marker: the native `gossip.receive` span says the envelope arrived and
+    // decrypted; this one says the app actually surfaced it (or that a non-friend/removing gate
+    // ate it — the last place a ping can silently die).
     const known = !!this.state.friends[event.author] && !this.removingFriends.has(event.author);
     const span = telemetry.startSpan('fix.received.app', {
       attributes: {
         'sc.author': event.author.slice(0, 10),
         'sc.seq': event.seq,
-        backfill: !!event.backfill,
         payload_type: 'location-fix',
         payload_ts: event.fix.ts,
         payload_accuracy_m: event.fix.accuracyM,
@@ -2392,7 +2376,7 @@ export class LocationSharingService implements FixPublisher {
       ...(event.via ? { via: event.via } : {}),
     };
     void this.trail
-      .appendFriend(fix)
+      .recordFriendLatest(fix)
       .then(() => this.notifyTrailChanged())
       .catch((error: unknown) => this.reportError(error));
     this.fixListeners.forEach((l) => l(fix));
@@ -2436,13 +2420,6 @@ export class LocationSharingService implements FixPublisher {
   private reportError(error: unknown): void {
     const message = errorMessage(error);
     this.errorListeners.forEach((listener) => listener(message));
-  }
-
-  private handleSync(event: OnSyncEvent): void {
-    if (event.status === 'completed') {
-      this.lastSyncRecovered = event.recovered ?? 0;
-      this.emit();
-    }
   }
 
   private setStatus(status: string): void {

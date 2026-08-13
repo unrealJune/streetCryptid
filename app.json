@@ -107,7 +107,8 @@
       "expo-image",
       "expo-status-bar",
       "expo-web-browser",
-      "./plugins/withSharedSigning"
+      "./plugins/withSharedSigning",
+      "./plugins/withBackupExclusion"
     ],
     "experiments": {
       "typedRoutes": true,

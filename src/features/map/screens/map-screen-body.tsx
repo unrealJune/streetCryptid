@@ -8,7 +8,6 @@ import { Spacing } from '@/constants/theme';
 import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
 import {
   CoverageIsland,
-  FriendHistoryIsland,
   FriendsIsland,
   hexToRgb,
   LocateMeControl,
@@ -25,11 +24,12 @@ import {
   type MapLayerId,
   type MapLayerToggles,
   type MapRosterFriend,
+  type MapTrailLocation,
   type Rgb,
 } from '@/features/map';
+import { sampleTrailForMap } from '@/features/map/core/trail-sampling';
 import { BumpPairingStrip } from '@/features/social/components/bump-pairing-strip';
 import { FriendProfileSheet } from '@/features/social/components/friend-profile-sheet';
-import { sampleTrailForMap, selectAuthorTrail } from '@/features/social/core/history';
 import { formatPresenceAge } from '@/features/social/core/presence';
 import type { LocationFix } from '@/features/social/core/types';
 import { useArmedBump } from '@/features/social/hooks/use-armed-bump';
@@ -144,10 +144,6 @@ export default function MapScreenBody() {
       }),
     [friends, theme.chrome.green]
   );
-  const selectedFriend = useMemo(
-    () => mapFriends.find((friend) => friend.id === selectedEndpoint) ?? null,
-    [mapFriends, selectedEndpoint]
-  );
   // The roster carries EVERY friend, not just the ones with a fix — a friend who
   // has gone dark should dim in place rather than silently vanish from the list.
   const rosterFriends = useMemo<MapRosterFriend[]>(
@@ -176,31 +172,11 @@ export default function MapScreenBody() {
     () => hexToRgb(selfSignal, theme.canvas.accent),
     [selfSignal, theme.canvas.accent]
   );
-  const selfHistory = useMemo(() => {
-    const history = selectAuthorTrail(trail, SELF_AUTHOR);
-    const sampled = sampleTrailForMap(history);
-    return {
-      count: history.length,
-      sampled: trailLocations(sampled),
-    };
-  }, [trail]);
-  const selfMapLocation = useMemo<MapFriendLocation | null>(() => {
-    if (!selfFix || !profile) return null;
-    return {
-      id: SELF_AUTHOR,
-      handle: profile.handle,
-      sigil: profile.sigil,
-      cryptidName: profile.cryptidName,
-      color: selfSignal,
-      location: { lat: selfFix.lat, lon: selfFix.lon },
-      latestTs: selfFix.ts,
-    };
-  }, [profile, selfFix, selfSignal]);
-  const selectedHistory = selectedEndpoint === SELF_AUTHOR ? selfMapLocation : selectedFriend;
-  // A selected trace is a drill-down *inside* the FRIENDS tab, not a third tab:
-  // the roster is only actually on screen when nothing is drilled into. This is
-  // also what arms bump pairing, so the radio never runs behind a trace island.
-  const rosterOpen = islandTab === 'friends' && !selectedHistory;
+  // `trail` is our OWN retained trail — friends carry a current fix and nothing behind it.
+  const selfHistory = useMemo(() => trailLocations(sampleTrailForMap(trail)), [trail]);
+  // Selecting a locator highlights it (and draws OUR trail when it is us). The roster is on
+  // screen whenever the FRIENDS tab is up; it is also what arms bump pairing.
+  const rosterOpen = islandTab === 'friends';
   const bump = useArmedBump(rosterOpen);
 
   const closeHistory = useCallback(() => {
@@ -348,7 +324,7 @@ export default function MapScreenBody() {
           onSelectSelf={selectSelf}
           friends={mapFriends}
           selectedFriendId={selectedEndpoint === SELF_AUTHOR ? null : selectedEndpoint}
-          selfHistory={selfHistory.sampled}
+          selfHistory={selfHistory}
           selfSelected={selectedEndpoint === SELF_AUTHOR}
           selfColor={selfInk}
           selfLocation={hasLiveSelfFix && selfFix ? { lat: selfFix.lat, lon: selfFix.lon } : null}
@@ -383,15 +359,7 @@ export default function MapScreenBody() {
           />
         </View>
         <MapIsland active={islandTab} onSelect={selectIslandTab} signal={selfSignal} theme={theme}>
-          {selectedHistory ? (
-            <FriendHistoryIsland
-              friend={selectedHistory}
-              onClose={closeHistory}
-              self={selectedEndpoint === SELF_AUTHOR}
-              signalCount={selfHistory.count}
-              theme={theme}
-            />
-          ) : rosterOpen ? (
+          {rosterOpen ? (
             <FriendsIsland
               friends={rosterFriends}
               onOpenProfile={setProfileEndpoint}

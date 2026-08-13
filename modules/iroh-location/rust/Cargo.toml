@@ -71,6 +71,15 @@ hpke = { version = "0.12", features = ["x25519"] } # per-recipient key wrap (RFC
 ed25519-dalek = { version = "2", features = ["rand_core"] } # envelope signatures
 blake3 = "1" # topic derivation + recipient key ids
 rand = "0.8" # OsRng (rand_core 0.6, matches dalek 2 / hpke 0.12)
+# Raw X25519 DH for the festival-mesh radio capsule (docs/mesh/DESIGN.md §3.2). HPKE gives us
+# per-recipient wraps but no bare shared secret, and the capsule tag/key must be derivable from
+# BOTH sides of the same receiving keypair. Already in the tree via hpke 0.12 — same version.
+x25519-dalek = { version = "2", default-features = false, features = [
+    "alloc",
+    "precomputed-tables",
+    "static_secrets",
+    "zeroize",
+] }
 
 # --- wire encoding for the envelope (internal to this crate) ---
 serde = { version = "1", features = ["derive"] }
@@ -139,6 +148,9 @@ uuid = "1"
 
 [dev-dependencies]
 uniffi = { version = "0.31", features = ["tokio", "bindgen-tests"] }
+# tests/mesh_vectors.rs reads the cross-language mesh fixture (serde_json is already an
+# optional `cli` dependency; dev-dependencies make it unconditional for tests).
+serde_json = "1"
 
 # The uniffi-bindgen CLI used to generate Swift/Kotlin bindings after building.
 [[bin]]

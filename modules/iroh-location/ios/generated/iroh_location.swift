@@ -2417,6 +2417,236 @@ public func FfiConverterTypeLocationNode_lower(_ value: LocationNode) -> UInt64 
 
 
 /**
+ * A mailbox: capsules indexed by rotating tag, newest-first, bounded per tag and overall.
+ *
+ * Held by the phone (what it has fetched, so a Query can carry a `have` set) and — once W4
+ * lands — by a smart node. Capsule interiors are opaque here, exactly as in firmware.
+ */
+public protocol MeshCapsuleStoreProtocol: AnyObject, Sendable {
+    
+    /**
+     * Capsules matching `tags` minus everything in `have` — the Deliver set a node would send.
+     */
+    func deliver(tags: [Data], have: [Data])  -> [Data]
+    
+    /**
+     * Dedup keys already held for `tags` — the `have` set sent with a BLE Query.
+     */
+    func have(tags: [Data])  -> [Data]
+    
+    /**
+     * Offer a capsule. A drop here is a drop-decision point: the returned `reason` is the
+     * `sc.drop_reason` value to stamp.
+     */
+    func insert(capsule: Data, nowSecs: UInt64)  -> MeshInsert
+    
+    /**
+     * The live position for a tag — the most recently arrived capsule.
+     */
+    func latest(tag: Data)  -> Data?
+    
+    /**
+     * Drop everything that has fallen out of the acceptance window. Returns the count removed.
+     */
+    func prune(nowSecs: UInt64)  -> UInt64
+    
+    func stats(nowSecs: UInt64)  -> MeshStats
+    
+}
+/**
+ * A mailbox: capsules indexed by rotating tag, newest-first, bounded per tag and overall.
+ *
+ * Held by the phone (what it has fetched, so a Query can carry a `have` set) and — once W4
+ * lands — by a smart node. Capsule interiors are opaque here, exactly as in firmware.
+ */
+open class MeshCapsuleStore: MeshCapsuleStoreProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_iroh_location_fn_clone_meshcapsulestore(self.handle, $0) }
+    }
+    /**
+     * `capacity` bounds the number of distinct tags held; each holds up to `ring_depth`
+     * capsules. This is the PSRAM/RAM knob (DESIGN Q6).
+     */
+public convenience init(capacity: UInt32) {
+    let handle =
+        try! rustCall() {
+    uniffi_iroh_location_fn_constructor_meshcapsulestore_new(
+        FfiConverterUInt32.lower(capacity),$0
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_iroh_location_fn_free_meshcapsulestore(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Capsules matching `tags` minus everything in `have` — the Deliver set a node would send.
+     */
+open func deliver(tags: [Data], have: [Data]) -> [Data]  {
+    return try!  FfiConverterSequenceData.lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_meshcapsulestore_deliver(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceData.lower(tags),
+        FfiConverterSequenceData.lower(have),$0
+    )
+})
+}
+    
+    /**
+     * Dedup keys already held for `tags` — the `have` set sent with a BLE Query.
+     */
+open func have(tags: [Data]) -> [Data]  {
+    return try!  FfiConverterSequenceData.lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_meshcapsulestore_have(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceData.lower(tags),$0
+    )
+})
+}
+    
+    /**
+     * Offer a capsule. A drop here is a drop-decision point: the returned `reason` is the
+     * `sc.drop_reason` value to stamp.
+     */
+open func insert(capsule: Data, nowSecs: UInt64) -> MeshInsert  {
+    return try!  FfiConverterTypeMeshInsert_lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_meshcapsulestore_insert(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(capsule),
+        FfiConverterUInt64.lower(nowSecs),$0
+    )
+})
+}
+    
+    /**
+     * The live position for a tag — the most recently arrived capsule.
+     */
+open func latest(tag: Data) -> Data?  {
+    return try!  FfiConverterOptionData.lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_meshcapsulestore_latest(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(tag),$0
+    )
+})
+}
+    
+    /**
+     * Drop everything that has fallen out of the acceptance window. Returns the count removed.
+     */
+open func prune(nowSecs: UInt64) -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_meshcapsulestore_prune(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(nowSecs),$0
+    )
+})
+}
+    
+open func stats(nowSecs: UInt64) -> MeshStats  {
+    return try!  FfiConverterTypeMeshStats_lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_meshcapsulestore_stats(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(nowSecs),$0
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshCapsuleStore: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = MeshCapsuleStore
+
+    public static func lift(_ handle: UInt64) throws -> MeshCapsuleStore {
+        return MeshCapsuleStore(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: MeshCapsuleStore) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshCapsuleStore {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: MeshCapsuleStore, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshCapsuleStore_lift(_ handle: UInt64) throws -> MeshCapsuleStore {
+    return try FfiConverterTypeMeshCapsuleStore.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshCapsuleStore_lower(_ value: MeshCapsuleStore) -> UInt64 {
+    return FfiConverterTypeMeshCapsuleStore.lower(value)
+}
+
+
+
+
+
+
+/**
  * A live topic subscription; publish fixes through it.
  */
 public protocol SubscriptionProtocol: AnyObject, Sendable {
@@ -3080,6 +3310,444 @@ public func FfiConverterTypeLocationFix_lift(_ buf: RustBuffer) throws -> Locati
 #endif
 public func FfiConverterTypeLocationFix_lower(_ value: LocationFix) -> RustBuffer {
     return FfiConverterTypeLocationFix.lower(value)
+}
+
+
+/**
+ * Wire + policy constants for the mesh, so the TS orchestration layer never hardcodes them.
+ */
+public struct MeshConstants: Equatable, Hashable {
+    /**
+     * Capsule wire version currently emitted.
+     */
+    public var capsuleV: UInt8
+    /**
+     * Epoch length in seconds (900 = 15 min).
+     */
+    public var epochSecs: UInt64
+    public var tagLen: UInt32
+    public var dedupLen: UInt32
+    /**
+     * Bytes of plaintext header (`v || epoch || tag`) — all a bare antenna parses.
+     */
+    public var headerLen: UInt32
+    /**
+     * Capsules retained per tag by a mailbox.
+     */
+    public var ringDepth: UInt32
+    /**
+     * Cap on tags in one BLE Query message (§4.1).
+     */
+    public var maxQueryTags: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Capsule wire version currently emitted.
+         */capsuleV: UInt8, 
+        /**
+         * Epoch length in seconds (900 = 15 min).
+         */epochSecs: UInt64, tagLen: UInt32, dedupLen: UInt32, 
+        /**
+         * Bytes of plaintext header (`v || epoch || tag`) — all a bare antenna parses.
+         */headerLen: UInt32, 
+        /**
+         * Capsules retained per tag by a mailbox.
+         */ringDepth: UInt32, 
+        /**
+         * Cap on tags in one BLE Query message (§4.1).
+         */maxQueryTags: UInt32) {
+        self.capsuleV = capsuleV
+        self.epochSecs = epochSecs
+        self.tagLen = tagLen
+        self.dedupLen = dedupLen
+        self.headerLen = headerLen
+        self.ringDepth = ringDepth
+        self.maxQueryTags = maxQueryTags
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MeshConstants: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshConstants: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshConstants {
+        return
+            try MeshConstants(
+                capsuleV: FfiConverterUInt8.read(from: &buf), 
+                epochSecs: FfiConverterUInt64.read(from: &buf), 
+                tagLen: FfiConverterUInt32.read(from: &buf), 
+                dedupLen: FfiConverterUInt32.read(from: &buf), 
+                headerLen: FfiConverterUInt32.read(from: &buf), 
+                ringDepth: FfiConverterUInt32.read(from: &buf), 
+                maxQueryTags: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshConstants, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.capsuleV, into: &buf)
+        FfiConverterUInt64.write(value.epochSecs, into: &buf)
+        FfiConverterUInt32.write(value.tagLen, into: &buf)
+        FfiConverterUInt32.write(value.dedupLen, into: &buf)
+        FfiConverterUInt32.write(value.headerLen, into: &buf)
+        FfiConverterUInt32.write(value.ringDepth, into: &buf)
+        FfiConverterUInt32.write(value.maxQueryTags, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshConstants_lift(_ buf: RustBuffer) throws -> MeshConstants {
+    return try FfiConverterTypeMeshConstants.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshConstants_lower(_ value: MeshConstants) -> RustBuffer {
+    return FfiConverterTypeMeshConstants.lower(value)
+}
+
+
+/**
+ * The plaintext prefix of a capsule.
+ */
+public struct MeshHeader: Equatable, Hashable {
+    public var v: UInt8
+    public var epoch: UInt32
+    public var tag: Data
+    /**
+     * `blake3(capsule)[..16]` — the dedup key every relay tier keys on.
+     */
+    public var dedupKey: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(v: UInt8, epoch: UInt32, tag: Data, 
+        /**
+         * `blake3(capsule)[..16]` — the dedup key every relay tier keys on.
+         */dedupKey: Data) {
+        self.v = v
+        self.epoch = epoch
+        self.tag = tag
+        self.dedupKey = dedupKey
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MeshHeader: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshHeader: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshHeader {
+        return
+            try MeshHeader(
+                v: FfiConverterUInt8.read(from: &buf), 
+                epoch: FfiConverterUInt32.read(from: &buf), 
+                tag: FfiConverterData.read(from: &buf), 
+                dedupKey: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshHeader, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.v, into: &buf)
+        FfiConverterUInt32.write(value.epoch, into: &buf)
+        FfiConverterData.write(value.tag, into: &buf)
+        FfiConverterData.write(value.dedupKey, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshHeader_lift(_ buf: RustBuffer) throws -> MeshHeader {
+    return try FfiConverterTypeMeshHeader.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshHeader_lower(_ value: MeshHeader) -> RustBuffer {
+    return FfiConverterTypeMeshHeader.lower(value)
+}
+
+
+/**
+ * Outcome of offering a capsule to a [`MeshCapsuleStore`].
+ */
+public struct MeshInsert: Equatable, Hashable {
+    public var accepted: Bool
+    /**
+     * `accepted` | `malformed` | `bad_version` | `stale_epoch` | `future_epoch` | `duplicate`.
+     * Stamp this as `sc.drop_reason` on the caller's span (`infra/otel/README.md`).
+     */
+    public var reason: String
+    public var dedupKey: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(accepted: Bool, 
+        /**
+         * `accepted` | `malformed` | `bad_version` | `stale_epoch` | `future_epoch` | `duplicate`.
+         * Stamp this as `sc.drop_reason` on the caller's span (`infra/otel/README.md`).
+         */reason: String, dedupKey: Data) {
+        self.accepted = accepted
+        self.reason = reason
+        self.dedupKey = dedupKey
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MeshInsert: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshInsert: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshInsert {
+        return
+            try MeshInsert(
+                accepted: FfiConverterBool.read(from: &buf), 
+                reason: FfiConverterString.read(from: &buf), 
+                dedupKey: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshInsert, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.accepted, into: &buf)
+        FfiConverterString.write(value.reason, into: &buf)
+        FfiConverterData.write(value.dedupKey, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshInsert_lift(_ buf: RustBuffer) throws -> MeshInsert {
+    return try FfiConverterTypeMeshInsert.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshInsert_lower(_ value: MeshInsert) -> RustBuffer {
+    return FfiConverterTypeMeshInsert.lower(value)
+}
+
+
+/**
+ * A friend as the mesh needs them: the two public halves of their contact card.
+ */
+public struct MeshPeer: Equatable, Hashable {
+    /**
+     * 32-byte ed25519 EndpointId (the envelope author id).
+     */
+    public var endpointId: Data
+    /**
+     * 32-byte X25519 receiving public key.
+     */
+    public var recvPublic: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 32-byte ed25519 EndpointId (the envelope author id).
+         */endpointId: Data, 
+        /**
+         * 32-byte X25519 receiving public key.
+         */recvPublic: Data) {
+        self.endpointId = endpointId
+        self.recvPublic = recvPublic
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MeshPeer: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshPeer: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshPeer {
+        return
+            try MeshPeer(
+                endpointId: FfiConverterData.read(from: &buf), 
+                recvPublic: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshPeer, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.endpointId, into: &buf)
+        FfiConverterData.write(value.recvPublic, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshPeer_lift(_ buf: RustBuffer) throws -> MeshPeer {
+    return try FfiConverterTypeMeshPeer.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshPeer_lower(_ value: MeshPeer) -> RustBuffer {
+    return FfiConverterTypeMeshPeer.lower(value)
+}
+
+
+/**
+ * Mailbox occupancy, for the dev screen and the BLE Node Info characteristic.
+ */
+public struct MeshStats: Equatable, Hashable {
+    public var capsules: UInt64
+    public var tags: UInt64
+    public var epoch: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(capsules: UInt64, tags: UInt64, epoch: UInt32) {
+        self.capsules = capsules
+        self.tags = tags
+        self.epoch = epoch
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MeshStats: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshStats: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshStats {
+        return
+            try MeshStats(
+                capsules: FfiConverterUInt64.read(from: &buf), 
+                tags: FfiConverterUInt64.read(from: &buf), 
+                epoch: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshStats, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.capsules, into: &buf)
+        FfiConverterUInt64.write(value.tags, into: &buf)
+        FfiConverterUInt32.write(value.epoch, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshStats_lift(_ buf: RustBuffer) throws -> MeshStats {
+    return try FfiConverterTypeMeshStats.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshStats_lower(_ value: MeshStats) -> RustBuffer {
+    return FfiConverterTypeMeshStats.lower(value)
+}
+
+
+/**
+ * A mailbox address we expect traffic on, plus who/when it belongs to.
+ */
+public struct MeshTag: Equatable, Hashable {
+    public var tag: Data
+    public var author: Data
+    public var epoch: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(tag: Data, author: Data, epoch: UInt32) {
+        self.tag = tag
+        self.author = author
+        self.epoch = epoch
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MeshTag: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshTag: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshTag {
+        return
+            try MeshTag(
+                tag: FfiConverterData.read(from: &buf), 
+                author: FfiConverterData.read(from: &buf), 
+                epoch: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshTag, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.tag, into: &buf)
+        FfiConverterData.write(value.author, into: &buf)
+        FfiConverterUInt32.write(value.epoch, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshTag_lift(_ buf: RustBuffer) throws -> MeshTag {
+    return try FfiConverterTypeMeshTag.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshTag_lower(_ value: MeshTag) -> RustBuffer {
+    return FfiConverterTypeMeshTag.lower(value)
 }
 
 
@@ -4584,6 +5252,56 @@ fileprivate struct FfiConverterSequenceTypeIncomingFix: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeMeshPeer: FfiConverterRustBuffer {
+    typealias SwiftType = [MeshPeer]
+
+    public static func write(_ value: [MeshPeer], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeMeshPeer.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MeshPeer] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [MeshPeer]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeMeshPeer.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeMeshTag: FfiConverterRustBuffer {
+    typealias SwiftType = [MeshTag]
+
+    public static func write(_ value: [MeshTag], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeMeshTag.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MeshTag] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [MeshTag]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeMeshTag.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePairEvent: FfiConverterRustBuffer {
     typealias SwiftType = [PairEvent]
 
@@ -4829,6 +5547,108 @@ public func h3CellsForPolygon(coordinates: [Double], resolution: UInt8)throws  -
 })
 }
 /**
+ * Parse `{v, epoch, tag}` + dedup key from a capsule. No key material involved — this is
+ * exactly what a bare antenna does.
+ */
+public func meshCapsuleHeader(capsule: Data)throws  -> MeshHeader  {
+    return try  FfiConverterTypeMeshHeader_lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_func_mesh_capsule_header(
+        FfiConverterData.lower(capsule),$0
+    )
+})
+}
+/**
+ * Unwrap a capsule to the inner envelope bytes. The envelope's ed25519 signature is **not**
+ * checked here — that happens in `crypto::open`, i.e. in [`mesh_open_fix`].
+ */
+public func meshCapsuleOpen(recvSecret: Data, author: MeshPeer, capsule: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_func_mesh_capsule_open(
+        FfiConverterData.lower(recvSecret),
+        FfiConverterTypeMeshPeer_lower(author),
+        FfiConverterData.lower(capsule),$0
+    )
+})
+}
+/**
+ * Wrap one already-sealed envelope for one recipient.
+ */
+public func meshCapsuleSeal(recvSecret: Data, authorEndpointId: Data, recipientRecvPublic: Data, envelope: Data, epoch: UInt32)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_func_mesh_capsule_seal(
+        FfiConverterData.lower(recvSecret),
+        FfiConverterData.lower(authorEndpointId),
+        FfiConverterData.lower(recipientRecvPublic),
+        FfiConverterData.lower(envelope),
+        FfiConverterUInt32.lower(epoch),$0
+    )
+})
+}
+public func meshConstants() -> MeshConstants  {
+    return try!  FfiConverterTypeMeshConstants_lift(try! rustCall() {
+    uniffi_iroh_location_fn_func_mesh_constants($0
+    )
+})
+}
+/**
+ * Which 15-minute epoch a unix timestamp (seconds) falls in.
+ */
+public func meshEpoch(nowSecs: UInt64) -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+    uniffi_iroh_location_fn_func_mesh_epoch(
+        FfiConverterUInt64.lower(nowSecs),$0
+    )
+})
+}
+/**
+ * Every mailbox address addressed **to me** across `{e-1, e, e+1}` — the BLE Query set.
+ *
+ * Peers whose card fails key-length validation are skipped rather than failing the sweep. The
+ * caller chunks the result to [`MeshConstants::max_query_tags`] per Query message.
+ */
+public func meshExpectedTags(recvSecret: Data, peers: [MeshPeer], nowSecs: UInt64) -> [MeshTag]  {
+    return try!  FfiConverterSequenceTypeMeshTag.lift(try! rustCall() {
+    uniffi_iroh_location_fn_func_mesh_expected_tags(
+        FfiConverterData.lower(recvSecret),
+        FfiConverterSequenceTypeMeshPeer.lower(peers),
+        FfiConverterUInt64.lower(nowSecs),$0
+    )
+})
+}
+/**
+ * Capsule -> envelope -> verified, decrypted fix. The inverse of [`mesh_seal_fix`] for one
+ * capsule; feeds the **existing** friend-presence path, so the map needs no mesh awareness.
+ */
+public func meshOpenFix(recvSecret: Data, author: MeshPeer, capsule: Data)throws  -> IncomingFix  {
+    return try  FfiConverterTypeIncomingFix_lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_func_mesh_open_fix(
+        FfiConverterData.lower(recvSecret),
+        FfiConverterTypeMeshPeer_lower(author),
+        FfiConverterData.lower(capsule),$0
+    )
+})
+}
+/**
+ * Seal one fix into **one capsule per recipient**, ready for Submit over BLE.
+ *
+ * Each capsule carries its own envelope wrapped for that recipient alone (DESIGN §3.2): smaller
+ * frames, and group membership never leaves the device. Going through this function rather than
+ * [`mesh_capsule_seal`] is what makes that structural instead of a convention.
+ */
+public func meshSealFix(identitySecret: Data, recvSecret: Data, authorEndpointId: Data, seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [MeshPeer])throws  -> [Data]  {
+    return try  FfiConverterSequenceData.lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_func_mesh_seal_fix(
+        FfiConverterData.lower(identitySecret),
+        FfiConverterData.lower(recvSecret),
+        FfiConverterData.lower(authorEndpointId),
+        FfiConverterUInt64.lower(seq),
+        FfiConverterUInt32.lower(epoch),
+        FfiConverterTypeLocationFix_lower(fix),
+        FfiConverterSequenceTypeMeshPeer.lower(recipients),$0
+    )
+})
+}
+/**
  * Point developer telemetry at an OTLP/HTTP collector (`http://<lan-ip>:4318`), or disable it by
  * passing an empty endpoint. Returns whether export is active — always `false` when the crate was
  * built without the `otel` feature (store builds), so the uniffi surface is identical either way
@@ -4899,6 +5719,30 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_h3_cells_for_polygon() != 51742) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_capsule_header() != 56669) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_capsule_open() != 22247) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_capsule_seal() != 18327) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_constants() != 6729) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_epoch() != 9095) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_expected_tags() != 41685) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_open_fix() != 58136) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_seal_fix() != 54504) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {
@@ -5069,6 +5913,24 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics() != 23251) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_meshcapsulestore_deliver() != 47836) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_meshcapsulestore_have() != 26291) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_meshcapsulestore_insert() != 1404) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_meshcapsulestore_latest() != 19517) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_meshcapsulestore_prune() != 57364) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_subscription_publish() != 60528) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5079,6 +5941,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_constructor_locationnode_new() != 52316) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_constructor_meshcapsulestore_new() != 52560) {
         return InitializationResult.apiChecksumMismatch
     }
 

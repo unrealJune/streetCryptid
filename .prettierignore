@@ -19,6 +19,14 @@ docs/design/
 # generated map tile fixtures (binary/base64 blobs)
 src/features/map/tiles/__fixtures__/
 
+# normative mesh wire vectors — emitted verbatim by `cargo test -- --ignored print_fixture`
+# (tests/mesh_vectors.rs); reformatting it would make every regeneration a diff
+modules/iroh-location/rust/tests/fixtures/mesh_vectors.json
+
+# Gradle build output from the Wi-Fi Aware spike (untracked, regenerated on every build)
+spike/*/*/build/
+spike/*/build/
+
 # wasm-pack generated glue and binary
 modules/iroh-location/web/
 

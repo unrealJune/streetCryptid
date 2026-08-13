@@ -24,6 +24,27 @@ private func dataToHex(_ data: Data) -> String {
   data.map { String(format: "%02x", $0) }.joined()
 }
 
+/// Keep the iroh node's docs/blobs store out of device backups (FORWARD-SECRECY.md §6). The
+/// Rust side roots it at `temp_dir()/streetcryptid/<endpointIdHex>`; tmp is already outside
+/// iCloud backup, but the exclusion must be structural, not an artifact of where the dir
+/// happens to live today — so create the directory eagerly and stamp
+/// `NSURLIsExcludedFromBackupKey` on it. Best-effort: the Rust node re-creates the dir on
+/// `start()` regardless, and a failure here only loses the belt-and-braces marker.
+private func excludeNodeDataDirFromBackup(endpointIdHex: String) {
+  var dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+    .appendingPathComponent("streetcryptid", isDirectory: true)
+    .appendingPathComponent(endpointIdHex, isDirectory: true)
+  do {
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var values = URLResourceValues()
+    values.isExcludedFromBackup = true
+    try dir.setResourceValues(values)
+  } catch {
+    NSLog("IrohLocation: could not mark data dir as excluded from backup: %@",
+          error.localizedDescription)
+  }
+}
+
 /// Build the UniFFI `LocationFix` from the JS bridge dict.
 private func locationFix(from fix: [String: Double]) -> LocationFix {
   LocationFix(
@@ -277,6 +298,7 @@ public final class IrohLocationModule: Module {
         identitySecret: identityHex.map(hexToData),
         recvSecret: recvHex.map(hexToData))
       self.node = node
+      excludeNodeDataDirFromBackup(endpointIdHex: dataToHex(node.endpointId()))
       return [
         "endpointId": dataToHex(node.endpointId()),
         "identitySecret": dataToHex(node.identitySecret()),

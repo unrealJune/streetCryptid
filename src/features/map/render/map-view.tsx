@@ -132,6 +132,11 @@ interface RegionBundle {
 
 const REGION_RENDER_CACHE_CAPACITY = 3;
 
+/**
+ * A locator on the map: a friend's current position, or our own. No trail comes with it —
+ * friends' location history is not retained (FORWARD-SECRECY.md §4.4), and our own trail is
+ * passed separately as `selfHistory`.
+ */
 export interface MapFriendLocation {
   id: string;
   handle: string;
@@ -564,8 +569,8 @@ export function MapView({
         : [],
     [anchor, selfHistory, viewport]
   );
-  // Only YOUR trail is ever drawn. A friend is a single dot at their last known position: we no
-  // longer receive, retain, or render anyone else's history.
+  // Only our own trail is ever drawn: a friend is a single dot at their last known position with
+  // nothing behind it to draw (FORWARD-SECRECY.md §4.4), so selecting one highlights their locator.
   const selectedTrail = useMemo(() => {
     if (!viewport || !selfSelected) return null;
     return buildTrail(selfTrailPoints, `rgb(${selfInk.join(', ')})`);

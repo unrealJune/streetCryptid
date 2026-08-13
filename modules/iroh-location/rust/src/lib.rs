@@ -19,6 +19,9 @@ mod ble;
 mod crypto;
 mod docs;
 mod h3;
+/// Festival-mesh radio capsules: the outer wrapper that carries an envelope over open
+/// radio without a linkable identity (pure; see `mesh.rs` and `docs/mesh/DESIGN.md`).
+pub mod mesh;
 /// Native MVT tile/bundle decoder for the map pipeline (pure; see `mvt.rs`).
 pub mod mvt;
 mod pairing;
@@ -42,7 +45,7 @@ use n0_future::StreamExt;
 use tokio::sync::Mutex;
 
 use ble::BleHandle;
-use docs::{TrailDocs, TrailFix, TrailSink};
+use docs::{LatestFix, TrailDocs};
 use pairing::{
     InviteData, PairCore, PairNotice, PairPhase, PairProtocol, PairResultData, PairSignal,
     PairStateData, SasChallengeData, SasRole,
@@ -122,6 +125,17 @@ impl From<crypto::CryptoError> for LocationError {
     }
 }
 
+impl From<mesh::MeshError> for LocationError {
+    fn from(e: mesh::MeshError) -> Self {
+        match e {
+            mesh::MeshError::Malformed | mesh::MeshError::UnsupportedVersion(_) => {
+                LocationError::Decode(e.to_string())
+            }
+            _ => LocationError::Crypto(e.to_string()),
+        }
+    }
+}
+
 /// A decrypted location fix handed to the app.
 #[derive(Debug, Clone, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct LocationFix {
@@ -186,9 +200,6 @@ pub trait FixListener: Send + Sync + 'static {
     fn on_opaque(&self, author: Vec<u8>, seq: u64);
     /// Membership / connectivity status strings for the harness UI.
     fn on_status(&self, status: String);
-    /// Durable-trail sync progress for an author/namespace: `started` | `completed` | `error`,
-    /// with the number of recovered envelopes on completion.
-    fn on_sync(&self, author: Vec<u8>, status: String, recovered: Option<u64>);
 }
 
 /// Derive the gossip topic for a given author's location stream.
@@ -228,6 +239,364 @@ pub fn h3_cells_for_polygon(
     resolution: u8,
 ) -> Result<Vec<String>, LocationError> {
     h3::cells_for_polygon(&coordinates, resolution).map_err(LocationError::Decode)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Festival mesh (docs/mesh/DESIGN.md, W1). Pure capsule crypto + the mailbox store; no radio.
+// The BLE/ESP-NOW transports live in `modules/mesh-radio/` (W3) and the antenna firmware (W2),
+// both of which move these bytes without ever holding a key.
+// ---------------------------------------------------------------------------------------------
+
+/// Wire + policy constants for the mesh, so the TS orchestration layer never hardcodes them.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MeshConstants {
+    /// Capsule wire version currently emitted.
+    pub capsule_v: u8,
+    /// Epoch length in seconds (900 = 15 min).
+    pub epoch_secs: u64,
+    pub tag_len: u32,
+    pub dedup_len: u32,
+    /// Bytes of plaintext header (`v || epoch || tag`) — all a bare antenna parses.
+    pub header_len: u32,
+    /// Capsules retained per tag by a mailbox.
+    pub ring_depth: u32,
+    /// Cap on tags in one BLE Query message (§4.1).
+    pub max_query_tags: u32,
+}
+
+#[uniffi::export]
+pub fn mesh_constants() -> MeshConstants {
+    MeshConstants {
+        capsule_v: mesh::CAPSULE_V,
+        epoch_secs: mesh::EPOCH_SECS,
+        tag_len: mesh::TAG_LEN as u32,
+        dedup_len: mesh::DEDUP_LEN as u32,
+        header_len: mesh::HEADER_LEN as u32,
+        ring_depth: mesh::RING_DEPTH as u32,
+        max_query_tags: mesh::MAX_QUERY_TAGS as u32,
+    }
+}
+
+/// A friend as the mesh needs them: the two public halves of their contact card.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MeshPeer {
+    /// 32-byte ed25519 EndpointId (the envelope author id).
+    pub endpoint_id: Vec<u8>,
+    /// 32-byte X25519 receiving public key.
+    pub recv_public: Vec<u8>,
+}
+
+/// A mailbox address we expect traffic on, plus who/when it belongs to.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MeshTag {
+    pub tag: Vec<u8>,
+    pub author: Vec<u8>,
+    pub epoch: u32,
+}
+
+/// The plaintext prefix of a capsule.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MeshHeader {
+    pub v: u8,
+    pub epoch: u32,
+    pub tag: Vec<u8>,
+    /// `blake3(capsule)[..16]` — the dedup key every relay tier keys on.
+    pub dedup_key: Vec<u8>,
+}
+
+/// Outcome of offering a capsule to a [`MeshCapsuleStore`].
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MeshInsert {
+    pub accepted: bool,
+    /// `accepted` | `malformed` | `bad_version` | `stale_epoch` | `future_epoch` | `duplicate`.
+    /// Stamp this as `sc.drop_reason` on the caller's span (`infra/otel/README.md`).
+    pub reason: String,
+    pub dedup_key: Vec<u8>,
+}
+
+/// Mailbox occupancy, for the dev screen and the BLE Node Info characteristic.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MeshStats {
+    pub capsules: u64,
+    pub tags: u64,
+    pub epoch: u32,
+}
+
+/// Which 15-minute epoch a unix timestamp (seconds) falls in.
+#[uniffi::export]
+pub fn mesh_epoch(now_secs: u64) -> u32 {
+    mesh::epoch_at(now_secs)
+}
+
+/// Every mailbox address addressed **to me** across `{e-1, e, e+1}` — the BLE Query set.
+///
+/// Peers whose card fails key-length validation are skipped rather than failing the sweep. The
+/// caller chunks the result to [`MeshConstants::max_query_tags`] per Query message.
+#[uniffi::export]
+pub fn mesh_expected_tags(
+    recv_secret: Vec<u8>,
+    peers: Vec<MeshPeer>,
+    now_secs: u64,
+) -> Vec<MeshTag> {
+    let peers: Vec<mesh::Peer> = peers
+        .into_iter()
+        .map(|p| mesh::Peer {
+            endpoint_id: p.endpoint_id,
+            recv_public: p.recv_public,
+        })
+        .collect();
+    mesh::expected_tags(&recv_secret, &peers, now_secs)
+        .into_iter()
+        .map(|t| MeshTag {
+            tag: t.tag.to_vec(),
+            author: t.author,
+            epoch: t.epoch,
+        })
+        .collect()
+}
+
+/// Parse `{v, epoch, tag}` + dedup key from a capsule. No key material involved — this is
+/// exactly what a bare antenna does.
+#[uniffi::export]
+pub fn mesh_capsule_header(capsule: Vec<u8>) -> Result<MeshHeader, LocationError> {
+    let header = mesh::parse_header(&capsule)?;
+    Ok(MeshHeader {
+        v: header.v,
+        epoch: header.epoch,
+        tag: header.tag.to_vec(),
+        dedup_key: mesh::dedup_key(&capsule).to_vec(),
+    })
+}
+
+/// Wrap one already-sealed envelope for one recipient.
+#[uniffi::export]
+pub fn mesh_capsule_seal(
+    recv_secret: Vec<u8>,
+    author_endpoint_id: Vec<u8>,
+    recipient_recv_public: Vec<u8>,
+    envelope: Vec<u8>,
+    epoch: u32,
+) -> Result<Vec<u8>, LocationError> {
+    Ok(mesh::seal(
+        &recv_secret,
+        &author_endpoint_id,
+        &recipient_recv_public,
+        &envelope,
+        epoch,
+    )?)
+}
+
+/// Unwrap a capsule to the inner envelope bytes. The envelope's ed25519 signature is **not**
+/// checked here — that happens in `crypto::open`, i.e. in [`mesh_open_fix`].
+#[uniffi::export]
+pub fn mesh_capsule_open(
+    recv_secret: Vec<u8>,
+    author: MeshPeer,
+    capsule: Vec<u8>,
+) -> Result<Vec<u8>, LocationError> {
+    Ok(mesh::open(
+        &recv_secret,
+        &author.endpoint_id,
+        &author.recv_public,
+        &capsule,
+    )?)
+}
+
+/// Seal one fix into **one capsule per recipient**, ready for Submit over BLE.
+///
+/// Each capsule carries its own envelope wrapped for that recipient alone (DESIGN §3.2): smaller
+/// frames, and group membership never leaves the device. Going through this function rather than
+/// [`mesh_capsule_seal`] is what makes that structural instead of a convention.
+#[uniffi::export]
+pub fn mesh_seal_fix(
+    identity_secret: Vec<u8>,
+    recv_secret: Vec<u8>,
+    author_endpoint_id: Vec<u8>,
+    seq: u64,
+    epoch: u32,
+    fix: LocationFix,
+    recipients: Vec<MeshPeer>,
+) -> Result<Vec<Vec<u8>>, LocationError> {
+    let span = tracing::info_span!(
+        "mesh.seal",
+        sc.author = %telemetry::short_hex(&author_endpoint_id),
+        sc.seq = seq,
+        epoch,
+        recipients = recipients.len(),
+    );
+    let _guard = span.enter();
+
+    let payload =
+        postcard::to_allocvec(&fix).map_err(|_| LocationError::Decode("encode fix".into()))?;
+    let mut capsules = Vec::with_capacity(recipients.len());
+    for recipient in &recipients {
+        let envelope = crypto::seal(
+            &identity_secret,
+            &author_endpoint_id,
+            seq,
+            fix.ts,
+            epoch,
+            &payload,
+            std::slice::from_ref(&recipient.recv_public),
+        )?;
+        let capsule = mesh::seal(
+            &recv_secret,
+            &author_endpoint_id,
+            &recipient.recv_public,
+            &envelope,
+            epoch,
+        )?;
+        // `sc.entry_hash` stays the envelope hash (the join key the stash and receivers share);
+        // `sc.capsule_hash` is the radio-tier dedup key that antennas and mailboxes key on.
+        tracing::debug!(
+            sc.entry_hash = %telemetry::envelope_hash(&envelope),
+            sc.capsule_hash = %telemetry::short_hex(&mesh::dedup_key(&capsule)),
+            bytes = capsule.len(),
+            "mesh capsule sealed"
+        );
+        capsules.push(capsule);
+    }
+    Ok(capsules)
+}
+
+/// Capsule -> envelope -> verified, decrypted fix. The inverse of [`mesh_seal_fix`] for one
+/// capsule; feeds the **existing** friend-presence path, so the map needs no mesh awareness.
+#[uniffi::export]
+pub fn mesh_open_fix(
+    recv_secret: Vec<u8>,
+    author: MeshPeer,
+    capsule: Vec<u8>,
+) -> Result<IncomingFix, LocationError> {
+    let capsule_hash = telemetry::short_hex(&mesh::dedup_key(&capsule));
+    let envelope = mesh::open(
+        &recv_secret,
+        &author.endpoint_id,
+        &author.recv_public,
+        &capsule,
+    )
+    .inspect_err(|e| {
+        tracing::debug!(
+            sc.author = %telemetry::short_hex(&author.endpoint_id),
+            sc.capsule_hash = %capsule_hash,
+            sc.drop_reason = "capsule_open",
+            error = %e,
+            "mesh capsule rejected"
+        );
+    })?;
+    let opened = crypto::open(&recv_secret, &envelope).inspect_err(|e| {
+        tracing::debug!(
+            sc.author = %telemetry::short_hex(&author.endpoint_id),
+            sc.capsule_hash = %capsule_hash,
+            sc.entry_hash = %telemetry::envelope_hash(&envelope),
+            sc.drop_reason = "envelope_open",
+            error = %e,
+            "mesh envelope rejected"
+        );
+    })?;
+    let fix: LocationFix = postcard::from_bytes(&opened.payload)
+        .map_err(|_| LocationError::Decode("decode fix".into()))?;
+    Ok(IncomingFix {
+        author: opened.author.to_vec(),
+        seq: opened.seq,
+        fix,
+    })
+}
+
+/// A mailbox: capsules indexed by rotating tag, newest-first, bounded per tag and overall.
+///
+/// Held by the phone (what it has fetched, so a Query can carry a `have` set) and — once W4
+/// lands — by a smart node. Capsule interiors are opaque here, exactly as in firmware.
+#[derive(uniffi::Object)]
+pub struct MeshCapsuleStore {
+    inner: StdMutex<mesh::Store>,
+}
+
+#[uniffi::export]
+impl MeshCapsuleStore {
+    /// `capacity` bounds the number of distinct tags held; each holds up to `ring_depth`
+    /// capsules. This is the PSRAM/RAM knob (DESIGN Q6).
+    #[uniffi::constructor]
+    pub fn new(capacity: u32) -> Self {
+        Self {
+            inner: StdMutex::new(mesh::Store::new(capacity as usize)),
+        }
+    }
+
+    /// Offer a capsule. A drop here is a drop-decision point: the returned `reason` is the
+    /// `sc.drop_reason` value to stamp.
+    pub fn insert(&self, capsule: Vec<u8>, now_secs: u64) -> MeshInsert {
+        let dedup = mesh::dedup_key(&capsule);
+        let outcome = self
+            .inner
+            .lock()
+            .expect("mesh store mutex")
+            .insert(&capsule, now_secs);
+        if !outcome.accepted() {
+            tracing::debug!(
+                sc.capsule_hash = %telemetry::short_hex(&dedup),
+                sc.drop_reason = outcome.as_str(),
+                "mesh capsule not stored"
+            );
+        }
+        MeshInsert {
+            accepted: outcome.accepted(),
+            reason: outcome.as_str().to_string(),
+            dedup_key: dedup.to_vec(),
+        }
+    }
+
+    /// The live position for a tag — the most recently arrived capsule.
+    pub fn latest(&self, tag: Vec<u8>) -> Option<Vec<u8>> {
+        let tag: [u8; mesh::TAG_LEN] = tag.try_into().ok()?;
+        self.inner
+            .lock()
+            .expect("mesh store mutex")
+            .latest(&tag)
+            .map(|b| b.to_vec())
+    }
+
+    /// Dedup keys already held for `tags` — the `have` set sent with a BLE Query.
+    pub fn have(&self, tags: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+        let tags = to_tag_array(tags);
+        self.inner
+            .lock()
+            .expect("mesh store mutex")
+            .have(&tags)
+            .into_iter()
+            .map(|k| k.to_vec())
+            .collect()
+    }
+
+    /// Capsules matching `tags` minus everything in `have` — the Deliver set a node would send.
+    pub fn deliver(&self, tags: Vec<Vec<u8>>, have: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+        let tags = to_tag_array(tags);
+        let have: Vec<[u8; mesh::DEDUP_LEN]> =
+            have.into_iter().filter_map(|k| k.try_into().ok()).collect();
+        self.inner
+            .lock()
+            .expect("mesh store mutex")
+            .deliver(&tags, &have)
+    }
+
+    /// Drop everything that has fallen out of the acceptance window. Returns the count removed.
+    pub fn prune(&self, now_secs: u64) -> u64 {
+        self.inner.lock().expect("mesh store mutex").prune(now_secs) as u64
+    }
+
+    pub fn stats(&self, now_secs: u64) -> MeshStats {
+        let (capsules, tags) = self.inner.lock().expect("mesh store mutex").stats();
+        MeshStats {
+            capsules,
+            tags,
+            epoch: mesh::epoch_at(now_secs),
+        }
+    }
+}
+
+/// Drop wrong-length tags rather than failing the whole call: a truncated BLE frame must not
+/// blind a sync to every other tag in the batch.
+fn to_tag_array(tags: Vec<Vec<u8>>) -> Vec<[u8; mesh::TAG_LEN]> {
+    tags.into_iter().filter_map(|t| t.try_into().ok()).collect()
 }
 
 /// A verified cryptid **profile** as surfaced to the app (§3). Returned already signature- and
@@ -955,7 +1324,7 @@ impl LocationNode {
             let ns = started.trail.own_namespace();
             started
                 .trail
-                .write(ns, &self.author, seq, envelope)
+                .write(ns, &self.author, envelope)
                 .await
                 .map_err(|e| {
                     tracing::warn!(error = %e, "durable docs write failed");
@@ -1042,32 +1411,24 @@ impl LocationNode {
             .collect())
     }
 
-    /// Kick off range-based set reconciliation across our own + imported friend namespaces to
-    /// recover envelopes missed while offline. When `peer_ticket` is present, every namespace
-    /// explicitly syncs with that endpoint (the trail stash). Recovered, decryptable fixes are
-    /// surfaced via the attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via
-    /// `on_sync`.
-    pub async fn sync_trail(
-        &self,
-        since_ts: u64,
-        peer_ticket: Option<String>,
-    ) -> Result<(), LocationError> {
-        self.sync_trail_inner(since_ts, peer_ticket, None).await
+    /// Reconcile our own + every imported friend namespace so each friend's **current** fix is
+    /// exchanged (FORWARD-SECRECY §4.4 — the durable path is last-write-wins; there is no missed
+    /// history to recover). When `peer_ticket` is present, every namespace explicitly syncs with
+    /// that endpoint (the trail stash). Read the results with [`Self::read_latest`].
+    pub async fn sync_latest(&self, peer_ticket: Option<String>) -> Result<(), LocationError> {
+        self.sync_latest_inner(peer_ticket, None).await
     }
 
-    pub async fn sync_trail_traced(
+    pub async fn sync_latest_traced(
         &self,
-        since_ts: u64,
         peer_ticket: Option<String>,
         traceparent: String,
     ) -> Result<(), LocationError> {
-        self.sync_trail_inner(since_ts, peer_ticket, Some(traceparent))
-            .await
+        self.sync_latest_inner(peer_ticket, Some(traceparent)).await
     }
 
-    async fn sync_trail_inner(
+    async fn sync_latest_inner(
         &self,
-        since_ts: u64,
         peer_ticket: Option<String>,
         traceparent: Option<String>,
     ) -> Result<(), LocationError> {
@@ -1075,9 +1436,7 @@ impl LocationNode {
         let span = tracing::info_span!(
             "trail.sync",
             sc.author = %telemetry::short_hex(&self.author),
-            since_ts,
             explicit_peer = peer_ticket.is_some(),
-            recovered = tracing::field::Empty,
         );
         telemetry::set_parent(&span, traceparent.as_deref());
         async move {
@@ -1095,19 +1454,14 @@ impl LocationNode {
                 })
                 .transpose()?
                 .unwrap_or_default();
-            let listener = self.listener.lock().await.clone();
-            let sink = ListenerSink {
-                listener,
-                stash_peer: peers.first().map(|peer| peer.id),
-            };
-            let recovered = trail
-                .sync_all(since_ts, peers, &sink, &self.recv_secret)
-                .await
-                .map_err(|e| {
-                    tracing::warn!(error = %e, "trail sync failed");
-                    LocationError::Network(e.to_string())
-                })?;
-            tracing::Span::current().record("recovered", recovered);
+            // No sink and no `recovered` count here any more: with one overwritten slot per author
+            // there is no back-catalogue to stream, so a sync just reconciles and the app reads the
+            // current fixes afterwards. The `recovered` span attribute is recorded app-side instead
+            // (see `refreshTrailFromReplica`), which keeps the infra/otel `sc.*` join keys intact.
+            trail.sync_all(peers).await.map_err(|e| {
+                tracing::warn!(error = %e, "trail sync failed");
+                LocationError::Network(e.to_string())
+            })?;
             Ok(())
         }
         .instrument(span)
@@ -1183,23 +1537,19 @@ impl LocationNode {
         .await
     }
 
-    /// Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >=
-    /// since_ts`.
-    pub async fn read_trail(
-        &self,
-        author: Vec<u8>,
-        since_ts: u64,
-    ) -> Result<Vec<IncomingFix>, LocationError> {
+    /// Read the latest decryptable fix per author (friends who share with us) from the local
+    /// replica. One entry per author — the durable path holds no history (FORWARD-SECRECY §4.4).
+    pub async fn read_latest(&self) -> Result<Vec<IncomingFix>, LocationError> {
         let guard = self.inner.lock().await;
         let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
         let fixes = started
             .trail
-            .read_trail(&author, since_ts, &self.recv_secret)
+            .read_latest(&self.recv_secret)
             .await
             .map_err(|e| LocationError::Network(e.to_string()))?;
         Ok(fixes
             .into_iter()
-            .filter_map(trail_fix_to_incoming)
+            .filter_map(latest_fix_to_incoming)
             .collect())
     }
 
@@ -1732,10 +2082,10 @@ impl LocationNode {
     }
 
     /// Directly reconcile a trail capability with exactly `peer_ticket`, without importing it into
-    /// the live docs engine or joining its gossip swarm. Returns decryptable fixes from that peer.
-    pub async fn sync_trail_via_only(
+    /// the live docs engine or joining its gossip swarm. Returns the latest decryptable fix per
+    /// author from that peer (LWW — there is no history to recover).
+    pub async fn sync_latest_via_only(
         &self,
-        since_ts: u64,
         read_ticket: String,
         peer_ticket: String,
     ) -> Result<Vec<IncomingFix>, LocationError> {
@@ -1753,7 +2103,6 @@ impl LocationNode {
             "trail.sync.stash_only",
             sc.author = %telemetry::short_hex(&self.author),
             stash.peer = %telemetry::short_hex(peer.id.as_bytes()),
-            since_ts,
             recovered = tracing::field::Empty,
         );
         async move {
@@ -1768,13 +2117,13 @@ impl LocationNode {
             };
             memory.add_endpoint_info(peer.clone());
             let fixes = trail
-                .sync_direct(&endpoint, doc_ticket, peer, since_ts, &self.recv_secret)
+                .sync_direct(&endpoint, doc_ticket, peer, &self.recv_secret)
                 .await
                 .map_err(|e| LocationError::Network(e.to_string()))?;
             tracing::Span::current().record("recovered", fixes.len());
             Ok(fixes
                 .into_iter()
-                .filter_map(trail_fix_to_incoming)
+                .filter_map(latest_fix_to_incoming)
                 .collect())
         }
         .instrument(span)
@@ -2040,42 +2389,14 @@ pub fn decode_pair_invite(token: String) -> Result<PairInvite, LocationError> {
     Ok(invite_to_uniffi(&inv))
 }
 
-/// Convert a decrypted [`TrailFix`] into the UniFFI [`IncomingFix`], decoding the payload.
-fn trail_fix_to_incoming(tf: TrailFix) -> Option<IncomingFix> {
-    let fix = postcard::from_bytes::<LocationFix>(&tf.payload).ok()?;
+/// Convert a decrypted [`LatestFix`] into the UniFFI [`IncomingFix`], decoding the payload.
+fn latest_fix_to_incoming(lf: LatestFix) -> Option<IncomingFix> {
+    let fix = postcard::from_bytes::<LocationFix>(&lf.payload).ok()?;
     Some(IncomingFix {
-        author: tf.author,
-        seq: tf.seq,
+        author: lf.author,
+        seq: lf.seq,
         fix,
     })
-}
-
-/// Bridges [`docs::TrailSink`] callbacks to the foreign [`FixListener`] for durable-trail events.
-struct ListenerSink {
-    listener: Option<Arc<dyn FixListener>>,
-    /// The explicit sync peer for this run (the trail stash), when one was given. Entries that came
-    /// from it are labelled `stash`; anything else reconciled with a friend's own node is `docs`.
-    stash_peer: Option<EndpointId>,
-}
-
-impl TrailSink for ListenerSink {
-    fn on_backfill(&self, author: Vec<u8>, seq: u64, payload: Vec<u8>, from: Vec<u8>) {
-        if let Some(listener) = &self.listener {
-            if let Ok(fix) = postcard::from_bytes::<LocationFix>(&payload) {
-                let from_stash = self
-                    .stash_peer
-                    .is_some_and(|stash| stash.as_bytes().as_slice() == from.as_slice());
-                let via = if from_stash { "stash" } else { "docs" };
-                listener.on_fix(author, seq, fix, true, via.to_string());
-            }
-        }
-    }
-
-    fn on_sync_status(&self, author: Vec<u8>, status: String, recovered: Option<u64>) {
-        if let Some(listener) = &self.listener {
-            listener.on_sync(author, status, recovered);
-        }
-    }
 }
 
 /// Derive the X25519 public key from a stored receiving secret (round-trips a seal to

@@ -583,6 +583,51 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_ticket(uint64_t ptr
 uint64_t uniffi_iroh_location_fn_method_locationnode_transport_diagnostics(uint64_t ptr, RustBuffer peer_endpoint_ids
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CLONE_MESHCAPSULESTORE
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CLONE_MESHCAPSULESTORE
+uint64_t uniffi_iroh_location_fn_clone_meshcapsulestore(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FREE_MESHCAPSULESTORE
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FREE_MESHCAPSULESTORE
+void uniffi_iroh_location_fn_free_meshcapsulestore(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CONSTRUCTOR_MESHCAPSULESTORE_NEW
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CONSTRUCTOR_MESHCAPSULESTORE_NEW
+uint64_t uniffi_iroh_location_fn_constructor_meshcapsulestore_new(uint32_t capacity, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_MESHCAPSULESTORE_DELIVER
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_MESHCAPSULESTORE_DELIVER
+RustBuffer uniffi_iroh_location_fn_method_meshcapsulestore_deliver(uint64_t ptr, RustBuffer tags, RustBuffer have, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_MESHCAPSULESTORE_HAVE
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_MESHCAPSULESTORE_HAVE
+RustBuffer uniffi_iroh_location_fn_method_meshcapsulestore_have(uint64_t ptr, RustBuffer tags, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_MESHCAPSULESTORE_INSERT
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_MESHCAPSULESTORE_INSERT
+RustBuffer uniffi_iroh_location_fn_method_meshcapsulestore_insert(uint64_t ptr, RustBuffer capsule, uint64_t now_secs, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_MESHCAPSULESTORE_LATEST
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_MESHCAPSULESTORE_LATEST
+RustBuffer uniffi_iroh_location_fn_method_meshcapsulestore_latest(uint64_t ptr, RustBuffer tag, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_MESHCAPSULESTORE_PRUNE
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_MESHCAPSULESTORE_PRUNE
+uint64_t uniffi_iroh_location_fn_method_meshcapsulestore_prune(uint64_t ptr, uint64_t now_secs, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_MESHCAPSULESTORE_STATS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_MESHCAPSULESTORE_STATS
+RustBuffer uniffi_iroh_location_fn_method_meshcapsulestore_stats(uint64_t ptr, uint64_t now_secs, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CLONE_SUBSCRIPTION
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CLONE_SUBSCRIPTION
 uint64_t uniffi_iroh_location_fn_clone_subscription(uint64_t handle, RustCallStatus *_Nonnull out_status
@@ -642,6 +687,47 @@ RustBuffer uniffi_iroh_location_fn_func_generate_recv_keypair(RustCallStatus *_N
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_H3_CELLS_FOR_POLYGON
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_H3_CELLS_FOR_POLYGON
 RustBuffer uniffi_iroh_location_fn_func_h3_cells_for_polygon(RustBuffer coordinates, uint8_t resolution, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_CAPSULE_HEADER
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_CAPSULE_HEADER
+RustBuffer uniffi_iroh_location_fn_func_mesh_capsule_header(RustBuffer capsule, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_CAPSULE_OPEN
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_CAPSULE_OPEN
+RustBuffer uniffi_iroh_location_fn_func_mesh_capsule_open(RustBuffer recv_secret, RustBuffer author, RustBuffer capsule, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_CAPSULE_SEAL
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_CAPSULE_SEAL
+RustBuffer uniffi_iroh_location_fn_func_mesh_capsule_seal(RustBuffer recv_secret, RustBuffer author_endpoint_id, RustBuffer recipient_recv_public, RustBuffer envelope, uint32_t epoch, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_CONSTANTS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_CONSTANTS
+RustBuffer uniffi_iroh_location_fn_func_mesh_constants(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_EPOCH
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_EPOCH
+uint32_t uniffi_iroh_location_fn_func_mesh_epoch(uint64_t now_secs, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_EXPECTED_TAGS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_EXPECTED_TAGS
+RustBuffer uniffi_iroh_location_fn_func_mesh_expected_tags(RustBuffer recv_secret, RustBuffer peers, uint64_t now_secs, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_OPEN_FIX
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_OPEN_FIX
+RustBuffer uniffi_iroh_location_fn_func_mesh_open_fix(RustBuffer recv_secret, RustBuffer author, RustBuffer capsule, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_SEAL_FIX
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_SEAL_FIX
+RustBuffer uniffi_iroh_location_fn_func_mesh_seal_fix(RustBuffer identity_secret, RustBuffer recv_secret, RustBuffer author_endpoint_id, uint64_t seq, uint32_t epoch, RustBuffer fix, RustBuffer recipients, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_CONFIGURE_TELEMETRY
@@ -954,6 +1040,54 @@ uint16_t uniffi_iroh_location_checksum_func_generate_recv_keypair(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_H3_CELLS_FOR_POLYGON
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_H3_CELLS_FOR_POLYGON
 uint16_t uniffi_iroh_location_checksum_func_h3_cells_for_polygon(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_CAPSULE_HEADER
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_CAPSULE_HEADER
+uint16_t uniffi_iroh_location_checksum_func_mesh_capsule_header(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_CAPSULE_OPEN
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_CAPSULE_OPEN
+uint16_t uniffi_iroh_location_checksum_func_mesh_capsule_open(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_CAPSULE_SEAL
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_CAPSULE_SEAL
+uint16_t uniffi_iroh_location_checksum_func_mesh_capsule_seal(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_CONSTANTS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_CONSTANTS
+uint16_t uniffi_iroh_location_checksum_func_mesh_constants(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_EPOCH
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_EPOCH
+uint16_t uniffi_iroh_location_checksum_func_mesh_epoch(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_EXPECTED_TAGS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_EXPECTED_TAGS
+uint16_t uniffi_iroh_location_checksum_func_mesh_expected_tags(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_OPEN_FIX
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_OPEN_FIX
+uint16_t uniffi_iroh_location_checksum_func_mesh_open_fix(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_SEAL_FIX
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_SEAL_FIX
+uint16_t uniffi_iroh_location_checksum_func_mesh_seal_fix(void
     
 );
 #endif
@@ -1293,6 +1427,42 @@ uint16_t uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_DELIVER
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_DELIVER
+uint16_t uniffi_iroh_location_checksum_method_meshcapsulestore_deliver(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_HAVE
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_HAVE
+uint16_t uniffi_iroh_location_checksum_method_meshcapsulestore_have(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_INSERT
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_INSERT
+uint16_t uniffi_iroh_location_checksum_method_meshcapsulestore_insert(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_LATEST
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_LATEST
+uint16_t uniffi_iroh_location_checksum_method_meshcapsulestore_latest(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_PRUNE
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_PRUNE
+uint16_t uniffi_iroh_location_checksum_method_meshcapsulestore_prune(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_STATS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_STATS
+uint16_t uniffi_iroh_location_checksum_method_meshcapsulestore_stats(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH
 uint16_t uniffi_iroh_location_checksum_method_subscription_publish(void
@@ -1314,6 +1484,12 @@ uint16_t uniffi_iroh_location_checksum_method_subscription_publish_traced(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_CONSTRUCTOR_LOCATIONNODE_NEW
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_CONSTRUCTOR_LOCATIONNODE_NEW
 uint16_t uniffi_iroh_location_checksum_constructor_locationnode_new(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_CONSTRUCTOR_MESHCAPSULESTORE_NEW
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_CONSTRUCTOR_MESHCAPSULESTORE_NEW
+uint16_t uniffi_iroh_location_checksum_constructor_meshcapsulestore_new(void
     
 );
 #endif
