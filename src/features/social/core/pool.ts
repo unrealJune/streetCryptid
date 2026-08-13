@@ -81,3 +81,23 @@ export function recipients(state: PoolState): Friend[] {
 export function recipientRecvKeys(state: PoolState): string[] {
   return recipients(state).map((f) => f.recvPublic);
 }
+
+/**
+ * The friends we are NOT sharing position with — the **watcher edges** (FORWARD-SECRECY.md §4.1).
+ *
+ * Every sharing relationship runs the protocol in both directions: these friends get a null fix
+ * (an envelope with an empty padded payload) on the same cadence the friends in {@link recipients}
+ * get a real one. That is what keeps a one-directional edge symmetric, so the watching side still
+ * contributes fresh key material and the stash cannot tell the two lanes apart by ciphertext size.
+ *
+ * Disjoint from {@link recipients} by construction — no friend is ever in both, so no recipient
+ * ever sees two envelopes from the same tick.
+ */
+export function watchers(state: PoolState): Friend[] {
+  return friendList(state).filter((f) => !state.sharingWith.includes(f.endpointId));
+}
+
+/** The X25519 receiving public keys to wrap the next null fix for. */
+export function watcherRecvKeys(state: PoolState): string[] {
+  return watchers(state).map((f) => f.recvPublic);
+}

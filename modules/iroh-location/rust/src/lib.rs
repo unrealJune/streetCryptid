@@ -24,9 +24,9 @@ mod h3;
 pub mod mesh;
 /// Native MVT tile/bundle decoder for the map pipeline (pure; see `mvt.rs`).
 pub mod mvt;
+pub mod pad;
 mod pairing;
 mod profile;
-pub mod pad;
 pub mod ratchet;
 pub mod session_store;
 
@@ -1300,7 +1300,8 @@ impl LocationNode {
         fix: LocationFix,
         recipients: Vec<Vec<u8>>,
     ) -> Result<(), LocationError> {
-        self.docs_write_inner(subscription_id, seq, fix, recipients, None)
+        let ts = fix.ts;
+        self.docs_write_inner(subscription_id, seq, Some(fix), ts, recipients, None)
             .await
     }
 
@@ -1312,39 +1313,87 @@ impl LocationNode {
         recipients: Vec<Vec<u8>>,
         traceparent: String,
     ) -> Result<(), LocationError> {
-        self.docs_write_inner(subscription_id, seq, fix, recipients, Some(traceparent))
+        let ts = fix.ts;
+        self.docs_write_inner(
+            subscription_id,
+            seq,
+            Some(fix),
+            ts,
+            recipients,
+            Some(traceparent),
+        )
+        .await
+    }
+
+    /// Seal a **null fix** for `recipients` and write it to our namespace's null slot
+    /// (FORWARD-SECRECY §4.1) — the watcher half of the symmetric lanes.
+    ///
+    /// A null fix is an ordinary envelope carrying an empty padded payload: same signature, same
+    /// AAD binding, same `seq` monotonicity, same ciphertext length as a real fix. It exists so a
+    /// friend we do not share position with still receives our envelopes on cadence, which is
+    /// what carries our ratchet contribution once envelope v3 lands (§4.2). `ts` is the tick's
+    /// timestamp — it rides in the signed header exactly as a real fix's does.
+    ///
+    /// Written to a separate LWW key from the fix lane so the two envelopes a tick produces,
+    /// wrapped for disjoint recipient sets, do not supersede each other (see `docs::encode_nul_key`).
+    pub async fn docs_write_null(
+        &self,
+        subscription_id: String,
+        seq: u64,
+        ts: u64,
+        recipients: Vec<Vec<u8>>,
+    ) -> Result<(), LocationError> {
+        self.docs_write_inner(subscription_id, seq, None, ts, recipients, None)
             .await
+    }
+
+    pub async fn docs_write_null_traced(
+        &self,
+        subscription_id: String,
+        seq: u64,
+        ts: u64,
+        recipients: Vec<Vec<u8>>,
+        traceparent: String,
+    ) -> Result<(), LocationError> {
+        self.docs_write_inner(
+            subscription_id,
+            seq,
+            None,
+            ts,
+            recipients,
+            Some(traceparent),
+        )
+        .await
     }
 
     async fn docs_write_inner(
         &self,
         _subscription_id: String,
         seq: u64,
-        fix: LocationFix,
+        fix: Option<LocationFix>,
+        ts: u64,
         recipients: Vec<Vec<u8>>,
         traceparent: Option<String>,
     ) -> Result<(), LocationError> {
         use tracing::Instrument;
+        let null = fix.is_none();
         let span = tracing::info_span!(
             "docs.write",
             sc.author = %telemetry::short_hex(&self.author),
             sc.seq = seq,
+            sc.lane = if null { "null" } else { "fix" },
             sc.entry_hash = tracing::field::Empty,
         );
         telemetry::set_parent(&span, traceparent.as_deref());
         async move {
             let guard = self.inner.lock().await;
             let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
-            let payload = pad::pad(
-                &postcard::to_allocvec(&fix)
-                    .map_err(|_| LocationError::Decode("encode fix".into()))?,
-            )
-            .map_err(|e| LocationError::Decode(e.to_string()))?;
+            let payload = encode_fix_payload(fix.as_ref())?;
             let envelope = crypto::seal(
                 &self.identity_seed,
                 &self.author,
                 seq,
-                fix.ts,
+                ts,
                 DOCS_MESH_EPOCH,
                 &payload,
                 &recipients,
@@ -1354,14 +1403,15 @@ impl LocationNode {
                 tracing::field::display(telemetry::envelope_hash(&envelope)),
             );
             let ns = started.trail.own_namespace();
-            started
-                .trail
-                .write(ns, &self.author, envelope)
-                .await
-                .map_err(|e| {
-                    tracing::warn!(error = %e, "durable docs write failed");
-                    LocationError::Network(e.to_string())
-                })?;
+            let write = if null {
+                started.trail.write_nul(ns, &self.author, envelope).await
+            } else {
+                started.trail.write(ns, &self.author, envelope).await
+            };
+            write.map_err(|e| {
+                tracing::warn!(error = %e, "durable docs write failed");
+                LocationError::Network(e.to_string())
+            })?;
             Ok(())
         }
         .instrument(span)
@@ -2434,6 +2484,19 @@ fn latest_fix_to_incoming(lf: LatestFix) -> Option<IncomingFix> {
     })
 }
 
+/// Pad-and-encode a fix payload for sealing. `None` is the **null fix** (§4.1): an empty padded
+/// frame, byte-identical in length to a real fix so the two lanes are indistinguishable by
+/// ciphertext size. The inverse is [`decode_fix_payload`].
+fn encode_fix_payload(fix: Option<&LocationFix>) -> Result<Vec<u8>, LocationError> {
+    let encoded = match fix {
+        Some(fix) => {
+            postcard::to_allocvec(fix).map_err(|_| LocationError::Decode("encode fix".into()))?
+        }
+        None => Vec::new(),
+    };
+    pad::pad(&encoded).map_err(|e| LocationError::Decode(e.to_string()))
+}
+
 /// Unpad and decode a sealed fix payload. `Ok(None)` is a null fix (§4.1) — a watcher's cadence
 /// keep-alive, which carries no position and is not an error.
 fn decode_fix_payload(payload: &[u8]) -> Result<Option<LocationFix>, LocationError> {
@@ -2485,7 +2548,9 @@ impl Subscription {
         fix: LocationFix,
         recipients: Vec<Vec<u8>>,
     ) -> Result<(), LocationError> {
-        self.publish_inner(seq, fix, recipients, None).await
+        let ts = fix.ts;
+        self.publish_inner(seq, Some(fix), ts, recipients, None)
+            .await
     }
 
     pub async fn publish_traced(
@@ -2495,14 +2560,41 @@ impl Subscription {
         recipients: Vec<Vec<u8>>,
         traceparent: String,
     ) -> Result<(), LocationError> {
-        self.publish_inner(seq, fix, recipients, Some(traceparent))
+        let ts = fix.ts;
+        self.publish_inner(seq, Some(fix), ts, recipients, Some(traceparent))
+            .await
+    }
+
+    /// Broadcast a **null fix** — an envelope with an empty padded payload (FORWARD-SECRECY §4.1).
+    ///
+    /// The live half of the watcher lane: identical in shape, length, and signing discipline to
+    /// [`Self::publish`], carrying no position. Recipients decode it as a healthy envelope with
+    /// nothing to deliver.
+    pub async fn publish_null(
+        &self,
+        seq: u64,
+        ts: u64,
+        recipients: Vec<Vec<u8>>,
+    ) -> Result<(), LocationError> {
+        self.publish_inner(seq, None, ts, recipients, None).await
+    }
+
+    pub async fn publish_null_traced(
+        &self,
+        seq: u64,
+        ts: u64,
+        recipients: Vec<Vec<u8>>,
+        traceparent: String,
+    ) -> Result<(), LocationError> {
+        self.publish_inner(seq, None, ts, recipients, Some(traceparent))
             .await
     }
 
     async fn publish_inner(
         &self,
         seq: u64,
-        fix: LocationFix,
+        fix: Option<LocationFix>,
+        ts: u64,
         recipients: Vec<Vec<u8>>,
         traceparent: Option<String>,
     ) -> Result<(), LocationError> {
@@ -2513,21 +2605,18 @@ impl Subscription {
             "gossip.publish",
             sc.author = %telemetry::short_hex(&self.node.author),
             sc.seq = seq,
+            sc.lane = if fix.is_none() { "null" } else { "fix" },
             sc.entry_hash = tracing::field::Empty,
             recipients = recipients.len(),
         );
         telemetry::set_parent(&span, traceparent.as_deref());
         async move {
-            let payload = pad::pad(
-                &postcard::to_allocvec(&fix)
-                    .map_err(|_| LocationError::Decode("encode fix".into()))?,
-            )
-            .map_err(|e| LocationError::Decode(e.to_string()))?;
+            let payload = encode_fix_payload(fix.as_ref())?;
             let envelope = crypto::seal(
                 &self.node.identity_seed,
                 &self.node.author,
                 seq,
-                fix.ts,
+                ts,
                 DOCS_MESH_EPOCH,
                 &payload,
                 &recipients,
@@ -2545,6 +2634,97 @@ impl Subscription {
         }
         .instrument(span)
         .await
+    }
+}
+
+#[cfg(test)]
+mod null_fix_tests {
+    use super::{decode_fix_payload, encode_fix_payload, LocationFix};
+    use crate::crypto;
+    use crate::docs::{encode_ctl_key, encode_key, encode_nul_key};
+
+    fn fix() -> LocationFix {
+        LocationFix {
+            lat: -122.419416,
+            lon: 37.774929,
+            accuracy_m: 12.5,
+            heading_deg: 91.0,
+            ts: 1_786_000_000_000,
+        }
+    }
+
+    /// The property symmetric lanes rest on (§4.1): sealed, a watcher's null envelope must be
+    /// byte-for-byte the same size as a sharer's real one, or the stash can classify every edge
+    /// by counting bytes and the padding was decorative.
+    #[test]
+    fn a_sealed_null_fix_is_the_same_size_as_a_sealed_real_fix() {
+        let (seed, author) = crypto::test_identity();
+        let (_, recv_pub) = crypto::generate_recv_keypair();
+        let recipients = vec![recv_pub];
+
+        let real = crypto::seal(
+            &seed,
+            &author,
+            7,
+            fix().ts,
+            crate::DOCS_MESH_EPOCH,
+            &encode_fix_payload(Some(&fix())).unwrap(),
+            &recipients,
+        )
+        .unwrap();
+        let null = crypto::seal(
+            &seed,
+            &author,
+            8,
+            fix().ts,
+            crate::DOCS_MESH_EPOCH,
+            &encode_fix_payload(None).unwrap(),
+            &recipients,
+        )
+        .unwrap();
+
+        assert_eq!(null.len(), real.len());
+    }
+
+    /// A null fix is a healthy envelope that carries no position — not a decode failure. The
+    /// gossip receive path leans on exactly this three-way outcome.
+    #[test]
+    fn a_null_fix_opens_and_decodes_to_no_position() {
+        let (seed, author) = crypto::test_identity();
+        let (recv_secret, recv_pub) = crypto::generate_recv_keypair();
+
+        let envelope = crypto::seal(
+            &seed,
+            &author,
+            1,
+            fix().ts,
+            crate::DOCS_MESH_EPOCH,
+            &encode_fix_payload(None).unwrap(),
+            &[recv_pub],
+        )
+        .unwrap();
+
+        let opened = crypto::open(&recv_secret, &envelope).unwrap();
+        assert!(decode_fix_payload(&opened.payload).unwrap().is_none());
+    }
+
+    /// Round-trip the real lane through the same encoder, so the `Option` split cannot silently
+    /// start dropping positions.
+    #[test]
+    fn a_real_fix_still_round_trips_through_the_shared_encoder() {
+        let payload = encode_fix_payload(Some(&fix())).unwrap();
+        let back = decode_fix_payload(&payload).unwrap().expect("a position");
+        assert_eq!(back.ts, fix().ts);
+        assert_eq!(back.accuracy_m, 12.5);
+    }
+
+    /// The two envelopes one tick produces are wrapped for disjoint recipient sets, so they must
+    /// land in different last-write-wins slots or each silently supersedes the other.
+    #[test]
+    fn the_null_lane_does_not_collide_with_the_fix_lane() {
+        let author = [0x42u8; 32];
+        assert_ne!(encode_nul_key(&author), encode_key(&author));
+        assert_ne!(encode_nul_key(&author), encode_ctl_key(&author));
     }
 }
 

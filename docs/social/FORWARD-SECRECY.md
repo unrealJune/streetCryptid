@@ -129,6 +129,19 @@ Cost: watcher devices publish small envelopes on the cold cadence. They already 
 background execution to ack under revision 1; this changes the payload, not the wake
 requirement.
 
+**Each envelope gets its own `seq`.** A tick that has both sharing and watching edges
+publishes two envelopes, and they take consecutive `seq` values rather than sharing one —
+no two envelopes from an author are ever the same `(author, seq)`, which keeps `seq` a
+usable identity for replay rejection and for the `sc.*` telemetry join keys. Recipient
+sets are disjoint, so each peer still sees a strictly increasing `seq` from us; it just
+has gaps where the other lane's envelopes were. Monotonic acceptance (§4.2) is a
+strictly-ahead test, not a no-gaps test, so gaps are already legal.
+
+The null lane is **best effort within the tick**: it runs after the real fix is on the
+wire and its `seq` returned, so a failure there must not fail the tick — that would make
+the outbox retain and re-publish a fix that already went out. A missed watcher envelope
+costs at most one cadence interval of freshness, bounded by T_lapse (§4.2).
+
 ### 4.2 The ratchet
 
 The key schedule is the **Double Ratchet**
@@ -222,6 +235,24 @@ The durable path collapses from `(author, seq)` to a single overwritten key per 
 structurally identical to the existing control-message path (`encode_ctl_key`,
 `Query::single_latest_per_key`). `seq` stays in the envelope for replay rejection; the
 ratchet position lives in the per-wrap header (§4.7); both leave the doc key.
+
+**Two lanes, two slots.** A tick produces two envelopes — the real fix for the wrap set,
+the null fix for the watcher edges (§4.1) — wrapped for _disjoint_ recipient sets. They
+therefore need distinct LWW keys, or each tick's second write silently supersedes its
+first and a device that both shares and watches can keep only one lane durable. Null
+fixes go to `nul/hex(author)` (`encode_nul_key`), alongside `hex(author)/fix` and
+`ctl/hex(author)`; like `ctl`, the `nul` lead is not valid hex, so every existing fix
+reader skips the lane without change. Each lane keeps exactly one overwritten slot per
+author — a null fix carries no history worth keying either, only the sender's current
+ratchet contribution.
+
+The two lanes are distinguishable by doc key to the stash, which is a real (small)
+metadata leak: the stash can see that an author writes a null lane at all. It is
+strictly less than what today's _stable_ wrap `kid` already tells it — the exact
+recipient set of every envelope, per §1.1 — and it is what §4.7's rotating kids close.
+Revisit lane-shape uniformity (always writing both slots, so role is not inferable from
+which lanes an author uses) when rotating kids land, not before: until then it would buy
+nothing and cost every device a write per tick.
 
 Received trails are deleted entirely. **Self trails stay** — locally generated, never
 decrypted from the network, bounded by §5.3.

@@ -359,6 +359,27 @@ export interface IrohLocationApi {
   ): Promise<void>;
   /** Leave a topic. */
   unsubscribe(subscriptionId: string): Promise<void>;
+  /**
+   * Broadcast a **null fix**: an envelope carrying an empty padded payload rather than a position
+   * (FORWARD-SECRECY.md §4.1). Wrapped for the friends we do NOT share position with, so every
+   * sharing relationship runs the protocol in both directions and a watcher's device contributes
+   * fresh key material on the same cadence a sharer does.
+   *
+   * Identical to {@link publish} in signing, AAD binding, `seq` monotonicity and — because the
+   * plaintext is padded to a fixed size class — ciphertext length, so the stash cannot tell the
+   * two lanes apart. `ts` is the tick's timestamp; it rides in the signed header exactly as a
+   * real fix's does.
+   *
+   * OPTIONAL: absent on iOS bindings generated before this API existed (Swift bindings only
+   * regenerate on macOS), so callers must guard with `typeof mod.publishNull === 'function'`.
+   */
+  publishNull?(
+    subscriptionId: string,
+    seq: number,
+    ts: number,
+    recipientsHex: string[],
+    traceparent?: string | null
+  ): Promise<void>;
 
   // ── Durable trail (iroh-docs) — see docs/social/ARCHITECTURE.md §5–6, §9 ────────────────────
   /**
@@ -371,6 +392,24 @@ export interface IrohLocationApi {
     subscriptionId: string,
     seq: number,
     fix: NativeLocationFix,
+    recipientsHex: string[],
+    traceparent?: string | null
+  ): Promise<void>;
+  /**
+   * Durable mirror of {@link publishNull}, written to a **separate** last-write-wins slot from the
+   * fix lane. The two envelopes a tick produces are wrapped for disjoint recipient sets, so a
+   * shared slot would make each silently supersede the other and a device that both shares and
+   * watches could keep only one lane durable.
+   *
+   * Same write-then-push rule as {@link docsWrite}: call {@link pushTrail} afterwards or it never
+   * leaves the device.
+   *
+   * OPTIONAL: same iOS bindgen caveat as {@link publishNull}.
+   */
+  docsWriteNull?(
+    subscriptionId: string,
+    seq: number,
+    ts: number,
     recipientsHex: string[],
     traceparent?: string | null
   ): Promise<void>;

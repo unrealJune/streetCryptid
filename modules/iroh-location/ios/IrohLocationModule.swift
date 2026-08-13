@@ -369,6 +369,23 @@ public final class IrohLocationModule: Module {
       }
     }
 
+    // A null fix is an ordinary envelope with an empty padded payload (FORWARD-SECRECY.md §4.1) —
+    // the watcher half of the symmetric lanes. No fix dictionary: there is no position, only the
+    // tick's timestamp, which rides in the signed header as usual.
+    AsyncFunction("publishNull") {
+      (subscriptionId: String, seq: Double, ts: Double, recipients: [String], traceparent: String?) async throws in
+      guard let sub = self.subscriptions[subscriptionId] else { return }
+      if let traceparent {
+        try await sub.publishNullTraced(
+          seq: UInt64(seq), ts: UInt64(ts),
+          recipients: recipients.map(hexToData), traceparent: traceparent)
+      } else {
+        try await sub.publishNull(
+          seq: UInt64(seq), ts: UInt64(ts),
+          recipients: recipients.map(hexToData))
+      }
+    }
+
     AsyncFunction("unsubscribe") { (subscriptionId: String) in
       self.subscriptions.removeValue(forKey: subscriptionId)
       self.bridges.removeValue(forKey: subscriptionId)
@@ -388,6 +405,22 @@ public final class IrohLocationModule: Module {
         try await node.docsWrite(
           subscriptionId: subscriptionId, seq: UInt64(seq),
           fix: locationFix(from: fix), recipients: recipients.map(hexToData))
+      }
+    }
+
+    // Separate LWW slot from the fix lane (`docs::encode_nul_key`): a tick's two envelopes are
+    // wrapped for disjoint recipient sets, so one slot would make each supersede the other.
+    AsyncFunction("docsWriteNull") {
+      (subscriptionId: String, seq: Double, ts: Double, recipients: [String], traceparent: String?) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      if let traceparent {
+        try await node.docsWriteNullTraced(
+          subscriptionId: subscriptionId, seq: UInt64(seq), ts: UInt64(ts),
+          recipients: recipients.map(hexToData), traceparent: traceparent)
+      } else {
+        try await node.docsWriteNull(
+          subscriptionId: subscriptionId, seq: UInt64(seq), ts: UInt64(ts),
+          recipients: recipients.map(hexToData))
       }
     }
 

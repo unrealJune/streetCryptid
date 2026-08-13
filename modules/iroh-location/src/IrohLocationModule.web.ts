@@ -155,6 +155,19 @@ export class IrohLocationNativeModule
     await sub.publish(seq, fix, recipientsHex);
   }
 
+  async publishNull(
+    subscriptionId: string,
+    seq: number,
+    ts: number,
+    recipientsHex: string[],
+    _traceparent?: string | null
+  ): Promise<void> {
+    await ensureWasm();
+    const sub = this.subscriptions.get(subscriptionId)?.sub;
+    if (!sub) throw new Error(`Unknown IrohLocation subscription: ${subscriptionId}`);
+    await sub.publish_null(seq, ts, recipientsHex);
+  }
+
   async unsubscribe(subscriptionId: string): Promise<void> {
     const stored = this.subscriptions.get(subscriptionId);
     if (!stored) return;
@@ -180,6 +193,17 @@ export class IrohLocationNativeModule
   ): Promise<void> {
     await ensureWasm();
     await this.requireNode().docs_write(subscriptionId, seq, fix, recipientsHex);
+  }
+
+  async docsWriteNull(
+    subscriptionId: string,
+    seq: number,
+    ts: number,
+    recipientsHex: string[],
+    _traceparent?: string | null
+  ): Promise<void> {
+    await ensureWasm();
+    await this.requireNode().docs_write_null(subscriptionId, seq, ts, recipientsHex);
   }
 
   async syncLatest(peerTicket: string | null, _traceparent?: string | null): Promise<void> {

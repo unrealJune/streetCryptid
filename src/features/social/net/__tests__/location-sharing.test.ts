@@ -19,6 +19,8 @@ class FakeNativeModule {
   calls = {
     publish: [] as unknown[][],
     docsWrite: [] as unknown[][],
+    publishNull: [] as unknown[][],
+    docsWriteNull: [] as unknown[][],
     syncLatest: [] as { peerTicket: string | null; traceparent?: string }[],
     importDocTicket: [] as string[],
     subscribe: [] as { topic: string; bootstrap: string[] }[],
@@ -60,6 +62,12 @@ class FakeNativeModule {
   }
   async docsWrite(...args: unknown[]) {
     this.calls.docsWrite.push(args);
+  }
+  async publishNull(...args: unknown[]) {
+    this.calls.publishNull.push(args);
+  }
+  async docsWriteNull(...args: unknown[]) {
+    this.calls.docsWriteNull.push(args);
   }
   async docsWriteControl(...args: unknown[]) {
     this.calls.docsWriteControl.push(args);
@@ -643,5 +651,131 @@ describe('LocationSharingService — live watch pull', () => {
     for (const open of gates.splice(0)) open();
     await jest.advanceTimersByTimeAsync(0);
     mockHolder.mod.syncLatest = original;
+  });
+});
+
+/**
+ * Symmetric lanes — FORWARD-SECRECY.md §4.1 / §7 step 5.
+ *
+ * Every sharing relationship runs the protocol in both directions: a friend we do NOT share
+ * position with still receives an envelope from us on the same cadence, carrying an empty padded
+ * payload instead of a position. These tests pin the *routing* (who gets which lane, and that the
+ * two lanes never address the same person or the same durable slot); the constant-ciphertext-length
+ * property they depend on is pinned Rust-side in `modules/iroh-location/rust/tests/pad.rs`.
+ */
+describe('LocationSharingService — symmetric lanes (null fixes)', () => {
+  const watcherFriend: ContactCard = {
+    endpointId: 'cc33',
+    handle: '@cee',
+    sigil: 'chupacabra',
+    recvPublic: 'c0c0',
+    ticket: 'ticket-c',
+    docTicket: 'doc-c',
+  };
+
+  beforeEach(() => {
+    mockHolder.mod = new FakeNativeModule();
+    mockHolder.stashConfig = null;
+    setTelemetryForTesting(undefined);
+  });
+
+  /** A pool where we share with `friend` and merely watch `watcherFriend`. */
+  async function mixedEdges(): Promise<LocationSharingService> {
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+    await svc.addFriend(watcherFriend);
+    await svc.shareWith(friend.endpointId);
+    return svc;
+  }
+
+  it('publishes a null fix to the friends it is not sharing with, on the same tick', async () => {
+    const svc = await mixedEdges();
+
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+
+    expect(mockHolder.mod.calls.publishNull).toHaveLength(1);
+    expect(mockHolder.mod.calls.docsWriteNull).toHaveLength(1);
+    // (subscriptionId, seq, ts, recipients, traceparent)
+    expect(mockHolder.mod.calls.publishNull[0][2]).toBe(123);
+    expect(mockHolder.mod.calls.publishNull[0][3]).toEqual([watcherFriend.recvPublic]);
+    expect(mockHolder.mod.calls.docsWriteNull[0][3]).toEqual([watcherFriend.recvPublic]);
+  });
+
+  it('never addresses the same friend on both lanes', async () => {
+    const svc = await mixedEdges();
+
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+
+    const shared = mockHolder.mod.calls.publish[0][3] as string[];
+    const watched = mockHolder.mod.calls.publishNull[0][3] as string[];
+    expect(shared).toEqual([friend.recvPublic]);
+    expect(watched).toEqual([watcherFriend.recvPublic]);
+    expect(shared.filter((k) => watched.includes(k))).toEqual([]);
+  });
+
+  it('gives the null fix its own seq, so no two envelopes share (author, seq)', async () => {
+    const svc = await mixedEdges();
+
+    const seq = await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+
+    const nullSeq = mockHolder.mod.calls.publishNull[0][1] as number;
+    expect(nullSeq).not.toBe(seq);
+    expect(mockHolder.mod.calls.docsWriteNull[0][1]).toBe(nullSeq);
+    // Monotonic, like every other envelope we sign.
+    expect(nullSeq).toBeGreaterThan(seq);
+  });
+
+  it('publishes nothing on the null lane when every friend is a sharing recipient', async () => {
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+    await svc.shareWith(friend.endpointId);
+
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+
+    expect(mockHolder.mod.calls.publish).toHaveLength(1);
+    expect(mockHolder.mod.calls.publishNull).toHaveLength(0);
+  });
+
+  it('still publishes the watcher lane for a device that shares with nobody', async () => {
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(watcherFriend);
+
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+
+    expect(mockHolder.mod.calls.publishNull).toHaveLength(1);
+    expect(mockHolder.mod.calls.publishNull[0][3]).toEqual([watcherFriend.recvPublic]);
+  });
+
+  // The real fix is already on the wire and its seq returned by the time the null lane runs, so a
+  // failure here must not fail the tick — that would make the outbox retain and re-publish a fix
+  // that already went out.
+  it('does not fail the tick when the null lane throws', async () => {
+    const svc = await mixedEdges();
+    mockHolder.mod.publishNull = async () => {
+      throw new Error('gossip broadcast failed');
+    };
+
+    await expect(
+      svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 })
+    ).resolves.toBeGreaterThan(0);
+
+    expect(mockHolder.mod.calls.publish).toHaveLength(1);
+  });
+
+  // Swift bindings only regenerate on macOS, so an installed iOS binary can predate this API.
+  it('skips the null lane on a binary without the native export', async () => {
+    const svc = await mixedEdges();
+    // A class method lives on the prototype, so it is overwritten rather than deleted — the shape
+    // an older binary presents is `typeof mod.publishNull !== 'function'`, which this reproduces.
+    (mockHolder.mod as unknown as Record<string, unknown>).publishNull = undefined;
+
+    await expect(
+      svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 })
+    ).resolves.toBeGreaterThan(0);
+
+    expect(mockHolder.mod.calls.docsWriteNull).toHaveLength(0);
   });
 });

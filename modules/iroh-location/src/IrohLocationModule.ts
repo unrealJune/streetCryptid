@@ -54,6 +54,33 @@ export declare class IrohLocationNativeModule
     recipientsHex: string[],
     traceparent?: string | null
   ): Promise<void>;
+  /**
+   * Broadcast a **null fix**: an envelope with an empty padded payload, wrapped for the friends we
+   * do NOT share position with (FORWARD-SECRECY.md §4.1). Same signing, AAD, and ciphertext length
+   * as {@link publish} — only the tick timestamp, no coordinates.
+   *
+   * Optional for compatibility with installed iOS binaries built before the null-fix API (Swift
+   * bindings regenerate only on macOS, `just bindgen-ios`). Guard with `typeof … === 'function'`.
+   */
+  publishNull?(
+    subscriptionId: string,
+    seq: number,
+    ts: number,
+    recipientsHex: string[],
+    traceparent?: string | null
+  ): Promise<void>;
+  /**
+   * Durable mirror of {@link publishNull}. Writes to a **separate** last-write-wins slot from the
+   * fix lane, because a tick's two envelopes are wrapped for disjoint recipient sets and would
+   * otherwise supersede each other. Optional for the same reason as {@link publishNull}.
+   */
+  docsWriteNull?(
+    subscriptionId: string,
+    seq: number,
+    ts: number,
+    recipientsHex: string[],
+    traceparent?: string | null
+  ): Promise<void>;
   syncLatest(peerTicket: string | null, traceparent?: string | null): Promise<void>;
   /** Optional for compatibility with installed iOS binaries built before the push API. */
   pushTrail?(peerTicket: string | null, traceparent?: string | null): Promise<void>;

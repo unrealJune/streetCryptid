@@ -1352,11 +1352,69 @@ export class LocationSharingService implements FixPublisher {
       }
       await this.trail.appendOwn(fix, seq);
       this.notifyTrailChanged();
+      await this.publishNullFix(fix.ts, span.context);
       span.setStatus('ok');
       return seq;
     } catch (err) {
       span.recordError(err);
       throw err;
+    } finally {
+      span.end();
+    }
+  }
+
+  /**
+   * Publish the tick's **watcher** envelope: a null fix — no position, an empty padded payload —
+   * wrapped for every friend we are NOT sharing with (FORWARD-SECRECY.md §4.1).
+   *
+   * Symmetric lanes: a one-directional watcher edge still carries an envelope from us on the same
+   * cadence a sharer's does, so the relationship runs the protocol in both directions and the
+   * stash — which sees constant-length ciphertext either way — cannot tell which edges are which.
+   * Once envelope v3 lands (§4.2) this is what carries our ratchet contribution to those friends.
+   *
+   * Best effort by design: the real fix has already been published and its `seq` returned, and a
+   * watcher edge carries no position, so a failure here must not fail the tick or make the outbox
+   * retain (and re-publish) a fix that already went out. It is a distinct `seq` from the real fix
+   * — two envelopes, never the same `(author, seq)` — and lands in its own durable slot, so the
+   * two lanes cannot supersede each other.
+   */
+  private async publishNullFix(ts: number, parent?: SpanContext): Promise<void> {
+    const mod = this.mod;
+    const subId = this.mySubId;
+    if (!mod || !subId) return;
+    const watchers = pool.watcherRecvKeys(this.state);
+    if (watchers.length === 0) return;
+    // Absent on iOS binaries built before this API (Swift bindings regenerate only on macOS).
+    if (typeof mod.publishNull !== 'function') return;
+
+    const span = getTelemetry().startSpan('publish.null', {
+      parent,
+      attributes: {
+        'sc.author': this.keys ? this.keys.endpointId.slice(0, 10) : undefined,
+        recipients: watchers.length,
+        payload_type: 'null-fix',
+        payload_ts: ts,
+      },
+    });
+    try {
+      const seq = await this.nextSeq();
+      span.setAttribute('sc.seq', seq);
+      const traceparent = getTelemetry().enabled ? traceparentFor(span.context) : null;
+      await mod.publishNull(subId, seq, ts, watchers, traceparent);
+      span.addEvent('gossip.publish.completed');
+      if (typeof mod.docsWriteNull === 'function') {
+        await mod.docsWriteNull(subId, seq, ts, watchers, traceparent);
+        span.addEvent('docs.write.completed');
+      }
+      span.setStatus('ok');
+    } catch (err) {
+      // Never rethrow: see the doc comment — the real fix of this tick is already on the wire.
+      const reason = err instanceof Error ? err.message : String(err);
+      span.recordError(err);
+      getTelemetry().log(
+        'warn',
+        `null fix publish failed (watcher edges miss this tick): ${reason}`
+      );
     } finally {
       span.end();
     }
@@ -2223,7 +2281,9 @@ export class LocationSharingService implements FixPublisher {
       // backfill silently syncs nothing but our own trail and can never recover a friend's fixes.
       await this.importFriendTrails();
     }
-    if (this.state.sharingWith.length > 0) {
+    // Any friend at all, not just the ones we share position with: watcher edges publish null
+    // fixes on the same cadence (FORWARD-SECRECY.md §4.1), and that needs our own topic open.
+    if (pool.friendList(this.state).length > 0) {
       try {
         await this.ensureMySubscription();
       } catch {

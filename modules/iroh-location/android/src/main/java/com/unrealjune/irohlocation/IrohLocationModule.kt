@@ -470,6 +470,34 @@ class IrohLocationModule : Module() {
         }
       }
 
+    // A null fix is an ordinary envelope with an empty padded payload
+    // (FORWARD-SECRECY.md §4.1) — the watcher half of the symmetric lanes. No fix map: there is
+    // no position, only the tick's timestamp, which rides in the signed header as usual.
+    AsyncFunction("publishNull") Coroutine
+      {
+        subscriptionId: String,
+        seq: Double,
+        ts: Double,
+        recipients: List<String>,
+        traceparent: String? ->
+        val sub = subs[subscriptionId] ?: return@Coroutine
+        val recipientBytes = recipients.map { it.hexToBytes() }
+        if (traceparent != null) {
+          sub.publishNullTraced(
+            seq.toLong().toULong(),
+            ts.toLong().toULong(),
+            recipientBytes,
+            traceparent,
+          )
+        } else {
+          sub.publishNull(
+            seq.toLong().toULong(),
+            ts.toLong().toULong(),
+            recipientBytes,
+          )
+        }
+      }
+
     AsyncFunction("unsubscribe") { subscriptionId: String ->
       subs.remove(subscriptionId)?.destroy()
       Unit
@@ -499,6 +527,33 @@ class IrohLocationModule : Module() {
             subscriptionId,
             seq.toLong().toULong(),
             locationFixOf(fix),
+            recipientBytes,
+          )
+        }
+      }
+
+    AsyncFunction("docsWriteNull") Coroutine
+      {
+        subscriptionId: String,
+        seq: Double,
+        ts: Double,
+        recipients: List<String>,
+        traceparent: String? ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        val recipientBytes = recipients.map { it.hexToBytes() }
+        if (traceparent != null) {
+          n.docsWriteNullTraced(
+            subscriptionId,
+            seq.toLong().toULong(),
+            ts.toLong().toULong(),
+            recipientBytes,
+            traceparent,
+          )
+        } else {
+          n.docsWriteNull(
+            subscriptionId,
+            seq.toLong().toULong(),
+            ts.toLong().toULong(),
             recipientBytes,
           )
         }

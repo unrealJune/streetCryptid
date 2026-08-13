@@ -386,6 +386,43 @@ impl WasmLocationNode {
         Ok(())
     }
 
+    /// Seal a **null fix** for `recipients_hex` and write it to our namespace's null slot (§4.1).
+    ///
+    /// Separate LWW key from the fix lane: a tick's two envelopes are wrapped for disjoint
+    /// recipient sets, so sharing one slot would make each supersede the other.
+    pub async fn docs_write_null(
+        &self,
+        _subscription_id: String,
+        seq: f64,
+        ts: f64,
+        recipients_hex: JsValue,
+    ) -> Result<(), JsError> {
+        let recipients = decode_recipients(recipients_hex)?;
+        let payload = pad_null().map_err(to_js_err)?;
+        let envelope = crypto::seal(
+            &self.identity_seed,
+            &self.author,
+            seq as u64,
+            ts as u64,
+            DOCS_MESH_EPOCH,
+            &payload,
+            &recipients,
+        )
+        .map_err(to_js_err)?;
+
+        let guard = self.started.lock().await;
+        let started = guard
+            .as_ref()
+            .ok_or_else(|| JsError::new("node not started"))?;
+        let ns = started.trail.own_namespace();
+        started
+            .trail
+            .write_nul(ns, &self.author, envelope)
+            .await
+            .map_err(to_js_err)?;
+        Ok(())
+    }
+
     /// Reconcile our own + every imported friend namespace so each friend's **current** fix is
     /// exchanged (the durable path is last-write-wins; there is no missed history to recover).
     /// When `peer_ticket` is present, every namespace explicitly syncs with that endpoint. Read
@@ -512,6 +549,21 @@ fn pad_encoded(wire_fix: &WireLocationFix) -> Result<Vec<u8>> {
     pad::pad(&encoded).map_err(|e| anyhow!(e.to_string()))
 }
 
+/// The empty padded frame a null fix carries (§4.1) — same length on the wire as [`pad_encoded`].
+fn pad_null() -> Result<Vec<u8>> {
+    pad::pad(&[]).map_err(|e| anyhow!(e.to_string()))
+}
+
+/// Decode `recipients_hex` (a JS array of hex-encoded X25519 receiving keys) into raw bytes.
+fn decode_recipients(recipients_hex: JsValue) -> std::result::Result<Vec<Vec<u8>>, JsError> {
+    let recipient_strings: Vec<String> = serde_wasm_bindgen::from_value(recipients_hex)?;
+    recipient_strings
+        .iter()
+        .map(|hex| hex::decode(hex).context("bad recipient key hex"))
+        .collect::<Result<Vec<_>>>()
+        .map_err(to_js_err)
+}
+
 /// Unpad and decode a sealed fix payload. `Ok(None)` is a null fix — a watcher publishing on
 /// cadence so the ratchet has a return contribution (§4.1); it carries no position.
 fn decode_fix_payload(payload: &[u8]) -> std::result::Result<Option<WireLocationFix>, String> {
@@ -582,6 +634,36 @@ impl WasmLocationSubscription {
             &self.author,
             seq as u64,
             wire_fix.ts,
+            DOCS_MESH_EPOCH,
+            &payload,
+            &recipients,
+        )
+        .map_err(to_js_err)?;
+        self.sender
+            .lock()
+            .await
+            .broadcast(envelope.into())
+            .await
+            .map_err(to_js_err)?;
+        Ok(())
+    }
+
+    /// Broadcast a **null fix** — an envelope with an empty padded payload (§4.1). The watcher
+    /// half of the symmetric lanes: same signing, same AAD, same ciphertext length as
+    /// [`Self::publish`], carrying no position.
+    pub async fn publish_null(
+        &self,
+        seq: f64,
+        ts: f64,
+        recipients_hex: JsValue,
+    ) -> Result<(), JsError> {
+        let recipients = decode_recipients(recipients_hex)?;
+        let payload = pad_null().map_err(to_js_err)?;
+        let envelope = crypto::seal(
+            &self.identity_seed,
+            &self.author,
+            seq as u64,
+            ts as u64,
             DOCS_MESH_EPOCH,
             &payload,
             &recipients,

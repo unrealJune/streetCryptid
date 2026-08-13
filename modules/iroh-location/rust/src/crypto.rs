@@ -104,6 +104,16 @@ pub fn generate_recv_keypair() -> (Vec<u8>, Vec<u8>) {
     (sk.to_bytes().to_vec(), pk.to_bytes().to_vec())
 }
 
+/// A fresh signing identity -> (32-byte ed25519 seed, 32-byte public key / author id).
+///
+/// Test-only, but shared with `lib.rs`'s own test modules, which is why it lives here rather
+/// than in the `tests` module below.
+#[cfg(test)]
+pub fn test_identity() -> ([u8; 32], [u8; 32]) {
+    let sk = SigningKey::generate(&mut OsRng);
+    (sk.to_bytes(), sk.verifying_key().to_bytes())
+}
+
 /// Bind the per-message context into both AEAD and HPKE as associated data so a wrap /
 /// ciphertext cannot be replayed under a different header.
 fn aad(version: u8, author: &[u8], seq: u64, ts: u64, mesh_epoch: u32) -> Vec<u8> {
@@ -289,8 +299,7 @@ mod tests {
     }
 
     fn identity() -> ([u8; 32], [u8; 32]) {
-        let sk = SigningKey::generate(&mut OsRng);
-        (sk.to_bytes(), sk.verifying_key().to_bytes())
+        super::test_identity()
     }
 
     #[test]

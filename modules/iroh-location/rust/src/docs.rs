@@ -189,6 +189,31 @@ pub fn encode_ctl_key(author: &[u8]) -> Vec<u8> {
 // nothing needs the inverse. The invariant that matters — that fix readers cannot see these keys
 // — is asserted in `fix_readers_ignore_control_keys` below.
 
+/// Literal leading segment marking a **null fix** — a watcher's cadence keep-alive
+/// (FORWARD-SECRECY.md §4.1) rather than a position.
+///
+/// Null fixes need their own slot because the durable path is last-write-wins with exactly one
+/// fix key per author (§4.4), and the two lanes are wrapped for *disjoint* recipient sets: the
+/// fix lane for the friends we share position with, the null lane for the friends we do not.
+/// Sharing one slot would mean each tick's second envelope silently supersedes the first, so a
+/// device that both shares and watches could never keep both lanes durable.
+///
+/// Like [`CTL_TAG`], the `nul` lead is not valid hex, so [`decode_key`] rejects it and every fix
+/// reader skips null entries without change.
+pub const NUL_TAG: &str = "nul";
+
+/// Encode the null-fix key as `nul/hex(author)` — one overwritten slot per author.
+///
+/// Latest-wins is the right semantics here for the same reason as the fix lane: a null fix
+/// carries no position and no history, only the sender's current ratchet contribution (§4.1), and
+/// only the most recent one is ever of use.
+pub fn encode_nul_key(author: &[u8]) -> Vec<u8> {
+    let mut key = NUL_TAG.as_bytes().to_vec();
+    key.push(KEY_SEP);
+    key.extend_from_slice(hex_encode(author).as_bytes());
+    key
+}
+
 /// Explicit-pruning selection: given `(key, entry_ts)` pairs, return the keys whose entry is
 /// **strictly older** than `older_than_ts` and should be pruned.
 pub fn keys_to_prune(entries: &[(Vec<u8>, u64)], older_than_ts: u64) -> Vec<Vec<u8>> {
@@ -318,6 +343,19 @@ impl TrailDocs {
     pub async fn write_ctl(&self, ns: NamespaceId, author: &[u8], envelope: Vec<u8>) -> Result<()> {
         let doc = self.doc_for(ns).await?;
         doc.set_bytes(self.author, encode_ctl_key(author), envelope)
+            .await?;
+        Ok(())
+    }
+
+    /// Write a sealed **null fix** to `ns` under `nul/hex(author)` (FORWARD-SECRECY §4.1).
+    ///
+    /// Identical sealing to a fix — the plaintext is an empty padded frame, so the envelope is
+    /// byte-for-byte the same length as a real one and the stash cannot tell the lanes apart by
+    /// ciphertext size. The separate key is what keeps this from superseding the fix lane; see
+    /// [`encode_nul_key`].
+    pub async fn write_nul(&self, ns: NamespaceId, author: &[u8], envelope: Vec<u8>) -> Result<()> {
+        let doc = self.doc_for(ns).await?;
+        doc.set_bytes(self.author, encode_nul_key(author), envelope)
             .await?;
         Ok(())
     }
@@ -660,6 +698,27 @@ mod tests {
         let b = [4u8; 32];
         assert_eq!(encode_ctl_key(&a), encode_ctl_key(&a));
         assert_ne!(encode_ctl_key(&a), encode_ctl_key(&b));
+    }
+
+    /// The null lane must be invisible to fix readers and must not collide with either other
+    /// lane — the whole point of giving it its own key is that a tick's two envelopes, wrapped
+    /// for disjoint recipient sets, both survive.
+    #[test]
+    fn null_keys_are_their_own_lane() {
+        let author = [0x11u8; 32];
+        let nul = encode_nul_key(&author);
+        assert!(decode_key(&nul).is_none());
+        assert_ne!(nul, encode_key(&author));
+        assert_ne!(nul, encode_ctl_key(&author));
+    }
+
+    /// One overwritten slot per author, same as the fix and control lanes.
+    #[test]
+    fn nul_key_is_stable_per_author() {
+        let a = [5u8; 32];
+        let b = [6u8; 32];
+        assert_eq!(encode_nul_key(&a), encode_nul_key(&a));
+        assert_ne!(encode_nul_key(&a), encode_nul_key(&b));
     }
 
     // ── prune-threshold selection ────────────────────────────────────────────────────────
