@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use iroh_location::ratchet::{
     kdf_ck, kdf_kid, kdf_mk, kdf_rk, initiator_by_endpoint, MessageKey, RatchetError,
     RatchetHeader, RatchetKeySource, RatchetState, DEFAULT_ACCEPT_WINDOW, DEFAULT_T_LAPSE_MS,
-    KEY_LEN, SESSION_ID_LEN,
+    KEY_LEN, SESSION_ID_LEN, STATE_LEN, STATE_V,
 };
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
 
@@ -413,4 +413,112 @@ fn the_domain_contexts_are_distinct() {
 fn the_root_step_separates_its_two_outputs() {
     let (rk, ck) = kdf_rk(&[3u8; KEY_LEN], &[4u8; KEY_LEN]);
     assert_ne!(rk, ck);
+}
+
+// ── persistence ───────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_restored_session_continues_the_same_schedule() {
+    // Field equality is not the property that matters; producing the SAME NEXT KEY is. A restore
+    // that silently diverged would reuse counter values against a peer that had moved on.
+    let (mut a, _ka, mut b, mut kb) = pair();
+    drop(b.accept(&a.next_send().unwrap().header, 0, W, &mut kb).unwrap());
+
+    let saved = a.to_bytes();
+    let expected = a.next_send().unwrap();
+
+    let mut restored = RatchetState::from_bytes(&saved).unwrap();
+    let got = restored.next_send().unwrap();
+
+    assert_eq!(expected.header, got.header);
+    assert_eq!(expected.kid, got.kid);
+    assert_eq!(bytes(expected.key), bytes(got.key));
+}
+
+#[test]
+fn a_restored_session_still_opens_what_the_peer_sends() {
+    let (mut a, mut ka, mut b, mut kb) = pair();
+    drop(b.accept(&a.next_send().unwrap().header, 0, W, &mut kb).unwrap());
+
+    let mut a = RatchetState::from_bytes(&a.to_bytes()).unwrap();
+    let reply = b.next_send().unwrap();
+    let expected = bytes(reply.key);
+    assert_eq!(expected, bytes(a.accept(&reply.header, 0, W, &mut ka).unwrap()));
+}
+
+#[test]
+fn the_serialized_state_is_a_fixed_small_size() {
+    // §4.2 budgets ~200 B per friend per session.
+    let (a, _ka, _b, _kb) = pair();
+    assert_eq!(a.to_bytes().len(), STATE_LEN);
+    assert!(STATE_LEN <= 256, "session state grew past its budget: {STATE_LEN}");
+}
+
+#[test]
+fn a_responder_with_no_chains_round_trips() {
+    // The bootstrap state has three absent keys; the presence flags must survive it.
+    let (_a, _ka, b, _kb) = pair();
+    let mut restored = RatchetState::from_bytes(&b.to_bytes()).unwrap();
+    assert_eq!(restored.next_send().unwrap_err(), RatchetError::NoSendingChain);
+}
+
+#[test]
+fn corrupt_or_foreign_state_is_refused_rather_than_reset() {
+    // Starting fresh on a parse failure would reuse counters the peer has already seen. The
+    // caller must treat this as a desync and resync (§4.6), so it has to be an error.
+    let (a, _ka, _b, _kb) = pair();
+    let good = a.to_bytes();
+
+    assert_eq!(
+        RatchetState::from_bytes(&good[..good.len() - 1]).unwrap_err(),
+        RatchetError::MalformedState,
+        "truncated"
+    );
+    assert_eq!(
+        RatchetState::from_bytes(&[]).unwrap_err(),
+        RatchetError::MalformedState,
+        "empty"
+    );
+
+    let mut newer = good.clone();
+    newer[0] = STATE_V + 1;
+    assert_eq!(
+        RatchetState::from_bytes(&newer).unwrap_err(),
+        RatchetError::MalformedState,
+        "a newer build's format"
+    );
+
+    let mut bad_flag = good.clone();
+    bad_flag[1 + SESSION_ID_LEN + KEY_LEN + KEY_LEN] = 2; // dh_peer presence flag
+    assert_eq!(
+        RatchetState::from_bytes(&bad_flag).unwrap_err(),
+        RatchetError::MalformedState,
+        "invalid presence flag"
+    );
+}
+
+#[test]
+fn a_replayed_snapshot_cannot_re_derive_a_used_key_at_the_receiver() {
+    // The persistence failure mode that matters: an attacker, or a careless restore-from-backup,
+    // rolls the state file back. The schedule cannot stop the SENDER re-deriving — that is why §6
+    // excludes the store from backups and §4.2 mandates persist-before-publish — but the RECEIVER
+    // must refuse the rewound positions, so the damage stops at the sender.
+    let (mut a, _ka, mut b, mut kb) = pair();
+    let snapshot = a.to_bytes();
+
+    let first = a.next_send().unwrap();
+    let first_key = bytes(first.key);
+    drop(b.accept(&first.header, 0, W, &mut kb).unwrap());
+
+    let mut rolled_back = RatchetState::from_bytes(&snapshot).unwrap();
+    let reused = rolled_back.next_send().unwrap();
+    assert_eq!(
+        bytes(reused.key),
+        first_key,
+        "a rolled-back sender does re-derive — this is the risk §6 addresses"
+    );
+    assert_eq!(
+        b.accept(&reused.header, 0, W, &mut kb).unwrap_err(),
+        RatchetError::NotAhead
+    );
 }

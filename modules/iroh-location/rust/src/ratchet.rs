@@ -99,7 +99,26 @@ pub enum RatchetError {
     /// The sending chain has run to the end of its counter space.
     #[error("sending chain exhausted")]
     ChainExhausted,
+    /// Persisted state is truncated, or carries a version this build does not understand.
+    #[error("persisted ratchet state is malformed or from a newer build")]
+    MalformedState,
 }
+
+/// Wire version of the persisted session blob. Bump on any layout change — a session that cannot
+/// be read is a desync, which §4.6 recovers by restarting the session, never by falling back.
+pub const STATE_V: u8 = 1;
+
+/// Size of a serialized session (see [`RatchetState::to_bytes`]).
+pub const STATE_LEN: usize = 1      // version
+    + SESSION_ID_LEN                // session_id
+    + KEY_LEN                       // rk
+    + KEY_LEN                       // dh_self
+    + 1 + KEY_LEN                   // dh_peer (present flag + key)
+    + 1 + KEY_LEN                   // cks
+    + 1 + KEY_LEN                   // ckr
+    + 4 * 3                         // ns, nr, pn
+    + 4 * 2                         // send_epoch, recv_epoch
+    + 8; // peer_advanced_ms
 
 /// A **single-use** message key.
 ///
@@ -493,6 +512,138 @@ impl RatchetState {
         self.ckr = Some(next);
         self.nr = target.saturating_add(1);
         Ok(MessageKey(mk))
+    }
+}
+
+// ── persistence ───────────────────────────────────────────────────────────────────────────────
+
+/// Append a `[u8; KEY_LEN]` preceded by a presence flag.
+fn put_opt_key(out: &mut Vec<u8>, key: Option<&[u8; KEY_LEN]>) {
+    match key {
+        Some(k) => {
+            out.push(1);
+            out.extend_from_slice(k);
+        }
+        None => {
+            out.push(0);
+            out.extend_from_slice(&[0u8; KEY_LEN]);
+        }
+    }
+}
+
+/// Read a presence-flagged key, advancing `at`.
+fn take_opt_key(bytes: &[u8], at: &mut usize) -> Result<Option<[u8; KEY_LEN]>, RatchetError> {
+    let present = *bytes.get(*at).ok_or(RatchetError::MalformedState)?;
+    *at += 1;
+    let raw = take_key(bytes, at)?;
+    match present {
+        0 => Ok(None),
+        1 => Ok(Some(raw)),
+        _ => Err(RatchetError::MalformedState),
+    }
+}
+
+fn take_key(bytes: &[u8], at: &mut usize) -> Result<[u8; KEY_LEN], RatchetError> {
+    let end = *at + KEY_LEN;
+    let slice = bytes.get(*at..end).ok_or(RatchetError::MalformedState)?;
+    let mut out = [0u8; KEY_LEN];
+    out.copy_from_slice(slice);
+    *at = end;
+    Ok(out)
+}
+
+fn take_u32(bytes: &[u8], at: &mut usize) -> Result<u32, RatchetError> {
+    let end = *at + 4;
+    let slice = bytes.get(*at..end).ok_or(RatchetError::MalformedState)?;
+    let out = u32::from_le_bytes(slice.try_into().map_err(|_| RatchetError::MalformedState)?);
+    *at = end;
+    Ok(out)
+}
+
+fn take_u64(bytes: &[u8], at: &mut usize) -> Result<u64, RatchetError> {
+    let end = *at + 8;
+    let slice = bytes.get(*at..end).ok_or(RatchetError::MalformedState)?;
+    let out = u64::from_le_bytes(slice.try_into().map_err(|_| RatchetError::MalformedState)?);
+    *at = end;
+    Ok(out)
+}
+
+impl RatchetState {
+    /// Serialize the session to a fixed [`STATE_LEN`] blob, little-endian.
+    ///
+    /// Hand-written rather than derived, and deliberately so: a `Serialize` impl on this type
+    /// would make it trivial for unrelated code to write chain keys into a log line, a telemetry
+    /// attribute, or a debug dump. The only way these bytes leave the type is this method, whose
+    /// single caller should be the encrypted store.
+    ///
+    /// **The output is secret key material.** It must be encrypted at rest and written with the
+    /// persist-before-publish discipline in §4.2 — a silent persist failure *is* key reuse.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(STATE_LEN);
+        out.push(STATE_V);
+        out.extend_from_slice(&self.session_id);
+        out.extend_from_slice(&self.rk);
+        out.extend_from_slice(&self.dh_self.to_bytes());
+        put_opt_key(&mut out, self.dh_peer.as_ref());
+        put_opt_key(&mut out, self.cks.as_ref());
+        put_opt_key(&mut out, self.ckr.as_ref());
+        out.extend_from_slice(&self.ns.to_le_bytes());
+        out.extend_from_slice(&self.nr.to_le_bytes());
+        out.extend_from_slice(&self.pn.to_le_bytes());
+        out.extend_from_slice(&self.send_epoch.to_le_bytes());
+        out.extend_from_slice(&self.recv_epoch.to_le_bytes());
+        out.extend_from_slice(&self.peer_advanced_ms.to_le_bytes());
+        debug_assert_eq!(out.len(), STATE_LEN);
+        out
+    }
+
+    /// Restore a session written by [`to_bytes`].
+    ///
+    /// A blob this build cannot parse is an error, never a silently fresh session: starting over
+    /// from a zero state would reuse counter values the peer has already seen, which is exactly
+    /// the key reuse the whole design exists to prevent. Callers surface it as a desync and run
+    /// the §4.6 resync instead.
+    ///
+    /// [`to_bytes`]: Self::to_bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, RatchetError> {
+        if bytes.len() != STATE_LEN || bytes[0] != STATE_V {
+            return Err(RatchetError::MalformedState);
+        }
+        let mut at = 1usize;
+
+        let session_id_slice = bytes
+            .get(at..at + SESSION_ID_LEN)
+            .ok_or(RatchetError::MalformedState)?;
+        let mut session_id = [0u8; SESSION_ID_LEN];
+        session_id.copy_from_slice(session_id_slice);
+        at += SESSION_ID_LEN;
+
+        let rk = take_key(bytes, &mut at)?;
+        let dh_self = XStaticSecret::from(take_key(bytes, &mut at)?);
+        let dh_peer = take_opt_key(bytes, &mut at)?;
+        let cks = take_opt_key(bytes, &mut at)?;
+        let ckr = take_opt_key(bytes, &mut at)?;
+        let ns = take_u32(bytes, &mut at)?;
+        let nr = take_u32(bytes, &mut at)?;
+        let pn = take_u32(bytes, &mut at)?;
+        let send_epoch = take_u32(bytes, &mut at)?;
+        let recv_epoch = take_u32(bytes, &mut at)?;
+        let peer_advanced_ms = take_u64(bytes, &mut at)?;
+
+        Ok(Self {
+            session_id,
+            rk,
+            dh_self,
+            dh_peer,
+            cks,
+            ckr,
+            ns,
+            nr,
+            pn,
+            send_epoch,
+            recv_epoch,
+            peer_advanced_ms,
+        })
     }
 }
 
