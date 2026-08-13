@@ -23,6 +23,10 @@ src/features/map/tiles/__fixtures__/
 # (tests/mesh_vectors.rs); reformatting it would make every regeneration a diff
 modules/iroh-location/rust/tests/fixtures/mesh_vectors.json
 
+# normative Double Ratchet schedule vectors — same deal (tests/ratchet_vectors.rs compares the
+# file byte-for-byte against the emitted string, so prettier touching it fails the suite)
+modules/iroh-location/rust/tests/fixtures/ratchet_vectors.json
+
 # Gradle build output from the Wi-Fi Aware spike (untracked, regenerated on every build)
 spike/*/*/build/
 spike/*/build/

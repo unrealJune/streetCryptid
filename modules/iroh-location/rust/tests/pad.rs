@@ -28,7 +28,11 @@ fn the_size_class_actually_fits_a_real_fix() {
     // added to LocationFix.
     let now = encoded(1_786_000_000_000);
     assert_eq!(now.len(), 38, "a present-day fix");
-    assert_eq!(encoded(4_102_444_800_000).len(), 38, "still 38 in the year 2100");
+    assert_eq!(
+        encoded(4_102_444_800_000).len(),
+        38,
+        "still 38 in the year 2100"
+    );
 
     // The absolute bound: a varint ts cannot exceed this however far the clock runs.
     let worst = encoded(u64::MAX);
@@ -39,7 +43,10 @@ fn the_size_class_actually_fits_a_real_fix() {
         worst.len()
     );
     // Headroom is deliberate: changing the class is a wire break.
-    assert!(MAX_PAYLOAD - worst.len() >= 16, "too little headroom for future fields");
+    assert!(
+        MAX_PAYLOAD - worst.len() >= 16,
+        "too little headroom for future fields"
+    );
 }
 
 #[test]
@@ -107,7 +114,10 @@ fn non_zero_padding_is_rejected() {
 fn a_malformed_frame_is_rejected() {
     let frame = pad::pad(b"hello").unwrap();
 
-    assert_eq!(pad::unpad(&frame[..PADDED_LEN - 1]).unwrap_err(), PadError::BadLength);
+    assert_eq!(
+        pad::unpad(&frame[..PADDED_LEN - 1]).unwrap_err(),
+        PadError::BadLength
+    );
     assert_eq!(pad::unpad(&[]).unwrap_err(), PadError::BadLength);
 
     let mut lying = frame.clone();

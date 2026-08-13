@@ -23,7 +23,7 @@
 use std::collections::HashSet;
 
 use iroh_location::ratchet::{
-    kdf_ck, kdf_kid, kdf_mk, kdf_rk, initiator_by_endpoint, MessageKey, RatchetError,
+    initiator_by_endpoint, kdf_ck, kdf_kid, kdf_mk, kdf_rk, MessageKey, RatchetError,
     RatchetHeader, RatchetKeySource, RatchetState, DEFAULT_ACCEPT_WINDOW, DEFAULT_T_LAPSE_MS,
     KEY_LEN, SESSION_ID_LEN, STATE_LEN, STATE_V,
 };
@@ -242,7 +242,10 @@ fn a_crash_after_persisting_burns_one_counter_and_recovers_locally() {
     assert_eq!(next.header.counter, 1, "exactly one counter value skipped");
 
     let expected = bytes(next.key);
-    assert_eq!(expected, bytes(b.accept(&next.header, 0, W, &mut kb).unwrap()));
+    assert_eq!(
+        expected,
+        bytes(b.accept(&next.header, 0, W, &mut kb).unwrap())
+    );
 }
 
 // ── the two invariants step 6 names ───────────────────────────────────────────────────────────
@@ -375,7 +378,10 @@ fn a_receiver_finds_its_wrap_by_scanning_kids_forward() {
 
     // Peeking is non-mutating: the state is still where it was, and the wrap still opens.
     let expected = bytes(live.key);
-    assert_eq!(expected, bytes(b.accept(&live.header, 0, W, &mut kb).unwrap()));
+    assert_eq!(
+        expected,
+        bytes(b.accept(&live.header, 0, W, &mut kb).unwrap())
+    );
 }
 
 #[test]
@@ -384,7 +390,10 @@ fn kids_do_not_repeat_across_positions() {
     let (mut a, _ka, _b, _kb) = pair();
     let mut seen = HashSet::new();
     for _ in 0..64 {
-        assert!(seen.insert(a.next_send().unwrap().kid), "a wrap id repeated");
+        assert!(
+            seen.insert(a.next_send().unwrap().kid),
+            "a wrap id repeated"
+        );
     }
 }
 
@@ -393,8 +402,7 @@ fn kids_do_not_repeat_across_positions() {
 #[test]
 fn a_low_order_peer_key_is_refused() {
     let mut ka = FixedKeys::new(0xA0);
-    let err =
-        RatchetState::bootstrap_initiator(SID, RK0, [0u8; KEY_LEN], 0, &mut ka).unwrap_err();
+    let err = RatchetState::bootstrap_initiator(SID, RK0, [0u8; KEY_LEN], 0, &mut ka).unwrap_err();
     assert_eq!(err, RatchetError::DegenerateKey);
 }
 
@@ -422,7 +430,10 @@ fn a_restored_session_continues_the_same_schedule() {
     // Field equality is not the property that matters; producing the SAME NEXT KEY is. A restore
     // that silently diverged would reuse counter values against a peer that had moved on.
     let (mut a, _ka, mut b, mut kb) = pair();
-    drop(b.accept(&a.next_send().unwrap().header, 0, W, &mut kb).unwrap());
+    drop(
+        b.accept(&a.next_send().unwrap().header, 0, W, &mut kb)
+            .unwrap(),
+    );
 
     let saved = a.to_bytes();
     let expected = a.next_send().unwrap();
@@ -438,12 +449,18 @@ fn a_restored_session_continues_the_same_schedule() {
 #[test]
 fn a_restored_session_still_opens_what_the_peer_sends() {
     let (mut a, mut ka, mut b, mut kb) = pair();
-    drop(b.accept(&a.next_send().unwrap().header, 0, W, &mut kb).unwrap());
+    drop(
+        b.accept(&a.next_send().unwrap().header, 0, W, &mut kb)
+            .unwrap(),
+    );
 
     let mut a = RatchetState::from_bytes(&a.to_bytes()).unwrap();
     let reply = b.next_send().unwrap();
     let expected = bytes(reply.key);
-    assert_eq!(expected, bytes(a.accept(&reply.header, 0, W, &mut ka).unwrap()));
+    assert_eq!(
+        expected,
+        bytes(a.accept(&reply.header, 0, W, &mut ka).unwrap())
+    );
 }
 
 #[test]
@@ -451,7 +468,10 @@ fn the_serialized_state_is_a_fixed_small_size() {
     // §4.2 budgets ~200 B per friend per session.
     let (a, _ka, _b, _kb) = pair();
     assert_eq!(a.to_bytes().len(), STATE_LEN);
-    assert!(STATE_LEN <= 256, "session state grew past its budget: {STATE_LEN}");
+    assert!(
+        STATE_LEN <= 256,
+        "session state grew past its budget: {STATE_LEN}"
+    );
 }
 
 #[test]
@@ -459,7 +479,10 @@ fn a_responder_with_no_chains_round_trips() {
     // The bootstrap state has three absent keys; the presence flags must survive it.
     let (_a, _ka, b, _kb) = pair();
     let mut restored = RatchetState::from_bytes(&b.to_bytes()).unwrap();
-    assert_eq!(restored.next_send().unwrap_err(), RatchetError::NoSendingChain);
+    assert_eq!(
+        restored.next_send().unwrap_err(),
+        RatchetError::NoSendingChain
+    );
 }
 
 #[test]

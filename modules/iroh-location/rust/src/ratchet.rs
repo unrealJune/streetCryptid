@@ -136,7 +136,6 @@ impl MessageKey {
         self.0.zeroize();
         out
     }
-
 }
 
 impl Drop for MessageKey {
@@ -648,7 +647,10 @@ impl RatchetState {
 }
 
 /// X25519, refusing a low-order peer key so the shared secret cannot be forced to a known value.
-fn dh_or_err(secret: &XStaticSecret, peer_pub: &[u8; KEY_LEN]) -> Result<[u8; KEY_LEN], RatchetError> {
+fn dh_or_err(
+    secret: &XStaticSecret,
+    peer_pub: &[u8; KEY_LEN],
+) -> Result<[u8; KEY_LEN], RatchetError> {
     let shared = secret.diffie_hellman(&XPublicKey::from(*peer_pub));
     if !shared.was_contributory() {
         return Err(RatchetError::DegenerateKey);

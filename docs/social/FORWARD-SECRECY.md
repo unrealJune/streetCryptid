@@ -27,13 +27,13 @@ with that device.
 
 In scope:
 
-1. **Past traffic is unrecoverable.** An adversary holding the archive *and* every key
+1. **Past traffic is unrecoverable.** An adversary holding the archive _and_ every key
    present on a seized device can decrypt no fix older than a bounded, small window.
 2. **No plaintext history at rest.** Received location history is not retained on device.
 3. **No ciphertext archive.** The stash holds the last thing it received, and that is
    structurally true rather than true-by-query.
 
-"Unrecoverable" and "not retained" are claims about *erasure*, not just deletion — SQLite
+"Unrecoverable" and "not retained" are claims about _erasure_, not just deletion — SQLite
 and flash storage keep deleted data recoverable by default. §5.4 bounds the gap; the
 honest form of claim 1 is "no fix older than the last erasure pass," which §5.4 keeps
 small, not zero.
@@ -51,33 +51,33 @@ recipient's wrap; `crypto.rs` re-keys `K` per fix, so no wrap means no access).
   holds B's identity key and ratchet state and can keep the session healthy
   indistinguishably from B, receiving A's ongoing location. No ratchet fixes this — the
   adversary simply continues it — and PCS would not either. The only cutoff is A revoking,
-  which requires A to *learn* of the seizure. The lapse window (§4.5) at least forces the
+  which requires A to _learn_ of the seizure. The lapse window (§4.5) at least forces the
   adversary to actively emit signed envelopes on B's cadence, which is observable evidence
   and a legal/opsec cost, but it is not prevention. This is a disclosure item, not a
   design item.
 - **Metadata is not protected from the stash.** The stash operator sees each author's
   publish cadence, envelope sizes, and recipient count. Revision 1 was worse: today's wrap
-  `kid` is a *stable* hash of the recipient's receiving key (`crypto.rs:87` [verified]),
-  so the archive clusters recipient sets *across authors* — a shared-friend-graph leak.
+  `kid` is a _stable_ hash of the recipient's receiving key (`crypto.rs:87` [verified]),
+  so the archive clusters recipient sets _across authors_ — a shared-friend-graph leak.
   §4.7's rotating kids close that. Padded null fixes (§4.1) make watchers and sharers
   indistinguishable. Full traffic-analysis resistance remains a non-goal.
 
 Non-goals this phase: multi-device identity, mesh-path forward secrecy (see §8), and
-protection of the user's *own* trail beyond a retention cap (§5.3).
+protection of the user's _own_ trail beyond a retention cap (§5.3).
 
 ## 2. What exists today
 
-| Property | State | Evidence |
-| --- | --- | --- |
-| Payload crypto | ChaCha20-Poly1305 under a fresh random `K` per fix | `crypto.rs:145` |
-| Key wrap | HPKE base mode, `DhKemX25519HkdfSha256`, per recipient | `crypto.rs:172` |
-| Sender-side FS | **Holds.** HPKE discards the ephemeral; `K` is random and dropped | `crypto.rs:146` |
-| Receiver-side FS | **None.** `recvSecret` is long-term and has no rotation path | `secure-keys.ts:33` |
-| Wrap recipient id | Stable `blake3(recvPub)[..8]` — linkable across envelopes and authors | `crypto.rs:87` |
-| Local history | Every friend's fixes as plaintext JSON, never pruned | `persistence.ts:137`, `prune()` at `:199` is dead code |
-| Archive | Stash retains indefinitely; no TTL | no retention config in tree |
-| Envelope `epoch` | Overloaded: `0` on the docs path, mesh 15-min epoch via `mesh_seal_fix` | `location-sharing.ts:1243`, `lib.rs:412` |
-| Key persistence | Best-effort, silently swallows failures | `secure-keys.ts:35`, `state-store.ts:27` |
+| Property          | State                                                                   | Evidence                                               |
+| ----------------- | ----------------------------------------------------------------------- | ------------------------------------------------------ |
+| Payload crypto    | ChaCha20-Poly1305 under a fresh random `K` per fix                      | `crypto.rs:145`                                        |
+| Key wrap          | HPKE base mode, `DhKemX25519HkdfSha256`, per recipient                  | `crypto.rs:172`                                        |
+| Sender-side FS    | **Holds.** HPKE discards the ephemeral; `K` is random and dropped       | `crypto.rs:146`                                        |
+| Receiver-side FS  | **None.** `recvSecret` is long-term and has no rotation path            | `secure-keys.ts:33`                                    |
+| Wrap recipient id | Stable `blake3(recvPub)[..8]` — linkable across envelopes and authors   | `crypto.rs:87`                                         |
+| Local history     | Every friend's fixes as plaintext JSON, never pruned                    | `persistence.ts:137`, `prune()` at `:199` is dead code |
+| Archive           | Stash retains indefinitely; no TTL                                      | no retention config in tree                            |
+| Envelope `epoch`  | Overloaded: `0` on the docs path, mesh 15-min epoch via `mesh_seal_fix` | `location-sharing.ts:1243`, `lib.rs:412`               |
+| Key persistence   | Best-effort, silently swallows failures                                 | `secure-keys.ts:35`, `state-store.ts:27`               |
 
 The gap is precise and one-directional: **the static `recvSecret` versus the archive of
 envelopes wrapped to it.** Sender-side FS already holds and needs no work.
@@ -102,7 +102,7 @@ There are exactly two ways to obtain the ephemeral contribution:
 - **Prepublished one-time prekeys** — receiver publishes a batch, sender consumes one,
   receiver deletes the private after opening. Requires no liveness.
 
-This design takes the first path and *manufactures* the bidirectionality (§4.1).
+This design takes the first path and _manufactures_ the bidirectionality (§4.1).
 
 ## 4. Design
 
@@ -113,7 +113,7 @@ watcher publishes **null fixes** — ordinary envelopes whose plaintext is an em
 on the same cadence a sharer publishes real ones. There is no standalone ack message and
 no separate ack state machine.
 
-The ratchet header (the sender's current ratchet public key, §4.7) rides *inside* every
+The ratchet header (the sender's current ratchet public key, §4.7) rides _inside_ every
 signed envelope. This buys three things at once:
 
 1. **Authentication and replay protection for free.** The ratchet material inherits the
@@ -135,7 +135,7 @@ The key schedule is the **Double Ratchet**
 ([Signal spec](https://signal.org/docs/specifications/doubleratchet/), normative for the
 schedule), with one deliberate delta: **there is no skipped-message key storage.** Under
 LWW there is no history to catch up on — a receiver that is behind fast-forwards its
-receiving chain to the message's position, uses that one key, and *deletes* every
+receiving chain to the message's position, uses that one key, and _deletes_ every
 intermediate chain key it stepped past. Skipped messages are gone, by design. This keeps
 §9's objection to the skipped-key table (a stored key index into the archive) fully
 intact while inheriting the DR schedule's published security analysis.
@@ -164,8 +164,8 @@ symmetric step (every message sent or accepted):
   state (epoch, then counter); everything else — including a byte-identical replay from
   the archive — is dropped before any state mutation. Signature verification precedes
   state mutation, preserving the `crypto.rs:225` ordering.
-- **Persist-before-publish.** Hold the state lock across *load → derive → persist →
-  seal → publish*, persisting the advanced state **before** the doc write. A crash then
+- **Persist-before-publish.** Hold the state lock across _load → derive → persist →
+  seal → publish_, persisting the advanced state **before** the doc write. A crash then
   burns one counter value instead of reusing a key — and because the sending chain can
   step symmetrically, recovery is local: the next publish uses the next counter. No
   peer round-trip, no deadlock. (Revision 1's strict gate turned this same crash into a
@@ -173,7 +173,7 @@ symmetric step (every message sent or accepted):
 - **Persistence is fail-stop.** If ratchet state cannot be persisted, publishing stops.
   The current best-effort/silent-catch pattern (`secure-keys.ts:35`, `state-store.ts:27`
   [verified]) is fine for a static key and fatal for sequential state — a silent persist
-  no-op *is* key reuse.
+  no-op _is_ key reuse.
 - **The single-writer lock must be structural, not behavioral.** `self.inner.lock()` is
   in-process only. The headless-vs-foreground node races that were fixed by discipline
   would, with sequential state, cause key reuse rather than a clobber. Before §7 step 6
@@ -192,7 +192,7 @@ Bootstrap is the §4.6 resync primitive run over the pairing connection during t
 in-person SAS bump: fresh ephemerals from both sides, identity-signed, mixed into `RK₀`.
 The window of statically-recomputable messages is zero.
 
-**Do not trigger the DH ratchet on `NeighborUp`.** The gossip topic is per *author*
+**Do not trigger the DH ratchet on `NeighborUp`.** The gossip topic is per _author_
 (`lib.rs:202`), so its neighbours are the whole pool; a neighbour coming up may be C, not
 B. The trigger is a signed envelope from B carrying a new ratchet pub. `NeighborUp` is
 only a hint that publishing is worthwhile.
@@ -202,17 +202,17 @@ only a hint that publishing is worthwhile.
 The transport split already exists (`ARCHITECTURE.md:139`): gossip for live, docs for
 durable.
 
-| | Cold | Hot |
-| --- | --- | --- |
-| Transport | docs / stash, LWW | gossip, peer connected |
-| Cadence | 5 min (`sampling-policy.ts:41`) | 4 s floor |
+|                  | Cold                                               | Hot                      |
+| ---------------- | -------------------------------------------------- | ------------------------ |
+| Transport        | docs / stash, LWW                                  | gossip, peer connected   |
+| Cadence          | 5 min (`sampling-policy.ts:41`)                    | 4 s floor                |
 | Ratchet material | header on every envelope (null fixes for watchers) | header on every envelope |
-| DH epoch advance | ~each publish interval (peer's next envelope) | continuous |
-| Publish gate | none — never blocked on a round-trip | none |
+| DH epoch advance | ~each publish interval (peer's next envelope)      | continuous               |
+| Publish gate     | none — never blocked on a round-trip               | none                     |
 
 Mutual sharers pay nothing extra. Watchers pay one padded null envelope per cold interval.
-Because the sending chain steps symmetrically between DH epochs, staleness of the *peer's*
-device never blocks the *sender's* publish — the failure mode of revision 1's hard gate —
+Because the sending chain steps symmetrically between DH epochs, staleness of the _peer's_
+device never blocks the _sender's_ publish — the failure mode of revision 1's hard gate —
 and B's view of A degrades only after T_lapse, surfaced through the existing
 `PresenceFreshness` vocabulary (`presence.ts:6`, `live | recent | stale | unknown`).
 
@@ -228,7 +228,7 @@ decrypted from the network, bounded by §5.3.
 
 ### 4.5 Wrap set
 
-The wrap set is *recipients who are neither revoked nor lapsed* (no fresh ratchet pub
+The wrap set is _recipients who are neither revoked nor lapsed_ (no fresh ratchet pub
 within T_lapse, §4.2). A lapsed recipient is structurally identical to a revoked one until
 they check back in, so this reuses revocation's mechanism rather than adding one. One
 envelope, N wraps, unchanged in shape.
@@ -298,8 +298,8 @@ Crypto is the smaller half of this work. Four surfaces retain data independently
 
 ### 5.1 Superseded doc versions [verified]
 
-`docs.rs:409` states it outright: *"the control key is overwritten in place, so superseded
-versions still exist in the replica."* That is why `single_latest_per_key` is load-bearing
+`docs.rs:409` states it outright: _"the control key is overwritten in place, so superseded
+versions still exist in the replica."_ That is why `single_latest_per_key` is load-bearing
 for control messages. **LWW keying alone therefore does not empty the archive** — it
 produces a stash that reads as "last thing received" while still holding every prior
 version under a different query. Superseded entries need explicit removal, on device and on
@@ -380,11 +380,11 @@ legitimate landing spot; steps 6–7 are the ratchet proper, gated separately.
 **0. Backup + keychain semantics.** Set
 `keychainAccessible: AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY` on all three `setItemAsync`
 calls (`secure-keys.ts:33`, `:34`, `state-store.ts:26`). Add Android
-`dataExtractionRules` (cloud backup *and* device transfer) excluding the secure-store
+`dataExtractionRules` (cloud backup _and_ device transfer) excluding the secure-store
 prefs, the app databases, and the iroh data directory; exclude the iroh data directory
 from iOS backup (`NSURLIsExcludedFromBackupKey`, via config plugin). Make sequential-state
 persistence fail-stop (§4.2) — the silent catches stay only for the static identity keys.
-*Test:* unit assertion on the options object; a persistence-failure test asserting publish
+_Test:_ unit assertion on the options object; a persistence-failure test asserting publish
 aborts; manual restore-from-backup check that neither keys nor node state survive to a new
 device.
 
@@ -395,28 +395,28 @@ TS: delete `history.ts` + tests, `FriendHistoryIsland`, `backfill-task.ts`,
 `MAX_BACKFILL_MS`, friend breadcrumbs (`map-screen-body.tsx:122`). Keep the `SELF_AUTHOR`
 path (`:174`). Refactor `presence.ts:65` from "join trail authors" to "latest fix per
 friend".
-*Test:* existing social suites minus deleted ones; new assertion that a second publish
+_Test:_ existing social suites minus deleted ones; new assertion that a second publish
 leaves exactly one readable entry per author.
 
 **2. Retention surfaces + erasure hygiene.** Resolve both **[MUST VERIFY]** items in
 §5.1/§5.2, then reclaim superseded entries and blobs on device and stash. Enable
 `secure_delete`, WAL truncation, and incremental vacuum per §5.4.
-*Test:* publish N fixes, assert on-disk blob count and doc-entry count stay O(1); assert a
+_Test:_ publish N fixes, assert on-disk blob count and doc-entry count stay O(1); assert a
 prior-version query returns nothing; assert the pragmas are set on every connection.
 
 **3. Self-trail TTL.** Wire `prune()` to a user-visible retention setting, on the same
 tick as the vacuum.
-*Test:* `prune()` call-site coverage; assert rows older than the TTL are gone after a tick.
+_Test:_ `prune()` call-site coverage; assert rows older than the TTL are gone after a tick.
 
 **4. Epoch split.** Separate the envelope key epoch from the mesh 15-min epoch before
 `mesh_vectors.json` is treated as frozen. With v3 the docs-path key epoch is the per-wrap
 `i` (§4.7); the envelope-level field is mesh-only.
-*Test:* mesh vectors still reproduce; docs-path envelopes carry the per-wrap epoch.
+_Test:_ mesh vectors still reproduce; docs-path envelopes carry the per-wrap epoch.
 
 **5. Symmetric lanes.** Null-fix publishing for watcher edges, payload padding to the
 chosen size class, on the existing v2 crypto. This is independent of the ratchet and
 de-risks it.
-*Test:* a watcher edge publishes on cadence; ciphertext length is constant across null
+_Test:_ a watcher edge publishes on cadence; ciphertext length is constant across null
 and real fixes; presence updates flow to the watched side.
 
 **6. The ratchet (envelope v3).** DR schedule per §4.2, wire format per §4.7, state
@@ -424,14 +424,14 @@ per friend per session (~200 B) in the encrypted Rust-side store. Single-writer
 discipline per §4.2, including the structural/cross-process guard. Signature
 verification before any state mutation, preserving the `crypto.rs:225` ordering.
 
-The implementation must satisfy the **sender-liveness invariant**: *from any persisted
-sender state short of lapse, the next publish derives without peer input.* This is the
+The implementation must satisfy the **sender-liveness invariant**: _from any persisted
+sender state short of lapse, the next publish derives without peer input._ This is the
 property that kills the revision-1 deadlock — recovery from a burned key is a local
 symmetric step on the sending chain, never a round-trip — and it is what makes
 persist-before-publish safe to mandate. Any future change that reintroduces a "waiting
 on the peer to publish" state (a hard gate, a per-fix ack requirement, a consumed-key
 retry) violates it and must be rejected in review.
-*Test:* the published DR test vectors against the schedule; a property test of the
+_Test:_ the published DR test vectors against the schedule; a property test of the
 sender-liveness invariant (for every reachable persisted state below the lapse bound,
 `next_publish()` succeeds with no peer message consumed); an explicit state-machine
 suite covering message loss, reordering, replay-from-archive, crash-between-persist-and-
@@ -443,7 +443,7 @@ window; a global assertion that no `MK` is ever derived twice.
 **7. Resync + bootstrap.** The §4.6 primitive, used for both the SAS-bump bootstrap and
 desync recovery; desync detection; `sc.resync` telemetry; the re-pair prompt on resync
 loops.
-*Test:* forced state loss on one side converges to a working new session; a replayed old
+_Test:_ forced state loss on one side converges to a working new session; a replayed old
 resync record is rejected; grep-level assertion that no session root derives from
 static-static DH alone.
 
@@ -461,24 +461,24 @@ with far fewer ways to be silently wrong.
    keys. The festival mesh either accepts weaker FS or keeps a prekey mechanism for that
    path alone. One mitigating observation: if mailbox capsule TTL is actually enforced,
    the mesh's archive surface is structurally far smaller than the stash's was, which may
-   make "weaker FS, short TTL" a defensible *deliberate* answer. Decide deliberately; do
+   make "weaker FS, short TTL" a defensible _deliberate_ answer. Decide deliberately; do
    not let it be settled by omission.
 2. **iroh-docs purge semantics** (§5.1) — gates the shape of step 2.
 3. **iroh-blobs default retention** (§5.2).
 4. **Tuning:** T_lapse default (24 h?), the padding size class, R (desync threshold), and
-   the UX copy distinguishing *stale* / *hasn't checked in* / *revoked*.
+   the UX copy distinguishing _stale_ / _hasn't checked in_ / _revoked_.
 5. **trail-stash server** needs the matching LWW + retention change; it is not in this
    tree. It is ciphertext-blind and stays so; rotating kids additionally stop it from
    clustering recipients.
 
 ## 9. Rejected alternatives
 
-| Option | Why not |
-| --- | --- |
-| Recv-key rotation ring | Floors at a ~1-week window: a friend offline a week still wraps to the week-old `recvPub`, so the secret must be retained. `K × period ≥ max offline gap` is a product requirement, not a crypto one. |
-| Symmetric chain from the pairing DH | **No FS at all.** Static-static root is recomputable from surviving long-term keys (§3). |
-| Prepublished one-time prekeys | Correct, but the symmetric lanes deliver the ephemeral contribution continuously with no batch, exhaustion, or fallback machinery. Survives as a candidate for the mesh path only (§8.1). |
-| **Strict one-fix-per-ack gate** (revision 1 of this document) | Deadlocks: a crash after persisting a consumed ack leaves the sender needing an ack the watcher believes it already gave — the retry is a replay and must be rejected. Fixing that needs either a retained multi-key set on the acker or symmetric chain steps; the latter also decouples publish availability from ack round-trips, so the hard gate buys nothing the bounded chain doesn't. |
-| **Standalone ack messages** (revision 1) | A second, unauthenticated-by-default message lane and state machine whose replay/ordering rules had to be specified from scratch. Superseded by riding the ratchet header inside the already-signed envelope (§4.1). |
-| Skipped-message key **storage** (full DR as deployed by messengers) | Unnecessary under LWW — there is no history to catch up on — and against an archive-holding adversary it is actively harmful, being a stored key index into the archive. The DR *schedule* is adopted (§4.2); only the table is rejected: skipped keys are deleted, not stored. |
-| MLS-style group epochs | Membership here is per-author and asymmetric, and offline members reintroduce retained epoch secrets. Large lift, little gain over the above. |
+| Option                                                              | Why not                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Recv-key rotation ring                                              | Floors at a ~1-week window: a friend offline a week still wraps to the week-old `recvPub`, so the secret must be retained. `K × period ≥ max offline gap` is a product requirement, not a crypto one.                                                                                                                                                                                         |
+| Symmetric chain from the pairing DH                                 | **No FS at all.** Static-static root is recomputable from surviving long-term keys (§3).                                                                                                                                                                                                                                                                                                      |
+| Prepublished one-time prekeys                                       | Correct, but the symmetric lanes deliver the ephemeral contribution continuously with no batch, exhaustion, or fallback machinery. Survives as a candidate for the mesh path only (§8.1).                                                                                                                                                                                                     |
+| **Strict one-fix-per-ack gate** (revision 1 of this document)       | Deadlocks: a crash after persisting a consumed ack leaves the sender needing an ack the watcher believes it already gave — the retry is a replay and must be rejected. Fixing that needs either a retained multi-key set on the acker or symmetric chain steps; the latter also decouples publish availability from ack round-trips, so the hard gate buys nothing the bounded chain doesn't. |
+| **Standalone ack messages** (revision 1)                            | A second, unauthenticated-by-default message lane and state machine whose replay/ordering rules had to be specified from scratch. Superseded by riding the ratchet header inside the already-signed envelope (§4.1).                                                                                                                                                                          |
+| Skipped-message key **storage** (full DR as deployed by messengers) | Unnecessary under LWW — there is no history to catch up on — and against an archive-holding adversary it is actively harmful, being a stored key index into the archive. The DR _schedule_ is adopted (§4.2); only the table is rejected: skipped keys are deleted, not stored.                                                                                                               |
+| MLS-style group epochs                                              | Membership here is per-author and asymmetric, and offline members reintroduce retained epoch secrets. Large lift, little gain over the above.                                                                                                                                                                                                                                                 |

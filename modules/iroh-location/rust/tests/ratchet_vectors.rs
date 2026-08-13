@@ -78,17 +78,18 @@ fn transcript() -> Vec<Step> {
     let w = DEFAULT_ACCEPT_WINDOW;
 
     let mut out = Vec::new();
-    let mut record = |label, slot: iroh_location::ratchet::SendSlot| -> iroh_location::ratchet::RatchetHeader {
-        let header = slot.header;
-        out.push(Step {
-            label,
-            epoch: header.epoch,
-            counter: header.counter,
-            kid: hex_encode(&slot.kid),
-            mk: key_hex(slot.key),
-        });
-        header
-    };
+    let mut record =
+        |label, slot: iroh_location::ratchet::SendSlot| -> iroh_location::ratchet::RatchetHeader {
+            let header = slot.header;
+            out.push(Step {
+                label,
+                epoch: header.epoch,
+                counter: header.counter,
+                kid: hex_encode(&slot.kid),
+                mk: key_hex(slot.key),
+            });
+            header
+        };
 
     // A sends three; the first two never arrive.
     let _lost_0 = record("a_send_0_lost", a.next_send().unwrap());
@@ -150,7 +151,8 @@ fn fixture_json() -> String {
 #[test]
 fn schedule_matches_the_frozen_fixture() {
     let expected = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ratchet_vectors.json"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/ratchet_vectors.json"),
     )
     .expect("fixture is missing — regenerate it (see this file's module docs)");
 
@@ -179,7 +181,11 @@ fn the_transcript_actually_exercises_a_skip_and_a_ratchet() {
     keys.sort();
     let before = keys.len();
     keys.dedup();
-    assert_eq!(before, keys.len(), "a message key repeated inside the transcript");
+    assert_eq!(
+        before,
+        keys.len(),
+        "a message key repeated inside the transcript"
+    );
 }
 
 #[test]
