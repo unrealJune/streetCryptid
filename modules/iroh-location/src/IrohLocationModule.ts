@@ -42,7 +42,6 @@ export declare class IrohLocationNativeModule
   publish(
     subscriptionId: string,
     seq: number,
-    epoch: number,
     fix: NativeLocationFix,
     recipientsHex: string[],
     traceparent?: string | null
@@ -51,7 +50,6 @@ export declare class IrohLocationNativeModule
   docsWrite(
     subscriptionId: string,
     seq: number,
-    epoch: number,
     fix: NativeLocationFix,
     recipientsHex: string[],
     traceparent?: string | null

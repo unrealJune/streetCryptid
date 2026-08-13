@@ -46,7 +46,7 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
         ts: 1234,
     };
     author
-        .docs_write("test".into(), 1, 0, fix, vec![phone.recv_public()])
+        .docs_write("test".into(), 1, fix, vec![phone.recv_public()])
         .await
         .expect("author writes encrypted trail fix");
     let trail_ticket = author.doc_ticket().await.expect("author trail ticket");

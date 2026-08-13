@@ -356,15 +356,15 @@ public final class IrohLocationModule: Module {
     }
 
     AsyncFunction("publish") {
-      (subscriptionId: String, seq: Double, epoch: Double, fix: [String: Double], recipients: [String], traceparent: String?) async throws in
+      (subscriptionId: String, seq: Double, fix: [String: Double], recipients: [String], traceparent: String?) async throws in
       guard let sub = self.subscriptions[subscriptionId] else { return }
       if let traceparent {
         try await sub.publishTraced(
-          seq: UInt64(seq), epoch: UInt32(epoch), fix: locationFix(from: fix),
+          seq: UInt64(seq), fix: locationFix(from: fix),
           recipients: recipients.map(hexToData), traceparent: traceparent)
       } else {
         try await sub.publish(
-          seq: UInt64(seq), epoch: UInt32(epoch), fix: locationFix(from: fix),
+          seq: UInt64(seq), fix: locationFix(from: fix),
           recipients: recipients.map(hexToData))
       }
     }
@@ -377,16 +377,16 @@ public final class IrohLocationModule: Module {
     // ── Durable trail (iroh-docs) — see docs/social/ARCHITECTURE.md §5–6 ──────────────────
 
     AsyncFunction("docsWrite") {
-      (subscriptionId: String, seq: Double, epoch: Double, fix: [String: Double], recipients: [String], traceparent: String?) async throws in
+      (subscriptionId: String, seq: Double, fix: [String: Double], recipients: [String], traceparent: String?) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       if let traceparent {
         try await node.docsWriteTraced(
-          subscriptionId: subscriptionId, seq: UInt64(seq), epoch: UInt32(epoch),
+          subscriptionId: subscriptionId, seq: UInt64(seq),
           fix: locationFix(from: fix), recipients: recipients.map(hexToData),
           traceparent: traceparent)
       } else {
         try await node.docsWrite(
-          subscriptionId: subscriptionId, seq: UInt64(seq), epoch: UInt32(epoch),
+          subscriptionId: subscriptionId, seq: UInt64(seq),
           fix: locationFix(from: fix), recipients: recipients.map(hexToData))
       }
     }

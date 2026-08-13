@@ -286,9 +286,11 @@ describe('LocationSharingService — durable trail wiring', () => {
 
     await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 }, parent);
 
-    const publishTraceparent = mockHolder.mod.calls.publish[0][5];
+    // Last argument, rather than a fixed index: the epoch parameter was removed from both calls
+    // when the mesh and docs epochs were split (FORWARD-SECRECY.md §7 step 4).
+    const publishTraceparent = mockHolder.mod.calls.publish[0].at(-1);
     expect(publishTraceparent).toMatch(new RegExp(`^00-${parent.traceId}-[0-9a-f]{16}-01$`));
-    expect(mockHolder.mod.calls.docsWrite[0][5]).toBe(publishTraceparent);
+    expect(mockHolder.mod.calls.docsWrite[0].at(-1)).toBe(publishTraceparent);
 
     await svc.syncTrail(0, parent);
 

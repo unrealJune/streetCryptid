@@ -353,7 +353,6 @@ export interface IrohLocationApi {
   publish(
     subscriptionId: string,
     seq: number,
-    epoch: number,
     fix: NativeLocationFix,
     recipientsHex: string[],
     traceparent?: string | null
@@ -371,7 +370,6 @@ export interface IrohLocationApi {
   docsWrite(
     subscriptionId: string,
     seq: number,
-    epoch: number,
     fix: NativeLocationFix,
     recipientsHex: string[],
     traceparent?: string | null

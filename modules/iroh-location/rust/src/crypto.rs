@@ -68,7 +68,14 @@ struct Envelope {
     author: Vec<u8>, // ed25519 EndpointId (32B)
     seq: u64,
     ts: u64,
-    epoch: u32,
+    /// **Mesh only.** The 15-minute capsule epoch (`mesh.rs`), bound into the AAD so an envelope
+    /// cannot be lifted out of one capsule epoch and replayed in another. The docs path has no
+    /// use for it and always writes [`DOCS_MESH_EPOCH`](crate::DOCS_MESH_EPOCH).
+    ///
+    /// **Do not repurpose this for the ratchet.** The docs-path key epoch is the per-wrap `i` in
+    /// the v3 ratchet header (FORWARD-SECRECY.md §4.7); reusing this field would re-merge the two
+    /// meanings that §7 step 4 exists to separate, and `mesh_vectors.json` pins its bytes.
+    mesh_epoch: u32,
     nonce: Vec<u8>, // RFC 8439 ChaCha20-Poly1305 nonce (12B)
     ct: Vec<u8>,    // ChaCha20-Poly1305 ciphertext of the payload
     wraps: Vec<Wrap>,
@@ -99,13 +106,13 @@ pub fn generate_recv_keypair() -> (Vec<u8>, Vec<u8>) {
 
 /// Bind the per-message context into both AEAD and HPKE as associated data so a wrap /
 /// ciphertext cannot be replayed under a different header.
-fn aad(version: u8, author: &[u8], seq: u64, ts: u64, epoch: u32) -> Vec<u8> {
+fn aad(version: u8, author: &[u8], seq: u64, ts: u64, mesh_epoch: u32) -> Vec<u8> {
     let mut a = Vec::with_capacity(author.len() + 21);
     a.push(version);
     a.extend_from_slice(author);
     a.extend_from_slice(&seq.to_le_bytes());
     a.extend_from_slice(&ts.to_le_bytes());
-    a.extend_from_slice(&epoch.to_le_bytes());
+    a.extend_from_slice(&mesh_epoch.to_le_bytes());
     a
 }
 
@@ -129,7 +136,7 @@ pub fn seal(
     author: &[u8],
     seq: u64,
     ts: u64,
-    epoch: u32,
+    mesh_epoch: u32,
     payload: &[u8],
     recipients: &[Vec<u8>],
 ) -> Result<Vec<u8>, CryptoError> {
@@ -147,7 +154,7 @@ pub fn seal(
     let mut nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
 
-    let ad = aad(ENVELOPE_V, author, seq, ts, epoch);
+    let ad = aad(ENVELOPE_V, author, seq, ts, mesh_epoch);
 
     // 1) encrypt the payload ONCE.
     let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| CryptoError::KeyLength)?;
@@ -191,7 +198,7 @@ pub fn seal(
         author: author.to_vec(),
         seq,
         ts,
-        epoch,
+        mesh_epoch,
         nonce: nonce.to_vec(),
         ct,
         wraps,
@@ -236,7 +243,7 @@ pub fn open(my_recv_secret: &[u8], envelope_bytes: &[u8]) -> Result<Opened, Cryp
         .find(|w| w.kid == my_kid)
         .ok_or(CryptoError::NotARecipient)?;
 
-    let ad = aad(env.v, &env.author, env.seq, env.ts, env.epoch);
+    let ad = aad(env.v, &env.author, env.seq, env.ts, env.mesh_epoch);
 
     // unwrap the content key with HPKE.
     let encapped = <HpkeKem as hpke::Kem>::EncappedKey::from_bytes(&wrap.enc)

@@ -449,7 +449,6 @@ class IrohLocationModule : Module() {
       {
         subscriptionId: String,
         seq: Double,
-        epoch: Double,
         fix: Map<String, Double>,
         recipients: List<String>,
         traceparent: String? ->
@@ -458,7 +457,6 @@ class IrohLocationModule : Module() {
         if (traceparent != null) {
           sub.publishTraced(
             seq.toLong().toULong(),
-            epoch.toLong().toUInt(),
             locationFixOf(fix),
             recipientBytes,
             traceparent,
@@ -466,7 +464,6 @@ class IrohLocationModule : Module() {
         } else {
           sub.publish(
             seq.toLong().toULong(),
-            epoch.toLong().toUInt(),
             locationFixOf(fix),
             recipientBytes,
           )
@@ -484,7 +481,6 @@ class IrohLocationModule : Module() {
       {
         subscriptionId: String,
         seq: Double,
-        epoch: Double,
         fix: Map<String, Double>,
         recipients: List<String>,
         traceparent: String? ->
@@ -494,7 +490,6 @@ class IrohLocationModule : Module() {
           n.docsWriteTraced(
             subscriptionId,
             seq.toLong().toULong(),
-            epoch.toLong().toUInt(),
             locationFixOf(fix),
             recipientBytes,
             traceparent,
@@ -503,7 +498,6 @@ class IrohLocationModule : Module() {
           n.docsWrite(
             subscriptionId,
             seq.toLong().toULong(),
-            epoch.toLong().toUInt(),
             locationFixOf(fix),
             recipientBytes,
           )

@@ -27,6 +27,16 @@ pub mod mvt;
 mod pairing;
 mod profile;
 pub mod ratchet;
+
+/// The `mesh_epoch` every DOCS-path envelope carries.
+///
+/// The envelope's epoch field belongs to the mesh capsule layer (`crypto::Envelope::mesh_epoch`).
+/// The docs path has no 15-minute epoch, so it writes a constant — and it is a constant rather
+/// than a parameter deliberately: FORWARD-SECRECY.md §7 step 4 separates the two meanings, and a
+/// caller-supplied value would leave them merged in the signed AAD by convention only.
+///
+/// The docs-path key epoch is the per-wrap `i` in the v3 ratchet header (§4.7), not this.
+pub const DOCS_MESH_EPOCH: u32 = 0;
 mod relay;
 mod telemetry;
 
@@ -414,7 +424,7 @@ pub fn mesh_seal_fix(
     recv_secret: Vec<u8>,
     author_endpoint_id: Vec<u8>,
     seq: u64,
-    epoch: u32,
+    mesh_epoch: u32,
     fix: LocationFix,
     recipients: Vec<MeshPeer>,
 ) -> Result<Vec<Vec<u8>>, LocationError> {
@@ -422,7 +432,7 @@ pub fn mesh_seal_fix(
         "mesh.seal",
         sc.author = %telemetry::short_hex(&author_endpoint_id),
         sc.seq = seq,
-        epoch,
+        mesh_epoch,
         recipients = recipients.len(),
     );
     let _guard = span.enter();
@@ -436,7 +446,7 @@ pub fn mesh_seal_fix(
             &author_endpoint_id,
             seq,
             fix.ts,
-            epoch,
+            mesh_epoch,
             &payload,
             std::slice::from_ref(&recipient.recv_public),
         )?;
@@ -445,7 +455,7 @@ pub fn mesh_seal_fix(
             &author_endpoint_id,
             &recipient.recv_public,
             &envelope,
-            epoch,
+            mesh_epoch,
         )?;
         // `sc.entry_hash` stays the envelope hash (the join key the stash and receivers share);
         // `sc.capsule_hash` is the radio-tier dedup key that antennas and mailboxes key on.
@@ -1259,11 +1269,10 @@ impl LocationNode {
         &self,
         subscription_id: String,
         seq: u64,
-        epoch: u32,
         fix: LocationFix,
         recipients: Vec<Vec<u8>>,
     ) -> Result<(), LocationError> {
-        self.docs_write_inner(subscription_id, seq, epoch, fix, recipients, None)
+        self.docs_write_inner(subscription_id, seq, fix, recipients, None)
             .await
     }
 
@@ -1271,27 +1280,18 @@ impl LocationNode {
         &self,
         subscription_id: String,
         seq: u64,
-        epoch: u32,
         fix: LocationFix,
         recipients: Vec<Vec<u8>>,
         traceparent: String,
     ) -> Result<(), LocationError> {
-        self.docs_write_inner(
-            subscription_id,
-            seq,
-            epoch,
-            fix,
-            recipients,
-            Some(traceparent),
-        )
-        .await
+        self.docs_write_inner(subscription_id, seq, fix, recipients, Some(traceparent))
+            .await
     }
 
     async fn docs_write_inner(
         &self,
         _subscription_id: String,
         seq: u64,
-        epoch: u32,
         fix: LocationFix,
         recipients: Vec<Vec<u8>>,
         traceparent: Option<String>,
@@ -1314,7 +1314,7 @@ impl LocationNode {
                 &self.author,
                 seq,
                 fix.ts,
-                epoch,
+                DOCS_MESH_EPOCH,
                 &payload,
                 &recipients,
             )?;
@@ -2436,29 +2436,26 @@ impl Subscription {
     pub async fn publish(
         &self,
         seq: u64,
-        epoch: u32,
         fix: LocationFix,
         recipients: Vec<Vec<u8>>,
     ) -> Result<(), LocationError> {
-        self.publish_inner(seq, epoch, fix, recipients, None).await
+        self.publish_inner(seq, fix, recipients, None).await
     }
 
     pub async fn publish_traced(
         &self,
         seq: u64,
-        epoch: u32,
         fix: LocationFix,
         recipients: Vec<Vec<u8>>,
         traceparent: String,
     ) -> Result<(), LocationError> {
-        self.publish_inner(seq, epoch, fix, recipients, Some(traceparent))
+        self.publish_inner(seq, fix, recipients, Some(traceparent))
             .await
     }
 
     async fn publish_inner(
         &self,
         seq: u64,
-        epoch: u32,
         fix: LocationFix,
         recipients: Vec<Vec<u8>>,
         traceparent: Option<String>,
@@ -2482,7 +2479,7 @@ impl Subscription {
                 &self.node.author,
                 seq,
                 fix.ts,
-                epoch,
+                DOCS_MESH_EPOCH,
                 &payload,
                 &recipients,
             )?;

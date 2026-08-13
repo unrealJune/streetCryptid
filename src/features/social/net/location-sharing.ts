@@ -1330,11 +1330,11 @@ export class LocationSharingService implements FixPublisher {
         recipients: recipients.length,
         payload_ts: fix.ts,
       });
-      await this.mod.publish(this.mySubId, seq, 0, native, recipients, traceparent);
+      await this.mod.publish(this.mySubId, seq, native, recipients, traceparent);
       span.addEvent('gossip.publish.completed');
       try {
         // Durable mirror: same sealed bytes, so per-recipient revocation carries over (ARCHITECTURE §6).
-        await this.mod.docsWrite(this.mySubId, seq, 0, native, recipients, traceparent);
+        await this.mod.docsWrite(this.mySubId, seq, native, recipients, traceparent);
         span.addEvent('docs.write.completed', {
           'stash.replication_enabled': stashReplicationEnabled,
         });

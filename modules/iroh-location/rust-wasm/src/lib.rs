@@ -39,6 +39,11 @@ use docs::{LatestFix, TrailDocs};
 
 const TOPIC_PREFIX: &[u8] = b"streetcryptid.loc";
 
+/// The `mesh_epoch` every docs/gossip envelope carries. Mirrors `iroh_location::DOCS_MESH_EPOCH`
+/// — this crate includes `crypto.rs` by path rather than depending on the mobile crate, so the
+/// constant is restated rather than imported. There is no mesh path in the browser build.
+const DOCS_MESH_EPOCH: u32 = 0;
+
 #[wasm_bindgen(start)]
 fn wasm_start() {
     console_error_panic_hook::set_once();
@@ -332,7 +337,6 @@ impl WasmLocationNode {
         &self,
         _subscription_id: String,
         seq: f64,
-        epoch: u32,
         fix: JsValue,
         recipients_hex: JsValue,
     ) -> Result<(), JsError> {
@@ -358,7 +362,7 @@ impl WasmLocationNode {
             &self.author,
             seq as u64,
             wire_fix.ts,
-            epoch,
+            DOCS_MESH_EPOCH,
             &payload,
             &recipients,
         )
@@ -530,7 +534,6 @@ impl WasmLocationSubscription {
     pub async fn publish(
         &self,
         seq: f64,
-        epoch: u32,
         fix: JsValue,
         recipients_hex: JsValue,
     ) -> Result<(), JsError> {
@@ -556,7 +559,7 @@ impl WasmLocationSubscription {
             &self.author,
             seq as u64,
             wire_fix.ts,
-            epoch,
+            DOCS_MESH_EPOCH,
             &payload,
             &recipients,
         )
