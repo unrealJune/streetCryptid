@@ -85,7 +85,7 @@ describe('FriendProfileSheet signal path', () => {
 
   it('names the transport in the accessibility label', () => {
     renderer = renderSheet(presenceWith('relay'));
-    expect(labels(renderer)).toContain('SIGNAL PATH: received live over a relay');
+    expect(labels(renderer)).toContain('SIGNAL PATH: received live, nearest open path a relay');
   });
 
   it('falls back to an unknown marker for a fix stored before provenance existed', () => {
