@@ -290,6 +290,23 @@ const BUMP_RESOLVE_TIMEOUT_MS = 12_000;
 export const BUMP_WINDOW_MS = 15_000;
 
 /**
+ * How often we re-arm profile replication for a friend still wearing the pairing placeholder.
+ *
+ * A friend's persona reaches us only if the single `import_ticket` dial made when the pair
+ * completed actually reconciled; nothing behind it retries. A one-way network failure (the exact
+ * shape of the Android 15+ local-network block) therefore used to strand one side of a Bump on
+ * `@endpointprefix` / `unknown` forever while the other side paired cleanly.
+ */
+const PROFILE_BACKFILL_INTERVAL_MS = 30_000;
+
+/**
+ * Give up re-arming a friend's profile after this many tries (~5 min at the interval above).
+ * Bounded because a friend who has genuinely published nothing must not be re-dialled for the
+ * lifetime of the process; a relaunch re-imports every ticket anyway and resets the count.
+ */
+const PROFILE_BACKFILL_MAX_ATTEMPTS = 10;
+
+/**
  * How long trail-change notifications are gathered before the fan-out fires.
  *
  * Docs reconciliation does not trickle: catching up with a friend delivers their whole retained
@@ -423,6 +440,19 @@ export class LocationSharingService implements FixPublisher {
   private readonly initiatedRoutes = new Map<string, PairingMethod>();
   /** Complete sessions already materialized locally, including discoveries the user dismissed. */
   private readonly handledPairSessions = new Set<string>();
+  /**
+   * Verified profiles that arrived before their friend existed in the pool, keyed by endpoint id.
+   *
+   * The native profile queue is drained exactly once per poll, and a peer's profile can replicate
+   * before their pair `ready` notice is even queued (`finalize` imports the profile namespace,
+   * then does the slower trail import, and only then pushes `Ready`). Dropping those on the floor
+   * cost the friend their persona until the next relaunch. Flushed by {@link onPairReady}.
+   */
+  private readonly pendingProfiles = new Map<string, ProfileView>();
+  /** Re-arm attempts per friend for {@link backfillMissingProfiles}, bounded and in-memory. */
+  private readonly profileBackfillAttempts = new Map<string, number>();
+  /** When the profile backfill sweep last ran, so it paces off the pairing poll. */
+  private lastProfileBackfillAt = 0;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private pollInFlight: Promise<void> | null = null;
   /** Last poll-error message surfaced, so we don't spam listeners with identical errors. */
@@ -808,6 +838,8 @@ export class LocationSharingService implements FixPublisher {
     }
 
     if (this.discoveredFriend?.endpointId === endpointId) this.discoveredFriend = null;
+    this.pendingProfiles.delete(endpointId);
+    this.profileBackfillAttempts.delete(endpointId);
     this.emit();
 
     const cleanup: Promise<void>[] = [];
@@ -1039,6 +1071,8 @@ export class LocationSharingService implements FixPublisher {
 
     this.discoveredFriend = null;
     this.state = pool.removeFriend(this.state, friend.endpointId);
+    this.pendingProfiles.delete(friend.endpointId);
+    this.profileBackfillAttempts.delete(friend.endpointId);
     this.persistPool();
     this.setPairingActivity('cryptid rejected');
 
@@ -2512,7 +2546,12 @@ export class LocationSharingService implements FixPublisher {
     }
   }
 
-  /** After restore, read each friend's current profile (from their imported ticket) and merge it. */
+  /**
+   * After restore, read each friend's current profile (from their imported ticket) and merge it.
+   * The tickets themselves are re-imported by {@link subscribeToFriend} during `restorePool`, so
+   * the live watcher is already re-armed by the time this runs; this only picks up what the local
+   * replica holds. Friends still missing a profile are retried by {@link backfillMissingProfiles}.
+   */
   private async importFriendProfiles(): Promise<void> {
     if (!this.mod) return;
     for (const friend of pool.friendList(this.state)) {
@@ -2522,10 +2561,47 @@ export class LocationSharingService implements FixPublisher {
     }
   }
 
+  /**
+   * Re-arm replication for friends who still have no verified profile, then re-read.
+   *
+   * Paced by {@link PROFILE_BACKFILL_INTERVAL_MS} and capped at
+   * {@link PROFILE_BACKFILL_MAX_ATTEMPTS} per friend, so a peer who published nothing costs a
+   * handful of dials rather than a permanent retry loop. `profileEpoch` is the honest "we merged a
+   * real profile" marker — {@link mergeProfileIntoFriend} sets it and nothing else does.
+   */
+  private async backfillMissingProfiles(): Promise<void> {
+    const mod = this.mod;
+    if (!mod) return;
+    const now = Date.now();
+    if (now - this.lastProfileBackfillAt < PROFILE_BACKFILL_INTERVAL_MS) return;
+    this.lastProfileBackfillAt = now;
+
+    for (const friend of pool.friendList(this.state)) {
+      if (!friend.profileTicket || friend.profileEpoch !== undefined) continue;
+      const attempts = this.profileBackfillAttempts.get(friend.endpointId) ?? 0;
+      if (attempts >= PROFILE_BACKFILL_MAX_ATTEMPTS) continue;
+      this.profileBackfillAttempts.set(friend.endpointId, attempts + 1);
+      await mod.importProfileTicket(friend.profileTicket).catch(() => undefined);
+      const profile = await mod.readProfile(friend.endpointId).catch(() => null);
+      if (profile) this.applyProfile(profile);
+    }
+  }
+
   /** Merge a verified profile into a known friend (monotonic by epoch); persist + emit if changed. */
   private applyProfile(profile: ProfileView): void {
     const next = pool.applyProfile(this.state, profile);
-    if (next === this.state) return;
+    if (next === this.state) {
+      // Hold a profile whose friend hasn't landed yet — the pair `ready` event can trail the
+      // profile watcher by a poll, and each native queue is drained exactly once.
+      if (!this.state.friends[profile.endpointId]) {
+        const held = this.pendingProfiles.get(profile.endpointId);
+        if (!held || profile.epoch > held.epoch) {
+          this.pendingProfiles.set(profile.endpointId, profile);
+        }
+      }
+      return;
+    }
+    this.pendingProfiles.delete(profile.endpointId);
     this.state = next;
     if (this.discoveredFriend?.endpointId === profile.endpointId) {
       this.discoveredFriend = mergeProfileIntoFriend(this.discoveredFriend, profile);
@@ -2625,11 +2701,15 @@ export class LocationSharingService implements FixPublisher {
         pairing_ready: caps.pairingReady,
       });
       await this.pollTransportDiagnosticsOnce();
-      for (const profile of profileEvents) this.applyProfile(profile);
+      // Pair events FIRST: `pool.applyProfile` is a no-op for an endpoint that isn't a friend yet,
+      // and both queues are drained together above, so applying profiles first threw away the
+      // persona of anyone whose `ready` was sitting in the very same batch.
       for (const event of pairEvents) await this.handlePairEvent(event);
       // Ready is a drained, one-shot native event. A transient bridge/result failure must not lose
       // the completed friendship forever, so recover any unhandled Complete session snapshots too.
       await this.reconcileCompletedPairs(sessions);
+      for (const profile of profileEvents) this.applyProfile(profile);
+      await this.backfillMissingProfiles();
       // Reconcile the SAS verification model AFTER handling events, from BOTH the polled session
       // list and this poll's events: `listPairSessions()` is fetched in parallel with the event
       // queue, so a just-emitted `verifying` transition may not appear in `sessions` yet. Merging
@@ -2920,6 +3000,13 @@ export class LocationSharingService implements FixPublisher {
     const method = this.initiatedRoutes.get(event.sessionId);
     let friend = this.placeholderFriend(result, method);
     if (result.peerProfile) friend = mergeProfileIntoFriend(friend, result.peerProfile);
+    // A profile that replicated before this `ready` landed was parked rather than dropped; it is
+    // the only copy we'll get without another sync, so claim it now that the friend exists.
+    const held = this.pendingProfiles.get(result.peerEndpointId);
+    if (held) {
+      this.pendingProfiles.delete(result.peerEndpointId);
+      friend = mergeProfileIntoFriend(friend, held);
+    }
 
     this.state = pool.shareWith(pool.addFriend(this.state, friend), friend.endpointId);
     try {

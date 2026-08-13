@@ -652,6 +652,13 @@ impl LocationNode {
                 .await
                 .map_err(|e| LocationError::Network(e.to_string()))?,
         );
+        // Arm the profile namespace as soon as the engine exists, not just on the next publish:
+        // a friend who imported our read-ticket dials us to reconcile, and the live engine only
+        // serves namespaces `start_sync` has marked as syncing. Best-effort — `publish_profile`
+        // arms again, and a node that can't sync yet still holds the record locally.
+        if let Err(err) = profile.arm_publishing().await {
+            tracing::warn!(error = %err, "profile: could not arm the profile namespace at start");
+        }
 
         // Wire the live handles into the pairing core so an Accept can mint our tickets and a
         // completed pair imports the peer's profile/trail namespaces.
