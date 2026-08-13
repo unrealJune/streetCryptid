@@ -96,6 +96,35 @@ export interface SelfIdentity {
  */
 export type FixTransport = 'relay' | 'direct' | 'lan' | 'ble' | 'live' | 'docs' | 'stash' | 'sync';
 
+/** One network path to the peer that handed us a fix, as it stood at delivery time. */
+export interface DeliveryPath {
+  /** `relay` | `direct` | `lan` | `ble`. */
+  kind: string;
+  /** Concrete address: the relay URL, `host:port`, or the custom transport address. */
+  address: string;
+  active: boolean;
+}
+
+/**
+ * What the single {@link FixTransport} word hides: which peer handed the fix over, and what paths
+ * were open to it.
+ *
+ * ONE HOP, never a route. Gossip is epidemic, so {@link from} is whichever neighbour forwarded the
+ * envelope — often neither the author nor a friend — and the protocol carries nothing about where
+ * that neighbour got it. Travels WITH {@link FixTransport} through the store, because `mergeVia` is
+ * first-writer-wins and a label from one writer beside detail from another would describe two
+ * different deliveries.
+ */
+export interface DeliveryDetail {
+  via: FixTransport;
+  /** Hex endpoint id of the peer that handed us this fix. Empty when iroh could not name it. */
+  from: string;
+  /** Whether {@link from} is the configured trail stash. Backfill only. */
+  fromStash: boolean;
+  /** Paths known to {@link from} at delivery time, active first then closest. Empty on backfill. */
+  paths: DeliveryPath[];
+}
+
 /** An inbound decrypted fix from a friend. */
 export interface IncomingFix {
   author: Hex;
@@ -109,4 +138,6 @@ export interface IncomingFix {
    * to the coarse live/sync split implied by {@link backfill}.
    */
   via?: FixTransport;
+  /** {@link via} with the delivering peer and its paths. Absent on older native cores. */
+  delivery?: DeliveryDetail;
 }

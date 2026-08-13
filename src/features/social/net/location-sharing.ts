@@ -2371,6 +2371,14 @@ export class LocationSharingService implements FixPublisher {
         payload_accuracy_m: event.fix.accuracyM,
         payload_heading_deg: event.fix.headingDeg,
         transport_path: event.via ?? (event.backfill ? 'durable-trail' : 'live-gossip'),
+        // The neighbour that handed this over — one hop, not a route. `from_stash` is the only
+        // per-fix proof that offline delivery actually served something.
+        ...(event.delivery
+          ? {
+              'sc.from': event.delivery.from.slice(0, 10),
+              from_stash: event.delivery.fromStash,
+            }
+          : {}),
         ...(known ? {} : { 'sc.drop_reason': 'unknown-or-removing-author' }),
       },
     });
@@ -2390,6 +2398,7 @@ export class LocationSharingService implements FixPublisher {
       receivedAt: Date.now(),
       ...(event.backfill ? { backfill: true } : {}),
       ...(event.via ? { via: event.via } : {}),
+      ...(event.delivery ? { delivery: event.delivery } : {}),
     };
     void this.trail
       .appendFriend(fix)

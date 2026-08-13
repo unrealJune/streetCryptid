@@ -10,7 +10,7 @@ import type { FixTransport } from './types';
  * For the four live-gossip transports the label is the CLOSEST open path to that neighbour, not a
  * measurement of the packet's route — iroh holds every usable path open at once (a hole-punched
  * direct path never retires the relay fallback) and exposes only the set, never the carrier. See
- * `delivery_label` in `modules/iroh-location/rust/src/lib.rs` for the ranking and why picking the
+ * `delivery_detail` in `modules/iroh-location/rust/src/lib.rs` for the ranking and why picking the
  * first active path instead made two phones disagree about the same link. `docs` / `stash` / `sync`
  * come off the backfill path and are exact.
  */

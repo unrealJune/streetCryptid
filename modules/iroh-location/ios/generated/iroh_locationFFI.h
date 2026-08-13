@@ -300,7 +300,7 @@ void uniffi_iroh_location_fn_init_callback_vtable_fixlistener(const UniffiVTable
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_FIXLISTENER_ON_FIX
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_FIXLISTENER_ON_FIX
-void uniffi_iroh_location_fn_method_fixlistener_on_fix(uint64_t ptr, RustBuffer author, uint64_t seq, RustBuffer fix, int8_t backfill, RustBuffer via, RustCallStatus *_Nonnull out_status
+void uniffi_iroh_location_fn_method_fixlistener_on_fix(uint64_t ptr, RustBuffer author, uint64_t seq, RustBuffer fix, int8_t backfill, RustBuffer delivery, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_FIXLISTENER_ON_OPAQUE

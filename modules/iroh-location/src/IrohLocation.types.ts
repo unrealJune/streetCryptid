@@ -42,6 +42,34 @@ export interface TransportConfig {
  */
 export type FixVia = 'relay' | 'direct' | 'lan' | 'ble' | 'live' | 'docs' | 'stash';
 
+/** One network path to the peer that handed us a fix, as it stood at delivery time. */
+export interface DeliveryPath {
+  /** `relay` | `direct` | `lan` | `ble` — the same vocabulary as {@link FixVia}. */
+  kind: string;
+  /** Concrete address: the relay URL, `host:port`, or the custom transport address. */
+  address: string;
+  /** Whether iroh had this path open at delivery time. */
+  active: boolean;
+}
+
+/**
+ * How one fix reached this device, beyond the single {@link FixVia} label.
+ *
+ * ONE HOP, not a route: `from` is the neighbour that handed us the envelope — with epidemic gossip
+ * that is frequently neither the author nor a friend — and nothing in the protocol says where that
+ * neighbour got it. See the `DeliveryDetail` doc comment in the Rust crate for why recovering the
+ * full chain would mean publishing the forwarding graph.
+ */
+export interface DeliveryDetail {
+  via: FixVia;
+  /** Hex endpoint id of the peer that handed us this fix. Empty when iroh could not name it. */
+  from: string;
+  /** Whether `from` is the configured trail stash. Backfill only. */
+  fromStash: boolean;
+  /** Paths known to `from` at delivery time, active first then closest. Empty on backfill. */
+  paths: DeliveryPath[];
+}
+
 export interface OnFixEvent {
   author: string;
   seq: number;
@@ -53,6 +81,12 @@ export interface OnFixEvent {
   backfill?: boolean;
   /** How the fix reached this device. Absent on binaries built before per-fix transport labels. */
   via?: FixVia;
+  /**
+   * The same delivery, with the neighbour and its path set. Absent on binaries built before the
+   * delivery tooltip — always guard rather than assume, since a JS bundle routinely runs against
+   * an older installed native core.
+   */
+  delivery?: DeliveryDetail;
 }
 
 export interface OnOpaqueEvent {

@@ -621,7 +621,7 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
     fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultVoid.UniffiByValue,)
 }
 internal interface UniffiCallbackInterfaceFixListenerMethod0 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`via`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`delivery`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceFixListenerMethod1 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
@@ -842,7 +842,7 @@ external fun uniffi_iroh_location_fn_free_fixlistener(`handle`: Long,uniffi_out_
 ): Unit
 external fun uniffi_iroh_location_fn_init_callback_vtable_fixlistener(`vtable`: UniffiVTableCallbackInterfaceFixListener,
 ): Unit
-external fun uniffi_iroh_location_fn_method_fixlistener_on_fix(`ptr`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`via`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+external fun uniffi_iroh_location_fn_method_fixlistener_on_fix(`ptr`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`delivery`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_iroh_location_fn_method_fixlistener_on_opaque(`ptr`: Long,`author`: RustBuffer.ByValue,`seq`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1130,7 +1130,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 28882) {
+    if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 46155) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_opaque() != 14800) {
@@ -1855,13 +1855,13 @@ public interface FixListener {
      * A fix we could decrypt (someone shared with us). `backfill` is `true` when the fix arrived
      * via durable range-reconciliation (iroh-docs catch-up) rather than the live gossip path.
      *
-     * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
-     * the stash is a mirror, so it never claims a direct link to the fix's author.
+     * `delivery` names the LAST HOP into this device — see [`DeliveryDetail`]. Gossip is epidemic
+     * and the stash is a mirror, so it never claims a direct link to the fix's author.
      *
-     * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
-     * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
+     * On the live path `via` is the CLOSEST open path to the delivering neighbour rather than the
+     * carrier of this particular datagram, which iroh does not expose — see [`delivery_detail`].
      */
-    fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean, `via`: kotlin.String)
+    fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean, `delivery`: DeliveryDetail)
     
     /**
      * A fix we received but could NOT decrypt (not addressed to us / revoked). Useful
@@ -1987,18 +1987,18 @@ open class FixListenerImpl: Disposable, AutoCloseable, FixListener
      * A fix we could decrypt (someone shared with us). `backfill` is `true` when the fix arrived
      * via durable range-reconciliation (iroh-docs catch-up) rather than the live gossip path.
      *
-     * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
-     * the stash is a mirror, so it never claims a direct link to the fix's author.
+     * `delivery` names the LAST HOP into this device — see [`DeliveryDetail`]. Gossip is epidemic
+     * and the stash is a mirror, so it never claims a direct link to the fix's author.
      *
-     * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
-     * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
-     */override fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean, `via`: kotlin.String)
+     * On the live path `via` is the CLOSEST open path to the delivering neighbour rather than the
+     * carrier of this particular datagram, which iroh does not expose — see [`delivery_detail`].
+     */override fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean, `delivery`: DeliveryDetail)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_iroh_location_fn_method_fixlistener_on_fix(
         it,
-        FfiConverterByteArray.lower(`author`),FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterBoolean.lower(`backfill`),FfiConverterString.lower(`via`),_status)
+        FfiConverterByteArray.lower(`author`),FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterBoolean.lower(`backfill`),FfiConverterTypeDeliveryDetail.lower(`delivery`),_status)
 }
     }
     
@@ -2070,7 +2070,7 @@ open class FixListenerImpl: Disposable, AutoCloseable, FixListener
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceFixListener {
     internal object `onFix`: UniffiCallbackInterfaceFixListenerMethod0 {
-        override fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`via`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+        override fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`delivery`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeFixListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
                 uniffiObj.`onFix`(
@@ -2078,7 +2078,7 @@ internal object uniffiCallbackInterfaceFixListener {
                     FfiConverterULong.lift(`seq`),
                     FfiConverterTypeLocationFix.lift(`fix`),
                     FfiConverterBoolean.lift(`backfill`),
-                    FfiConverterString.lift(`via`),
+                    FfiConverterTypeDeliveryDetail.lift(`delivery`),
                 )
             }
             val writeReturn = { _: Unit -> Unit }
@@ -4585,6 +4585,134 @@ public object FfiConverterTypeControlMsg: FfiConverterRustBuffer<ControlMsg> {
 
 
 /**
+ * How one fix reached this device, beyond the single [`DeliveryDetail::via`] label.
+ *
+ * This describes ONE HOP: the peer that handed us the envelope, and the paths we had open to it.
+ * It is not a route. Gossip is epidemic, so `from` is whichever neighbour forwarded the envelope —
+ * frequently not its author, and not necessarily a friend — and nothing in the protocol carries
+ * where that neighbour got it from. Recovering the full chain would mean stamping hops into
+ * plaintext envelope metadata, which would publish the forwarding graph to the stash and to every
+ * swarm member that currently sees only opaque bytes.
+ */
+data class DeliveryDetail (
+    /**
+     * The label the UI badges: closest open path on the live route, or `docs` / `stash` on
+     * backfill. See [`delivery_detail`] and [`transport_rank`].
+     */
+    var `via`: kotlin.String
+    , 
+    /**
+     * Endpoint id of the peer that handed us this fix. Empty when iroh could not name it.
+     */
+    var `from`: kotlin.ByteArray
+    , 
+    /**
+     * Whether `from` is the configured trail stash. Backfill only — the live path never sets it,
+     * because the stash serves the durable replica and does not forward gossip.
+     */
+    var `fromStash`: kotlin.Boolean
+    , 
+    /**
+     * Every path we knew to `from` at delivery time, active ones first. Empty on the backfill
+     * path, which reconciles through iroh-docs rather than a gossip neighbour.
+     */
+    var `paths`: List<DeliveryPath>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeliveryDetail: FfiConverterRustBuffer<DeliveryDetail> {
+    override fun read(buf: ByteBuffer): DeliveryDetail {
+        return DeliveryDetail(
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterSequenceTypeDeliveryPath.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DeliveryDetail) = (
+            FfiConverterString.allocationSize(value.`via`) +
+            FfiConverterByteArray.allocationSize(value.`from`) +
+            FfiConverterBoolean.allocationSize(value.`fromStash`) +
+            FfiConverterSequenceTypeDeliveryPath.allocationSize(value.`paths`)
+    )
+
+    override fun write(value: DeliveryDetail, buf: ByteBuffer) {
+            FfiConverterString.write(value.`via`, buf)
+            FfiConverterByteArray.write(value.`from`, buf)
+            FfiConverterBoolean.write(value.`fromStash`, buf)
+            FfiConverterSequenceTypeDeliveryPath.write(value.`paths`, buf)
+    }
+}
+
+
+
+/**
+ * One network path to the peer that handed us a fix, as it stood at delivery time.
+ */
+data class DeliveryPath (
+    /**
+     * `relay` | `direct` | `lan` | `ble` — the same vocabulary as the per-fix `via` label.
+     */
+    var `kind`: kotlin.String
+    , 
+    /**
+     * Concrete address: the relay URL, `host:port`, or the custom transport address.
+     */
+    var `address`: kotlin.String
+    , 
+    /**
+     * Whether iroh had this path open at delivery time.
+     */
+    var `active`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeliveryPath: FfiConverterRustBuffer<DeliveryPath> {
+    override fun read(buf: ByteBuffer): DeliveryPath {
+        return DeliveryPath(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DeliveryPath) = (
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterString.allocationSize(value.`address`) +
+            FfiConverterBoolean.allocationSize(value.`active`)
+    )
+
+    override fun write(value: DeliveryPath, buf: ByteBuffer) {
+            FfiConverterString.write(value.`kind`, buf)
+            FfiConverterString.write(value.`address`, buf)
+            FfiConverterBoolean.write(value.`active`, buf)
+    }
+}
+
+
+
+/**
  * A decrypted fix read back from the durable replica (mirrors the TS `NativeIncomingFix`).
  */
 data class IncomingFix (
@@ -5952,6 +6080,34 @@ public object FfiConverterSequenceTypeControlMsg: FfiConverterRustBuffer<List<Co
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeControlMsg.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeDeliveryPath: FfiConverterRustBuffer<List<DeliveryPath>> {
+    override fun read(buf: ByteBuffer): List<DeliveryPath> {
+        val len = buf.getInt()
+        return List<DeliveryPath>(len) {
+            FfiConverterTypeDeliveryPath.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<DeliveryPath>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeDeliveryPath.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<DeliveryPath>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeDeliveryPath.write(it, buf)
         }
     }
 }

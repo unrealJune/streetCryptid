@@ -334,14 +334,16 @@ class IrohLocationModule : Module() {
   // Bridges inbound Rust gossip events to the JS EventEmitter.
   private inner class EventBridge(private val subscriptionId: String) : FixListener {
     // `backfill` is true when the fix arrived via durable range-reconciliation (iroh-docs
-    // catch-up) rather than the live gossip path. `via` names the last hop into this device
-    // (`relay` | `direct` | `lan` | `ble` | `live` | `docs` | `stash`).
+    // catch-up) rather than the live gossip path. `delivery` names the last hop into this device
+    // (`relay` | `direct` | `lan` | `ble` | `live` | `docs` | `stash`) plus the peer that handed
+    // the fix over and the paths open to it. `via` stays a top-level field so the JS side keeps
+    // reading one string for the badge.
     override fun onFix(
       author: ByteArray,
       seq: ULong,
       fix: LocationFix,
       backfill: Boolean,
-      via: String,
+      delivery: DeliveryDetail,
     ) {
       sendEvent(
         "onFix",
@@ -357,7 +359,21 @@ class IrohLocationModule : Module() {
               "ts" to fix.ts.toLong(),
             ),
           "backfill" to backfill,
-          "via" to via,
+          "via" to delivery.via,
+          "delivery" to
+            mapOf(
+              "via" to delivery.via,
+              "from" to delivery.from.toHex(),
+              "fromStash" to delivery.fromStash,
+              "paths" to
+                delivery.paths.map { path ->
+                  mapOf(
+                    "kind" to path.kind,
+                    "address" to path.address,
+                    "active" to path.active,
+                  )
+                },
+            ),
         ),
       )
     }

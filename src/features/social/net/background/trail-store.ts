@@ -1,4 +1,4 @@
-import type { FixTransport, IncomingFix, LocationFix } from '../../core/types';
+import type { DeliveryDetail, FixTransport, IncomingFix, LocationFix } from '../../core/types';
 
 /**
  * Local history of location fixes — the app-side mirror of the durable iroh-docs
@@ -33,6 +33,14 @@ export interface TrailPoint {
    * {@link UNRESOLVED_VIA} — see {@link mergeVia}.
    */
   via?: FixTransport;
+  /**
+   * {@link via} with the delivering peer and its open paths, when the native core supplied it.
+   *
+   * Bound to {@link via}: whichever writer's label {@link mergeVia} keeps, that writer's detail is
+   * kept too (see {@link mergeDelivery}). Storing them independently would let the row claim one
+   * delivery's transport and another's peer.
+   */
+  delivery?: DeliveryDetail;
 }
 
 /**
@@ -56,6 +64,23 @@ export function mergeVia(
   if (!existing) return incoming;
   if (existing === UNRESOLVED_VIA && incoming && incoming !== UNRESOLVED_VIA) return incoming;
   return existing;
+}
+
+/**
+ * Keep the detail belonging to whichever label {@link mergeVia} kept, so a row never mixes one
+ * delivery's transport with another's peer. Passing both sides' labels is what makes that
+ * decidable — the detail alone cannot say which write won.
+ */
+export function mergeDelivery(
+  existing: TrailPoint,
+  incoming: TrailPoint
+): DeliveryDetail | undefined {
+  const winner = mergeVia(existing.via, incoming.via);
+  // The incoming write took the label, so it owns the detail too.
+  if (winner !== existing.via) return incoming.delivery;
+  // The existing write kept the label. Fill a missing detail only from a write that agrees about
+  // the transport — anything else would pair one delivery's label with another's peer.
+  return existing.delivery ?? (incoming.via === existing.via ? incoming.delivery : undefined);
 }
 
 /** Storage port. Real impl: expo-sqlite. Tests use {@link InMemoryTrailStorage}. */
@@ -105,8 +130,12 @@ export class InMemoryTrailStorage implements TrailStorage {
     // Upsert by (author, seq): a re-delivered fix must not duplicate, and must not relabel how the
     // fix first arrived (`refreshTrailFromReplica` re-reads every entry on every sync).
     const i = this.points.findIndex((p) => p.author === point.author && p.seq === point.seq);
-    if (i >= 0) this.points[i] = { ...point, via: mergeVia(this.points[i].via, point.via) };
-    else this.points.push(point);
+    if (i >= 0) {
+      const existing = this.points[i];
+      const via = mergeVia(existing.via, point.via);
+      const delivery = mergeDelivery(existing, point);
+      this.points[i] = { ...point, ...(via ? { via } : {}), ...(delivery ? { delivery } : {}) };
+    } else this.points.push(point);
   }
   async putLatest(point: TrailPoint): Promise<void> {
     await this.put(point);
@@ -203,6 +232,9 @@ export function createTrailStore(opts: TrailStoreOptions): TrailStore {
         fix: incoming.fix,
         receivedAt: incoming.receivedAt ?? now(),
         via: incoming.via ?? (incoming.backfill ? 'sync' : 'live'),
+        // Only when the native core supplied it — never synthesised from the fallback label, which
+        // by definition knows no peer and no paths.
+        ...(incoming.delivery ? { delivery: incoming.delivery } : {}),
       });
     },
     async collapseFriendHistory(): Promise<number> {

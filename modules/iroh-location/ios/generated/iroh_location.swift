@@ -602,13 +602,13 @@ public protocol FixListener: AnyObject, Sendable {
      * A fix we could decrypt (someone shared with us). `backfill` is `true` when the fix arrived
      * via durable range-reconciliation (iroh-docs catch-up) rather than the live gossip path.
      *
-     * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
-     * the stash is a mirror, so it never claims a direct link to the fix's author.
+     * `delivery` names the LAST HOP into this device — see [`DeliveryDetail`]. Gossip is epidemic
+     * and the stash is a mirror, so it never claims a direct link to the fix's author.
      *
-     * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
-     * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
+     * On the live path `via` is the CLOSEST open path to the delivering neighbour rather than the
+     * carrier of this particular datagram, which iroh does not expose — see [`delivery_detail`].
      */
-    func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String) 
+    func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, delivery: DeliveryDetail) 
     
     /**
      * A fix we received but could NOT decrypt (not addressed to us / revoked). Useful
@@ -688,20 +688,20 @@ open class FixListenerImpl: FixListener, @unchecked Sendable {
      * A fix we could decrypt (someone shared with us). `backfill` is `true` when the fix arrived
      * via durable range-reconciliation (iroh-docs catch-up) rather than the live gossip path.
      *
-     * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
-     * the stash is a mirror, so it never claims a direct link to the fix's author.
+     * `delivery` names the LAST HOP into this device — see [`DeliveryDetail`]. Gossip is epidemic
+     * and the stash is a mirror, so it never claims a direct link to the fix's author.
      *
-     * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
-     * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
+     * On the live path `via` is the CLOSEST open path to the delivering neighbour rather than the
+     * carrier of this particular datagram, which iroh does not expose — see [`delivery_detail`].
      */
-open func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String)  {try! rustCall() {
+open func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, delivery: DeliveryDetail)  {try! rustCall() {
     uniffi_iroh_location_fn_method_fixlistener_on_fix(
             self.uniffiCloneHandle(),
         FfiConverterData.lower(author),
         FfiConverterUInt64.lower(seq),
         FfiConverterTypeLocationFix_lower(fix),
         FfiConverterBool.lower(backfill),
-        FfiConverterString.lower(via),$0
+        FfiConverterTypeDeliveryDetail_lower(delivery),$0
     )
 }
 }
@@ -778,7 +778,7 @@ fileprivate struct UniffiCallbackInterfaceFixListener {
             seq: UInt64,
             fix: RustBuffer,
             backfill: Int8,
-            via: RustBuffer,
+            delivery: RustBuffer,
             uniffiOutReturn: UnsafeMutableRawPointer,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -792,7 +792,7 @@ fileprivate struct UniffiCallbackInterfaceFixListener {
                      seq: try FfiConverterUInt64.lift(seq),
                      fix: try FfiConverterTypeLocationFix_lift(fix),
                      backfill: try FfiConverterBool.lift(backfill),
-                     via: try FfiConverterString.lift(via)
+                     delivery: try FfiConverterTypeDeliveryDetail_lift(delivery)
                 )
             }
 
@@ -2954,6 +2954,187 @@ public func FfiConverterTypeControlMsg_lower(_ value: ControlMsg) -> RustBuffer 
 
 
 /**
+ * How one fix reached this device, beyond the single [`DeliveryDetail::via`] label.
+ *
+ * This describes ONE HOP: the peer that handed us the envelope, and the paths we had open to it.
+ * It is not a route. Gossip is epidemic, so `from` is whichever neighbour forwarded the envelope —
+ * frequently not its author, and not necessarily a friend — and nothing in the protocol carries
+ * where that neighbour got it from. Recovering the full chain would mean stamping hops into
+ * plaintext envelope metadata, which would publish the forwarding graph to the stash and to every
+ * swarm member that currently sees only opaque bytes.
+ */
+public struct DeliveryDetail: Equatable, Hashable {
+    /**
+     * The label the UI badges: closest open path on the live route, or `docs` / `stash` on
+     * backfill. See [`delivery_detail`] and [`transport_rank`].
+     */
+    public var via: String
+    /**
+     * Endpoint id of the peer that handed us this fix. Empty when iroh could not name it.
+     */
+    public var from: Data
+    /**
+     * Whether `from` is the configured trail stash. Backfill only — the live path never sets it,
+     * because the stash serves the durable replica and does not forward gossip.
+     */
+    public var fromStash: Bool
+    /**
+     * Every path we knew to `from` at delivery time, active ones first. Empty on the backfill
+     * path, which reconciles through iroh-docs rather than a gossip neighbour.
+     */
+    public var paths: [DeliveryPath]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The label the UI badges: closest open path on the live route, or `docs` / `stash` on
+         * backfill. See [`delivery_detail`] and [`transport_rank`].
+         */via: String, 
+        /**
+         * Endpoint id of the peer that handed us this fix. Empty when iroh could not name it.
+         */from: Data, 
+        /**
+         * Whether `from` is the configured trail stash. Backfill only — the live path never sets it,
+         * because the stash serves the durable replica and does not forward gossip.
+         */fromStash: Bool, 
+        /**
+         * Every path we knew to `from` at delivery time, active ones first. Empty on the backfill
+         * path, which reconciles through iroh-docs rather than a gossip neighbour.
+         */paths: [DeliveryPath]) {
+        self.via = via
+        self.from = from
+        self.fromStash = fromStash
+        self.paths = paths
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DeliveryDetail: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeliveryDetail: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeliveryDetail {
+        return
+            try DeliveryDetail(
+                via: FfiConverterString.read(from: &buf), 
+                from: FfiConverterData.read(from: &buf), 
+                fromStash: FfiConverterBool.read(from: &buf), 
+                paths: FfiConverterSequenceTypeDeliveryPath.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeliveryDetail, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.via, into: &buf)
+        FfiConverterData.write(value.from, into: &buf)
+        FfiConverterBool.write(value.fromStash, into: &buf)
+        FfiConverterSequenceTypeDeliveryPath.write(value.paths, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeliveryDetail_lift(_ buf: RustBuffer) throws -> DeliveryDetail {
+    return try FfiConverterTypeDeliveryDetail.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeliveryDetail_lower(_ value: DeliveryDetail) -> RustBuffer {
+    return FfiConverterTypeDeliveryDetail.lower(value)
+}
+
+
+/**
+ * One network path to the peer that handed us a fix, as it stood at delivery time.
+ */
+public struct DeliveryPath: Equatable, Hashable {
+    /**
+     * `relay` | `direct` | `lan` | `ble` — the same vocabulary as the per-fix `via` label.
+     */
+    public var kind: String
+    /**
+     * Concrete address: the relay URL, `host:port`, or the custom transport address.
+     */
+    public var address: String
+    /**
+     * Whether iroh had this path open at delivery time.
+     */
+    public var active: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `relay` | `direct` | `lan` | `ble` — the same vocabulary as the per-fix `via` label.
+         */kind: String, 
+        /**
+         * Concrete address: the relay URL, `host:port`, or the custom transport address.
+         */address: String, 
+        /**
+         * Whether iroh had this path open at delivery time.
+         */active: Bool) {
+        self.kind = kind
+        self.address = address
+        self.active = active
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DeliveryPath: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeliveryPath: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeliveryPath {
+        return
+            try DeliveryPath(
+                kind: FfiConverterString.read(from: &buf), 
+                address: FfiConverterString.read(from: &buf), 
+                active: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeliveryPath, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterString.write(value.address, into: &buf)
+        FfiConverterBool.write(value.active, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeliveryPath_lift(_ buf: RustBuffer) throws -> DeliveryPath {
+    return try FfiConverterTypeDeliveryPath.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeliveryPath_lower(_ value: DeliveryPath) -> RustBuffer {
+    return FfiConverterTypeDeliveryPath.lower(value)
+}
+
+
+/**
  * A decrypted fix read back from the durable replica (mirrors the TS `NativeIncomingFix`).
  */
 public struct IncomingFix: Equatable, Hashable {
@@ -4559,6 +4740,31 @@ fileprivate struct FfiConverterSequenceTypeControlMsg: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeDeliveryPath: FfiConverterRustBuffer {
+    typealias SwiftType = [DeliveryPath]
+
+    public static func write(_ value: [DeliveryPath], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDeliveryPath.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DeliveryPath] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DeliveryPath]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDeliveryPath.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeIncomingFix: FfiConverterRustBuffer {
     typealias SwiftType = [IncomingFix]
 
@@ -4907,7 +5113,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 28882) {
+    if (uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 46155) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_fixlistener_on_opaque() != 14800) {

@@ -1,5 +1,11 @@
-import type { IncomingFix, LocationFix } from '../../../core/types';
-import { createTrailStore, InMemoryTrailStorage, SELF_AUTHOR } from '../trail-store';
+import type { DeliveryDetail, IncomingFix, LocationFix } from '../../../core/types';
+import {
+  createTrailStore,
+  InMemoryTrailStorage,
+  mergeDelivery,
+  SELF_AUTHOR,
+  type TrailPoint,
+} from '../trail-store';
 
 function fix(ts: number, overrides: Partial<LocationFix> = {}): LocationFix {
   return { lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts, ...overrides };
@@ -187,5 +193,107 @@ describe('trail store', () => {
     const points = await store.rangeFor(SELF_AUTHOR, 0);
     expect(points).toHaveLength(1);
     expect(points[0].fix.lat).toBe(42);
+  });
+});
+
+describe('mergeDelivery', () => {
+  function detail(from: string): DeliveryDetail {
+    return { via: 'relay', from, fromStash: false, paths: [] };
+  }
+
+  function point(overrides: Partial<TrailPoint>): TrailPoint {
+    return { author: 'f', seq: 1, fix: fix(100), receivedAt: 0, ...overrides };
+  }
+
+  it('keeps the detail belonging to the write whose label won', () => {
+    const existing = point({ via: 'relay', delivery: detail('winner') });
+    const incoming = point({ via: 'sync', delivery: detail('loser') });
+    expect(mergeDelivery(existing, incoming)?.from).toBe('winner');
+  });
+
+  it('hands the detail over when the incoming label takes the row', () => {
+    const existing = point({ via: 'sync' });
+    const incoming = point({ via: 'stash', delivery: detail('stash-peer') });
+    expect(mergeDelivery(existing, incoming)?.from).toBe('stash-peer');
+  });
+
+  /** An older native core labels without detail; a later write of the SAME transport can fill it. */
+  it('fills a missing detail from a write that agrees about the transport', () => {
+    const existing = point({ via: 'relay' });
+    const incoming = point({ via: 'relay', delivery: detail('late') });
+    expect(mergeDelivery(existing, incoming)?.from).toBe('late');
+  });
+
+  /** The failure this guards: a relay label wearing a replica read's peer. */
+  it('refuses detail from a write about a different transport', () => {
+    const existing = point({ via: 'relay' });
+    const incoming = point({ via: 'sync', delivery: detail('someone-else') });
+    expect(mergeDelivery(existing, incoming)).toBeUndefined();
+  });
+
+  it('takes the incoming detail when the row had no label at all', () => {
+    const existing = point({});
+    const incoming = point({ via: 'lan', delivery: detail('first') });
+    expect(mergeDelivery(existing, incoming)?.from).toBe('first');
+  });
+});
+
+describe('trail store delivery detail', () => {
+  const delivery: DeliveryDetail = {
+    via: 'direct',
+    from: 'peer-1',
+    fromStash: false,
+    paths: [{ kind: 'direct', address: '203.0.113.7:4433', active: true }],
+  };
+
+  it('stores the detail the native core supplied', async () => {
+    const storage = new InMemoryTrailStorage();
+    const store = createTrailStore({ storage });
+    await store.appendFriend({
+      author: 'f',
+      seq: 1,
+      fix: fix(100),
+      receivedAt: 0,
+      via: 'direct',
+      delivery,
+    });
+
+    const points = await store.rangeFor('f', 0);
+    expect(points[0].delivery).toEqual(delivery);
+  });
+
+  it('never invents detail for a fix that arrived without any', async () => {
+    const storage = new InMemoryTrailStorage();
+    const store = createTrailStore({ storage });
+    await store.appendFriend({ author: 'f', seq: 1, fix: fix(100), receivedAt: 0 });
+
+    const points = await store.rangeFor('f', 0);
+    expect(points[0].via).toBe('live');
+    expect(points[0].delivery).toBeUndefined();
+  });
+
+  /** A replica re-read must not strip the precise detail the live delivery already recorded. */
+  it('keeps live detail when reconciliation re-sees the same fix', async () => {
+    const storage = new InMemoryTrailStorage();
+    const store = createTrailStore({ storage });
+    await store.appendFriend({
+      author: 'f',
+      seq: 1,
+      fix: fix(100),
+      receivedAt: 0,
+      via: 'direct',
+      delivery,
+    });
+    await store.appendFriend({
+      author: 'f',
+      seq: 1,
+      fix: fix(100),
+      receivedAt: 1,
+      backfill: true,
+    });
+
+    const points = await store.rangeFor('f', 0);
+    expect(points[0].via).toBe('direct');
+    expect(points[0].delivery).toEqual(delivery);
   });
 });

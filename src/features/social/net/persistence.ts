@@ -68,6 +68,9 @@ function getDb(): Promise<SqliteDb | null> {
       // column unconditionally and swallow the "duplicate column name" error on installs that
       // already have it. Rows written before this read back as NULL → provenance unknown.
       await db.execAsync('ALTER TABLE trail ADD COLUMN via TEXT').catch(() => {});
+      // Same unconditional-add pattern as `via`. A JSON blob rather than columns: it is display-only
+      // detail with a nested path list, never queried or joined on.
+      await db.execAsync('ALTER TABLE trail ADD COLUMN delivery TEXT').catch(() => {});
       return db;
     } catch {
       return null;
@@ -130,6 +133,18 @@ interface TrailRow {
   fix: string;
   received_at: number;
   via: string | null;
+  delivery: string | null;
+}
+
+/** Rows predate the column, or were written by a build that stored malformed JSON — neither is
+ *  worth failing a trail read over, so an unparseable blob reads back as "no detail". */
+function parseDelivery(raw: string | null): TrailPoint['delivery'] {
+  if (!raw) return undefined;
+  try {
+    return JSON.parse(raw) as TrailPoint['delivery'];
+  } catch {
+    return undefined;
+  }
 }
 
 function rowToPoint(row: TrailRow): TrailPoint {
@@ -139,6 +154,10 @@ function rowToPoint(row: TrailRow): TrailPoint {
     fix: JSON.parse(row.fix) as TrailPoint['fix'],
     receivedAt: Number(row.received_at),
     ...(row.via ? { via: row.via as NonNullable<TrailPoint['via']> } : {}),
+    ...((): { delivery?: TrailPoint['delivery'] } => {
+      const delivery = parseDelivery(row.delivery);
+      return delivery ? { delivery } : {};
+    })(),
   };
 }
 
@@ -151,19 +170,29 @@ class SqliteTrailStorage implements TrailStorage {
     if (!db) return this.fallback.put(point);
     try {
       await db.runAsync(
-        `INSERT INTO trail (author, seq, fix, received_at, fix_ts, via) VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO trail (author, seq, fix, received_at, fix_ts, via, delivery)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(author, seq) DO UPDATE SET
            fix = excluded.fix, received_at = excluded.received_at, fix_ts = excluded.fix_ts,
+           -- delivery FIRST: it tests the pre-update trail.via, and SQLite applies SET clauses
+           -- left to right, so reversing these would compare against the value just written.
+           delivery = CASE WHEN trail.via IS NULL OR trail.via = ?
+                           THEN COALESCE(excluded.delivery, trail.delivery)
+                           WHEN trail.delivery IS NULL AND trail.via IS excluded.via
+                           THEN excluded.delivery
+                           ELSE trail.delivery END,
            via = CASE WHEN trail.via IS NULL OR trail.via = ?
                       THEN COALESCE(excluded.via, trail.via) ELSE trail.via END`,
-        // Bound positionally, left-to-right across the whole statement: the six VALUES first,
-        // then the CASE's comparison value.
+        // Bound positionally, left-to-right across the whole statement: the seven VALUES first,
+        // then one comparison value per CASE.
         point.author,
         point.seq,
         JSON.stringify(point.fix),
         point.receivedAt,
         point.fix.ts,
         point.via ?? null,
+        point.delivery ? JSON.stringify(point.delivery) : null,
+        UNRESOLVED_VIA,
         UNRESOLVED_VIA
       );
     } catch {
@@ -217,7 +246,7 @@ class SqliteTrailStorage implements TrailStorage {
     if (!db) return this.fallback.range(author, sinceTs);
     try {
       const rows = await db.getAllAsync<TrailRow>(
-        `SELECT author, seq, fix, received_at, via FROM trail
+        `SELECT author, seq, fix, received_at, via, delivery FROM trail
          WHERE author = ? AND fix_ts >= ? ORDER BY seq ASC`,
         author,
         sinceTs
@@ -233,7 +262,7 @@ class SqliteTrailStorage implements TrailStorage {
     if (!db) return this.fallback.latest();
     try {
       const rows = await db.getAllAsync<TrailRow>(
-        `SELECT t.author, t.seq, t.fix, t.received_at, t.via FROM trail t
+        `SELECT t.author, t.seq, t.fix, t.received_at, t.via, t.delivery FROM trail t
          JOIN (SELECT author, MAX(fix_ts) AS mt FROM trail GROUP BY author) m
            ON t.author = m.author AND t.fix_ts = m.mt
          GROUP BY t.author`

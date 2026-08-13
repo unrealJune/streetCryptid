@@ -7,6 +7,7 @@ import { resolveSignalColor, signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Spacing } from '@/constants/theme';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import { useTheme } from '@/hooks/use-theme';
+import { buildDeliverySummary } from '../core/delivery-summary';
 import { fixTransportBadge, fixTransportDescription } from '../core/fix-transport';
 import { formatDistance, formatPresenceAge, type FriendPresence } from '../core/presence';
 
@@ -67,6 +68,7 @@ export function FriendProfileSheet({
   const theme = useTheme();
   const scheme = useColorScheme();
   const insets = useSafeAreaInsets();
+  const [showingSignalPath, setShowingSignalPath] = useState(false);
   const [confirmingEndpoint, setConfirmingEndpoint] = useState<string | null>(null);
   const [removingEndpoint, setRemovingEndpoint] = useState<string | null>(null);
   const [removeFailure, setRemoveFailure] = useState<{
@@ -86,6 +88,7 @@ export function FriendProfileSheet({
   const locationLine = distance ?? (presence.fix ? 'Location received' : 'Waiting for location');
 
   function closeSheet(): void {
+    setShowingSignalPath(false);
     setConfirmingEndpoint(null);
     setRemovingEndpoint(null);
     setRemoveFailure(null);
@@ -159,9 +162,13 @@ export function FriendProfileSheet({
           <DetailRow label="LAST SIGNAL" value={formatPresenceAge(presence.ageMs)} />
           {presence.fix ? (
             <DetailRow
-              accessibilityLabel={fixTransportDescription(presence.via)}
+              accessibilityLabel={`${fixTransportDescription(presence.via)}. Double tap for delivery detail.`}
               label="SIGNAL PATH"
               value={fixTransportBadge(presence.via)}
+              // Tap as well as long-press: a long-press with no affordance is undiscoverable, and
+              // the dotted underline below is the only hint the row does anything.
+              onPress={() => setShowingSignalPath(true)}
+              underlineValue
             />
           ) : null}
           <DetailRow label="CONNECTION" value={pairingLabel(presence.friend.pairingMethod)} />
@@ -298,6 +305,9 @@ export function FriendProfileSheet({
           )}
         </View>
       </ScrollView>
+      {showingSignalPath ? (
+        <SignalPathDetail presence={presence} onClose={() => setShowingSignalPath(false)} />
+      ) : null}
     </Modal>
   );
 }
@@ -306,11 +316,48 @@ function DetailRow({
   accessibilityLabel,
   label,
   value,
+  onPress,
+  underlineValue,
 }: {
   accessibilityLabel?: string;
   label: string;
   value: string;
+  /** Makes the row interactive. Bound to both tap and long-press — see the call site. */
+  onPress?: () => void;
+  /** Dotted underline marking the value as openable; the row's only affordance. */
+  underlineValue?: boolean;
 }) {
+  const valueText = (
+    <ThemedText
+      type="smallBold"
+      style={[styles.detailValue, underlineValue ? styles.detailValueOpenable : null]}
+    >
+      {value}
+    </ThemedText>
+  );
+  const labelText = (
+    <ThemedText type="code" themeColor="textSecondary">
+      {label}
+    </ThemedText>
+  );
+
+  if (onPress) {
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={
+          accessibilityLabel === undefined ? undefined : `${label}: ${accessibilityLabel}`
+        }
+        onPress={onPress}
+        onLongPress={onPress}
+        style={({ pressed }) => [styles.detailRow, { opacity: pressed ? 0.6 : 1 }]}
+      >
+        {labelText}
+        {valueText}
+      </Pressable>
+    );
+  }
+
   return (
     <View
       accessible={accessibilityLabel !== undefined}
@@ -319,13 +366,87 @@ function DetailRow({
       }
       style={styles.detailRow}
     >
-      <ThemedText type="code" themeColor="textSecondary">
-        {label}
-      </ThemedText>
-      <ThemedText type="smallBold" style={styles.detailValue}>
-        {value}
-      </ThemedText>
+      {labelText}
+      {valueText}
     </View>
+  );
+}
+
+/**
+ * What the one-word badge hides: which peer handed this fix over, and what paths were open to it.
+ *
+ * Deliberately ends on {@link DeliverySummary.note}. Everything above it describes ONE HOP, and a
+ * list of addresses under a heading like "signal path" invites reading it as a traceroute — which
+ * it is not, and which the protocol cannot supply.
+ */
+function SignalPathDetail({
+  presence,
+  onClose,
+}: {
+  presence: FriendPresence;
+  onClose: () => void;
+}) {
+  const theme = useTheme();
+  const summary = buildDeliverySummary(presence.via, presence.delivery, (id) =>
+    id === presence.friend.endpointId ? presence.friend.handle : undefined
+  );
+
+  return (
+    <Modal animationType="fade" transparent visible onRequestClose={onClose}>
+      <Pressable style={styles.tooltipBackdrop} onPress={onClose}>
+        {/* Swallows taps so pressing inside the card does not dismiss it. */}
+        <Pressable
+          style={[
+            styles.tooltipCard,
+            { backgroundColor: theme.background, borderColor: theme.backgroundSelected },
+          ]}
+          onPress={() => {}}
+        >
+          <View style={styles.tooltipHeader}>
+            <ThemedText type="code" themeColor="textSecondary">
+              SIGNAL PATH
+            </ThemedText>
+            <ThemedText type="smallBold">{summary.badge}</ThemedText>
+          </View>
+          <ThemedText type="small" themeColor="textSecondary">
+            {summary.description}
+          </ThemedText>
+
+          {summary.rows.map((row) => (
+            <View key={row.label} style={styles.tooltipRow}>
+              <ThemedText type="code" themeColor="textSecondary">
+                {row.label}
+              </ThemedText>
+              <ThemedText type="small" style={styles.detailValue}>
+                {row.value}
+              </ThemedText>
+            </View>
+          ))}
+
+          {summary.paths.length > 0 ? (
+            <View style={styles.tooltipPaths}>
+              <ThemedText type="code" themeColor="textSecondary">
+                PATHS OPEN
+              </ThemedText>
+              {summary.paths.map((path) => (
+                <View key={`${path.kind}:${path.address}`} style={styles.tooltipRow}>
+                  <ThemedText type="code" themeColor={path.active ? 'text' : 'textSecondary'}>
+                    {path.active ? `${path.kind} ·` : `${path.kind} (idle) ·`}
+                  </ThemedText>
+                  <ThemedText type="small" style={styles.detailValue}>
+                    {path.address}
+                  </ThemedText>
+                </View>
+              ))}
+            </View>
+          ) : null}
+
+          <ThemedText type="small" themeColor="textSecondary" style={styles.tooltipNote}>
+            {summary.note}
+          </ThemedText>
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 }
 
@@ -365,6 +486,42 @@ const styles = StyleSheet.create({
     gap: Spacing.three,
     justifyContent: 'space-between',
     minHeight: 52,
+  },
+  detailValueOpenable: {
+    textDecorationLine: 'underline',
+    textDecorationStyle: 'dotted',
+  },
+  tooltipBackdrop: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    padding: Spacing.four,
+  },
+  tooltipCard: {
+    width: '100%',
+    maxWidth: 420,
+    borderWidth: 1,
+    borderRadius: Spacing.two,
+    padding: Spacing.four,
+    gap: Spacing.two,
+  },
+  tooltipHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  tooltipRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: Spacing.two,
+  },
+  tooltipPaths: {
+    gap: Spacing.one,
+  },
+  tooltipNote: {
+    marginTop: Spacing.one,
   },
   detailValue: {
     flex: 1,

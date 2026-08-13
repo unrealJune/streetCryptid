@@ -175,12 +175,19 @@ pub trait FixListener: Send + Sync + 'static {
     /// A fix we could decrypt (someone shared with us). `backfill` is `true` when the fix arrived
     /// via durable range-reconciliation (iroh-docs catch-up) rather than the live gossip path.
     ///
-    /// `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
-    /// the stash is a mirror, so it never claims a direct link to the fix's author.
+    /// `delivery` names the LAST HOP into this device — see [`DeliveryDetail`]. Gossip is epidemic
+    /// and the stash is a mirror, so it never claims a direct link to the fix's author.
     ///
-    /// On the live path it is the CLOSEST open path to the delivering neighbour rather than the
-    /// carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
-    fn on_fix(&self, author: Vec<u8>, seq: u64, fix: LocationFix, backfill: bool, via: String);
+    /// On the live path `via` is the CLOSEST open path to the delivering neighbour rather than the
+    /// carrier of this particular datagram, which iroh does not expose — see [`delivery_detail`].
+    fn on_fix(
+        &self,
+        author: Vec<u8>,
+        seq: u64,
+        fix: LocationFix,
+        backfill: bool,
+        delivery: DeliveryDetail,
+    );
     /// A fix we received but could NOT decrypt (not addressed to us / revoked). Useful
     /// for presence metrics without leaking content.
     fn on_opaque(&self, author: Vec<u8>, seq: u64);
@@ -371,6 +378,40 @@ pub struct TransportAddressDiagnostic {
     /// Whether a remote path is actively carrying traffic. `None` for local advertised addresses,
     /// whose presence does not prove another endpoint is using them.
     pub active: Option<bool>,
+}
+
+/// One network path to the peer that handed us a fix, as it stood at delivery time.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DeliveryPath {
+    /// `relay` | `direct` | `lan` | `ble` — the same vocabulary as the per-fix `via` label.
+    pub kind: String,
+    /// Concrete address: the relay URL, `host:port`, or the custom transport address.
+    pub address: String,
+    /// Whether iroh had this path open at delivery time.
+    pub active: bool,
+}
+
+/// How one fix reached this device, beyond the single [`DeliveryDetail::via`] label.
+///
+/// This describes ONE HOP: the peer that handed us the envelope, and the paths we had open to it.
+/// It is not a route. Gossip is epidemic, so `from` is whichever neighbour forwarded the envelope —
+/// frequently not its author, and not necessarily a friend — and nothing in the protocol carries
+/// where that neighbour got it from. Recovering the full chain would mean stamping hops into
+/// plaintext envelope metadata, which would publish the forwarding graph to the stash and to every
+/// swarm member that currently sees only opaque bytes.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DeliveryDetail {
+    /// The label the UI badges: closest open path on the live route, or `docs` / `stash` on
+    /// backfill. See [`delivery_detail`] and [`transport_rank`].
+    pub via: String,
+    /// Endpoint id of the peer that handed us this fix. Empty when iroh could not name it.
+    pub from: Vec<u8>,
+    /// Whether `from` is the configured trail stash. Backfill only — the live path never sets it,
+    /// because the stash serves the durable replica and does not forward gossip.
+    pub from_stash: bool,
+    /// Every path we knew to `from` at delivery time, active ones first. Empty on the backfill
+    /// path, which reconciles through iroh-docs rather than a gossip neighbour.
+    pub paths: Vec<DeliveryPath>,
 }
 
 /// Iroh's current address knowledge for one requested peer.
@@ -815,6 +856,8 @@ impl LocationNode {
                             sc.author = tracing::field::Empty,
                             sc.seq = tracing::field::Empty,
                             sc.via = tracing::field::Empty,
+                            // The neighbour that forwarded this envelope — one hop, not a route.
+                            sc.from = tracing::field::Empty,
                             outcome = tracing::field::Empty,
                         );
                         let opened = {
@@ -824,9 +867,14 @@ impl LocationNode {
                         // The path lookup is awaited OUTSIDE the span guard: holding a
                         // `tracing` span entered across an await would leak it into whatever
                         // task the executor polls next.
-                        let via = match &opened {
-                            Ok(_) => delivery_label(&delivery_endpoint, msg.delivered_from).await,
-                            Err(_) => "live".to_string(),
+                        let delivery = match &opened {
+                            Ok(_) => delivery_detail(&delivery_endpoint, msg.delivered_from).await,
+                            Err(_) => DeliveryDetail {
+                                via: "live".to_string(),
+                                from: msg.delivered_from.as_bytes().to_vec(),
+                                from_stash: false,
+                                paths: Vec::new(),
+                            },
                         };
                         let _guard = span.enter();
                         match opened {
@@ -836,12 +884,22 @@ impl LocationNode {
                                     tracing::field::display(telemetry::short_hex(&opened.author)),
                                 );
                                 span.record("sc.seq", opened.seq);
-                                span.record("sc.via", via.as_str());
+                                span.record("sc.via", delivery.via.as_str());
+                                span.record(
+                                    "sc.from",
+                                    tracing::field::display(telemetry::short_hex(&delivery.from)),
+                                );
                                 if let Ok(fix) =
                                     postcard::from_bytes::<LocationFix>(&opened.payload)
                                 {
                                     span.record("outcome", "delivered");
-                                    cb.on_fix(opened.author.to_vec(), opened.seq, fix, false, via);
+                                    cb.on_fix(
+                                        opened.author.to_vec(),
+                                        opened.seq,
+                                        fix,
+                                        false,
+                                        delivery,
+                                    );
                                 } else {
                                     span.record("outcome", "payload-decode-failed");
                                 }
@@ -1999,19 +2057,47 @@ fn transport_rank(label: &str) -> u8 {
 ///
 /// Falls back to `live` (arrived, path unknown) rather than guessing: `remote_info` is a
 /// point-in-time snapshot and may have nothing active to report.
-async fn delivery_label(endpoint: &Endpoint, delivered_from: EndpointId) -> String {
+///
+/// Returns the every-path detail alongside the label so the UI can show what the single word hides
+/// — which neighbour handed the fix over, and what else was open at the time. Retaining the losers
+/// costs nothing here and is the only chance to capture them: `remote_info` is a snapshot, and by
+/// the time anything asks again the path set has moved on.
+async fn delivery_detail(endpoint: &Endpoint, delivered_from: EndpointId) -> DeliveryDetail {
+    let from = delivered_from.as_bytes().to_vec();
     let info = match endpoint.remote_info(delivered_from).await {
         Some(info) => info,
-        None => return "live".to_string(),
+        None => {
+            return DeliveryDetail {
+                via: "live".to_string(),
+                from,
+                from_stash: false,
+                paths: Vec::new(),
+            };
+        }
     };
-    let closest = info
+
+    let mut paths: Vec<DeliveryPath> = info
         .addrs()
-        .filter(|address| matches!(address.usage(), iroh::endpoint::TransportAddrUsage::Active))
-        .map(|address| transport_label(address.addr()))
-        .min_by_key(|label| transport_rank(label));
-    match closest {
-        Some(label) => label.to_string(),
-        None => "live".to_string(),
+        .map(|address| DeliveryPath {
+            kind: transport_label(address.addr()).to_string(),
+            address: address.addr().to_string(),
+            active: matches!(address.usage(), iroh::endpoint::TransportAddrUsage::Active),
+        })
+        .collect();
+    // Active first, then closest — the order the tooltip reads them in, so the UI never re-sorts.
+    paths.sort_by_key(|path| (!path.active, transport_rank(&path.kind)));
+
+    let via = paths
+        .iter()
+        .find(|path| path.active)
+        .map(|path| path.kind.clone())
+        .unwrap_or_else(|| "live".to_string());
+
+    DeliveryDetail {
+        via,
+        from,
+        from_stash: false,
+        paths,
     }
 }
 
@@ -2066,7 +2152,15 @@ impl TrailSink for ListenerSink {
                     .stash_peer
                     .is_some_and(|stash| stash.as_bytes().as_slice() == from.as_slice());
                 let via = if from_stash { "stash" } else { "docs" };
-                listener.on_fix(author, seq, fix, true, via.to_string());
+                // No `paths`: reconciliation runs over iroh-docs against the serving peer, so there
+                // is no gossip neighbour whose path table would describe this delivery.
+                let delivery = DeliveryDetail {
+                    via: via.to_string(),
+                    from,
+                    from_stash,
+                    paths: Vec::new(),
+                };
+                listener.on_fix(author, seq, fix, true, delivery);
             }
         }
     }
@@ -2189,8 +2283,8 @@ mod transport_label_tests {
         TransportAddr::Ip(addr.parse().expect("socket addr"))
     }
 
-    /// The selection `delivery_label` performs over the active paths, minus the async endpoint
-    /// lookup: rank the labels and keep the closest. Kept in step with `delivery_label` by hand —
+    /// The selection `delivery_detail` performs over the active paths, minus the async endpoint
+    /// lookup: rank the labels and keep the closest. Kept in step with `delivery_detail` by hand —
     /// `RemoteInfo`/`TransportAddrInfo` cannot be constructed outside iroh, so the real function
     /// is only reachable with two live endpoints.
     fn closest(labels: &[&'static str]) -> Option<&'static str> {
@@ -2273,7 +2367,7 @@ mod transport_label_tests {
         assert_eq!(closest(&["relay"]), Some("relay"));
     }
 
-    /// No active path at all is `delivery_label`'s `live` fallback, not a guessed transport.
+    /// No active path at all is `delivery_detail`'s `live` fallback, not a guessed transport.
     #[test]
     fn no_active_path_selects_nothing() {
         assert_eq!(closest(&[]), None);
