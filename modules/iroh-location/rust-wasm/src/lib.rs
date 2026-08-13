@@ -24,6 +24,11 @@ mod crypto;
 mod docs;
 #[path = "../../rust/src/pad.rs"]
 mod pad;
+// crypto.rs's v3 envelope wraps under a Double Ratchet message key, so the schedule comes with
+// it. Pure and dependency-light (rand, serde, x25519-dalek, zeroize), so it costs the web bundle
+// very little and keeps the two crates on one wire format.
+#[path = "../../rust/src/ratchet.rs"]
+mod ratchet;
 #[path = "../../rust/src/relay.rs"]
 mod relay;
 
@@ -155,7 +160,6 @@ impl WasmLocationNode {
             recv_secret,
             recv_public,
             started: Arc::new(Mutex::new(None)),
-            docs_events: Arc::new(Mutex::new(None)),
         })
     }
 

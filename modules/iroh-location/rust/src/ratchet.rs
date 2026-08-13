@@ -415,6 +415,65 @@ impl RatchetState {
         out
     }
 
+    /// Whether an authenticated wrap header + `kid` addresses **us**, decided without mutating
+    /// anything.
+    ///
+    /// This is the receive-side counterpart of the rotating `kid` (§4.7). An envelope carries one
+    /// wrap per recipient and we must pick ours out before [`accept`] touches state, because
+    /// `accept` performs a DH ratchet — running it on somebody else's wrap would burn our chain
+    /// on a key that was never meant for us.
+    ///
+    /// Two cases, and the second is the one that makes the `kid` worth its eight bytes:
+    ///
+    /// * **Same ratchet key as we already hold.** Walk our receiving chain forward to the claimed
+    ///   counter and compare. Cheap, no DH.
+    /// * **A ratchet key we have not adopted.** We cannot tell from the header alone whether this
+    ///   wrap is ours or another recipient's — every wrap in the envelope carries a *different*
+    ///   sender ratchet key, because sessions are per pair. So derive what our receiving chain
+    ///   *would* become under that key and check the `kid` against it. A match means the sender
+    ///   derived it from a chain rooted in our shared secret, which nobody else can do. A miss
+    ///   costs one DH and leaves state untouched.
+    ///
+    /// Returns `false` for anything at or behind our position, beyond `window`, or malformed —
+    /// the same refusals [`accept`] would make, so a `true` here is not a promise that `accept`
+    /// succeeds, only that it is worth attempting.
+    ///
+    /// [`accept`]: Self::accept
+    pub fn matches(&self, header: &RatchetHeader, kid: &[u8; KID_LEN], window: u32) -> bool {
+        match (self.ckr.as_ref(), self.dh_peer) {
+            // The chain we are already on.
+            (Some(ckr), Some(peer)) if peer == header.sender_ratchet_pub => {
+                if header.epoch != self.recv_epoch || header.counter < self.nr {
+                    return false;
+                }
+                let skip = header.counter - self.nr;
+                if skip > window {
+                    return false;
+                }
+                kid_at(ckr, skip) == *kid
+            }
+            // A key we have not adopted: it must belong to a later epoch than the chain we hold.
+            _ => {
+                if self.ckr.is_some() && header.epoch <= self.recv_epoch {
+                    return false;
+                }
+                // A DH ratchet resets the receiving counter, so the claimed position is measured
+                // from zero rather than from `nr`.
+                if header.counter > window {
+                    return false;
+                }
+                let Ok(dh) = dh_or_err(&self.dh_self, &header.sender_ratchet_pub) else {
+                    return false;
+                };
+                let (mut rk, mut ckr) = kdf_rk(&self.rk, &dh);
+                rk.zeroize();
+                let found = kid_at(&ckr, header.counter) == *kid;
+                ckr.zeroize();
+                found
+            }
+        }
+    }
+
     /// Accept an authenticated header and derive the key that opens its wrap.
     ///
     /// Signature verification and AAD binding happen **before** this is called, preserving the
@@ -697,4 +756,20 @@ fn derive(context: &str, input: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
     let mut hasher = blake3::Hasher::new_derive_key(context);
     hasher.update(input);
     *hasher.finalize().as_bytes()
+}
+
+/// The `kid` `skip` positions along a chain from `ck`, scrubbing every chain key it walks past.
+///
+/// Lookup-only: this derives no message key, so a probe against a wrap that turns out not to be
+/// ours costs nothing but hashing and leaves nothing behind.
+fn kid_at(ck: &[u8; KEY_LEN], skip: u32) -> [u8; KID_LEN] {
+    let mut cur = *ck;
+    for _ in 0..skip {
+        let next = kdf_ck(&cur);
+        cur.zeroize();
+        cur = next;
+    }
+    let kid = kdf_kid(&cur);
+    cur.zeroize();
+    kid
 }
