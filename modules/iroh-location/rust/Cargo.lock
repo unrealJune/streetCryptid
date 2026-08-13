@@ -2714,6 +2714,7 @@ dependencies = [
  "uniffi",
  "uuid",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

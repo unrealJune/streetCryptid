@@ -85,6 +85,10 @@ x25519-dalek = { version = "2", default-features = false, features = [
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 thiserror = "2"
+# Explicit scrubbing of ratchet key material (src/ratchet.rs). Already in the tree transitively
+# via x25519-dalek's `zeroize` feature — named directly here because the schedule holds raw
+# [u8; 32] chain keys that dalek's own Drop impls do not cover.
+zeroize = { version = "1", features = ["derive"] }
 anyhow = "1" # error plumbing for the iroh-docs/iroh-blobs durable-trail glue
 tracing = "0.1" # mobile BLE transport diagnostics
 clap = { version = "4", features = ["derive"], optional = true }

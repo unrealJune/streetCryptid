@@ -26,6 +26,7 @@ pub mod mesh;
 pub mod mvt;
 mod pairing;
 mod profile;
+pub mod ratchet;
 mod relay;
 mod telemetry;
 
