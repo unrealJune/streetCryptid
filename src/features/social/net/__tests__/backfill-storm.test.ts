@@ -19,7 +19,7 @@ import { setTelemetryForTesting } from '@/features/dev/telemetry';
  */
 
 class FakeNativeModule {
-  readTrailCalls: { author: string; sinceTs: number }[] = [];
+  readLatestCalls = 0;
   diagnosticsCalls = 0;
 
   private handlers: Record<string, (e: unknown) => void> = {};
@@ -45,7 +45,7 @@ class FakeNativeModule {
   async unsubscribe() {}
   async publish() {}
   async docsWrite() {}
-  async syncTrail() {}
+  async syncLatest() {}
   async pruneTrail() {}
 
   trailFixes: {
@@ -54,9 +54,21 @@ class FakeNativeModule {
     fix: { lat: number; lon: number; accuracyM: number; headingDeg: number; ts: number };
   }[] = [];
 
-  async readTrail(author: string, sinceTs: number) {
-    this.readTrailCalls.push({ author, sinceTs });
-    return this.trailFixes.filter((f) => f.author === author && f.fix.ts >= sinceTs);
+  /**
+   * Models the replica as it is now: ONE overwritten slot per author, so a read returns each
+   * author's current fix and nothing behind it. `trailFixes` is still written as a list of
+   * historical entries — collapsing it here is what the real namespace does on write.
+   */
+  async readLatest() {
+    this.readLatestCalls += 1;
+    const current = new Map<string, (typeof this.trailFixes)[number]>();
+    for (const f of this.trailFixes) {
+      const held = current.get(f.author);
+      const newer =
+        !held || f.fix.ts > held.fix.ts || (f.fix.ts === held.fix.ts && f.seq > held.seq);
+      if (newer) current.set(f.author, f);
+    }
+    return [...current.values()];
   }
 
   /**
@@ -183,7 +195,7 @@ describe('backfill storm', () => {
     expect(notifications).toBeGreaterThan(0);
     // A friend's history is deliberately not retained: the burst collapses to their newest fix,
     // which is what the map draws. See trail-store.ts.
-    const trail = await svc.trailFor('bb22');
+    const trail = (await svc.friendLatest()).filter((point) => point.author === 'bb22');
     expect(trail).toHaveLength(1);
     expect(trail[0].seq).toBe(500);
     expect(trail[0].fix.ts).toBe(1_500);
@@ -191,6 +203,8 @@ describe('backfill storm', () => {
 
   it('does not re-ingest the entire replica on every sync', async () => {
     const svc = makeService();
+    const snapshots: { lastSyncRecovered: number | null }[] = [];
+    svc.onChange((snapshot) => snapshots.push(snapshot));
     await svc.init('@me', 'mothman');
     await svc.addFriend(friend);
 
@@ -201,18 +215,17 @@ describe('backfill storm', () => {
     }));
 
     await svc.syncTrail(0);
-    const firstPass = mockHolder.mod.readTrailCalls.filter((c) => c.author === 'bb22');
-    expect(firstPass).toHaveLength(1);
-    expect(firstPass[0].sinceTs).toBe(0);
+    // One read for the whole replica, not one per author — and it yields the friend's CURRENT fix
+    // only, so the 300 historical entries never cross the bridge at all.
+    expect(mockHolder.mod.readLatestCalls).toBe(1);
+    expect(snapshots.at(-1)?.lastSyncRecovered).toBe(1);
 
-    mockHolder.mod.readTrailCalls = [];
     await svc.syncTrail(0);
 
-    // The second sync must resume from what it already has, not re-read (and re-write) all 300.
-    // Live mode fires one of these every 8 seconds.
-    const secondPass = mockHolder.mod.readTrailCalls.filter((c) => c.author === 'bb22');
-    expect(secondPass).toHaveLength(1);
-    expect(secondPass[0].sinceTs).toBe(1_299);
+    // The second sync must not re-store what it already has. Live mode fires one every 8 seconds,
+    // and re-ingesting on each is what pinned the JS thread. The watermark is what skips it.
+    expect(mockHolder.mod.readLatestCalls).toBe(2);
+    expect(snapshots.at(-1)?.lastSyncRecovered).toBe(0);
   });
 
   it('re-reads a friend from scratch after their cached trail is dropped', async () => {
@@ -224,16 +237,19 @@ describe('backfill storm', () => {
     ];
 
     await svc.syncTrail(0);
+    expect((await svc.friendLatest()).filter((p) => p.author === 'bb22')).toHaveLength(1);
+
     await svc.removeFriend('bb22');
+    expect((await svc.friendLatest()).filter((p) => p.author === 'bb22')).toHaveLength(0);
+
     await svc.addFriend(friend);
-    mockHolder.mod.readTrailCalls = [];
     await svc.syncTrail(0);
 
-    // Removing a friend deletes their cached points, so the watermark has to reset with them or
-    // re-adding them would show an empty trail forever.
-    const calls = mockHolder.mod.readTrailCalls.filter((c) => c.author === 'bb22');
-    expect(calls).toHaveLength(1);
-    expect(calls[0].sinceTs).toBe(0);
+    // Removing a friend deletes their cached fix, so the watermark has to reset with them —
+    // otherwise the re-read is skipped as "already seen" and they never reappear on the map.
+    const restored = (await svc.friendLatest()).filter((p) => p.author === 'bb22');
+    expect(restored).toHaveLength(1);
+    expect(restored[0].fix.ts).toBe(500);
   });
 
   it('treats a key-reordered transport snapshot as unchanged', async () => {

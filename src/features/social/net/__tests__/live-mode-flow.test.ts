@@ -24,7 +24,7 @@ interface ControlMsgLike {
 
 class FakeNativeModule {
   calls = {
-    syncTrail: [] as { since: number; peerTicket: string | null }[],
+    syncLatest: [] as { peerTicket: string | null }[],
     pushTrail: [] as { peerTicket: string | null }[],
     docsWriteControl: [] as { msg: ControlMsgLike; recipients: string[] }[],
     readControl: [] as string[],
@@ -53,8 +53,8 @@ class FakeNativeModule {
   async unsubscribe() {}
   async publish() {}
   async docsWrite() {}
-  async syncTrail(since: number, peerTicket: string | null) {
-    this.calls.syncTrail.push({ since, peerTicket });
+  async syncLatest(peerTicket: string | null) {
+    this.calls.syncLatest.push({ peerTicket });
   }
   async pushTrail(peerTicket: string | null) {
     this.calls.pushTrail.push({ peerTicket });
@@ -66,7 +66,7 @@ class FakeNativeModule {
     this.calls.readControl.push(author);
     return this.control[author] ?? [];
   }
-  async readTrail() {
+  async readLatest() {
     return [];
   }
   async pruneTrail() {}
@@ -253,11 +253,11 @@ describe('live mode — receiving a request', () => {
   it('reconciles before reading — an unpulled request is invisible', async () => {
     const svc = makeService(stashDeps());
     await svc.init('@me', 'mothman');
-    mockHolder.mod.calls.syncTrail.length = 0;
+    mockHolder.mod.calls.syncLatest.length = 0;
 
     await poll(svc);
 
-    expect(mockHolder.mod.calls.syncTrail.length).toBeGreaterThan(0);
+    expect(mockHolder.mod.calls.syncLatest.length).toBeGreaterThan(0);
     expect(mockHolder.mod.calls.readControl).toContain(friend.endpointId);
   });
 

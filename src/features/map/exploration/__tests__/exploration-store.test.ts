@@ -26,7 +26,12 @@ function makeStore(db = new InMemoryExplorationDb()) {
 
 async function seedTrail(storage: TrailStorage, fixes: LocationFix[]): Promise<void> {
   for (let i = 0; i < fixes.length; i++) {
-    await storage.putSelf({ author: SELF_AUTHOR, seq: i + 1, fix: fixes[i], receivedAt: fixes[i].ts });
+    await storage.putSelf({
+      author: SELF_AUTHOR,
+      seq: i + 1,
+      fix: fixes[i],
+      receivedAt: fixes[i].ts,
+    });
   }
 }
 

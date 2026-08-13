@@ -510,13 +510,13 @@ class IrohLocationModule : Module() {
         }
       }
 
-    AsyncFunction("syncTrail") Coroutine
-      { sinceTs: Double, peerTicket: String?, traceparent: String? ->
+    AsyncFunction("syncLatest") Coroutine
+      { peerTicket: String?, traceparent: String? ->
         val n = node ?: throw IllegalStateException("call createNode first")
         if (traceparent != null) {
-          n.syncTrailTraced(sinceTs.toLong().toULong(), peerTicket, traceparent)
+          n.syncLatestTraced(peerTicket, traceparent)
         } else {
-          n.syncTrail(sinceTs.toLong().toULong(), peerTicket)
+          n.syncLatest(peerTicket)
         }
       }
 
@@ -544,10 +544,10 @@ class IrohLocationModule : Module() {
         n.readControl(author.hexToBytes()).map { controlMsgToMap(it) }
       }
 
-    AsyncFunction("readTrail") Coroutine
-      { author: String, sinceTs: Double ->
+    AsyncFunction("readLatest") Coroutine
+      {
         val n = node ?: throw IllegalStateException("call createNode first")
-        n.readTrail(author.hexToBytes(), sinceTs.toLong().toULong()).map { incoming: IncomingFix ->
+        n.readLatest().map { incoming: IncomingFix ->
           mapOf(
             "author" to incoming.author.toHex(),
             "seq" to incoming.seq.toLong(),

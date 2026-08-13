@@ -19,7 +19,7 @@ class FakeNativeModule {
   calls = {
     publish: [] as unknown[][],
     docsWrite: [] as unknown[][],
-    syncTrail: [] as { since: number; peerTicket: string | null; traceparent?: string }[],
+    syncLatest: [] as { peerTicket: string | null; traceparent?: string }[],
     importDocTicket: [] as string[],
     subscribe: [] as { topic: string; bootstrap: string[] }[],
     unsubscribe: [] as string[],
@@ -64,9 +64,8 @@ class FakeNativeModule {
   async docsWriteControl(...args: unknown[]) {
     this.calls.docsWriteControl.push(args);
   }
-  async syncTrail(since: number, peerTicket: string | null, traceparent?: string | null) {
-    this.calls.syncTrail.push({
-      since,
+  async syncLatest(peerTicket: string | null, traceparent?: string | null) {
+    this.calls.syncLatest.push({
       peerTicket,
       ...(traceparent ? { traceparent } : {}),
     });
@@ -76,8 +75,16 @@ class FakeNativeModule {
     seq: number;
     fix: { lat: number; lon: number; accuracyM: number; headingDeg: number; ts: number };
   }[] = [];
-  async readTrail(author: string, sinceTs: number) {
-    return this.trailFixes.filter((f) => f.author === author && f.fix.ts >= sinceTs);
+  async readLatest() {
+    // One overwritten slot per author: a read yields each author's current fix, nothing behind it.
+    const current = new Map<string, (typeof this.trailFixes)[number]>();
+    for (const f of this.trailFixes) {
+      const held = current.get(f.author);
+      if (!held || f.fix.ts > held.fix.ts || (f.fix.ts === held.fix.ts && f.seq > held.seq)) {
+        current.set(f.author, f);
+      }
+    }
+    return [...current.values()];
   }
   async pruneTrail() {}
   addListener(name: string, cb: (e: unknown) => void) {
@@ -199,7 +206,7 @@ describe('LocationSharingService — durable trail wiring', () => {
     expect(latest?.friends).toEqual([]);
     expect(latest?.sharingWith).toEqual([]);
     expect(mockHolder.mod.calls.unsubscribe).toContain('sub-topic-bb22');
-    expect((await svc.trailLatest()).some((point) => point.author === friend.endpointId)).toBe(
+    expect((await svc.friendLatest()).some((point) => point.author === friend.endpointId)).toBe(
       false
     );
 
@@ -209,7 +216,7 @@ describe('LocationSharingService — durable trail wiring', () => {
       fix: { lat: 3, lon: 4, accuracyM: 3, headingDeg: 0, ts: 200 },
     });
     await flush();
-    expect((await svc.trailLatest()).some((point) => point.author === friend.endpointId)).toBe(
+    expect((await svc.friendLatest()).some((point) => point.author === friend.endpointId)).toBe(
       false
     );
   });
@@ -285,7 +292,7 @@ describe('LocationSharingService — durable trail wiring', () => {
 
     await svc.syncTrail(0, parent);
 
-    expect(mockHolder.mod.calls.syncTrail.at(-1)?.traceparent).toMatch(
+    expect(mockHolder.mod.calls.syncLatest.at(-1)?.traceparent).toMatch(
       new RegExp(`^00-${parent.traceId}-[0-9a-f]{16}-01$`)
     );
   });
@@ -294,7 +301,7 @@ describe('LocationSharingService — durable trail wiring', () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
     await svc.syncTrail(0);
-    expect(mockHolder.mod.calls.syncTrail).toEqual([{ since: 0, peerTicket: null }]);
+    expect(mockHolder.mod.calls.syncLatest).toEqual([{ peerTicket: null }]);
   });
 
   it('syncTrail explicitly targets the configured stash when opted in', async () => {
@@ -310,8 +317,7 @@ describe('LocationSharingService — durable trail wiring', () => {
 
     await svc.syncTrail(123);
 
-    expect(mockHolder.mod.calls.syncTrail).toContainEqual({
-      since: 123,
+    expect(mockHolder.mod.calls.syncLatest).toContainEqual({
       peerTicket: 'ticket-stash',
     });
   });
@@ -385,7 +391,7 @@ describe('LocationSharingService — durable trail wiring', () => {
     await svc.syncTrail(0);
 
     expect(recovered).toBe(1);
-    const latest = await svc.trailLatest();
+    const latest = await svc.friendLatest();
     expect(latest.some((p) => p.author === 'bb22' && p.seq === 7)).toBe(true);
   });
 
@@ -406,7 +412,7 @@ describe('LocationSharingService — durable trail wiring', () => {
 
     expect(received).toHaveLength(1);
     expect(received[0].backfill).toBe(true);
-    const latest = await svc.trailLatest();
+    const latest = await svc.friendLatest();
     expect(latest.some((p) => p.author === 'bb22' && p.seq === 5)).toBe(true);
   });
 
@@ -430,20 +436,31 @@ describe('LocationSharingService — durable trail wiring', () => {
     await flush();
 
     // A friend collapses to their newest fix — their history is not retained.
-    const full = await svc.trailAll();
+    const full = await svc.friendLatest();
     expect(full.filter((point) => point.author === 'bb22').map((point) => point.seq)).toEqual([52]);
   });
 
-  it('surfaces the recovered count from onSync into the snapshot', async () => {
+  it('surfaces the recovered count from a sync into the snapshot', async () => {
+    // The count is now derived app-side from what the replica read actually stored, rather than
+    // from a native `onSync` callback: with one overwritten slot per author there is no backfill
+    // stream to report progress on, so the sink that used to emit it is gone.
     const svc = makeService();
     let recovered: number | null = null;
     svc.onChange((s) => {
       recovered = s.lastSyncRecovered;
     });
     await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
 
-    mockHolder.mod.emit('onSync', { author: 'bb22', status: 'completed', recovered: 3 });
-    expect(recovered).toBe(3);
+    mockHolder.mod.trailFixes = [
+      { author: 'bb22', seq: 1, fix: { lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 900 } },
+    ];
+    await svc.syncTrail(0);
+    expect(recovered).toBe(1);
+
+    // Nothing new in the replica: the watermark skips the re-store, so nothing is "recovered".
+    await svc.syncTrail(0);
+    expect(recovered).toBe(0);
   });
 
   describe('share interval', () => {
@@ -528,13 +545,13 @@ describe('LocationSharingService — live watch pull', () => {
   /** syncTrail calls since a mark, ignoring the ones add/share themselves trigger. */
   function syncsSince(svc: LocationSharingService, mark: number): number {
     void svc;
-    return mockHolder.mod.calls.syncTrail.length - mark;
+    return mockHolder.mod.calls.syncLatest.length - mark;
   }
 
   it('pulls the trail on an interval while a live session is active', async () => {
     const svc = await watching();
     await svc.requestLive(friend.endpointId, 5 * 60_000);
-    const mark = mockHolder.mod.calls.syncTrail.length;
+    const mark = mockHolder.mod.calls.syncLatest.length;
 
     await jest.advanceTimersByTimeAsync(8_000);
     expect(syncsSince(svc, mark)).toBe(1);
@@ -559,7 +576,7 @@ describe('LocationSharingService — live watch pull', () => {
     await jest.advanceTimersByTimeAsync(8_000);
 
     await svc.cancelLiveRequest(friend.endpointId);
-    const mark = mockHolder.mod.calls.syncTrail.length;
+    const mark = mockHolder.mod.calls.syncLatest.length;
 
     await jest.advanceTimersByTimeAsync(40_000);
     expect(syncsSince(svc, mark)).toBe(0);
@@ -571,15 +588,15 @@ describe('LocationSharingService — live watch pull', () => {
     await svc.requestLive(friend.endpointId, 1_000);
 
     await jest.advanceTimersByTimeAsync(8_000);
-    const beforeExpiry = mockHolder.mod.calls.syncTrail.length;
+    const beforeExpiry = mockHolder.mod.calls.syncLatest.length;
     expect(beforeExpiry).toBeGreaterThan(0);
 
     await jest.advanceTimersByTimeAsync(70_000);
-    const afterExpiry = mockHolder.mod.calls.syncTrail.length;
+    const afterExpiry = mockHolder.mod.calls.syncLatest.length;
 
     // A lapsed session must not keep a timer alive behind it.
     await jest.advanceTimersByTimeAsync(40_000);
-    expect(mockHolder.mod.calls.syncTrail.length).toBe(afterExpiry);
+    expect(mockHolder.mod.calls.syncLatest.length).toBe(afterExpiry);
   });
 
   // Backgrounding withdraws the ask: a watcher not looking at the screen has no use for a friend's
@@ -595,18 +612,18 @@ describe('LocationSharingService — live watch pull', () => {
     // A cancel is written into our control slot, superseding the request.
     expect(mockHolder.mod.calls.docsWriteControl.length).toBeGreaterThanOrEqual(2);
 
-    const mark = mockHolder.mod.calls.syncTrail.length;
+    const mark = mockHolder.mod.calls.syncLatest.length;
     await jest.advanceTimersByTimeAsync(40_000);
     expect(syncsSince(svc, mark)).toBe(0);
   });
 
   it('does not overlap ticks when a sync runs longer than the interval', async () => {
     const svc = await watching();
-    const original = mockHolder.mod.syncTrail.bind(mockHolder.mod);
+    const original = mockHolder.mod.syncLatest.bind(mockHolder.mod);
     const gates: (() => void)[] = [];
     let inFlight = 0;
     let maxConcurrent = 0;
-    mockHolder.mod.syncTrail = async (...args: Parameters<typeof original>) => {
+    mockHolder.mod.syncLatest = async (...args: Parameters<typeof original>) => {
       inFlight += 1;
       maxConcurrent = Math.max(maxConcurrent, inFlight);
       await original(...args);
@@ -623,6 +640,6 @@ describe('LocationSharingService — live watch pull', () => {
     // Let the held sync finish so nothing is left pending when the test ends.
     for (const open of gates.splice(0)) open();
     await jest.advanceTimersByTimeAsync(0);
-    mockHolder.mod.syncTrail = original;
+    mockHolder.mod.syncLatest = original;
   });
 });

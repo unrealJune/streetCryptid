@@ -24,7 +24,6 @@ import {
   type MapLayerId,
   type MapLayerToggles,
   type MapRosterFriend,
-  type MapTrailLocation,
   type Rgb,
 } from '@/features/map';
 import { sampleTrailForMap } from '@/features/map/core/trail-sampling';

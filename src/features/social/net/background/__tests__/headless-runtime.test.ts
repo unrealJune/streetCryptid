@@ -9,9 +9,9 @@ import {
 import {
   ensureSharingArmedHeadless,
   flushBackgroundOutboxHeadless,
-  runBackgroundBackfillHeadless,
+  runBackgroundRefreshHeadless,
 } from '../headless-runtime';
-import { registerActiveBackfillHandler } from '../register-task';
+import { registerActiveRefreshHandler } from '../register-task';
 
 // The headless session news up a real LocationSharingService (→ native iroh `createNode`). Mock it so
 // we can assert that the periodic backfill NEVER constructs one while a mounted runtime is alive —
@@ -125,15 +125,15 @@ describe('headless-runtime', () => {
     jest.clearAllMocks();
   });
 
-  describe('runBackgroundBackfillHeadless', () => {
+  describe('runBackgroundRefreshHeadless', () => {
     it('routes to the mounted runtime and never spins up a headless node when one is registered', async () => {
       // A backgrounded Android runtime is alive but NOT 'active' (the location foreground service).
       setAppState('background');
       const mountedBackfill = jest.fn(async () => {});
-      unregister = registerActiveBackfillHandler(mountedBackfill);
+      unregister = registerActiveRefreshHandler(mountedBackfill);
       const parent = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
 
-      await runBackgroundBackfillHeadless(parent);
+      await runBackgroundRefreshHeadless(parent);
 
       expect(mountedBackfill).toHaveBeenCalledTimes(1);
       expect(mountedBackfill).toHaveBeenCalledWith(parent);
@@ -147,7 +147,7 @@ describe('headless-runtime', () => {
       setAppState('background');
       const parent = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
 
-      await runBackgroundBackfillHeadless(parent);
+      await runBackgroundRefreshHeadless(parent);
 
       expect(mockServiceCtor).toHaveBeenCalledTimes(1);
       expect(mockInit).toHaveBeenCalledTimes(1);
@@ -158,7 +158,7 @@ describe('headless-runtime', () => {
     it('does not run a headless session while the app is active', async () => {
       setAppState('active');
 
-      await runBackgroundBackfillHeadless();
+      await runBackgroundRefreshHeadless();
 
       expect(mockServiceCtor).not.toHaveBeenCalled();
     });
@@ -169,7 +169,7 @@ describe('headless-runtime', () => {
       setAppState('background');
       queueFixes(2);
 
-      await runBackgroundBackfillHeadless();
+      await runBackgroundRefreshHeadless();
 
       expect(calls).toEqual(['drain', 'syncTrail']);
     });
@@ -282,7 +282,7 @@ describe('headless-runtime', () => {
     it('does nothing when the user has sharing switched off', async () => {
       mockLoadSharingEnabled.mockImplementation(async () => false);
 
-      await expect(ensureSharingArmedHeadless('backfill')).resolves.toBe(false);
+      await expect(ensureSharingArmedHeadless('refresh')).resolves.toBe(false);
       expect(mockStartBackgroundLocation).not.toHaveBeenCalled();
     });
 
@@ -290,7 +290,7 @@ describe('headless-runtime', () => {
       // Android's BOOT_COMPLETED receiver and START_REDELIVER_INTENT both land here.
       mockIsRunning.mockImplementation(async () => true);
 
-      await expect(ensureSharingArmedHeadless('backfill')).resolves.toBe(false);
+      await expect(ensureSharingArmedHeadless('refresh')).resolves.toBe(false);
       expect(mockStartBackgroundLocation).not.toHaveBeenCalled();
     });
 
@@ -300,7 +300,7 @@ describe('headless-runtime', () => {
       });
 
       // Expected on a backfill wake, and must not reject — the caller still has real work to do.
-      await expect(ensureSharingArmedHeadless('backfill')).resolves.toBe(false);
+      await expect(ensureSharingArmedHeadless('refresh')).resolves.toBe(false);
     });
 
     it('swallows an unexpected failure too', async () => {

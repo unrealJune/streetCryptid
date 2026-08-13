@@ -391,13 +391,12 @@ public final class IrohLocationModule: Module {
       }
     }
 
-    AsyncFunction("syncTrail") { (sinceTs: Double, peerTicket: String?, traceparent: String?) async throws in
+    AsyncFunction("syncLatest") { (peerTicket: String?, traceparent: String?) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       if let traceparent {
-        try await node.syncTrailTraced(
-          sinceTs: UInt64(sinceTs), peerTicket: peerTicket, traceparent: traceparent)
+        try await node.syncLatestTraced(peerTicket: peerTicket, traceparent: traceparent)
       } else {
-        try await node.syncTrail(sinceTs: UInt64(sinceTs), peerTicket: peerTicket)
+        try await node.syncLatest(peerTicket: peerTicket)
       }
     }
 
@@ -434,9 +433,9 @@ public final class IrohLocationModule: Module {
       }
     }
 
-    AsyncFunction("readTrail") { (author: String, sinceTs: Double) async throws -> [[String: Any]] in
+    AsyncFunction("readLatest") { () async throws -> [[String: Any]] in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      let fixes = try await node.readTrail(author: hexToData(author), sinceTs: UInt64(sinceTs))
+      let fixes = try await node.readLatest()
       return fixes.map { incoming in
         [
           "author": dataToHex(incoming.author),

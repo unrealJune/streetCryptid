@@ -184,27 +184,23 @@ export class IrohLocationNativeModule
     await this.requireNode().docs_write(subscriptionId, seq, epoch, fix, recipientsHex);
   }
 
-  async syncTrail(
-    sinceTs: number,
-    peerTicket: string | null,
-    _traceparent?: string | null
-  ): Promise<void> {
+  async syncLatest(peerTicket: string | null, _traceparent?: string | null): Promise<void> {
     await ensureWasm();
-    await this.requireNode().sync_trail(sinceTs, peerTicket ?? undefined);
+    await this.requireNode().sync_latest(peerTicket ?? undefined);
   }
 
   async pushTrail(peerTicket: string | null, _traceparent?: string | null): Promise<void> {
     await ensureWasm();
     const node = this.requireNode();
     // `web/` is a generated build output (`just build-wasm`); a bundle built before `push_trail`
-    // existed still has `sync_trail`, which reconciles every namespace — including our own — and
+    // existed still has `sync_latest`, which reconciles every namespace — including our own — and
     // so performs the same `start_sync` that gets our entries to the stash, just less directly.
     const push = (node as { push_trail?: (peerTicket?: string) => Promise<void> }).push_trail;
     if (typeof push === 'function') {
       await push.call(node, peerTicket ?? undefined);
       return;
     }
-    await node.sync_trail(0, peerTicket ?? undefined);
+    await node.sync_latest(peerTicket ?? undefined);
   }
 
   // NOTE: `docsWriteControl` / `readControl` are deliberately NOT implemented here, and are
@@ -214,9 +210,9 @@ export class IrohLocationNativeModule
   // ephemeral (lost on reload), so a control entry written here would be a request the sender
   // cannot reliably withdraw. Absent beats half-working.
 
-  async readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]> {
+  async readLatest(): Promise<NativeIncomingFix[]> {
     await ensureWasm();
-    return (await this.requireNode().read_trail(author, sinceTs)) as NativeIncomingFix[];
+    return (await this.requireNode().read_latest()) as NativeIncomingFix[];
   }
 
   async pruneTrail(olderThanTs: number): Promise<void> {

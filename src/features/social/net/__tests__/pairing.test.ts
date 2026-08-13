@@ -130,8 +130,8 @@ class FakeNativeModule {
   }
   async publish() {}
   async docsWrite() {}
-  async syncTrail() {}
-  async readTrail() {
+  async syncLatest() {}
+  async readLatest() {
     return [];
   }
   async pruneTrail() {}

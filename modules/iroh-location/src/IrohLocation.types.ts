@@ -74,7 +74,7 @@ export interface OnSyncEvent {
   recovered?: number;
 }
 
-/** A decrypted fix read back from the local durable replica (see {@link IrohLocationApi.readTrail}). */
+/** A decrypted fix read back from the local durable replica (see {@link IrohLocationApi.readLatest}). */
 export interface NativeIncomingFix {
   author: string;
   seq: number;
@@ -377,18 +377,20 @@ export interface IrohLocationApi {
     traceparent?: string | null
   ): Promise<void>;
   /**
-   * Kick off range-based set reconciliation to recover envelopes we missed while offline. Recovered
-   * fixes we can decrypt arrive as `onFix` with `backfill: true`; progress via `onSync`. `sinceTs`
-   * bounds how far back to reconcile (0 = full history). `peerTicket` explicitly targets the trail
-   * stash; null retains peer-only reconciliation.
+   * Reconcile every replicated namespace so each author's current fix is up to date locally.
+   * `peerTicket` explicitly targets the trail stash; null retains peer-only reconciliation.
+   *
+   * There is no `sinceTs` and no backfill stream any more: each author's namespace holds ONE
+   * overwritten slot (FORWARD-SECRECY.md §4.4), so there is no back-catalogue to bound or to
+   * deliver incrementally. Read the result with {@link readLatest} once this resolves.
    */
-  syncTrail(sinceTs: number, peerTicket: string | null, traceparent?: string | null): Promise<void>;
+  syncLatest(peerTicket: string | null, traceparent?: string | null): Promise<void>;
   /**
    * Push OUR trail namespace to `peerTicket` (the trail stash) and wait for the exchange to finish.
    *
    * **This is what actually gets a published fix off the phone.** {@link docsWrite} only writes the
    * local replica; iroh-docs broadcasts a local insert only for namespaces that `start_sync` has
-   * marked as syncing, and nothing but this call (or {@link syncTrail}) does that. A context that
+   * marked as syncing, and nothing but this call (or {@link syncLatest}) does that. A context that
    * publishes without it — every headless background wake — strands its envelopes on the device.
    * Call it after draining a batch.
    *
@@ -419,8 +421,12 @@ export interface IrohLocationApi {
    * OPTIONAL: same iOS bindgen caveat as {@link docsWriteControl}.
    */
   readControl?(author: string): Promise<NativeControlMsg[]>;
-  /** Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >= sinceTs`. */
-  readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]>;
+  /**
+   * Read every author's CURRENT decrypted fix out of the local replica — at most one per author,
+   * ours included. Replaces the old per-author range read: with a single last-write-wins slot per
+   * author there is no range left to ask for, so this is one call instead of a loop.
+   */
+  readLatest(): Promise<NativeIncomingFix[]>;
   /** Explicitly drop durable entries older than `olderThanTs`. */
   pruneTrail(olderThanTs: number): Promise<void>;
   /**
@@ -430,7 +436,7 @@ export interface IrohLocationApi {
   docTicket(): Promise<string>;
   /**
    * Import a friend's docs read-ticket (their card's `docTicket`) so we replicate their trail
-   * namespace and can recover their missed fixes via {@link syncTrail}. Grants replication only;
+   * namespace and can recover their missed fixes via {@link syncLatest}. Grants replication only;
    * reading still needs our per-recipient wrap in each envelope. See ARCHITECTURE §6.
    */
   importDocTicket(ticket: string): Promise<void>;

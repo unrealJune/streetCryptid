@@ -119,10 +119,11 @@ export class InMemoryTrailStorage implements TrailStorage {
       return;
     }
     // Older, or the same fix re-delivered. Either way the position must not move — but a
-    // re-delivery that names the serving peer can still sharpen the label we hold. Mirrors the
-    // SQLite `ON CONFLICT` clause in persistence.ts.
+    // re-delivery that names the serving peer can still sharpen the label we hold. Everything else
+    // takes the newer write, so `receivedAt` reflects the latest receipt. Mirrors the SQLite
+    // `ON CONFLICT` clause in persistence.ts.
     if (point.seq === current.seq && point.fix.ts === current.fix.ts) {
-      this.friends.set(point.author, { ...current, via: mergeVia(current.via, point.via) });
+      this.friends.set(point.author, { ...point, via: mergeVia(current.via, point.via) });
     }
   }
 

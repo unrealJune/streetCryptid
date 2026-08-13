@@ -52,12 +52,7 @@ import type {
 import type { BackgroundLocationProvider } from './background/background-provider';
 import type { BackgroundStartConfig } from './background/background-task';
 import type { FixPublisher, LocationEngine } from './background/location-engine';
-import {
-  createTrailStore,
-  SELF_AUTHOR,
-  type TrailPoint,
-  type TrailStore,
-} from './background/trail-store';
+import { createTrailStore, type TrailPoint, type TrailStore } from './background/trail-store';
 import type { PersistentKV } from './background/fix-outbox';
 import {
   clampMailboxTtlSeconds,
@@ -391,7 +386,7 @@ export class LocationSharingService implements FixPublisher {
    * SQLite eight seconds apart for as long as anyone was watching. Cleared per author whenever
    * their cached points are dropped, or a re-added friend would never be re-read.
    */
-  private readonly replicaWatermarks = new Map<string, number>();
+  private readonly replicaWatermarks = new Map<string, { ts: number; seq: number }>();
   private readonly errorListeners = new Set<ErrorListener>();
   private fixSub: Removable | null = null;
 
@@ -471,7 +466,7 @@ export class LocationSharingService implements FixPublisher {
   private bgProvider: BackgroundLocationProvider | null = null;
   private bgUnwatch: (() => void) | null = null;
   private bgTaskHandlerStop: (() => void) | null = null;
-  private bgBackfillHandlerStop: (() => void) | null = null;
+  private bgRefreshHandlerStop: (() => void) | null = null;
   private bgLifecycleStop: (() => void) | null = null;
   private bgCadenceStop: (() => Promise<void>) | null = null;
   /** Auto-revert timer for a bounded live-tracking window; null when ambient. */
@@ -1411,8 +1406,7 @@ export class LocationSharingService implements FixPublisher {
       attributes: { since_ts: sinceTs, stash: this.stashEnabled() },
     });
     try {
-      await this.mod.syncTrail(
-        sinceTs,
+      await this.mod.syncLatest(
         this.stashEnabled() ? this.stashTicket : null,
         getTelemetry().enabled ? traceparentFor(span.context) : null
       );
@@ -1481,66 +1475,62 @@ export class LocationSharingService implements FixPublisher {
   }
 
   /**
-   * Read decrypted fixes for self + friends out of the durable replica and merge them into the
-   * trail cache. Returns how many friend fixes are present.
+   * Read every author's current decrypted fix out of the durable replica and merge it into the
+   * local store. Returns how many FRIEND fixes were newly stored.
    *
    * Two things keep this cheap, and both matter — live mode runs one of these every
    * {@link LIVE_WATCH_PULL_INTERVAL_MS}:
    *
-   * - each author is read from {@link replicaWatermarks}, not from `sinceTs`, so a sync re-reads
-   *   only what it has not already seen instead of decrypting the author's whole namespace again;
-   * - a friend's batch collapses to its newest fix before it is stored, because their history is
-   *   not retained (see `trail-store.ts`). A friend who has been away for a week reconciles into
-   *   exactly one row, not a week of rows.
+   * - there is nothing to collapse. Each namespace holds a single overwritten slot, so a friend
+   *   who has been away for a week reconciles into exactly one entry, not a week of them. This is
+   *   structural now rather than a batch the app trims after the fact;
+   * - {@link replicaWatermarks} skips authors whose slot we have already ingested, so a repeat
+   *   sync neither re-writes SQLite nor fans out a redundant repaint.
    */
   private async refreshTrailFromReplica(sinceTs: number): Promise<number> {
     if (!this.mod) return 0;
     const selfId = this.keys?.endpointId;
-    const authors = new Set<string>();
-    if (selfId) authors.add(selfId);
-    for (const f of pool.friendList(this.state)) authors.add(f.endpointId);
+    const known = new Set(pool.friendList(this.state).map((f) => f.endpointId));
+
+    // One read for the whole replica: every namespace holds a single overwritten slot, so there is
+    // no per-author range to walk and nothing to collapse. The watermark is kept only to skip
+    // re-storing a fix we have already seen — it is no longer a read bound.
+    const fixes = await this.mod.readLatest().catch(() => []);
 
     let recoveredFriendFixes = 0;
-    for (const author of authors) {
-      const from = Math.max(sinceTs, this.replicaWatermarks.get(author) ?? 0);
-      const fixes = await this.mod.readTrail(author, from).catch(() => []);
-      if (fixes.length === 0) continue;
-      const highWater = fixes.reduce((max, nf) => Math.max(max, nf.fix.ts), from);
+    for (const nf of fixes) {
+      const fix = {
+        lat: nf.fix.lat,
+        lon: nf.fix.lon,
+        accuracyM: nf.fix.accuracyM,
+        headingDeg: nf.fix.headingDeg,
+        ts: nf.fix.ts,
+      };
+      // `sinceTs` is the caller's inclusive lower bound; the watermark is what we have already
+      // ingested. Compared on `(ts, seq)` so a republish at the same timestamp is not mistaken for
+      // the entry we already hold — the store is last-write-wins regardless, but skipping here is
+      // what stops live mode re-writing and re-rendering the same slot every 8 seconds.
+      if (nf.fix.ts < sinceTs) continue;
+      const seen = this.replicaWatermarks.get(nf.author);
+      if (seen && (nf.fix.ts < seen.ts || (nf.fix.ts === seen.ts && nf.seq <= seen.seq))) continue;
 
-      if (selfId && author === selfId) {
-        for (const nf of fixes) {
-          await this.trail.appendOwn(
-            {
-              lat: nf.fix.lat,
-              lon: nf.fix.lon,
-              accuracyM: nf.fix.accuracyM,
-              headingDeg: nf.fix.headingDeg,
-              ts: nf.fix.ts,
-            },
-            nf.seq
-          );
-        }
-      } else {
-        // Only the newest survives storage anyway; picking it here avoids writing the rest at all.
-        const newest = fixes.reduce((best, nf) =>
-          nf.fix.ts > best.fix.ts || (nf.fix.ts === best.fix.ts && nf.seq > best.seq) ? nf : best
-        );
+      if (selfId && nf.author === selfId) {
+        await this.trail.appendOwn(fix, nf.seq);
+      } else if (known.has(nf.author)) {
         await this.trail.recordFriendLatest({
-          author: newest.author,
-          seq: newest.seq,
-          fix: {
-            lat: newest.fix.lat,
-            lon: newest.fix.lon,
-            accuracyM: newest.fix.accuracyM,
-            headingDeg: newest.fix.headingDeg,
-            ts: newest.fix.ts,
-          },
+          author: nf.author,
+          seq: nf.seq,
+          fix,
           receivedAt: Date.now(),
           backfill: true,
         });
-        recoveredFriendFixes += fixes.length;
+        recoveredFriendFixes += 1;
+      } else {
+        // An author we no longer pool with. Their slot is still replicated until the namespace is
+        // dropped; storing it would resurrect a removed friend's dot.
+        continue;
       }
-      this.replicaWatermarks.set(author, highWater);
+      this.replicaWatermarks.set(nf.author, { ts: nf.fix.ts, seq: nf.seq });
     }
     return recoveredFriendFixes;
   }
@@ -1578,7 +1568,7 @@ export class LocationSharingService implements FixPublisher {
         { createLocationEngine },
         { createSamplingPolicy },
         { BackgroundLocationProvider: Provider },
-        { backgroundOutbox, registerActiveBackgroundFixHandler, registerActiveBackfillHandler },
+        { backgroundOutbox, registerActiveBackgroundFixHandler, registerActiveRefreshHandler },
         { createBatterySource },
         { createCadenceController, cfgFromDecision },
       ] = await Promise.all([
@@ -1617,7 +1607,7 @@ export class LocationSharingService implements FixPublisher {
       // Drain BEFORE syncing: `syncTrail` is the only thing that pushes our own namespace to the
       // stash, so flushing after it would leave everything this wake published stranded until the
       // next OS wake (~15 min at best, and iOS may skip many).
-      this.bgBackfillHandlerStop = registerActiveBackfillHandler(async (parent) => {
+      this.bgRefreshHandlerStop = registerActiveRefreshHandler(async (parent?: SpanContext) => {
         // Heartbeat first: this OS wake may be the only chance a stationary phone gets to fill the
         // slots that elapsed while it was frozen, and the fills have to be in the outbox before the
         // drain below or they wait for the next wake.
@@ -1696,11 +1686,11 @@ export class LocationSharingService implements FixPublisher {
       // and never pulls. Best-effort and inert on builds without expo-background-task; scheduling it
       // must never fail startBackground.
       try {
-        const { isBackgroundBackfillAvailable, scheduleBackgroundBackfill } =
-          await import('./background/backfill-task');
-        if (isBackgroundBackfillAvailable()) await scheduleBackgroundBackfill();
+        const { isBackgroundRefreshAvailable, scheduleBackgroundRefresh } =
+          await import('./background/refresh-task');
+        if (isBackgroundRefreshAvailable()) await scheduleBackgroundRefresh();
       } catch (error) {
-        console.warn('[background-backfill] schedule failed', error);
+        console.warn('[background-refresh] schedule failed', error);
       }
 
       // Record the INTENT last, once everything is actually up. A headless wake compares this against
@@ -1802,8 +1792,8 @@ export class LocationSharingService implements FixPublisher {
     this.bgUnwatch = null;
     this.bgTaskHandlerStop?.();
     this.bgTaskHandlerStop = null;
-    this.bgBackfillHandlerStop?.();
-    this.bgBackfillHandlerStop = null;
+    this.bgRefreshHandlerStop?.();
+    this.bgRefreshHandlerStop = null;
     this.bgLifecycleStop?.();
     this.bgLifecycleStop = null;
     try {
@@ -1822,8 +1812,8 @@ export class LocationSharingService implements FixPublisher {
       // ignore
     }
     try {
-      const { cancelBackgroundBackfill } = await import('./background/backfill-task');
-      await cancelBackgroundBackfill();
+      const { cancelBackgroundRefresh } = await import('./background/refresh-task');
+      await cancelBackgroundRefresh();
     } catch {
       // ignore — cancellation is best-effort
     }
@@ -2181,8 +2171,8 @@ export class LocationSharingService implements FixPublisher {
     this.bgUnwatch = null;
     this.bgTaskHandlerStop?.();
     this.bgTaskHandlerStop = null;
-    this.bgBackfillHandlerStop?.();
-    this.bgBackfillHandlerStop = null;
+    this.bgRefreshHandlerStop?.();
+    this.bgRefreshHandlerStop = null;
     this.bgLifecycleStop?.();
     this.bgLifecycleStop = null;
     this.fixSub?.remove();

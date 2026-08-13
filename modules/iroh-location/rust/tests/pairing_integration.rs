@@ -56,19 +56,16 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
         .await
         .expect("stash imports author trail");
     stash
-        .sync_trail(
-            0,
-            Some(author.ticket().await.expect("author endpoint ticket")),
-        )
+        .sync_latest(Some(author.ticket().await.expect("author endpoint ticket")))
         .await
         .expect("stash explicitly reconciles with author");
     assert!(
         !stash
-            .read_trail(author_id.clone(), 0)
+            .read_latest()
             .await
             .expect("stash reads opaque trail")
             .iter()
-            .any(|entry| entry.seq == 1),
+            .any(|entry| entry.author == author_id && entry.seq == 1),
         "stash must remain unable to decrypt the replicated fix"
     );
     author.shutdown().await.expect("author goes offline");
@@ -78,19 +75,18 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
         .await
         .expect("phone imports friend trail");
     phone
-        .sync_trail(
-            0,
-            Some(stash.ticket().await.expect("stash endpoint ticket")),
-        )
+        .sync_latest(Some(stash.ticket().await.expect("stash endpoint ticket")))
         .await
         .expect("phone explicitly reconciles with stash");
 
     let recovered = phone
-        .read_trail(author_id.clone(), 0)
+        .read_latest()
         .await
         .expect("phone reads recovered friend trail");
     assert!(
-        recovered.iter().any(|entry| entry.seq == 1),
+        recovered
+            .iter()
+            .any(|entry| entry.author == author_id && entry.seq == 1),
         "phone must recover the friend's fix from the stash while the author is offline"
     );
 
