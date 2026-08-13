@@ -885,6 +885,20 @@ pub struct LocationNode {
     /// bootstrap the user simply repeats, whereas one persisted to disk is a private key sitting
     /// in storage for no reason.
     pending_bootstrap: Mutex<HashMap<Vec<u8>, x25519_dalek::StaticSecret>>,
+    /// The ephemeral behind our currently published resync record (§4.6), if any.
+    ///
+    /// One, not one per peer: a single fresh ephemeral serves every peer we are restarting with,
+    /// because the transcript separates the roots. Dropped once every peer has been resynced, and
+    /// on restart — a resync whose ephemeral is gone is simply re-offered.
+    pending_resync: Mutex<Option<PendingResync>>,
+}
+
+/// Our half of an in-flight resync exchange.
+struct PendingResync {
+    secret: x25519_dalek::StaticSecret,
+    public: [u8; 32],
+    nonce: [u8; 16],
+    ts: u64,
 }
 
 /// Internals kept out of the `#[uniffi::export]` block above — UniFFI exports every method in an
@@ -898,6 +912,218 @@ impl LocationNode {
             .ok_or(LocationError::NotStarted)
     }
 }
+
+/// Desync detection and the §4.6 resync primitive.
+#[uniffi::export(async_runtime = "tokio")]
+impl LocationNode {
+    /// Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+    pub async fn is_desynced(&self, peer_endpoint_hex: String) -> Result<bool, LocationError> {
+        let peer = decode_endpoint(&peer_endpoint_hex)?;
+        Ok(self.session_manager().await?.is_desynced(&peer))
+    }
+
+    /// How many resyncs we have driven with this peer.
+    ///
+    /// §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+    /// retrying forever, so this is deliberately a count rather than a boolean: the UI decides
+    /// where patience runs out, and the crypto layer does not pretend to know.
+    pub async fn resync_count(&self, peer_endpoint_hex: String) -> Result<u32, LocationError> {
+        let peer = decode_endpoint(&peer_endpoint_hex)?;
+        Ok(self.session_manager().await?.resync_count(&peer))
+    }
+
+    /// Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+    ///
+    /// Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
+    /// re-establishes a ratchet, so it cannot require one. That is also why it is the one place
+    /// the design has to be most careful: **recovery must never become the bypass**. The record
+    /// carries only an ephemeral public key. It cannot downgrade anything, because a root is
+    /// only ever derived when *both* ephemerals are in hand.
+    ///
+    /// Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
+    /// than minting a new one, so a peer that already saw our half does not have to see a second.
+    pub async fn publish_resync(
+        &self,
+        recipient_recv_pubs: Vec<String>,
+    ) -> Result<String, LocationError> {
+        let recipients = recipient_recv_pubs
+            .iter()
+            .map(|h| decode_hex(h).ok_or_else(|| LocationError::Decode("bad recv key hex".into())))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let (public, nonce, ts) = {
+            let mut pending = self.pending_resync.lock().await;
+            match pending.as_ref() {
+                Some(p) => (p.public, p.nonce, p.ts),
+                None => {
+                    let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+                    let public = x25519_dalek::PublicKey::from(&secret).to_bytes();
+                    let mut nonce = [0u8; 16];
+                    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+                    let ts = now_ms();
+                    *pending = Some(PendingResync {
+                        secret,
+                        public,
+                        nonce,
+                        ts,
+                    });
+                    (public, nonce, ts)
+                }
+            }
+        };
+
+        let record = ResyncRecord {
+            v: RESYNC_V,
+            ephemeral: public.to_vec(),
+            ts,
+            nonce: nonce.to_vec(),
+        };
+        let payload =
+            postcard::to_allocvec(&record).map_err(|_| LocationError::Decode("encode".into()))?;
+        let envelope = crypto::seal(
+            &self.identity_seed,
+            &self.author,
+            0,
+            ts,
+            0,
+            &payload,
+            &recipients,
+        )?;
+        tracing::info!(
+            sc.author = %telemetry::short_hex(&self.author),
+            sc.resync = "published",
+            recipients = recipients.len(),
+            "published a resync record"
+        );
+
+        let guard = self.inner.lock().await;
+        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let ns = started.trail.own_namespace();
+        started
+            .trail
+            .write_rsy(ns, &self.author, envelope)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        Ok(encode_hex(&public))
+    }
+
+    /// Look for `peer`'s resync record and, if one is there, restart the session from it.
+    ///
+    /// Publishes our own half first when we have not already, so a single call from each side
+    /// completes the exchange without either having to go first — which matters because the
+    /// side that noticed the desync and the side that caused it are usually not the same one.
+    ///
+    /// Returns whether a session was installed. `false` covers "no record yet", "stale record",
+    /// and "already applied" — all ordinary, none an error.
+    pub async fn poll_resync(
+        &self,
+        peer_endpoint_hex: String,
+        peer_recv_pub_hex: String,
+    ) -> Result<bool, LocationError> {
+        let peer = decode_endpoint(&peer_endpoint_hex)?;
+
+        let payloads = {
+            let guard = self.inner.lock().await;
+            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            started
+                .trail
+                .read_rsy(&peer, &self.recv_secret)
+                .await
+                .map_err(|e| LocationError::Network(e.to_string()))?
+        };
+        let Some(record) = payloads
+            .iter()
+            .filter_map(|p| postcard::from_bytes::<ResyncRecord>(p).ok())
+            .find(|r| r.v == RESYNC_V && r.ephemeral.len() == 32 && r.nonce.len() == 16)
+        else {
+            return Ok(false);
+        };
+
+        // Offer our half if we have not. Without this the exchange needs the two sides to
+        // independently decide to start one, and only one of them can see the failure.
+        if self.pending_resync.lock().await.is_none() {
+            self.publish_resync(vec![peer_recv_pub_hex]).await?;
+        }
+        let (our_secret, our_public) = {
+            let pending = self.pending_resync.lock().await;
+            let p = pending.as_ref().ok_or(LocationError::NotStarted)?;
+            (p.secret.clone(), p.public)
+        };
+
+        let peer_eph: [u8; 32] = record.ephemeral[..]
+            .try_into()
+            .map_err(|_| LocationError::Decode("bad ephemeral".into()))?;
+        let nonce: [u8; 16] = record.nonce[..]
+            .try_into()
+            .map_err(|_| LocationError::Decode("bad nonce".into()))?;
+
+        let shared = our_secret.diffie_hellman(&x25519_dalek::PublicKey::from(peer_eph));
+        if !shared.was_contributory() {
+            return Err(LocationError::Decode("degenerate ephemeral key".into()));
+        }
+        let transcript = boot_transcript(&self.author, &peer, &our_public, &peer_eph);
+        let (rk0, session_id) = derive_boot_root(shared.as_bytes(), &transcript);
+
+        let manager = self.session_manager().await?;
+        let initiator = ratchet::initiator_by_endpoint(&self.author, &peer);
+        let applied = manager
+            .apply_resync(
+                &peer,
+                nonce,
+                record.ts,
+                session_id,
+                rk0,
+                peer_eph,
+                if initiator { None } else { Some(our_secret) },
+                now_ms(),
+            )
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+
+        if applied {
+            tracing::info!(
+                sc.author = %telemetry::short_hex(&self.author),
+                sc.peer = %telemetry::short_hex(&peer),
+                sc.resync = "applied",
+                sc.resync_count = manager.resync_count(&peer),
+                "restarted the session from a resync record"
+            );
+        }
+        Ok(applied)
+    }
+
+    /// Drop our in-flight resync ephemeral once every peer has been restarted.
+    pub async fn clear_resync(&self) {
+        *self.pending_resync.lock().await = None;
+    }
+}
+
+/// The §4.6 resync record: one fresh ephemeral, offered to every peer we need to restart with.
+///
+/// Two deliberate departures from §4.6's field list, both of which remove a way to disagree:
+///
+/// * **no session id.** §4.6 lists one, but both sides can derive it from the transcript, and a
+///   transmitted id is an id the two sides can differ on. Derived, they cannot.
+/// * **no peer id.** The wrap set already addresses the record, and the transcript binds both
+///   identities into the root, so a record replayed at a third party derives a root its supposed
+///   author never computes. Naming the peer in the payload would add nothing except a second
+///   place for the answer to live.
+///
+/// Authentication is inherited, not added: the record rides inside a v2 envelope, which is
+/// ed25519-signed over the whole thing by the author's identity key. That is the same argument
+/// §4.1 makes for the ratchet header — one signed lane rather than a second one to get wrong.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ResyncRecord {
+    v: u8,
+    /// Our fresh ephemeral X25519 public key. One serves every peer: each peer's root is
+    /// `KDF(DH(eph_ours, eph_theirs), transcript)`, so the transcript separates them.
+    ephemeral: Vec<u8>,
+    ts: u64,
+    /// 16 random bytes, so a record replayed out of the overwritten slot is a recognisable
+    /// no-op rather than a second session restart.
+    nonce: Vec<u8>,
+}
+
+const RESYNC_V: u8 = 1;
 
 fn new_location_node_at(
     identity_secret: Option<Vec<u8>>,
@@ -940,6 +1166,7 @@ fn new_location_node_at(
         profile_events: ProfileEventQueue::default(),
         sessions: Mutex::new(None),
         pending_bootstrap: Mutex::new(HashMap::new()),
+        pending_resync: Mutex::new(None),
     }))
 }
 
@@ -1122,6 +1349,15 @@ impl LocationNode {
                 .map_err(|e| LocationError::Network(e.to_string()))?;
         }
         *self.listener.lock().await = None;
+        // Release the session-store writer claim, or `start` can never succeed again: the claim is
+        // process-global (§4.2 requires that — a per-module flag cannot see across the fresh JS
+        // context expo-task-manager hands each headless callback), so holding it past shutdown
+        // turns every lifecycle stop/start into a permanent `AlreadyOpen`.
+        //
+        // The ratchet state itself is on disk and unaffected; this drops only the claim and the
+        // in-memory desync counters. `pending_resync` deliberately survives — a stop/start in the
+        // same process should not abandon an in-flight resync exchange and force a second one.
+        *self.sessions.lock().await = None;
         Ok(())
     }
 

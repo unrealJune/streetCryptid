@@ -214,6 +214,29 @@ pub fn encode_nul_key(author: &[u8]) -> Vec<u8> {
     key
 }
 
+/// Literal leading segment marking a **resync record** (FORWARD-SECRECY.md §4.6).
+///
+/// Its own lane rather than the control lane, for the same reason the null fix needed one: both
+/// are one overwritten slot per author, and a resync record sharing a slot with a live-mode
+/// request would mean asking to watch someone cancels your attempt to re-establish a session
+/// with them. Not valid hex, so fix readers skip it.
+pub const RSY_TAG: &str = "rsy";
+
+/// Encode the resync key as `rsy/hex(author)` — **one slot per author, not per pair**.
+///
+/// Deliberately not keyed by peer. A per-pair key would put the peer's endpoint id in a doc key
+/// the stash replicates in clear, handing it the author's entire friend list — the §1.1 leak
+/// that §4.7's rotating kids exist to close, reintroduced through the back door. One slot works
+/// because a single fresh ephemeral serves every peer at once: each peer's root is
+/// `KDF(DH(eph_ours, eph_theirs), transcript)`, so the transcript separates them even though our
+/// half is shared. The record is wrapped per recipient, so only intended peers can read it.
+pub fn encode_rsy_key(author: &[u8]) -> Vec<u8> {
+    let mut key = RSY_TAG.as_bytes().to_vec();
+    key.push(KEY_SEP);
+    key.extend_from_slice(hex_encode(author).as_bytes());
+    key
+}
+
 /// Explicit-pruning selection: given `(key, entry_ts)` pairs, return the keys whose entry is
 /// **strictly older** than `older_than_ts` and should be pruned.
 pub fn keys_to_prune(entries: &[(Vec<u8>, u64)], older_than_ts: u64) -> Vec<Vec<u8>> {
@@ -421,6 +444,49 @@ impl TrailDocs {
                     Ok(bytes) => out.push(bytes.to_vec()),
                     Err(_) => continue, // content not yet available locally
                 }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Write a sealed **resync record** to `ns` under `rsy/hex(author)` (FORWARD-SECRECY §4.6).
+    ///
+    /// HPKE-sealed like a control message rather than ratcheted, necessarily: this is the message
+    /// that re-establishes a ratchet, so it cannot depend on one existing.
+    pub async fn write_rsy(&self, ns: NamespaceId, author: &[u8], envelope: Vec<u8>) -> Result<()> {
+        let doc = self.doc_for(ns).await?;
+        doc.set_bytes(self.author, encode_rsy_key(author), envelope)
+            .await?;
+        Ok(())
+    }
+
+    /// Read + decrypt `author`'s current resync record across every known namespace.
+    ///
+    /// Same shape as [`Self::read_ctl`], including the load-bearing `single_latest_per_key`: the
+    /// slot is overwritten in place, so a plain query would resurrect a superseded record and
+    /// walk the session backwards into a root the peer has already moved off.
+    pub async fn read_rsy(&self, author: &[u8], recv_secret: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let namespaces: Vec<NamespaceId> = {
+            let handles = self.handles.lock().await;
+            handles.keys().map(|b| NamespaceId::from(*b)).collect()
+        };
+        let key = encode_rsy_key(author);
+        let mut out = Vec::new();
+        for ns in namespaces {
+            let doc = self.doc_for(ns).await?;
+            let query = Query::single_latest_per_key()
+                .key_exact(key.clone())
+                .build();
+            let entry = match doc.get_one(query).await? {
+                Some(e) => e,
+                None => continue,
+            };
+            let bytes = match self.blobs.blobs().get_bytes(entry.content_hash()).await {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            if let Ok(opened) = crypto::open(recv_secret, &bytes) {
+                out.push(opened.payload);
             }
         }
         Ok(out)

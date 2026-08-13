@@ -28,6 +28,7 @@
 //! no-op *is* key reuse. Dropping one recipient costs them one interval of freshness; publishing
 //! anyway costs the whole session its forward secrecy.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::crypto::{SealWrap, VerifiedEnvelope};
@@ -35,6 +36,22 @@ use crate::ratchet::{
     OsRatchetKeys, RatchetState, DEFAULT_ACCEPT_WINDOW, DEFAULT_T_LAPSE_MS, KEY_LEN, SESSION_ID_LEN,
 };
 use crate::session_store::{SessionStore, StoreError};
+
+/// How many consecutive signature-valid but unopenable envelopes from one peer mark the session
+/// desynced (`R` in §4.6).
+///
+/// Not 1: a single miss is ordinary. An envelope addressed to somebody else is indistinguishable
+/// from one we merely failed to open, and in a pool that happens constantly — every envelope
+/// carries a wrap per recipient and only one of them is ever ours. Requiring a run makes the
+/// signal mean "this peer keeps talking and we keep failing", which is what a desync looks like.
+pub const DEFAULT_DESYNC_THRESHOLD: u32 = 3;
+
+/// How long a resync record stays acceptable (§4.6 replay defence).
+///
+/// The stash can withhold and replay at will and the resync slot is overwritten in place, so a
+/// stale record served deliberately is the expected attack. Freshness plus nonce dedup bounds it
+/// to the churn §4.6 already accepts as a DoS that recovery heals.
+pub const RESYNC_FRESHNESS_MS: u64 = 60 * 60 * 1000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -108,6 +125,25 @@ pub struct SessionManager {
     critical: Mutex<()>,
     window: u32,
     t_lapse_ms: u64,
+    /// Consecutive unopenable envelopes per peer, and how many resyncs we have driven with them.
+    ///
+    /// In memory only. A restart forgets both, which merely delays detection by `R` envelopes —
+    /// whereas persisting it would put a "this peer is failing" counter on disk that survives the
+    /// very restart most likely to have fixed the problem.
+    health: Mutex<HashMap<Vec<u8>, PeerHealth>>,
+    desync_threshold: u32,
+}
+
+/// Per-peer desync bookkeeping (§4.6).
+#[derive(Debug, Default, Clone)]
+struct PeerHealth {
+    /// Consecutive signature-valid envelopes from this peer we could not open.
+    misses: u32,
+    /// Resyncs driven with this peer. A climbing count is the "re-pair with this friend" signal:
+    /// recovery that keeps recovering is not recovering.
+    resyncs: u32,
+    /// Nonces of resync records already applied, so a replayed one is a no-op.
+    seen_nonces: Vec<[u8; 16]>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -127,6 +163,8 @@ impl SessionManager {
             critical: Mutex::new(()),
             window: DEFAULT_ACCEPT_WINDOW,
             t_lapse_ms: DEFAULT_T_LAPSE_MS,
+            health: Mutex::new(HashMap::new()),
+            desync_threshold: DEFAULT_DESYNC_THRESHOLD,
         }
     }
 
@@ -283,7 +321,12 @@ impl SessionManager {
             .into_iter()
             .enumerate()
             .find(|(_, loc)| state.matches(&loc.header, &loc.kid, self.window));
-        let (index, loc) = located.ok_or(SessionError::NotForUs)?;
+        let Some((index, loc)) = located else {
+            // Signature-valid, but nothing here is ours. Ordinary in a pool — but a *run* of
+            // these from one peer is what §4.6 calls a desync.
+            self.note_miss(author);
+            return Err(SessionError::NotForUs);
+        };
 
         let mut keys = OsRatchetKeys;
         let key = state.accept(&loc.header, now_ms, self.window, &mut keys)?;
@@ -298,6 +341,109 @@ impl SessionManager {
         let opened = verified
             .open_wrap(index, &session_id, key)
             .map_err(|_| SessionError::NotForUs)?;
+        self.clear_misses(author);
         Ok(opened.payload)
+    }
+
+    // ── desync detection and resync (§4.6) ────────────────────────────────────────────────
+
+    fn note_miss(&self, peer: &[u8]) {
+        if let Ok(mut health) = self.health.lock() {
+            health.entry(peer.to_vec()).or_default().misses += 1;
+        }
+    }
+
+    fn clear_misses(&self, peer: &[u8]) {
+        if let Ok(mut health) = self.health.lock() {
+            if let Some(entry) = health.get_mut(peer) {
+                entry.misses = 0;
+            }
+        }
+    }
+
+    /// Whether this peer has missed `R` consecutive envelopes — the §4.6 desync signal.
+    ///
+    /// Only meaningful for a peer we actually hold a session with: with no session there is
+    /// nothing to be out of step with, and the answer is "not desynced, un-bootstrapped".
+    pub fn is_desynced(&self, peer: &[u8]) -> bool {
+        let misses = self
+            .health
+            .lock()
+            .ok()
+            .and_then(|h| h.get(peer).map(|e| e.misses))
+            .unwrap_or(0);
+        misses >= self.desync_threshold && self.has_session(peer)
+    }
+
+    /// How many resyncs we have driven with this peer.
+    ///
+    /// §4.6: "a resync loop surfaces a 're-pair with this friend' prompt rather than retrying
+    /// forever". This is the number that prompt is driven from — recovery that keeps recovering
+    /// is not recovering, and the honest move is to send the humans back to an in-person bump.
+    pub fn resync_count(&self, peer: &[u8]) -> u32 {
+        self.health
+            .lock()
+            .ok()
+            .and_then(|h| h.get(peer).map(|e| e.resyncs))
+            .unwrap_or(0)
+    }
+
+    /// Adopt a peer's resync record, replacing the session with one rooted in the two ephemerals.
+    ///
+    /// Returns `false` when the record is refused — stale, already applied, or one we have
+    /// already acted on. Refusal is not an error: the stash can serve an old record from the
+    /// overwritten slot at any time, and that has to be ordinary rather than alarming.
+    ///
+    /// **There is no fallback path here.** Either both ephemerals are present and the new root
+    /// comes from their DH, or nothing happens. §4.6 is explicit that no code path may root a
+    /// session in static-static DH, and this is the function that would be tempted to.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_resync(
+        &self,
+        peer: &[u8],
+        record_nonce: [u8; 16],
+        record_ts: u64,
+        session_id: [u8; SESSION_ID_LEN],
+        rk0: [u8; KEY_LEN],
+        peer_ephemeral: [u8; KEY_LEN],
+        our_ephemeral: Option<x25519_dalek::StaticSecret>,
+        now_ms: u64,
+    ) -> Result<bool, SessionError> {
+        if now_ms.saturating_sub(record_ts) > RESYNC_FRESHNESS_MS {
+            return Ok(false); // stale: a replay out of the overwritten slot
+        }
+        {
+            let mut health = self.health.lock().map_err(|_| SessionError::Poisoned)?;
+            let entry = health.entry(peer.to_vec()).or_default();
+            if entry.seen_nonces.contains(&record_nonce) {
+                return Ok(false);
+            }
+            entry.seen_nonces.push(record_nonce);
+            // Bounded: the list only needs to outlive the freshness window, and an unbounded
+            // one is a memory leak an adversary controls the size of.
+            if entry.seen_nonces.len() > 32 {
+                entry.seen_nonces.remove(0);
+            }
+            entry.resyncs += 1;
+            entry.misses = 0;
+        }
+
+        let guard = self.critical.lock().map_err(|_| SessionError::Poisoned)?;
+        let mut keys = OsRatchetKeys;
+        let state = match our_ephemeral {
+            // We are the responder for the new session: our bump ephemeral is the ratchet key
+            // the initiator's root step already ran against.
+            Some(ours) => RatchetState::bootstrap_responder(session_id, rk0, ours, now_ms),
+            None => RatchetState::bootstrap_initiator(
+                session_id,
+                rk0,
+                peer_ephemeral,
+                now_ms,
+                &mut keys,
+            )?,
+        };
+        self.store.save(peer, &state)?;
+        drop(guard);
+        Ok(true)
     }
 }
