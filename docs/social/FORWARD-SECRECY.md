@@ -485,6 +485,46 @@ does. If the budget for vectors, the state-machine suite, and outside review is 
 there, **stopping after step 5 is a legitimate landing spot** — weaker than this design,
 with far fewer ways to be silently wrong.
 
+### 7.1 The step-6 gate, discharged [surveyed 2026-08-13]
+
+**Finding: no vetted Rust implementation binds cleanly. We keep `ratchet.rs`.**
+
+Every candidate treats the skipped-message-key store as a load-bearing correctness
+feature with a **hardcoded, private** capacity, because every candidate assumes a
+store-and-forward transport with message history. Last-write-wins inverts that
+assumption, and none exposes a knob for it. The zero-skipped-keys requirement (§4.2,
+§9) is not a near-miss anywhere — it is structurally the opposite of what these
+libraries do.
+
+| Candidate                                                                                                           | Verdict                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vodozemac` 0.10.0 (Matrix, Apache-2.0)                                                                             | The only serious base. `MAX_MESSAGE_KEYS = 40` and `MAX_MESSAGE_GAP = 2000` are `pub(crate) const`; `SessionConfig` carries only a version. `MessageKey::key()` exists under `low-level-api` but **sending side only** — `RemoteMessageKey` is `pub(super)` and the receive path always does the AEAD itself, so we could never unwrap `K`. Chain keys are `pub(super)`: no `kid` derivation. Worst-case pickle ~6.4 KB against our 200 B budget. No injectable RNG, so our frozen vectors would be unreproducible. |
+| `libsignal` (Signal)                                                                                                | **AGPL-3.0-only** — disqualifying on its own. Also `pub(crate)` and welded to Signal's protobuf session storage.                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `double-ratchet-2` 0.3.6                                                                                            | Abandoned 2023. Uses **P-256, not Curve25519** (self-declared in its own crate docs), constant nonce, `ratchet_decrypt` panics on malformed input, and its `Drop` impl is a no-op bug. `MAX_SKIP = 100` private.                                                                                                                                                                                                                                                                                                    |
+| `double-ratchet` 0.1.0 (sebastianv89)                                                                               | Best architecture — a `CryptoProvider` trait would genuinely satisfy the external-wrap and chain-key-derivation constraints. But **no serialization at all** (fails §4.2's persist-before-publish outright), capacity is a precondition rather than a cap (zero would make every fast-forward `Err(StorageFull)`), and it has been dead since 2021 on `rand_core 0.4` / `hashbrown 0.1`.                                                                                                                            |
+| `nostr-double-ratchet`, `enigma-double-ratchet`, `light-double-ratchet`, `olm-rs`, `libsignal-protocol` (crates.io) | Unvetted, dormant, transport-coupled, or C bindings requiring clang (which our wasm target already cannot satisfy).                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+Forcing vodozemac would take roughly 100 lines across three files — but they are ~100
+lines **inside precisely the code the Least Authority audit covered** (the receiver
+chain, the key store, key-lifetime logic), which forks away the one property that made
+adoption attractive, and takes on permanent rebase cost against a `main` that already
+diverges from 0.10.0 across four dependency majors.
+
+Worth recording about vodozemac regardless, since it is the reference point: its audit
+(Least Authority, 2022-05-16, co-funded by gematik) covered the **Rust crate itself**,
+which is rarer and better than it sounds — but it audited ~0.1/0.2, eight minor releases
+and an edition migration ago. Two post-audit CVEs landed (CVE-2024-34063, degraded
+zeroization; CVE-2024-40640, non-constant-time Base64 over secret key material), and a
+2026 cryptanalysis dispute is unresolved, though 0.10.0 credits it for making
+`diffie_hellman()` return an `Option`. **An audit is a snapshot, not a standing
+property** — which is the argument for §7 step 6's own outside-review line item, not
+against it.
+
+The consequence for our own implementation: `ratchet.rs` keeps the published DR
+**schedule** (already vector-tested against a frozen fixture) and stays deliberately
+free of a skipped-key table. The audit budget named in the gate above does not go away
+by having surveyed — it moves onto our code.
+
 ## 8. Open questions
 
 1. **Mesh forward secrecy.** BLE capsules are opportunistic with no reliable return path,
@@ -513,3 +553,4 @@ with far fewer ways to be silently wrong.
 | **Standalone ack messages** (revision 1)                            | A second, unauthenticated-by-default message lane and state machine whose replay/ordering rules had to be specified from scratch. Superseded by riding the ratchet header inside the already-signed envelope (§4.1).                                                                                                                                                                          |
 | Skipped-message key **storage** (full DR as deployed by messengers) | Unnecessary under LWW — there is no history to catch up on — and against an archive-holding adversary it is actively harmful, being a stored key index into the archive. The DR _schedule_ is adopted (§4.2); only the table is rejected: skipped keys are deleted, not stored.                                                                                                               |
 | MLS-style group epochs                                              | Membership here is per-author and asymmetric, and offline members reintroduce retained epoch secrets. Large lift, little gain over the above.                                                                                                                                                                                                                                                 |
+| **Adopting a third-party Double Ratchet crate**                     | Surveyed under §7.1 and rejected on evidence, not preference: every candidate hardcodes a private skipped-key store capacity, and the strongest (vodozemac) exposes a message key on the sending side only — so a receiver could never unwrap `K` itself. Forcing it means forking the exact code its audit covered. Kept as the standing answer to "why not just use a library?".            |
