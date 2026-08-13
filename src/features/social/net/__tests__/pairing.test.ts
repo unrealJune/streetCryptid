@@ -1115,6 +1115,100 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(still?.handle).toBe('@beeUpdated');
   });
 
+  it('keeps a profile that lands in the same drain as the pair it belongs to', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+
+    // Both native queues are drained together, and `finalize` imports the peer's profile
+    // namespace before it queues `ready` — so the profile really can share a batch with it.
+    mockHolder.mod.pairResults.set(
+      'sess-same',
+      pairResult({ sessionId: 'sess-same', peerEndpointId: 'ccddeeff', peerProfile: null })
+    );
+    mockHolder.mod.pairEvents = [
+      { kind: 'ready', sessionId: 'sess-same', peerEndpointId: 'ccddeeff', nearby: true },
+    ];
+    mockHolder.mod.profileEvents = [
+      profileView({ endpointId: 'ccddeeff', epoch: 700, handle: '@bumped', sigil: 'wendigo' }),
+    ];
+    await svc.refreshPairing();
+
+    const friend = snap.current?.friends.find((f) => f.endpointId === 'ccddeeff');
+    expect(friend?.handle).toBe('@bumped');
+    expect(friend?.sigil).toBe('wendigo');
+    expect(friend?.profileEpoch).toBe(700);
+  });
+
+  it('holds a profile that arrives a poll before its pair completes', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+
+    // Profile first, with no friend to attach it to. The native queue is drained one-shot, so
+    // dropping it here used to cost the persona until the next relaunch.
+    mockHolder.mod.profileEvents = [
+      profileView({ endpointId: 'ddeeff00', epoch: 800, handle: '@early', sigil: 'chupacabra' }),
+    ];
+    await svc.refreshPairing();
+    expect(snap.current?.friends.find((f) => f.endpointId === 'ddeeff00')).toBeUndefined();
+
+    mockHolder.mod.pairResults.set(
+      'sess-late',
+      pairResult({ sessionId: 'sess-late', peerEndpointId: 'ddeeff00', peerProfile: null })
+    );
+    mockHolder.mod.pairEvents = [
+      { kind: 'ready', sessionId: 'sess-late', peerEndpointId: 'ddeeff00', nearby: true },
+    ];
+    await svc.refreshPairing();
+
+    const friend = snap.current?.friends.find((f) => f.endpointId === 'ddeeff00');
+    expect(friend?.handle).toBe('@early');
+    expect(friend?.sigil).toBe('chupacabra');
+    expect(friend?.profileEpoch).toBe(800);
+  });
+
+  it('re-arms replication for a friend paired without a profile', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+
+    // The pair completes with no verified profile — the usual outcome, since the peer's namespace
+    // has only just been imported — and no profile event ever follows, which is what a one-way
+    // sync failure looks like from this side.
+    mockHolder.mod.pairResults.set(
+      'sess-dry',
+      pairResult({ sessionId: 'sess-dry', peerEndpointId: 'eeff0011', peerProfile: null })
+    );
+    mockHolder.mod.pairEvents = [
+      { kind: 'ready', sessionId: 'sess-dry', peerEndpointId: 'eeff0011', nearby: true },
+    ];
+    await svc.refreshPairing();
+    expect(snap.current?.friends.find((f) => f.endpointId === 'eeff0011')?.handle).toBe(
+      '@eeff0011'
+    );
+
+    // A later sweep re-imports the ticket, which re-dials the addresses in it. This time the
+    // replica has the record.
+    mockHolder.mod.profiles.set(
+      'eeff0011',
+      profileView({ endpointId: 'eeff0011', epoch: 900, handle: '@late', sigil: 'skinwalker' })
+    );
+    mockHolder.mod.calls.importProfileTicket.length = 0;
+    const realNow = Date.now();
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(realNow + 60_000);
+    try {
+      await svc.refreshPairing();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(mockHolder.mod.calls.importProfileTicket).toContain('peer-profile');
+    const friend = snap.current?.friends.find((f) => f.endpointId === 'eeff0011');
+    expect(friend?.handle).toBe('@late');
+    expect(friend?.profileEpoch).toBe(900);
+  });
+
   it('surfaces pairing readiness and capabilities into the snapshot', async () => {
     const svc = newService();
     const snap = watch(svc);

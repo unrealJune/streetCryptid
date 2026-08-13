@@ -19,12 +19,13 @@
 //! [`is_newer_epoch`] / the namespace-metadata file helpers is pure and unit-tested here.
 //! [`ProfileDocs`] wraps the live iroh-docs replica.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use iroh::EndpointAddr;
 use iroh_blobs::api::Store as BlobsStore;
 use iroh_docs::{
     api::{
@@ -340,6 +341,9 @@ pub struct ProfileDocs {
     handles: Mutex<HashMap<[u8; 32], Doc>>,
     /// Highest profile epoch accepted per endpoint id (rollback protection).
     epochs: Mutex<HashMap<[u8; 32], u64>>,
+    /// Namespaces that already have a live watcher task, so re-importing a friend's ticket (the
+    /// retry path for a profile that never arrived) doesn't pile up duplicate subscribers.
+    watched: Mutex<HashSet<[u8; 32]>>,
 }
 
 impl ProfileDocs {
@@ -379,6 +383,7 @@ impl ProfileDocs {
             own_ns,
             handles: Mutex::new(handles),
             epochs: Mutex::new(HashMap::new()),
+            watched: Mutex::new(HashSet::new()),
         })
     }
 
@@ -395,6 +400,25 @@ impl ProfileDocs {
         Ok(doc)
     }
 
+    /// Mark our own profile namespace as syncing in the iroh-docs live engine.
+    ///
+    /// This is the SEND half of the profile path and it is not optional, for exactly the reason
+    /// [`crate::docs::TrailDocs::push`] documents: `publish` only touches the local replica, and
+    /// the live engine broadcasts a `LocalInsert` — and serves inbound range reconciliation —
+    /// **only** for namespaces `start_sync` has marked as syncing
+    /// (`engine::live::on_replica_event`). Without this a friend who imported our read-ticket has
+    /// nothing to reconcile from, so they keep the placeholder identity from the pairing result
+    /// forever while we see theirs just fine.
+    ///
+    /// Unlike the trail push this does not wait for a `SyncFinished`: a profile has no stash peer
+    /// to confirm against, so blocking would only stall the caller for the timeout. Idempotent and
+    /// cheap — `start_sync` is a no-op once the namespace is already syncing.
+    pub async fn arm_publishing(&self) -> Result<()> {
+        let doc = self.doc_for(self.own_ns).await?;
+        doc.start_sync(Vec::<EndpointAddr>::new()).await?;
+        Ok(())
+    }
+
     /// Publish (or update) our own profile record bytes under [`PROFILE_KEY`].
     pub async fn publish(
         &self,
@@ -403,6 +427,14 @@ impl ProfileDocs {
         record_bytes: Vec<u8>,
     ) -> Result<()> {
         let doc = self.doc_for(self.own_ns).await?;
+        // Arm the engine BEFORE the write: a `LocalInsert` is broadcast only for an
+        // already-syncing namespace, so arming afterwards would leave this record waiting for
+        // someone else's reconciliation instead of going out now. Best-effort — a friend who
+        // imported our ticket can still dial us, and failing here would mean not even storing
+        // the record locally.
+        if let Err(err) = self.arm_publishing().await {
+            tracing::warn!(error = %err, "profile: start_sync failed; publish is local-only");
+        }
         doc.set_bytes(self.author, PROFILE_KEY.to_vec(), record_bytes)
             .await?;
         if let Ok(arr) = <[u8; 32]>::try_from(endpoint_id) {
@@ -505,47 +537,60 @@ impl ProfileDocs {
 
     /// Spawn a live-sync watcher for `ns` that verifies inbound profile records, enforces the
     /// monotonic-epoch rule, and forwards accepted updates to `sink`. Runs until the doc closes.
+    ///
+    /// At most one watcher runs per namespace: re-importing a friend's ticket is how we retry a
+    /// profile that never replicated, and that path would otherwise spawn a fresh subscriber every
+    /// attempt. The claim is released when the watcher exits, so a later re-import can restart it.
     pub fn watch(self: &Arc<Self>, ns: NamespaceId, sink: Arc<dyn ProfileSink>) {
         let this = self.clone();
         tokio::spawn(async move {
-            let doc = match this.doc_for(ns).await {
-                Ok(d) => d,
-                Err(_) => return,
-            };
-            let mut events = match doc.subscribe().await {
-                Ok(e) => e,
-                Err(_) => return,
-            };
-            while let Some(event) = events.next().await {
-                let entry = match event {
-                    Ok(LiveEvent::InsertRemote { entry, .. }) => entry,
-                    Ok(LiveEvent::InsertLocal { entry }) => entry,
-                    Ok(LiveEvent::ContentReady { .. }) => {
-                        // Content for a previously-seen entry may now be available; re-read.
-                        if let Ok(Some(rec)) = this.read_latest(ns, None).await {
-                            if this.accept_if_newer(&rec).await {
-                                sink.on_profile_update(rec);
-                            }
+            if !this.watched.lock().await.insert(ns.to_bytes()) {
+                return;
+            }
+            this.clone().watch_loop(ns, sink).await;
+            this.watched.lock().await.remove(&ns.to_bytes());
+        });
+    }
+
+    async fn watch_loop(self: Arc<Self>, ns: NamespaceId, sink: Arc<dyn ProfileSink>) {
+        let this = self;
+        let doc = match this.doc_for(ns).await {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mut events = match doc.subscribe().await {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        while let Some(event) = events.next().await {
+            let entry = match event {
+                Ok(LiveEvent::InsertRemote { entry, .. }) => entry,
+                Ok(LiveEvent::InsertLocal { entry }) => entry,
+                Ok(LiveEvent::ContentReady { .. }) => {
+                    // Content for a previously-seen entry may now be available; re-read.
+                    if let Ok(Some(rec)) = this.read_latest(ns, None).await {
+                        if this.accept_if_newer(&rec).await {
+                            sink.on_profile_update(rec);
                         }
-                        continue;
                     }
-                    Ok(_) => continue,
-                    Err(_) => break,
-                };
-                if entry.key() != PROFILE_KEY {
                     continue;
                 }
-                let bytes = match this.blobs.blobs().get_bytes(entry.content_hash()).await {
-                    Ok(b) => b,
-                    Err(_) => continue, // await ContentReady
-                };
-                if let Ok(rec) = verify(&bytes, None) {
-                    if this.accept_if_newer(&rec).await {
-                        sink.on_profile_update(rec);
-                    }
+                Ok(_) => continue,
+                Err(_) => break,
+            };
+            if entry.key() != PROFILE_KEY {
+                continue;
+            }
+            let bytes = match this.blobs.blobs().get_bytes(entry.content_hash()).await {
+                Ok(b) => b,
+                Err(_) => continue, // await ContentReady
+            };
+            if let Ok(rec) = verify(&bytes, None) {
+                if this.accept_if_newer(&rec).await {
+                    sink.on_profile_update(rec);
                 }
             }
-        });
+        }
     }
 }
 
