@@ -50,6 +50,13 @@ Conventions when changing that code:
 - Headless background code that records telemetry must flush before returning
   (`getTelemetry().flush()` / `flushDevTelemetry()`), or the OS freezes the process with the
   batch unexported.
-- iOS Swift bindings regenerate only on macOS (`just bindgen-ios`); until run there, the native
-  `configureTelemetry`/`flushTelemetry` exports are absent on iOS — always guard access
-  (`typeof mod.configureTelemetry === 'function'`).
+- Changing the Rust UniFFI surface does NOT need a Mac. `scripts/generate-uniffi-bindings.sh`
+  generates both the Kotlin and the Swift **source** bindings from the host library on any OS, and
+  CI runs it on every pull request and pushes the refreshed bindings back to the branch — so a Rust
+  API change lands complete without anyone running `just bindgen-*` by hand. Only the compiled iOS
+  **XCFramework** needs macOS + Xcode (`lipo`/`xcodebuild`); it is untracked and rebuilt during the
+  iOS build by `scripts/eas-build-pre-install.sh`.
+- A JS bundle still routinely runs against an OLDER installed native core, so a newly added native
+  export is absent until the device gets a build carrying it — always guard access
+  (`typeof mod.configureTelemetry === 'function'`) rather than assuming the binding implies the
+  binary.
