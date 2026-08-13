@@ -396,6 +396,36 @@ impl TrailDocs {
         Ok(out)
     }
 
+    /// Read the **still-sealed** current fix envelope per author, across every known namespace.
+    ///
+    /// The v3 counterpart of [`Self::read_latest`]. Opening a ratcheted envelope needs the
+    /// per-friend session state (FORWARD-SECRECY §4.7), which lives above this module — so this
+    /// hands back bytes and lets the caller decide. Skipping the decrypt here also keeps the
+    /// §4.2 ordering intact: the caller verifies the signature before any session state moves.
+    ///
+    /// Our own outbound envelopes are included; the caller filters them by author, since it is
+    /// the one that knows who we are.
+    pub async fn read_latest_sealed(&self) -> Result<Vec<Vec<u8>>> {
+        let mut out = Vec::new();
+        for ns in self.namespaces().await {
+            let doc = self.doc_for(ns).await?;
+            let query = Query::single_latest_per_key().build();
+            let stream = doc.get_many(query).await?;
+            tokio::pin!(stream);
+            while let Some(entry) = stream.next().await {
+                let entry = entry?;
+                if decode_key(entry.key()).is_none() {
+                    continue; // control entry, null-fix lane, or pre-LWW key
+                }
+                match self.blobs.blobs().get_bytes(entry.content_hash()).await {
+                    Ok(bytes) => out.push(bytes.to_vec()),
+                    Err(_) => continue, // content not yet available locally
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Read + decrypt the **latest** fix per author across every known namespace (own + imported
     /// friends). Entries we cannot open (not addressed to us / revoked / our own outbound
     /// envelopes) and non-fix keys (control entries, pre-LWW keys) are silently skipped.

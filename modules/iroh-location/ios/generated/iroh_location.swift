@@ -920,6 +920,19 @@ public func FfiConverterTypeFixListener_lower(_ value: FixListener) -> UInt64 {
 public protocol LocationNodeProtocol: AnyObject, Sendable {
     
     /**
+     * Begin a session bootstrap with `peer_endpoint_hex`: mint a fresh ephemeral X25519 keypair
+     * and return its **public** half as hex, to be carried to the peer.
+     *
+     * This is one half of the §4.6 primitive. In production both halves ride the pairing
+     * connection during the in-person SAS bump, identity-signed and transcript-bound; the
+     * signing and transport are step 7's, and until they land this is the seam a caller drives.
+     *
+     * Calling it again for the same peer replaces the pending ephemeral — an abandoned bootstrap
+     * leaves nothing behind but one unused secret, which drops with the process.
+     */
+    func beginSession(peerEndpointHex: String) async throws  -> String
+    
+    /**
      * Whether a BLE transport is wired into this node's endpoint on this platform.
      */
     func bleAvailable() async  -> Bool
@@ -940,6 +953,20 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
      */
     func cancelPair(sessionId: Data) async throws 
+    
+    /**
+     * Complete the bootstrap with the peer's ephemeral public half, installing the session.
+     *
+     * `RK₀` is derived from the ephemeral-ephemeral DH and a transcript over both endpoint ids
+     * and both ephemerals — **never** from static-static DH, which a seized device could
+     * recompute from long-term keys it still holds (§3, §4.6 "no code path roots a session in
+     * static-static DH alone"). The transcript is canonically ordered, so both devices derive
+     * the same root and the same session id without negotiating either.
+     *
+     * The role is fixed by endpoint-id ordering, so the two sides take opposite halves of the
+     * standard asymmetric bootstrap with no extra round trip.
+     */
+    func completeSession(peerEndpointHex: String, peerEphemeralHex: String) async throws 
     
     /**
      * Displayer action: confirm whether the other human matched the shown figure. `true` latches
@@ -1000,12 +1027,36 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     
     func docsWriteNullTraced(subscriptionId: String, seq: UInt64, ts: UInt64, recipients: [Data], traceparent: String) async throws 
     
+    /**
+     * Seal `fix` under **envelope v3** for each recipient's ratchet session and write it to our
+     * durable namespace (FORWARD-SECRECY §4.7).
+     *
+     * Recipients are **endpoint ids**, not receiving keys: a v3 wrap is addressed by session,
+     * and sessions are keyed by who the peer is rather than by a long-term key of theirs. That
+     * difference is the point — the long-term receiving key is exactly what a seized device
+     * still holds.
+     *
+     * Returns the recipients that were left out, as `endpoint_hex:reason` — lapsed (§4.5),
+     * un-bootstrapped, or unpersistable. A short wrap list is never silent.
+     */
+    func docsWriteRatcheted(subscriptionId: String, seq: UInt64, fix: LocationFix, recipientEndpoints: [String]) async throws  -> [String]
+    
     func docsWriteTraced(subscriptionId: String, seq: UInt64, fix: LocationFix, recipients: [Data], traceparent: String) async throws 
     
     /**
      * This device's EndpointId (== envelope `author`).
      */
     func endpointId()  -> Data
+    
+    /**
+     * Forget the session with this peer (un-friending, or a §4.6 restart).
+     */
+    func forgetSession(peerEndpointHex: String) async throws 
+    
+    /**
+     * Whether a ratchet session exists for this peer.
+     */
+    func hasSession(peerEndpointHex: String) async throws  -> Bool
     
     /**
      * The ed25519 identity secret — persist in the OS secure store.
@@ -1156,6 +1207,16 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * replica. One entry per author — the durable path holds no history (FORWARD-SECRECY §4.4).
      */
     func readLatest() async throws  -> [IncomingFix]
+    
+    /**
+     * Read the latest **ratcheted** fix per author from the local replica.
+     *
+     * Signature first, then session state — `verify_v3` returns a type that the session manager
+     * is the only consumer of, so no unauthenticated byte can reach the ratchet (§4.2).
+     * Envelopes we cannot open are skipped exactly as v2's are: addressed to someone else,
+     * replayed from the archive, or beyond the acceptance window are all "nothing to surface".
+     */
+    func readLatestRatcheted() async throws  -> [IncomingFix]
     
     /**
      * Read the newest verified profile for `endpoint_id` (self or a friend) from the local
@@ -1319,6 +1380,34 @@ public convenience init(identitySecret: Data?, recvSecret: Data?)throws  {
 
     
     /**
+     * Begin a session bootstrap with `peer_endpoint_hex`: mint a fresh ephemeral X25519 keypair
+     * and return its **public** half as hex, to be carried to the peer.
+     *
+     * This is one half of the §4.6 primitive. In production both halves ride the pairing
+     * connection during the in-person SAS bump, identity-signed and transcript-bound; the
+     * signing and transport are step 7's, and until they land this is the seam a caller drives.
+     *
+     * Calling it again for the same peer replaces the pending ephemeral — an abandoned bootstrap
+     * leaves nothing behind but one unused secret, which drops with the process.
+     */
+open func beginSession(peerEndpointHex: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_begin_session(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Whether a BLE transport is wired into this node's endpoint on this platform.
      */
 open func bleAvailable()async  -> Bool  {
@@ -1393,6 +1482,35 @@ open func cancelPair(sessionId: Data)async throws   {
                 uniffi_iroh_location_fn_method_locationnode_cancel_pair(
                     self.uniffiCloneHandle(),
                     FfiConverterData.lower(sessionId)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Complete the bootstrap with the peer's ephemeral public half, installing the session.
+     *
+     * `RK₀` is derived from the ephemeral-ephemeral DH and a transcript over both endpoint ids
+     * and both ephemerals — **never** from static-static DH, which a seized device could
+     * recompute from long-term keys it still holds (§3, §4.6 "no code path roots a session in
+     * static-static DH alone"). The transcript is canonically ordered, so both devices derive
+     * the same root and the same session id without negotiating either.
+     *
+     * The role is fixed by endpoint-id ordering, so the two sides take opposite halves of the
+     * standard asymmetric bootstrap with no extra round trip.
+     */
+open func completeSession(peerEndpointHex: String, peerEphemeralHex: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_complete_session(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex),FfiConverterString.lower(peerEphemeralHex)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -1582,6 +1700,35 @@ open func docsWriteNullTraced(subscriptionId: String, seq: UInt64, ts: UInt64, r
         )
 }
     
+    /**
+     * Seal `fix` under **envelope v3** for each recipient's ratchet session and write it to our
+     * durable namespace (FORWARD-SECRECY §4.7).
+     *
+     * Recipients are **endpoint ids**, not receiving keys: a v3 wrap is addressed by session,
+     * and sessions are keyed by who the peer is rather than by a long-term key of theirs. That
+     * difference is the point — the long-term receiving key is exactly what a seized device
+     * still holds.
+     *
+     * Returns the recipients that were left out, as `endpoint_hex:reason` — lapsed (§4.5),
+     * un-bootstrapped, or unpersistable. A short wrap list is never silent.
+     */
+open func docsWriteRatcheted(subscriptionId: String, seq: UInt64, fix: LocationFix, recipientEndpoints: [String])async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceString.lower(recipientEndpoints)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
 open func docsWriteTraced(subscriptionId: String, seq: UInt64, fix: LocationFix, recipients: [Data], traceparent: String)async throws   {
     return
         try  await uniffiRustCallAsync(
@@ -1608,6 +1755,46 @@ open func endpointId() -> Data  {
             self.uniffiCloneHandle(),$0
     )
 })
+}
+    
+    /**
+     * Forget the session with this peer (un-friending, or a §4.6 restart).
+     */
+open func forgetSession(peerEndpointHex: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_forget_session(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Whether a ratchet session exists for this peer.
+     */
+open func hasSession(peerEndpointHex: String)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_has_session(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_i8,
+            completeFunc: ffi_iroh_location_rust_future_complete_i8,
+            freeFunc: ffi_iroh_location_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
 }
     
     /**
@@ -2080,6 +2267,31 @@ open func readLatest()async throws  -> [IncomingFix]  {
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_locationnode_read_latest(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeIncomingFix.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Read the latest **ratcheted** fix per author from the local replica.
+     *
+     * Signature first, then session state — `verify_v3` returns a type that the session manager
+     * is the only consumer of, so no unauthenticated byte can reach the ratchet (§4.2).
+     * Envelopes we cannot open are skipped exactly as v2's are: addressed to someone else,
+     * replayed from the archive, or beyond the acceptance window are all "nothing to surface".
+     */
+open func readLatestRatcheted()async throws  -> [IncomingFix]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_read_latest_ratcheted(
                     self.uniffiCloneHandle()
                     
                 )
@@ -5826,6 +6038,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_fixlistener_on_status() != 49613) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_begin_session() != 25232) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_ble_available() != 5831) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5836,6 +6051,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 49013) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_complete_session() != 30383) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_confirm_pair_display() != 2067) {
@@ -5862,10 +6080,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_docs_write_null_traced() != 22862) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted() != 5397) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_docs_write_traced() != 47616) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_endpoint_id() != 34847) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_forget_session() != 58135) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_has_session() != 16365) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_identity_secret() != 6853) {
@@ -5935,6 +6162,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_read_latest() != 16725) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted() != 45503) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_read_profile() != 28632) {

@@ -29,6 +29,7 @@ mod pairing;
 mod profile;
 pub mod ratchet;
 pub mod session_store;
+pub mod sessions;
 
 /// The `mesh_epoch` every DOCS-path envelope carries.
 ///
@@ -42,7 +43,7 @@ pub const DOCS_MESH_EPOCH: u32 = 0;
 mod relay;
 mod telemetry;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -875,6 +876,27 @@ pub struct LocationNode {
     pair: Arc<PairCore>,
     /// Node-level queue of verified profile-update events (drained via `poll_profile_events`).
     profile_events: ProfileEventQueue,
+    /// Per-friend Double Ratchet sessions (FORWARD-SECRECY §4.2). Created on `start`, because
+    /// [`SessionStore`](session_store::SessionStore) claims the session directory for the
+    /// process and that claim must be released on shutdown.
+    sessions: Mutex<Option<Arc<sessions::SessionManager>>>,
+    /// Ephemerals minted by `begin_session` and awaiting the peer's half. Keyed by peer endpoint
+    /// id. Held in memory only: an unfinished bootstrap that does not survive a restart is a
+    /// bootstrap the user simply repeats, whereas one persisted to disk is a private key sitting
+    /// in storage for no reason.
+    pending_bootstrap: Mutex<HashMap<Vec<u8>, x25519_dalek::StaticSecret>>,
+}
+
+/// Internals kept out of the `#[uniffi::export]` block above — UniFFI exports every method in an
+/// exported impl, including private ones, and `SessionManager` is not an FFI type.
+impl LocationNode {
+    async fn session_manager(&self) -> Result<Arc<sessions::SessionManager>, LocationError> {
+        self.sessions
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
 }
 
 fn new_location_node_at(
@@ -916,6 +938,8 @@ fn new_location_node_at(
         listener: Mutex::new(None),
         pair: PairCore::new(identity_seed, author, recv_public),
         profile_events: ProfileEventQueue::default(),
+        sessions: Mutex::new(None),
+        pending_bootstrap: Mutex::new(HashMap::new()),
     }))
 }
 
@@ -1044,6 +1068,17 @@ impl LocationNode {
                 .await
                 .map_err(|e| LocationError::Network(e.to_string()))?,
         );
+        // Claim the ratchet session directory for this process (§4.2's structural single-writer
+        // guard). A second live writer is refused rather than tolerated, because with sequential
+        // state two writers is key reuse rather than a clobber.
+        {
+            let mut slot = self.sessions.lock().await;
+            if slot.is_none() {
+                let store = session_store::SessionStore::open(&self.data_dir, &self.identity_seed)
+                    .map_err(|e| LocationError::Network(e.to_string()))?;
+                *slot = Some(Arc::new(sessions::SessionManager::new(store)));
+            }
+        }
         let profile = Arc::new(
             ProfileDocs::init(docs, (*blobs).clone(), self.data_dir.clone())
                 .await
@@ -1633,6 +1668,204 @@ impl LocationNode {
             .into_iter()
             .filter_map(latest_fix_to_incoming)
             .collect())
+    }
+
+    // ── ratcheted sessions (FORWARD-SECRECY.md §4.2, §4.7) ────────────────────────────────
+
+    /// Begin a session bootstrap with `peer_endpoint_hex`: mint a fresh ephemeral X25519 keypair
+    /// and return its **public** half as hex, to be carried to the peer.
+    ///
+    /// This is one half of the §4.6 primitive. In production both halves ride the pairing
+    /// connection during the in-person SAS bump, identity-signed and transcript-bound; the
+    /// signing and transport are step 7's, and until they land this is the seam a caller drives.
+    ///
+    /// Calling it again for the same peer replaces the pending ephemeral — an abandoned bootstrap
+    /// leaves nothing behind but one unused secret, which drops with the process.
+    pub async fn begin_session(&self, peer_endpoint_hex: String) -> Result<String, LocationError> {
+        let peer = decode_endpoint(&peer_endpoint_hex)?;
+        let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let public = x25519_dalek::PublicKey::from(&secret).to_bytes();
+        self.pending_bootstrap
+            .lock()
+            .await
+            .insert(peer.to_vec(), secret);
+        Ok(encode_hex(&public))
+    }
+
+    /// Complete the bootstrap with the peer's ephemeral public half, installing the session.
+    ///
+    /// `RK₀` is derived from the ephemeral-ephemeral DH and a transcript over both endpoint ids
+    /// and both ephemerals — **never** from static-static DH, which a seized device could
+    /// recompute from long-term keys it still holds (§3, §4.6 "no code path roots a session in
+    /// static-static DH alone"). The transcript is canonically ordered, so both devices derive
+    /// the same root and the same session id without negotiating either.
+    ///
+    /// The role is fixed by endpoint-id ordering, so the two sides take opposite halves of the
+    /// standard asymmetric bootstrap with no extra round trip.
+    pub async fn complete_session(
+        &self,
+        peer_endpoint_hex: String,
+        peer_ephemeral_hex: String,
+    ) -> Result<(), LocationError> {
+        let peer = decode_endpoint(&peer_endpoint_hex)?;
+        let peer_eph: [u8; 32] = decode_hex(&peer_ephemeral_hex)
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| LocationError::Decode("bad ephemeral key hex".into()))?;
+
+        let ours = self
+            .pending_bootstrap
+            .lock()
+            .await
+            .remove(peer.as_slice())
+            .ok_or_else(|| LocationError::Decode("no pending bootstrap for this peer".into()))?;
+        let our_eph = x25519_dalek::PublicKey::from(&ours).to_bytes();
+
+        let shared = ours.diffie_hellman(&x25519_dalek::PublicKey::from(peer_eph));
+        if !shared.was_contributory() {
+            return Err(LocationError::Decode("degenerate ephemeral key".into()));
+        }
+        let transcript = boot_transcript(&self.author, &peer, &our_eph, &peer_eph);
+        let (rk0, session_id) = derive_boot_root(shared.as_bytes(), &transcript);
+
+        let manager = self.session_manager().await?;
+        // Endpoint ordering, not who spoke first: simultaneous nearby bumps must not both think
+        // they are the initiator (`ratchet::initiator_by_endpoint`).
+        if ratchet::initiator_by_endpoint(&self.author, &peer) {
+            manager
+                .bootstrap(&peer, session_id, rk0, peer_eph, now_ms())
+                .map_err(|e| LocationError::Network(e.to_string()))?;
+        } else {
+            // The responder's bump ephemeral doubles as its bootstrap ratchet key: it is exactly
+            // the key the initiator just performed its root step against, and DR needs the
+            // responder to hold a private the initiator can reach. It is replaced on the first
+            // DH ratchet, which is the initiator's first envelope.
+            manager
+                .bootstrap_responder(&peer, session_id, rk0, ours, now_ms())
+                .map_err(|e| LocationError::Network(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Whether a ratchet session exists for this peer.
+    pub async fn has_session(&self, peer_endpoint_hex: String) -> Result<bool, LocationError> {
+        let peer = decode_endpoint(&peer_endpoint_hex)?;
+        Ok(self.session_manager().await?.has_session(&peer))
+    }
+
+    /// Forget the session with this peer (un-friending, or a §4.6 restart).
+    pub async fn forget_session(&self, peer_endpoint_hex: String) -> Result<(), LocationError> {
+        let peer = decode_endpoint(&peer_endpoint_hex)?;
+        self.session_manager()
+            .await?
+            .remove(&peer)
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// Seal `fix` under **envelope v3** for each recipient's ratchet session and write it to our
+    /// durable namespace (FORWARD-SECRECY §4.7).
+    ///
+    /// Recipients are **endpoint ids**, not receiving keys: a v3 wrap is addressed by session,
+    /// and sessions are keyed by who the peer is rather than by a long-term key of theirs. That
+    /// difference is the point — the long-term receiving key is exactly what a seized device
+    /// still holds.
+    ///
+    /// Returns the recipients that were left out, as `endpoint_hex:reason` — lapsed (§4.5),
+    /// un-bootstrapped, or unpersistable. A short wrap list is never silent.
+    pub async fn docs_write_ratcheted(
+        &self,
+        _subscription_id: String,
+        seq: u64,
+        fix: LocationFix,
+        recipient_endpoints: Vec<String>,
+    ) -> Result<Vec<String>, LocationError> {
+        let peers = recipient_endpoints
+            .iter()
+            .map(|hex| decode_endpoint(hex).map(|e| e.to_vec()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let manager = self.session_manager().await?;
+
+        let payload = encode_fix_payload(Some(&fix))?;
+        // Persist-before-publish: every counter these wraps represent is on disk before the seal
+        // below, let alone the write (§4.2).
+        let set = manager
+            .next_wraps(&peers, now_ms())
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        let dropped = set
+            .dropped
+            .iter()
+            .map(|(peer, reason)| format!("{}:{}", encode_hex(peer), reason.as_str()))
+            .collect();
+
+        let envelope = crypto::seal_v3(
+            &self.identity_seed,
+            &self.author,
+            seq,
+            fix.ts,
+            DOCS_MESH_EPOCH,
+            &payload,
+            set.wraps,
+        )?;
+
+        let guard = self.inner.lock().await;
+        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let ns = started.trail.own_namespace();
+        started
+            .trail
+            .write(ns, &self.author, envelope)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        Ok(dropped)
+    }
+
+    /// Read the latest **ratcheted** fix per author from the local replica.
+    ///
+    /// Signature first, then session state — `verify_v3` returns a type that the session manager
+    /// is the only consumer of, so no unauthenticated byte can reach the ratchet (§4.2).
+    /// Envelopes we cannot open are skipped exactly as v2's are: addressed to someone else,
+    /// replayed from the archive, or beyond the acceptance window are all "nothing to surface".
+    pub async fn read_latest_ratcheted(&self) -> Result<Vec<IncomingFix>, LocationError> {
+        let sealed = {
+            let guard = self.inner.lock().await;
+            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            started
+                .trail
+                .read_latest_sealed()
+                .await
+                .map_err(|e| LocationError::Network(e.to_string()))?
+        };
+        let manager = self.session_manager().await?;
+        let now = now_ms();
+
+        let mut out = Vec::new();
+        for bytes in sealed {
+            let Ok(verified) = crypto::verify_v3(&bytes) else {
+                continue; // a v2 envelope, our own control entry, or corrupt
+            };
+            if verified.author == self.author {
+                continue; // our own outbound envelope
+            }
+            let author = verified.author.to_vec();
+            let payload = match manager.open(&author, &verified, now) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    tracing::debug!(
+                        sc.author = %telemetry::short_hex(&author),
+                        sc.seq = verified.seq,
+                        sc.drop_reason = %err,
+                        "ratcheted envelope not opened"
+                    );
+                    continue;
+                }
+            };
+            if let Ok(Some(fix)) = decode_fix_payload(&payload) {
+                out.push(IncomingFix {
+                    author,
+                    seq: verified.seq,
+                    fix,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Explicitly drop durable entries older than `older_than_ts`.
@@ -2507,6 +2740,80 @@ fn decode_fix_payload(payload: &[u8]) -> Result<Option<LocationFix>, LocationErr
     postcard::from_bytes::<LocationFix>(inner)
         .map(Some)
         .map_err(|_| LocationError::Decode("decode fix".into()))
+}
+
+/// Milliseconds since the Unix epoch, saturating at 0 on a clock before it.
+///
+/// The ratchet uses this only for `T_lapse` (§4.5) and never for ordering or acceptance — those
+/// are counter-based — so a wrong clock costs freshness, not correctness.
+fn decode_endpoint(hex_str: &str) -> Result<[u8; 32], LocationError> {
+    decode_hex(hex_str)
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| LocationError::Decode("bad endpoint id hex".into()))
+}
+
+/// Lowercase hex, for the endpoint ids and ephemerals the session API speaks in.
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+/// The bootstrap transcript: both identities and both ephemerals, canonically ordered.
+///
+/// Ordering by endpoint id rather than by role is what lets both devices compute the identical
+/// transcript with no negotiation — the same trick `initiator_by_endpoint` uses for the role.
+/// Binding all four values is what stops a peer's ephemeral from being replayed into a different
+/// pairing (§4.6 "transcript-bound (both identities and both ephemerals under the signature)").
+fn boot_transcript(
+    ours: &[u8; 32],
+    theirs: &[u8; 32],
+    our_eph: &[u8; 32],
+    their_eph: &[u8; 32],
+) -> Vec<u8> {
+    let mut t = Vec::with_capacity(128);
+    let (first, first_eph, second, second_eph) = if ours < theirs {
+        (ours, our_eph, theirs, their_eph)
+    } else {
+        (theirs, their_eph, ours, our_eph)
+    };
+    t.extend_from_slice(first);
+    t.extend_from_slice(first_eph);
+    t.extend_from_slice(second);
+    t.extend_from_slice(second_eph);
+    t
+}
+
+/// `RK₀` and the session id, both from the ephemeral-ephemeral shared secret and the transcript.
+///
+/// Two derivations from one secret under distinct blake3 contexts: the root must be secret, the
+/// session id must not be (it goes in every wrap's AAD and both sides must agree on it offline).
+fn derive_boot_root(shared: &[u8; 32], transcript: &[u8]) -> ([u8; 32], [u8; 16]) {
+    let mut hasher = blake3::Hasher::new_derive_key(ratchet::BOOT_CONTEXT);
+    hasher.update(shared);
+    hasher.update(transcript);
+    let rk0 = *hasher.finalize().as_bytes();
+
+    // The session id is a public label, so it is derived from the transcript ALONE — deriving it
+    // from the shared secret would leak nothing today but would make the id a secret-dependent
+    // value travelling in clear AAD, which is a needless hostage to future analysis.
+    let mut id_hasher = blake3::Hasher::new_derive_key("sc-dr/v1/session-id");
+    id_hasher.update(transcript);
+    let mut session_id = [0u8; 16];
+    session_id.copy_from_slice(&id_hasher.finalize().as_bytes()[..16]);
+    (rk0, session_id)
 }
 
 /// Derive the X25519 public key from a stored receiving secret (round-trips a seal to
