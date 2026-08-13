@@ -1130,7 +1130,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 21245) {
+    if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 28882) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_opaque() != 14800) {
@@ -1857,6 +1857,9 @@ public interface FixListener {
      *
      * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
      * the stash is a mirror, so it never claims a direct link to the fix's author.
+     *
+     * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
+     * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
      */
     fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean, `via`: kotlin.String)
     
@@ -1986,6 +1989,9 @@ open class FixListenerImpl: Disposable, AutoCloseable, FixListener
      *
      * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
      * the stash is a mirror, so it never claims a direct link to the fix's author.
+     *
+     * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
+     * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
      */override fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean, `via`: kotlin.String)
         = 
     callWithHandle {

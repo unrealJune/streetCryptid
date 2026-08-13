@@ -604,6 +604,9 @@ public protocol FixListener: AnyObject, Sendable {
      *
      * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
      * the stash is a mirror, so it never claims a direct link to the fix's author.
+     *
+     * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
+     * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
      */
     func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String) 
     
@@ -687,6 +690,9 @@ open class FixListenerImpl: FixListener, @unchecked Sendable {
      *
      * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
      * the stash is a mirror, so it never claims a direct link to the fix's author.
+     *
+     * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
+     * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
      */
 open func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String)  {try! rustCall() {
     uniffi_iroh_location_fn_method_fixlistener_on_fix(
@@ -4901,7 +4907,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 21245) {
+    if (uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 28882) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_fixlistener_on_opaque() != 14800) {
