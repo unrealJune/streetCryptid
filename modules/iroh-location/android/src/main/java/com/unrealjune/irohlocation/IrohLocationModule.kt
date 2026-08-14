@@ -7,6 +7,7 @@ import android.net.wifi.WifiManager
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -396,7 +397,22 @@ class IrohLocationModule : Module() {
     AsyncFunction("createNode") Coroutine
       { identityHex: String?, recvHex: String? ->
         clearRuntime()
-        val n = LocationNode(identityHex?.hexToBytes(), recvHex?.hexToBytes())
+        val context = checkNotNull(
+          appContext.reactContext?.applicationContext
+            ?: appContext.currentActivity?.applicationContext
+        ) { "IrohLocation requires an Android application context to create a node" }
+        // Two roots, opposite requirements (FORWARD-SECRECY.md §4.2):
+        //   cacheDir — the trail replica. Big, re-fetchable, and never in Auto Backup.
+        //   filesDir — ratchet session state. Survives the cache being cleared under storage
+        //     pressure, which cacheDir explicitly does not, and is excluded from backup and
+        //     device-to-device transfer by withBackupExclusion.js. Restoring old session state
+        //     would rewind send counters, which is key reuse, so both halves are required.
+        val n = LocationNode.newAtDirs(
+          identityHex?.hexToBytes(),
+          recvHex?.hexToBytes(),
+          File(context.cacheDir, "streetcryptid").absolutePath,
+          File(context.filesDir, "streetcryptid").absolutePath,
+        )
         node = n
         mapOf(
           "endpointId" to n.endpointId().toHex(),

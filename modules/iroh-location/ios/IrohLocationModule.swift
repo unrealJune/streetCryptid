@@ -24,24 +24,44 @@ private func dataToHex(_ data: Data) -> String {
   data.map { String(format: "%02x", $0) }.joined()
 }
 
-/// Keep the iroh node's docs/blobs store out of device backups (FORWARD-SECRECY.md §6). The
-/// Rust side roots it at `temp_dir()/streetcryptid/<endpointIdHex>`; tmp is already outside
-/// iCloud backup, but the exclusion must be structural, not an artifact of where the dir
-/// happens to live today — so create the directory eagerly and stamp
-/// `NSURLIsExcludedFromBackupKey` on it. Best-effort: the Rust node re-creates the dir on
-/// `start()` regardless, and a failure here only loses the belt-and-braces marker.
-private func excludeNodeDataDirFromBackup(endpointIdHex: String) {
-  var dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-    .appendingPathComponent("streetcryptid", isDirectory: true)
-    .appendingPathComponent(endpointIdHex, isDirectory: true)
+/// The node's two storage roots, which have opposite requirements (FORWARD-SECRECY.md §4.2).
+///
+/// - `data` → the temp dir. The docs/blobs replica: large, re-fetchable from the stash and from
+///   friends, and something the OS is welcome to reclaim. This is byte-for-byte the path the
+///   Rust `default_data_dir` used before the roots were split (`temp_dir()/streetcryptid/<id>`),
+///   deliberately — moving it would abandon every existing install's replica for no benefit.
+/// - `state` → Application Support. Ratchet session state, which is **not** recoverable — losing
+///   it desyncs every friend at once, so it cannot live anywhere iOS purges. Application Support
+///   *is* backed up by default, and restoring an old copy would rewind send counters into key
+///   reuse, so `excludeFromBackup` below is not optional decoration; it is the other half of
+///   putting the state here at all.
+private func nodeStorageRoots() -> (data: URL, state: URL) {
+  let fm = FileManager.default
+  let tmp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+  // Application Support is not guaranteed to exist; createDirectory below makes it.
+  let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+  return (
+    tmp.appendingPathComponent("streetcryptid", isDirectory: true),
+    support.appendingPathComponent("streetcryptid", isDirectory: true)
+  )
+}
+
+/// Create `dir` and stamp `NSURLIsExcludedFromBackupKey` on it.
+///
+/// The flag is inherited by everything created underneath, so stamping the root covers the
+/// per-identity subdirectory the Rust side creates. Best-effort on the *creation* — the node
+/// re-creates what it needs on `start()` — but a failure here means the state root may be
+/// backed up, so it is logged loudly rather than swallowed.
+private func excludeFromBackup(_ dir: URL) {
+  var dir = dir
   do {
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     var values = URLResourceValues()
     values.isExcludedFromBackup = true
     try dir.setResourceValues(values)
   } catch {
-    NSLog("IrohLocation: could not mark data dir as excluded from backup: %@",
-          error.localizedDescription)
+    NSLog("IrohLocation: could not exclude %@ from backup: %@",
+          dir.path, error.localizedDescription)
   }
 }
 
@@ -294,11 +314,19 @@ public final class IrohLocationModule: Module {
 
     AsyncFunction("createNode") { (identityHex: String?, recvHex: String?) async throws -> [String: String] in
       try await self.clearRuntime()
-      let node = try LocationNode(
+      let roots = nodeStorageRoots()
+      // Stamp the exclusion *before* the node can write a session into it — a blob that is
+      // created and then backed up before the flag lands is exactly the rollback we are
+      // preventing. Both roots are marked: Caches is already outside backup, but the exclusion
+      // should be structural rather than an artifact of where the dir happens to live.
+      excludeFromBackup(roots.state)
+      excludeFromBackup(roots.data)
+      let node = try LocationNode.newAtDirs(
         identitySecret: identityHex.map(hexToData),
-        recvSecret: recvHex.map(hexToData))
+        recvSecret: recvHex.map(hexToData),
+        dataRoot: roots.data.path,
+        stateRoot: roots.state.path)
       self.node = node
-      excludeNodeDataDirFromBackup(endpointIdHex: dataToHex(node.endpointId()))
       return [
         "endpointId": dataToHex(node.endpointId()),
         "identitySecret": dataToHex(node.identitySecret()),

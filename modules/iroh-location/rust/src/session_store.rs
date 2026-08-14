@@ -37,6 +37,7 @@
 //! process would need a file lock as well.
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -92,6 +93,23 @@ impl Drop for WriterClaim {
             set.remove(&self.0);
         }
     }
+}
+
+/// fsync a directory, so a `rename` into it is durable and not just visible.
+///
+/// POSIX only. On Windows a directory handle is not something `File::open` will give us, and
+/// NTFS orders the metadata write itself; the mobile targets this actually protects are both
+/// POSIX, and desktop Windows is a development host rather than a device holding real sessions.
+fn sync_dir(dir: &Path) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
+    Ok(())
 }
 
 /// The single writer of this device's ratchet sessions.
@@ -190,10 +208,26 @@ impl SessionStore {
         state.map(Some)
     }
 
-    /// Write `state` for `peer`, durably enough that a crash cannot leave a torn file.
+    /// Write `state` for `peer`, durably enough that **power loss** cannot roll it back.
     ///
     /// **Fail-stop.** Every error propagates; there is no best-effort path. §4.2 is explicit that a
     /// silent persist no-op *is* key reuse, so a caller that cannot persist must not publish.
+    ///
+    /// Write-then-rename alone is not enough here, and the difference is a cryptographic one.
+    /// Rename gives atomicity against a *torn* file; it gives nothing against the page cache
+    /// losing the data behind a rename that already landed. `next_wraps` treats this function
+    /// returning `Ok` as "the counter is on disk, it is now safe to seal" — so a save that returns
+    /// `Ok` and then evaporates lets the next boot re-derive an already-used `(epoch, counter)`,
+    /// and that message key seals a different content key under the same zero nonce. Repeated
+    /// (key, nonce) in ChaCha20-Poly1305 leaks the XOR of both plaintexts and reuses the Poly1305
+    /// one-time key. Hence: fsync the data, rename, then fsync the directory that holds the
+    /// rename.
+    ///
+    /// The cost is one fsync per recipient per publish. At the 5-minute cold cadence that is
+    /// noise; if the hot cadence ever moves onto this path, the answer is counter *reservation*
+    /// (persist `ns + N` once, hand out `N` from RAM, burn the remainder on restart), not a
+    /// weaker save. Burned counters are free under the sender-liveness invariant; reused ones
+    /// are not.
     pub fn save(&self, peer: &[u8], state: &RatchetState) -> Result<(), StoreError> {
         let mut plaintext = state.to_bytes();
 
@@ -222,8 +256,16 @@ impl SessionStore {
         // failure is (correctly) fatal — so a torn write would cost a resync every time.
         let final_path = self.path_for(peer);
         let tmp_path = final_path.with_extension("tmp");
-        std::fs::write(&tmp_path, &blob)?;
+        {
+            let mut file = std::fs::File::create(&tmp_path)?;
+            file.write_all(&blob)?;
+            // The data, before anything points at it.
+            file.sync_all()?;
+        }
         std::fs::rename(&tmp_path, &final_path)?;
+        // The rename itself. Without this the directory entry can still be lost after the data
+        // is safe, which lands us back on the previous blob — the rollback described above.
+        sync_dir(&self.dir)?;
         Ok(())
     }
 

@@ -1,6 +1,11 @@
 # streetCryptid — Forward Secrecy (ratcheted envelopes over last-write-wins fixes)
 
-> Status: **design of record, pre-implementation.** Nothing here is built. This document
+> Status: **design of record; partially built.** The schedule, store, session seam, and
+> envelope v3 exist in `modules/iroh-location/rust` and are covered by unit, condition,
+> and two-node integration tests. What those tests drive is `LocationNode` directly — the
+> app itself still runs on v2 until the plumbing in §7 steps 6–7 lands, and the null,
+> gossip, control, and mesh lanes are v2 by construction today (§4.1). Read "proven end to
+> end" in the commit log as "proven between two nodes", not "shipped". This document
 > supersedes the forward-secrecy line in [`ARCHITECTURE.md`](./ARCHITECTURE.md) §11
 > ("full ratcheting … is out of scope for this phase") and **changes two of that
 > document's stated goals** — §1.3 offline trail recovery is deleted, and the durable
@@ -13,6 +18,13 @@
 > This revision also adds desync recovery (§4.6), a wire-format section (§4.7), an
 > erasure-hygiene surface (§5.4), rescopes the backup fix (§6), and states two residual
 > risks previously implicit (§1).
+>
+> **Revision 3 (2026-08-13), after the second security review.** The schedule was found
+> correct; the holes were around it. This revision makes persist-before-publish mean
+> _fsync_ (§4.2), splits the node's storage into a purgeable data root and a durable,
+> backup-excluded state root (§6), adds storage corruption as a distinct desync entry
+> point and monotonic acceptance plus re-minting for resync records (§4.6). The schedule
+> itself is unchanged.
 >
 > Claims below are marked **[verified]** where checked against the tree at the time of
 > writing, and **[MUST VERIFY]** where they are assumptions that gate the plan.
@@ -177,12 +189,23 @@ symmetric step (every message sent or accepted):
   state (epoch, then counter); everything else — including a byte-identical replay from
   the archive — is dropped before any state mutation. Signature verification precedes
   state mutation, preserving the `crypto.rs:225` ordering.
-- **Persist-before-publish.** Hold the state lock across _load → derive → persist →
-  seal → publish_, persisting the advanced state **before** the doc write. A crash then
-  burns one counter value instead of reusing a key — and because the sending chain can
-  step symmetrically, recovery is local: the next publish uses the next counter. No
-  peer round-trip, no deadlock. (Revision 1's strict gate turned this same crash into a
-  permanent deadlock for watcher edges; see §9.)
+- **Persist-before-publish, _durably_.** Hold the state lock across _load → derive →
+  persist → seal → publish_, persisting the advanced state **before** the doc write. A
+  crash then burns one counter value instead of reusing a key — and because the sending
+  chain can step symmetrically, recovery is local: the next publish uses the next
+  counter. No peer round-trip, no deadlock. (Revision 1's strict gate turned this same
+  crash into a permanent deadlock for watcher edges; see §9.)
+
+  "Persist" here means **fsync**, not `write`. Write-then-rename is atomic against a torn
+  file and gives nothing against power loss: the rename can land while the data behind it
+  has not. Since the caller treats a successful save as "the counter is on disk, it is
+  safe to seal", a save that returns `Ok` and then evaporates is precisely the reuse this
+  rule exists to forbid — the same key at the same position sealing a different content
+  key under the same zero nonce. `SessionStore::save` therefore fsyncs the temp file, then
+  renames, then fsyncs the directory. One fsync per recipient per publish is affordable at
+  the cold cadence; if the hot cadence ever moves onto this path the answer is counter
+  _reservation_ (persist `ns + N`, hand out `N` from RAM, burn the remainder on restart),
+  never a weaker save. Burned counters are free under the sender-liveness invariant.
 - **Persistence is fail-stop.** If ratchet state cannot be persisted, publishing stops.
   The current best-effort/silent-catch pattern (`secure-keys.ts:35`, `state-store.ts:27`
   [verified]) is fine for a static key and fatal for sequential state — a silent persist
@@ -280,6 +303,12 @@ causes: state loss on one side (reinstall without backup, storage corruption), o
 active adversary tampering with ratchet headers — which the envelope signature confines
 to the peer's identity key or the archive replaying (already rejected by monotonicity).
 
+**Storage corruption is a second, separate entry point**, because miss-counting cannot
+reach it: a state blob that will not decrypt fails every `open` at the load, so no miss is
+ever recorded and R is never crossed. A peer whose state is unreadable therefore reports
+desynced immediately. This also means "damaged" must stay distinguishable from "absent" —
+nothing on disk is an un-bootstrapped peer waiting for a bump, not a session to recover.
+
 **Recovery is a session restart via the resync primitive — never a static fallback.**
 Each side publishes on its control key a resync record: `{new session_id, fresh ephemeral
 X25519 pub, peer id, ts}`, signed with its ed25519 identity key, transcript-bound (both
@@ -294,6 +323,27 @@ no automatic downgrade of any kind. An adversary who can force desync (the stash
 can try, by withholding or replaying) gains a DoS that recovery heals — never a weaker
 root. Resyncs are telemetered (`sc.resync` counter with reason); they should be rare, and
 a resync loop surfaces a "re-pair with this friend" prompt rather than retrying forever.
+
+**Replay of a resync record is bounded by two rules, one of which must be durable.**
+Freshness (a record older than `RESYNC_FRESHNESS_MS` is refused) and nonce dedup together
+cover a running process, but the nonce set is deliberately in memory — so a restart
+forgets every record it has applied, and the stash, which keeps whatever versions of the
+slot it likes, could replay one and restart a working session for free. The durable half
+is **monotonic acceptance**: a session records the timestamp of the record that created
+it, and only a strictly newer record may replace it. Every replay fails that test. A
+session with no record behind it (created by a bump) carries zero, so a genuine first
+resync always applies; a peer whose state is absent or damaged accepts any fresh record,
+since there is no working session to protect and refusing would lock out the case recovery
+exists for.
+
+**Our own published record is re-minted as it ages**, at half the freshness window. The
+naive idempotent version — mint once, republish forever — puts the exchange in a permanent
+deadlock: once the original `ts` passes the freshness bound, the peer refuses our record
+while we keep republishing the same stale bytes, and the normal reason to be resyncing at
+all is a peer who is offline for longer than that. Re-minting discards the ephemeral that
+every conclusion we have already drawn was based on, so it also clears which of the peer's
+records we have applied — otherwise the peer re-derives against our new ephemeral while we
+sit on a session rooted in the old one, and the two never converge.
 
 ### 4.7 Wire format — envelope v3
 
@@ -386,14 +436,31 @@ Two stores are exposed, not one:
 than a `THIS_DEVICE_ONLY` class. `app.json` declares no `allowBackup` or
 `dataExtractionRules`, so Android Auto Backup applies.
 
-**The Rust-side store.** Ratchet state (§4.2) persists in the node's data directory on
-the filesystem — which Android Auto Backup and iCloud backup capture, and which no
-keychain flag protects. This is the store that actually holds the sequential state.
+**The Rust-side store.** Ratchet state (§4.2) persists on the filesystem, and this is the
+store that actually holds the sequential state.
 
 Today this is harmless: a static key restores to itself. **The moment key state becomes
 sequential it is a critical hazard** — restoring from backup rewinds the chain and reissues
 message keys, which is nonce-and-key reuse and breaks confidentiality outright. This is the
 most common way ratchet deployments fail in practice.
+
+_Resolved (rev 3)._ The node keeps **two** storage roots, because the two hazards pull in
+opposite directions and only one of them is a cryptographic break:
+
+|                                   | cache / temp | app data dir            |
+| --------------------------------- | ------------ | ----------------------- |
+| backup rollback → key reuse       | impossible   | **must** be excluded    |
+| OS purge → every session lost     | **likely**   | no                      |
+
+The docs/blobs replica stays in cache: it is large, re-fetchable from the stash and from
+friends, and a purge costs nothing but a resync. Ratchet session state goes in the app's
+private data dir — Android `filesDir`, iOS Application Support — because losing it desyncs
+every friend at once, **and** is excluded from backup there, because a restored copy
+rewinds counters. Both halves are required and ship together: iOS stamps
+`NSURLIsExcludedFromBackupKey` on the state root before the node can write into it
+(`IrohLocationModule.swift`), Android excludes `files/streetcryptid` from cloud backup and
+device transfer (`plugins/withBackupExclusion.js`). Moving the store without the exclusion
+would create exactly the hazard the move was meant to prevent.
 
 The accessibility class is `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`, **not**
 `WHEN_UNLOCKED_THIS_DEVICE_ONLY`: the background location task publishes while the phone

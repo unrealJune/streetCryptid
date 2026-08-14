@@ -21,6 +21,7 @@ use hpke::{
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::ratchet::{MessageKey, RatchetHeader, KID_LEN, SESSION_ID_LEN};
 
@@ -106,7 +107,13 @@ struct Envelope {
 pub struct Opened {
     pub author: [u8; AUTHOR_LEN],
     pub seq: u64,
-    pub payload: Vec<u8>,
+    /// The decrypted payload — a friend's coordinates. `Zeroizing` for the same reason the keys
+    /// that protect it are: §5.4 treats erasure as a design surface, and a plaintext fix left in
+    /// freed heap is exactly what the §1 threat model (a seized device) goes looking for.
+    ///
+    /// Everything downstream reads this by reference and decodes out of it, so the buffer is
+    /// scrubbed when the `Opened` drops without any caller having to remember to.
+    pub payload: Zeroizing<Vec<u8>>,
 }
 
 // ── envelope v3: the ratcheted wrap (FORWARD-SECRECY.md §4.7) ─────────────────────────────────
@@ -219,7 +226,11 @@ impl VerifiedEnvelope {
         );
         let wrap_ad = wrap_aad(&ad, &wrap.header, session_id);
 
-        let content_key = key.use_once(|mk| {
+        // `Zeroizing` because this is the key that protects the fix, and §5.4 makes erasure
+        // hygiene an explicit design surface. `RatchetState` and `MessageKey` already scrub
+        // themselves; a content key left in freed heap would be the one link in the chain that
+        // does not, and it is the link that decrypts a friend's coordinates.
+        let content_key = Zeroizing::new(key.use_once(|mk| {
             let cipher =
                 ChaCha20Poly1305::new_from_slice(mk).map_err(|_| CryptoError::KeyLength)?;
             cipher
@@ -231,7 +242,7 @@ impl VerifiedEnvelope {
                     },
                 )
                 .map_err(|_| CryptoError::Cipher)
-        })?;
+        })?);
         if content_key.len() != CONTENT_KEY_LEN {
             return Err(CryptoError::KeyLength);
         }
@@ -251,7 +262,7 @@ impl VerifiedEnvelope {
         Ok(Opened {
             author: self.author,
             seq: self.seq,
-            payload,
+            payload: Zeroizing::new(payload),
         })
     }
 }
@@ -304,14 +315,19 @@ pub fn seal_v3(
         .map_err(|_| CryptoError::KeyLength)?;
     let signing_key = SigningKey::from_bytes(&seed);
 
-    let mut key = [0u8; CONTENT_KEY_LEN];
-    OsRng.fill_bytes(&mut key);
+    // The one key every wrap in this envelope protects. `Zeroizing` rather than a bare array
+    // because it outlives the loop below and is copied into each wrap's plaintext — leaving it in
+    // freed stack after `seal_v3` returns would undo, for the content key, the erasure discipline
+    // `MessageKey` and `RatchetState` enforce for everything around it (§5.4).
+    let mut key = Zeroizing::new([0u8; CONTENT_KEY_LEN]);
+    OsRng.fill_bytes(key.as_mut());
     let mut nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
 
     let ad = aad(ENVELOPE_V3, author, seq, ts, mesh_epoch);
 
-    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| CryptoError::KeyLength)?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(key.as_ref()).map_err(|_| CryptoError::KeyLength)?;
     let ct = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
@@ -332,7 +348,7 @@ pub fn seal_v3(
             c.encrypt(
                 Nonce::from_slice(&WRAP_NONCE),
                 AeadPayload {
-                    msg: &key,
+                    msg: key.as_ref(),
                     aad: &wrap_ad,
                 },
             )
@@ -619,7 +635,7 @@ pub fn open(my_recv_secret: &[u8], envelope_bytes: &[u8]) -> Result<Opened, Cryp
     Ok(Opened {
         author: author_arr,
         seq: env.seq,
-        payload,
+        payload: Zeroizing::new(payload),
     })
 }
 
@@ -719,7 +735,7 @@ mod v3_tests {
         let env = seal_to(&seed, &author, 1, b"hello", &mut [(&sid, &mut a)]);
         let opened = receive(&env, &sid, &mut b, &mut kb).unwrap();
 
-        assert_eq!(opened.payload, b"hello");
+        assert_eq!(opened.payload.as_slice(), b"hello");
         assert_eq!(opened.author, author);
         assert_eq!(opened.seq, 1);
     }
@@ -742,11 +758,17 @@ mod v3_tests {
         );
 
         assert_eq!(
-            receive(&env, &sid_b, &mut b, &mut kb).unwrap().payload,
+            receive(&env, &sid_b, &mut b, &mut kb)
+                .unwrap()
+                .payload
+                .as_slice(),
             b"two recipients"
         );
         assert_eq!(
-            receive(&env, &sid_c, &mut c, &mut kc).unwrap().payload,
+            receive(&env, &sid_c, &mut c, &mut kc)
+                .unwrap()
+                .payload
+                .as_slice(),
             b"two recipients"
         );
 
@@ -885,14 +907,20 @@ mod v3_tests {
 
         let first = seal_to(&a_seed, &a_author, 1, b"ping", &mut [(&sid, &mut a)]);
         assert_eq!(
-            receive(&first, &sid, &mut b, &mut kb).unwrap().payload,
+            receive(&first, &sid, &mut b, &mut kb)
+                .unwrap()
+                .payload
+                .as_slice(),
             b"ping"
         );
 
         // B now has a sending chain, on a fresh ratchet key A has never seen.
         let reply = seal_to(&b_seed, &b_author, 1, b"pong", &mut [(&sid, &mut b)]);
         assert_eq!(
-            receive(&reply, &sid, &mut a, &mut ka).unwrap().payload,
+            receive(&reply, &sid, &mut a, &mut ka)
+                .unwrap()
+                .payload
+                .as_slice(),
             b"pong"
         );
     }
@@ -911,7 +939,10 @@ mod v3_tests {
         let arrives = seal_to(&seed, &author, 3, b"arrives", &mut [(&sid, &mut a)]);
 
         assert_eq!(
-            receive(&arrives, &sid, &mut b, &mut kb).unwrap().payload,
+            receive(&arrives, &sid, &mut b, &mut kb)
+                .unwrap()
+                .payload
+                .as_slice(),
             b"arrives"
         );
         for lost in [&lost_first, &lost_second] {
@@ -961,8 +992,8 @@ mod tests {
 
         let ob = open(&b_sk, &env).unwrap();
         let oc = open(&c_sk, &env).unwrap();
-        assert_eq!(ob.payload, payload);
-        assert_eq!(oc.payload, payload);
+        assert_eq!(ob.payload.as_slice(), payload);
+        assert_eq!(oc.payload.as_slice(), payload);
         assert_eq!(ob.author, author);
         assert_eq!(ob.seq, 1);
     }

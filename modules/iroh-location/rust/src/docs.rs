@@ -41,6 +41,7 @@ use iroh_docs::{
 use n0_future::time::{timeout, Duration};
 use n0_future::StreamExt;
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
 use crate::crypto;
 
@@ -257,7 +258,9 @@ pub fn keys_to_prune(entries: &[(Vec<u8>, u64)], older_than_ts: u64) -> Vec<Vec<
 pub struct LatestFix {
     pub author: Vec<u8>,
     pub seq: u64,
-    pub payload: Vec<u8>,
+    /// Decrypted fix bytes. Zeroizing so a friend's coordinates are scrubbed when this drops
+    /// rather than left in freed heap; see [`crypto::Opened::payload`].
+    pub payload: Zeroizing<Vec<u8>>,
 }
 
 /// Wraps an iroh-docs replica: our own namespace (we are its sole writer) plus any friend
@@ -389,7 +392,11 @@ impl TrailDocs {
     /// author's own namespace). Entries we cannot open are skipped — a control message addressed
     /// to someone else is indistinguishable from noise, by design. No `since_ts` filtering here:
     /// the payload is a `ControlMsg`, so freshness is the caller's to judge after decoding.
-    pub async fn read_ctl(&self, author: &[u8], recv_secret: &[u8]) -> Result<Vec<Vec<u8>>> {
+    pub async fn read_ctl(
+        &self,
+        author: &[u8],
+        recv_secret: &[u8],
+    ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
         let namespaces: Vec<NamespaceId> = {
             let handles = self.handles.lock().await;
             handles.keys().map(|b| NamespaceId::from(*b)).collect()
@@ -465,7 +472,11 @@ impl TrailDocs {
     /// Same shape as [`Self::read_ctl`], including the load-bearing `single_latest_per_key`: the
     /// slot is overwritten in place, so a plain query would resurrect a superseded record and
     /// walk the session backwards into a root the peer has already moved off.
-    pub async fn read_rsy(&self, author: &[u8], recv_secret: &[u8]) -> Result<Vec<Vec<u8>>> {
+    pub async fn read_rsy(
+        &self,
+        author: &[u8],
+        recv_secret: &[u8],
+    ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
         let namespaces: Vec<NamespaceId> = {
             let handles = self.handles.lock().await;
             handles.keys().map(|b| NamespaceId::from(*b)).collect()
@@ -857,8 +868,14 @@ mod tests {
         let _key = encode_key(&author); // exercises the docs key path
 
         // Both recipients can open the SAME stored bytes.
-        assert_eq!(crypto::open(&b_sk, &envelope).unwrap().payload, payload);
-        assert_eq!(crypto::open(&c_sk, &envelope).unwrap().payload, payload);
+        assert_eq!(
+            crypto::open(&b_sk, &envelope).unwrap().payload.as_slice(),
+            payload
+        );
+        assert_eq!(
+            crypto::open(&c_sk, &envelope).unwrap().payload.as_slice(),
+            payload
+        );
 
         // fix #2: C revoked (dropped from wraps). The durable bytes are opaque to C, still
         // readable by B — no docs node required to prove it.
@@ -953,14 +970,14 @@ mod tests {
         );
         assert_eq!(latest[0].author, author.to_vec());
         assert_eq!(latest[0].seq, 2, "the second publish supersedes the first");
-        assert_eq!(latest[0].payload, b"second");
+        assert_eq!(latest[0].payload.as_slice(), b"second");
 
         // A control entry in the same namespace stays invisible to fix readers.
         let ctl = crypto::seal(&seed, &author, 0, 3000, 0, b"ctl-msg", &[b_pk]).unwrap();
         td.write_ctl(ns, &author, ctl).await.unwrap();
         let latest = td.read_latest(&b_sk).await.unwrap();
         assert_eq!(latest.len(), 1, "control entries must not read as fixes");
-        assert_eq!(latest[0].payload, b"second");
+        assert_eq!(latest[0].payload.as_slice(), b"second");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

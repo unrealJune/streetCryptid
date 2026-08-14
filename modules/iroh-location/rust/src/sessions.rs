@@ -53,6 +53,15 @@ pub const DEFAULT_DESYNC_THRESHOLD: u32 = 3;
 /// to the churn §4.6 already accepts as a DoS that recovery heals.
 pub const RESYNC_FRESHNESS_MS: u64 = 60 * 60 * 1000;
 
+/// How old our own pending resync record may get before `publish_resync` mints a new one.
+///
+/// Half the freshness window, so a re-minted record is always published with at least half a
+/// window of validity ahead of it and there is never a moment when what we have published is
+/// already unacceptable. Derived from [`RESYNC_FRESHNESS_MS`] rather than written out, because
+/// the relationship between them is the property that matters — a re-mint interval that drifted
+/// past the freshness window would reintroduce the deadlock it exists to prevent.
+pub const RESYNC_REMINT_MS: u64 = RESYNC_FRESHNESS_MS / 2;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("session store: {0}")]
@@ -122,6 +131,20 @@ pub struct SessionManager {
     store: SessionStore,
     /// Guards the whole load → derive → persist sequence. `()` because the state itself lives on
     /// disk — this exists to make the sequence atomic, not to own anything.
+    ///
+    /// # Lock order: `health` before `critical`, never the reverse
+    ///
+    /// Both orders exist in this module today and only one of them is safe to *hold*:
+    ///
+    /// - `open` takes `critical`, then `note_miss` takes `health` **inside** it.
+    /// - `is_desynced` and `apply_resync` take `health` first, then `critical`.
+    ///
+    /// That is a textbook inversion, and it does not deadlock only because the second group
+    /// always *releases* `health` before acquiring `critical` — in `is_desynced` because the guard
+    /// is a statement temporary, in `apply_resync` because the health scope closes explicitly.
+    /// Both are properties of brace placement, so they are stated here rather than left to be
+    /// rediscovered: hoisting either guard up a scope deadlocks the publish path against the
+    /// receive path, and it will do so intermittently rather than in tests.
     critical: Mutex<()>,
     window: u32,
     t_lapse_ms: u64,
@@ -132,6 +155,20 @@ pub struct SessionManager {
     /// very restart most likely to have fixed the problem.
     health: Mutex<HashMap<Vec<u8>, PeerHealth>>,
     desync_threshold: u32,
+}
+
+/// What the store holds for a peer. Three states, because "no session" and "a session we cannot
+/// read" call for opposite responses and only one of them is recoverable by resync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionPresence {
+    /// Nothing on disk: never bootstrapped, or deliberately forgotten. Waiting on a bump.
+    Absent,
+    /// A session that loads.
+    Present,
+    /// A session file that will not decrypt or will not parse. Unrecoverable in place — a blob
+    /// that fails AEAD is not going to start working — so it is a desync verdict on its own,
+    /// without waiting for `R` misses that can never accumulate.
+    Damaged,
 }
 
 /// Per-peer desync bookkeeping (§4.6).
@@ -175,8 +212,31 @@ impl SessionManager {
     }
 
     pub fn has_session(&self, peer: &[u8]) -> bool {
+        matches!(self.presence(peer), SessionPresence::Present)
+    }
+
+    /// What is actually on disk for this peer — the distinction `has_session` alone cannot make.
+    ///
+    /// §4.6 names "state loss on one side (reinstall without backup, storage corruption)" as an
+    /// expected cause of desync, and it is the one cause miss-counting cannot see: a peer whose
+    /// blob will not decrypt never gets far enough to miss anything, because every `open` fails at
+    /// the load. Collapsing that into `false` reports a broken session as an un-bootstrapped one,
+    /// which is the opposite of the truth — un-bootstrapped is waiting for a bump, damaged needs a
+    /// resync.
+    ///
+    /// Read fresh each call rather than cached in `health`: once a resync writes a good blob the
+    /// verdict corrects itself, with no flag to clear.
+    fn presence(&self, peer: &[u8]) -> SessionPresence {
         let _guard = self.critical.lock();
-        matches!(self.store.load(peer), Ok(Some(_)))
+        match self.store.load(peer) {
+            Ok(Some(_)) => SessionPresence::Present,
+            Ok(None) => SessionPresence::Absent,
+            Err(err) => {
+                tracing::warn!(error = %err, "ratchet session state is unreadable; treating the \
+                    session as desynced so §4.6 recovery can run");
+                SessionPresence::Damaged
+            }
+        }
     }
 
     /// Install a bootstrapped session for `peer`, replacing any existing one.
@@ -312,7 +372,7 @@ impl SessionManager {
         author: &[u8],
         verified: &VerifiedEnvelope,
         now_ms: u64,
-    ) -> Result<Vec<u8>, SessionError> {
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, SessionError> {
         let _guard = self.critical.lock().map_err(|_| SessionError::Poisoned)?;
         let mut state = self.store.load(author)?.ok_or(SessionError::NoSession)?;
 
@@ -361,10 +421,21 @@ impl SessionManager {
         }
     }
 
-    /// Whether this peer has missed `R` consecutive envelopes — the §4.6 desync signal.
+    /// Whether this peer's session needs §4.6 recovery.
     ///
-    /// Only meaningful for a peer we actually hold a session with: with no session there is
-    /// nothing to be out of step with, and the answer is "not desynced, un-bootstrapped".
+    /// Two ways in, because there are two ways a session breaks:
+    ///
+    /// - **`R` consecutive misses** against a session that loads fine — we are talking past each
+    ///   other, the classic desync.
+    /// - **A damaged state file**, which reports desynced immediately. Misses cannot accumulate
+    ///   here (every `open` fails before it can miss), so waiting for `R` would wait forever.
+    ///
+    /// With nothing on disk the answer is "not desynced, un-bootstrapped": there is no session to
+    /// be out of step with, and the fix is a bump rather than a resync.
+    ///
+    /// **Lock order.** `health` is taken and released before `presence` takes `critical`; see the
+    /// note on [`SessionManager::critical`]. The `let` below must keep its guard temporary
+    /// confined to the statement — do not hoist it.
     pub fn is_desynced(&self, peer: &[u8]) -> bool {
         let misses = self
             .health
@@ -372,7 +443,30 @@ impl SessionManager {
             .ok()
             .and_then(|h| h.get(peer).map(|e| e.misses))
             .unwrap_or(0);
-        misses >= self.desync_threshold && self.has_session(peer)
+        match self.presence(peer) {
+            SessionPresence::Damaged => true,
+            SessionPresence::Present => misses >= self.desync_threshold,
+            SessionPresence::Absent => false,
+        }
+    }
+
+    /// Forget which resync records we have applied, across every peer.
+    ///
+    /// Called only when our own resync ephemeral is re-minted: the nonces in that set are records
+    /// we applied *against the old ephemeral*, and once it is gone those results are ones we need
+    /// to be able to reach again. Keeps `misses` and `resyncs` — the first is about envelopes and
+    /// the second is the "re-pair with this friend" signal, and neither has anything to do with
+    /// which ephemeral we are currently offering.
+    ///
+    /// This does not weaken the replay defence: the durable half is
+    /// [`RatchetState::resync_ts`](crate::ratchet::RatchetState::resync_ts), which is unaffected
+    /// and still refuses anything not newer than the session it would replace.
+    pub fn forget_applied_resyncs(&self) {
+        if let Ok(mut health) = self.health.lock() {
+            for entry in health.values_mut() {
+                entry.seen_nonces.clear();
+            }
+        }
     }
 
     /// How many resyncs we have driven with this peer.
@@ -429,8 +523,25 @@ impl SessionManager {
         }
 
         let guard = self.critical.lock().map_err(|_| SessionError::Poisoned)?;
+
+        // Monotonic acceptance, checked under the same guard that installs the replacement so
+        // there is no window between deciding and doing. This is the half of §4.6's replay
+        // defence that survives a restart: `seen_nonces` above is in memory by design, so after a
+        // restart every record inside the freshness window looks new again, and the stash may
+        // serve whatever version of the `rsy` slot it kept. A record may only replace a session
+        // older than itself, and a replay never is.
+        //
+        // Scoped to a session we can actually read, deliberately: with nothing on disk, or a blob
+        // that will not decrypt, there is no working session to protect, and refusing here would
+        // lock out the exact case §4.6 exists for.
+        if let Ok(Some(existing)) = self.store.load(peer) {
+            if record_ts <= existing.resync_ts() {
+                return Ok(false);
+            }
+        }
+
         let mut keys = OsRatchetKeys;
-        let state = match our_ephemeral {
+        let mut state = match our_ephemeral {
             // We are the responder for the new session: our bump ephemeral is the ratchet key
             // the initiator's root step already ran against.
             Some(ours) => RatchetState::bootstrap_responder(session_id, rk0, ours, now_ms),
@@ -442,6 +553,9 @@ impl SessionManager {
                 &mut keys,
             )?,
         };
+        // Stamp the record that created this session before it is written, so the bound above is
+        // in force from the very first save rather than from the next one.
+        state.set_resync_ts(record_ts);
         self.store.save(peer, &state)?;
         drop(guard);
         Ok(true)

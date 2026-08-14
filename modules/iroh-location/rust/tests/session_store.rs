@@ -195,6 +195,83 @@ fn saving_twice_leaves_no_temporary_file_behind() {
 }
 
 #[test]
+fn a_rolled_back_state_file_reissues_a_counter_that_was_already_spent() {
+    // This is the failure `save()`'s fsync exists to prevent, written down as an executable
+    // statement of *why* it is there.
+    //
+    // A power loss between `save()` returning Ok and the data reaching stable storage leaves the
+    // previous blob on disk. `next_wraps` has already treated that Ok as "the counter is durable,
+    // it is safe to seal", so the next boot re-derives the same position — and in v3 that message
+    // key seals a different content key under the same zero nonce, which is the (key, nonce)
+    // reuse the whole design exists to prevent.
+    //
+    // The test simulates the rollback directly, because a real power loss is not reproducible in
+    // process. What it pins is the consequence: nothing downstream detects it, so durability at
+    // the write is the only thing standing between us and this.
+    let scratch = Scratch::new("rollback");
+    let store = SessionStore::open(&scratch.0, IDENTITY).unwrap();
+    store.save(PEER, &a_session()).unwrap();
+
+    let path = scratch.0.join("sessions").join(format!(
+        "{}.bin",
+        PEER.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ));
+    let snapshot = std::fs::read(&path).unwrap();
+
+    // Spend a counter and persist it, exactly as a publish would.
+    let mut state = store.load(PEER).unwrap().unwrap();
+    let spent = state.next_send().unwrap();
+    let spent_kid = spent.kid;
+    let spent_key = spent.key.use_once(|k| *k);
+    store.save(PEER, &state).unwrap();
+
+    // ...then roll the file back to before that save, the way a lost page cache would.
+    std::fs::write(&path, &snapshot).unwrap();
+
+    let mut rolled_back = store.load(PEER).unwrap().unwrap();
+    let reissued = rolled_back.next_send().unwrap();
+    assert_eq!(
+        reissued.kid, spent_kid,
+        "a rolled-back state re-derives the same ratchet position"
+    );
+    assert_eq!(
+        reissued.key.use_once(|k| *k),
+        spent_key,
+        "and hands out a message key that has already sealed a wrap — the exact (key, nonce) \
+         reuse `save()` must fsync to make unreachable"
+    );
+}
+
+#[test]
+fn a_saved_session_is_on_disk_before_save_returns() {
+    // The persist-before-publish contract is about *durability*, not visibility, and the part a
+    // test can hold is that `save` is fully synchronous: when it returns, the bytes are readable
+    // through a completely independent handle, with no buffering left in flight.
+    let scratch = Scratch::new("durable");
+    let store = SessionStore::open(&scratch.0, IDENTITY).unwrap();
+
+    let mut state = a_session();
+    let slot = state.next_send().unwrap();
+    store.save(PEER, &state).unwrap();
+
+    let path = scratch.0.join("sessions").join(format!(
+        "{}.bin",
+        PEER.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ));
+    let raw = std::fs::read(&path).expect("the blob must exist the moment save() returns");
+    assert!(!raw.is_empty());
+
+    // And the persisted state must be the *advanced* one — persisting the pre-step state would
+    // hand the same counter out twice on the next load.
+    let mut reloaded = store.load(PEER).unwrap().unwrap();
+    let next = reloaded.next_send().unwrap();
+    assert_ne!(
+        next.kid, slot.kid,
+        "the saved state must be the one that already spent the counter"
+    );
+}
+
+#[test]
 fn a_removed_session_is_gone_and_removing_twice_is_fine() {
     let scratch = Scratch::new("remove");
     let store = SessionStore::open(&scratch.0, IDENTITY).unwrap();

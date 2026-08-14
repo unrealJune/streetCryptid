@@ -865,8 +865,28 @@ pub struct LocationNode {
     recv_public: Vec<u8>,
     /// On-disk root for the persistent docs replica + blobs store (durable trail). Derived from
     /// the identity so it stays stable across restarts.
-    /// TODO: let the Expo module pass the app's sandbox data dir instead of the OS temp dir.
+    ///
+    /// This one is allowed to live in cache/temp: everything under it is *recoverable* — a purged
+    /// trail resyncs from the stash and from friends. Ratchet state is not, which is why it does
+    /// not live here; see [`state_dir`](Self::state_dir).
     data_dir: PathBuf,
+    /// On-disk root for state that **cannot be re-derived or re-fetched** — today, the ratchet
+    /// session store (§4.2).
+    ///
+    /// Separate from `data_dir` because the two have opposite storage requirements, and getting
+    /// either wrong is a break rather than an inconvenience:
+    ///
+    /// | | cache / temp | app data dir |
+    /// |---|---|---|
+    /// | backup rollback → counter rewind → key reuse | impossible | must be excluded |
+    /// | OS purge → every session lost at once | likely | no |
+    ///
+    /// Sequential state has to survive an OS purge, so it belongs in the app data dir — and a
+    /// restored backup would rewind counters into key reuse, so the host is responsible for
+    /// excluding this path from backup *as well*. Both halves ship together: iOS stamps
+    /// `NSURLIsExcludedFromBackupKey` in `IrohLocationModule.swift`, Android excludes `files/` in
+    /// `plugins/withBackupExclusion.js`. Never point this at `data_dir` on a device.
+    state_dir: PathBuf,
     inner: Mutex<Option<Started>>,
     /// The most recently attached listener, reused to surface durable-trail (backfill / sync)
     /// events from the node-level `sync_trail` call.
@@ -951,26 +971,55 @@ impl LocationNode {
             .map(|h| decode_hex(h).ok_or_else(|| LocationError::Decode("bad recv key hex".into())))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let (public, nonce, ts) = {
+        let (public, nonce, ts, reminted) = {
             let mut pending = self.pending_resync.lock().await;
+            let now = now_ms();
+            // Idempotent while the record is still usable, re-minted once it is not.
+            //
+            // Without the age check this is idempotent *forever*: it would re-publish the original
+            // `ts` on every call, and once that passed `RESYNC_FRESHNESS_MS` the peer would refuse
+            // our record permanently while we kept republishing the same stale bytes. The session
+            // would sit desynced, refusing to heal, reporting no error — and the normal reason you
+            // are resyncing at all is a peer who is offline, i.e. exactly the case that takes
+            // longer than an hour.
+            //
+            // Re-minting at half the window leaves the fresh record a full half-window of validity
+            // before it too needs replacing, so there is no gap where our published record is
+            // unusable.
+            let stale = pending
+                .as_ref()
+                .is_some_and(|p| now.saturating_sub(p.ts) >= sessions::RESYNC_REMINT_MS);
             match pending.as_ref() {
-                Some(p) => (p.public, p.nonce, p.ts),
-                None => {
+                Some(p) if !stale => (p.public, p.nonce, p.ts, false),
+                _ => {
                     let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
                     let public = x25519_dalek::PublicKey::from(&secret).to_bytes();
                     let mut nonce = [0u8; 16];
                     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
-                    let ts = now_ms();
+                    let was_pending = pending.is_some();
                     *pending = Some(PendingResync {
                         secret,
                         public,
                         nonce,
-                        ts,
+                        ts: now,
                     });
-                    (public, nonce, ts)
+                    (public, nonce, now, was_pending)
                 }
             }
         };
+
+        // Re-minting discards the ephemeral behind every conclusion we have already drawn, so
+        // those conclusions have to go with it. Concretely: we may have already applied the peer's
+        // record against the *old* ephemeral and installed a session from it. The peer will see
+        // our new record and re-apply against the new one, landing on a different root — while we,
+        // having already marked their nonce as seen, would never re-apply and would sit on the old
+        // session forever. Forgetting the applied nonces lets us re-apply their current record
+        // against the new ephemeral, so both sides converge on the same root again.
+        if reminted {
+            if let Ok(manager) = self.session_manager().await {
+                manager.forget_applied_resyncs();
+            }
+        }
 
         let record = ResyncRecord {
             v: RESYNC_V,
@@ -1125,10 +1174,27 @@ struct ResyncRecord {
 
 const RESYNC_V: u8 = 1;
 
+/// How a caller wants the node's two on-disk roots resolved.
+///
+/// Both variants have to be resolved *after* the identity is known, because every path here is
+/// scoped by the author hex and the author is only derivable once the key exists (it may have
+/// just been generated).
+enum NodeDirs {
+    /// OS temp, scoped by author. Host tests and the desktop CLI, where nothing purges anything
+    /// mid-run and there is no backup to be restored from.
+    Default,
+    /// Exact directories, used verbatim — the `cli` feature's `new_with_data_dir`, which keeps
+    /// deliberately separate replica stores and must not have them renamed underneath it.
+    #[cfg(feature = "cli")]
+    Exact(PathBuf),
+    /// Storage roots to scope per identity. The mobile path; see [`LocationNode::new_at_dirs`].
+    Roots { data: PathBuf, state: PathBuf },
+}
+
 fn new_location_node_at(
     identity_secret: Option<Vec<u8>>,
     recv_secret: Option<Vec<u8>>,
-    data_dir: Option<PathBuf>,
+    dirs: NodeDirs,
 ) -> Result<Arc<LocationNode>, LocationError> {
     telemetry::init_tracing();
     let secret = match identity_secret {
@@ -1154,12 +1220,29 @@ fn new_location_node_at(
         }
     };
 
+    // Off-device, both live in one directory: temp is the right answer there, and collapsing them
+    // keeps the CLI's on-disk layout exactly as it was. On a device they must diverge — see
+    // `NodeDirs` and `LocationNode::state_dir`.
+    let (data_dir, state_dir) = match dirs {
+        NodeDirs::Default => {
+            let dir = default_data_dir(&author);
+            (dir.clone(), dir)
+        }
+        #[cfg(feature = "cli")]
+        NodeDirs::Exact(dir) => (dir.clone(), dir),
+        NodeDirs::Roots { data, state } => {
+            let scope = encode_hex(&author);
+            (data.join(&scope), state.join(&scope))
+        }
+    };
+
     Ok(Arc::new(LocationNode {
         identity_seed,
         author,
         recv_secret,
         recv_public: recv_public.clone(),
-        data_dir: data_dir.unwrap_or_else(|| default_data_dir(&author)),
+        data_dir,
+        state_dir,
         inner: Mutex::new(None),
         listener: Mutex::new(None),
         pair: PairCore::new(identity_seed, author, recv_public),
@@ -1180,7 +1263,40 @@ impl LocationNode {
         identity_secret: Option<Vec<u8>>,
         recv_secret: Option<Vec<u8>>,
     ) -> Result<Arc<Self>, LocationError> {
-        new_location_node_at(identity_secret, recv_secret, None)
+        new_location_node_at(identity_secret, recv_secret, NodeDirs::Default)
+    }
+
+    /// Create a node under host-supplied storage roots. **This is the constructor mobile must
+    /// use**; [`new`](Self::new) puts everything in the OS temp dir, which is right for host tests
+    /// and wrong for a device.
+    ///
+    /// Both roots are scoped per identity internally (`<root>/<author hex>`), because the host
+    /// cannot know the endpoint id before the node that derives it exists.
+    ///
+    /// - `data_root` — the recoverable trail replica and blobs. Cache is the correct home: it is
+    ///   large, it is re-fetchable, and it must never be restored from a backup.
+    /// - `state_root` — ratchet session state, which is **not** recoverable. This must be the
+    ///   app's private data dir (Android `filesDir`, iOS Application Support) *and* excluded from
+    ///   backup, since restoring an old copy rewinds send counters into key reuse. See
+    ///   [`LocationNode::state_dir`].
+    ///
+    /// Passing the same root for both is a bug on device in one direction and a break in the
+    /// other; the two have opposite requirements.
+    #[uniffi::constructor]
+    pub fn new_at_dirs(
+        identity_secret: Option<Vec<u8>>,
+        recv_secret: Option<Vec<u8>>,
+        data_root: String,
+        state_root: String,
+    ) -> Result<Arc<Self>, LocationError> {
+        new_location_node_at(
+            identity_secret,
+            recv_secret,
+            NodeDirs::Roots {
+                data: PathBuf::from(data_root),
+                state: PathBuf::from(state_root),
+            },
+        )
     }
 
     /// Bind the iroh endpoint + spawn the gossip router. Idempotent.
@@ -1301,7 +1417,9 @@ impl LocationNode {
         {
             let mut slot = self.sessions.lock().await;
             if slot.is_none() {
-                let store = session_store::SessionStore::open(&self.data_dir, &self.identity_seed)
+                std::fs::create_dir_all(&self.state_dir)
+                    .map_err(|e| LocationError::Network(e.to_string()))?;
+                let store = session_store::SessionStore::open(&self.state_dir, &self.identity_seed)
                     .map_err(|e| LocationError::Network(e.to_string()))?;
                 *slot = Some(Arc::new(sessions::SessionManager::new(store)));
             }
@@ -2629,7 +2747,7 @@ impl LocationNode {
         recv_secret: Option<Vec<u8>>,
         data_dir: PathBuf,
     ) -> Result<Arc<Self>, LocationError> {
-        new_location_node_at(identity_secret, recv_secret, Some(data_dir))
+        new_location_node_at(identity_secret, recv_secret, NodeDirs::Exact(data_dir))
     }
 
     /// Directly reconcile a trail capability with exactly `peer_ticket`, without importing it into

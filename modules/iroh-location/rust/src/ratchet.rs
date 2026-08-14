@@ -106,7 +106,7 @@ pub enum RatchetError {
 
 /// Wire version of the persisted session blob. Bump on any layout change — a session that cannot
 /// be read is a desync, which §4.6 recovers by restarting the session, never by falling back.
-pub const STATE_V: u8 = 1;
+pub const STATE_V: u8 = 2;
 
 /// Size of a serialized session (see [`RatchetState::to_bytes`]).
 pub const STATE_LEN: usize = 1      // version
@@ -118,7 +118,8 @@ pub const STATE_LEN: usize = 1      // version
     + 1 + KEY_LEN                   // ckr
     + 4 * 3                         // ns, nr, pn
     + 4 * 2                         // send_epoch, recv_epoch
-    + 8; // peer_advanced_ms
+    + 8                             // peer_advanced_ms
+    + 8; // resync_ts
 
 /// A **single-use** message key.
 ///
@@ -219,6 +220,20 @@ pub struct RatchetState {
     recv_epoch: u32,
     /// When the peer last contributed a fresh ratchet key (ms since epoch). Drives `T_lapse`.
     peer_advanced_ms: u64,
+    /// Timestamp of the resync record that created this session, or `0` if it came from a bump.
+    ///
+    /// This is the **durable** half of §4.6's replay defence, and it is durable because the other
+    /// half cannot be. `PeerHealth::seen_nonces` lives in memory by design, so a process restart
+    /// forgets every record it has applied — and the stash is modelled as hostile and keeps
+    /// whatever versions of the `rsy` slot it likes. Replaying a record within the freshness
+    /// window after a restart would therefore restart a session that was working, for free, as
+    /// often as the stash cared to.
+    ///
+    /// One monotonic value closes that without persisting an unbounded set: a resync record is
+    /// only acceptable if it is *newer* than the one that produced the session it would replace.
+    /// Every replay is by definition not newer. A session from a bump carries `0`, so a genuine
+    /// first resync always applies.
+    resync_ts: u64,
 }
 
 impl std::fmt::Debug for RatchetState {
@@ -301,6 +316,7 @@ impl RatchetState {
             send_epoch: 0,
             recv_epoch: 0,
             peer_advanced_ms: now_ms,
+            resync_ts: 0,
         };
         // One root step gives the initiator its sending chain. The receiving chain arrives with
         // the responder's first envelope, which carries their new ratchet pub.
@@ -333,7 +349,22 @@ impl RatchetState {
             send_epoch: 0,
             recv_epoch: 0,
             peer_advanced_ms: now_ms,
+            resync_ts: 0,
         }
+    }
+
+    /// Timestamp of the resync record this session was created from (`0` for a bump).
+    ///
+    /// The §4.6 monotonic-acceptance bound: a resync record is acceptable only if `record.ts` is
+    /// strictly greater than this. See [`RatchetState::resync_ts`].
+    pub fn resync_ts(&self) -> u64 {
+        self.resync_ts
+    }
+
+    /// Record which resync produced this session. Called only by `SessionManager::apply_resync`,
+    /// immediately after the bootstrap that record implies.
+    pub fn set_resync_ts(&mut self, ts: u64) {
+        self.resync_ts = ts;
     }
 
     /// Our current ratchet public key — what goes in the header of everything we send.
@@ -651,6 +682,7 @@ impl RatchetState {
         out.extend_from_slice(&self.send_epoch.to_le_bytes());
         out.extend_from_slice(&self.recv_epoch.to_le_bytes());
         out.extend_from_slice(&self.peer_advanced_ms.to_le_bytes());
+        out.extend_from_slice(&self.resync_ts.to_le_bytes());
         debug_assert_eq!(out.len(), STATE_LEN);
         out
     }
@@ -687,6 +719,7 @@ impl RatchetState {
         let send_epoch = take_u32(bytes, &mut at)?;
         let recv_epoch = take_u32(bytes, &mut at)?;
         let peer_advanced_ms = take_u64(bytes, &mut at)?;
+        let resync_ts = take_u64(bytes, &mut at)?;
 
         Ok(Self {
             session_id,
@@ -701,6 +734,7 @@ impl RatchetState {
             send_epoch,
             recv_epoch,
             peer_advanced_ms,
+            resync_ts,
         })
     }
 }
