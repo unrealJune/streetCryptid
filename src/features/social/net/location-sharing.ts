@@ -529,7 +529,6 @@ export class LocationSharingService implements FixPublisher {
   // Background service runtime (native-only; lazily imported so web/Expo Go never load it).
   private engine: LocationEngine | null = null;
   private bgProvider: BackgroundLocationProvider | null = null;
-  private bgUnwatch: (() => void) | null = null;
   private bgTaskHandlerStop: (() => void) | null = null;
   private bgRefreshHandlerStop: (() => void) | null = null;
   private bgLifecycleStop: (() => void) | null = null;
@@ -571,9 +570,8 @@ export class LocationSharingService implements FixPublisher {
   /** Injectable CSPRNG for control nonces; tests supply a deterministic one. */
   private readonly randomBytes: RandomBytesFn;
   /**
-   * Drives {@link LocationEngine.heartbeat} at the sampling interval. This is what keeps the
-   * cadence constant while the user is stationary: with no movement the OS may deliver no fixes at
-   * all, and without a heartbeat the envelopes would simply stop — making silence mean "not moving".
+   * Drives {@link LocationEngine.heartbeat} at the sampling interval while the runtime is alive.
+   * iOS may suspend this timer while stationary; the periodic OS refresh is the best-effort backstop.
    */
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   /** The user's chosen publish cadence; see `loadShareIntervalMs`. */
@@ -1923,12 +1921,10 @@ export class LocationSharingService implements FixPublisher {
 
       const firstFix = await this.bgProvider.getCurrent();
       await this.ingestAndTrackLocal(firstFix);
-      this.bgUnwatch = await this.bgProvider.watch((fix) => {
-        void this.ingestAndTrackLocal(fix);
-      });
+      // The TaskManager location task delivers in foreground too. A second watch processed every
+      // iOS fix twice and kept another CLLocationManager running for no additional information.
 
-      // Emit on every slot boundary even when the OS delivers no fixes (a phone sitting on a desk).
-      // Cheap: it republishes a position we already have and no-ops when the slot is covered.
+      // Fill due slots while the runtime remains alive. iOS may suspend this timer in the background.
       this.armHeartbeat(this.shareIntervalMs);
 
       // Live-mode requests are only actionable while we are actually sampling, so the poll's
@@ -2063,8 +2059,6 @@ export class LocationSharingService implements FixPublisher {
     this.watcherSessions = [];
     const stopCadence = this.bgCadenceStop;
     this.bgCadenceStop = null;
-    this.bgUnwatch?.();
-    this.bgUnwatch = null;
     this.bgTaskHandlerStop?.();
     this.bgTaskHandlerStop = null;
     this.bgRefreshHandlerStop?.();
@@ -2442,8 +2436,6 @@ export class LocationSharingService implements FixPublisher {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
-    this.bgUnwatch?.();
-    this.bgUnwatch = null;
     this.bgTaskHandlerStop?.();
     this.bgTaskHandlerStop = null;
     this.bgRefreshHandlerStop?.();

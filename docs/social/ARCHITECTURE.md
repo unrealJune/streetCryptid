@@ -204,25 +204,24 @@ both the live (gossip) and durable (docs) paths. Design of the JS layer lives un
 GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ LocationSharingService.publishFix
    expo-location            │ slot gate +      │ durable queue,   ├─▶ gossip.broadcast   (live)
    + TaskManager            │ SamplingPolicy   │ survives resume  └─▶ docs.write(a/seq)  (durable)
-   + Android FG service     │ (fixed cadence)  ▼                        │ range reconciliation
+   + Android FG service     │ (slot cadence)   ▼                        │ range reconciliation
    ▲                        │        ▲    TrailStore (local, history) ◀─ backfill onFix (sync)
    └── CadenceController ◀──┘   BatterySource
        re-arms OS on decision change   (expo-battery)
 ```
 
-- **Fixed cadence is a security property, not a tuning choice.** Envelopes are E2E-encrypted, but
-  the trail-stash and any network observer still see when they arrive. The old ladder (~18s driving
-  / ~45s walking / ~180s stationary, ×3 under Low-Power Mode) therefore published _what the user was
-  doing_ in the clear alongside the ciphertext — inter-arrival timing alone separates driving from
-  walking from sitting still. Everything below follows from closing that channel: nothing about
-  movement, app state, or battery may change the publish rate.
+- **The slot grid bounds publication; the OS wake cadence is movement-driven.** Envelopes are
+  E2E-encrypted, but their arrival timing is visible. A perfectly fixed wire cadence hid motion at
+  the cost of effectively continuous Core Location on iOS, because iOS ignores `timeInterval`.
+  Ambient sharing now accepts that movement timing is observable, as it is in Life360-class
+  products, and prioritizes sustainable battery use. Live mode remains explicit and bounded.
 - **Sampling** (`sampling-policy.ts`): one fix per `intervalMs` — user-selectable 1/5/15 min,
   default 5 — at balanced (~100m) accuracy, tuned as an _ambient_ sharer (Life360 / Find-My class),
   not a navigator. Battery moves **accuracy only** (→ `low` under ≤20% or Low-Power Mode, cancelled
   by charging) and, below 5% unplugged, suspends outright — a hard stop that reads as "the phone
   died" rather than a slow-down that would encode the charge level in the cadence. There is
-  deliberately **no distance filter and no deferred-updates batching**: both gate delivery on
-  movement, which would re-open the leak at the platform layer. A bounded, on-demand **live mode**
+  uses a 100 m distance filter, background deferral up to the chosen interval, and iOS automatic
+  pausing so a stationary phone does not keep GPS and JS hot. A bounded, on-demand **live mode**
   (`SamplingInputs.live` → `LocationEngine.setLiveMode` → `LocationSharingService.setLiveTracking`)
   swaps in a real-time ~4s/high cadence for the "a friend is actively watching" case. It is the one
   sanctioned exception and it _is_ visible on the wire as such. Authorisation is **the sharing grant
@@ -239,26 +238,22 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   fixes' combined error radii, so a stationary phone's jitter is not mistaken for a teleport. After
   `acceptAnythingAfterMs` (15 min) with nothing accepted it takes what it can get, because a coarse
   position beats a frozen trail. **A rejected fix must never silence a slot**: the gate sits before
-  `lastKnownFix`, never before the publish, so a stretch of bad GPS looks exactly like a stretch of
-  sitting still on the wire. Were it otherwise, "no envelope" would mean "this person is indoors /
-  underground", which is the same class of inference the fixed cadence exists to prevent. The
-  requested accuracy tier must never be coarser than `maxAccuracyM`, or we would spend battery on
-  fixes we then discard — which is why `lowBatteryAccuracy` is `balanced` and not `low`.
+  `lastKnownFix`, never before the publish, so an awake runtime can reuse the last good coordinate
+  rather than emit a known-bad one. The requested accuracy tier must never be coarser than
+  `maxAccuracyM`, or we would spend battery on fixes we then discard — which is why
+  `lowBatteryAccuracy` is `balanced` and not `low`.
 - **Slot quantisation** (`location-engine.ts`): the engine publishes on wall-clock boundaries of
   `intervalMs`, not on fix arrival. Extra fixes within a slot are absorbed into `lastKnownFix`; a
-  slot that produces no fix re-publishes `lastKnownFix` **verbatim, original `ts` intact**, so
-  silence never means "stationary" while friends still see a stale position as stale. Missed slots
-  are backfilled on the next wake up to `MAX_BACKFILL_MS` (30 min) — beyond that the arrival burst
-  reveals the outage anyway, so filling hours of duplicates buys nothing. `LocationEngine.heartbeat`
-  drives this from a timer at the interval and from every OS background wake. Note the outbox's
+  slot that produces no fix can re-publish `lastKnownFix` **verbatim, original `ts` intact**, while
+  the runtime remains awake. Missed slots are backfilled on the next wake up to `MAX_BACKFILL_MS`
+  (30 min). `LocationEngine.heartbeat` drives this from a timer and every OS background wake. Note
+  the outbox's
   near-duplicate **coalescing is disabled** (`background-outbox.ts`): left on, it would collapse a
   backfill replay into a single envelope.
-- **iOS/Android parity is a correctness requirement.** If a stationary iPhone went quiet while a
-  stationary Android kept emitting, silence would still mean "not moving" on iOS and the leak would
-  be only half closed. `timeInterval` is Android-only, so parity comes from `distanceInterval: 0`
-  plus `pausesUpdatesAutomatically: false` on both: the OS keeps delivering while stationary, the
-  process stays alive, and the JS slot gate produces the identical uniform series. What differs is
-  cost, not behaviour — Android's OS paces natively, iOS delivers continuously and we discard in JS.
+- **iOS is event-driven, not timer-driven.** `timeInterval` is Android-only. On iOS the ambient
+  task uses `distanceInterval: 100`, deferred updates, and `pausesUpdatesAutomatically: true`.
+  The 200 m revive fence can relaunch a normally terminated app after movement, while periodic
+  refresh is a best-effort stationary backstop. A user force-quit remains an iOS hard stop.
 - **The visible indicators** are where the platforms genuinely diverge. iOS: we set
   `showsBackgroundLocationIndicator: false`; per Apple QA1965 the blue pill is mandatory only for
   _when-in-use_ apps, so an "Always"-authorized app can leave it off (we were opting in). Android:

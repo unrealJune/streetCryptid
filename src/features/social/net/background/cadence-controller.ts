@@ -69,12 +69,9 @@ export function cfgFromDecision(
     // Location pace itself — but it is derived from movement, and we no longer classify movement at
     // all. A constant hint also keeps the OS request identical whatever the user is doing.
     activityType: 'other',
-    // Never let iOS Core Location auto-pause. It suspends background updates when it decides the
-    // device is stationary and does NOT reliably resume, silently stopping background location
-    // sharing until the app is next foregrounded (the "pings only arrive when the app is opened"
-    // bug). Continuous sharing needs a steady stream; battery is bounded by the time/distance
-    // cadence above, not by auto-pause.
-    pausesUpdatesAutomatically: false,
+    // Ambient sharing is not navigation. Let Core Location power down while stationary; the
+    // movement filter, revive geofence, and periodic refresh provide the resume/backstop paths.
+    pausesUpdatesAutomatically: true,
     notificationTitle: notification.title,
     notificationBody: notification.body,
     ...(notification.color ? { notificationColor: notification.color } : {}),

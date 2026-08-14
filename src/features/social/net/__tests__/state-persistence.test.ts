@@ -85,7 +85,7 @@ import { loadSeq, saveSeq } from '../state-store';
 // eslint-disable-next-line import/first
 import { LocationSharingService } from '../location-sharing';
 
-const SEQ_KEY = 'sc.social.seq';
+const SEQ_KEY = 'sc.social.seq.v2';
 
 beforeEach(() => {
   mockSecureStore.store.clear();
@@ -107,6 +107,15 @@ describe('secure-store accessibility class (step 0)', () => {
     for (const call of mockSecureStore.setCalls) {
       expect(call.options).toBe(SECURE_STORE_OPTIONS);
     }
+  });
+
+  it('migrates legacy WHEN_UNLOCKED values to new background-readable keys', async () => {
+    mockSecureStore.store.set('sc.iroh.identitySecret', 'legacy-id');
+    mockSecureStore.store.set('sc.iroh.recvSecret', 'legacy-recv');
+    mockSecureStore.store.set('sc.social.seq', '41');
+
+    await expect(loadSeq()).resolves.toBe(41);
+    expect(mockSecureStore.store.get('sc.social.seq.v2')).toBe('41');
   });
 });
 

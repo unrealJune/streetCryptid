@@ -7,7 +7,7 @@ import {
 const config: BackgroundStartConfig = {
   accuracy: 'balanced',
   timeIntervalMs: 300_000,
-  distanceIntervalM: 0,
+  distanceIntervalM: 100,
   notificationTitle: 'streetCryptid',
   notificationBody: "Keeping your friends' map current.",
 };
@@ -29,7 +29,7 @@ describe('background location registration', () => {
       BACKGROUND_LOCATION_TASK,
       expect.objectContaining({
         timeInterval: 300_000,
-        distanceInterval: 0,
+        distanceInterval: 100,
       })
     );
   });
@@ -59,14 +59,14 @@ describe('background location registration', () => {
     );
   });
 
-  it('defaults to NO auto-pause when unspecified (keep iOS background delivery alive)', async () => {
+  it('defaults to auto-pause when unspecified for battery-efficient ambient sharing', async () => {
     const api = makeApi(false);
 
     await rearmBackgroundLocationTask(api, config);
 
     expect(api.startLocationUpdatesAsync).toHaveBeenCalledWith(
       BACKGROUND_LOCATION_TASK,
-      expect.objectContaining({ pausesUpdatesAutomatically: false })
+      expect.objectContaining({ pausesUpdatesAutomatically: true })
     );
   });
 

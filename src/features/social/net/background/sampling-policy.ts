@@ -13,7 +13,8 @@ import type { AccuracyTier, BatteryState, SamplingConfig, SamplingDecision } fro
  *    `charging` cancels the penalty. Accuracy is not timing, so this is safe to vary.
  *  - battery < `suspendBelowLevel` AND not charging ⇒ `active: false` — a hard stop indistinguishable
  *    from the phone dying, rather than a slow-down that would encode the battery level in the cadence.
- *  - `distanceIntervalM` is 0 outside live mode: a distance filter is a motion filter.
+ *  - ambient OS sampling is movement-driven and deferred. Publishing still uses the slot grid, but
+ *    a stationary phone does not keep GPS and the JS runtime awake merely to repeat one coordinate.
  */
 export interface SamplingInputs {
   battery: BatteryState;
@@ -39,6 +40,7 @@ export interface SamplingPolicy {
 
 /** The default cadence, and the middle option offered in settings. */
 export const DEFAULT_SHARE_INTERVAL_MS = 5 * 60_000;
+export const AMBIENT_DISTANCE_INTERVAL_M = 100;
 
 /**
  * Defaults for an *ambient* "friends on a map" sharer (Life360 / Find-My class), not a turn-by-turn
@@ -96,11 +98,11 @@ export function createSamplingPolicy(config?: Partial<SamplingConfig>): Sampling
       // Constant, whatever the battery says. The only battery response is the accuracy tier above
       // and the hard suspend below; stretching the interval would put the charge level on the wire.
       timeIntervalMs: merged.intervalMs,
-      // No distance filter: it would gate delivery on movement, which is the leak we are closing.
-      distanceIntervalM: 0,
-      // No deferred batching either — it would coalesce quiet periods into bursts and re-introduce
-      // the same motion signal at the delivery layer.
-      deferredUpdatesIntervalMs: 0,
+      // Standard Core Location ignores timeInterval on iOS. A zero distance filter therefore means
+      // continuous GPS, even for a five-minute product cadence. Let the OS wake on meaningful
+      // movement and batch background delivery up to the selected ambient interval.
+      distanceIntervalM: AMBIENT_DISTANCE_INTERVAL_M,
+      deferredUpdatesIntervalMs: merged.intervalMs,
       active: !criticallyLow(battery),
     };
   };

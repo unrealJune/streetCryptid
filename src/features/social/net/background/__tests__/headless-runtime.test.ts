@@ -275,7 +275,9 @@ describe('headless-runtime', () => {
       // failure compounds instead of ending.
       expect(mockStartBackgroundLocation.mock.calls[0][0]).toMatchObject({
         timeIntervalMs: 300_000,
-        distanceIntervalM: 0,
+        distanceIntervalM: 100,
+        deferredUpdatesIntervalMs: 300_000,
+        pausesUpdatesAutomatically: true,
       });
     });
 

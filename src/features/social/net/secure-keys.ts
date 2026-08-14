@@ -6,8 +6,10 @@ import * as SecureStore from 'expo-secure-store';
  * launches. See docs/social/ARCHITECTURE.md §3.
  */
 
-const ID_KEY = 'sc.iroh.identitySecret';
-const RECV_KEY = 'sc.iroh.recvSecret';
+const ID_KEY = 'sc.iroh.identitySecret.v2';
+const RECV_KEY = 'sc.iroh.recvSecret.v2';
+const LEGACY_ID_KEY = 'sc.iroh.identitySecret';
+const LEGACY_RECV_KEY = 'sc.iroh.recvSecret';
 
 /**
  * Keychain semantics for everything this app puts in the secure store (FORWARD-SECRECY.md §6):
@@ -29,15 +31,23 @@ export interface PersistedKeys {
   recvSecret: string | null;
 }
 
+async function loadAndMigrate(key: string, legacyKey: string): Promise<string | null> {
+  const current = await SecureStore.getItemAsync(key, SECURE_STORE_OPTIONS);
+  if (current !== null) return current;
+
+  const legacy = await SecureStore.getItemAsync(legacyKey);
+  if (legacy === null) return null;
+
+  // Expo SecureStore updates only the value of an existing keychain item, not kSecAttrAccessible.
+  // Writing under a new key is therefore required to migrate old WHEN_UNLOCKED entries.
+  await SecureStore.setItemAsync(key, legacy, SECURE_STORE_OPTIONS);
+  return legacy;
+}
+
 export async function loadKeys(): Promise<PersistedKeys> {
-  try {
-    const identitySecret = await SecureStore.getItemAsync(ID_KEY);
-    const recvSecret = await SecureStore.getItemAsync(RECV_KEY);
-    return { identitySecret, recvSecret };
-  } catch {
-    // Secure store is unavailable (web / Expo Go); fall back to ephemeral keys.
-    return { identitySecret: null, recvSecret: null };
-  }
+  const identitySecret = await loadAndMigrate(ID_KEY, LEGACY_ID_KEY);
+  const recvSecret = await loadAndMigrate(RECV_KEY, LEGACY_RECV_KEY);
+  return { identitySecret, recvSecret };
 }
 
 export async function saveKeys(keys: {

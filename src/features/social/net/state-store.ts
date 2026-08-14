@@ -15,18 +15,20 @@ import { SECURE_STORE_OPTIONS } from './secure-keys';
  * failure aborts the publish instead of risking reuse.
  */
 
-const SEQ_KEY = 'sc.social.seq';
+const SEQ_KEY = 'sc.social.seq.v2';
+const LEGACY_SEQ_KEY = 'sc.social.seq';
 
 export async function loadSeq(): Promise<number> {
-  try {
-    const raw = await SecureStore.getItemAsync(SEQ_KEY);
-    const n = raw ? Number.parseInt(raw, 10) : 0;
-    return Number.isFinite(n) && n >= 0 ? n : 0;
-  } catch {
-    // Secure store unavailable (web / Expo Go); start from 0 (ephemeral). Harmless today because
-    // those environments cannot publish (no native module), and saveSeq below is fail-stop.
-    return 0;
+  let raw = await SecureStore.getItemAsync(SEQ_KEY, SECURE_STORE_OPTIONS);
+  if (raw === null) {
+    raw = await SecureStore.getItemAsync(LEGACY_SEQ_KEY);
+    if (raw !== null) {
+      // A new key is intentional: SecureStore's update path does not change kSecAttrAccessible.
+      await SecureStore.setItemAsync(SEQ_KEY, raw, SECURE_STORE_OPTIONS);
+    }
   }
+  const n = raw ? Number.parseInt(raw, 10) : 0;
+  return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
 /**

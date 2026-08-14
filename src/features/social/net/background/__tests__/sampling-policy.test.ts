@@ -1,5 +1,9 @@
 import { DEFAULT_FIX_QUALITY_CONFIG } from '../fix-quality';
-import { createSamplingPolicy, DEFAULT_SAMPLING_CONFIG } from '../sampling-policy';
+import {
+  AMBIENT_DISTANCE_INTERVAL_M,
+  createSamplingPolicy,
+  DEFAULT_SAMPLING_CONFIG,
+} from '../sampling-policy';
 import type { AccuracyTier, BatteryState } from '../types';
 
 const healthy: BatteryState = { level: 0.9, charging: false, lowPower: false };
@@ -28,17 +32,17 @@ describe('createSamplingPolicy', () => {
     }
   });
 
-  it('never sets a distance filter, which would gate delivery on movement', () => {
+  it('uses a meaningful ambient movement filter so iOS does not run continuous GPS', () => {
     const policy = createSamplingPolicy();
     for (const battery of [healthy, low, lowPower, charging]) {
-      expect(policy.decide({ battery }).distanceIntervalM).toBe(0);
+      expect(policy.decide({ battery }).distanceIntervalM).toBe(AMBIENT_DISTANCE_INTERVAL_M);
     }
   });
 
-  it('never defers/batches updates, which would bunch quiet periods into bursts', () => {
+  it('defers ambient background delivery up to the selected interval', () => {
     const policy = createSamplingPolicy();
     for (const battery of [healthy, low, lowPower, charging]) {
-      expect(policy.decide({ battery }).deferredUpdatesIntervalMs).toBe(0);
+      expect(policy.decide({ battery }).deferredUpdatesIntervalMs).toBe(300_000);
     }
   });
 
