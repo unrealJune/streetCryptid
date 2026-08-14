@@ -36,11 +36,16 @@
 > desynced from needs-re-pair, and forgets a session on unfriend (§4.5, §4.6).
 >
 > **Migration, stated plainly:** the pairing ALPN went to `streetcryptid/pair/3` and a
-> session can only come from a v3 bump, so **every friendship formed before this must be
-> re-paired in person.** Until then those friends are dropped from each publish with
-> `no_session` and the app shows "re-pair with this friend". This is a deliberate choice
-> over a v2 fallback, which would have kept the archive non-forward-secret for exactly the
+> session can only come from a v3 pair, so **every friendship formed before this must be
+> re-paired.** Until then those friends are dropped from each publish with `no_session`
+> and the app shows "re-pair with this friend". This is a deliberate choice over a v2
+> fallback, which would have kept the archive non-forward-secret for exactly the
 > friendships that have existed longest.
+>
+> Re-pairing does **not** require being in the same room: invite/link pairs and nearby BLE
+> pairs run the identical handshake and both bootstrap a session (§4.2). What the SAS gate
+> needs is an out-of-band channel for the two humans to compare their figure on — see the
+> note in §4.2 on what "out-of-band" has to mean for a link pair.
 >
 > Claims below are marked **[verified]** where checked against the tree at the time of
 > writing, and **[MUST VERIFY]** where they are assumptions that gate the plan.
@@ -241,9 +246,26 @@ property on a longer fuse, and forces the §1.1 seized-device adversary to activ
 signed envelopes at least every T_lapse to keep tracking.
 
 **The `RK₀` bootstrap.** The first session's root must not be recomputable from statics.
-Bootstrap is the §4.6 resync primitive run over the pairing connection during the
-in-person SAS bump: fresh ephemerals from both sides, identity-signed, mixed into `RK₀`.
-The window of statically-recomputable messages is zero.
+Bootstrap is the §4.6 resync primitive run over the pairing connection during the SAS
+gate: fresh ephemerals from both sides, identity-signed, mixed into `RK₀`. The window of
+statically-recomputable messages is zero.
+
+Both pairing routes bootstrap identically — an invite/link pair and a nearby BLE pair run
+the same `Hello`/`Reveal` handshake, the same SAS gate, and the same `finalize`, and
+`pairing.rs` does not branch on `nearby` for any of it. Each side mints a fresh X25519
+ephemeral per pairing session, commits to it in `Hello` alongside its SAS nonce, and
+carries it in the SAS transcript, so a MITM who swaps an ephemeral changes the figure the
+two humans are comparing.
+
+**What that last clause rests on.** The ephemeral binding is only as strong as the channel
+the humans compare the figure over, and that channel is not the pairing connection — the
+whole point is that it is out-of-band. In person, or a voice/video call where each
+recognises the other, is sound. **Comparing the figure in the same chat thread that
+carried the invite link is not**: an attacker who controls that thread substitutes the
+link, sits in the middle, and reports whichever figure keeps both sides agreeing. That is
+a UX obligation, not a protocol one — the link-pair flow must tell the user to check the
+figure somewhere other than where the link came from, or the SAS gate is decorative for
+exactly the users most likely to use it.
 
 **Do not trigger the DH ratchet on `NeighborUp`.** The gossip topic is per _author_
 (`lib.rs:202`), so its neighbours are the whole pool; a neighbour coming up may be C, not
