@@ -203,13 +203,28 @@ async fn bootstrap_and_prime(
     second.read_latest_ratcheted().await.expect("prime read");
 }
 
+/// How long to keep reconciling before calling a delivery genuinely lost.
+///
+/// A *count* of passes is the wrong bound, which is what this used to use. Each pass is one real
+/// QUIC reconciliation whose own timeouts are seconds long, so five passes means something
+/// different on an idle machine than on a loaded one — and a test that publishes thirty times
+/// needs all thirty deliveries to land inside the budget, so the chance of one slow pass failing
+/// the run compounds. A deadline says the thing actually meant: "this should arrive; give it a
+/// reasonable while."
+const DELIVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Publish from `from` to `to` and deliver it, returning what `to` could open.
 ///
 /// Reconciliation is bounded by timeouts (a cold dial can outlast them on a loaded machine), so
-/// delivery is attempted a few times rather than once. This is not papering over flakiness — the
+/// delivery is attempted repeatedly rather than once. This is not papering over flakiness — the
 /// app itself reconciles on a cadence and never assumes a single pass landed. Retrying is safe
 /// because a pass that transfers nothing consumes no ratchet position: there is nothing to open,
 /// so nothing is accepted.
+///
+/// **What this does not absorb.** The `dropped` assertion below is a protocol assertion and is
+/// checked once, before any retrying: if the ratchet refused to wrap for this recipient — no
+/// session, lapsed, no sending chain — that is a real failure and no amount of reconciliation
+/// changes it. Only *delivery* is retried.
 async fn publish_and_deliver(
     from: &Arc<LocationNode>,
     to: &Arc<LocationNode>,
@@ -226,15 +241,25 @@ async fn publish_and_deliver(
         "publish seq {seq} silently dropped its recipient: {dropped:?}"
     );
     let author_id = from.endpoint_id();
+    let deadline = std::time::Instant::now() + DELIVERY_DEADLINE;
     let mut last = Vec::new();
-    for _ in 0..5 {
+    let mut passes = 0usize;
+    while std::time::Instant::now() < deadline {
+        passes += 1;
         replicate(from, stash, to).await;
         last = to.read_latest_ratcheted().await.expect("read");
         if last.iter().any(|e| e.author == author_id) {
             return last;
         }
+        // Let the sync tasks settle rather than immediately dialling again.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    last
+    panic!(
+        "seq {seq} never reached the peer: {passes} reconciliation passes over {:?} and its \
+         envelope was still not openable. The publish itself reported no dropped recipients, so \
+         the wrap existed — this is delivery, not the ratchet.",
+        DELIVERY_DEADLINE
+    );
 }
 /// One delivery attempt, for assertions that expect **nothing** to arrive — retrying there would
 /// only spend five reconciliation timeouts proving the same negative.
