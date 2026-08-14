@@ -371,13 +371,6 @@ class IrohLocationModule : Module() {
       sendEvent("onStatus", mapOf("subscriptionId" to subscriptionId, "status" to status))
     }
 
-    // Durable-trail sync progress for an author/namespace: started | completed | error.
-    override fun onSync(author: ByteArray, status: String, recovered: ULong?) {
-      val payload =
-        mutableMapOf<String, Any>("author" to author.toHex(), "status" to status)
-      if (recovered != null) payload["recovered"] = recovered.toLong()
-      sendEvent("onSync", payload)
-    }
   }
 
   override fun definition() = ModuleDefinition {
@@ -618,7 +611,7 @@ class IrohLocationModule : Module() {
 
     /// Drop our in-flight resync ephemeral once every peer has been restarted.
     AsyncFunction("clearResync") Coroutine
-      {
+      { ->
         val n = node ?: throw IllegalStateException("call createNode first")
         n.clearResync()
       }
@@ -665,7 +658,7 @@ class IrohLocationModule : Module() {
       }
 
     AsyncFunction("readLatest") Coroutine
-      {
+      { ->
         val n = node ?: throw IllegalStateException("call createNode first")
         n.readLatestRatcheted().map { incoming: IncomingFix ->
           mapOf(

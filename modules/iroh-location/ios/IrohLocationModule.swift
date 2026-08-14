@@ -288,12 +288,11 @@ private final class EventBridge: FixListener {
   func onStatus(status: String) {
     module?.sendEvent("onStatus", ["subscriptionId": subscriptionId, "status": status])
   }
-  // Durable-trail sync progress for an author/namespace: `started` | `completed` | `error`.
-  func onSync(author: Data, status: String, recovered: UInt64?) {
-    var payload: [String: Any] = ["author": dataToHex(author), "status": status]
-    if let recovered = recovered { payload["recovered"] = recovered }
-    module?.sendEvent("onSync", payload)
-  }
+  // No `onSync`: the Rust `FixListener` trait has no `on_sync`, so nothing ever calls it. It went
+  // when the durable path collapsed to last-write-wins (FORWARD-SECRECY.md §4.4) — with one
+  // overwritten slot per author there is no backfill stream to report progress on. Swift tolerated
+  // the leftover method because a protocol conformance ignores extras; Kotlin's `override` did not,
+  // which is what actually broke the Android build.
 }
 
 public final class IrohLocationModule: Module {
