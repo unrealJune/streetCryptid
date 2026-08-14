@@ -215,6 +215,21 @@ pub fn encode_nul_key(author: &[u8]) -> Vec<u8> {
     key
 }
 
+/// Decode a key produced by [`encode_nul_key`] back into the author bytes.
+///
+/// The mirror of [`decode_key`] for the null lane. Both are needed by
+/// [`TrailDocs::read_latest_sealed`], which must return the two lanes and no others: the control
+/// and resync lanes are not fix envelopes and would fail `verify_v3` anyway, but skipping them by
+/// key is cheaper and states the intent.
+pub fn decode_nul_key(key: &[u8]) -> Option<Vec<u8>> {
+    let pos = key.iter().position(|&b| b == KEY_SEP)?;
+    if &key[..pos] != NUL_TAG.as_bytes() {
+        return None;
+    }
+    let author_hex = std::str::from_utf8(&key[pos + 1..]).ok()?;
+    hex_decode(author_hex)
+}
+
 /// Literal leading segment marking a **resync record** (FORWARD-SECRECY.md §4.6).
 ///
 /// Its own lane rather than the control lane, for the same reason the null fix needed one: both
@@ -426,12 +441,20 @@ impl TrailDocs {
         Ok(out)
     }
 
-    /// Read the **still-sealed** current fix envelope per author, across every known namespace.
+    /// Read the **still-sealed** current envelope per author from both fix lanes, across every
+    /// known namespace.
     ///
     /// The v3 counterpart of [`Self::read_latest`]. Opening a ratcheted envelope needs the
     /// per-friend session state (FORWARD-SECRECY §4.7), which lives above this module — so this
     /// hands back bytes and lets the caller decide. Skipping the decrypt here also keeps the
     /// §4.2 ordering intact: the caller verifies the signature before any session state moves.
+    ///
+    /// **Both** the `hex(author)/fix` and `nul/hex(author)` lanes are returned, and that is
+    /// load-bearing rather than convenient. §4.1's symmetric lanes only manufacture the
+    /// bidirectionality forward secrecy needs if a watcher's null fix actually reaches the
+    /// sharer's ratchet — a reader that skipped the null lane would never call `accept` for a
+    /// watch-only friend, never move their `peer_advanced_ms`, and drop them as `Lapsed` at
+    /// `T_lapse`. Every one-directional watch edge would die after a day.
     ///
     /// Our own outbound envelopes are included; the caller filters them by author, since it is
     /// the one that knows who we are.
@@ -444,8 +467,10 @@ impl TrailDocs {
             tokio::pin!(stream);
             while let Some(entry) = stream.next().await {
                 let entry = entry?;
-                if decode_key(entry.key()).is_none() {
-                    continue; // control entry, null-fix lane, or pre-LWW key
+                let is_fix = decode_key(entry.key()).is_some();
+                let is_null = decode_nul_key(entry.key()).is_some();
+                if !is_fix && !is_null {
+                    continue; // control entry, resync record, or pre-LWW key
                 }
                 match self.blobs.blobs().get_bytes(entry.content_hash()).await {
                     Ok(bytes) => out.push(bytes.to_vec()),

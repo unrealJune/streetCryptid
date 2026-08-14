@@ -869,39 +869,142 @@ async fn repeated_failures_mark_the_session_desynced() {
     let stash = start_node().await;
 
     bootstrap_and_prime(&a, &b, &stash).await;
-    let a_id = hex(&a.endpoint_id());
+    bootstrap_pair(&a, &b).await;
+
+    // The talker must be the side that can actually publish. After a fresh bootstrap only the
+    // initiator has a sending chain, and a publish with nothing to wrap writes no envelope at
+    // all — so driving this from the responder would produce silence rather than the run of
+    // unopenable envelopes the test is about. Roles are by endpoint-id ordering, which is random
+    // per run, so the sides are chosen rather than assumed.
+    let (talker, listener) = initiator_first(&a, &b);
+    let talker_id = hex(&talker.endpoint_id());
+    let listener_id = hex(&listener.endpoint_id());
 
     assert!(
-        !b.is_desynced(a_id.clone()).await.expect("healthy"),
+        !listener
+            .is_desynced(talker_id.clone())
+            .await
+            .expect("healthy"),
         "a working session must not report desynced"
     );
 
-    // Rebootstrap only a's side: a now talks on a session b cannot follow, which is exactly the
-    // shape of one-sided state loss.
-    bootstrap_pair(&a, &b).await;
-    b.forget_session(a_id.clone()).await.expect("drop b's new");
-    // Give b a session again that does not match a's, so the failures are misses rather than
-    // "no session at all".
-    let stale = a.begin_session(hex(&b.endpoint_id())).await.expect("eph");
-    b.begin_session(a_id.clone()).await.expect("b eph");
-    b.complete_session(a_id.clone(), stale)
+    // Give the listener a session rooted differently from the talker's, so its failures are
+    // misses rather than "no session at all" — the shape of one-sided state loss.
+    listener
+        .forget_session(talker_id.clone())
         .await
-        .expect("b builds a session a does not share");
+        .expect("drop the listener's matching session");
+    let stale = talker.begin_session(listener_id).await.expect("eph");
+    listener
+        .begin_session(talker_id.clone())
+        .await
+        .expect("listener eph");
+    listener
+        .complete_session(talker_id.clone(), stale)
+        .await
+        .expect("listener builds a session the talker does not share");
 
     for seq in 1..=4u64 {
-        a.docs_write_ratcheted("t".into(), seq, fix_at(seq), vec![hex(&b.endpoint_id())])
+        let dropped = talker
+            .docs_write_ratcheted(
+                "t".into(),
+                seq,
+                fix_at(seq),
+                vec![hex(&listener.endpoint_id())],
+            )
             .await
-            .expect("a publishes");
-        replicate(&a, &stash, &b).await;
-        let _ = b.read_latest_ratcheted().await.expect("b tries");
+            .expect("the talker publishes");
+        assert!(
+            dropped.is_empty(),
+            "the talker must still hold a usable session, else there is nothing to miss: \
+             {dropped:?}"
+        );
+        replicate(talker, &stash, listener).await;
+        let _ = listener
+            .read_latest_ratcheted()
+            .await
+            .expect("the listener tries");
     }
 
     assert!(
-        b.is_desynced(a_id).await.expect("desynced"),
+        listener.is_desynced(talker_id).await.expect("desynced"),
         "a run of unopenable envelopes from one peer must mark the session desynced"
     );
 
     for node in [a, b, stash] {
+        node.shutdown().await.expect("shutdown");
+    }
+}
+
+/// A watcher who only ever *reads* still feeds the ratchet — §4.1's symmetric lanes, end to end.
+///
+/// This is the property the null lane exists for, and the one it did not have while that lane was
+/// v2. A watch-only friend publishes null fixes on the same cadence as a real one: same shape,
+/// same length, no position. Ratcheted, those envelopes carry the watcher's ratchet contribution,
+/// which is what advances `peer_advanced_ms` on the sharer's side and stops `next_wraps` dropping
+/// them as `Lapsed` at `T_lapse`. On the v2 null lane there was no contribution *and* the reader
+/// skipped the `nul` key outright, so a one-directional watch edge went quiet after 24 h with
+/// nothing in the app able to explain why.
+///
+/// The assertion is that the sharer keeps working across a return direction made **only** of null
+/// fixes — including after the watcher's DH ratchet, which is the step that would fail if those
+/// envelopes never reached the schedule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watch_only_friend_feeds_the_ratchet_with_null_fixes() {
+    let sharer = start_node().await;
+    let watcher = start_node().await;
+    let stash = start_node().await;
+
+    bootstrap_and_prime(&sharer, &watcher, &stash).await;
+    let sharer_id = sharer.endpoint_id();
+    let watcher_hex = hex(&watcher.endpoint_id());
+    let sharer_hex = hex(&sharer_id);
+
+    // The sharer shares position; the watcher never does.
+    let seen = publish_and_deliver(&sharer, &watcher, &stash, 1, 80_000).await;
+    assert!(
+        seen.iter().any(|e| e.author == sharer_id),
+        "the watcher opens the sharer's fix"
+    );
+
+    // The watcher's whole contribution is null fixes on the null lane.
+    for seq in 1..=3u64 {
+        let dropped = watcher
+            .docs_write_null_ratcheted("t".into(), seq, 90_000 + seq, vec![sharer_hex.clone()])
+            .await
+            .expect("the watcher publishes a null fix");
+        assert!(
+            dropped.is_empty(),
+            "the watcher's null fix dropped its recipient: {dropped:?}"
+        );
+        replicate(&watcher, &stash, &sharer).await;
+
+        // Nulls carry no position, so nothing is *delivered* — but the read is what feeds the
+        // schedule, and a `nul` entry the reader skipped would never get here at all.
+        let delivered = sharer.read_latest_ratcheted().await.expect("sharer reads");
+        assert!(
+            !delivered.iter().any(|e| e.author == watcher.endpoint_id()),
+            "a null fix must never surface as a position"
+        );
+        assert!(
+            !sharer
+                .is_desynced(watcher_hex.clone())
+                .await
+                .expect("healthy"),
+            "opening the watcher's null fix keeps the session healthy"
+        );
+    }
+
+    // The payoff: the sharer keeps publishing after DH-ratcheting onto the key the watcher
+    // contributed through the null lane alone.
+    let seen = publish_and_deliver(&sharer, &watcher, &stash, 2, 95_000).await;
+    assert!(
+        seen.iter()
+            .any(|e| e.author == sharer_id && e.fix.ts == 95_000),
+        "the sharer must keep publishing after ratcheting onto a key that arrived on the null lane"
+    );
+
+    for node in [sharer, watcher, stash] {
         node.shutdown().await.expect("shutdown");
     }
 }

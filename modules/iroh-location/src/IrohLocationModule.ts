@@ -17,6 +17,7 @@ import type {
   PairResult,
   PairStateRecord,
   ProfileView,
+  RatchetDropped,
   SasChallenge,
   TransportDiagnostics,
   TransportConfig,
@@ -43,17 +44,17 @@ export declare class IrohLocationNativeModule
     subscriptionId: string,
     seq: number,
     fix: NativeLocationFix,
-    recipientsHex: string[],
+    recipientEndpointsHex: string[],
     traceparent?: string | null
-  ): Promise<void>;
+  ): Promise<RatchetDropped[]>;
   unsubscribe(subscriptionId: string): Promise<void>;
   docsWrite(
     subscriptionId: string,
     seq: number,
     fix: NativeLocationFix,
-    recipientsHex: string[],
+    recipientEndpointsHex: string[],
     traceparent?: string | null
-  ): Promise<void>;
+  ): Promise<RatchetDropped[]>;
   /**
    * Broadcast a **null fix**: an envelope with an empty padded payload, wrapped for the friends we
    * do NOT share position with (FORWARD-SECRECY.md §4.1). Same signing, AAD, and ciphertext length
@@ -66,9 +67,9 @@ export declare class IrohLocationNativeModule
     subscriptionId: string,
     seq: number,
     ts: number,
-    recipientsHex: string[],
+    watcherEndpointsHex: string[],
     traceparent?: string | null
-  ): Promise<void>;
+  ): Promise<RatchetDropped[]>;
   /**
    * Durable mirror of {@link publishNull}. Writes to a **separate** last-write-wins slot from the
    * fix lane, because a tick's two envelopes are wrapped for disjoint recipient sets and would
@@ -78,9 +79,19 @@ export declare class IrohLocationNativeModule
     subscriptionId: string,
     seq: number,
     ts: number,
-    recipientsHex: string[],
+    watcherEndpointsHex: string[],
     traceparent?: string | null
-  ): Promise<void>;
+  ): Promise<RatchetDropped[]>;
+  /**
+   * §4.6 recovery. Optional for the same reason as the other recent additions: iOS Swift bindings
+   * regenerate only on macOS, so an installed binary may predate these exports.
+   */
+  isDesynced?(peerEndpointHex: string): Promise<boolean>;
+  resyncCount?(peerEndpointHex: string): Promise<number>;
+  publishResync?(recipientRecvPubsHex: string[]): Promise<string>;
+  pollResync?(peerEndpointHex: string, peerRecvPubHex: string): Promise<boolean>;
+  clearResync?(): Promise<void>;
+  forgetSession?(peerEndpointHex: string): Promise<void>;
   syncLatest(peerTicket: string | null, traceparent?: string | null): Promise<void>;
   /** Optional for compatibility with installed iOS binaries built before the push API. */
   pushTrail?(peerTicket: string | null, traceparent?: string | null): Promise<void>;

@@ -1,11 +1,13 @@
 # streetCryptid — Forward Secrecy (ratcheted envelopes over last-write-wins fixes)
 
-> Status: **design of record; partially built.** The schedule, store, session seam, and
-> envelope v3 exist in `modules/iroh-location/rust` and are covered by unit, condition,
-> and two-node integration tests. What those tests drive is `LocationNode` directly — the
-> app itself still runs on v2 until the plumbing in §7 steps 6–7 lands, and the null,
-> gossip, control, and mesh lanes are v2 by construction today (§4.1). Read "proven end to
-> end" in the commit log as "proven between two nodes", not "shipped". This document
+> Status: **design of record; built and wired.** The schedule, store, session seam, and
+> envelope v3 live in `modules/iroh-location/rust`, and every **fix** lane now uses them:
+> durable, null, and live/gossip. Sessions are bootstrapped by the SAS bump itself
+> (`pairing.rs`), so there is no manual seam and no JS-callable way to root one from
+> anything weaker; the app drives §4.6 recovery from `location-sharing.ts`. Still v2 by
+> construction, deliberately: the control lane, the resync record (it re-establishes the
+> ratchet, so it cannot depend on one), the BLE mesh path (§8.1), and the web/WASM build,
+> which has no durable store to keep sequential state in. This document
 > supersedes the forward-secrecy line in [`ARCHITECTURE.md`](./ARCHITECTURE.md) §11
 > ("full ratcheting … is out of scope for this phase") and **changes two of that
 > document's stated goals** — §1.3 offline trail recovery is deleted, and the durable
@@ -25,6 +27,20 @@
 > backup-excluded state root (§6), adds storage corruption as a distinct desync entry
 > point and monotonic acceptance plus re-minting for resync records (§4.6). The schedule
 > itself is unchanged.
+>
+> It also closes the gap the review named as its second-highest finding: the ratchet was
+> **built but unreachable**. The bump now carries a ratchet ephemeral, bound into the SAS
+> transcript and committed at `Hello`, so the figure the humans compare authenticates the
+> root (§4.2); the null and live lanes moved to v3, which is what stops a watch-only edge
+> lapsing after 24 h (§4.1); and the app runs the resync driver, distinguishes lapsed from
+> desynced from needs-re-pair, and forgets a session on unfriend (§4.5, §4.6).
+>
+> **Migration, stated plainly:** the pairing ALPN went to `streetcryptid/pair/3` and a
+> session can only come from a v3 bump, so **every friendship formed before this must be
+> re-paired in person.** Until then those friends are dropped from each publish with
+> `no_session` and the app shows "re-pair with this friend". This is a deliberate choice
+> over a v2 fallback, which would have kept the archive non-forward-secret for exactly the
+> friendships that have existed longest.
 >
 > Claims below are marked **[verified]** where checked against the tree at the time of
 > writing, and **[MUST VERIFY]** where they are assumptions that gate the plan.
@@ -206,6 +222,7 @@ symmetric step (every message sent or accepted):
   the cold cadence; if the hot cadence ever moves onto this path the answer is counter
   _reservation_ (persist `ns + N`, hand out `N` from RAM, burn the remainder on restart),
   never a weaker save. Burned counters are free under the sender-liveness invariant.
+
 - **Persistence is fail-stop.** If ratchet state cannot be persisted, publishing stops.
   The current best-effort/silent-catch pattern (`secure-keys.ts:35`, `state-store.ts:27`
   [verified]) is fine for a static key and fatal for sequential state — a silent persist
@@ -447,10 +464,10 @@ most common way ratchet deployments fail in practice.
 _Resolved (rev 3)._ The node keeps **two** storage roots, because the two hazards pull in
 opposite directions and only one of them is a cryptographic break:
 
-|                                   | cache / temp | app data dir            |
-| --------------------------------- | ------------ | ----------------------- |
-| backup rollback → key reuse       | impossible   | **must** be excluded    |
-| OS purge → every session lost     | **likely**   | no                      |
+|                               | cache / temp | app data dir         |
+| ----------------------------- | ------------ | -------------------- |
+| backup rollback → key reuse   | impossible   | **must** be excluded |
+| OS purge → every session lost | **likely**   | no                   |
 
 The docs/blobs replica stays in cache: it is large, re-fetchable from the stash and from
 friends, and a purge costs nothing but a resync. Ratchet session state goes in the app's

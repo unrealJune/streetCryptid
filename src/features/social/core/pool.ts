@@ -77,9 +77,21 @@ export function recipients(state: PoolState): Friend[] {
     .filter((f): f is Friend => f !== undefined);
 }
 
-/** The X25519 receiving public keys to wrap the next fix for. */
+/**
+ * The X25519 receiving public keys to wrap the next fix for.
+ *
+ * **No longer used by the fix lanes.** Every fix lane is envelope v3 now, keyed by ratchet
+ * session and therefore addressed by endpoint id — see {@link recipientEndpoints}. Receiving keys
+ * remain the address for the lanes that cannot be ratcheted: control messages, and the §4.6
+ * resync record, which is the thing that re-establishes a ratchet and so cannot depend on one.
+ */
 export function recipientRecvKeys(state: PoolState): string[] {
   return recipients(state).map((f) => f.recvPublic);
+}
+
+/** The endpoint ids to address the next ratcheted fix to (FORWARD-SECRECY.md §4.7). */
+export function recipientEndpoints(state: PoolState): string[] {
+  return recipients(state).map((f) => f.endpointId);
 }
 
 /**
@@ -97,7 +109,12 @@ export function watchers(state: PoolState): Friend[] {
   return friendList(state).filter((f) => !state.sharingWith.includes(f.endpointId));
 }
 
-/** The X25519 receiving public keys to wrap the next null fix for. */
+/** The X25519 receiving public keys to wrap the next null fix for. See {@link recipientRecvKeys}. */
 export function watcherRecvKeys(state: PoolState): string[] {
   return watchers(state).map((f) => f.recvPublic);
+}
+
+/** The endpoint ids to address the next ratcheted null fix to (FORWARD-SECRECY.md §4.1). */
+export function watcherEndpoints(state: PoolState): string[] {
+  return watchers(state).map((f) => f.endpointId);
 }

@@ -727,6 +727,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_cancel_pair(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_clear_resync(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_complete_session(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_confirm_pair_display(
@@ -743,9 +745,17 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted_traced(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null_traced(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_inner(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_traced(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_traced(
     ): Int
@@ -767,6 +777,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_is_desynced(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_list_pair_sessions(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_nearby_ble_peers(
@@ -785,11 +797,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_poll_profile_events(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_poll_resync(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_profile_ticket(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_prune_trail(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_publish_profile(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_publish_resync(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_push_trail(
     ): Int
@@ -812,6 +828,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_iroh_location_checksum_method_locationnode_resolve_bump_peer(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_respond_pair(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_resync_count(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready(
     ): Int
@@ -857,6 +875,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_constructor_locationnode_new(
     ): Int
+    external fun uniffi_iroh_location_checksum_constructor_locationnode_new_at_dirs(
+    ): Int
     external fun uniffi_iroh_location_checksum_constructor_meshcapsulestore_new(
     ): Int
     external fun ffi_iroh_location_uniffi_contract_version(
@@ -896,6 +916,8 @@ external fun uniffi_iroh_location_fn_free_locationnode(`handle`: Long,uniffi_out
 ): Unit
 external fun uniffi_iroh_location_fn_constructor_locationnode_new(`identitySecret`: RustBuffer.ByValue,`recvSecret`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
+external fun uniffi_iroh_location_fn_constructor_locationnode_new_at_dirs(`identitySecret`: RustBuffer.ByValue,`recvSecret`: RustBuffer.ByValue,`dataRoot`: RustBuffer.ByValue,`stateRoot`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_begin_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_ble_available(`ptr`: Long,
@@ -905,6 +927,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_ble_capabilities(`ptr`:
 external fun uniffi_iroh_location_fn_method_locationnode_ble_has_scan_hint(`ptr`: Long,`endpointId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_cancel_pair(`ptr`: Long,`sessionId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_clear_resync(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_complete_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,`peerEphemeralHex`: RustBuffer.ByValue,
 ): Long
@@ -922,9 +946,17 @@ external fun uniffi_iroh_location_fn_method_locationnode_docs_write_inner(`ptr`:
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_docs_write_null(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`ts`: Long,`recipients`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`ts`: Long,`watcherEndpoints`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted_traced(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`ts`: Long,`watcherEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_docs_write_null_traced(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`ts`: Long,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`recipientEndpoints`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_inner(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`nullTs`: Long,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_traced(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_docs_write_traced(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
@@ -946,6 +978,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_initiate_pair_by_ticket
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_initiate_pair_nearby(`ptr`: Long,`peerEndpointId`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_is_desynced(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_list_pair_sessions(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_nearby_ble_peers(`ptr`: Long,
@@ -964,11 +998,15 @@ external fun uniffi_iroh_location_fn_method_locationnode_poll_pair_events(`ptr`:
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_poll_profile_events(`ptr`: Long,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_poll_resync(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,`peerRecvPubHex`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_profile_ticket(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_prune_trail(`ptr`: Long,`olderThanTs`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_publish_profile(`ptr`: Long,`handle`: RustBuffer.ByValue,`cryptidName`: RustBuffer.ByValue,`sigil`: RustBuffer.ByValue,`color`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_publish_resync(`ptr`: Long,`recipientRecvPubs`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_push_trail(`ptr`: Long,`peerTicket`: RustBuffer.ByValue,
 ): Long
@@ -991,6 +1029,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_recv_secret(`ptr`: Long
 external fun uniffi_iroh_location_fn_method_locationnode_resolve_bump_peer(`ptr`: Long,`timeoutMs`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_respond_pair(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`accept`: Byte,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_resync_count(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_set_pairing_ready(`ptr`: Long,`ready`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1034,15 +1074,15 @@ external fun uniffi_iroh_location_fn_clone_subscription(`handle`: Long,uniffi_ou
 ): Long
 external fun uniffi_iroh_location_fn_free_subscription(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_iroh_location_fn_method_subscription_publish(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_subscription_publish(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`recipientEndpoints`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_subscription_publish_inner(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`ts`: Long,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_subscription_publish_inner(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`ts`: Long,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_subscription_publish_null(`ptr`: Long,`seq`: Long,`ts`: Long,`recipients`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_subscription_publish_null(`ptr`: Long,`seq`: Long,`ts`: Long,`recipientEndpoints`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_subscription_publish_null_traced(`ptr`: Long,`seq`: Long,`ts`: Long,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_subscription_publish_null_traced(`ptr`: Long,`seq`: Long,`ts`: Long,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_subscription_publish_traced(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_subscription_publish_traced(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_func_decode_mvt_bundle(`bundle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1272,6 +1312,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 49013) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_clear_resync() != 52312) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_complete_session() != 30383) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1296,10 +1339,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_null() != 46772) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted() != 18657) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted_traced() != 10230) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_null_traced() != 22862) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted() != 5397) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted() != 14176) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_inner() != 59600) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_traced() != 56484) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_traced() != 47616) {
@@ -1332,6 +1387,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby() != 64589) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 60716) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_list_pair_sessions() != 11581) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1359,6 +1417,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_poll_profile_events() != 11150) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_poll_resync() != 5911) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_profile_ticket() != 35099) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1366,6 +1427,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_profile() != 57330) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 54563) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail() != 65355) {
@@ -1399,6 +1463,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_respond_pair() != 4487) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_resync_count() != 62719) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
@@ -1449,22 +1516,25 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_subscription_publish() != 48389) {
+    if (lib.uniffi_iroh_location_checksum_method_subscription_publish() != 18306) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_inner() != 22728) {
+    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_inner() != 62762) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_null() != 7952) {
+    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_null() != 2917) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_null_traced() != 10512) {
+    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_null_traced() != 48794) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_traced() != 21202) {
+    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_traced() != 2036) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_constructor_locationnode_new() != 52316) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_constructor_locationnode_new_at_dirs() != 15584) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_constructor_meshcapsulestore_new() != 52560) {
@@ -2458,6 +2528,11 @@ public interface LocationNodeInterface {
     suspend fun `cancelPair`(`sessionId`: kotlin.ByteArray)
     
     /**
+     * Drop our in-flight resync ephemeral once every peer has been restarted.
+     */
+    suspend fun `clearResync`()
+    
+    /**
      * Complete the bootstrap with the peer's ephemeral public half, installing the session.
      *
      * `RK₀` is derived from the ephemeral-ephemeral DH and a transcript over both endpoint ids
@@ -2528,6 +2603,20 @@ public interface LocationNodeInterface {
      */
     suspend fun `docsWriteNull`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>)
     
+    /**
+     * Seal a **ratcheted null fix** for `watcher_endpoints` and write it to the null slot.
+     *
+     * The v3 counterpart of [`Self::docs_write_null`], and the half of §4.1 that makes the
+     * symmetric-lane argument true rather than aspirational. A watcher who only ever *reads* our
+     * position still publishes on cadence, and once that envelope is ratcheted it carries their
+     * ratchet contribution — which is what advances our `peer_advanced_ms` for them and stops
+     * `next_wraps` dropping them as `Lapsed` after 24 h. On the v2 null lane the contribution did
+     * not exist, so every one-directional watch edge expired after a day.
+     */
+    suspend fun `docsWriteNullRatcheted`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `watcherEndpoints`: List<kotlin.String>): List<kotlin.String>
+    
+    suspend fun `docsWriteNullRatchetedTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `watcherEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String): List<kotlin.String>
+    
     suspend fun `docsWriteNullTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String)
     
     /**
@@ -2543,6 +2632,16 @@ public interface LocationNodeInterface {
      * un-bootstrapped, or unpersistable. A short wrap list is never silent.
      */
     suspend fun `docsWriteRatcheted`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>): List<kotlin.String>
+    
+    /**
+     * Both ratcheted durable lanes. `fix.is_none()` is the null lane, which differs only in
+     * carrying an empty padded payload and landing in a separate LWW slot — the two envelopes a
+     * tick produces are wrapped for disjoint recipient sets, so sharing a slot would have them
+     * supersede each other.
+     */
+    suspend fun `docsWriteRatchetedInner`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix?, `nullTs`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String?): List<kotlin.String>
+    
+    suspend fun `docsWriteRatchetedTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String): List<kotlin.String>
     
     suspend fun `docsWriteTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String)
     
@@ -2594,6 +2693,11 @@ public interface LocationNodeInterface {
      * pairing-ready). Returns the deterministic session id.
      */
     suspend fun `initiatePairNearby`(`peerEndpointId`: kotlin.ByteArray): kotlin.ByteArray
+    
+    /**
+     * Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+     */
+    suspend fun `isDesynced`(`peerEndpointHex`: kotlin.String): kotlin.Boolean
     
     /**
      * List all known pairing sessions.
@@ -2659,6 +2763,18 @@ public interface LocationNodeInterface {
     suspend fun `pollProfileEvents`(): List<ProfileView>
     
     /**
+     * Look for `peer`'s resync record and, if one is there, restart the session from it.
+     *
+     * Publishes our own half first when we have not already, so a single call from each side
+     * completes the exchange without either having to go first — which matters because the
+     * side that noticed the desync and the side that caused it are usually not the same one.
+     *
+     * Returns whether a session was installed. `false` covers "no record yet", "stale record",
+     * and "already applied" — all ordinary, none an error.
+     */
+    suspend fun `pollResync`(`peerEndpointHex`: kotlin.String, `peerRecvPubHex`: kotlin.String): kotlin.Boolean
+    
+    /**
      * A shareable **read**-ticket for our profile namespace. Also exchanged automatically inside
      * a pairing Accept, so friends usually don't need to import it by hand.
      */
@@ -2676,6 +2792,20 @@ public interface LocationNodeInterface {
      * rollback guard requires.
      */
     suspend fun `publishProfile`(`handle`: kotlin.String, `cryptidName`: kotlin.String, `sigil`: kotlin.String, `color`: kotlin.String): kotlin.ULong
+    
+    /**
+     * Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+     *
+     * Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
+     * re-establishes a ratchet, so it cannot require one. That is also why it is the one place
+     * the design has to be most careful: **recovery must never become the bypass**. The record
+     * carries only an ephemeral public key. It cannot downgrade anything, because a root is
+     * only ever derived when *both* ephemerals are in hand.
+     *
+     * Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
+     * than minting a new one, so a peer that already saw our half does not have to see a second.
+     */
+    suspend fun `publishResync`(`recipientRecvPubs`: List<kotlin.String>): kotlin.String
     
     /**
      * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
@@ -2756,6 +2886,15 @@ public interface LocationNodeInterface {
      * call [`pair_result`](Self::pair_result).
      */
     suspend fun `respondPair`(`sessionId`: kotlin.ByteArray, `accept`: kotlin.Boolean)
+    
+    /**
+     * How many resyncs we have driven with this peer.
+     *
+     * §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+     * retrying forever, so this is deliberately a count rather than a boolean: the UI decides
+     * where patience runs out, and the crypto layer does not pretend to know.
+     */
+    suspend fun `resyncCount`(`peerEndpointHex`: kotlin.String): kotlin.UInt
     
     /**
      * Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. Invite-based
@@ -3056,6 +3195,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Drop our in-flight resync ephemeral once every peer has been restarted.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `clearResync`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_clear_resync(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
      * Complete the bootstrap with the peer's ephemeral public half, installing the session.
      *
      * `RK₀` is derived from the ephemeral-ephemeral DH and a transcript over both endpoint ids
@@ -3284,6 +3447,58 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     }
 
     
+    /**
+     * Seal a **ratcheted null fix** for `watcher_endpoints` and write it to the null slot.
+     *
+     * The v3 counterpart of [`Self::docs_write_null`], and the half of §4.1 that makes the
+     * symmetric-lane argument true rather than aspirational. A watcher who only ever *reads* our
+     * position still publishes on cadence, and once that envelope is ratcheted it carries their
+     * ratchet contribution — which is what advances our `peer_advanced_ms` for them and stops
+     * `next_wraps` dropping them as `Lapsed` after 24 h. On the v2 null lane the contribution did
+     * not exist, so every one-directional watch edge expired after a day.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `docsWriteNullRatcheted`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `watcherEndpoints`: List<kotlin.String>) : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterULong.lower(`ts`),FfiConverterSequenceString.lower(`watcherEndpoints`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `docsWriteNullRatchetedTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `watcherEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String) : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted_traced(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterULong.lower(`ts`),FfiConverterSequenceString.lower(`watcherEndpoints`),FfiConverterString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `docsWriteNullTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String) {
@@ -3326,6 +3541,54 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted(
                 uniffiHandle,
                 FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceString.lower(`recipientEndpoints`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Both ratcheted durable lanes. `fix.is_none()` is the null lane, which differs only in
+     * carrying an empty padded payload and landing in a separate LWW slot — the two envelopes a
+     * tick produces are wrapped for disjoint recipient sets, so sharing a slot would have them
+     * supersede each other.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `docsWriteRatchetedInner`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix?, `nullTs`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String?) : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_inner(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterOptionalTypeLocationFix.lower(`fix`),FfiConverterULong.lower(`nullTs`),FfiConverterSequenceString.lower(`recipientEndpoints`),FfiConverterOptionalString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `docsWriteRatchetedTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String) : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_traced(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceString.lower(`recipientEndpoints`),FfiConverterString.lower(`traceparent`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -3569,6 +3832,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `isDesynced`(`peerEndpointHex`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_is_desynced(
+                uniffiHandle,
+                FfiConverterString.lower(`peerEndpointHex`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * List all known pairing sessions.
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -3791,6 +4078,37 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Look for `peer`'s resync record and, if one is there, restart the session from it.
+     *
+     * Publishes our own half first when we have not already, so a single call from each side
+     * completes the exchange without either having to go first — which matters because the
+     * side that noticed the desync and the side that caused it are usually not the same one.
+     *
+     * Returns whether a session was installed. `false` covers "no record yet", "stale record",
+     * and "already applied" — all ordinary, none an error.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `pollResync`(`peerEndpointHex`: kotlin.String, `peerRecvPubHex`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_poll_resync(
+                uniffiHandle,
+                FfiConverterString.lower(`peerEndpointHex`),FfiConverterString.lower(`peerRecvPubHex`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * A shareable **read**-ticket for our profile namespace. Also exchanged automatically inside
      * a pairing Accept, so friends usually don't need to import it by hand.
      */
@@ -3861,6 +4179,39 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_u64(future) },
         // lift function
         { FfiConverterULong.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+     *
+     * Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
+     * re-establishes a ratchet, so it cannot require one. That is also why it is the one place
+     * the design has to be most careful: **recovery must never become the bypass**. The record
+     * carries only an ephemeral public key. It cannot downgrade anything, because a root is
+     * only ever derived when *both* ephemerals are in hand.
+     *
+     * Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
+     * than minting a new one, so a peer that already saw our half does not have to see a second.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishResync`(`recipientRecvPubs`: List<kotlin.String>) : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_publish_resync(
+                uniffiHandle,
+                FfiConverterSequenceString.lower(`recipientRecvPubs`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -4144,6 +4495,34 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * How many resyncs we have driven with this peer.
+     *
+     * §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+     * retrying forever, so this is deliberately a count rather than a boolean: the UI decides
+     * where patience runs out, and the crypto layer does not pretend to know.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `resyncCount`(`peerEndpointHex`: kotlin.String) : kotlin.UInt {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_resync_count(
+                uniffiHandle,
+                FfiConverterString.lower(`peerEndpointHex`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_u32(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_u32(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_u32(future) },
+        // lift function
+        { FfiConverterUInt.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. Invite-based
      * pairing is always allowed. This is an app-level acceptance gate, not a radio control.
      */override fun `setPairingReady`(`ready`: kotlin.Boolean)
@@ -4388,11 +4767,39 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
 
     
-    
+    companion object {
+        
     /**
-     * @suppress
+     * Create a node under host-supplied storage roots. **This is the constructor mobile must
+     * use**; [`new`](Self::new) puts everything in the OS temp dir, which is right for host tests
+     * and wrong for a device.
+     *
+     * Both roots are scoped per identity internally (`<root>/<author hex>`), because the host
+     * cannot know the endpoint id before the node that derives it exists.
+     *
+     * - `data_root` — the recoverable trail replica and blobs. Cache is the correct home: it is
+     * large, it is re-fetchable, and it must never be restored from a backup.
+     * - `state_root` — ratchet session state, which is **not** recoverable. This must be the
+     * app's private data dir (Android `filesDir`, iOS Application Support) *and* excluded from
+     * backup, since restoring an old copy rewinds send counters into key reuse. See
+     * [`LocationNode::state_dir`].
+     *
+     * Passing the same root for both is a bug on device in one direction and a break in the
+     * other; the two have opposite requirements.
      */
-    companion object
+    @Throws(LocationException::class) fun `newAtDirs`(`identitySecret`: kotlin.ByteArray?, `recvSecret`: kotlin.ByteArray?, `dataRoot`: kotlin.String, `stateRoot`: kotlin.String): LocationNode {
+            return FfiConverterTypeLocationNode.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_constructor_locationnode_new_at_dirs(
+    
+        FfiConverterOptionalByteArray.lower(`identitySecret`),FfiConverterOptionalByteArray.lower(`recvSecret`),FfiConverterString.lower(`dataRoot`),FfiConverterString.lower(`stateRoot`),_status)
+}
+    )
+    }
+    
+
+        
+    }
     
 }
 
@@ -4907,9 +5314,9 @@ public interface SubscriptionInterface {
      * broadcast it on the topic. Recipients NOT in this list cannot decrypt it —
      * that's how revocation works.
      */
-    suspend fun `publish`(`seq`: kotlin.ULong, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>)
+    suspend fun `publish`(`seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>): List<kotlin.String>
     
-    suspend fun `publishInner`(`seq`: kotlin.ULong, `fix`: LocationFix?, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String?)
+    suspend fun `publishInner`(`seq`: kotlin.ULong, `fix`: LocationFix?, `ts`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String?): List<kotlin.String>
     
     /**
      * Broadcast a **null fix** — an envelope with an empty padded payload (FORWARD-SECRECY §4.1).
@@ -4918,11 +5325,11 @@ public interface SubscriptionInterface {
      * [`Self::publish`], carrying no position. Recipients decode it as a healthy envelope with
      * nothing to deliver.
      */
-    suspend fun `publishNull`(`seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>)
+    suspend fun `publishNull`(`seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>): List<kotlin.String>
     
-    suspend fun `publishNullTraced`(`seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String)
+    suspend fun `publishNullTraced`(`seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String): List<kotlin.String>
     
-    suspend fun `publishTraced`(`seq`: kotlin.ULong, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String)
+    suspend fun `publishTraced`(`seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String): List<kotlin.String>
     
     companion object
 }
@@ -5034,20 +5441,19 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `publish`(`seq`: kotlin.ULong, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>) {
+    override suspend fun `publish`(`seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>) : List<kotlin.String> {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_subscription_publish(
                 uniffiHandle,
-                FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),
+                FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceString.lower(`recipientEndpoints`),
             )
         },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
-        { Unit },
-        
+        { FfiConverterSequenceString.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -5056,20 +5462,19 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
     
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `publishInner`(`seq`: kotlin.ULong, `fix`: LocationFix?, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String?) {
+    override suspend fun `publishInner`(`seq`: kotlin.ULong, `fix`: LocationFix?, `ts`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String?) : List<kotlin.String> {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_subscription_publish_inner(
                 uniffiHandle,
-                FfiConverterULong.lower(`seq`),FfiConverterOptionalTypeLocationFix.lower(`fix`),FfiConverterULong.lower(`ts`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterOptionalString.lower(`traceparent`),
+                FfiConverterULong.lower(`seq`),FfiConverterOptionalTypeLocationFix.lower(`fix`),FfiConverterULong.lower(`ts`),FfiConverterSequenceString.lower(`recipientEndpoints`),FfiConverterOptionalString.lower(`traceparent`),
             )
         },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
-        { Unit },
-        
+        { FfiConverterSequenceString.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -5085,20 +5490,19 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `publishNull`(`seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>) {
+    override suspend fun `publishNull`(`seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>) : List<kotlin.String> {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_subscription_publish_null(
                 uniffiHandle,
-                FfiConverterULong.lower(`seq`),FfiConverterULong.lower(`ts`),FfiConverterSequenceByteArray.lower(`recipients`),
+                FfiConverterULong.lower(`seq`),FfiConverterULong.lower(`ts`),FfiConverterSequenceString.lower(`recipientEndpoints`),
             )
         },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
-        { Unit },
-        
+        { FfiConverterSequenceString.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -5107,20 +5511,19 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
     
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `publishNullTraced`(`seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String) {
+    override suspend fun `publishNullTraced`(`seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String) : List<kotlin.String> {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_subscription_publish_null_traced(
                 uniffiHandle,
-                FfiConverterULong.lower(`seq`),FfiConverterULong.lower(`ts`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterString.lower(`traceparent`),
+                FfiConverterULong.lower(`seq`),FfiConverterULong.lower(`ts`),FfiConverterSequenceString.lower(`recipientEndpoints`),FfiConverterString.lower(`traceparent`),
             )
         },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
-        { Unit },
-        
+        { FfiConverterSequenceString.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -5129,20 +5532,19 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
     
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `publishTraced`(`seq`: kotlin.ULong, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String) {
+    override suspend fun `publishTraced`(`seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String) : List<kotlin.String> {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_subscription_publish_traced(
                 uniffiHandle,
-                FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterString.lower(`traceparent`),
+                FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceString.lower(`recipientEndpoints`),FfiConverterString.lower(`traceparent`),
             )
         },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
-        { Unit },
-        
+        { FfiConverterSequenceString.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )

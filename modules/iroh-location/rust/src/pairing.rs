@@ -64,15 +64,21 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
 
 use crate::docs::TrailDocs;
 use crate::profile::{ProfileDocs, ProfileSink};
+use crate::sessions::SessionManager;
 
 /// The pairing ALPN. Bump the trailing version on any breaking wire change.
-pub const PAIR_ALPN: &[u8] = b"streetcryptid/pair/2";
+///
+/// v3 adds the ratchet ephemeral to the handshake (FORWARD-SECRECY.md §4.2), which changes the
+/// `PairMsg` encoding. Bumping the ALPN rather than only the wire version means a peer on an
+/// older build fails to negotiate at all, instead of connecting and then failing to decode.
+pub const PAIR_ALPN: &[u8] = b"streetcryptid/pair/3";
 
 /// Wire schema version carried in every [`PairMsg`].
-pub const PAIR_WIRE_V: u8 = 2;
+pub const PAIR_WIRE_V: u8 = 3;
 
 /// Invite schema version carried in every [`InviteData`].
 pub const INVITE_V: u8 = 1;
@@ -130,6 +136,13 @@ const SESSION_ID_LEN: usize = 16;
 const INVITE_SECRET_LEN: usize = 16;
 const ENDPOINT_LEN: usize = 32;
 const RECV_PUB_LEN: usize = 32;
+/// X25519 ratchet ephemeral public key exchanged during the bump (FORWARD-SECRECY.md §4.2).
+const RATCHET_PUB_LEN: usize = 32;
+/// One side's contribution to the SAS transcript: identity, receiving key, ratchet ephemeral,
+/// nonce. The ratchet ephemeral is in here so that swapping it changes the figure the two humans
+/// compare — which is what makes the bump, rather than the transport, the thing that authenticates
+/// the ratchet root.
+const SAS_RECORD_LEN: usize = ENDPOINT_LEN + RECV_PUB_LEN + RATCHET_PUB_LEN + SAS_NONCE_LEN;
 const SIG_LEN: usize = 64;
 
 // ── Time helper ─────────────────────────────────────────────────────────────────────────
@@ -254,6 +267,16 @@ struct PairMsg {
     from_endpoint: Vec<u8>,
     /// 32-byte X25519 receiving public key of the sender.
     recv_pub: Vec<u8>,
+    /// 32-byte X25519 **ratchet ephemeral** public key of the sender (FORWARD-SECRECY.md §4.2).
+    ///
+    /// Fresh per pairing session and discarded with it. This is the sender's half of the material
+    /// that roots the Double Ratchet: `RK₀ = KDF(DH(eph_ours, eph_theirs), transcript)`. It rides
+    /// the pairing handshake rather than a separate exchange for two reasons — it is covered by
+    /// the same ed25519 signature and connection pinning as every other field here, and it is
+    /// folded into the SAS transcript ([`sas_record`]), so a MITM who swaps ephemerals changes
+    /// the figure the humans compare. An ephemeral exchanged outside the bump would be
+    /// authenticated by nothing the humans ever see.
+    ratchet_pub: Vec<u8>,
     decision: Decision,
     /// 32-byte BLAKE3 commitment to the sender's SAS nonce; present on `Hello`, empty otherwise.
     sas_commit: Vec<u8>,
@@ -298,6 +321,7 @@ fn verify_msg(m: &PairMsg) -> Result<()> {
     if m.session_id.len() != SESSION_ID_LEN
         || m.from_endpoint.len() != ENDPOINT_LEN
         || m.recv_pub.len() != RECV_PUB_LEN
+        || m.ratchet_pub.len() != RATCHET_PUB_LEN
         || m.sig.len() != SIG_LEN
     {
         bail!("pair message field length invalid");
@@ -533,21 +557,36 @@ enum LocalDecision {
 fn sas_record(
     endpoint: &[u8; ENDPOINT_LEN],
     recv_pub: &[u8; RECV_PUB_LEN],
+    ratchet_pub: &[u8; RATCHET_PUB_LEN],
     nonce: &[u8; SAS_NONCE_LEN],
-) -> [u8; ENDPOINT_LEN + RECV_PUB_LEN + SAS_NONCE_LEN] {
-    let mut rec = [0u8; ENDPOINT_LEN + RECV_PUB_LEN + SAS_NONCE_LEN];
-    rec[..ENDPOINT_LEN].copy_from_slice(endpoint);
-    rec[ENDPOINT_LEN..ENDPOINT_LEN + RECV_PUB_LEN].copy_from_slice(recv_pub);
-    rec[ENDPOINT_LEN + RECV_PUB_LEN..].copy_from_slice(nonce);
+) -> [u8; SAS_RECORD_LEN] {
+    let mut rec = [0u8; SAS_RECORD_LEN];
+    let mut at = 0;
+    for field in [
+        endpoint.as_slice(),
+        recv_pub.as_slice(),
+        ratchet_pub.as_slice(),
+        nonce.as_slice(),
+    ] {
+        rec[at..at + field.len()].copy_from_slice(field);
+        at += field.len();
+    }
+    debug_assert_eq!(at, SAS_RECORD_LEN);
     rec
 }
 
 /// Domain-separated BLAKE3 commitment binding a nonce to its committer's session + identity, so a
 /// commitment can neither be reflected onto the peer nor reused across sessions.
+///
+/// The ratchet ephemeral is committed here too, which fixes it at `Hello` — before either side
+/// has seen the other's. Without that, a side could choose its ephemeral *after* seeing the
+/// peer's and grind for a transcript producing a figure of its liking; committing makes the
+/// ephemeral as unchangeable as the nonce it sits beside.
 fn sas_commitment(
     session_id: &[u8; SESSION_ID_LEN],
     endpoint: &[u8; ENDPOINT_LEN],
     recv_pub: &[u8; RECV_PUB_LEN],
+    ratchet_pub: &[u8; RATCHET_PUB_LEN],
     nonce: &[u8; SAS_NONCE_LEN],
 ) -> [u8; SAS_COMMIT_LEN] {
     let mut hasher = blake3::Hasher::new();
@@ -555,6 +594,7 @@ fn sas_commitment(
     hasher.update(session_id);
     hasher.update(endpoint);
     hasher.update(recv_pub);
+    hasher.update(ratchet_pub);
     hasher.update(nonce);
     *hasher.finalize().as_bytes()
 }
@@ -567,8 +607,8 @@ fn sas_commitment(
 /// differ the roles are always complementary (even for two simultaneous nearby initiators).
 fn sas_seed(
     session_id: &[u8; SESSION_ID_LEN],
-    local_rec: &[u8; ENDPOINT_LEN + RECV_PUB_LEN + SAS_NONCE_LEN],
-    peer_rec: &[u8; ENDPOINT_LEN + RECV_PUB_LEN + SAS_NONCE_LEN],
+    local_rec: &[u8; SAS_RECORD_LEN],
+    peer_rec: &[u8; SAS_RECORD_LEN],
 ) -> ([u8; 32], bool) {
     let local_is_displayer = local_rec.as_slice() < peer_rec.as_slice();
     let (lo, hi) = if local_is_displayer {
@@ -732,7 +772,11 @@ pub struct PairResultData {
 }
 
 /// Per-session state. Pure: no I/O, fully unit-testable.
-#[derive(Clone, Debug)]
+///
+/// `Debug` is hand-written rather than derived because this now holds a private key. Deriving it
+/// would make the ratchet ephemeral one careless `{:?}` away from a log line, and the session it
+/// roots would be compromised by the logs alone.
+#[derive(Clone)]
 struct PairSession {
     session_id: [u8; SESSION_ID_LEN],
     initiator: bool,
@@ -742,6 +786,8 @@ struct PairSession {
     nearby: bool,
     peer_endpoint: [u8; ENDPOINT_LEN],
     peer_recv_pub: Option<[u8; RECV_PUB_LEN]>,
+    /// The peer's ratchet ephemeral, learned from their first signed message.
+    peer_ratchet_pub: Option<[u8; RATCHET_PUB_LEN]>,
     local_decision: Option<bool>,
     peer_decision: Option<bool>,
     peer_endpoint_ticket: Option<String>,
@@ -754,6 +800,10 @@ struct PairSession {
     /// Our own identity/keys/nonce, captured at creation so the transcript is pure + testable.
     local_endpoint: [u8; ENDPOINT_LEN],
     local_recv_pub: [u8; RECV_PUB_LEN],
+    /// Our ratchet ephemeral for this bump. Minted per session and dropped with it — an
+    /// unfinished pair leaves no private key behind, and a completed one has already consumed it
+    /// into `RK₀`. `x25519_dalek` zeroizes the secret on drop.
+    local_ratchet_secret: XStaticSecret,
     sas_nonce: [u8; SAS_NONCE_LEN],
     peer_sas_commit: Option<[u8; SAS_COMMIT_LEN]>,
     peer_sas_nonce: Option<[u8; SAS_NONCE_LEN]>,
@@ -772,6 +822,24 @@ struct PairSession {
     timed_out: bool,
 }
 
+impl std::fmt::Debug for PairSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairSession")
+            .field("session_id", &self.session_id)
+            .field("initiator", &self.initiator)
+            .field("nearby", &self.nearby)
+            .field("peer_endpoint", &self.peer_endpoint)
+            .field("local_decision", &self.local_decision)
+            .field("peer_decision", &self.peer_decision)
+            .field("sas_verified", &self.sas_verified)
+            .field("local_sas_confirmed", &self.local_sas_confirmed)
+            .field("failed", &self.failed)
+            .field("timed_out", &self.timed_out)
+            .field("result_emitted", &self.result_emitted)
+            .finish_non_exhaustive()
+    }
+}
+
 impl PairSession {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -782,6 +850,7 @@ impl PairSession {
         created_ms: u64,
         local_endpoint: [u8; ENDPOINT_LEN],
         local_recv_pub: [u8; RECV_PUB_LEN],
+        local_ratchet_secret: XStaticSecret,
         sas_nonce: [u8; SAS_NONCE_LEN],
     ) -> Self {
         Self {
@@ -790,6 +859,8 @@ impl PairSession {
             nearby,
             peer_endpoint,
             peer_recv_pub: None,
+            peer_ratchet_pub: None,
+            local_ratchet_secret,
             local_decision: None,
             peer_decision: None,
             peer_endpoint_ticket: None,
@@ -817,8 +888,14 @@ impl PairSession {
             &self.session_id,
             &self.local_endpoint,
             &self.local_recv_pub,
+            &self.local_ratchet_pub(),
             &self.sas_nonce,
         )
+    }
+
+    /// The public half of this session's ratchet ephemeral — what goes on the wire.
+    fn local_ratchet_pub(&self) -> [u8; RATCHET_PUB_LEN] {
+        XPublicKey::from(&self.local_ratchet_secret).to_bytes()
     }
 
     fn phase(&self) -> PairPhase {
@@ -1020,6 +1097,13 @@ impl PairSession {
                 self.peer_recv_pub = Some(pr);
             }
         }
+        // First disclosure wins, like the receiving key above: the ephemeral that ends up in the
+        // SAS transcript must be the one the humans verified, so a later message cannot move it.
+        if self.peer_ratchet_pub.is_none() {
+            if let Ok(rp) = <[u8; RATCHET_PUB_LEN]>::try_from(msg.ratchet_pub.clone()) {
+                self.peer_ratchet_pub = Some(rp);
+            }
+        }
         if !msg.endpoint_ticket.is_empty() {
             self.peer_endpoint_ticket = Some(msg.endpoint_ticket.clone());
         }
@@ -1045,7 +1129,16 @@ impl PairSession {
             .clone()
             .try_into()
             .map_err(|_| anyhow!("reveal missing nonce"))?;
-        let expect = sas_commitment(&self.session_id, &self.peer_endpoint, &peer_recv, &nonce);
+        let peer_ratchet = self
+            .peer_ratchet_pub
+            .ok_or_else(|| anyhow!("reveal before peer ratchet key"))?;
+        let expect = sas_commitment(
+            &self.session_id,
+            &self.peer_endpoint,
+            &peer_recv,
+            &peer_ratchet,
+            &nonce,
+        );
         if expect != commit {
             bail!("sas commitment does not match revealed nonce");
         }
@@ -1064,8 +1157,16 @@ impl PairSession {
         let peer_nonce = self
             .peer_sas_nonce
             .ok_or_else(|| anyhow!("no peer nonce"))?;
-        let local_rec = sas_record(&self.local_endpoint, &self.local_recv_pub, &self.sas_nonce);
-        let peer_rec = sas_record(&self.peer_endpoint, &peer_recv, &peer_nonce);
+        let peer_ratchet = self
+            .peer_ratchet_pub
+            .ok_or_else(|| anyhow!("no peer ratchet key"))?;
+        let local_rec = sas_record(
+            &self.local_endpoint,
+            &self.local_recv_pub,
+            &self.local_ratchet_pub(),
+            &self.sas_nonce,
+        );
+        let peer_rec = sas_record(&self.peer_endpoint, &peer_recv, &peer_ratchet, &peer_nonce);
         let (seed, local_is_displayer) = sas_seed(&self.session_id, &local_rec, &peer_rec);
         let (target, options) = sas_catalog(&seed);
         let role = if local_is_displayer {
@@ -1117,6 +1218,8 @@ struct PairRuntime {
     trail: Arc<TrailDocs>,
     profile: Arc<ProfileDocs>,
     profile_sink: Arc<dyn ProfileSink>,
+    /// Where a completed bump installs its ratchet session (FORWARD-SECRECY.md §4.2).
+    sessions: Arc<SessionManager>,
 }
 
 /// The shared pairing state + behaviour. Held by [`PairProtocol`] (inbound) and the
@@ -1153,13 +1256,25 @@ impl PairCore {
         trail: Arc<TrailDocs>,
         profile: Arc<ProfileDocs>,
         profile_sink: Arc<dyn ProfileSink>,
+        sessions: Arc<SessionManager>,
     ) {
         *self.runtime.lock().await = Some(PairRuntime {
             endpoint,
             trail,
             profile,
             profile_sink,
+            sessions,
         });
+    }
+
+    /// Drop the live handles. Called from `shutdown()`.
+    ///
+    /// Not merely tidiness: this runtime holds an `Arc<SessionManager>`, and the session store's
+    /// writer claim is process-global and released only when the last handle drops. A runtime
+    /// left attached across a stop/start would keep the claim alive and make the next `start`
+    /// fail with `AlreadyOpen` — permanently, since nothing else would ever release it.
+    pub async fn detach_runtime(&self) {
+        *self.runtime.lock().await = None;
     }
 
     /// Whether we currently accept *nearby* (invite-less) pair requests. Invite-based requests
@@ -1235,15 +1350,21 @@ impl PairCore {
             ),
             _ => (String::new(), String::new()),
         };
-        let (sas_commit, sas_nonce) = {
+        // The ratchet ephemeral rides every message, like `recv_pub`: it is the same disclosure on
+        // each, the receiver binds the first one it sees, and a message that omitted it would fail
+        // the length check in `verify_msg` rather than silently pairing without a ratchet root.
+        let (sas_commit, sas_nonce, ratchet_pub) = {
             let sessions = self.sessions.lock().await;
             match sessions.get(&session_id) {
-                Some(s) => match decision {
-                    Decision::Hello => (s.local_commit().to_vec(), Vec::new()),
-                    Decision::Reveal => (Vec::new(), s.sas_nonce.to_vec()),
-                    _ => (Vec::new(), Vec::new()),
-                },
-                None => (Vec::new(), Vec::new()),
+                Some(s) => {
+                    let (commit, nonce) = match decision {
+                        Decision::Hello => (s.local_commit().to_vec(), Vec::new()),
+                        Decision::Reveal => (Vec::new(), s.sas_nonce.to_vec()),
+                        _ => (Vec::new(), Vec::new()),
+                    };
+                    (commit, nonce, s.local_ratchet_pub().to_vec())
+                }
+                None => (Vec::new(), Vec::new(), vec![0u8; RATCHET_PUB_LEN]),
             }
         };
         let msg = PairMsg {
@@ -1252,6 +1373,7 @@ impl PairCore {
             invite_secret,
             from_endpoint: self.endpoint_id.to_vec(),
             recv_pub: self.recv_public.clone(),
+            ratchet_pub,
             decision,
             sas_commit,
             sas_nonce,
@@ -1294,6 +1416,7 @@ impl PairCore {
             created_ms,
             self.endpoint_id,
             self.local_recv_arr()?,
+            XStaticSecret::random_from_rng(OsRng),
             Self::fresh_nonce(),
         ))
     }
@@ -1751,6 +1874,65 @@ impl PairCore {
         Ok(())
     }
 
+    /// Turn a completed bump into a Double Ratchet session (FORWARD-SECRECY.md §4.2).
+    ///
+    /// `RK₀ = KDF(DH(eph_ours, eph_theirs), transcript)` — **ephemeral-ephemeral only**. Neither
+    /// identity key nor receiving key contributes to the root, which is the whole point: a seized
+    /// device holds both of those forever, and a root it can recompute is a root with no forward
+    /// secrecy. The ephemerals were signed, connection-pinned, and folded into the SAS figure the
+    /// two humans compared, so the root is authenticated by the bump itself rather than by the
+    /// transport.
+    ///
+    /// The role is fixed by endpoint-id ordering, never by who dialled: simultaneous nearby
+    /// initiation makes both sides "the initiator", and two initiators would both bootstrap a
+    /// sending chain against a peer that has none.
+    async fn bootstrap_ratchet(
+        &self,
+        peer_endpoint: &[u8; ENDPOINT_LEN],
+        our_secret: XStaticSecret,
+        peer_ratchet_pub: [u8; RATCHET_PUB_LEN],
+    ) -> Result<()> {
+        let sessions = {
+            let guard = self.runtime.lock().await;
+            guard
+                .as_ref()
+                .ok_or_else(|| anyhow!("pair runtime not attached"))?
+                .sessions
+                .clone()
+        };
+
+        let shared = our_secret.diffie_hellman(&XPublicKey::from(peer_ratchet_pub));
+        if !shared.was_contributory() {
+            bail!("peer ratchet key is a low-order point");
+        }
+        let our_ratchet_pub = XPublicKey::from(&our_secret).to_bytes();
+        let transcript = crate::boot_transcript(
+            &self.endpoint_id,
+            peer_endpoint,
+            &our_ratchet_pub,
+            &peer_ratchet_pub,
+        );
+        let (rk0, session_id) = crate::derive_boot_root(shared.as_bytes(), &transcript);
+        let now = now_ms();
+
+        if crate::ratchet::initiator_by_endpoint(&self.endpoint_id, peer_endpoint) {
+            sessions.bootstrap(peer_endpoint, session_id, rk0, peer_ratchet_pub, now)?;
+        } else {
+            // The responder keeps its bump ephemeral *as* its first ratchet key — it is the one
+            // the initiator's opening root step already ran against — and has no sending chain
+            // until that first envelope lands.
+            sessions.bootstrap_responder(peer_endpoint, session_id, rk0, our_secret, now)?;
+        }
+
+        tracing::info!(
+            sc.peer = %crate::telemetry::short_hex(peer_endpoint),
+            sc.session = %crate::telemetry::short_hex(&session_id),
+            initiator = crate::ratchet::initiator_by_endpoint(&self.endpoint_id, peer_endpoint),
+            "bootstrapped a ratchet session from the pairing bump"
+        );
+        Ok(())
+    }
+
     /// Import the peer's tickets, start watching their profile, and raise a `Ready` notice —
     /// exactly once per session.
     async fn finalize(
@@ -1758,7 +1940,7 @@ impl PairCore {
         session_id: &[u8; SESSION_ID_LEN],
         peer_endpoint: [u8; ENDPOINT_LEN],
     ) -> Result<()> {
-        let (profile_ticket, trail_ticket, nearby) = {
+        let (profile_ticket, trail_ticket, nearby, boot) = {
             let mut sessions = self.sessions.lock().await;
             let s = sessions
                 .get_mut(session_id)
@@ -1773,12 +1955,45 @@ impl PairCore {
                 return Ok(());
             }
             s.result_emitted = true;
+            // Take the bump's ratchet material out under the same lock and the same
+            // exactly-once guard as the rest of completion, so a duplicate delivery cannot
+            // bootstrap the session twice and reset it to epoch 0 the second time.
+            let boot = s
+                .peer_ratchet_pub
+                .map(|peer_pub| (s.local_ratchet_secret.clone(), peer_pub));
             (
                 s.peer_profile_ticket.clone(),
                 s.peer_trail_ticket.clone(),
                 s.nearby,
+                boot,
             )
         };
+
+        // Install the ratchet session before anything else completion does. A pair that reaches
+        // Ready without one would look friended while every ratcheted publish to them dropped
+        // with `no_session` — the failure mode §4.2 is least able to explain to a user.
+        match boot {
+            Some((our_secret, peer_ratchet_pub)) => {
+                if let Err(err) = self
+                    .bootstrap_ratchet(&peer_endpoint, our_secret, peer_ratchet_pub)
+                    .await
+                {
+                    // Not fatal to the friendship: the pair is real and the humans verified it.
+                    // The session is recoverable by §4.6 resync, and `is_desynced` will say so.
+                    tracing::warn!(
+                        error = %err,
+                        sc.peer = %crate::telemetry::short_hex(&peer_endpoint),
+                        "pair completed but the ratchet session could not be bootstrapped"
+                    );
+                }
+            }
+            None => {
+                tracing::warn!(
+                    sc.peer = %crate::telemetry::short_hex(&peer_endpoint),
+                    "pair completed without a peer ratchet key; no session bootstrapped"
+                );
+            }
+        }
 
         if let Ok((trail, profile, sink)) = self.runtime_docs().await {
             if let Some(pt) = profile_ticket.as_deref() {
@@ -2173,6 +2388,21 @@ mod tests {
         b
     }
 
+    /// A deterministic ratchet ephemeral public key from a one-byte tag.
+    fn test_ratchet_arr(tag: u8) -> [u8; RATCHET_PUB_LEN] {
+        XPublicKey::from(&XStaticSecret::from([tag; RATCHET_PUB_LEN])).to_bytes()
+    }
+
+    fn test_ratchet_pub(tag: u8) -> Vec<u8> {
+        test_ratchet_arr(tag).to_vec()
+    }
+
+    /// The ephemeral a test side with this endpoint id would carry. Derived from the endpoint so
+    /// both sides of a two-party test agree on each other's key without threading it through.
+    fn test_ratchet_for(ep: [u8; ENDPOINT_LEN]) -> [u8; RATCHET_PUB_LEN] {
+        XPublicKey::from(&XStaticSecret::from(ep)).to_bytes()
+    }
+
     fn sample_msg(seed: &[u8; 32], endpoint: &[u8; 32], decision: Decision) -> PairMsg {
         let msg = PairMsg {
             v: PAIR_WIRE_V,
@@ -2180,6 +2410,7 @@ mod tests {
             invite_secret: Vec::new(),
             from_endpoint: endpoint.to_vec(),
             recv_pub: recv_pub(),
+            ratchet_pub: test_ratchet_pub(0x5A),
             decision,
             sas_commit: Vec::new(),
             sas_nonce: Vec::new(),
@@ -2207,6 +2438,7 @@ mod tests {
             0,
             [0xAAu8; ENDPOINT_LEN],
             [0xBBu8; RECV_PUB_LEN],
+            XStaticSecret::from([0xDDu8; RATCHET_PUB_LEN]),
             [0xCCu8; SAS_NONCE_LEN],
         )
     }
@@ -2276,6 +2508,7 @@ mod tests {
             invite_secret: Vec::new(),
             from_endpoint: other.to_vec(), // not the public half of `seed`
             recv_pub: recv_pub(),
+            ratchet_pub: test_ratchet_pub(0x5A),
             decision: Decision::Hello,
             sas_commit: Vec::new(),
             sas_nonce: Vec::new(),
@@ -2495,6 +2728,7 @@ mod tests {
     fn reveal_msg(
         peer_ep: [u8; ENDPOINT_LEN],
         peer_recv: [u8; RECV_PUB_LEN],
+        peer_ratchet: [u8; RATCHET_PUB_LEN],
         peer_nonce: [u8; SAS_NONCE_LEN],
         sid: [u8; SESSION_ID_LEN],
     ) -> PairMsg {
@@ -2504,6 +2738,7 @@ mod tests {
             invite_secret: Vec::new(),
             from_endpoint: peer_ep.to_vec(),
             recv_pub: peer_recv.to_vec(),
+            ratchet_pub: peer_ratchet.to_vec(),
             decision: Decision::Reveal,
             sas_commit: Vec::new(),
             sas_nonce: peer_nonce.to_vec(),
@@ -2535,10 +2770,19 @@ mod tests {
             0,
             local_ep,
             local_recv,
+            XStaticSecret::from(local_ep),
             local_nonce,
         );
+        let peer_ratchet = test_ratchet_for(peer_ep);
         s.peer_recv_pub = Some(peer_recv);
-        s.peer_sas_commit = Some(sas_commitment(&sid, &peer_ep, &peer_recv, &peer_nonce));
+        s.peer_ratchet_pub = Some(peer_ratchet);
+        s.peer_sas_commit = Some(sas_commitment(
+            &sid,
+            &peer_ep,
+            &peer_recv,
+            &peer_ratchet,
+            &peer_nonce,
+        ));
         s
     }
 
@@ -2559,15 +2803,24 @@ mod tests {
         // Good reveal: nonce matches the earlier commitment → verified + challenge produced.
         let mut a = primed_session(sid, true, a_ep, a_recv, a_nonce, b_ep, b_recv, b_nonce);
         assert_eq!(a.phase(), PairPhase::Pending);
-        a.ingest_reveal(&reveal_msg(b_ep, b_recv, b_nonce, sid), 1_000)
-            .expect("good reveal verifies");
+        a.ingest_reveal(
+            &reveal_msg(b_ep, b_recv, test_ratchet_for(b_ep), b_nonce, sid),
+            1_000,
+        )
+        .expect("good reveal verifies");
         assert!(a.sas_verified);
         assert!(a.challenge.is_some());
         assert_eq!(a.phase(), PairPhase::Verifying);
 
         // Bad reveal: a different nonce does not match the commitment → rejected.
         let mut a2 = primed_session(sid, true, a_ep, a_recv, a_nonce, b_ep, b_recv, b_nonce);
-        let bad = reveal_msg(b_ep, b_recv, [7u8; SAS_NONCE_LEN], sid);
+        let bad = reveal_msg(
+            b_ep,
+            b_recv,
+            test_ratchet_for(b_ep),
+            [7u8; SAS_NONCE_LEN],
+            sid,
+        );
         assert!(a2.ingest_reveal(&bad, 1_000).is_err());
         assert!(!a2.sas_verified);
         assert!(a2.challenge.is_none());
@@ -2590,10 +2843,16 @@ mod tests {
         // Simultaneous nearby initiation: BOTH sides are `initiator = true`.
         let mut a = primed_session(sid, true, a_ep, a_recv, a_nonce, b_ep, b_recv, b_nonce);
         let mut b = primed_session(sid, true, b_ep, b_recv, b_nonce, a_ep, a_recv, a_nonce);
-        a.ingest_reveal(&reveal_msg(b_ep, b_recv, b_nonce, sid), 1_000)
-            .unwrap();
-        b.ingest_reveal(&reveal_msg(a_ep, a_recv, a_nonce, sid), 1_000)
-            .unwrap();
+        a.ingest_reveal(
+            &reveal_msg(b_ep, b_recv, test_ratchet_for(b_ep), b_nonce, sid),
+            1_000,
+        )
+        .unwrap();
+        b.ingest_reveal(
+            &reveal_msg(a_ep, a_recv, test_ratchet_for(a_ep), a_nonce, sid),
+            1_000,
+        )
+        .unwrap();
 
         let ca = a.challenge.clone().unwrap();
         let cb = b.challenge.clone().unwrap();
@@ -2642,6 +2901,7 @@ mod tests {
             created,
             [3u8; ENDPOINT_LEN],
             [4u8; RECV_PUB_LEN],
+            XStaticSecret::from([6u8; RATCHET_PUB_LEN]),
             [5u8; SAS_NONCE_LEN],
         );
         let deadline = created + PAIR_HANDSHAKE_TIMEOUT_MS;
@@ -2667,8 +2927,11 @@ mod tests {
             [6u8; SAS_NONCE_LEN],
         );
         let mut s = primed_session(sid, true, a_ep, a_recv, a_nonce, b_ep, b_recv, b_nonce);
-        s.ingest_reveal(&reveal_msg(b_ep, b_recv, b_nonce, sid), 1_000)
-            .unwrap();
+        s.ingest_reveal(
+            &reveal_msg(b_ep, b_recv, test_ratchet_for(b_ep), b_nonce, sid),
+            1_000,
+        )
+        .unwrap();
         let deadline = s.verify_deadline();
         assert_eq!(deadline, 1_000 + SAS_TIMEOUT_MS);
 
@@ -2700,8 +2963,11 @@ mod tests {
             [6u8; SAS_NONCE_LEN],
         );
         let mut s = primed_session(sid, true, a_ep, a_recv, a_nonce, b_ep, b_recv, b_nonce);
-        s.ingest_reveal(&reveal_msg(b_ep, b_recv, b_nonce, sid), 1_000)
-            .unwrap();
+        s.ingest_reveal(
+            &reveal_msg(b_ep, b_recv, test_ratchet_for(b_ep), b_nonce, sid),
+            1_000,
+        )
+        .unwrap();
         let deadline = s.verify_deadline();
 
         s.local_sas_confirmed = true;
@@ -2733,8 +2999,11 @@ mod tests {
             [6u8; SAS_NONCE_LEN],
         );
         let mut s = primed_session(sid, true, a_ep, a_recv, a_nonce, b_ep, b_recv, b_nonce);
-        s.ingest_reveal(&reveal_msg(b_ep, b_recv, b_nonce, sid), 1_000)
-            .unwrap();
+        s.ingest_reveal(
+            &reveal_msg(b_ep, b_recv, test_ratchet_for(b_ep), b_nonce, sid),
+            1_000,
+        )
+        .unwrap();
         s.peer_decision = Some(false);
 
         assert!(!s.sas_action_allowed(1_001));
@@ -2835,6 +3104,7 @@ mod tests {
             invite_secret: Vec::new(),
             from_endpoint: peer_endpoint.to_vec(),
             recv_pub: peer_recv.to_vec(),
+            ratchet_pub: test_ratchet_for(*peer_endpoint).to_vec(),
             decision: Decision::Hello,
             sas_commit: commit.to_vec(),
             sas_nonce: Vec::new(),
@@ -2855,7 +3125,13 @@ mod tests {
         let peer_ep = peer_sk.verifying_key().to_bytes();
         let peer_recv = [7u8; RECV_PUB_LEN];
         let sid = derive_nearby_id(&our_ep, &peer_ep);
-        let commit = sas_commitment(&sid, &peer_ep, &peer_recv, &[8u8; SAS_NONCE_LEN]);
+        let commit = sas_commitment(
+            &sid,
+            &peer_ep,
+            &peer_recv,
+            &test_ratchet_for(peer_ep),
+            &[8u8; SAS_NONCE_LEN],
+        );
 
         // Inbound Hello creates a session but leaves SAS unconfirmed.
         core.handle_incoming(
@@ -2879,7 +3155,13 @@ mod tests {
         let peer_recv = [7u8; RECV_PUB_LEN];
         let sid = derive_nearby_id(&our_ep, &peer_ep);
 
-        let commit1 = sas_commitment(&sid, &peer_ep, &peer_recv, &[1u8; SAS_NONCE_LEN]);
+        let commit1 = sas_commitment(
+            &sid,
+            &peer_ep,
+            &peer_recv,
+            &test_ratchet_for(peer_ep),
+            &[1u8; SAS_NONCE_LEN],
+        );
         core.handle_incoming(
             peer_ep,
             signed_hello_nearby(&peer_sk.to_bytes(), &peer_ep, &peer_recv, sid, commit1),
@@ -2897,7 +3179,13 @@ mod tests {
 
         // A fresh human-triggered attempt (new Hello) must replace the dead session with new SAS
         // material rather than being permanently blocked.
-        let commit2 = sas_commitment(&sid, &peer_ep, &peer_recv, &[2u8; SAS_NONCE_LEN]);
+        let commit2 = sas_commitment(
+            &sid,
+            &peer_ep,
+            &peer_recv,
+            &test_ratchet_for(peer_ep),
+            &[2u8; SAS_NONCE_LEN],
+        );
         core.handle_incoming(
             peer_ep,
             signed_hello_nearby(&peer_sk.to_bytes(), &peer_ep, &peer_recv, sid, commit2),
@@ -2932,12 +3220,24 @@ mod tests {
             0,
             core.endpoint_id,
             local_recv,
+            XStaticSecret::from([0xDDu8; RATCHET_PUB_LEN]),
             local_nonce,
         );
+        let peer_ratchet = test_ratchet_arr(0x44);
         s.peer_recv_pub = Some(peer_recv);
-        s.peer_sas_commit = Some(sas_commitment(&sid, &peer_ep, &peer_recv, &peer_nonce));
-        s.ingest_reveal(&reveal_msg(peer_ep, peer_recv, peer_nonce, sid), now_ms())
-            .unwrap();
+        s.peer_ratchet_pub = Some(peer_ratchet);
+        s.peer_sas_commit = Some(sas_commitment(
+            &sid,
+            &peer_ep,
+            &peer_recv,
+            &peer_ratchet,
+            &peer_nonce,
+        ));
+        s.ingest_reveal(
+            &reveal_msg(peer_ep, peer_recv, peer_ratchet, peer_nonce, sid),
+            now_ms(),
+        )
+        .unwrap();
         let challenge = s.challenge.clone().unwrap();
         core.sessions.lock().await.insert(sid, s);
         (sid, challenge)
@@ -3036,6 +3336,7 @@ mod tests {
             invite_secret: Vec::new(),
             from_endpoint: peer_ep.to_vec(),
             recv_pub: peer_recv.to_vec(),
+            ratchet_pub: test_ratchet_for(peer_ep).to_vec(),
             decision,
             sas_commit: Vec::new(),
             sas_nonce: Vec::new(),
@@ -3209,6 +3510,7 @@ mod tests {
                     0,
                     our_ep,
                     core.recv_public.clone().try_into().unwrap(),
+                    XStaticSecret::from(our_ep),
                     [1u8; SAS_NONCE_LEN],
                 );
                 s.peer_recv_pub = Some(peer_recv);

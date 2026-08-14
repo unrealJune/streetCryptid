@@ -931,6 +931,52 @@ impl LocationNode {
             .clone()
             .ok_or(LocationError::NotStarted)
     }
+
+    /// Verify and open one inbound **ratcheted** envelope from the live gossip lane.
+    ///
+    /// The live lane is v3 for the same reason the durable one is: §4.3 asks for a ratchet header
+    /// on every envelope, and a hot-mode fix sealed to a long-term receiving key is a fix the
+    /// archive can decrypt forever once the device is seized. Hot and cold now share one schedule,
+    /// so a live session also advances the counters the cold cadence will use next.
+    ///
+    /// Three outcomes rather than a `Result`, because "not addressed to us" is the common case in
+    /// a pool — every envelope carries a wrap per recipient and only one is ever ours — and must
+    /// not be logged as a failure.
+    async fn open_ratcheted_envelope(&self, bytes: &[u8]) -> GossipOpen {
+        let Ok(verified) = crypto::verify_v3(bytes) else {
+            return GossipOpen::Failed;
+        };
+        if verified.author == self.author {
+            return GossipOpen::NotForUs; // our own broadcast, echoed back
+        }
+        let Ok(manager) = self.session_manager().await else {
+            return GossipOpen::Failed;
+        };
+        match manager.open(&verified.author, &verified, now_ms()) {
+            Ok(payload) => GossipOpen::Delivered {
+                author: verified.author,
+                seq: verified.seq,
+                payload,
+            },
+            Err(sessions::SessionError::NotForUs) | Err(sessions::SessionError::NoSession) => {
+                GossipOpen::NotForUs
+            }
+            Err(_) => GossipOpen::Failed,
+        }
+    }
+}
+
+/// What happened to an inbound gossip envelope. See [`LocationNode::open_ratcheted_envelope`].
+enum GossipOpen {
+    Delivered {
+        author: [u8; 32],
+        seq: u64,
+        payload: zeroize::Zeroizing<Vec<u8>>,
+    },
+    /// Addressed to someone else, or from a peer we hold no session with. Ordinary.
+    NotForUs,
+    /// Not a v3 envelope, signature invalid, or the schedule refused the position.
+    Failed,
 }
 
 /// Desync detection and the §4.6 resync primitive.
@@ -1437,11 +1483,24 @@ impl LocationNode {
             tracing::warn!(error = %err, "profile: could not arm the profile namespace at start");
         }
 
-        // Wire the live handles into the pairing core so an Accept can mint our tickets and a
-        // completed pair imports the peer's profile/trail namespaces.
+        // Wire the live handles into the pairing core so an Accept can mint our tickets, a
+        // completed pair imports the peer's profile/trail namespaces, and — since §4.2 — the bump
+        // installs the ratchet session it just rooted.
         let sink: Arc<dyn ProfileSink> = Arc::new(self.profile_events.clone());
+        let session_manager = self
+            .sessions
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)?;
         self.pair
-            .attach_runtime(endpoint.clone(), trail.clone(), profile.clone(), sink)
+            .attach_runtime(
+                endpoint.clone(),
+                trail.clone(),
+                profile.clone(),
+                sink,
+                session_manager,
+            )
             .await;
 
         *guard = Some(Started {
@@ -1475,6 +1534,12 @@ impl LocationNode {
         // The ratchet state itself is on disk and unaffected; this drops only the claim and the
         // in-memory desync counters. `pending_resync` deliberately survives — a stop/start in the
         // same process should not abandon an in-flight resync exchange and force a second one.
+        //
+        // The pair runtime holds a handle too (it bootstraps sessions on a completed bump), and
+        // the claim is released only when the *last* `Arc` drops — so clearing our slot alone
+        // would leak it and make every restart `AlreadyOpen`. Detaching also matches what the
+        // runtime is: live endpoint + docs handles that are about to become invalid anyway.
+        self.pair.detach_runtime().await;
         *self.sessions.lock().await = None;
         Ok(())
     }
@@ -1576,7 +1641,10 @@ impl LocationNode {
         let delivery_endpoint = started.endpoint.clone();
         drop(guard);
 
-        let recv_secret = self.recv_secret.clone();
+        // The node itself, not a snapshot of its session manager: `shutdown` replaces that handle,
+        // and a task holding the old one would keep opening envelopes against a store whose writer
+        // claim has been released.
+        let node = self.clone();
         let cb = listener.clone();
 
         // Remember the listener so node-level `sync_trail` can surface backfill / sync events.
@@ -1600,20 +1668,31 @@ impl LocationNode {
                             sc.via = tracing::field::Empty,
                             outcome = tracing::field::Empty,
                         );
-                        let opened = {
-                            let _guard = span.enter();
-                            crypto::open(&recv_secret, &msg.content)
-                        };
+                        // Signature first, then session state (§4.2): `verify_v3` hands back a
+                        // type the session manager is the only consumer of, so no unauthenticated
+                        // byte can reach the ratchet.
+                        let opened = node.open_ratcheted_envelope(&msg.content).await;
                         // The path lookup is awaited OUTSIDE the span guard: holding a
                         // `tracing` span entered across an await would leak it into whatever
                         // task the executor polls next.
                         let via = match &opened {
-                            Ok(_) => delivery_label(&delivery_endpoint, msg.delivered_from).await,
-                            Err(_) => "live".to_string(),
+                            GossipOpen::Delivered { .. } => {
+                                delivery_label(&delivery_endpoint, msg.delivered_from).await
+                            }
+                            _ => "live".to_string(),
                         };
                         let _guard = span.enter();
                         match opened {
-                            Ok(opened) => {
+                            GossipOpen::Delivered {
+                                author,
+                                seq,
+                                payload,
+                            } => {
+                                let opened = crypto::Opened {
+                                    author,
+                                    seq,
+                                    payload,
+                                };
                                 span.record(
                                     "sc.author",
                                     tracing::field::display(telemetry::short_hex(&opened.author)),
@@ -1643,12 +1722,12 @@ impl LocationNode {
                                     }
                                 }
                             }
-                            Err(crypto::CryptoError::NotARecipient) => {
+                            GossipOpen::NotForUs => {
                                 span.record("outcome", "opaque");
                                 // best-effort presence signal without content
                                 cb.on_opaque(Vec::new(), 0);
                             }
-                            Err(_) => {
+                            GossipOpen::Failed => {
                                 span.record("outcome", "open-failed");
                             }
                         }
@@ -2127,48 +2206,154 @@ impl LocationNode {
     /// un-bootstrapped, or unpersistable. A short wrap list is never silent.
     pub async fn docs_write_ratcheted(
         &self,
-        _subscription_id: String,
+        subscription_id: String,
         seq: u64,
         fix: LocationFix,
         recipient_endpoints: Vec<String>,
     ) -> Result<Vec<String>, LocationError> {
-        let peers = recipient_endpoints
-            .iter()
-            .map(|hex| decode_endpoint(hex).map(|e| e.to_vec()))
-            .collect::<Result<Vec<_>, _>>()?;
-        let manager = self.session_manager().await?;
-
-        let payload = encode_fix_payload(Some(&fix))?;
-        // Persist-before-publish: every counter these wraps represent is on disk before the seal
-        // below, let alone the write (§4.2).
-        let set = manager
-            .next_wraps(&peers, now_ms())
-            .map_err(|e| LocationError::Network(e.to_string()))?;
-        let dropped = set
-            .dropped
-            .iter()
-            .map(|(peer, reason)| format!("{}:{}", encode_hex(peer), reason.as_str()))
-            .collect();
-
-        let envelope = crypto::seal_v3(
-            &self.identity_seed,
-            &self.author,
+        self.docs_write_ratcheted_inner(
+            subscription_id,
             seq,
-            fix.ts,
-            DOCS_MESH_EPOCH,
-            &payload,
-            set.wraps,
-        )?;
+            Some(fix),
+            0,
+            recipient_endpoints,
+            None,
+        )
+        .await
+    }
 
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
-        let ns = started.trail.own_namespace();
-        started
-            .trail
-            .write(ns, &self.author, envelope)
+    /// Seal a **ratcheted null fix** for `watcher_endpoints` and write it to the null slot.
+    ///
+    /// The v3 counterpart of [`Self::docs_write_null`], and the half of §4.1 that makes the
+    /// symmetric-lane argument true rather than aspirational. A watcher who only ever *reads* our
+    /// position still publishes on cadence, and once that envelope is ratcheted it carries their
+    /// ratchet contribution — which is what advances our `peer_advanced_ms` for them and stops
+    /// `next_wraps` dropping them as `Lapsed` after 24 h. On the v2 null lane the contribution did
+    /// not exist, so every one-directional watch edge expired after a day.
+    pub async fn docs_write_null_ratcheted(
+        &self,
+        subscription_id: String,
+        seq: u64,
+        ts: u64,
+        watcher_endpoints: Vec<String>,
+    ) -> Result<Vec<String>, LocationError> {
+        self.docs_write_ratcheted_inner(subscription_id, seq, None, ts, watcher_endpoints, None)
             .await
-            .map_err(|e| LocationError::Network(e.to_string()))?;
-        Ok(dropped)
+    }
+
+    pub async fn docs_write_null_ratcheted_traced(
+        &self,
+        subscription_id: String,
+        seq: u64,
+        ts: u64,
+        watcher_endpoints: Vec<String>,
+        traceparent: String,
+    ) -> Result<Vec<String>, LocationError> {
+        self.docs_write_ratcheted_inner(
+            subscription_id,
+            seq,
+            None,
+            ts,
+            watcher_endpoints,
+            Some(traceparent),
+        )
+        .await
+    }
+
+    pub async fn docs_write_ratcheted_traced(
+        &self,
+        subscription_id: String,
+        seq: u64,
+        fix: LocationFix,
+        recipient_endpoints: Vec<String>,
+        traceparent: String,
+    ) -> Result<Vec<String>, LocationError> {
+        self.docs_write_ratcheted_inner(
+            subscription_id,
+            seq,
+            Some(fix),
+            0,
+            recipient_endpoints,
+            Some(traceparent),
+        )
+        .await
+    }
+
+    /// Both ratcheted durable lanes. `fix.is_none()` is the null lane, which differs only in
+    /// carrying an empty padded payload and landing in a separate LWW slot — the two envelopes a
+    /// tick produces are wrapped for disjoint recipient sets, so sharing a slot would have them
+    /// supersede each other.
+    async fn docs_write_ratcheted_inner(
+        &self,
+        _subscription_id: String,
+        seq: u64,
+        fix: Option<LocationFix>,
+        null_ts: u64,
+        recipient_endpoints: Vec<String>,
+        traceparent: Option<String>,
+    ) -> Result<Vec<String>, LocationError> {
+        use tracing::Instrument;
+        let null = fix.is_none();
+        let ts = fix.as_ref().map(|f| f.ts).unwrap_or(null_ts);
+        let span = tracing::info_span!(
+            "docs.write",
+            sc.author = %telemetry::short_hex(&self.author),
+            sc.seq = seq,
+            sc.lane = if null { "null" } else { "fix" },
+            sc.envelope = 3,
+            recipients = recipient_endpoints.len(),
+            dropped = tracing::field::Empty,
+        );
+        telemetry::set_parent(&span, traceparent.as_deref());
+        async move {
+            let peers = recipient_endpoints
+                .iter()
+                .map(|hex| decode_endpoint(hex).map(|e| e.to_vec()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let manager = self.session_manager().await?;
+
+            let payload = encode_fix_payload(fix.as_ref())?;
+            // Persist-before-publish: every counter these wraps represent is on disk before the
+            // seal below, let alone the write (§4.2).
+            let set = manager
+                .next_wraps(&peers, now_ms())
+                .map_err(|e| LocationError::Network(e.to_string()))?;
+            let dropped: Vec<String> = set
+                .dropped
+                .iter()
+                .map(|(peer, reason)| format!("{}:{}", encode_hex(peer), reason.as_str()))
+                .collect();
+            tracing::Span::current().record("dropped", dropped.len());
+
+            // Every recipient dropped means this envelope reaches nobody. Writing it anyway would
+            // burn a `seq` and leave a wrap-less envelope in the replica for the stash to hold.
+            if set.wraps.is_empty() {
+                return Ok(dropped);
+            }
+
+            let envelope = crypto::seal_v3(
+                &self.identity_seed,
+                &self.author,
+                seq,
+                ts,
+                DOCS_MESH_EPOCH,
+                &payload,
+                set.wraps,
+            )?;
+
+            let guard = self.inner.lock().await;
+            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            let ns = started.trail.own_namespace();
+            let write = if null {
+                started.trail.write_nul(ns, &self.author, envelope).await
+            } else {
+                started.trail.write(ns, &self.author, envelope).await
+            };
+            write.map_err(|e| LocationError::Network(e.to_string()))?;
+            Ok(dropped)
+        }
+        .instrument(span)
+        .await
     }
 
     /// Read the latest **ratcheted** fix per author from the local replica.
@@ -3207,10 +3392,10 @@ impl Subscription {
         &self,
         seq: u64,
         fix: LocationFix,
-        recipients: Vec<Vec<u8>>,
-    ) -> Result<(), LocationError> {
+        recipient_endpoints: Vec<String>,
+    ) -> Result<Vec<String>, LocationError> {
         let ts = fix.ts;
-        self.publish_inner(seq, Some(fix), ts, recipients, None)
+        self.publish_inner(seq, Some(fix), ts, recipient_endpoints, None)
             .await
     }
 
@@ -3218,11 +3403,11 @@ impl Subscription {
         &self,
         seq: u64,
         fix: LocationFix,
-        recipients: Vec<Vec<u8>>,
+        recipient_endpoints: Vec<String>,
         traceparent: String,
-    ) -> Result<(), LocationError> {
+    ) -> Result<Vec<String>, LocationError> {
         let ts = fix.ts;
-        self.publish_inner(seq, Some(fix), ts, recipients, Some(traceparent))
+        self.publish_inner(seq, Some(fix), ts, recipient_endpoints, Some(traceparent))
             .await
     }
 
@@ -3235,19 +3420,20 @@ impl Subscription {
         &self,
         seq: u64,
         ts: u64,
-        recipients: Vec<Vec<u8>>,
-    ) -> Result<(), LocationError> {
-        self.publish_inner(seq, None, ts, recipients, None).await
+        recipient_endpoints: Vec<String>,
+    ) -> Result<Vec<String>, LocationError> {
+        self.publish_inner(seq, None, ts, recipient_endpoints, None)
+            .await
     }
 
     pub async fn publish_null_traced(
         &self,
         seq: u64,
         ts: u64,
-        recipients: Vec<Vec<u8>>,
+        recipient_endpoints: Vec<String>,
         traceparent: String,
-    ) -> Result<(), LocationError> {
-        self.publish_inner(seq, None, ts, recipients, Some(traceparent))
+    ) -> Result<Vec<String>, LocationError> {
+        self.publish_inner(seq, None, ts, recipient_endpoints, Some(traceparent))
             .await
     }
 
@@ -3256,9 +3442,9 @@ impl Subscription {
         seq: u64,
         fix: Option<LocationFix>,
         ts: u64,
-        recipients: Vec<Vec<u8>>,
+        recipient_endpoints: Vec<String>,
         traceparent: Option<String>,
-    ) -> Result<(), LocationError> {
+    ) -> Result<Vec<String>, LocationError> {
         use tracing::Instrument;
         // `sc.entry_hash` is recorded post-seal: it is the blake3 of the sealed envelope, i.e.
         // the same content hash the stash and receivers see — the cross-device join key.
@@ -3267,20 +3453,43 @@ impl Subscription {
             sc.author = %telemetry::short_hex(&self.node.author),
             sc.seq = seq,
             sc.lane = if fix.is_none() { "null" } else { "fix" },
+            sc.envelope = 3,
             sc.entry_hash = tracing::field::Empty,
-            recipients = recipients.len(),
+            recipients = recipient_endpoints.len(),
+            dropped = tracing::field::Empty,
         );
         telemetry::set_parent(&span, traceparent.as_deref());
         async move {
+            let peers = recipient_endpoints
+                .iter()
+                .map(|hex| decode_endpoint(hex).map(|e| e.to_vec()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let manager = self.node.session_manager().await?;
             let payload = encode_fix_payload(fix.as_ref())?;
-            let envelope = crypto::seal(
+
+            // Persist-before-publish holds on the live lane exactly as on the durable one — and
+            // matters more here, because at the hot cadence the counters move ~75× faster.
+            let set = manager
+                .next_wraps(&peers, now_ms())
+                .map_err(|e| LocationError::Network(e.to_string()))?;
+            let dropped: Vec<String> = set
+                .dropped
+                .iter()
+                .map(|(peer, reason)| format!("{}:{}", encode_hex(peer), reason.as_str()))
+                .collect();
+            tracing::Span::current().record("dropped", dropped.len());
+            if set.wraps.is_empty() {
+                return Ok(dropped);
+            }
+
+            let envelope = crypto::seal_v3(
                 &self.node.identity_seed,
                 &self.node.author,
                 seq,
                 ts,
                 DOCS_MESH_EPOCH,
                 &payload,
-                &recipients,
+                set.wraps,
             )?;
             tracing::Span::current().record(
                 "sc.entry_hash",
@@ -3291,7 +3500,7 @@ impl Subscription {
                 tracing::warn!(error = %e, "gossip broadcast failed");
                 LocationError::Network(e.to_string())
             })?;
-            Ok(())
+            Ok(dropped)
         }
         .instrument(span)
         .await

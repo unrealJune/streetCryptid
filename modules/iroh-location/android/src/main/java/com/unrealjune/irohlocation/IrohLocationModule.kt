@@ -461,27 +461,31 @@ class IrohLocationModule : Module() {
         id
       }
 
+    // Recipients are **endpoint ids**, not receiving keys: every fix lane is envelope v3 now, and
+    // a v3 wrap is keyed by the per-friend ratchet session, which is keyed by endpoint id
+    // (FORWARD-SECRECY.md §4.7). Returns the recipients left out, as "<endpointHex>:<reason>" —
+    // a friend with no session yet, a lapsed one, or one whose state could not be read. The
+    // caller must surface these rather than treat a short wrap list as success.
     AsyncFunction("publish") Coroutine
       {
         subscriptionId: String,
         seq: Double,
         fix: Map<String, Double>,
-        recipients: List<String>,
+        recipientEndpoints: List<String>,
         traceparent: String? ->
-        val sub = subs[subscriptionId] ?: return@Coroutine
-        val recipientBytes = recipients.map { it.hexToBytes() }
+        val sub = subs[subscriptionId] ?: return@Coroutine emptyList<String>()
         if (traceparent != null) {
           sub.publishTraced(
             seq.toLong().toULong(),
             locationFixOf(fix),
-            recipientBytes,
+            recipientEndpoints,
             traceparent,
           )
         } else {
           sub.publish(
             seq.toLong().toULong(),
             locationFixOf(fix),
-            recipientBytes,
+            recipientEndpoints,
           )
         }
       }
@@ -494,22 +498,21 @@ class IrohLocationModule : Module() {
         subscriptionId: String,
         seq: Double,
         ts: Double,
-        recipients: List<String>,
+        watcherEndpoints: List<String>,
         traceparent: String? ->
-        val sub = subs[subscriptionId] ?: return@Coroutine
-        val recipientBytes = recipients.map { it.hexToBytes() }
+        val sub = subs[subscriptionId] ?: return@Coroutine emptyList<String>()
         if (traceparent != null) {
           sub.publishNullTraced(
             seq.toLong().toULong(),
             ts.toLong().toULong(),
-            recipientBytes,
+            watcherEndpoints,
             traceparent,
           )
         } else {
           sub.publishNull(
             seq.toLong().toULong(),
             ts.toLong().toULong(),
-            recipientBytes,
+            watcherEndpoints,
           )
         }
       }
@@ -526,24 +529,23 @@ class IrohLocationModule : Module() {
         subscriptionId: String,
         seq: Double,
         fix: Map<String, Double>,
-        recipients: List<String>,
+        recipientEndpoints: List<String>,
         traceparent: String? ->
         val n = node ?: throw IllegalStateException("call createNode first")
-        val recipientBytes = recipients.map { it.hexToBytes() }
         if (traceparent != null) {
-          n.docsWriteTraced(
+          n.docsWriteRatchetedTraced(
             subscriptionId,
             seq.toLong().toULong(),
             locationFixOf(fix),
-            recipientBytes,
+            recipientEndpoints,
             traceparent,
           )
         } else {
-          n.docsWrite(
+          n.docsWriteRatcheted(
             subscriptionId,
             seq.toLong().toULong(),
             locationFixOf(fix),
-            recipientBytes,
+            recipientEndpoints,
           )
         }
       }
@@ -553,26 +555,79 @@ class IrohLocationModule : Module() {
         subscriptionId: String,
         seq: Double,
         ts: Double,
-        recipients: List<String>,
+        watcherEndpoints: List<String>,
         traceparent: String? ->
         val n = node ?: throw IllegalStateException("call createNode first")
-        val recipientBytes = recipients.map { it.hexToBytes() }
         if (traceparent != null) {
-          n.docsWriteNullTraced(
+          n.docsWriteNullRatchetedTraced(
             subscriptionId,
             seq.toLong().toULong(),
             ts.toLong().toULong(),
-            recipientBytes,
+            watcherEndpoints,
             traceparent,
           )
         } else {
-          n.docsWriteNull(
+          n.docsWriteNullRatcheted(
             subscriptionId,
             seq.toLong().toULong(),
             ts.toLong().toULong(),
-            recipientBytes,
+            watcherEndpoints,
           )
         }
+      }
+
+    // ── ratchet sessions + §4.6 recovery ────────────────────────────────────────────────
+    //
+    // There is deliberately no `beginSession`/`completeSession` here. A session is bootstrapped
+    // by the SAS bump itself (pairing.rs), from ephemerals that are signed, connection-pinned and
+    // folded into the figure the two humans compared — so there is no JS-callable seam that could
+    // root a session from anything weaker. What JS drives is only recovery.
+
+    /// Whether this peer needs §4.6 recovery: a run of unopenable envelopes, or state we cannot
+    /// read at all. Drives the "re-pair" prompt together with `resyncCount`.
+    AsyncFunction("isDesynced") Coroutine
+      { peerEndpoint: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.isDesynced(peerEndpoint)
+      }
+
+    /// How many resyncs we have driven with this peer. Recovery that keeps recovering is not
+    /// recovering: past a small number the honest move is to send the humans back to a bump.
+    AsyncFunction("resyncCount") Coroutine
+      { peerEndpoint: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.resyncCount(peerEndpoint).toLong()
+      }
+
+    /// Publish our half of a resync exchange to `recipientRecvPubs`. HPKE-sealed, necessarily:
+    /// this is the message that re-establishes a ratchet, so it cannot depend on one.
+    AsyncFunction("publishResync") Coroutine
+      { recipientRecvPubs: List<String> ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.publishResync(recipientRecvPubs)
+      }
+
+    /// Look for this peer's resync record and restart the session from it, publishing our own
+    /// half first if we have not. Returns whether a session was installed; `false` covers "no
+    /// record yet", "stale", and "already applied", none of which are errors.
+    AsyncFunction("pollResync") Coroutine
+      { peerEndpoint: String, peerRecvPub: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.pollResync(peerEndpoint, peerRecvPub)
+      }
+
+    /// Drop our in-flight resync ephemeral once every peer has been restarted.
+    AsyncFunction("clearResync") Coroutine
+      {
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.clearResync()
+      }
+
+    /// Forget this peer's session entirely — unfriend or revoke.
+    AsyncFunction("forgetSession") Coroutine
+      { peerEndpoint: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.forgetSession(peerEndpoint)
       }
 
     AsyncFunction("syncLatest") Coroutine
@@ -612,7 +667,7 @@ class IrohLocationModule : Module() {
     AsyncFunction("readLatest") Coroutine
       {
         val n = node ?: throw IllegalStateException("call createNode first")
-        n.readLatest().map { incoming: IncomingFix ->
+        n.readLatestRatcheted().map { incoming: IncomingFix ->
           mapOf(
             "author" to incoming.author.toHex(),
             "seq" to incoming.seq.toLong(),

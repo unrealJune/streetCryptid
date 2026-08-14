@@ -410,3 +410,72 @@ async fn sas_cancel_never_completes() {
         "B must not have a PairResult after cancel"
     );
 }
+
+/// The bump bootstraps a ratchet session on **both** sides, with no manual seam.
+///
+/// This is the property that separates "the ratchet exists" from "the ratchet is reachable".
+/// Before it, `begin_session`/`complete_session` were manual calls nobody made, so a completed
+/// pair left two friends with no session and every ratcheted publish dropped as `no_session`.
+///
+/// The assertion is deliberately behavioural rather than a `has_session` peek: publish a real
+/// ratcheted fix and require the peer to open it. That exercises the whole chain the bump is
+/// supposed to have set up — matching roots, agreeing session ids, complementary initiator /
+/// responder roles — and would fail if any of them were merely plausible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_completed_bump_leaves_both_sides_with_a_ratchet_session() {
+    let (a, b, sid) = pair_to_verifying().await;
+    clear_sas_gate(&a, &sid).await;
+    clear_sas_gate(&b, &sid).await;
+
+    // Wait for completion on both sides — `finalize` is what installs the session.
+    for node in [&a, &b] {
+        poll_until!(20, {
+            node.pair_result(sid.clone()).await.expect("pair_result")
+        });
+    }
+
+    let a_id = a.endpoint_id();
+    let b_id = b.endpoint_id();
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+
+    // The role is fixed by endpoint-id ordering, not by who dialled: only the initiator has a
+    // sending chain before the first envelope crosses. Publish from that side.
+    let (sender, receiver, receiver_hex) = if a_id < b_id {
+        (&a, &b, hex(&b_id))
+    } else {
+        (&b, &a, hex(&a_id))
+    };
+
+    let fix = iroh_location::LocationFix {
+        lat: 47.6062,
+        lon: -122.3321,
+        accuracy_m: 4.0,
+        heading_deg: 90.0,
+        ts: 4321,
+    };
+    let dropped = sender
+        .docs_write_ratcheted("test".into(), 1, fix, vec![receiver_hex.clone()])
+        .await
+        .expect("ratcheted publish");
+    assert!(
+        dropped.is_empty(),
+        "the bump must leave a usable session — recipient was dropped: {dropped:?}"
+    );
+
+    // ...and the peer opens it against the session its own side of the bump installed.
+    let opened = poll_until!(20, {
+        receiver
+            .read_latest_ratcheted()
+            .await
+            .expect("read ratcheted")
+            .into_iter()
+            .find(|f| f.author == sender.endpoint_id())
+    });
+    assert_eq!(
+        opened.fix.ts, 4321,
+        "the opened fix is the one that was sent"
+    );
+
+    a.shutdown().await.expect("A shutdown");
+    b.shutdown().await.expect("B shutdown");
+}

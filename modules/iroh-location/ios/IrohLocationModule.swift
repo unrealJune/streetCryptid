@@ -383,17 +383,22 @@ public final class IrohLocationModule: Module {
       return subscriptionId
     }
 
+    // Recipients are **endpoint ids**, not receiving keys: every fix lane is envelope v3 now, and
+    // a v3 wrap is keyed by the per-friend ratchet session, which is keyed by endpoint id
+    // (FORWARD-SECRECY.md 4.7). Returns the recipients left out, as "<endpointHex>:<reason>" —
+    // a friend with no session yet, a lapsed one, or one whose state could not be read. The
+    // caller must surface these rather than treat a short wrap list as success.
     AsyncFunction("publish") {
-      (subscriptionId: String, seq: Double, fix: [String: Double], recipients: [String], traceparent: String?) async throws in
-      guard let sub = self.subscriptions[subscriptionId] else { return }
+      (subscriptionId: String, seq: Double, fix: [String: Double], recipientEndpoints: [String], traceparent: String?) async throws -> [String] in
+      guard let sub = self.subscriptions[subscriptionId] else { return [] }
       if let traceparent {
-        try await sub.publishTraced(
+        return try await sub.publishTraced(
           seq: UInt64(seq), fix: locationFix(from: fix),
-          recipients: recipients.map(hexToData), traceparent: traceparent)
+          recipientEndpoints: recipientEndpoints, traceparent: traceparent)
       } else {
-        try await sub.publish(
+        return try await sub.publish(
           seq: UInt64(seq), fix: locationFix(from: fix),
-          recipients: recipients.map(hexToData))
+          recipientEndpoints: recipientEndpoints)
       }
     }
 
@@ -401,16 +406,16 @@ public final class IrohLocationModule: Module {
     // the watcher half of the symmetric lanes. No fix dictionary: there is no position, only the
     // tick's timestamp, which rides in the signed header as usual.
     AsyncFunction("publishNull") {
-      (subscriptionId: String, seq: Double, ts: Double, recipients: [String], traceparent: String?) async throws in
-      guard let sub = self.subscriptions[subscriptionId] else { return }
+      (subscriptionId: String, seq: Double, ts: Double, watcherEndpoints: [String], traceparent: String?) async throws -> [String] in
+      guard let sub = self.subscriptions[subscriptionId] else { return [] }
       if let traceparent {
-        try await sub.publishNullTraced(
+        return try await sub.publishNullTraced(
           seq: UInt64(seq), ts: UInt64(ts),
-          recipients: recipients.map(hexToData), traceparent: traceparent)
+          recipientEndpoints: watcherEndpoints, traceparent: traceparent)
       } else {
-        try await sub.publishNull(
+        return try await sub.publishNull(
           seq: UInt64(seq), ts: UInt64(ts),
-          recipients: recipients.map(hexToData))
+          recipientEndpoints: watcherEndpoints)
       }
     }
 
@@ -422,34 +427,71 @@ public final class IrohLocationModule: Module {
     // ── Durable trail (iroh-docs) — see docs/social/ARCHITECTURE.md §5–6 ──────────────────
 
     AsyncFunction("docsWrite") {
-      (subscriptionId: String, seq: Double, fix: [String: Double], recipients: [String], traceparent: String?) async throws in
+      (subscriptionId: String, seq: Double, fix: [String: Double], recipientEndpoints: [String], traceparent: String?) async throws -> [String] in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       if let traceparent {
-        try await node.docsWriteTraced(
+        return try await node.docsWriteRatchetedTraced(
           subscriptionId: subscriptionId, seq: UInt64(seq),
-          fix: locationFix(from: fix), recipients: recipients.map(hexToData),
+          fix: locationFix(from: fix), recipientEndpoints: recipientEndpoints,
           traceparent: traceparent)
       } else {
-        try await node.docsWrite(
+        return try await node.docsWriteRatcheted(
           subscriptionId: subscriptionId, seq: UInt64(seq),
-          fix: locationFix(from: fix), recipients: recipients.map(hexToData))
+          fix: locationFix(from: fix), recipientEndpoints: recipientEndpoints)
       }
     }
 
     // Separate LWW slot from the fix lane (`docs::encode_nul_key`): a tick's two envelopes are
     // wrapped for disjoint recipient sets, so one slot would make each supersede the other.
     AsyncFunction("docsWriteNull") {
-      (subscriptionId: String, seq: Double, ts: Double, recipients: [String], traceparent: String?) async throws in
+      (subscriptionId: String, seq: Double, ts: Double, watcherEndpoints: [String], traceparent: String?) async throws -> [String] in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       if let traceparent {
-        try await node.docsWriteNullTraced(
+        return try await node.docsWriteNullRatchetedTraced(
           subscriptionId: subscriptionId, seq: UInt64(seq), ts: UInt64(ts),
-          recipients: recipients.map(hexToData), traceparent: traceparent)
+          watcherEndpoints: watcherEndpoints, traceparent: traceparent)
       } else {
-        try await node.docsWriteNull(
+        return try await node.docsWriteNullRatcheted(
           subscriptionId: subscriptionId, seq: UInt64(seq), ts: UInt64(ts),
-          recipients: recipients.map(hexToData))
+          watcherEndpoints: watcherEndpoints)
       }
+    }
+
+    // Ratchet sessions + 4.6 recovery.
+    //
+    // There is deliberately no `beginSession`/`completeSession` here. A session is bootstrapped by
+    // the SAS bump itself (pairing.rs), from ephemerals that are signed, connection-pinned and
+    // folded into the figure the two humans compared — so there is no JS-callable seam that could
+    // root a session from anything weaker. What JS drives is only recovery.
+
+    AsyncFunction("isDesynced") { (peerEndpoint: String) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.isDesynced(peerEndpointHex: peerEndpoint)
+    }
+
+    AsyncFunction("resyncCount") { (peerEndpoint: String) async throws -> Int in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Int(try await node.resyncCount(peerEndpointHex: peerEndpoint))
+    }
+
+    AsyncFunction("publishResync") { (recipientRecvPubs: [String]) async throws -> String in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.publishResync(recipientRecvPubs: recipientRecvPubs)
+    }
+
+    AsyncFunction("pollResync") { (peerEndpoint: String, peerRecvPub: String) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.pollResync(peerEndpointHex: peerEndpoint, peerRecvPubHex: peerRecvPub)
+    }
+
+    AsyncFunction("clearResync") { () async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.clearResync()
+    }
+
+    AsyncFunction("forgetSession") { (peerEndpoint: String) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.forgetSession(peerEndpointHex: peerEndpoint)
     }
 
     AsyncFunction("syncLatest") { (peerTicket: String?, traceparent: String?) async throws in
@@ -496,7 +538,7 @@ public final class IrohLocationModule: Module {
 
     AsyncFunction("readLatest") { () async throws -> [[String: Any]] in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      let fixes = try await node.readLatest()
+      let fixes = try await node.readLatestRatcheted()
       return fixes.map { incoming in
         [
           "author": dataToHex(incoming.author),

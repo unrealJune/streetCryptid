@@ -142,17 +142,38 @@ export class IrohLocationNativeModule
     return id;
   }
 
+  // ── NO FORWARD SECRECY ON WEB ───────────────────────────────────────────────────────────────
+  //
+  // Native moved every fix lane to envelope v3 (ratcheted, FORWARD-SECRECY.md §4.7). This path
+  // did not, and cannot as it stands: a Double Ratchet needs sequential state that survives a
+  // reload, and the WASM build has no filesystem — its replica and blob store are both in-memory
+  // and vanish with the tab. Sequential state kept there would rewind on every reload, which is
+  // key reuse rather than a missing feature.
+  //
+  // So web still seals v2/HPKE to long-term receiving keys, and `recipientsHex` here really is
+  // receiving keys, not endpoint ids. Consequences, stated rather than buried:
+  //
+  //   * a web peer's fixes are NOT forward-secret, and a native peer cannot open them at all
+  //     (native reads v3 only) — web is a development surface, not a way to share location;
+  //   * the dropped-recipient array these return is always empty, because nothing here can be
+  //     dropped for want of a session.
+  //
+  // Making web a real peer again means either a persistent store (IndexedDB-backed, with the
+  // rollback problem solved) or accepting that it only ever watches. That is a product decision,
+  // not a port.
+
   async publish(
     subscriptionId: string,
     seq: number,
     fix: NativeLocationFix,
     recipientsHex: string[],
     _traceparent?: string | null
-  ): Promise<void> {
+  ): Promise<string[]> {
     await ensureWasm();
     const sub = this.subscriptions.get(subscriptionId)?.sub;
     if (!sub) throw new Error(`Unknown IrohLocation subscription: ${subscriptionId}`);
     await sub.publish(seq, fix, recipientsHex);
+    return [];
   }
 
   async publishNull(
@@ -161,11 +182,12 @@ export class IrohLocationNativeModule
     ts: number,
     recipientsHex: string[],
     _traceparent?: string | null
-  ): Promise<void> {
+  ): Promise<string[]> {
     await ensureWasm();
     const sub = this.subscriptions.get(subscriptionId)?.sub;
     if (!sub) throw new Error(`Unknown IrohLocation subscription: ${subscriptionId}`);
     await sub.publish_null(seq, ts, recipientsHex);
+    return [];
   }
 
   async unsubscribe(subscriptionId: string): Promise<void> {
@@ -190,9 +212,10 @@ export class IrohLocationNativeModule
     fix: NativeLocationFix,
     recipientsHex: string[],
     _traceparent?: string | null
-  ): Promise<void> {
+  ): Promise<string[]> {
     await ensureWasm();
     await this.requireNode().docs_write(subscriptionId, seq, fix, recipientsHex);
+    return [];
   }
 
   async docsWriteNull(
@@ -201,9 +224,10 @@ export class IrohLocationNativeModule
     ts: number,
     recipientsHex: string[],
     _traceparent?: string | null
-  ): Promise<void> {
+  ): Promise<string[]> {
     await ensureWasm();
     await this.requireNode().docs_write_null(subscriptionId, seq, ts, recipientsHex);
+    return [];
   }
 
   async syncLatest(peerTicket: string | null, _traceparent?: string | null): Promise<void> {

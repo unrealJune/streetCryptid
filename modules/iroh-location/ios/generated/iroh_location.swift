@@ -955,6 +955,11 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func cancelPair(sessionId: Data) async throws 
     
     /**
+     * Drop our in-flight resync ephemeral once every peer has been restarted.
+     */
+    func clearResync() async 
+    
+    /**
      * Complete the bootstrap with the peer's ephemeral public half, installing the session.
      *
      * `RK₀` is derived from the ephemeral-ephemeral DH and a transcript over both endpoint ids
@@ -1025,6 +1030,20 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      */
     func docsWriteNull(subscriptionId: String, seq: UInt64, ts: UInt64, recipients: [Data]) async throws 
     
+    /**
+     * Seal a **ratcheted null fix** for `watcher_endpoints` and write it to the null slot.
+     *
+     * The v3 counterpart of [`Self::docs_write_null`], and the half of §4.1 that makes the
+     * symmetric-lane argument true rather than aspirational. A watcher who only ever *reads* our
+     * position still publishes on cadence, and once that envelope is ratcheted it carries their
+     * ratchet contribution — which is what advances our `peer_advanced_ms` for them and stops
+     * `next_wraps` dropping them as `Lapsed` after 24 h. On the v2 null lane the contribution did
+     * not exist, so every one-directional watch edge expired after a day.
+     */
+    func docsWriteNullRatcheted(subscriptionId: String, seq: UInt64, ts: UInt64, watcherEndpoints: [String]) async throws  -> [String]
+    
+    func docsWriteNullRatchetedTraced(subscriptionId: String, seq: UInt64, ts: UInt64, watcherEndpoints: [String], traceparent: String) async throws  -> [String]
+    
     func docsWriteNullTraced(subscriptionId: String, seq: UInt64, ts: UInt64, recipients: [Data], traceparent: String) async throws 
     
     /**
@@ -1040,6 +1059,16 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * un-bootstrapped, or unpersistable. A short wrap list is never silent.
      */
     func docsWriteRatcheted(subscriptionId: String, seq: UInt64, fix: LocationFix, recipientEndpoints: [String]) async throws  -> [String]
+    
+    /**
+     * Both ratcheted durable lanes. `fix.is_none()` is the null lane, which differs only in
+     * carrying an empty padded payload and landing in a separate LWW slot — the two envelopes a
+     * tick produces are wrapped for disjoint recipient sets, so sharing a slot would have them
+     * supersede each other.
+     */
+    func docsWriteRatchetedInner(subscriptionId: String, seq: UInt64, fix: LocationFix?, nullTs: UInt64, recipientEndpoints: [String], traceparent: String?) async throws  -> [String]
+    
+    func docsWriteRatchetedTraced(subscriptionId: String, seq: UInt64, fix: LocationFix, recipientEndpoints: [String], traceparent: String) async throws  -> [String]
     
     func docsWriteTraced(subscriptionId: String, seq: UInt64, fix: LocationFix, recipients: [Data], traceparent: String) async throws 
     
@@ -1091,6 +1120,11 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * pairing-ready). Returns the deterministic session id.
      */
     func initiatePairNearby(peerEndpointId: Data) async throws  -> Data
+    
+    /**
+     * Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+     */
+    func isDesynced(peerEndpointHex: String) async throws  -> Bool
     
     /**
      * List all known pairing sessions.
@@ -1156,6 +1190,18 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func pollProfileEvents() async  -> [ProfileView]
     
     /**
+     * Look for `peer`'s resync record and, if one is there, restart the session from it.
+     *
+     * Publishes our own half first when we have not already, so a single call from each side
+     * completes the exchange without either having to go first — which matters because the
+     * side that noticed the desync and the side that caused it are usually not the same one.
+     *
+     * Returns whether a session was installed. `false` covers "no record yet", "stale record",
+     * and "already applied" — all ordinary, none an error.
+     */
+    func pollResync(peerEndpointHex: String, peerRecvPubHex: String) async throws  -> Bool
+    
+    /**
      * A shareable **read**-ticket for our profile namespace. Also exchanged automatically inside
      * a pairing Accept, so friends usually don't need to import it by hand.
      */
@@ -1173,6 +1219,20 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * rollback guard requires.
      */
     func publishProfile(handle: String, cryptidName: String, sigil: String, color: String) async throws  -> UInt64
+    
+    /**
+     * Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+     *
+     * Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
+     * re-establishes a ratchet, so it cannot require one. That is also why it is the one place
+     * the design has to be most careful: **recovery must never become the bypass**. The record
+     * carries only an ephemeral public key. It cannot downgrade anything, because a root is
+     * only ever derived when *both* ephemerals are in hand.
+     *
+     * Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
+     * than minting a new one, so a peer that already saw our half does not have to see a second.
+     */
+    func publishResync(recipientRecvPubs: [String]) async throws  -> String
     
     /**
      * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
@@ -1253,6 +1313,15 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * call [`pair_result`](Self::pair_result).
      */
     func respondPair(sessionId: Data, accept: Bool) async throws 
+    
+    /**
+     * How many resyncs we have driven with this peer.
+     *
+     * §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+     * retrying forever, so this is deliberately a count rather than a boolean: the UI decides
+     * where patience runs out, and the crypto layer does not pretend to know.
+     */
+    func resyncCount(peerEndpointHex: String) async throws  -> UInt32
     
     /**
      * Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. Invite-based
@@ -1377,6 +1446,35 @@ public convenience init(identitySecret: Data?, recvSecret: Data?)throws  {
     }
 
     
+    /**
+     * Create a node under host-supplied storage roots. **This is the constructor mobile must
+     * use**; [`new`](Self::new) puts everything in the OS temp dir, which is right for host tests
+     * and wrong for a device.
+     *
+     * Both roots are scoped per identity internally (`<root>/<author hex>`), because the host
+     * cannot know the endpoint id before the node that derives it exists.
+     *
+     * - `data_root` — the recoverable trail replica and blobs. Cache is the correct home: it is
+     * large, it is re-fetchable, and it must never be restored from a backup.
+     * - `state_root` — ratchet session state, which is **not** recoverable. This must be the
+     * app's private data dir (Android `filesDir`, iOS Application Support) *and* excluded from
+     * backup, since restoring an old copy rewinds send counters into key reuse. See
+     * [`LocationNode::state_dir`].
+     *
+     * Passing the same root for both is a bug on device in one direction and a break in the
+     * other; the two have opposite requirements.
+     */
+public static func newAtDirs(identitySecret: Data?, recvSecret: Data?, dataRoot: String, stateRoot: String)throws  -> LocationNode  {
+    return try  FfiConverterTypeLocationNode_lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_constructor_locationnode_new_at_dirs(
+        FfiConverterOptionData.lower(identitySecret),
+        FfiConverterOptionData.lower(recvSecret),
+        FfiConverterString.lower(dataRoot),
+        FfiConverterString.lower(stateRoot),$0
+    )
+})
+}
+    
 
     
     /**
@@ -1489,6 +1587,27 @@ open func cancelPair(sessionId: Data)async throws   {
             freeFunc: ffi_iroh_location_rust_future_free_void,
             liftFunc: { $0 },
             errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Drop our in-flight resync ephemeral once every peer has been restarted.
+     */
+open func clearResync()async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_clear_resync(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
         )
 }
     
@@ -1683,6 +1802,50 @@ open func docsWriteNull(subscriptionId: String, seq: UInt64, ts: UInt64, recipie
         )
 }
     
+    /**
+     * Seal a **ratcheted null fix** for `watcher_endpoints` and write it to the null slot.
+     *
+     * The v3 counterpart of [`Self::docs_write_null`], and the half of §4.1 that makes the
+     * symmetric-lane argument true rather than aspirational. A watcher who only ever *reads* our
+     * position still publishes on cadence, and once that envelope is ratcheted it carries their
+     * ratchet contribution — which is what advances our `peer_advanced_ms` for them and stops
+     * `next_wraps` dropping them as `Lapsed` after 24 h. On the v2 null lane the contribution did
+     * not exist, so every one-directional watch edge expired after a day.
+     */
+open func docsWriteNullRatcheted(subscriptionId: String, seq: UInt64, ts: UInt64, watcherEndpoints: [String])async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(watcherEndpoints)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func docsWriteNullRatchetedTraced(subscriptionId: String, seq: UInt64, ts: UInt64, watcherEndpoints: [String], traceparent: String)async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted_traced(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(watcherEndpoints),FfiConverterString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
 open func docsWriteNullTraced(subscriptionId: String, seq: UInt64, ts: UInt64, recipients: [Data], traceparent: String)async throws   {
     return
         try  await uniffiRustCallAsync(
@@ -1719,6 +1882,46 @@ open func docsWriteRatcheted(subscriptionId: String, seq: UInt64, fix: LocationF
                 uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted(
                     self.uniffiCloneHandle(),
                     FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceString.lower(recipientEndpoints)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Both ratcheted durable lanes. `fix.is_none()` is the null lane, which differs only in
+     * carrying an empty padded payload and landing in a separate LWW slot — the two envelopes a
+     * tick produces are wrapped for disjoint recipient sets, so sharing a slot would have them
+     * supersede each other.
+     */
+open func docsWriteRatchetedInner(subscriptionId: String, seq: UInt64, fix: LocationFix?, nullTs: UInt64, recipientEndpoints: [String], traceparent: String?)async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_inner(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterOptionTypeLocationFix.lower(fix),FfiConverterUInt64.lower(nullTs),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterOptionString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func docsWriteRatchetedTraced(subscriptionId: String, seq: UInt64, fix: LocationFix, recipientEndpoints: [String], traceparent: String)async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_traced(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterString.lower(traceparent)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
@@ -1908,6 +2111,26 @@ open func initiatePairNearby(peerEndpointId: Data)async throws  -> Data  {
             completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
             freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
             liftFunc: FfiConverterData.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+     */
+open func isDesynced(peerEndpointHex: String)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_is_desynced(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_i8,
+            completeFunc: ffi_iroh_location_rust_future_complete_i8,
+            freeFunc: ffi_iroh_location_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -2107,6 +2330,33 @@ open func pollProfileEvents()async  -> [ProfileView]  {
 }
     
     /**
+     * Look for `peer`'s resync record and, if one is there, restart the session from it.
+     *
+     * Publishes our own half first when we have not already, so a single call from each side
+     * completes the exchange without either having to go first — which matters because the
+     * side that noticed the desync and the side that caused it are usually not the same one.
+     *
+     * Returns whether a session was installed. `false` covers "no record yet", "stale record",
+     * and "already applied" — all ordinary, none an error.
+     */
+open func pollResync(peerEndpointHex: String, peerRecvPubHex: String)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_poll_resync(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex),FfiConverterString.lower(peerRecvPubHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_i8,
+            completeFunc: ffi_iroh_location_rust_future_complete_i8,
+            freeFunc: ffi_iroh_location_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * A shareable **read**-ticket for our profile namespace. Also exchanged automatically inside
      * a pairing Accept, so friends usually don't need to import it by hand.
      */
@@ -2166,6 +2416,35 @@ open func publishProfile(handle: String, cryptidName: String, sigil: String, col
             completeFunc: ffi_iroh_location_rust_future_complete_u64,
             freeFunc: ffi_iroh_location_rust_future_free_u64,
             liftFunc: FfiConverterUInt64.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+     *
+     * Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
+     * re-establishes a ratchet, so it cannot require one. That is also why it is the one place
+     * the design has to be most careful: **recovery must never become the bypass**. The record
+     * carries only an ephemeral public key. It cannot downgrade anything, because a root is
+     * only ever derived when *both* ephemerals are in hand.
+     *
+     * Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
+     * than minting a new one, so a peer that already saw our half does not have to see a second.
+     */
+open func publishResync(recipientRecvPubs: [String])async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_publish_resync(
+                    self.uniffiCloneHandle(),
+                    FfiConverterSequenceString.lower(recipientRecvPubs)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -2394,6 +2673,30 @@ open func respondPair(sessionId: Data, accept: Bool)async throws   {
             completeFunc: ffi_iroh_location_rust_future_complete_void,
             freeFunc: ffi_iroh_location_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * How many resyncs we have driven with this peer.
+     *
+     * §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+     * retrying forever, so this is deliberately a count rather than a boolean: the UI decides
+     * where patience runs out, and the crypto layer does not pretend to know.
+     */
+open func resyncCount(peerEndpointHex: String)async throws  -> UInt32  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_resync_count(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_u32,
+            completeFunc: ffi_iroh_location_rust_future_complete_u32,
+            freeFunc: ffi_iroh_location_rust_future_free_u32,
+            liftFunc: FfiConverterUInt32.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -2882,9 +3185,9 @@ public protocol SubscriptionProtocol: AnyObject, Sendable {
      * broadcast it on the topic. Recipients NOT in this list cannot decrypt it —
      * that's how revocation works.
      */
-    func publish(seq: UInt64, fix: LocationFix, recipients: [Data]) async throws 
+    func publish(seq: UInt64, fix: LocationFix, recipientEndpoints: [String]) async throws  -> [String]
     
-    func publishInner(seq: UInt64, fix: LocationFix?, ts: UInt64, recipients: [Data], traceparent: String?) async throws 
+    func publishInner(seq: UInt64, fix: LocationFix?, ts: UInt64, recipientEndpoints: [String], traceparent: String?) async throws  -> [String]
     
     /**
      * Broadcast a **null fix** — an envelope with an empty padded payload (FORWARD-SECRECY §4.1).
@@ -2893,11 +3196,11 @@ public protocol SubscriptionProtocol: AnyObject, Sendable {
      * [`Self::publish`], carrying no position. Recipients decode it as a healthy envelope with
      * nothing to deliver.
      */
-    func publishNull(seq: UInt64, ts: UInt64, recipients: [Data]) async throws 
+    func publishNull(seq: UInt64, ts: UInt64, recipientEndpoints: [String]) async throws  -> [String]
     
-    func publishNullTraced(seq: UInt64, ts: UInt64, recipients: [Data], traceparent: String) async throws 
+    func publishNullTraced(seq: UInt64, ts: UInt64, recipientEndpoints: [String], traceparent: String) async throws  -> [String]
     
-    func publishTraced(seq: UInt64, fix: LocationFix, recipients: [Data], traceparent: String) async throws 
+    func publishTraced(seq: UInt64, fix: LocationFix, recipientEndpoints: [String], traceparent: String) async throws  -> [String]
     
 }
 /**
@@ -2961,36 +3264,36 @@ open class Subscription: SubscriptionProtocol, @unchecked Sendable {
      * broadcast it on the topic. Recipients NOT in this list cannot decrypt it —
      * that's how revocation works.
      */
-open func publish(seq: UInt64, fix: LocationFix, recipients: [Data])async throws   {
+open func publish(seq: UInt64, fix: LocationFix, recipientEndpoints: [String])async throws  -> [String]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_subscription_publish(
                     self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients)
+                    FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceString.lower(recipientEndpoints)
                 )
             },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
     
-open func publishInner(seq: UInt64, fix: LocationFix?, ts: UInt64, recipients: [Data], traceparent: String?)async throws   {
+open func publishInner(seq: UInt64, fix: LocationFix?, ts: UInt64, recipientEndpoints: [String], traceparent: String?)async throws  -> [String]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_subscription_publish_inner(
                     self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(seq),FfiConverterOptionTypeLocationFix.lower(fix),FfiConverterUInt64.lower(ts),FfiConverterSequenceData.lower(recipients),FfiConverterOptionString.lower(traceparent)
+                    FfiConverterUInt64.lower(seq),FfiConverterOptionTypeLocationFix.lower(fix),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterOptionString.lower(traceparent)
                 )
             },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -3002,53 +3305,53 @@ open func publishInner(seq: UInt64, fix: LocationFix?, ts: UInt64, recipients: [
      * [`Self::publish`], carrying no position. Recipients decode it as a healthy envelope with
      * nothing to deliver.
      */
-open func publishNull(seq: UInt64, ts: UInt64, recipients: [Data])async throws   {
+open func publishNull(seq: UInt64, ts: UInt64, recipientEndpoints: [String])async throws  -> [String]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_subscription_publish_null(
                     self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceData.lower(recipients)
+                    FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(recipientEndpoints)
                 )
             },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
     
-open func publishNullTraced(seq: UInt64, ts: UInt64, recipients: [Data], traceparent: String)async throws   {
+open func publishNullTraced(seq: UInt64, ts: UInt64, recipientEndpoints: [String], traceparent: String)async throws  -> [String]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_subscription_publish_null_traced(
                     self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceData.lower(recipients),FfiConverterString.lower(traceparent)
+                    FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterString.lower(traceparent)
                 )
             },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
     
-open func publishTraced(seq: UInt64, fix: LocationFix, recipients: [Data], traceparent: String)async throws   {
+open func publishTraced(seq: UInt64, fix: LocationFix, recipientEndpoints: [String], traceparent: String)async throws  -> [String]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_subscription_publish_traced(
                     self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients),FfiConverterString.lower(traceparent)
+                    FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterString.lower(traceparent)
                 )
             },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -6053,6 +6356,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 49013) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_clear_resync() != 52312) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_complete_session() != 30383) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6077,10 +6383,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_docs_write_null() != 46772) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted() != 18657) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted_traced() != 10230) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_docs_write_null_traced() != 22862) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted() != 5397) {
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted() != 14176) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_inner() != 59600) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_traced() != 56484) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_docs_write_traced() != 47616) {
@@ -6113,6 +6431,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby() != 64589) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 60716) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_list_pair_sessions() != 11581) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6140,6 +6461,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_poll_profile_events() != 11150) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_poll_resync() != 5911) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_profile_ticket() != 35099) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6147,6 +6471,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_publish_profile() != 57330) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 54563) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_push_trail() != 65355) {
@@ -6180,6 +6507,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_respond_pair() != 4487) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_resync_count() != 62719) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
@@ -6230,22 +6560,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_subscription_publish() != 48389) {
+    if (uniffi_iroh_location_checksum_method_subscription_publish() != 18306) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_subscription_publish_inner() != 22728) {
+    if (uniffi_iroh_location_checksum_method_subscription_publish_inner() != 62762) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_subscription_publish_null() != 7952) {
+    if (uniffi_iroh_location_checksum_method_subscription_publish_null() != 2917) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_subscription_publish_null_traced() != 10512) {
+    if (uniffi_iroh_location_checksum_method_subscription_publish_null_traced() != 48794) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_subscription_publish_traced() != 21202) {
+    if (uniffi_iroh_location_checksum_method_subscription_publish_traced() != 2036) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_constructor_locationnode_new() != 52316) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_constructor_locationnode_new_at_dirs() != 15584) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_constructor_meshcapsulestore_new() != 52560) {

@@ -74,6 +74,23 @@ export interface OnSyncEvent {
   recovered?: number;
 }
 
+/**
+ * Recipients left out of a ratcheted publish, as `"<endpointIdHex>:<reason>"`.
+ *
+ * A short wrap list is never silently fine: a friend in here did **not** receive that fix. The
+ * reasons come from `DropReason` in `sessions.rs`:
+ *
+ * - `no_session` — never bootstrapped, or the session was forgotten. Needs an in-person re-pair;
+ *   sessions are only ever rooted by the SAS bump (FORWARD-SECRECY.md §4.2).
+ * - `lapsed` — no fresh ratchet key from them within `T_lapse` (24 h). Structurally identical to
+ *   a revocation until they open the app and publish again (§4.5).
+ * - `no_sending_chain` — a responder that has not yet received the initiator's first envelope.
+ *   Resolves itself on the next tick; not worth surfacing to a human.
+ * - `state_unavailable` — their session state could not be read or persisted. Recoverable via
+ *   §4.6 resync, which `isDesynced` will also be reporting.
+ */
+export type RatchetDropped = string;
+
 /** A decrypted fix read back from the local durable replica (see {@link IrohLocationApi.readLatest}). */
 export interface NativeIncomingFix {
   author: string;
@@ -349,14 +366,24 @@ export interface IrohLocationApi {
   deriveTopic(authorEndpointIdHex: string): Promise<string>;
   /** Join a topic; returns a subscription id. Inbound fixes arrive via `onFix`. */
   subscribe(topicHex: string, bootstrapTickets: string[]): Promise<string>;
-  /** Seal `fix` for `recipientsHex` (X25519 pubkeys) and broadcast on the topic. */
+  /**
+   * Seal `fix` under each recipient's **ratchet session** and broadcast it on the topic
+   * (envelope v3 — FORWARD-SECRECY.md §4.7).
+   *
+   * Recipients are **endpoint ids**, not receiving keys. A v3 wrap is keyed by the per-friend
+   * Double Ratchet session, and sessions are keyed by endpoint id; the long-term receiving key
+   * plays no part in the fix lanes any more. Passing recv keys here fails at the hex decode.
+   *
+   * Returns the recipients that were **left out** — see {@link RatchetDropped}. An empty array
+   * means everyone asked for got a wrap.
+   */
   publish(
     subscriptionId: string,
     seq: number,
     fix: NativeLocationFix,
-    recipientsHex: string[],
+    recipientEndpointsHex: string[],
     traceparent?: string | null
-  ): Promise<void>;
+  ): Promise<RatchetDropped[]>;
   /** Leave a topic. */
   unsubscribe(subscriptionId: string): Promise<void>;
   /**
@@ -377,9 +404,9 @@ export interface IrohLocationApi {
     subscriptionId: string,
     seq: number,
     ts: number,
-    recipientsHex: string[],
+    watcherEndpointsHex: string[],
     traceparent?: string | null
-  ): Promise<void>;
+  ): Promise<RatchetDropped[]>;
 
   // ── Durable trail (iroh-docs) — see docs/social/ARCHITECTURE.md §5–6, §9 ────────────────────
   /**
@@ -392,9 +419,9 @@ export interface IrohLocationApi {
     subscriptionId: string,
     seq: number,
     fix: NativeLocationFix,
-    recipientsHex: string[],
+    recipientEndpointsHex: string[],
     traceparent?: string | null
-  ): Promise<void>;
+  ): Promise<RatchetDropped[]>;
   /**
    * Durable mirror of {@link publishNull}, written to a **separate** last-write-wins slot from the
    * fix lane. The two envelopes a tick produces are wrapped for disjoint recipient sets, so a
@@ -410,9 +437,9 @@ export interface IrohLocationApi {
     subscriptionId: string,
     seq: number,
     ts: number,
-    recipientsHex: string[],
+    watcherEndpointsHex: string[],
     traceparent?: string | null
-  ): Promise<void>;
+  ): Promise<RatchetDropped[]>;
   /**
    * Reconcile every replicated namespace so each author's current fix is up to date locally.
    * `peerTicket` explicitly targets the trail stash; null retains peer-only reconciliation.
@@ -464,6 +491,51 @@ export interface IrohLocationApi {
    * author there is no range left to ask for, so this is one call instead of a loop.
    */
   readLatest(): Promise<NativeIncomingFix[]>;
+
+  // ── ratchet sessions + §4.6 recovery ────────────────────────────────────────────────────────
+  //
+  // There is deliberately no `beginSession` / `completeSession` here. A session is bootstrapped by
+  // the SAS bump itself, from ephemerals that are signed, connection-pinned, and folded into the
+  // figure the two humans compare — so there is no JS-callable seam that could root a session from
+  // anything weaker (FORWARD-SECRECY.md §4.2, §4.6's "no automatic downgrade of any kind"). What
+  // JS drives is recovery, and only recovery.
+  //
+  // All OPTIONAL: absent on iOS bindings generated before this API existed (Swift bindings only
+  // regenerate on macOS), so callers must guard with `typeof mod.<name> === 'function'`.
+
+  /**
+   * Whether this peer's session needs §4.6 recovery — a run of signature-valid envelopes we could
+   * not open, or state we cannot read at all. `false` for a peer we simply have no session with:
+   * that is un-bootstrapped, which a resync cannot fix and a re-pair can.
+   */
+  isDesynced?(peerEndpointHex: string): Promise<boolean>;
+  /**
+   * How many resyncs we have driven with this peer. Recovery that keeps recovering is not
+   * recovering — past a small number, surface "re-pair with this friend" instead of retrying.
+   */
+  resyncCount?(peerEndpointHex: string): Promise<number>;
+  /**
+   * Publish our half of a resync exchange, addressed to these friends' **receiving keys**.
+   *
+   * HPKE-sealed rather than ratcheted, necessarily: this is the message that re-establishes a
+   * ratchet, so it cannot depend on one already working. Idempotent while the record is fresh,
+   * re-minted once it ages past half its acceptance window. Returns our ephemeral's public half.
+   */
+  publishResync?(recipientRecvPubsHex: string[]): Promise<string>;
+  /**
+   * Look for this peer's resync record and restart the session from it, publishing our own half
+   * first if we have not — so one call from each side completes the exchange without either
+   * having to go first.
+   *
+   * Returns whether a session was installed. `false` covers "no record yet", "stale record", and
+   * "already applied": all ordinary, none an error.
+   */
+  pollResync?(peerEndpointHex: string, peerRecvPubHex: string): Promise<boolean>;
+  /** Drop our in-flight resync ephemeral once every peer has been restarted. */
+  clearResync?(): Promise<void>;
+  /** Forget a peer's ratchet session entirely — unfriend, or revoke. */
+  forgetSession?(peerEndpointHex: string): Promise<void>;
+
   /** Explicitly drop durable entries older than `olderThanTs`. */
   pruneTrail(olderThanTs: number): Promise<void>;
   /**

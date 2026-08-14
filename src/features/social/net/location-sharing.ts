@@ -26,6 +26,7 @@ import {
   getTelemetry,
   recordEventLog,
   traceparentFor,
+  type Span,
   type SpanContext,
 } from '@/features/dev/telemetry';
 import { encodeContactCard } from '../core/contact-card';
@@ -212,6 +213,35 @@ export interface SharingSnapshot {
   pairing: PairingSnapshot;
   /** Live-mode request state (ARCHITECTURE §9c). */
   live: LiveSnapshot;
+  /** Per-friend forward-secrecy health — who is not receiving our fixes, and why (§4.5, §4.6). */
+  sessions: SessionHealthSnapshot;
+}
+
+/**
+ * Why a friend is not currently receiving our location, in the terms §4.5 asks the UI to keep
+ * apart. All three look identical from the outside — their dot stops moving — and each needs a
+ * different sentence from us.
+ */
+export type SessionHealth =
+  /** Normal: a live ratchet session, publishing to them. */
+  | 'ok'
+  /** No ratchet session. Only an in-person re-pair can create one. */
+  | 'needs-repair'
+  /** No fresh ratchet key from them within `T_lapse` — their app has not run for ~a day. */
+  | 'lapsed'
+  /** We keep failing to open their envelopes; §4.6 recovery is running. */
+  | 'desynced'
+  /** Recovery has run repeatedly without sticking. Stop retrying and send the humans to a bump. */
+  | 'recovery-failed';
+
+/** The drop reasons `sessions.rs` reports that a human can actually act on. */
+export type RatchetDropReason = 'no_session' | 'lapsed';
+
+export interface SessionHealthSnapshot {
+  /** Endpoint id → health, for every friend that is not `ok`. Absent means healthy. */
+  byFriend: Record<string, SessionHealth>;
+  /** When the resync driver last ran, or null if it has not yet. */
+  lastCheckedAt: number | null;
 }
 
 /**
@@ -314,6 +344,28 @@ const PROFILE_BACKFILL_MAX_ATTEMPTS = 10;
  */
 export const TRAIL_CHANGE_COALESCE_MS = 250;
 
+/**
+ * How many §4.6 resyncs with one friend before we stop and ask the humans to re-pair.
+ *
+ * The design is explicit that "a resync loop surfaces a 're-pair with this friend' prompt rather
+ * than retrying forever". Three is enough to absorb the ordinary causes — a stash that withheld a
+ * record, a phone that was off — while a session that has been rebuilt three times and still does
+ * not work is telling us something a fourth rebuild will not fix.
+ */
+const RESYNC_ATTEMPT_LIMIT = 3;
+
+/**
+ * Normalize a ratcheted publish's return value into a dropped-recipient list.
+ *
+ * The native calls return `string[]`, but an installed iOS binary built before the ratcheted
+ * lanes returns nothing at all (Swift bindings regenerate only on macOS, so a device can be
+ * running an older XCFramework against newer JS). Treating that as "nobody was dropped" is the
+ * right reading: those builds also seal v2, where there is no session to be missing.
+ */
+function droppedFrom(result: string[] | void | undefined): string[] {
+  return Array.isArray(result) ? result : [];
+}
+
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -364,6 +416,19 @@ export class LocationSharingService implements FixPublisher {
   private color = '';
   private state = pool.emptyPool();
   private status = 'idle';
+  /**
+   * Friends the last publish could not reach, and the human-actionable reason (§4.5).
+   *
+   * Rebuilt from each publish rather than accumulated: a friend who re-pairs or opens their app
+   * simply stops appearing, with no separate clearing path to forget. Only `no_session` and
+   * `lapsed` land here — see {@link LocationSharing.noteDroppedRecipients}.
+   */
+  private droppedRecipients = new Map<string, RatchetDropReason>();
+  /** Last verdict per friend from the resync driver. See {@link runResyncDriver}. */
+  private sessionVerdicts = new Map<string, SessionHealth>();
+  private sessionsCheckedAt: number | null = null;
+  /** Guards against a slow driver pass overlapping the next tick's. */
+  private resyncInFlight = false;
 
   private mySubId: string | null = null;
   private mySubRecipients = '';
@@ -832,11 +897,29 @@ export class LocationSharingService implements FixPublisher {
     if (this.discoveredFriend?.endpointId === endpointId) this.discoveredFriend = null;
     this.pendingProfiles.delete(endpointId);
     this.profileBackfillAttempts.delete(endpointId);
+    this.droppedRecipients.delete(endpointId);
+    this.sessionVerdicts.delete(endpointId);
     this.emit();
 
     const cleanup: Promise<void>[] = [];
     if (mod && friendSubId) {
       cleanup.push(mod.unsubscribe(friendSubId));
+    }
+    // Destroy the ratchet session with them (§4.2). Not merely tidiness: the state is chain keys
+    // for a relationship that no longer exists, and §5.4 makes erasure an explicit design surface
+    // — keeping it would leave material on disk whose only remaining use is to a seized device.
+    // Best-effort: the friendship is already gone from the pool either way.
+    if (mod && typeof mod.forgetSession === 'function') {
+      cleanup.push(
+        mod.forgetSession(endpointId).catch((err: unknown) => {
+          getTelemetry().log(
+            'warn',
+            `could not forget the ratchet session for a removed friend: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          );
+        })
+      );
     }
     if (wasSharing) cleanup.push(this.ensureMySubscription());
     cleanup.push(
@@ -1316,7 +1399,9 @@ export class LocationSharingService implements FixPublisher {
         headingDeg: fix.headingDeg,
         ts: fix.ts,
       };
-      const recipients = pool.recipientRecvKeys(this.state);
+      // Endpoint ids, not receiving keys: the fix lanes are envelope v3, wrapped under each
+      // friend's ratchet session (FORWARD-SECRECY.md §4.7).
+      const recipients = pool.recipientEndpoints(this.state);
       span.setAttributes({
         recipients: recipients.length,
         payload_type: 'location-fix',
@@ -1330,13 +1415,19 @@ export class LocationSharingService implements FixPublisher {
         recipients: recipients.length,
         payload_ts: fix.ts,
       });
-      await this.mod.publish(this.mySubId, seq, native, recipients, traceparent);
-      span.addEvent('gossip.publish.completed');
+      const liveDropped = droppedFrom(
+        await this.mod.publish(this.mySubId, seq, native, recipients, traceparent)
+      );
+      span.addEvent('gossip.publish.completed', { dropped: liveDropped.length });
       try {
         // Durable mirror: same sealed bytes, so per-recipient revocation carries over (ARCHITECTURE §6).
-        await this.mod.docsWrite(this.mySubId, seq, native, recipients, traceparent);
+        const dropped = droppedFrom(
+          await this.mod.docsWrite(this.mySubId, seq, native, recipients, traceparent)
+        );
+        this.noteDroppedRecipients(dropped, span);
         span.addEvent('docs.write.completed', {
           'stash.replication_enabled': stashReplicationEnabled,
+          dropped: dropped.length,
         });
       } catch (err) {
         // Best effort; the live path already delivered. A later syncTrail can reconcile — but the
@@ -1353,6 +1444,9 @@ export class LocationSharingService implements FixPublisher {
       await this.trail.appendOwn(fix, seq);
       this.notifyTrailChanged();
       await this.publishNullFix(fix.ts, span.context);
+      // After both lanes, so a session the resync exchange just restored is used from the next
+      // tick rather than this one — and so a slow driver pass never delays the fix itself.
+      await this.runResyncDriver();
       span.setStatus('ok');
       return seq;
     } catch (err) {
@@ -1364,13 +1458,135 @@ export class LocationSharingService implements FixPublisher {
   }
 
   /**
+   * Drive §4.6 recovery for every friend whose session has stopped working.
+   *
+   * The schedule cannot heal itself: a desynced session stays desynced until *something* notices
+   * and runs the resync exchange. This is that something. One pass per publish tick, which is the
+   * right cadence because the exchange completes across two ticks (each side publishes its half,
+   * then applies the other's) and the cost when nothing is wrong is one cheap native call per
+   * friend.
+   *
+   * Deliberately not a retry loop. Recovery that keeps recovering is not recovering, so past
+   * `RESYNC_ATTEMPT_LIMIT` the verdict becomes `recovery-failed` and we stop — the honest move at
+   * that point is to send the two humans back to an in-person bump, not to keep churning sessions
+   * on their behalf.
+   */
+  private async runResyncDriver(): Promise<void> {
+    const mod = this.mod;
+    if (!mod || this.resyncInFlight) return;
+    // Absent on iOS binaries built before the §4.6 API (Swift bindings regenerate only on macOS).
+    if (typeof mod.isDesynced !== 'function' || typeof mod.pollResync !== 'function') return;
+
+    this.resyncInFlight = true;
+    const verdicts = new Map<string, SessionHealth>();
+    let anyRecovered = false;
+    try {
+      for (const friend of pool.friendList(this.state)) {
+        const desynced = await mod.isDesynced(friend.endpointId).catch(() => false);
+        if (!desynced) {
+          verdicts.set(friend.endpointId, 'ok');
+          continue;
+        }
+        const attempts =
+          typeof mod.resyncCount === 'function'
+            ? await mod.resyncCount(friend.endpointId).catch(() => 0)
+            : 0;
+        if (attempts >= RESYNC_ATTEMPT_LIMIT) {
+          verdicts.set(friend.endpointId, 'recovery-failed');
+          getTelemetry().log(
+            'warn',
+            `resync has run ${attempts}× with ${friend.endpointId.slice(0, 10)} without sticking; ` +
+              'asking the humans to re-pair instead',
+            { 'sc.peer': friend.endpointId.slice(0, 10), 'sc.resync_count': attempts }
+          );
+          continue;
+        }
+        // `pollResync` publishes our half first when we have not, so a single call from each side
+        // completes the exchange — which matters because the side that noticed the desync and the
+        // side that caused it are usually not the same one.
+        const applied = await mod
+          .pollResync(friend.endpointId, friend.recvPublic)
+          .catch(() => false);
+        verdicts.set(friend.endpointId, applied ? 'ok' : 'desynced');
+        if (applied) {
+          anyRecovered = true;
+          getTelemetry().log('info', `resynced with ${friend.endpointId.slice(0, 10)}`, {
+            'sc.peer': friend.endpointId.slice(0, 10),
+          });
+        }
+      }
+
+      // Drop our resync ephemeral once nobody is still mid-exchange. Holding it costs a private
+      // key sitting in memory for no reason, and the next desync mints a fresh one anyway.
+      const stillRecovering = [...verdicts.values()].some((v) => v === 'desynced');
+      if (anyRecovered && !stillRecovering && typeof mod.clearResync === 'function') {
+        await mod.clearResync().catch(() => {});
+      }
+    } finally {
+      this.resyncInFlight = false;
+      this.sessionVerdicts = verdicts;
+      this.sessionsCheckedAt = Date.now();
+      this.emit();
+    }
+  }
+
+  /**
+   * Record which friends a ratcheted publish left out, and why (FORWARD-SECRECY.md §4.5).
+   *
+   * A short wrap list is not a partial success — the friends named here did not receive this fix,
+   * and nothing else in the system will notice. Two of the reasons are states a *human* has to
+   * resolve, so they are held on the friend and surfaced in the UI rather than only logged:
+   *
+   * - `no_session` — no ratchet session, because the pair predates envelope v3 or the session was
+   *   forgotten. Only an in-person re-pair fixes this; sessions are rooted by the SAS bump alone.
+   * - `lapsed` — they have not contributed a ratchet key within `T_lapse`, which usually means
+   *   their device has not run the app for a day. Distinct from revoked, and distinct from stale.
+   *
+   * The other two are transient — `no_sending_chain` clears on the next tick once the initiator's
+   * first envelope lands, and `state_unavailable` is a storage failure that §4.6 recovery handles
+   * — so they are telemetered but never shown.
+   */
+  private noteDroppedRecipients(dropped: string[], span: Span): void {
+    if (dropped.length === 0) {
+      if (this.droppedRecipients.size > 0) {
+        this.droppedRecipients.clear();
+        this.emit();
+      }
+      return;
+    }
+    const next = new Map<string, RatchetDropReason>();
+    for (const entry of dropped) {
+      const sep = entry.lastIndexOf(':');
+      if (sep <= 0) continue;
+      const endpointId = entry.slice(0, sep);
+      const reason = entry.slice(sep + 1) as RatchetDropReason;
+      const actionable = reason === 'no_session' || reason === 'lapsed';
+      if (actionable) next.set(endpointId, reason);
+      // `no_sending_chain` is a responder waiting for the initiator's first envelope and clears
+      // itself next tick, so it stays at debug; everything else means a friend missed this fix.
+      getTelemetry().log(
+        (reason as string) === 'no_sending_chain' ? 'debug' : 'warn',
+        `fix not delivered to ${endpointId.slice(0, 10)}: ${reason}`,
+        { 'sc.peer': endpointId.slice(0, 10), 'sc.drop_reason': reason }
+      );
+    }
+    span.addEvent('ratchet.recipients_dropped', { count: dropped.length });
+    this.droppedRecipients = next;
+    // Emit rather than coalesce: this is once-per-tick, and "your friend is not receiving your
+    // location" is exactly the kind of change a 250 ms debounce should not sit on.
+    this.emit();
+  }
+
+  /**
    * Publish the tick's **watcher** envelope: a null fix — no position, an empty padded payload —
    * wrapped for every friend we are NOT sharing with (FORWARD-SECRECY.md §4.1).
    *
    * Symmetric lanes: a one-directional watcher edge still carries an envelope from us on the same
    * cadence a sharer's does, so the relationship runs the protocol in both directions and the
    * stash — which sees constant-length ciphertext either way — cannot tell which edges are which.
-   * Once envelope v3 lands (§4.2) this is what carries our ratchet contribution to those friends.
+   * Ratcheted since §4.2 landed, and that is what makes the symmetry real rather than cosmetic:
+   * this envelope carries our ratchet contribution to those friends, which is what keeps a
+   * watch-only edge from lapsing at `T_lapse`.
    *
    * Best effort by design: the real fix has already been published and its `seq` returned, and a
    * watcher edge carries no position, so a failure here must not fail the tick or make the outbox
@@ -1382,7 +1598,7 @@ export class LocationSharingService implements FixPublisher {
     const mod = this.mod;
     const subId = this.mySubId;
     if (!mod || !subId) return;
-    const watchers = pool.watcherRecvKeys(this.state);
+    const watchers = pool.watcherEndpoints(this.state);
     if (watchers.length === 0) return;
     // Absent on iOS binaries built before this API (Swift bindings regenerate only on macOS).
     if (typeof mod.publishNull !== 'function') return;
@@ -1400,11 +1616,12 @@ export class LocationSharingService implements FixPublisher {
       const seq = await this.nextSeq();
       span.setAttribute('sc.seq', seq);
       const traceparent = getTelemetry().enabled ? traceparentFor(span.context) : null;
-      await mod.publishNull(subId, seq, ts, watchers, traceparent);
-      span.addEvent('gossip.publish.completed');
+      const liveDropped = droppedFrom(await mod.publishNull(subId, seq, ts, watchers, traceparent));
+      span.addEvent('gossip.publish.completed', { dropped: liveDropped.length });
       if (typeof mod.docsWriteNull === 'function') {
-        await mod.docsWriteNull(subId, seq, ts, watchers, traceparent);
-        span.addEvent('docs.write.completed');
+        const dropped = droppedFrom(await mod.docsWriteNull(subId, seq, ts, watchers, traceparent));
+        this.noteDroppedRecipients(dropped, span);
+        span.addEvent('docs.write.completed', { dropped: dropped.length });
       }
       span.setStatus('ok');
     } catch (err) {
@@ -2508,7 +2725,28 @@ export class LocationSharingService implements FixPublisher {
       shareIntervalMs: this.shareIntervalMs,
       pairing: this.pairingSnapshot(),
       live: this.liveSnapshot(),
+      sessions: this.sessionHealthSnapshot(),
     };
+  }
+
+  /**
+   * Per-friend forward-secrecy health for the UI (§4.5).
+   *
+   * Merges the two things that know something is wrong and would otherwise each be half a story:
+   * the drop reasons the last publish reported (we cannot reach them) and the desync verdicts the
+   * driver collected (we cannot open theirs). A friend can be in both, and the more actionable one
+   * wins — being told to re-pair is useful, being told recovery is in progress is not.
+   */
+  private sessionHealthSnapshot(): SessionHealthSnapshot {
+    const byFriend: Record<string, SessionHealth> = {};
+    for (const [endpointId, verdict] of this.sessionVerdicts) {
+      if (verdict !== 'ok') byFriend[endpointId] = verdict;
+    }
+    for (const [endpointId, reason] of this.droppedRecipients) {
+      // `needs-repair` is terminal until a human acts, so it outranks any recovery state.
+      byFriend[endpointId] = reason === 'no_session' ? 'needs-repair' : 'lapsed';
+    }
+    return { byFriend, lastCheckedAt: this.sessionsCheckedAt };
   }
 
   private liveSnapshot(): LiveSnapshot {

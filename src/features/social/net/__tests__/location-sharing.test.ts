@@ -26,9 +26,22 @@ class FakeNativeModule {
     subscribe: [] as { topic: string; bootstrap: string[] }[],
     unsubscribe: [] as string[],
     docsWriteControl: [] as unknown[][],
+    pollResync: [] as { peer: string; recvPub: string }[],
+    forgetSession: [] as string[],
+    clearResync: 0,
   };
   private handlers: Record<string, (e: unknown) => void> = {};
   readonly unsubscribeFailures = new Set<string>();
+
+  // ── ratchet state the fake pretends to hold (FORWARD-SECRECY.md §4.5, §4.6) ──────────────
+  /** Recipients every ratcheted publish reports as dropped, as "<endpointId>:<reason>". */
+  droppedRecipients: string[] = [];
+  /** Endpoint ids `isDesynced` should answer `true` for. */
+  readonly desynced = new Set<string>();
+  /** Endpoint id → how many resyncs have already been driven with them. */
+  readonly resyncCounts = new Map<string, number>();
+  /** Endpoint ids whose next `pollResync` should report a session installed. */
+  readonly resyncSucceeds = new Set<string>();
 
   async createNode() {
     return { endpointId: 'aa11', identitySecret: 'ii', recvSecret: 'rr', recvPublic: 'rp' };
@@ -59,15 +72,38 @@ class FakeNativeModule {
   }
   async publish(...args: unknown[]) {
     this.calls.publish.push(args);
+    return this.droppedRecipients;
   }
   async docsWrite(...args: unknown[]) {
     this.calls.docsWrite.push(args);
+    return this.droppedRecipients;
   }
   async publishNull(...args: unknown[]) {
     this.calls.publishNull.push(args);
+    return this.droppedRecipients;
   }
   async docsWriteNull(...args: unknown[]) {
     this.calls.docsWriteNull.push(args);
+    return this.droppedRecipients;
+  }
+
+  async isDesynced(peerEndpointHex: string) {
+    return this.desynced.has(peerEndpointHex);
+  }
+  async resyncCount(peerEndpointHex: string) {
+    return this.resyncCounts.get(peerEndpointHex) ?? 0;
+  }
+  async pollResync(peerEndpointHex: string, peerRecvPubHex: string) {
+    this.calls.pollResync.push({ peer: peerEndpointHex, recvPub: peerRecvPubHex });
+    if (!this.resyncSucceeds.has(peerEndpointHex)) return false;
+    this.desynced.delete(peerEndpointHex);
+    return true;
+  }
+  async clearResync() {
+    this.calls.clearResync += 1;
+  }
+  async forgetSession(peerEndpointHex: string) {
+    this.calls.forgetSession.push(peerEndpointHex);
   }
   async docsWriteControl(...args: unknown[]) {
     this.calls.docsWriteControl.push(args);
@@ -696,10 +732,11 @@ describe('LocationSharingService — symmetric lanes (null fixes)', () => {
 
     expect(mockHolder.mod.calls.publishNull).toHaveLength(1);
     expect(mockHolder.mod.calls.docsWriteNull).toHaveLength(1);
-    // (subscriptionId, seq, ts, recipients, traceparent)
+    // (subscriptionId, seq, ts, watcherEndpoints, traceparent) — endpoint ids, not receiving
+    // keys: the null lane is envelope v3 now, addressed by ratchet session (§4.7).
     expect(mockHolder.mod.calls.publishNull[0][2]).toBe(123);
-    expect(mockHolder.mod.calls.publishNull[0][3]).toEqual([watcherFriend.recvPublic]);
-    expect(mockHolder.mod.calls.docsWriteNull[0][3]).toEqual([watcherFriend.recvPublic]);
+    expect(mockHolder.mod.calls.publishNull[0][3]).toEqual([watcherFriend.endpointId]);
+    expect(mockHolder.mod.calls.docsWriteNull[0][3]).toEqual([watcherFriend.endpointId]);
   });
 
   it('never addresses the same friend on both lanes', async () => {
@@ -709,8 +746,8 @@ describe('LocationSharingService — symmetric lanes (null fixes)', () => {
 
     const shared = mockHolder.mod.calls.publish[0][3] as string[];
     const watched = mockHolder.mod.calls.publishNull[0][3] as string[];
-    expect(shared).toEqual([friend.recvPublic]);
-    expect(watched).toEqual([watcherFriend.recvPublic]);
+    expect(shared).toEqual([friend.endpointId]);
+    expect(watched).toEqual([watcherFriend.endpointId]);
     expect(shared.filter((k) => watched.includes(k))).toEqual([]);
   });
 
@@ -746,7 +783,7 @@ describe('LocationSharingService — symmetric lanes (null fixes)', () => {
     await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
 
     expect(mockHolder.mod.calls.publishNull).toHaveLength(1);
-    expect(mockHolder.mod.calls.publishNull[0][3]).toEqual([watcherFriend.recvPublic]);
+    expect(mockHolder.mod.calls.publishNull[0][3]).toEqual([watcherFriend.endpointId]);
   });
 
   // The real fix is already on the wire and its seq returned by the time the null lane runs, so a
@@ -777,5 +814,167 @@ describe('LocationSharingService — symmetric lanes (null fixes)', () => {
     ).resolves.toBeGreaterThan(0);
 
     expect(mockHolder.mod.calls.docsWriteNull).toHaveLength(0);
+  });
+});
+
+/**
+ * Forward-secrecy health surfacing and §4.6 recovery — FORWARD-SECRECY.md §4.5, §4.6 / §7 step 7.
+ *
+ * The schedule cannot heal itself and a short wrap list is not a partial success: something has to
+ * notice that a friend stopped receiving fixes, say which of the three lookalike reasons it is,
+ * and run the resync exchange. These pin that something.
+ */
+describe('LocationSharingService — session health and resync', () => {
+  const watcher: ContactCard = {
+    endpointId: 'cc33',
+    handle: '@cee',
+    sigil: 'chupacabra',
+    recvPublic: 'c0c0',
+    ticket: 'ticket-c',
+    docTicket: 'doc-c',
+  };
+
+  beforeEach(() => {
+    mockHolder.mod = new FakeNativeModule();
+    mockHolder.stashConfig = null;
+    setTelemetryForTesting(undefined);
+  });
+
+  async function shared(): Promise<LocationSharingService> {
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+    await svc.shareWith(friend.endpointId);
+    return svc;
+  }
+
+  /**
+   * A getter for the latest session-health map the service has emitted, read through its public
+   * change stream. A getter rather than a value because each emit hands over a *new* object — a
+   * captured reference would pin the empty one from before the publish.
+   */
+  function healthOf(svc: LocationSharingService): () => Record<string, string> {
+    let latest: Record<string, string> = {};
+    svc.onChange((s) => {
+      latest = s.sessions.byFriend;
+    });
+    return () => latest;
+  }
+
+  it('surfaces a friend with no ratchet session as needing a re-pair', async () => {
+    // The one drop reason no amount of waiting fixes: sessions are rooted only by the SAS bump,
+    // so a friend paired before envelope v3 needs the two humans in a room again.
+    const svc = await shared();
+    const health = healthOf(svc);
+    mockHolder.mod.droppedRecipients = [`${friend.endpointId}:no_session`];
+
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+
+    expect(health()[friend.endpointId]).toBe('needs-repair');
+  });
+
+  it('distinguishes a lapsed friend from one that needs a re-pair', async () => {
+    // §4.5 asks for these to read differently to a human: lapsed means "their app has not run for
+    // a day" and resolves itself the moment it does, which is not a re-pair.
+    const svc = await shared();
+    const health = healthOf(svc);
+    mockHolder.mod.droppedRecipients = [`${friend.endpointId}:lapsed`];
+
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+
+    expect(health()[friend.endpointId]).toBe('lapsed');
+  });
+
+  it('does not surface a transient responder-window drop to the user', async () => {
+    // `no_sending_chain` is a responder waiting for the initiator's first envelope. It clears
+    // itself on the next tick, so putting it in front of a human would be noise.
+    const svc = await shared();
+    const health = healthOf(svc);
+    mockHolder.mod.droppedRecipients = [`${friend.endpointId}:no_sending_chain`];
+
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+
+    expect(health()).toEqual({});
+  });
+
+  it('clears a drop once the friend is reachable again', async () => {
+    // Rebuilt per publish rather than accumulated, so recovery needs no separate clearing path.
+    const svc = await shared();
+    const health = healthOf(svc);
+    mockHolder.mod.droppedRecipients = [`${friend.endpointId}:no_session`];
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+    expect(health()[friend.endpointId]).toBe('needs-repair');
+
+    mockHolder.mod.droppedRecipients = [];
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 456 });
+
+    expect(health()).toEqual({});
+  });
+
+  it('runs the resync exchange for a desynced friend and reports recovery', async () => {
+    const svc = await shared();
+    const health = healthOf(svc);
+    mockHolder.mod.desynced.add(friend.endpointId);
+    mockHolder.mod.resyncSucceeds.add(friend.endpointId);
+
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+
+    expect(mockHolder.mod.calls.pollResync).toEqual([
+      { peer: friend.endpointId, recvPub: friend.recvPublic },
+    ]);
+    expect(health()).toEqual({});
+    // The ephemeral is dropped once nobody is mid-exchange — a private key held for no reason.
+    expect(mockHolder.mod.calls.clearResync).toBe(1);
+  });
+
+  it('leaves a friend marked desynced while the exchange is still in flight', async () => {
+    // The peer has not published their half yet. Ordinary: the two sides notice at different
+    // times, which is exactly why `pollResync` publishes ours before looking for theirs.
+    const svc = await shared();
+    const health = healthOf(svc);
+    mockHolder.mod.desynced.add(friend.endpointId);
+
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+
+    expect(health()[friend.endpointId]).toBe('desynced');
+    // ...and we must NOT drop the ephemeral, or the peer's half arrives with nothing to meet it.
+    expect(mockHolder.mod.calls.clearResync).toBe(0);
+  });
+
+  it('stops resyncing and asks for a re-pair once recovery keeps failing', async () => {
+    // "A resync loop surfaces a 're-pair with this friend' prompt rather than retrying forever."
+    // A session rebuilt three times that still does not work will not be fixed by a fourth.
+    const svc = await shared();
+    const health = healthOf(svc);
+    mockHolder.mod.desynced.add(friend.endpointId);
+    mockHolder.mod.resyncCounts.set(friend.endpointId, 3);
+
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+
+    expect(mockHolder.mod.calls.pollResync).toEqual([]);
+    expect(health()[friend.endpointId]).toBe('recovery-failed');
+  });
+
+  it('checks watch-only friends too, not just the ones we share with', async () => {
+    // A watcher edge is a session like any other — it is how our own fixes stay openable by them
+    // — so recovery must cover it. Watching only their lane would leave half the pool unhealable.
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(watcher);
+    mockHolder.mod.desynced.add(watcher.endpointId);
+
+    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+
+    expect(mockHolder.mod.calls.pollResync.map((c) => c.peer)).toEqual([watcher.endpointId]);
+  });
+
+  it('forgets the ratchet session when a friend is removed', async () => {
+    // §5.4: chain keys for a relationship that no longer exists are material whose only remaining
+    // use is to a seized device.
+    const svc = await shared();
+
+    await svc.removeFriend(friend.endpointId);
+
+    expect(mockHolder.mod.calls.forgetSession).toEqual([friend.endpointId]);
   });
 });
