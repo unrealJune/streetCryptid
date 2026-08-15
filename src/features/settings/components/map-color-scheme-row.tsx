@@ -4,9 +4,62 @@ import { Pressable, StyleSheet, View } from 'react-native';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedTextInput } from '@/components/themed-text-input';
 import { Fonts, Spacing } from '@/constants/theme';
-import { rgbToHex } from '@/features/map/core/color';
+import { ramp, rgbToHex } from '@/features/map/core/color';
+import type { MapPalette } from '@/features/map/core/types';
 import { useMapColorScheme } from '@/features/map/hooks/use-map-color-scheme';
+import type { MapColorScheme } from '@/features/map/theme/map-color-schemes';
 import { useTheme } from '@/hooks/use-theme';
+
+function MiniMap({ palette }: { palette: MapPalette }) {
+  const road = rgbToHex(ramp(palette.terr, 0.58));
+  const arterial = rgbToHex(ramp(palette.terr, 0.82));
+  const highway = rgbToHex(ramp(palette.terr, 0.98));
+
+  return (
+    <View style={[styles.miniMap, { backgroundColor: rgbToHex(palette.bg) }]}>
+      <View style={[styles.water, { backgroundColor: rgbToHex(ramp(palette.water, 0.68)) }]} />
+      <View
+        style={[
+          styles.park,
+          styles.parkOne,
+          { backgroundColor: rgbToHex(ramp(palette.park, 0.68)) },
+        ]}
+      />
+      <View
+        style={[
+          styles.park,
+          styles.parkTwo,
+          { backgroundColor: rgbToHex(ramp(palette.park, 0.82)) },
+        ]}
+      />
+      <View style={[styles.road, styles.roadOne, { backgroundColor: road }]} />
+      <View style={[styles.road, styles.roadTwo, { backgroundColor: road }]} />
+      <View style={[styles.road, styles.roadThree, { backgroundColor: arterial }]} />
+      <View style={[styles.road, styles.roadFour, { backgroundColor: arterial }]} />
+      <View style={[styles.highway, { backgroundColor: highway }]} />
+      <View style={[styles.transit, { backgroundColor: rgbToHex(palette.transit) }]} />
+      <View style={[styles.accent, { backgroundColor: rgbToHex(palette.accent) }]} />
+    </View>
+  );
+}
+
+function SchemePreview({ scheme }: { scheme: MapColorScheme }) {
+  return (
+    <View style={styles.preview} testID={`${scheme.id}-map-preview`}>
+      <MiniMap palette={scheme.light} />
+      <MiniMap palette={scheme.dark} />
+      <View pointerEvents="none" style={styles.previewDivider} />
+      <View pointerEvents="none" style={styles.modeLabels}>
+        <ThemedText style={styles.modeLabel} type="code">
+          L
+        </ThemedText>
+        <ThemedText style={styles.modeLabel} type="code">
+          D
+        </ThemedText>
+      </View>
+    </View>
+  );
+}
 
 export function MapColorSchemeRow() {
   const theme = useTheme();
@@ -47,19 +100,27 @@ export function MapColorSchemeRow() {
               style={({ pressed }) => [
                 styles.option,
                 {
-                  backgroundColor: selected ? theme.backgroundSelected : 'transparent',
-                  borderColor: selected ? theme.textSecondary : theme.backgroundSelected,
+                  backgroundColor: selected ? theme.backgroundElement : 'transparent',
+                  borderColor: selected ? theme.text : theme.backgroundSelected,
                   opacity: pressed ? 0.58 : 1,
                 },
               ]}
             >
-              <View style={styles.swatches}>
-                <View style={[styles.swatch, { backgroundColor: rgbToHex(scheme.light.bg) }]} />
-                <View style={[styles.swatch, { backgroundColor: rgbToHex(scheme.light.accent) }]} />
-                <View style={[styles.swatch, { backgroundColor: rgbToHex(scheme.dark.bg) }]} />
-                <View style={[styles.swatch, { backgroundColor: rgbToHex(scheme.dark.accent) }]} />
+              <SchemePreview scheme={scheme} />
+              <View style={styles.optionLabel}>
+                <ThemedText numberOfLines={1} type="code">
+                  {scheme.name.toUpperCase()}
+                </ThemedText>
+                <View
+                  style={[
+                    styles.selectionDot,
+                    {
+                      backgroundColor: selected ? theme.text : 'transparent',
+                      borderColor: selected ? theme.text : theme.textSecondary,
+                    },
+                  ]}
+                />
               </View>
-              <ThemedText type="code">{scheme.name.toUpperCase()}</ThemedText>
             </Pressable>
           );
         })}
@@ -138,26 +199,144 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
   },
   options: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: Spacing.two,
   },
   option: {
-    alignItems: 'center',
     borderRadius: Spacing.one,
     borderWidth: StyleSheet.hairlineWidth,
-    flexDirection: 'row',
-    gap: Spacing.three,
-    minHeight: 48,
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
-  },
-  swatches: {
-    borderRadius: 999,
-    flexDirection: 'row',
+    flexBasis: '47%',
+    flexGrow: 1,
+    gap: Spacing.two,
+    minWidth: 132,
     overflow: 'hidden',
+    padding: Spacing.two,
   },
-  swatch: {
-    height: 24,
-    width: 16,
+  preview: {
+    borderRadius: Spacing.one,
+    flexDirection: 'row',
+    height: 94,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  previewDivider: {
+    backgroundColor: 'rgba(255,255,255,.4)',
+    bottom: 0,
+    left: '50%',
+    position: 'absolute',
+    top: 0,
+    width: StyleSheet.hairlineWidth,
+  },
+  modeLabels: {
+    bottom: 4,
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    left: 0,
+    position: 'absolute',
+    right: 0,
+  },
+  modeLabel: {
+    backgroundColor: 'rgba(5,10,18,.62)',
+    borderRadius: 5,
+    color: '#FFFFFF',
+    fontSize: 8,
+    lineHeight: 11,
+    overflow: 'hidden',
+    paddingHorizontal: 3,
+  },
+  miniMap: {
+    flex: 1,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  water: {
+    borderRadius: 28,
+    bottom: -15,
+    position: 'absolute',
+    right: -15,
+    top: -10,
+    transform: [{ rotate: '16deg' }],
+    width: '35%',
+  },
+  park: {
+    borderRadius: 999,
+    position: 'absolute',
+  },
+  parkOne: {
+    height: 28,
+    left: 7,
+    top: 10,
+    transform: [{ rotate: '-18deg' }],
+    width: 38,
+  },
+  parkTwo: {
+    bottom: 11,
+    height: 20,
+    right: 15,
+    transform: [{ rotate: '12deg' }],
+    width: 29,
+  },
+  road: {
+    height: 2,
+    left: -10,
+    position: 'absolute',
+    width: '130%',
+  },
+  roadOne: {
+    top: 25,
+    transform: [{ rotate: '28deg' }],
+  },
+  roadTwo: {
+    top: 55,
+    transform: [{ rotate: '-20deg' }],
+  },
+  roadThree: {
+    height: 3,
+    top: 42,
+    transform: [{ rotate: '4deg' }],
+  },
+  roadFour: {
+    height: 3,
+    top: 68,
+    transform: [{ rotate: '38deg' }],
+  },
+  highway: {
+    height: 5,
+    left: -12,
+    position: 'absolute',
+    top: 16,
+    transform: [{ rotate: '64deg' }],
+    width: '140%',
+  },
+  transit: {
+    height: 2,
+    left: -8,
+    position: 'absolute',
+    top: 74,
+    transform: [{ rotate: '-6deg' }],
+    width: '125%',
+  },
+  accent: {
+    borderRadius: 5,
+    height: 7,
+    left: '46%',
+    position: 'absolute',
+    top: '46%',
+    width: 7,
+  },
+  optionLabel: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.one,
+    justifyContent: 'space-between',
+    minHeight: 20,
+  },
+  selectionDot: {
+    borderRadius: 6,
+    borderWidth: 1,
+    height: 10,
+    width: 10,
   },
   customButton: {
     alignItems: 'center',

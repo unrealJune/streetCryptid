@@ -71,7 +71,7 @@ export const DEFAULT_MAP_COLOR_SCHEME_ID = 'atlas';
 export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
   scheme(
     'atlas',
-    'Atlas',
+    'Seattle',
     {
       bg: '#ECF0F4',
       accent: '#D67C1A',
@@ -95,7 +95,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
   ),
   scheme(
     'field-notes',
-    'Field Notes',
+    'Portland',
     {
       bg: '#F2EFE4',
       accent: '#C45D35',
@@ -119,7 +119,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
   ),
   scheme(
     'afterglow',
-    'Afterglow',
+    'Kyoto',
     {
       bg: '#F2ECF6',
       accent: '#E05278',
@@ -143,7 +143,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
   ),
   scheme(
     'sunset',
-    'Sunset',
+    'Marrakesh',
     {
       bg: '#FFF3E6',
       accent: '#F04E23',
@@ -169,7 +169,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
   ),
   scheme(
     'retrowave',
-    'Retrowave',
+    'Miami',
     {
       bg: '#F7E9FF',
       accent: '#F03F9C',
@@ -193,7 +193,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
   ),
   scheme(
     'aurora',
-    'Aurora',
+    'Reykjavik',
     {
       bg: '#E9FFF8',
       accent: '#7B3FF2',
@@ -217,7 +217,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
   ),
   scheme(
     'neon-grid',
-    'Neon Grid',
+    'Tokyo',
     {
       bg: '#EEF1F5',
       accent: '#F0008C',

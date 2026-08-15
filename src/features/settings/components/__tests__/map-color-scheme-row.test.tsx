@@ -41,14 +41,19 @@ describe('MapColorSchemeRow', () => {
 
     expect(options).toHaveLength(BUILT_IN_MAP_COLOR_SCHEMES.length);
     expect(
+      BUILT_IN_MAP_COLOR_SCHEMES.every(
+        (scheme) => renderer.root.findAllByProps({ testID: `${scheme.id}-map-preview` }).length > 0
+      )
+    ).toBe(true);
+    expect(
       options.find((option) => option.props.accessibilityState.selected)?.props.accessibilityLabel
-    ).toBe('Neon Grid map colors');
+    ).toBe('Tokyo map colors');
   });
 
   it('selects a scheme from settings', () => {
     const options = render();
     const sunset = options.find(
-      (option) => option.props.accessibilityLabel === 'Sunset map colors'
+      (option) => option.props.accessibilityLabel === 'Marrakesh map colors'
     );
 
     act(() => sunset?.props.onPress());
