@@ -164,36 +164,37 @@ function streetCandidates(
   const best = new Map<string, StreetPick>();
 
   for (const part of geometry.parts) {
-    const s: PackedStreets = part.streets;
-    for (let i = 0; i < s.count; i++) {
-      const raw = s.names[i];
-      if (!raw) continue;
-      const roadClass = s.roadClass[i];
-      if (spec.zoom < labelMinZoom(roadClass)) continue;
+    for (const s of [part.streets, part.labelStreets] satisfies readonly PackedStreets[]) {
+      for (let i = 0; i < s.count; i++) {
+        const raw = s.names[i];
+        if (!raw) continue;
+        const roadClass = s.roadClass[i];
+        if (spec.zoom < labelMinZoom(roadClass)) continue;
 
-      const from = s.pointOff[i];
-      const to = s.pointOff[i + 1];
-      if (to - from < 2) continue;
+        const from = s.pointOff[i];
+        const to = s.pointOff[i + 1];
+        if (to - from < 2) continue;
 
-      const measured = measurePolyline(s.coords, from, to, part.originX, part.originY);
-      if (measured === null) continue;
+        const measured = measurePolyline(s.coords, from, to, part.originX, part.originY);
+        if (measured === null) continue;
 
-      const text = raw.toUpperCase();
-      const current = best.get(text);
-      if (
-        current &&
-        (current.roadClass > roadClass ||
-          (current.roadClass === roadClass && current.lengthWorld >= measured.lengthWorld))
-      ) {
-        continue;
+        const text = raw.toUpperCase();
+        const current = best.get(text);
+        if (
+          current &&
+          (current.roadClass > roadClass ||
+            (current.roadClass === roadClass && current.lengthWorld >= measured.lengthWorld))
+        ) {
+          continue;
+        }
+        best.set(text, {
+          text,
+          roadClass,
+          lengthWorld: measured.lengthWorld,
+          world: measured.mid,
+          angle: measured.angle,
+        });
       }
-      best.set(text, {
-        text,
-        roadClass,
-        lengthWorld: measured.lengthWorld,
-        world: measured.mid,
-        angle: measured.angle,
-      });
     }
   }
 

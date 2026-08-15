@@ -45,11 +45,12 @@
 //!   nameRef[count]    i32  (-1 = none)
 //!   pointOff[count+1] u32
 //!   coords[2*totalPoints] f32  (dx,dy)
+//! -- label streets (`transportation_name`; APPENDED AFTER transit) --
+//!   same layout as streets
 //! ```
-//! Transit is last on purpose: a JS reader that knows about it can detect the
-//! section by "there are bytes left", so buffers from an older native binary
-//! (an installed dev build, or iOS before `just bindgen-ios`) still parse and
-//! simply carry no transit lines.
+//! Appended sections are ordered transit, then label streets. A JS reader can
+//! detect each by "there are bytes left", so buffers from older native binaries
+//! still parse and simply carry no data for sections they predate.
 //! An "areas section" (rings grouped per feature): count u32, totalRings u32,
 //! totalPoints u32, nameRef[count] i32, ringOff[count+1] u32, pointOff[totalRings+1]
 //! u32, coords[2*totalPoints] f32.
@@ -212,6 +213,7 @@ fn is_park_landuse(class: &str) -> bool {
 #[derive(Default)]
 struct Geometry {
     streets: Vec<Street>,
+    label_streets: Vec<Street>,
     transit: Vec<Transit>,
     rivers: Vec<Line>,
     water: Vec<Area>,
@@ -600,6 +602,36 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                 }
             }
         }
+        "transportation_name" => {
+            for f in &layer.features {
+                if f.geom_type != GEOM_LINE {
+                    continue;
+                }
+                let Some(name) = layer.prop(f, "name").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                let Some(road_class) = layer
+                    .prop(f, "class")
+                    .and_then(|v| v.as_str())
+                    .and_then(road_class_of)
+                else {
+                    continue;
+                };
+                let name = geo.strings.intern(name);
+                for line in decode_geometry(&f.geometry, proj) {
+                    if line.len() >= 2 {
+                        geo.label_streets.push(Street {
+                            road_class,
+                            name,
+                            points: line,
+                        });
+                    }
+                }
+            }
+        }
         "waterway" => {
             for f in &layer.features {
                 if f.geom_type != GEOM_LINE {
@@ -815,29 +847,7 @@ fn encode(geo: &Geometry, origin: (f64, f64)) -> Vec<u8> {
     w.f64(origin.1);
 
     // streets ----------------------------------------------------------------
-    let total_pts: u32 = geo.streets.iter().map(|s| s.points.len() as u32).sum();
-    w.u32(geo.streets.len() as u32);
-    w.u32(total_pts);
-    for s in &geo.streets {
-        w.u8(s.road_class);
-    }
-    w.align4();
-    for s in &geo.streets {
-        w.i32(s.name);
-    }
-    let mut acc = 0u32;
-    for s in &geo.streets {
-        w.u32(acc);
-        acc += s.points.len() as u32;
-    }
-    w.u32(acc); // count+1
-    w.align4();
-    for s in &geo.streets {
-        for p in &s.points {
-            w.f32(p[0]);
-            w.f32(p[1]);
-        }
-    }
+    write_streets(&mut w, &geo.streets);
 
     // rivers -----------------------------------------------------------------
     write_lines(&mut w, &geo.rivers);
@@ -902,7 +912,36 @@ fn encode(geo: &Geometry, origin: (f64, f64)) -> Vec<u8> {
         }
     }
 
+    // label streets ----------------------------------------------------------
+    write_streets(&mut w, &geo.label_streets);
+
     w.buf
+}
+
+fn write_streets(w: &mut Writer, streets: &[Street]) {
+    let total_pts: u32 = streets.iter().map(|s| s.points.len() as u32).sum();
+    w.u32(streets.len() as u32);
+    w.u32(total_pts);
+    for s in streets {
+        w.u8(s.road_class);
+    }
+    w.align4();
+    for s in streets {
+        w.i32(s.name);
+    }
+    let mut acc = 0u32;
+    for s in streets {
+        w.u32(acc);
+        acc += s.points.len() as u32;
+    }
+    w.u32(acc); // count+1
+    w.align4();
+    for s in streets {
+        for p in &s.points {
+            w.f32(p[0]);
+            w.f32(p[1]);
+        }
+    }
 }
 
 fn write_lines(w: &mut Writer, lines: &[Line]) {
@@ -1147,6 +1186,31 @@ mod tests {
         let name_idx = geo.streets[0].name;
         assert!(name_idx >= 0);
         assert_eq!(geo.strings.list[name_idx as usize], "Main St");
+    }
+
+    #[test]
+    fn decodes_transportation_name_as_label_only_street() {
+        let layer = build_layer(
+            "transportation_name",
+            &["class", "name"],
+            &[value_str("minor"), value_str("East Pine Street")],
+            &[(
+                GEOM_LINE,
+                vec![0, 0, 1, 1],
+                geom_cmds(&[(0, 0), (100, 200)], false),
+            )],
+        );
+        let mut geo = Geometry::default();
+        let o = tile_min(14, 100, 200);
+        decode_tile_into(&layer, 14, 100, 200, (o.0, o.1), &mut geo);
+
+        assert!(geo.streets.is_empty());
+        assert_eq!(geo.label_streets.len(), 1);
+        assert_eq!(geo.label_streets[0].road_class, 1);
+        assert_eq!(
+            geo.strings.list[geo.label_streets[0].name as usize],
+            "East Pine Street"
+        );
     }
 
     #[test]

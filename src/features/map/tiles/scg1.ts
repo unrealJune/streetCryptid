@@ -18,7 +18,7 @@ import type {
   PackedTile,
   PackedTransit,
 } from './packed-geometry';
-import { EMPTY_PACKED_TRANSIT } from './packed-geometry';
+import { EMPTY_PACKED_STREETS, EMPTY_PACKED_TRANSIT } from './packed-geometry';
 import { addMapPerfMetric, type MapPerfMetricScope } from '../perf/map-perf';
 
 const SCG1_MAGIC = 0x31474353; // "SCG1" little-endian
@@ -133,9 +133,7 @@ export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null)
   const resolveNames = (refs: Int32Array) => Array.from(refs, name);
 
   // ---- TRANSIT (appended after the string table) --------------------------
-  // Deliberately last so a pre-transit buffer — what an already-installed
-  // native binary emits (and iOS until `just bindgen-ios` runs) — simply ends
-  // here and degrades to "no transit" instead of throwing.
+  // A pre-transit buffer simply ends here and degrades to no appended sections.
   const transit = p + 8 <= buf.byteLength ? readTransit() : EMPTY_PACKED_TRANSIT;
 
   function readTransit(): PackedTransit {
@@ -148,6 +146,21 @@ export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null)
     align4();
     const coords = viewF32(total * 2);
     return { count, mode, names: resolveNames(nameRef), pointOff, coords };
+  }
+
+  // Label-only streets from `transportation_name`, appended after transit.
+  const labelStreets = p + 8 <= buf.byteLength ? readStreets() : EMPTY_PACKED_STREETS;
+
+  function readStreets(): PackedStreets {
+    const count = u32();
+    const total = u32();
+    const roadClass = viewU8(count);
+    align4();
+    const nameRef = readI32(count);
+    const pointOff = viewU32(count + 1);
+    align4();
+    const coords = viewF32(total * 2);
+    return { count, roadClass, names: resolveNames(nameRef), pointOff, coords };
   }
 
   const streets: PackedStreets = {
@@ -180,6 +193,7 @@ export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null)
     originX,
     originY,
     streets,
+    labelStreets,
     transit,
     rivers,
     water: toAreas(water),

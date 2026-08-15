@@ -156,6 +156,20 @@ describe('decodeMvtTile round-trip', () => {
     },
   ];
 
+  const transportationNameFeatures: Feature[] = [
+    {
+      type: 'Feature',
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [LON - d, LAT - d * 0.3],
+          [LON + d, LAT - d * 0.3],
+        ],
+      } satisfies LineString,
+      properties: { class: 'minor', name: 'East Pine Street' },
+    },
+  ];
+
   const waterwayFeatures: Feature[] = [
     {
       type: 'Feature',
@@ -300,6 +314,7 @@ describe('decodeMvtTile round-trip', () => {
     decoded = buildAndDecode(
       {
         transportation: fc(transportationFeatures),
+        transportation_name: fc(transportationNameFeatures),
         waterway: fc(waterwayFeatures),
         water: fc(waterFeatures),
         park: fc(parkFeatures),
@@ -319,6 +334,14 @@ describe('decodeMvtTile round-trip', () => {
     expect(motorways[0].name).toBe('I-5');
     expect(motorways[0].roadClass).toBe(4);
     expect(decoded.streets).toHaveLength(1);
+  });
+
+  it('decodes OpenMapTiles transportation_name lines as label-only streets', () => {
+    expect(decoded.labelStreets).toHaveLength(1);
+    expect(decoded.labelStreets?.[0]).toMatchObject({
+      roadClass: 1,
+      name: 'East Pine Street',
+    });
   });
 
   it('decodes rail + light rail as transit lines and skips the aerialway', () => {

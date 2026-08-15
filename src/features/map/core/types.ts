@@ -106,6 +106,8 @@ export interface Place {
 /** Everything the renderer needs to draw one patch of the world. */
 export interface MapGeometry {
   readonly streets: readonly StreetWay[];
+  /** OpenMapTiles `transportation_name` lines, used only for label placement. */
+  readonly labelStreets?: readonly StreetWay[];
   readonly transit: readonly TransitWay[];
   readonly rivers: readonly RiverWay[];
   readonly water: readonly AreaFeature[];
