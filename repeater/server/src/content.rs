@@ -73,9 +73,24 @@ impl ContentIndex {
         self.state.contains_key(hash)
     }
 
+    /// Whether `ns` currently references `hash`, regardless of whether its bytes have arrived.
+    pub fn is_tracked_for(&self, ns: &NamespaceId, hash: &ContentHash) -> bool {
+        self.by_namespace
+            .get(ns)
+            .is_some_and(|hashes| hashes.contains(hash))
+    }
+
     /// Whether the bytes have landed — i.e. whether the stash can actually serve this entry.
     pub fn is_present(&self, hash: &ContentHash) -> bool {
         matches!(self.state.get(hash), Some(State::Present))
+    }
+
+    /// Whether `ns` still references `hash` and the bytes are locally servable.
+    pub fn is_present_for(&self, ns: &NamespaceId, hash: &ContentHash) -> bool {
+        self.by_namespace
+            .get(ns)
+            .is_some_and(|hashes| hashes.contains(hash))
+            && self.is_present(hash)
     }
 
     /// Drop `hash` from `ns` (the release policy made every entry in that namespace naming it
@@ -167,11 +182,21 @@ mod tests {
     }
 
     #[test]
+    fn tracked_hashes_are_scoped_to_their_namespace() {
+        let mut index = ContentIndex::new();
+        index.want(NS_A, HASH);
+        assert!(index.is_tracked_for(&NS_A, &HASH));
+        assert!(!index.is_tracked_for(&NS_B, &HASH));
+    }
+
+    #[test]
     fn arrival_clears_the_missing_count() {
         let mut index = ContentIndex::new();
         index.want(NS_A, HASH);
         index.mark_present(HASH);
         assert!(index.is_present(&HASH));
+        assert!(index.is_present_for(&NS_A, &HASH));
+        assert!(!index.is_present_for(&NS_B, &HASH));
         assert_eq!(index.missing_count(), 0);
         assert_eq!(index.tracked_count(), 1);
     }
