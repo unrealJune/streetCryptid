@@ -339,6 +339,7 @@ impl TrailDocs {
     }
 
     /// Upload every current slot in our namespace to the stash's authenticated opaque-content API.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn upload_own_latest(&self, base_url: &str, psk: Option<&str>) -> Result<u64> {
         let doc = self.doc_for(self.own_ns).await?;
         let stream = doc.get_many(Query::single_latest_per_key().build()).await?;
