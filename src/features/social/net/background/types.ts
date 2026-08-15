@@ -44,6 +44,10 @@ export type ActivityKind = 'other' | 'fitness' | 'automotive' | 'navigation';
 export interface SamplingConfig {
   /** The fixed cadence. User-selectable; see `loadShareIntervalMs` in `../persistence.ts`. */
   intervalMs: number;
+  /** Ambient OS movement filter in metres. */
+  ambientDistanceM: number;
+  /** Ambient iOS TaskManager delivery batching window in ms. */
+  ambientDeliveryIntervalMs: number;
   /**
    * Accuracy tier at normal battery.
    */

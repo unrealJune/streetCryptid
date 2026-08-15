@@ -11,9 +11,10 @@ Usage: maestro --udid <udid> hierarchy | hierarchy_text.py <testID>
 
 import json
 import sys
+from typing import Optional
 
 
-def find(node: object, resource_id: str) -> str | None:
+def find(node: object, resource_id: str) -> Optional[str]:
     if not isinstance(node, dict):
         return None
     attrs = node.get("attributes", {})

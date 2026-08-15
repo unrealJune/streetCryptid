@@ -475,6 +475,8 @@ export interface IrohLocationApi {
    * regenerate on macOS), so callers must guard with `typeof mod.pushTrail === 'function'`.
    */
   pushTrail?(peerTicket: string | null, traceparent?: string | null): Promise<void>;
+  /** Upload current opaque trail slots to the stash and wait for durable HTTP receipts. */
+  uploadTrailContent?(baseUrl: string, psk: string | null): Promise<number>;
   /**
    * Seal `msg` for `recipientsHex` and write it to OUR namespace's single control slot,
    * superseding any previous control message from us (ARCHITECTURE §9c). `recipientsHex` is

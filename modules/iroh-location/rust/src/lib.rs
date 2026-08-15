@@ -2139,6 +2139,22 @@ impl LocationNode {
         self.push_trail_inner(peer_ticket, Some(traceparent)).await
     }
 
+    /// Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
+    pub async fn upload_trail_content(
+        &self,
+        base_url: String,
+        psk: Option<String>,
+    ) -> Result<u64, LocationError> {
+        let guard = self.inner.lock().await;
+        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let trail = started.trail.clone();
+        drop(guard);
+        trail
+            .upload_own_latest(&base_url, psk.as_deref())
+            .await
+            .map_err(|error| LocationError::Network(error.to_string()))
+    }
+
     async fn push_trail_inner(
         &self,
         peer_ticket: Option<String>,
@@ -3015,6 +3031,8 @@ impl LocationNode {
         &self,
         read_ticket: String,
         peer_ticket: String,
+        stash_url: String,
+        stash_psk: Option<String>,
     ) -> Result<Vec<IncomingFix>, LocationError> {
         use tracing::Instrument;
 
@@ -3043,15 +3061,61 @@ impl LocationNode {
                 )
             };
             memory.add_endpoint_info(peer.clone());
-            let fixes = trail
-                .sync_direct(&endpoint, doc_ticket, peer, &self.recv_secret)
+            let sealed = trail
+                .sync_direct(
+                    &endpoint,
+                    doc_ticket,
+                    peer,
+                    &stash_url,
+                    stash_psk.as_deref(),
+                )
                 .await
                 .map_err(|e| LocationError::Network(e.to_string()))?;
+            let manager = self.session_manager().await?;
+            let mut verified = sealed
+                .iter()
+                .filter_map(|bytes| crypto::verify_v3(bytes).ok())
+                .filter(|envelope| envelope.author != self.author)
+                .collect::<Vec<_>>();
+            verified.sort_unstable_by_key(|envelope| (envelope.author, envelope.seq));
+
+            let mut fixes = Vec::new();
+            for envelope in verified {
+                let author = envelope.author.to_vec();
+                let payload = match manager.open(&author, &envelope, now_ms()) {
+                    Ok(payload) => payload,
+                    Err(sessions::SessionError::NotForUs) => continue,
+                    Err(error) => {
+                        eprintln!(
+                            "[watch] ratcheted envelope {} could not be opened: {error}",
+                            envelope.seq
+                        );
+                        continue;
+                    }
+                };
+                let Ok(Some(fix)) = decode_fix_payload(&payload) else {
+                    continue;
+                };
+                fixes.push(IncomingFix {
+                    author,
+                    seq: envelope.seq,
+                    fix,
+                });
+            }
+            for bytes in sealed {
+                let Ok(opened) = crypto::open(&self.recv_secret, &bytes) else {
+                    continue;
+                };
+                if let Some(fix) = latest_fix_to_incoming(docs::LatestFix {
+                    author: opened.author.to_vec(),
+                    seq: opened.seq,
+                    payload: opened.payload,
+                }) {
+                    fixes.push(fix);
+                }
+            }
             tracing::Span::current().record("recovered", fixes.len());
-            Ok(fixes
-                .into_iter()
-                .filter_map(latest_fix_to_incoming)
-                .collect())
+            Ok(fixes)
         }
         .instrument(span)
         .await

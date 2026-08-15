@@ -40,7 +40,29 @@ export interface SamplingPolicy {
 
 /** The default cadence, and the middle option offered in settings. */
 export const DEFAULT_SHARE_INTERVAL_MS = 5 * 60_000;
-export const AMBIENT_DISTANCE_INTERVAL_M = 100;
+export const AMBIENT_DISTANCE_INTERVAL_M = 50;
+export const AMBIENT_DELIVERY_INTERVAL_MS = 60_000;
+
+export type IosLocationBenchmarkProfile = 'battery' | 'balanced' | 'fidelity';
+
+/** Dev-only simulator profiles; production always uses the balanced defaults above. */
+export function benchmarkProfileOverrides(
+  profile: string | null
+): Partial<SamplingConfig> | undefined {
+  switch (profile) {
+    case 'battery':
+      return { ambientDistanceM: 100, ambientDeliveryIntervalMs: 5 * 60_000 };
+    case 'balanced':
+      return {
+        ambientDistanceM: AMBIENT_DISTANCE_INTERVAL_M,
+        ambientDeliveryIntervalMs: AMBIENT_DELIVERY_INTERVAL_MS,
+      };
+    case 'fidelity':
+      return { ambientDistanceM: 25, ambientDeliveryIntervalMs: 30_000 };
+    default:
+      return undefined;
+  }
+}
 
 /**
  * Defaults for an *ambient* "friends on a map" sharer (Life360 / Find-My class), not a turn-by-turn
@@ -50,6 +72,8 @@ export const AMBIENT_DISTANCE_INTERVAL_M = 100;
  */
 export const DEFAULT_SAMPLING_CONFIG: SamplingConfig = {
   intervalMs: DEFAULT_SHARE_INTERVAL_MS,
+  ambientDistanceM: AMBIENT_DISTANCE_INTERVAL_M,
+  ambientDeliveryIntervalMs: AMBIENT_DELIVERY_INTERVAL_MS,
   lowBatteryThreshold: 0.2,
   normalAccuracy: 'balanced',
   // Not `low`. That tier is nominally accurate to the kilometre, which is both useless on a friend
@@ -98,11 +122,10 @@ export function createSamplingPolicy(config?: Partial<SamplingConfig>): Sampling
       // Constant, whatever the battery says. The only battery response is the accuracy tier above
       // and the hard suspend below; stretching the interval would put the charge level on the wire.
       timeIntervalMs: merged.intervalMs,
-      // Standard Core Location ignores timeInterval on iOS. A zero distance filter therefore means
-      // continuous GPS, even for a five-minute product cadence. Let the OS wake on meaningful
-      // movement and batch background delivery up to the selected ambient interval.
-      distanceIntervalM: AMBIENT_DISTANCE_INTERVAL_M,
-      deferredUpdatesIntervalMs: merged.intervalMs,
+      // Standard Core Location ignores timeInterval on iOS, so distance is the hardware-facing
+      // battery control. Expo then batches the callbacks so a car does not wake JS every 50 m.
+      distanceIntervalM: merged.ambientDistanceM,
+      deferredUpdatesIntervalMs: merged.ambientDeliveryIntervalMs,
       active: !criticallyLow(battery),
     };
   };

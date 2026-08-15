@@ -69,6 +69,7 @@ import {
   createPersistentKV,
   createPersistentTrailStorage,
   loadHandledNonces,
+  loadIosLocationBenchmarkProfile,
   loadPool,
   loadRatchetActivity,
   loadShareIntervalMs,
@@ -498,8 +499,9 @@ export class LocationSharingService implements FixPublisher {
    * not deployed.
    */
   private readonly stash: StashClient;
+  private readonly stashConfig = getStashConfig();
   /** The stash's dial ticket for reconciliation bootstrap, or null when not configured. */
-  private readonly stashTicket: string | null = getStashConfig()?.ticket ?? null;
+  private readonly stashTicket: string | null = this.stashConfig?.ticket ?? null;
   /** Per-user opt-in (persisted). Defaults false — the stash is never used unless turned on. */
   private stashOptIn = false;
   /** Persisted native endpoint transports. All paths are enabled by default. */
@@ -1754,6 +1756,17 @@ export class LocationSharingService implements FixPublisher {
         this.stashTicket,
         getTelemetry().enabled ? traceparentFor(span.context) : null
       );
+      if (this.stashConfig && typeof this.mod.uploadTrailContent !== 'function') {
+        throw new Error('native module must be rebuilt for durable stash delivery');
+      }
+      if (this.stashConfig) {
+        const uploadTrailContent = this.mod.uploadTrailContent;
+        if (!uploadTrailContent) {
+          throw new Error('native module must be rebuilt for durable stash delivery');
+        }
+        const uploaded = await uploadTrailContent(this.stashConfig.baseUrl, this.stashConfig.psk);
+        span.setAttribute('content_uploaded', uploaded);
+      }
       span.setStatus('ok');
     } catch (err) {
       // A failure means these fixes only reach friends who are online now — exactly the gap the
@@ -1871,7 +1884,7 @@ export class LocationSharingService implements FixPublisher {
     try {
       const [
         { createLocationEngine },
-        { createSamplingPolicy },
+        { benchmarkProfileOverrides, createSamplingPolicy },
         { BackgroundLocationProvider: Provider },
         { backgroundOutbox, registerActiveBackgroundFixHandler, registerActiveRefreshHandler },
         { createBatterySource },
@@ -1889,7 +1902,11 @@ export class LocationSharingService implements FixPublisher {
       // Launch on the user's grid, not the default — otherwise a phone restarting at 15 min would
       // publish at 5 min until they next opened settings.
       this.shareIntervalMs = await loadShareIntervalMs(this.kv);
-      const policy = createSamplingPolicy({ intervalMs: this.shareIntervalMs });
+      const benchmarkProfile = await loadIosLocationBenchmarkProfile(this.kv);
+      const policy = createSamplingPolicy({
+        intervalMs: this.shareIntervalMs,
+        ...benchmarkProfileOverrides(benchmarkProfile),
+      });
       this.engine = createLocationEngine({
         publisher: this,
         outbox: backgroundOutbox,
@@ -3033,6 +3050,8 @@ export class LocationSharingService implements FixPublisher {
         pair_events: pairEvents.length,
         profile_events: profileEvents.length,
         sessions: sessions.length,
+        session_states: sessions.map((session) => session.state).join(','),
+        sas_verified_sessions: sessions.filter((session) => session.sasVerified).length,
         ble_peers: peers.length,
         pairing_ready: caps.pairingReady,
       });

@@ -122,8 +122,8 @@ describe('cadence pure helpers', () => {
   });
 
   it('keeps the ambient OS movement filter stable across battery states', () => {
-    expect(cfgFor(fullBattery).distanceIntervalM).toBe(100);
-    expect(cfgFor(lowBattery).distanceIntervalM).toBe(100);
+    expect(cfgFor(fullBattery).distanceIntervalM).toBe(50);
+    expect(cfgFor(lowBattery).distanceIntervalM).toBe(50);
   });
 
   it('cadenceDiffers ignores notification text but catches accuracy + interval changes', () => {

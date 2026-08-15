@@ -1381,6 +1381,11 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      */
     func transportDiagnostics(peerEndpointIds: [Data]) async throws  -> TransportDiagnostics
     
+    /**
+     * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
+     */
+    func uploadTrailContent(baseUrl: String, psk: String?) async throws  -> UInt64
+    
 }
 /**
  * The device node: holds identity + receiving keys and, once started, the iroh
@@ -2916,6 +2921,26 @@ open func transportDiagnostics(peerEndpointIds: [Data])async throws  -> Transpor
             completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
             freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeTransportDiagnostics_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
+     */
+open func uploadTrailContent(baseUrl: String, psk: String?)async throws  -> UInt64  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_upload_trail_content(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(baseUrl),FfiConverterOptionString.lower(psk)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_u64,
+            completeFunc: ffi_iroh_location_rust_future_complete_u64,
+            freeFunc: ffi_iroh_location_rust_future_free_u64,
+            liftFunc: FfiConverterUInt64.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -6666,6 +6691,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics() != 23251) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_upload_trail_content() != 549) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_meshcapsulestore_deliver() != 47836) {

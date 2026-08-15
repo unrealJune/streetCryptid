@@ -70,6 +70,7 @@ jest.mock('../../persistence', () => ({
   createPersistentKV: jest.fn(() => ({})),
   loadSharingEnabled: () => mockLoadSharingEnabled(),
   loadShareIntervalMs: jest.fn(async () => 300_000),
+  loadIosLocationBenchmarkProfile: jest.fn(async () => null),
 }));
 
 jest.mock('../battery-source', () => ({
@@ -275,8 +276,8 @@ describe('headless-runtime', () => {
       // failure compounds instead of ending.
       expect(mockStartBackgroundLocation.mock.calls[0][0]).toMatchObject({
         timeIntervalMs: 300_000,
-        distanceIntervalM: 100,
-        deferredUpdatesIntervalMs: 300_000,
+        distanceIntervalM: 50,
+        deferredUpdatesIntervalMs: 60_000,
         pausesUpdatesAutomatically: true,
       });
     });

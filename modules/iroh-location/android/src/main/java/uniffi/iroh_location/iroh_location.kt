@@ -853,6 +853,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_upload_trail_content(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_meshcapsulestore_deliver(
     ): Int
     external fun uniffi_iroh_location_checksum_method_meshcapsulestore_have(
@@ -1055,6 +1057,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_sync_latest_traced(`ptr
 external fun uniffi_iroh_location_fn_method_locationnode_ticket(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_transport_diagnostics(`ptr`: Long,`peerEndpointIds`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_upload_trail_content(`ptr`: Long,`baseUrl`: RustBuffer.ByValue,`psk`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_clone_meshcapsulestore(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
@@ -1503,6 +1507,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics() != 23251) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_upload_trail_content() != 549) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_deliver() != 47836) {
@@ -2960,6 +2967,11 @@ public interface LocationNodeInterface {
      * requested peers. Remote path usage is point-in-time; callers should poll when displaying it.
      */
     suspend fun `transportDiagnostics`(`peerEndpointIds`: List<kotlin.ByteArray>): TransportDiagnostics
+    
+    /**
+     * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
+     */
+    suspend fun `uploadTrailContent`(`baseUrl`: kotlin.String, `psk`: kotlin.String?): kotlin.ULong
     
     companion object
 }
@@ -4792,6 +4804,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeTransportDiagnostics.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `uploadTrailContent`(`baseUrl`: kotlin.String, `psk`: kotlin.String?) : kotlin.ULong {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_upload_trail_content(
+                uniffiHandle,
+                FfiConverterString.lower(`baseUrl`),FfiConverterOptionalString.lower(`psk`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterULong.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )

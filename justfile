@@ -117,6 +117,20 @@ test:
 e2e-pairing device-a device-b:
     bash scripts/e2e/pairing-e2e.sh {{device-a}} {{device-b}}
 
+# One-simulator iOS background pipeline smoke test. The simulator needs a current local build.
+# Example: `just e2e-ios-background 354E950C-...`
+e2e-ios-background device:
+    bash scripts/e2e/ios-background-location-e2e.sh {{device}}
+
+# Create/reuse the stash-only host observer used by iOS background E2E tests.
+e2e-ios-observer device:
+    bash scripts/e2e/ensure-ios-stash-observer.sh {{device}}
+
+# Compare battery, balanced, and fidelity profiles on identical simulator routes.
+# Defaults to six minutes each for walking + driving (~36 minutes total).
+benchmark-ios-location device output="ios-location-benchmark.tsv":
+    bash scripts/e2e/ios-location-benchmark.sh {{device}} {{output}}
+
 # Profile the deterministic launch/zoom/pan region-build sequence (fixture by default).
 profile-map source="":
     bun scripts/profile-scene.ts {{source}}

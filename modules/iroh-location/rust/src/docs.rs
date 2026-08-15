@@ -46,12 +46,10 @@ use zeroize::Zeroizing;
 use crate::crypto;
 
 #[cfg(feature = "cli")]
-use iroh_blobs::HashAndFormat;
-#[cfg(feature = "cli")]
 use iroh_docs::{
     actor::{OpenOpts, SyncHandle},
     net::connect_and_sync,
-    store::Store as DocsStore,
+    store::{DownloadPolicy, Store as DocsStore},
     DocTicket,
 };
 
@@ -338,6 +336,56 @@ impl TrailDocs {
     /// Our own trail namespace id.
     pub fn own_namespace(&self) -> NamespaceId {
         self.own_ns
+    }
+
+    /// Upload every current slot in our namespace to the stash's authenticated opaque-content API.
+    pub async fn upload_own_latest(&self, base_url: &str, psk: Option<&str>) -> Result<u64> {
+        let doc = self.doc_for(self.own_ns).await?;
+        let stream = doc.get_many(Query::single_latest_per_key().build()).await?;
+        tokio::pin!(stream);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+        let namespace = hex_encode(self.own_ns.as_bytes());
+        let mut uploaded = 0;
+        while let Some(entry) = stream.next().await {
+            let entry = entry?;
+            if entry.content_len() == 0 {
+                continue;
+            }
+            let hash = entry.content_hash();
+            let bytes = self.blobs.blobs().get_bytes(hash).await?;
+            let request = client
+                .put(format!(
+                    "{}/v1/namespaces/{namespace}/content/{hash}",
+                    base_url.trim_end_matches('/')
+                ))
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(bytes);
+            let request = match psk {
+                Some(psk) => request.bearer_auth(psk),
+                None => request,
+            };
+            let mut response = request
+                .try_clone()
+                .expect("byte-backed request is cloneable")
+                .send()
+                .await?;
+            for _ in 0..4 {
+                if response.status() != reqwest::StatusCode::NOT_FOUND {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                response = request
+                    .try_clone()
+                    .expect("byte-backed request is cloneable")
+                    .send()
+                    .await?;
+            }
+            response.error_for_status()?;
+            uploaded += 1;
+        }
+        Ok(uploaded)
     }
 
     /// Fetch a cached [`Doc`] handle for `ns`, or open it from the local replica store.
@@ -644,18 +692,29 @@ impl TrailDocs {
         endpoint: &iroh::Endpoint,
         ticket: DocTicket,
         peer: EndpointAddr,
-        recv_secret: &[u8],
-    ) -> Result<Vec<LatestFix>> {
+        stash_url: &str,
+        stash_psk: Option<&str>,
+    ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+        eprintln!("[watch] creating metadata-only sync actor");
         let sync = SyncHandle::spawn(
             DocsStore::memory(),
             None,
             format!("stash-cli-{}", endpoint.id().fmt_short()),
         );
+        eprintln!("[watch] importing trail capability");
         let namespace = sync.import_namespace(ticket.capability).await?;
+        // The stash intentionally releases ciphertext for superseded entries while retaining their
+        // signed docs records. Automatic download would request every historical hash and abort on
+        // the first released blob. Reconcile metadata only, then fetch the latest retained slot for
+        // each key explicitly below.
+        sync.set_download_policy(namespace, DownloadPolicy::NothingExcept(Vec::new()))
+            .await?;
         sync.open(namespace, OpenOpts::default().sync()).await?;
+        eprintln!("[watch] reconciling metadata with stash");
 
         let result = async {
             let finished = connect_and_sync(endpoint, &sync, namespace, peer.clone(), None).await?;
+            eprintln!("[watch] metadata reconciliation finished");
             if finished.peer != peer.id {
                 return Err(anyhow!(
                     "direct trail sync expected {}, got {}",
@@ -667,7 +726,6 @@ impl TrailDocs {
             let (tx, mut rx) = irpc::channel::mpsc::channel(256);
             sync.get_many(namespace, Query::single_latest_per_key().build(), tx)
                 .await?;
-            let downloader = self.blobs.downloader(endpoint);
             let mut out = Vec::new();
             while let Some(entry) = rx.recv().await? {
                 let entry = entry?;
@@ -675,28 +733,34 @@ impl TrailDocs {
                     continue;
                 }
                 let hash = entry.content_hash();
-                if self.blobs.blobs().get_bytes(hash).await.is_err() {
-                    downloader
-                        .download(HashAndFormat::raw(hash), [peer.id])
-                        .await?;
-                }
-                let bytes = self.blobs.blobs().get_bytes(hash).await?;
-                let opened = match crypto::open(recv_secret, &bytes) {
-                    Ok(opened) => opened,
-                    Err(_) => continue,
+                let bytes = match self.blobs.blobs().get_bytes(hash).await {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        eprintln!(
+                        "[watch] fetching latest retained blob {} through the stash receipt API",
+                        crate::telemetry::short_hex(hash.as_bytes())
+                    );
+                        let namespace_hex = hex_encode(namespace.as_bytes());
+                        let request = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(10))
+                            .build()?
+                            .get(format!(
+                                "{}/v1/namespaces/{namespace_hex}/content/{hash}",
+                                stash_url.trim_end_matches('/')
+                            ));
+                        let request = match stash_psk {
+                            Some(psk) => request.bearer_auth(psk),
+                            None => request,
+                        };
+                        let response = request.send().await?.error_for_status()?;
+                        let bytes = response.bytes().await?;
+                        if iroh_blobs::Hash::new(&bytes) != hash {
+                            return Err(anyhow!("stash receipt returned bytes for the wrong hash"));
+                        }
+                        bytes
+                    }
                 };
-                tracing::info!(
-                    sc.entry_hash = %crate::telemetry::short_hex(hash.as_bytes()),
-                    sc.author = %crate::telemetry::short_hex(&opened.author),
-                    sc.seq = opened.seq,
-                    sync.peer = %peer.id.fmt_short(),
-                    "trail.latest: recovered current fix via direct stash reconciliation"
-                );
-                out.push(LatestFix {
-                    author: opened.author.to_vec(),
-                    seq: opened.seq,
-                    payload: opened.payload,
-                });
+                out.push(Zeroizing::new(bytes.to_vec()));
             }
             Ok(out)
         }

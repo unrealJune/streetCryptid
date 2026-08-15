@@ -204,6 +204,7 @@ fixes through trail-stash only:
 ```bash
 just trail-stash-client status
 just trail-stash-client pair --adb
+just trail-stash-client pair --simulator <simulator-udid>
 just trail-stash-client watch
 just trail-stash-client watch --once --json
 ```

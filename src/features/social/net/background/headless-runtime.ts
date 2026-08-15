@@ -3,14 +3,19 @@ import { AppState, Platform } from 'react-native';
 import { getTelemetry, type SpanContext } from '@/features/dev/telemetry';
 import { createCryptidProfileStore } from '@/features/account/storage/profile-store';
 import { LocationSharingService } from '../location-sharing';
-import { createPersistentKV, loadShareIntervalMs, loadSharingEnabled } from '../persistence';
+import {
+  createPersistentKV,
+  loadIosLocationBenchmarkProfile,
+  loadShareIntervalMs,
+  loadSharingEnabled,
+} from '../persistence';
 import { backgroundOutbox } from './background-outbox';
 import { isBackgroundLocationRunning, startBackgroundLocation } from './background-task';
 import { createBatterySource } from './battery-source';
 import { cfgFromDecision } from './cadence-controller';
 import { isNativeRuntimeClaimed, withNativeRuntimeSession } from './native-runtime-owner';
 import { getActiveRefreshHandler } from './register-task';
-import { createSamplingPolicy } from './sampling-policy';
+import { benchmarkProfileOverrides, createSamplingPolicy } from './sampling-policy';
 
 interface HeadlessSession<T> {
   /** Cheap precondition checked BEFORE a node is spun up; `false` ⇒ skip and return `fallback`. */
@@ -156,7 +161,10 @@ export async function ensureSharingArmedHeadless(
     attributes: { trigger, platform: Platform.OS },
   });
   try {
-    const policy = createSamplingPolicy({ intervalMs: await loadShareIntervalMs(kv) });
+    const policy = createSamplingPolicy({
+      intervalMs: await loadShareIntervalMs(kv),
+      ...benchmarkProfileOverrides(await loadIosLocationBenchmarkProfile(kv)),
+    });
     // Ambient cadence only. A self-heal never restores live mode: the watcher's window has almost
     // certainly lapsed by now, and resurrecting a 4-second cadence unattended is how this failure
     // mode compounds instead of ending.

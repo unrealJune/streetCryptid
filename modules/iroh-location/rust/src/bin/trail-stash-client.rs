@@ -21,6 +21,8 @@ const APP_PACKAGE: &str = "com.unrealjune.streetcryptid";
 const DEFAULT_PAIR_TTL_SECONDS: u64 = 900;
 const DEFAULT_WATCH_INTERVAL_SECONDS: u64 = 10;
 const HTTP_TIMEOUT_SECONDS: u64 = 10;
+const NODE_OPERATION_TIMEOUT_SECONDS: u64 = 15;
+const SYNC_ATTEMPT_TIMEOUT_SECONDS: u64 = 15;
 const ONCE_RETRY_SECONDS: u64 = 2;
 const ONCE_MAX_ATTEMPTS: u64 = 15;
 
@@ -45,6 +47,10 @@ enum ClientCommand {
         /// Open the invite on the single ADB-connected Android device.
         #[arg(long)]
         adb: bool,
+
+        /// Open the invite on an iOS Simulator with this UDID.
+        #[arg(long)]
+        simulator: Option<String>,
 
         /// Replace an existing paired phone while retaining this CLI's identity.
         #[arg(long)]
@@ -72,6 +78,10 @@ enum ClientCommand {
         /// Poll interval for continuous watch mode.
         #[arg(long, default_value_t = DEFAULT_WATCH_INTERVAL_SECONDS)]
         interval_seconds: u64,
+
+        /// With --once, keep polling for a new fix until this timeout expires.
+        #[arg(long, default_value_t = 0)]
+        timeout_seconds: u64,
     },
 
     /// Show local pairing state, configured endpoints, and stash health.
@@ -187,15 +197,38 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         ClientCommand::Pair {
             adb,
+            simulator,
             force,
             ttl_seconds,
             auto_sas,
-        } => run_pair(&state_dir, &config, adb, force, ttl_seconds, auto_sas).await,
+        } => {
+            run_pair(
+                &state_dir,
+                &config,
+                adb,
+                simulator.as_deref(),
+                force,
+                ttl_seconds,
+                auto_sas,
+            )
+            .await
+        }
         ClientCommand::Watch {
             once,
             json,
             interval_seconds,
-        } => run_watch(&state_dir, &config, once, json, interval_seconds).await,
+            timeout_seconds,
+        } => {
+            run_watch(
+                &state_dir,
+                &config,
+                once,
+                json,
+                interval_seconds,
+                timeout_seconds,
+            )
+            .await
+        }
         ClientCommand::Status => run_status(&state_dir, &config).await,
     }
 }
@@ -204,12 +237,16 @@ async fn run_pair(
     state_dir: &Path,
     config: &RuntimeConfig,
     open_adb: bool,
+    simulator: Option<&str>,
     force: bool,
     ttl_seconds: u64,
     auto_sas: bool,
 ) -> Result<()> {
     if ttl_seconds == 0 {
         bail!("pair invite TTL must be greater than zero");
+    }
+    if open_adb && simulator.is_some() {
+        bail!("choose only one invite target: --adb or --simulator");
     }
 
     let state_path = state_path(state_dir);
@@ -260,9 +297,14 @@ async fn run_pair(
     if open_adb {
         open_pair_link_with_adb(&link)?;
         println!("Opened the invite on the ADB-connected phone.");
+    } else if let Some(udid) = simulator {
+        open_pair_link_with_simctl(udid, &link)?;
+        println!("Opened the invite on iOS Simulator {udid}.");
     } else {
         println!("ADB command:");
         println!("adb shell am start -a android.intent.action.VIEW -d \"{link}\" {APP_PACKAGE}");
+        println!("iOS Simulator command:");
+        println!("xcrun simctl openurl <udid> \"{link}\"");
     }
 
     let session_id = wait_for_pair_session(&node, Duration::from_secs(ttl_seconds)).await?;
@@ -321,10 +363,16 @@ async fn run_watch(
     once: bool,
     json: bool,
     interval_seconds: u64,
+    timeout_seconds: u64,
 ) -> Result<()> {
     if !once && interval_seconds == 0 {
         bail!("watch interval must be greater than zero");
     }
+    if !once && timeout_seconds > 0 {
+        bail!("watch timeout requires --once");
+    }
+    let deadline =
+        (timeout_seconds > 0).then(|| Instant::now() + Duration::from_secs(timeout_seconds));
 
     let state_path = state_path(state_dir);
     let mut state = load_state(&state_path)?.ok_or_else(|| anyhow!("no CLI state; pair first"))?;
@@ -345,11 +393,16 @@ async fn run_watch(
         .context("registering the phone namespace with trail-stash")?;
 
     let stash_endpoint = config.stash_endpoint_short()?;
-    println!(
+    let watch_message = format!(
         "Watching phone {} through stash {} only. No gossip subscription or phone ticket is used.",
         short_hex(&peer.endpoint_id),
         stash_endpoint
     );
+    if json {
+        eprintln!("{watch_message}");
+    } else {
+        println!("{watch_message}");
+    }
 
     let mut sync_attempt = 0u64;
     loop {
@@ -357,23 +410,41 @@ async fn run_watch(
         // store per attempt ensures the configured stash remains the only possible dial target.
         sync_attempt += 1;
         let watch_replica = watch_root.join(format!("attempt-{}-{sync_attempt}", now_ms()));
-        let (node, _) = create_node(Some(&state), watch_replica.clone())?;
+        let pairing_replica = watch_root
+            .parent()
+            .ok_or_else(|| anyhow!("observer state directory has no parent"))?
+            .join("pairing-replica");
+        let node = create_watch_node(&state, pairing_replica)?;
         configure_node_telemetry(&node, config);
-        node.start(
-            config.relay_urls.clone(),
-            config.relay_token.clone(),
-            true,
-            true,
-            true,
+        eprintln!("[watch] starting isolated iroh node (attempt {sync_attempt})");
+        tokio::time::timeout(
+            Duration::from_secs(NODE_OPERATION_TIMEOUT_SECONDS),
+            node.start(
+                config.relay_urls.clone(),
+                config.relay_token.clone(),
+                true,
+                true,
+                true,
+            ),
         )
         .await
+        .context("starting the stash-only node timed out")?
         .context("starting the stash-only node")?;
+        eprintln!("[watch] isolated iroh node ready (attempt {sync_attempt})");
 
         let attempt = async {
-            let fixes = node
-                .sync_latest_via_only(peer.trail_ticket.clone(), config.stash_ticket.clone())
-                .await
-                .context("direct stash-only trail reconciliation")?;
+            let fixes = tokio::time::timeout(
+                Duration::from_secs(SYNC_ATTEMPT_TIMEOUT_SECONDS),
+                node.sync_latest_via_only(
+                    peer.trail_ticket.clone(),
+                    config.stash_ticket.clone(),
+                    config.stash_url.clone(),
+                    config.stash_psk.clone(),
+                ),
+            )
+            .await
+            .context("direct stash-only trail reconciliation timed out")?
+            .context("direct stash-only trail reconciliation")?;
             if fixes
                 .iter()
                 .any(|fix| fix.author.as_slice() != peer_author.as_slice())
@@ -383,18 +454,15 @@ async fn run_watch(
             Ok::<_, anyhow::Error>(fixes)
         }
         .await;
-        let shutdown = node.shutdown().await.context("shutting down watcher node");
-        if let Err(error) = fs::remove_dir_all(&watch_replica) {
-            tracing::warn!(
-                path = %watch_replica.display(),
-                error = %error,
-                "could not remove the isolated watch replica"
-            );
-        }
-        shutdown?;
         let mut fixes = match attempt {
             Ok(fixes) => fixes,
             Err(error) => {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(NODE_OPERATION_TIMEOUT_SECONDS),
+                    node.shutdown(),
+                )
+                .await;
+                let _ = fs::remove_dir_all(&watch_replica);
                 eprintln!(
                     "[sync-error] attempt={} stash={} error={error:#}",
                     sync_attempt, stash_endpoint
@@ -405,7 +473,10 @@ async fn run_watch(
                     error = %error,
                     "stash.cli.sync_failed"
                 );
-                if once && sync_attempt >= ONCE_MAX_ATTEMPTS {
+                if once
+                    && (sync_attempt >= ONCE_MAX_ATTEMPTS
+                        || deadline.is_some_and(|deadline| Instant::now() >= deadline))
+                {
                     return Err(error).context("stash-only sync retry budget exhausted");
                 }
                 tokio::time::sleep(Duration::from_secs(if once {
@@ -479,8 +550,35 @@ async fn run_watch(
             );
         }
 
-        if once {
+        if once && !new_fixes.is_empty() {
+            io::stdout().flush().context("flushing fix output")?;
+            return Ok(());
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(NODE_OPERATION_TIMEOUT_SECONDS),
+            node.shutdown(),
+        )
+        .await
+        .context("shutting down watcher node timed out")?
+        .context("shutting down watcher node")?;
+        if let Err(error) = fs::remove_dir_all(&watch_replica) {
+            tracing::warn!(
+                path = %watch_replica.display(),
+                error = %error,
+                "could not remove the isolated watch replica"
+            );
+        }
+
+        if once && (!new_fixes.is_empty() || deadline.is_none()) {
             break;
+        }
+        if once {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                bail!("no new stash fix received within {timeout_seconds} seconds");
+            }
+            tokio::time::sleep(Duration::from_secs(ONCE_RETRY_SECONDS)).await;
+            continue;
         }
 
         tokio::select! {
@@ -562,6 +660,16 @@ fn create_node(
     Ok((node, next_state))
 }
 
+fn create_watch_node(state: &ClientState, data_dir: PathBuf) -> Result<Arc<LocationNode>> {
+    fs::create_dir_all(&data_dir)
+        .with_context(|| format!("creating replica directory {}", data_dir.display()))?;
+    let identity =
+        hex_decode(&state.identity_secret).context("stored identity secret is invalid")?;
+    let recv = hex_decode(&state.recv_secret).context("stored receiving secret is invalid")?;
+    LocationNode::new_with_data_dir(Some(identity), Some(recv), data_dir)
+        .context("constructing the ephemeral stash watcher")
+}
+
 fn configure_node_telemetry(node: &LocationNode, config: &RuntimeConfig) {
     let Some(endpoint) = config.otel_endpoint.as_ref() else {
         return;
@@ -569,7 +677,7 @@ fn configure_node_telemetry(node: &LocationNode, config: &RuntimeConfig) {
     let instance = format!("stash-cli-{}", short_hex(&hex_encode(&node.endpoint_id())));
     let active = configure_telemetry(endpoint.clone(), instance);
     if active {
-        println!("OTEL export enabled for the CLI core.");
+        eprintln!("OTEL export enabled for the CLI core.");
     }
 }
 
@@ -739,6 +847,17 @@ fn open_pair_link_with_adb(link: &str) -> Result<()> {
         )?;
     if !status.success() {
         bail!("adb failed to open the pairing link ({status})");
+    }
+    Ok(())
+}
+
+fn open_pair_link_with_simctl(udid: &str, link: &str) -> Result<()> {
+    let status = Command::new("xcrun")
+        .args(["simctl", "openurl", udid, link])
+        .status()
+        .context("running xcrun simctl; verify Xcode is installed and the simulator is booted")?;
+    if !status.success() {
+        bail!("simctl failed to open the pairing link ({status})");
     }
     Ok(())
 }

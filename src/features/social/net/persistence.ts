@@ -403,6 +403,7 @@ export async function saveLocationDisclosureChoice(
 }
 
 const SHARE_INTERVAL_KEY = 'sc.social.shareIntervalMs';
+const IOS_LOCATION_BENCHMARK_PROFILE_KEY = 'sc.dev.iosLocationProfile';
 
 /**
  * The cadences offered in settings, in ms. A closed set rather than a free-form number, for two
@@ -430,6 +431,15 @@ export async function loadShareIntervalMs(kv: PersistentKV): Promise<number> {
 export async function saveShareIntervalMs(kv: PersistentKV, intervalMs: number): Promise<void> {
   if (!SHARE_INTERVAL_OPTIONS_MS.some((option) => option === intervalMs)) return;
   await kv.set(SHARE_INTERVAL_KEY, String(intervalMs));
+}
+
+/** Dev-only simulator benchmark selection. Invalid or absent values use production defaults. */
+export async function loadIosLocationBenchmarkProfile(
+  kv: PersistentKV
+): Promise<'battery' | 'balanced' | 'fidelity' | null> {
+  if (!__DEV__) return null;
+  const raw = await kv.get(IOS_LOCATION_BENCHMARK_PROFILE_KEY);
+  return raw === 'battery' || raw === 'balanced' || raw === 'fidelity' ? raw : null;
 }
 
 const SHARING_ENABLED_KEY = 'sc.social.sharingEnabled';

@@ -88,6 +88,7 @@
         {
           "locationWhenInUsePermission": "streetCryptid shares your location only with friends you choose.",
           "locationAlwaysAndWhenInUsePermission": "streetCryptid keeps sharing your location with chosen friends while the app is in the background.",
+          "isIosBackgroundLocationEnabled": true,
           "isAndroidBackgroundLocationEnabled": true,
           "isAndroidForegroundServiceEnabled": true,
           "androidForegroundServiceIcon": "./assets/images/android-icon-monochrome.png"

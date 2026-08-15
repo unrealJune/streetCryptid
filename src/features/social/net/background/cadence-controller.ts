@@ -69,8 +69,8 @@ export function cfgFromDecision(
     // Location pace itself — but it is derived from movement, and we no longer classify movement at
     // all. A constant hint also keeps the OS request identical whatever the user is doing.
     activityType: 'other',
-    // Ambient sharing is not navigation. Let Core Location power down while stationary; the
-    // movement filter, revive geofence, and periodic refresh provide the resume/backstop paths.
+    // Apple recommends auto-pause for sustained background tracking. Expo also registers the
+    // significant-change service, and our revive fence covers terminated-process recovery.
     pausesUpdatesAutomatically: true,
     notificationTitle: notification.title,
     notificationBody: notification.body,

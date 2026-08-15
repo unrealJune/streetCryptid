@@ -59,7 +59,7 @@ describe('background location registration', () => {
     );
   });
 
-  it('defaults to auto-pause when unspecified for battery-efficient ambient sharing', async () => {
+  it('defaults to auto-pause for battery-efficient ambient sharing', async () => {
     const api = makeApi(false);
 
     await rearmBackgroundLocationTask(api, config);

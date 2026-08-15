@@ -518,6 +518,11 @@ public final class IrohLocationModule: Module {
       }
     }
 
+    AsyncFunction("uploadTrailContent") { (baseUrl: String, psk: String?) async throws -> UInt64 in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.uploadTrailContent(baseUrl: baseUrl, psk: psk)
+    }
+
     // Live-mode request channel (ARCHITECTURE §9c). Same bindgen caveat as `pushTrail` above:
     // needs `just bindgen-ios` on macOS before `node.docsWriteControl` / `node.readControl` exist
     // in the generated Swift. The JS side guards on both exports, so an older binary degrades to

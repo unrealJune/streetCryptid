@@ -650,6 +650,12 @@ class IrohLocationModule : Module() {
         }
       }
 
+    AsyncFunction("uploadTrailContent") Coroutine
+      { baseUrl: String, psk: String? ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.uploadTrailContent(baseUrl, psk).toDouble()
+      }
+
     // Live-mode request channel (ARCHITECTURE §9c). Writes OUR single control slot, superseding
     // any previous message from us; needs a `pushTrail` afterwards like any other docs write.
     AsyncFunction("docsWriteControl") Coroutine
