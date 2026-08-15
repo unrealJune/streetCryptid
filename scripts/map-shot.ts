@@ -11,7 +11,7 @@
  * the tileset — the privacy bundle path is a client concern, not a render one.
  *
  *   bun scripts/map-shot.ts --out /tmp/shots --places westcoast,europe --zooms 4,8,12
- *   bun scripts/map-shot.ts --scheme neon-grid --mode dark --places westcoast --zooms 13
+ *   bun scripts/map-shot.ts --scheme tokyo --mode dark --places westcoast --zooms 13
  *   bun scripts/map-shot.ts --out /tmp/shots --highways   # keep motorways on
  */
 

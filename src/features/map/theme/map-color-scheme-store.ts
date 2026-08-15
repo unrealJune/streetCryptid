@@ -10,7 +10,7 @@ import {
   type MapColorScheme,
 } from './map-color-schemes';
 
-const STORAGE_KEY = 'sc.map.color-scheme.v1';
+const STORAGE_KEY = 'sc.map.color-scheme.v2';
 const kv = createPersistentKV();
 
 interface PersistedPreference {

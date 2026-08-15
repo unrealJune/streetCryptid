@@ -66,11 +66,11 @@ function scheme(
   return { id, name, light: palette(light), dark: palette(dark) };
 }
 
-export const DEFAULT_MAP_COLOR_SCHEME_ID = 'atlas';
+export const DEFAULT_MAP_COLOR_SCHEME_ID = 'seattle';
 
 export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
   scheme(
-    'atlas',
+    'seattle',
     'Seattle',
     {
       bg: '#ECF0F4',
@@ -94,7 +94,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
     }
   ),
   scheme(
-    'field-notes',
+    'portland',
     'Portland',
     {
       bg: '#F2EFE4',
@@ -118,7 +118,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
     }
   ),
   scheme(
-    'afterglow',
+    'kyoto',
     'Kyoto',
     {
       bg: '#F2ECF6',
@@ -142,7 +142,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
     }
   ),
   scheme(
-    'sunset',
+    'marrakesh',
     'Marrakesh',
     {
       bg: '#FFF3E6',
@@ -168,7 +168,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
     }
   ),
   scheme(
-    'retrowave',
+    'miami',
     'Miami',
     {
       bg: '#F7E9FF',
@@ -192,7 +192,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
     }
   ),
   scheme(
-    'aurora',
+    'reykjavik',
     'Reykjavik',
     {
       bg: '#E9FFF8',
@@ -216,7 +216,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
     }
   ),
   scheme(
-    'neon-grid',
+    'tokyo',
     'Tokyo',
     {
       bg: '#EEF1F5',

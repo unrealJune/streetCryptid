@@ -15,7 +15,7 @@ jest.mock('@/features/map/hooks/use-map-color-scheme', () => ({
     schemes: jest.requireActual('@/features/map/theme/map-color-schemes')
       .BUILT_IN_MAP_COLOR_SCHEMES,
     select: mockSelect,
-    selectedId: 'neon-grid',
+    selectedId: 'tokyo',
   }),
 }));
 
@@ -52,13 +52,13 @@ describe('MapColorSchemeRow', () => {
 
   it('selects a scheme from settings', () => {
     const options = render();
-    const sunset = options.find(
+    const marrakesh = options.find(
       (option) => option.props.accessibilityLabel === 'Marrakesh map colors'
     );
 
-    act(() => sunset?.props.onPress());
+    act(() => marrakesh?.props.onPress());
 
-    expect(mockSelect).toHaveBeenCalledWith('sunset');
+    expect(mockSelect).toHaveBeenCalledWith('marrakesh');
   });
 
   it('opens the custom palette importer', () => {

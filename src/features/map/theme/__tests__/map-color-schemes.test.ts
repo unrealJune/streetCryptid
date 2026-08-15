@@ -3,13 +3,13 @@ import { BUILT_IN_MAP_COLOR_SCHEMES, parseCustomMapColorScheme } from '../map-co
 describe('map color schemes', () => {
   it('provides paired light and dark palettes for every built-in scheme', () => {
     expect(BUILT_IN_MAP_COLOR_SCHEMES.map((scheme) => scheme.id)).toEqual([
-      'atlas',
-      'field-notes',
-      'afterglow',
-      'sunset',
-      'retrowave',
-      'aurora',
-      'neon-grid',
+      'seattle',
+      'portland',
+      'kyoto',
+      'marrakesh',
+      'miami',
+      'reykjavik',
+      'tokyo',
     ]);
     for (const scheme of BUILT_IN_MAP_COLOR_SCHEMES) {
       expect(scheme.light.terr.length).toBeGreaterThanOrEqual(2);
