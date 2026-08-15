@@ -80,7 +80,7 @@ import {
   renderRegionImage,
 } from './region-shader';
 import { getRevealMaskEffect } from './reveal-mask-shader';
-import { prevRectUniform, REVEAL_TARGET } from './reveal-mask';
+import { hexLatticeSizeFor, prevRectUniform, rectUniform, REVEAL_TARGET } from './reveal-mask';
 import { YouLocator } from './you-locator';
 
 /** Crossfade duration (ms) — fallback only, when a bundle lacks its textures. */
@@ -494,9 +494,21 @@ export function MapView({
   // The area the outgoing layer already covered — the reveal shader swaps these
   // pixels in instantly and only hex-loads the newly-exposed ground around them.
   const prevRectVec = useMemo(() => prevRectUniform(prevRect), [prevRect]);
+  // The reveal needs a hex lattice to wipe along. Regions built below the
+  // exploration render cutoff carry no cells, so their baked texture is flat
+  // black — one order for every pixel, i.e. a plain fade. Fall back to the
+  // shader's procedural lattice there so city-and-out loads (the slow ones)
+  // still hex in. `k` is read live so the hexes hold a constant screen size.
+  const hasBakedCells = (track.cur?.region.cellField.cells.length ?? 0) > 0;
+  const curRectVec = useMemo(() => rectUniform(curRect), [curRect]);
   const revealUniforms = useDerivedValue(
-    () => ({ uReveal: revealFront.value, uPrevRect: prevRectVec }),
-    [prevRectVec]
+    () => ({
+      uReveal: revealFront.value,
+      uPrevRect: prevRectVec,
+      uRegion: curRectVec,
+      uHexPx: hexLatticeSizeFor(hasBakedCells, k.value),
+    }),
+    [prevRectVec, curRectVec, hasBakedCells]
   );
 
   // Loading skeleton: while a cold region is fetching over an uncovered area

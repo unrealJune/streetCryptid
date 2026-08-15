@@ -12,6 +12,14 @@
  *
  *   bun scripts/map-shot.ts --out /tmp/shots --places westcoast,europe --zooms 4,8,12
  *   bun scripts/map-shot.ts --out /tmp/shots --highways   # keep motorways on
+ *
+ * `--reveal` swaps the single settled frame for a filmstrip of the loading wipe
+ * (`REVEAL_MASK_SKSL`) over the same real geometry, which is how the hex load-in
+ * is checked at zooms that carry no exploration cells. `--legacy-reveal` renders
+ * it the old way — straight off the flat-black cell texture the engine bakes
+ * below the exploration cutoff — for the before/after pair.
+ *
+ *   bun scripts/map-shot.ts --out /tmp/reveal --reveal --places europe --zooms 5
  */
 
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -30,8 +38,13 @@ import { riverWidthFor } from '../src/features/map/core/water-lod';
 import { ROAD_VALUES } from '../src/features/map/core/masks';
 import type { CameraState, MapPalette, Viewport } from '../src/features/map/core/types';
 import { DOT_FIELD_SKSL } from '../src/features/map/render/dot-field-sksl';
+import {
+  HEX_LOADING_PX,
+  REVEAL_MASK_SKSL,
+  REVEAL_TARGET,
+} from '../src/features/map/render/reveal-mask';
 import { buildMaskPaths } from '../src/features/map/render/mask-paths';
-import { lodForZoom } from '../src/features/map/render/shader-uniforms';
+import { DOT_STEP, lodForZoom } from '../src/features/map/render/shader-uniforms';
 import { mergePacked, type PackedGeometry } from '../src/features/map/tiles/packed-geometry';
 import { BundleFetchByteSource } from '../src/features/map/tiles/bundle-fetch';
 import { DecodingGeometrySource } from '../src/features/map/tiles/decode-source';
@@ -100,6 +113,10 @@ async function main(): Promise<void> {
   });
   const effect = CanvasKit.RuntimeEffect.Make(DOT_FIELD_SKSL);
   if (!effect) throw new Error('dot-field shader failed to compile under CanvasKit');
+  const revealEffect = args.reveal ? CanvasKit.RuntimeEffect.Make(REVEAL_MASK_SKSL) : null;
+  if (args.reveal && !revealEffect) {
+    throw new Error('reveal-mask shader failed to compile under CanvasKit');
+  }
 
   const outDir = resolve(args.out ?? '/tmp/map-shots');
   await mkdir(outDir, { recursive: true });
@@ -119,8 +136,21 @@ async function main(): Promise<void> {
       };
       const spec = computeRegionSpec(camera, VIEWPORT, { dataZooms: PLANET_DATA_ZOOMS });
       const geometry = await loadGeometry(source, spec);
-      const png = renderShot({ CanvasKit, effect, lut, geometry, spec, camera, palette, layers });
-      const file = join(outDir, `${place.id}-z${zoom}.png`);
+      const input: ShotInput = {
+        CanvasKit,
+        effect,
+        lut,
+        geometry,
+        spec,
+        camera,
+        palette,
+        layers,
+      };
+      const suffix = revealEffect ? (args.legacyReveal ? '-reveal-before' : '-reveal-after') : '';
+      const png = revealEffect
+        ? renderRevealStrip(input, revealEffect, args.legacyReveal ?? false)
+        : renderShot(input);
+      const file = join(outDir, `${place.id}-z${zoom}${suffix}.png`);
       await writeFile(file, png);
       console.log(`${file}  ${place.label} z${zoom}  mask ${spec.maskWidth}x${spec.maskHeight}`);
     }
@@ -170,7 +200,27 @@ interface ShotInput {
   layers: RoadLayerOptions;
 }
 
-function renderShot({
+/** A rendered viewport crop plus where it sits inside the padded region rect. */
+interface RegionCrop {
+  /** The viewport window, device px. */
+  image: any;
+  /** Viewport origin within the region bitmap, device px. */
+  offX: number;
+  offY: number;
+  /** The whole padded region rect, device px. */
+  regionW: number;
+  regionH: number;
+  dispose: () => void;
+}
+
+function renderShot(input: ShotInput): Uint8Array {
+  const crop = renderRegionCrop(input);
+  const png = crop.image.encodeToBytes() as Uint8Array;
+  crop.dispose();
+  return png;
+}
+
+function renderRegionCrop({
   CanvasKit,
   effect,
   lut,
@@ -179,7 +229,7 @@ function renderShot({
   camera,
   palette,
   layers,
-}: ShotInput): Uint8Array {
+}: ShotInput): RegionCrop {
   const mask = buildMask(CanvasKit, geometry, spec, layers);
   // Exploration is off in these shots, so an all-black cell texture is exactly
   // what the shader wants: explored is ignored (uExploration=0) and reveal
@@ -201,7 +251,7 @@ function renderShot({
     rectH,
     spec.maskWidth,
     spec.maskHeight,
-    2.0, // DOT_STEP
+    DOT_STEP,
     palette.bg[0] / 255,
     palette.bg[1] / 255,
     palette.bg[2] / 255,
@@ -254,13 +304,100 @@ function renderShot({
   canvas.restore();
 
   const snapshot = surface.makeImageSnapshot();
-  const png = snapshot.encodeToBytes();
+  return {
+    image: snapshot,
+    offX: offX * PIXEL_RATIO,
+    offY: offY * PIXEL_RATIO,
+    regionW: rectW * scale * PIXEL_RATIO,
+    regionH: rectH * scale * PIXEL_RATIO,
+    dispose: () => {
+      snapshot.delete();
+      paint.delete();
+      surface.delete();
+      mask.delete();
+      cells.delete();
+    },
+  };
+}
+
+/**
+ * Filmstrip sample points, as a fraction of the animation's RUNTIME (not of the
+ * wipe front) — the app eases `uReveal` with Reanimated's default
+ * `inOut(quad)`, so sampling the front directly would bunch the frames up.
+ */
+const REVEAL_FRAMES = [0.08, 0.22, 0.36, 0.5, 1];
+
+/** Reanimated's default `withTiming` easing, so the strip is paced like the device. */
+function easeInOutQuad(t: number): number {
+  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+}
+
+/**
+ * A filmstrip of the loading wipe over one real region: the settled bitmap
+ * pushed through `REVEAL_MASK_SKSL` at each of {@link REVEAL_FRAMES}.
+ *
+ * The cell texture is all black on purpose — that is exactly what the engine
+ * bakes for a region below the exploration render cutoff (empty cell field), so
+ * `legacy` reproduces the pre-fix behaviour honestly rather than simulating it.
+ * Everything is in device px here, so the lattice size scales by PIXEL_RATIO.
+ */
+function renderRevealStrip(input: ShotInput, revealEffect: any, legacy: boolean): Uint8Array {
+  const { CanvasKit } = input;
+  const crop = renderRegionCrop(input);
+  const w = VIEWPORT.width * PIXEL_RATIO;
+  const h = VIEWPORT.height * PIXEL_RATIO;
+
+  const cells = imageFrom(CanvasKit, blackRgba(w, h), w, h);
+  const children = [crop.image, cells].map((img: any) =>
+    img.makeShaderOptions(
+      CanvasKit.TileMode.Clamp,
+      CanvasKit.TileMode.Clamp,
+      CanvasKit.FilterMode.Nearest,
+      CanvasKit.MipmapMode.None
+    )
+  );
+
+  const GAP = 10;
+  const strip = CanvasKit.MakeSurface(
+    REVEAL_FRAMES.length * w + (REVEAL_FRAMES.length + 1) * GAP,
+    h + 2 * GAP
+  );
+  if (!strip) throw new Error('strip surface failed');
+  const canvas = strip.getCanvas();
+  canvas.clear(CanvasKit.Color(12, 14, 18, 1));
+
+  REVEAL_FRAMES.forEach((t, i) => {
+    const front = REVEAL_TARGET * easeInOutQuad(t);
+    const uniforms = [
+      front,
+      0,
+      0,
+      0,
+      0, // uPrevRect — first load, nothing retained
+      // uRegion: the viewport's window expressed in the region's own frame, so
+      // the center-out ordering radiates from the region center like the app's.
+      -crop.offX,
+      -crop.offY,
+      crop.regionW,
+      crop.regionH,
+      legacy ? 0 : HEX_LOADING_PX * PIXEL_RATIO,
+    ];
+    const paint = new CanvasKit.Paint();
+    paint.setShader(revealEffect.makeShaderWithChildren(uniforms, children));
+    canvas.save();
+    canvas.translate(GAP + i * (w + GAP), GAP);
+    canvas.drawRect(CanvasKit.XYWHRect(0, 0, w, h), paint);
+    canvas.restore();
+    paint.delete();
+  });
+
+  const snapshot = strip.makeImageSnapshot();
+  const png = snapshot.encodeToBytes() as Uint8Array;
   snapshot.delete();
-  paint.delete();
-  surface.delete();
-  mask.delete();
+  strip.delete();
   cells.delete();
-  return png as Uint8Array;
+  crop.dispose();
+  return png;
 }
 
 /** The feature mask, built exactly like `render/mask-image.ts` but on CanvasKit. */
@@ -352,6 +489,8 @@ interface Args {
   zooms?: number[];
   highways?: boolean;
   legacyRivers?: boolean;
+  reveal?: boolean;
+  legacyReveal?: boolean;
 }
 
 function parseArgs(argv: readonly string[]): Args {
@@ -363,6 +502,8 @@ function parseArgs(argv: readonly string[]): Args {
     else if (arg === '--zooms') out.zooms = argv[++i].split(',').map(Number);
     else if (arg === '--highways') out.highways = true;
     else if (arg === '--legacy-rivers') out.legacyRivers = true;
+    else if (arg === '--reveal') out.reveal = true;
+    else if (arg === '--legacy-reveal') out.legacyReveal = true;
     else throw new Error(`unknown flag ${arg}`);
   }
   return out;
