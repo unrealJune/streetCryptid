@@ -12,6 +12,7 @@ import type {
   IrohLocationEvents,
   BleCapabilities,
   BlePeer,
+  BluetoothRadioState,
   BumpResolution,
   NativeIncomingFix,
   NativeLocationFix,
@@ -341,6 +342,10 @@ export class IrohLocationNativeModule
 
   async bleAvailable(): Promise<boolean> {
     return false;
+  }
+
+  async bluetoothRadioState(): Promise<BluetoothRadioState> {
+    return 'unsupported';
   }
 
   async bleCapabilities(): Promise<BleCapabilities> {

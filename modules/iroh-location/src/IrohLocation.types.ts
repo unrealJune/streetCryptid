@@ -270,6 +270,15 @@ export interface BleCapabilities {
   pairingReady: boolean;
 }
 
+/**
+ * Power/authorization state of the Bluetooth radio itself, reported independently of whether the
+ * BLE transport managed to attach. {@link BleCapabilities.available} collapses "radio off",
+ * "permission missing" and "no BLE hardware" into one flag; this separates the two the user can
+ * fix. `unknown` means the platform could not be asked (host builds, web, an old native binary).
+ */
+export type BluetoothRadioState =
+  'unknown' | 'unsupported' | 'unauthorized' | 'poweredOff' | 'poweredOn';
+
 export type TransportAddressKind = 'relay' | 'ip' | 'custom';
 
 /** One local or remote endpoint address from iroh's live path table. */
@@ -534,4 +543,6 @@ export interface IrohLocationApi {
   resolveBumpPeer(timeoutMs: number): Promise<BumpResolution>;
   /** Passive proximity hint: has this peer's BLE advertisement been seen this session? */
   bleHasScanHint(endpointIdHex: string): Promise<boolean>;
+  /** Power/authorization state of the Bluetooth radio, independent of the transport. */
+  bluetoothRadioState?(): Promise<BluetoothRadioState>;
 }

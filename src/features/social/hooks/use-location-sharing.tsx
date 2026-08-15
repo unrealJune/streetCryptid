@@ -15,6 +15,8 @@ import { buildFriendPresence, type FriendPresence } from '@/features/social/core
 import type { IncomingFix, LocationFix } from '@/features/social/core/types';
 import { SELF_AUTHOR, type TrailPoint } from '@/features/social/net/background/trail-store';
 import {
+  BLUETOOTH_OFF_MESSAGE,
+  BLUETOOTH_UNSUPPORTED_MESSAGE,
   LocationSharingService,
   type PairingSnapshot,
   type SharingSnapshot,
@@ -364,6 +366,15 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       throw new Error(message);
     }
     try {
+      // Radio first: with Bluetooth switched off every later step fails for a reason the user
+      // cannot act on ("Bluetooth could not start"), and the old flow armed anyway and went quiet.
+      const radio = await service.refreshBluetoothRadio();
+      if (radio === 'poweredOff') {
+        throw new Error(BLUETOOTH_OFF_MESSAGE);
+      }
+      if (radio === 'unsupported') {
+        throw new Error(BLUETOOTH_UNSUPPORTED_MESSAGE);
+      }
       if (!bluetoothPermissionGranted.current) {
         const granted = await ensurePairingPermissions();
         if (!granted) {

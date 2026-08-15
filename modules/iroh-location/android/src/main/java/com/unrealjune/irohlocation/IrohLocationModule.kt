@@ -1,9 +1,13 @@
 package com.unrealjune.irohlocation
 
+import android.Manifest
+import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.wifi.WifiManager
+import android.os.Build
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -244,6 +248,40 @@ class IrohLocationModule : Module() {
   private var node: LocationNode? = null
   private val subs = mutableMapOf<String, Subscription>()
   private var multicastLock: WifiManager.MulticastLock? = null
+
+  /**
+   * Honest radio/permission report for Bump, independent of whether a node exists.
+   *
+   * The BLE transport reports one flat "unavailable" for every cause, which is why a phone with
+   * Bluetooth switched off used to arm Bump and then fail silently. This separates the two causes
+   * the user can actually fix, and prefers the radio switch when both apply: turning Bluetooth on
+   * is the step that makes the permission prompt worth showing.
+   */
+  private fun bluetoothRadioState(): String {
+    val context =
+      appContext.reactContext?.applicationContext
+        ?: appContext.currentActivity?.applicationContext
+        ?: return "unknown"
+    if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
+      return "unsupported"
+    }
+    val adapter =
+      (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+        ?: return "unsupported"
+    // isEnabled() needs no runtime permission (it is @RequiresNoPermission from Android 12 on, and
+    // the legacy BLUETOOTH permission is install-time before that), but a vendor ROM throwing here
+    // must not take the whole strip down with it.
+    val enabled = runCatching { adapter.isEnabled }.getOrElse { return "unknown" }
+    if (!enabled) return "poweredOff"
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      val granted =
+        listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT).all {
+          context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+        }
+      if (!granted) return "unauthorized"
+    }
+    return "poweredOn"
+  }
 
   // Long-lived scope for firing the (suspend) network-change nudge from the ConnectivityManager
   // callback, which is itself synchronous. SupervisorJob so one failed nudge never cancels the rest.
@@ -735,6 +773,8 @@ class IrohLocationModule : Module() {
 
     AsyncFunction("bleAvailable") Coroutine
       { -> node?.bleAvailable() ?: false }
+
+    AsyncFunction("bluetoothRadioState") { -> bluetoothRadioState() }
 
     AsyncFunction("bleCapabilities") Coroutine
       { ->

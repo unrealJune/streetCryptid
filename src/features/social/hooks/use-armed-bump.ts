@@ -35,7 +35,7 @@ export interface ArmedBump {
  * listening.
  */
 export function useArmedBump(active: boolean): ArmedBump {
-  const { pairing, armBump, commitBump, cancelBump } = useLocationSharing();
+  const { pairing, armBump, commitBump, cancelBump, refreshPairing } = useLocationSharing();
   const [appState, setAppState] = useState<AppStateStatus>(AppState.currentState);
   const [error, setError] = useState<string | null>(null);
   const [arming, setArming] = useState(false);
@@ -59,6 +59,14 @@ export function useArmedBump(active: boolean): ArmedBump {
       setArming(false);
     }
   }, [armBump]);
+
+  // Re-read pairing (and with it the Bluetooth radio state) whenever this surface comes alive —
+  // including on the way back from the Bluetooth settings the strip can send you to, so the copy
+  // catches up with a radio that was just switched on without waiting for the next poll tick.
+  useEffect(() => {
+    if (!live) return;
+    void refreshPairing();
+  }, [live, refreshPairing]);
 
   // Derived, not stored-and-cleared: a failure only describes the attempt that
   // produced it, so it is simply not shown once the radio is open or you have

@@ -1,4 +1,4 @@
-import { Text } from 'react-native';
+import { Platform, Text } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import { CryptidThemes } from '@/constants/cryptid-theme';
@@ -34,6 +34,7 @@ function snapshot(overrides: Partial<PairingSnapshot> = {}): PairingSnapshot {
     sessions: [],
     pendingRequests: [],
     verifications: [],
+    radio: 'poweredOn',
     bump: { stage: 'idle', expiresAt: null, rssi: null, peerCount: 0, error: null },
     discoveredFriend: null,
     inviteLink: null,
@@ -46,6 +47,11 @@ function snapshot(overrides: Partial<PairingSnapshot> = {}): PairingSnapshot {
 
 describe('BumpPairingStrip', () => {
   let renderer: ReactTestRenderer;
+  const platform = Platform.OS;
+
+  afterEach(() => {
+    Platform.OS = platform;
+  });
 
   afterEach(() => {
     act(() => renderer?.unmount());
@@ -54,11 +60,13 @@ describe('BumpPairingStrip', () => {
   function render(pairing: PairingSnapshot | null, handlers = {}) {
     const onCommit = jest.fn().mockResolvedValue(undefined);
     const onArm = jest.fn().mockResolvedValue(undefined);
+    const onEnableBluetooth = jest.fn().mockResolvedValue(undefined);
     act(() => {
       renderer = create(
         <BumpPairingStrip
           onArm={onArm}
           onCommit={onCommit}
+          onEnableBluetooth={onEnableBluetooth}
           pairing={pairing}
           sensor={sensor}
           theme={CryptidThemes.daybreak}
@@ -66,7 +74,7 @@ describe('BumpPairingStrip', () => {
         />
       );
     });
-    return { onCommit, onArm };
+    return { onCommit, onArm, onEnableBluetooth };
   }
 
   it('says why pairing is impossible in Expo Go rather than offering a dead button', () => {
@@ -94,6 +102,44 @@ describe('BumpPairingStrip', () => {
       button.props.onPress();
     });
     expect(onArm).toHaveBeenCalledTimes(1);
+  });
+
+  // A dark radio used to arm happily and then resolve nothing: the strip said "READY FOR IMPACT"
+  // while no scan could ever succeed. Naming the switch is the whole fix.
+  it('names the radio switch instead of arming into a dark radio (Android)', async () => {
+    Platform.OS = 'android';
+    const { onEnableBluetooth, onArm } = render(snapshot({ radio: 'poweredOff' }));
+
+    expect(text(renderer)).toContain('BLUETOOTH IS OFF');
+    const button = renderer.root.findByProps({
+      accessibilityLabel: 'Open Bluetooth settings to turn the radio on',
+    });
+    await act(async () => {
+      button.props.onPress();
+    });
+    expect(onEnableBluetooth).toHaveBeenCalledTimes(1);
+    expect(onArm).not.toHaveBeenCalled();
+  });
+
+  // iOS has no public deep link to the Bluetooth toggle, so the control is greyed rather than
+  // sending the user somewhere that cannot turn the radio on.
+  it('greys the arm control on iOS when the radio is off', () => {
+    Platform.OS = 'ios';
+    render(snapshot({ radio: 'poweredOff' }));
+
+    expect(text(renderer)).toContain('BLUETOOTH IS OFF');
+    const button = renderer.root.findByProps({
+      accessibilityLabel: 'Arm bump to meet a nearby friend',
+    });
+    expect(button.props.disabled).toBe(true);
+    expect(button.props.accessibilityState).toEqual({ disabled: true });
+  });
+
+  it('drops the control entirely when the device has no BLE radio at all', () => {
+    render(snapshot({ radio: 'unsupported' }));
+
+    expect(text(renderer)).toContain('NO BLUETOOTH RADIO');
+    expect(renderer.root.findAllByProps({ accessibilityRole: 'button' })).toHaveLength(0);
   });
 
   it('offers a manual bump only once the radio is armed', async () => {

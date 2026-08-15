@@ -1,4 +1,56 @@
 import ExpoModulesCore
+import CoreBluetooth
+
+/// Reads the Bluetooth radio's power/authorization state without touching the iroh node.
+///
+/// The BLE transport reports one flat "unavailable" for every cause, so Bump used to arm and then
+/// fail silently on a phone whose radio was simply switched off. CoreBluetooth only reports state
+/// through a delegate callback, so the first read waits briefly for it rather than lying `unknown`.
+/// The manager is created with the power alert suppressed — the app decides how to ask.
+private final class BluetoothRadioProbe: NSObject, CBCentralManagerDelegate {
+  static let shared = BluetoothRadioProbe()
+
+  private let queue = DispatchQueue(label: "com.unrealjune.irohlocation.bluetooth-probe")
+  private var manager: CBCentralManager?
+
+  func state() async -> String {
+    start()
+    // ~1.5s of 50ms polls: the first callback normally lands within one or two.
+    for _ in 0..<30 {
+      let current = currentState()
+      if current != .unknown && current != .resetting { return Self.name(current) }
+      try? await Task.sleep(nanoseconds: 50_000_000)
+    }
+    return Self.name(currentState())
+  }
+
+  private func start() {
+    queue.sync {
+      if manager == nil {
+        manager = CBCentralManager(
+          delegate: self, queue: queue,
+          options: [CBCentralManagerOptionShowPowerAlertKey: false])
+      }
+    }
+  }
+
+  private func currentState() -> CBManagerState {
+    queue.sync { manager?.state ?? .unknown }
+  }
+
+  private static func name(_ state: CBManagerState) -> String {
+    switch state {
+    case .poweredOn: return "poweredOn"
+    case .poweredOff: return "poweredOff"
+    case .unauthorized: return "unauthorized"
+    case .unsupported: return "unsupported"
+    default: return "unknown"
+    }
+  }
+
+  // Required by the protocol; the polled `state` property is the whole signal.
+  func centralManagerDidUpdateState(_ central: CBCentralManager) {}
+}
 
 // The UniFFI-generated Swift bindings for the `iroh-location` Rust crate are compiled
 // into this target (see IrohLocation.podspec -> vendored xcframework + generated/*.swift).
@@ -579,6 +631,10 @@ public final class IrohLocationModule: Module {
     AsyncFunction("bleAvailable") { () async -> Bool in
       guard let node = self.node else { return false }
       return await node.bleAvailable()
+    }
+
+    AsyncFunction("bluetoothRadioState") { () async -> String in
+      await BluetoothRadioProbe.shared.state()
     }
 
     AsyncFunction("bleCapabilities") { () async throws -> [String: Any] in
