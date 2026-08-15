@@ -1,5 +1,6 @@
 import { packGeometry } from '../../tiles/packed-geometry';
 import { buildFeatureMasks, ROAD_VALUES } from '../masks';
+import { riverWidthFor } from '../water-lod';
 import { worldToScreen } from '../camera';
 import { sample } from '../raster';
 import type { CameraState, MapGeometry, Viewport } from '../types';
@@ -164,9 +165,11 @@ describe('water mask', () => {
     expect(sample(masks.water, cx, cy)).toBe(255);
   });
 
-  it('river centerline reads 255 and a pixel ~4 px off the centerline reads 0', () => {
-    // river at world y=0.47 → screen y=20; RIVER_WIDTH=5 (half=2.5)
+  it('river centerline registers in the water mask and falls off within the stroke', () => {
+    // river at world y=0.47 → screen y=20. Width is zoom-tapered now, so this
+    // asserts the falloff relative to riverWidthFor(zoom), not a fixed 5 px.
     const [, ry] = px(0.5, 0.47); // expect 20
+    const half = riverWidthFor(zoom)! / 2;
     const geo: MapGeometry = {
       ...emptyGeo(),
       rivers: [
@@ -180,29 +183,43 @@ describe('water mask', () => {
     };
     const masks = buildFeatureMasks(packGeometry(geo), camera, viewport);
 
-    expect(sample(masks.water, 50, ry)).toBe(255);
+    expect(sample(masks.water, 50, ry)).toBeGreaterThan(0);
 
-    // 4 px off centerline: cy at ry+4 → distance ≈ 4.5 > half+0.5=3.0 → 0
-    expect(sample(masks.water, 50, ry + 4)).toBe(0);
+    // Beyond half-width + the 0.5 px antialiased edge there is no coverage.
+    expect(sample(masks.water, 50, ry + Math.ceil(half + 2))).toBe(0);
   });
 
-  it('RIVER_WIDTH: a pixel exactly 2 px off the centerline is still inside', () => {
-    // half = RIVER_WIDTH/2 = 2.5; distance 2 ≈ 2.5 so still inside
-    const [, ry] = px(0.5, 0.47);
-    const geo: MapGeometry = {
+  it('tapers the river stroke with zoom instead of holding one fixed width', () => {
+    // The bug: RIVER_WIDTH was a flat 5 mask px at every zoom, so zooming out
+    // thinned every road class to 0.4× while rivers kept their street-zoom
+    // weight and swelled into ribbons 2.5× wider than a motorway.
+    const river: MapGeometry = {
       ...emptyGeo(),
       rivers: [
         {
           points: [
-            [0.45, 0.47],
-            [0.55, 0.47],
+            [0.0, 0.5],
+            [1.0, 0.5],
           ],
         },
       ],
     };
-    const masks = buildFeatureMasks(packGeometry(geo), camera, viewport);
-    // 2 px off: cy=ry+2+0.5, distance=2.5, coverage=RIVER_WIDTH/2+0.5−2.5=0.5 → partial > 0
-    expect(sample(masks.water, 50, ry + 2)).toBeGreaterThan(0);
+    // Coverage-weighted, not a pixel count: the widths differ by fractions of a
+    // mask px at these zooms, which whole-pixel counting rounds away.
+    const bandAt = (z: number): number => {
+      const masks = buildFeatureMasks(
+        packGeometry(river),
+        { center: [0.5, 0.5], zoom: z },
+        viewport
+      );
+      let coverage = 0;
+      for (let y = 0; y < viewport.height; y++) coverage += sample(masks.water, 50, y);
+      return coverage;
+    };
+
+    expect(bandAt(15)).toBeGreaterThan(bandAt(12));
+    expect(bandAt(12)).toBeGreaterThan(bandAt(9));
+    expect(bandAt(9)).toBe(bandAt(4)); // floored below the coarse zoom
   });
 
   it('water polygon and river polyline both contribute to the water mask', () => {
@@ -235,7 +252,7 @@ describe('water mask', () => {
     const [cx, cy] = px(0.5, 0.5);
     const [, ry] = px(0.5, 0.47);
     expect(sample(masks.water, cx, cy)).toBe(255); // from polygon
-    expect(sample(masks.water, 50, ry)).toBe(255); // from river
+    expect(sample(masks.water, 50, ry)).toBeGreaterThan(0); // from river
   });
 });
 

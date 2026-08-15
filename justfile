@@ -121,6 +121,15 @@ e2e-pairing device-a device-b:
 profile-map source="":
     bun scripts/profile-scene.ts {{source}}
 
+# Headless map screenshots — runs the real dot-field pipeline through CanvasKit
+# on the host, no simulator. Needs EXPO_PUBLIC_TILE_URL (just env-pull development).
+# Highways are off by default so water reads clearly; --legacy-rivers renders the
+# pre-taper river width for a before/after pair.
+#   just map-shot
+#   just map-shot "--out /tmp/shots --places europe,india --zooms 4,7,10,13"
+map-shot *args:
+    bun scripts/map-shot.ts {{args}}
+
 # Run the full local gate: types, lint, formatting, and tests (JS/TS only).
 check: typecheck lint format-check test
 

@@ -1,6 +1,7 @@
 import { worldToScreen } from '../core/camera';
 import { regionMaskCamera, type RegionSpec } from '../core/region';
 import { roadClassVisible, roadWidthFor, type RoadLayerOptions } from '../core/road-lod';
+import { riverWidthFor } from '../core/water-lod';
 import type { ScreenPoint } from '../core/types';
 import type { PackedAreas, PackedGeometry } from '../tiles/packed-geometry';
 
@@ -52,6 +53,7 @@ export function buildMaskPaths(
   const classActive = [0, 1, 2, 3, 4].map(
     (cls) => roadWidthFor(cls, spec.zoom) !== null && roadClassVisible(cls, layers)
   );
+  const riversActive = riverWidthFor(spec.zoom) !== null;
 
   const streets: string[][] = [[], [], [], [], []];
   const parkFills: string[] = [];
@@ -70,10 +72,12 @@ export function buildMaskPaths(
       if (line) streets[rc].push(line);
     }
 
-    const r = part.rivers;
-    for (let i = 0; i < r.count; i++) {
-      const line = polyline(r.coords, r.pointOff[i], r.pointOff[i + 1], project);
-      if (line) riverLines.push(line);
+    if (riversActive) {
+      const r = part.rivers;
+      for (let i = 0; i < r.count; i++) {
+        const line = polyline(r.coords, r.pointOff[i], r.pointOff[i + 1], project);
+        if (line) riverLines.push(line);
+      }
     }
 
     pushFills(waterFills, part.water, project);

@@ -3,17 +3,16 @@ import { worldToScreen } from './camera';
 import type { MaskRasterizer } from './raster';
 import { softwareRasterizer } from './raster';
 import { roadWidthFor } from './road-lod';
+import { riverWidthFor } from './water-lod';
 import type { CameraState, FeatureMasks, Mask, RoadClass, ScreenPoint, Viewport } from './types';
 
-// Stroke widths live with the road LOD logic; re-exported here for the mask
-// builders and tests that reference them alongside ROAD_VALUES / RIVER_WIDTH.
+// Stroke widths live with the road/water LOD logic; re-exported here for the
+// mask builders and tests that reference them alongside ROAD_VALUES.
 export { ROAD_WIDTHS } from './road-lod';
+export { RIVER_WIDTH } from './water-lod';
 
 /** Mask values per road class 0–4 — the mock's RGRAY brightness ladder. */
 export const ROAD_VALUES = [128, 170, 205, 225, 245] as const;
-
-/** River stroke width, logical px (the mock draws rivers 5px into the water mask). */
-export const RIVER_WIDTH = 5;
 
 const FULL = 255;
 
@@ -34,6 +33,9 @@ export function buildFeatureMasks(
   const streets = rasterizer.createMask(viewport);
   const parks = rasterizer.createMask(viewport);
   const water = rasterizer.createMask(viewport);
+  // Zoom-aware LOD, exactly like the streets below: without it a river keeps its
+  // street-zoom weight while every road thins, and reads as a fat ribbon.
+  const riverWidth = riverWidthFor(camera.zoom);
 
   for (const part of geometry.parts) {
     const { originX, originY } = part;
@@ -57,14 +59,16 @@ export function buildFeatureMasks(
     fillAreas(rasterizer, parks, part.parks, project);
     fillAreas(rasterizer, water, part.water, project);
 
-    const r = part.rivers;
-    for (let i = 0; i < r.count; i++) {
-      rasterizer.strokePolyline(
-        water,
-        projectRange(r.coords, r.pointOff[i], r.pointOff[i + 1], project),
-        RIVER_WIDTH,
-        FULL
-      );
+    if (riverWidth !== null) {
+      const r = part.rivers;
+      for (let i = 0; i < r.count; i++) {
+        rasterizer.strokePolyline(
+          water,
+          projectRange(r.coords, r.pointOff[i], r.pointOff[i + 1], project),
+          riverWidth,
+          FULL
+        );
+      }
     }
   }
 
