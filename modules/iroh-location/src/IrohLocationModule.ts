@@ -6,6 +6,7 @@ import type {
   IrohLocationApi,
   BleCapabilities,
   BlePeer,
+  BluetoothRadioState,
   BumpResolution,
   NativeControlMsg,
   NativeIncomingFix,
@@ -115,6 +116,11 @@ export declare class IrohLocationNativeModule
   nearbyBlePeers(): Promise<BlePeer[]>;
   resolveBumpPeer(timeoutMs: number): Promise<BumpResolution>;
   bleHasScanHint(endpointIdHex: string): Promise<boolean>;
+  /**
+   * Power/authorization state of the Bluetooth radio, independent of the BLE transport.
+   * Optional for compatibility with installed binaries built before the radio probe.
+   */
+  bluetoothRadioState?(): Promise<BluetoothRadioState>;
 }
 
 type RawIrohLocationNativeModule = Omit<IrohLocationNativeModule, 'start'> & {

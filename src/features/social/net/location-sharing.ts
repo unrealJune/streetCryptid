@@ -7,6 +7,7 @@ import {
   tryGetIrohLocation,
   type BleCapabilities,
   type BlePeer,
+  type BluetoothRadioState,
   type IrohLocationNativeModule,
   type NativeControlMsg,
   type NativeLocationFix,
@@ -155,6 +156,11 @@ export interface PairingSnapshot {
   ready: boolean;
   /** Honest BLE capability report (null until first polled / when unavailable). */
   capabilities: BleCapabilities | null;
+  /**
+   * Power/authorization state of the Bluetooth radio itself. Optional so snapshot literals written
+   * before the radio probe existed stay valid; the service always populates it.
+   */
+  radio?: BluetoothRadioState;
   /** Nearby BLE peers surfaced by the transport snapshot. */
   nearbyPeers: BlePeer[];
   /** All known pairing sessions and their coarse state. */
@@ -400,6 +406,7 @@ export class LocationSharingService implements FixPublisher {
   // Bilateral pairing / nearby discovery runtime.
   private pairingReadyFlag = false;
   private bleCaps: BleCapabilities | null = null;
+  private bluetoothRadio: BluetoothRadioState = 'unknown';
   private nearbyPeers: BlePeer[] = [];
   private pairSessions: PairStateRecord[] = [];
   private transportDiagnostics: TransportDiagnostics | null = null;
@@ -905,6 +912,15 @@ export class LocationSharingService implements FixPublisher {
     }
     if (this.hasActivePairingSession()) {
       throw new Error('Finish or cancel the current pairing before starting Bump.');
+    }
+    // Fail loudly before arming: with the radio off the window would open, the sensor would fire,
+    // and the resolve would come back empty with no hint that Bluetooth was the reason.
+    await this.refreshBluetoothRadio();
+    if (this.bluetoothRadio === 'poweredOff') {
+      throw new Error('Bluetooth is off. Turn it on to bump.');
+    }
+    if (this.bluetoothRadio === 'unsupported') {
+      throw new Error('This device has no Bluetooth LE radio, so Bump cannot run.');
     }
     if (this.bumpResolveInFlight) await this.bumpResolveInFlight;
     this.bumpGeneration += 1;
@@ -2499,6 +2515,7 @@ export class LocationSharingService implements FixPublisher {
       available: Platform.OS !== 'web' && this.mod !== null,
       ready: this.pairingReadyFlag,
       capabilities: this.bleCaps,
+      radio: this.bluetoothRadio,
       nearbyPeers: [...this.nearbyPeers],
       sessions: [...this.pairSessions],
       pendingRequests: [...this.pendingPairRequests],
@@ -2659,6 +2676,27 @@ export class LocationSharingService implements FixPublisher {
     this.emit();
   }
 
+  /**
+   * Re-read the Bluetooth radio's power/authorization state.
+   *
+   * Separate from {@link BleCapabilities}: the transport collapses "radio off", "permission
+   * missing" and "no BLE hardware" into a single `available: false`, which is why a phone with
+   * Bluetooth switched off could arm Bump and then fail with nothing to act on. Guarded — the
+   * probe is absent from binaries built before it existed (iOS bindings only rebuild on macOS).
+   */
+  async refreshBluetoothRadio(): Promise<BluetoothRadioState> {
+    const mod = this.mod;
+    if (!mod || typeof mod.bluetoothRadioState !== 'function') return this.bluetoothRadio;
+    const previous = this.bluetoothRadio;
+    try {
+      this.bluetoothRadio = await mod.bluetoothRadioState();
+    } catch {
+      this.bluetoothRadio = 'unknown';
+    }
+    if (this.bluetoothRadio !== previous) this.emit();
+    return this.bluetoothRadio;
+  }
+
   private isBumpActive(): boolean {
     return this.bumpUntil > Date.now();
   }
@@ -2687,6 +2725,7 @@ export class LocationSharingService implements FixPublisher {
         mod.listPairSessions(),
         mod.nearbyBlePeers(),
         mod.bleCapabilities(),
+        this.refreshBluetoothRadio(),
       ]);
 
       this.pairSessions = sessions;

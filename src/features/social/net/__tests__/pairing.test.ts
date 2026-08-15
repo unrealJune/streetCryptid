@@ -214,6 +214,10 @@ class FakeNativeModule {
   async bleAvailable() {
     return this.caps.available;
   }
+  radio: 'poweredOn' | 'poweredOff' | 'unauthorized' | 'unsupported' | 'unknown' = 'poweredOn';
+  async bluetoothRadioState() {
+    return this.radio;
+  }
   async resolveBumpPeer() {
     return this.bumpResolutionPromise ?? this.bumpResolution;
   }
@@ -1219,6 +1223,21 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(snap.current?.pairing.ready).toBe(true);
     expect(mockHolder.mod.calls.setPairingReady).toEqual([true]);
     expect(snap.current?.pairing.capabilities?.available).toBe(true);
+    expect(snap.current?.pairing.radio).toBe('poweredOn');
+  });
+
+  // Arming with the radio off used to succeed: the window opened, the sensor fired, and the
+  // resolve came back empty with nothing pointing at Bluetooth.
+  it('refuses to arm Bump while the Bluetooth radio is off', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    mockHolder.mod.radio = 'poweredOff';
+
+    await expect(svc.armBump()).rejects.toThrow(/Bluetooth is off/);
+    await svc.refreshPairing();
+    expect(snap.current?.pairing.radio).toBe('poweredOff');
+    expect(snap.current?.pairing.bump.stage).toBe('idle');
   });
 
   it('rebuilds a node that started before Bluetooth permission was granted', async () => {

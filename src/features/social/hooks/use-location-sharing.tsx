@@ -364,6 +364,15 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       throw new Error(message);
     }
     try {
+      // Radio first: with Bluetooth switched off every later step fails for a reason the user
+      // cannot act on ("Bluetooth could not start"), and the old flow armed anyway and went quiet.
+      const radio = await service.refreshBluetoothRadio();
+      if (radio === 'poweredOff') {
+        throw new Error('Bluetooth is off. Turn it on to bump.');
+      }
+      if (radio === 'unsupported') {
+        throw new Error('This device has no Bluetooth LE radio, so Bump cannot run.');
+      }
       if (!bluetoothPermissionGranted.current) {
         const granted = await ensurePairingPermissions();
         if (!granted) {
