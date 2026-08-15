@@ -261,6 +261,11 @@ interface Removable {
 }
 
 /** How often the pairing/discovery queues are drained once the node has started (ms). */
+/** Shared by the service and the provider so the two arm paths cannot drift apart. */
+export const BLUETOOTH_OFF_MESSAGE = 'Bluetooth is off. Turn it on to bump.';
+export const BLUETOOTH_UNSUPPORTED_MESSAGE =
+  'This device has no Bluetooth LE radio, so Bump cannot run.';
+
 const PAIRING_POLL_INTERVAL_MS = 4000;
 
 /**
@@ -917,10 +922,10 @@ export class LocationSharingService implements FixPublisher {
     // and the resolve would come back empty with no hint that Bluetooth was the reason.
     await this.refreshBluetoothRadio();
     if (this.bluetoothRadio === 'poweredOff') {
-      throw new Error('Bluetooth is off. Turn it on to bump.');
+      throw new Error(BLUETOOTH_OFF_MESSAGE);
     }
     if (this.bluetoothRadio === 'unsupported') {
-      throw new Error('This device has no Bluetooth LE radio, so Bump cannot run.');
+      throw new Error(BLUETOOTH_UNSUPPORTED_MESSAGE);
     }
     if (this.bumpResolveInFlight) await this.bumpResolveInFlight;
     this.bumpGeneration += 1;
