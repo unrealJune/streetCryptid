@@ -1,11 +1,21 @@
+import { useMemo } from 'react';
+
 import { CryptidThemes, type CryptidTheme } from '@/constants/cryptid-theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
+import { useMapColorScheme } from './use-map-color-scheme';
+
 /**
- * The active cryptid theme, driven by the OS color scheme: light → daybreak
- * (the default), dark → deepsea. (nocturne stays a manual alternate for later.)
+ * The active chrome follows the OS while the selected map scheme supplies the
+ * paired light/dark canvas palette.
  */
 export function useMapTheme(): CryptidTheme {
   const scheme = useColorScheme();
-  return scheme === 'dark' ? CryptidThemes.deepsea : CryptidThemes.daybreak;
+  const mapScheme = useMapColorScheme().selected;
+  const dark = scheme === 'dark';
+  const base = dark ? CryptidThemes.deepsea : CryptidThemes.daybreak;
+  return useMemo(
+    () => ({ ...base, canvas: dark ? mapScheme.dark : mapScheme.light }),
+    [base, dark, mapScheme]
+  );
 }

@@ -11,6 +11,7 @@
  * the tileset — the privacy bundle path is a client concern, not a render one.
  *
  *   bun scripts/map-shot.ts --out /tmp/shots --places westcoast,europe --zooms 4,8,12
+ *   bun scripts/map-shot.ts --scheme neon-grid --mode dark --places westcoast --zooms 13
  *   bun scripts/map-shot.ts --out /tmp/shots --highways   # keep motorways on
  */
 
@@ -45,6 +46,7 @@ import {
 } from '../src/features/map/tiles/tile-bundle';
 import { tilesCovering, type DataZoomRange } from '../src/features/map/tiles/tile-math';
 import { CryptidThemes } from '../src/constants/cryptid-theme';
+import { BUILT_IN_MAP_COLOR_SCHEMES } from '../src/features/map/theme/map-color-schemes';
 
 /** The planet bake's data zooms (mirrors `features/map/config.ts`, which pulls in RN). */
 const PLANET_DATA_ZOOMS: DataZoomRange = { min: 0, max: 14 };
@@ -107,7 +109,15 @@ async function main(): Promise<void> {
   const places = args.places ? PLACES.filter((p) => args.places!.includes(p.id)) : PLACES;
   const zooms = args.zooms ?? DEFAULT_ZOOMS;
   const layers: RoadLayerOptions = { highways: args.highways ?? false };
-  const palette = CryptidThemes.daybreak.canvas;
+  const selectedScheme = args.scheme
+    ? BUILT_IN_MAP_COLOR_SCHEMES.find((scheme) => scheme.id === args.scheme)
+    : null;
+  if (args.scheme && !selectedScheme) {
+    throw new Error(`unknown scheme ${args.scheme}`);
+  }
+  const palette = selectedScheme
+    ? selectedScheme[args.mode ?? 'light']
+    : CryptidThemes.daybreak.canvas;
   const lut = imageFrom(CanvasKit, buildPaletteLut(palette), 256, 3);
   const source = createSource(tileUrl!);
 
@@ -120,7 +130,8 @@ async function main(): Promise<void> {
       const spec = computeRegionSpec(camera, VIEWPORT, { dataZooms: PLANET_DATA_ZOOMS });
       const geometry = await loadGeometry(source, spec);
       const png = renderShot({ CanvasKit, effect, lut, geometry, spec, camera, palette, layers });
-      const file = join(outDir, `${place.id}-z${zoom}.png`);
+      const suffix = selectedScheme ? `-${selectedScheme.id}-${args.mode ?? 'light'}` : '';
+      const file = join(outDir, `${place.id}-z${zoom}${suffix}.png`);
       await writeFile(file, png);
       console.log(`${file}  ${place.label} z${zoom}  mask ${spec.maskWidth}x${spec.maskHeight}`);
     }
@@ -208,6 +219,8 @@ function renderShot({
     1, // uReveal
     lodForZoom(spec.zoom), // uLod
     0, // uExploration — plain city render, no fog of war
+    palette.effects?.neonGlow ?? 0,
+    palette.effects?.scanlines ?? 0,
   ];
 
   const shader = effect.makeShaderWithChildren(uniforms, [
@@ -352,6 +365,8 @@ interface Args {
   zooms?: number[];
   highways?: boolean;
   legacyRivers?: boolean;
+  scheme?: string;
+  mode?: 'light' | 'dark';
 }
 
 function parseArgs(argv: readonly string[]): Args {
@@ -361,7 +376,12 @@ function parseArgs(argv: readonly string[]): Args {
     if (arg === '--out') out.out = argv[++i];
     else if (arg === '--places') out.places = argv[++i].split(',');
     else if (arg === '--zooms') out.zooms = argv[++i].split(',').map(Number);
-    else if (arg === '--highways') out.highways = true;
+    else if (arg === '--scheme') out.scheme = argv[++i];
+    else if (arg === '--mode') {
+      const mode = argv[++i];
+      if (mode !== 'light' && mode !== 'dark') throw new Error('--mode expects light or dark');
+      out.mode = mode;
+    } else if (arg === '--highways') out.highways = true;
     else if (arg === '--legacy-rivers') out.legacyRivers = true;
     else throw new Error(`unknown flag ${arg}`);
   }

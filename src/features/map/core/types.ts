@@ -144,6 +144,14 @@ export interface RampStop {
   readonly rgb: Rgb;
 }
 
+/** Optional renderer treatment layered over the palette's feature colors. */
+export interface MapRenderEffects {
+  /** Soft additive halo sampled around road geometry, 0–1. */
+  readonly neonGlow?: number;
+  /** Subtle map-anchored CRT scanline modulation, 0–1. */
+  readonly scanlines?: number;
+}
+
 /**
  * Canvas palette for one theme — the map half of the single THEME source of truth
  * (the chrome half lives in `src/constants/theme.ts`).
@@ -164,6 +172,7 @@ export interface MapPalette {
   /** Hex-lattice / street-label ink. */
   readonly streetLabel: Rgb;
   readonly parkLabel: Rgb;
+  readonly effects?: MapRenderEffects;
 }
 
 /** The compact "where you are" readout surfaced to the chrome each frame. */

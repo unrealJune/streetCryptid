@@ -79,6 +79,7 @@ describe('packDotFieldUniforms', () => {
     expect(u[10]).toBe(1); // uReveal defaults to 1 (fully shown)
     expect(u[11]).toBe(0); // uLod: build zoom 15 → full detail
     expect(u[12]).toBe(1); // uExploration defaults to visible
+    expect(u.slice(13, 15)).toEqual([0, 0]); // renderer effects default off
   });
 
   it('honors a custom lattice step', () => {
@@ -100,6 +101,13 @@ describe('packDotFieldUniforms', () => {
 
   it('can disable explored/unexplored styling', () => {
     expect(packDotFieldUniforms({ ...base, explorationEnabled: false })[12]).toBe(0);
+  });
+
+  it('packs optional renderer effects', () => {
+    const effectsPalette = { ...palette, effects: { neonGlow: 0.7, scanlines: 0.3 } };
+    expect(packDotFieldUniforms({ ...base, palette: effectsPalette }).slice(13, 15)).toEqual([
+      0.7, 0.3,
+    ]);
   });
 });
 

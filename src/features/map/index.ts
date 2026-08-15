@@ -17,5 +17,6 @@ export { SettingsControl } from './components/settings-control';
 export { MapView } from './render/map-view';
 export type { MapFriendLocation, MapTrailLocation } from './render/map-view';
 export { hexToRgb, rgbToHex } from './core/color';
+export { useMapColorScheme } from './hooks/use-map-color-scheme';
 export { useMapTheme } from './hooks/use-map-theme';
 export type { MapReadout, Rgb } from './core/types';
