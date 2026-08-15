@@ -44,6 +44,10 @@ function renderSheet(presence: FriendPresence): ReactTestRenderer {
         sharing
         watching={false}
         watchedUntil={null}
+        ratchetActivity={{
+          fix: { seq: 12, receivedAt: Date.now(), source: 'live' },
+          null: { seq: 13, receivedAt: Date.now() - 120_000, source: 'durable' },
+        }}
         onClose={() => {}}
         onToggleShare={noop}
         onToggleWatch={noop}
@@ -97,5 +101,12 @@ describe('FriendProfileSheet signal path', () => {
   it('omits the signal path entirely when no fix has ever arrived', () => {
     renderer = renderSheet({ ...presenceWith('relay'), fix: null, distanceM: null, ageMs: null });
     expect(strings(renderer)).not.toContain('SIGNAL PATH');
+  });
+
+  it('shows fix and null ratchet acknowledgement activity', () => {
+    renderer = renderSheet(presenceWith('relay'));
+    expect(strings(renderer)).toContain('LAST FIX ACK');
+    expect(strings(renderer)).toContain('Now · live');
+    expect(strings(renderer)).toContain('2 min ago · sync');
   });
 });

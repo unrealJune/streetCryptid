@@ -1279,6 +1279,11 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func readLatestRatcheted() async throws  -> [IncomingFix]
     
     /**
+     * Read the latest ratcheted envelope per durable lane, including null responses.
+     */
+    func readLatestRatchetedEvents() async throws  -> [RatchetEvent]
+    
+    /**
      * Read the newest verified profile for `endpoint_id` (self or a friend) from the local
      * replica. `None` if absent or not yet replicated.
      */
@@ -2579,6 +2584,26 @@ open func readLatestRatcheted()async throws  -> [IncomingFix]  {
             completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
             freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypeIncomingFix.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Read the latest ratcheted envelope per durable lane, including null responses.
+     */
+open func readLatestRatchetedEvents()async throws  -> [RatchetEvent]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_read_latest_ratcheted_events(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeRatchetEvent.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -4812,6 +4837,79 @@ public func FfiConverterTypeProfileView_lower(_ value: ProfileView) -> RustBuffe
 
 
 /**
+ * A decrypted ratcheted envelope read from the durable replica.
+ *
+ * `kind` is `fix` or `null`; `fix` is present only for the fix lane. Keeping null envelopes in
+ * this result lets the app observe the symmetric return path instead of silently discarding the
+ * very messages that keep a one-directional relationship's ratchet alive.
+ */
+public struct RatchetEvent: Equatable, Hashable {
+    public var author: Data
+    public var seq: UInt64
+    public var ts: UInt64
+    public var kind: String
+    public var fix: LocationFix?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(author: Data, seq: UInt64, ts: UInt64, kind: String, fix: LocationFix?) {
+        self.author = author
+        self.seq = seq
+        self.ts = ts
+        self.kind = kind
+        self.fix = fix
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RatchetEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRatchetEvent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RatchetEvent {
+        return
+            try RatchetEvent(
+                author: FfiConverterData.read(from: &buf), 
+                seq: FfiConverterUInt64.read(from: &buf), 
+                ts: FfiConverterUInt64.read(from: &buf), 
+                kind: FfiConverterString.read(from: &buf), 
+                fix: FfiConverterOptionTypeLocationFix.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RatchetEvent, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.author, into: &buf)
+        FfiConverterUInt64.write(value.seq, into: &buf)
+        FfiConverterUInt64.write(value.ts, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterOptionTypeLocationFix.write(value.fix, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRatchetEvent_lift(_ buf: RustBuffer) throws -> RatchetEvent {
+    return try FfiConverterTypeRatchetEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRatchetEvent_lower(_ value: RatchetEvent) -> RustBuffer {
+    return FfiConverterTypeRatchetEvent.lower(value)
+}
+
+
+/**
  * The per-session Short Authentication String challenge shown while a pair is `Verifying`.
  */
 public struct SasChallenge: Equatable, Hashable {
@@ -5983,6 +6081,31 @@ fileprivate struct FfiConverterSequenceTypeProfileView: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeRatchetEvent: FfiConverterRustBuffer {
+    typealias SwiftType = [RatchetEvent]
+
+    public static func write(_ value: [RatchetEvent], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRatchetEvent.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RatchetEvent] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RatchetEvent]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeRatchetEvent.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRustBuffer {
     typealias SwiftType = [TransportAddressDiagnostic]
 
@@ -6492,6 +6615,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted() != 45503) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted_events() != 33560) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_read_profile() != 28632) {

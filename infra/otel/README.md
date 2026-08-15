@@ -165,6 +165,9 @@ phones land here — this is the network-state view when sync dies after a wifi�
 {service_name="streetcryptid-core"} |= "network_change"
 {service_name="trail-stash"}
 {service_name="streetcryptid-app"} |= "outbox"
+{service_name=~"streetcryptid-(app|core)"} |= "ratchet response received"
+{service_name="streetcryptid-core"} |= "ratchet send position persisted"
+{service_name="streetcryptid-core"} |= "ratchet receive position persisted"
 ```
 
 From any span, "Logs for this span" (trace→logs) jumps to that instance's logs around the span.

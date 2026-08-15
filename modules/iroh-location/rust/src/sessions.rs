@@ -347,6 +347,12 @@ impl SessionManager {
                 continue;
             }
 
+            tracing::debug!(
+                sc.peer = %crate::telemetry::short_hex(peer),
+                ratchet.epoch = slot.header.epoch,
+                ratchet.counter = slot.header.counter,
+                "ratchet send position persisted"
+            );
             wraps.push(SealWrap {
                 kid: slot.kid,
                 header: slot.header,
@@ -397,6 +403,13 @@ impl SessionManager {
         // reuse (receiving derives, it never seals) but it would resurrect a fix the UI has
         // already consumed.
         self.store.save(author, &state)?;
+        tracing::debug!(
+            sc.peer = %crate::telemetry::short_hex(author),
+            ratchet.epoch = loc.header.epoch,
+            ratchet.counter = loc.header.counter,
+            ratchet.recv_epoch = state.recv_epoch(),
+            "ratchet receive position persisted"
+        );
 
         let opened = verified
             .open_wrap(index, &session_id, key)

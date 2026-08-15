@@ -22,7 +22,7 @@ import uniffi.iroh_location.BlePeer
 import uniffi.iroh_location.BumpResolution
 import uniffi.iroh_location.ControlMsg
 import uniffi.iroh_location.FixListener
-import uniffi.iroh_location.IncomingFix
+import uniffi.iroh_location.RatchetEvent
 import uniffi.iroh_location.LocationFix
 import uniffi.iroh_location.LocationNode
 import uniffi.iroh_location.PairEvent
@@ -364,7 +364,14 @@ class IrohLocationModule : Module() {
     }
 
     override fun onOpaque(author: ByteArray, seq: ULong) {
-      sendEvent("onOpaque", mapOf("author" to author.toHex(), "seq" to seq.toLong()))
+      sendEvent(
+        "onOpaque",
+        mapOf(
+          "author" to author.toHex(),
+          "seq" to seq.toLong(),
+          "kind" to if (author.isEmpty()) "opaque" else "null",
+        ),
+      )
     }
 
     override fun onStatus(status: String) {
@@ -660,18 +667,21 @@ class IrohLocationModule : Module() {
     AsyncFunction("readLatest") Coroutine
       { ->
         val n = node ?: throw IllegalStateException("call createNode first")
-        n.readLatestRatcheted().map { incoming: IncomingFix ->
+        n.readLatestRatchetedEvents().map { incoming: RatchetEvent ->
           mapOf(
             "author" to incoming.author.toHex(),
             "seq" to incoming.seq.toLong(),
-            "fix" to
+            "ts" to incoming.ts.toLong(),
+            "kind" to incoming.kind,
+            "fix" to incoming.fix?.let { fix ->
               mapOf(
-                "lat" to incoming.fix.lat,
-                "lon" to incoming.fix.lon,
-                "accuracyM" to incoming.fix.accuracyM,
-                "headingDeg" to incoming.fix.headingDeg,
-                "ts" to incoming.fix.ts.toLong(),
-              ),
+                "lat" to fix.lat,
+                "lon" to fix.lon,
+                "accuracyM" to fix.accuracyM,
+                "headingDeg" to fix.headingDeg,
+                "ts" to fix.ts.toLong(),
+              )
+            },
           )
         }
       }

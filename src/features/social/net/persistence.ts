@@ -1,4 +1,5 @@
 import type { PoolState } from '../core/pool';
+import type { RatchetActivity } from '../core/types';
 import { InMemoryKV, type PersistentKV } from './background/fix-outbox';
 import type { HandledNonce } from './live-requests';
 import { DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
@@ -307,6 +308,30 @@ export async function savePool(kv: PersistentKV, state: PoolState): Promise<void
     POOL_KEY,
     JSON.stringify({ friends: state.friends, sharingWith: state.sharingWith })
   );
+}
+
+const RATCHET_ACTIVITY_KEY = 'sc.social.ratchetActivity';
+
+export async function loadRatchetActivity(
+  kv: PersistentKV
+): Promise<Record<string, RatchetActivity>> {
+  const raw = await kv.get(RATCHET_ACTIVITY_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as Record<string, RatchetActivity>;
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, activity]) => activity && typeof activity === 'object')
+    );
+  } catch {
+    return {};
+  }
+}
+
+export async function saveRatchetActivity(
+  kv: PersistentKV,
+  activity: Readonly<Record<string, RatchetActivity>>
+): Promise<void> {
+  await kv.set(RATCHET_ACTIVITY_KEY, JSON.stringify(activity));
 }
 
 const HANDLED_CTL_KEY = 'sc.social.handledControlNonces';

@@ -8,7 +8,7 @@ import type {
   BlePeer,
   BumpResolution,
   NativeControlMsg,
-  NativeIncomingFix,
+  NativeRatchetEvent,
   NativeLocationFix,
   NodeKeys,
   PairEvent,
@@ -99,7 +99,7 @@ export declare class IrohLocationNativeModule
   docsWriteControl?(msg: NativeControlMsg, recipientsHex: string[]): Promise<void>;
   /** Optional for compatibility with installed iOS binaries built before the control API. */
   readControl?(author: string): Promise<NativeControlMsg[]>;
-  readLatest(): Promise<NativeIncomingFix[]>;
+  readLatest(): Promise<NativeRatchetEvent[]>;
   pruneTrail(olderThanTs: number): Promise<void>;
   docTicket(): Promise<string>;
   importDocTicket(ticket: string): Promise<void>;

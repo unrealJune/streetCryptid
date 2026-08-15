@@ -14,6 +14,7 @@ import type {
   BlePeer,
   BumpResolution,
   NativeIncomingFix,
+  NativeRatchetEvent,
   NativeLocationFix,
   NodeKeys,
   PairEvent,
@@ -256,9 +257,14 @@ export class IrohLocationNativeModule
   // ephemeral (lost on reload), so a control entry written here would be a request the sender
   // cannot reliably withdraw. Absent beats half-working.
 
-  async readLatest(): Promise<NativeIncomingFix[]> {
+  async readLatest(): Promise<NativeRatchetEvent[]> {
     await ensureWasm();
-    return (await this.requireNode().read_latest()) as NativeIncomingFix[];
+    const fixes = (await this.requireNode().read_latest()) as NativeIncomingFix[];
+    return fixes.map((incoming) => ({
+      ...incoming,
+      ts: incoming.fix.ts,
+      kind: 'fix',
+    }));
   }
 
   async pruneTrail(olderThanTs: number): Promise<void> {
@@ -440,7 +446,7 @@ export class IrohLocationNativeModule
             backfill: event.backfill,
           });
         } else if (event.type === 'opaque') {
-          this.emit('onOpaque', { author: event.author, seq: event.seq });
+          this.emit('onOpaque', { author: event.author, seq: event.seq, kind: 'opaque' });
         } else if (event.type === 'sync') {
           this.emit('onSync', {
             author: event.author,

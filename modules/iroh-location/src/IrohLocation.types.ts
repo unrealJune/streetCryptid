@@ -58,6 +58,8 @@ export interface OnFixEvent {
 export interface OnOpaqueEvent {
   author: string;
   seq: number;
+  /** `null` means a decrypted null-lane response; `opaque` means no payload was opened. */
+  kind?: 'null' | 'opaque';
 }
 
 export interface OnStatusEvent {
@@ -96,6 +98,17 @@ export interface NativeIncomingFix {
   author: string;
   seq: number;
   fix: NativeLocationFix;
+}
+
+/** A decrypted v3 envelope from the durable replica, including the position-less null lane. */
+export interface NativeRatchetEvent {
+  author: string;
+  seq: number;
+  /** Sender timestamp from the signed envelope header. */
+  ts?: number;
+  /** Absent on installed native binaries from before null-lane activity was surfaced. */
+  kind?: 'fix' | 'null';
+  fix?: NativeLocationFix;
 }
 
 // ── Control messages (docs/social/ARCHITECTURE.md §9c) ──────────────────────────────────────
@@ -490,7 +503,7 @@ export interface IrohLocationApi {
    * ours included. Replaces the old per-author range read: with a single last-write-wins slot per
    * author there is no range left to ask for, so this is one call instead of a loop.
    */
-  readLatest(): Promise<NativeIncomingFix[]>;
+  readLatest(): Promise<NativeRatchetEvent[]>;
 
   // ── ratchet sessions + §4.6 recovery ────────────────────────────────────────────────────────
   //

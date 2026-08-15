@@ -10,8 +10,10 @@ import {
   type IrohLocationNativeModule,
   type NativeControlMsg,
   type NativeLocationFix,
+  type NativeRatchetEvent,
   type NodeKeys,
   type OnFixEvent,
+  type OnOpaqueEvent,
   type PairEvent,
   type PairResult,
   type PairStateRecord,
@@ -48,6 +50,9 @@ import type {
   IncomingFix,
   LocationFix,
   PairingMethod,
+  RatchetAckKind,
+  RatchetAckSource,
+  RatchetActivity,
   SelfIdentity,
 } from '../core/types';
 import type { BackgroundLocationProvider } from './background/background-provider';
@@ -65,11 +70,13 @@ import {
   createPersistentTrailStorage,
   loadHandledNonces,
   loadPool,
+  loadRatchetActivity,
   loadShareIntervalMs,
   loadStashOptIn,
   loadTransportPreferences,
   saveHandledNonces,
   savePool,
+  saveRatchetActivity,
   saveShareIntervalMs,
   saveSharingEnabled,
   saveStashOptIn,
@@ -215,6 +222,8 @@ export interface SharingSnapshot {
   live: LiveSnapshot;
   /** Per-friend forward-secrecy health — who is not receiving our fixes, and why (§4.5, §4.6). */
   sessions: SessionHealthSnapshot;
+  /** Latest signed fix/null return envelopes successfully opened from each friend. */
+  ratchetActivity: Record<string, RatchetActivity>;
 }
 
 /**
@@ -454,6 +463,8 @@ export class LocationSharingService implements FixPublisher {
   private readonly replicaWatermarks = new Map<string, { ts: number; seq: number }>();
   private readonly errorListeners = new Set<ErrorListener>();
   private fixSub: Removable | null = null;
+  private opaqueSub: Removable | null = null;
+  private ratchetActivity: Record<string, RatchetActivity> = {};
 
   // Bilateral pairing / nearby discovery runtime.
   private pairingReadyFlag = false;
@@ -763,6 +774,9 @@ export class LocationSharingService implements FixPublisher {
     this.configureDevTelemetry();
     // Restore the monotonic seq before anything can publish, so we never hand out a reused seq.
     this.seq = await loadSeq();
+    // Load before listeners attach: a live response arriving during startup must not be overwritten
+    // by older persisted diagnostics a few awaits later.
+    this.ratchetActivity = await loadRatchetActivity(this.kv);
     this.transportPreferences = await loadTransportPreferences(this.kv);
     await this.mod.start(this.transportPreferences);
     if (interactive) {
@@ -772,8 +786,10 @@ export class LocationSharingService implements FixPublisher {
       this.profileEpoch = await this.safePublishProfile();
       this.profileTicketStr = await this.safeProfileTicket();
       this.fixSub = this.mod.addListener('onFix', (event: OnFixEvent) => this.handleFix(event));
+      this.opaqueSub = this.mod.addListener('onOpaque', (event: OnOpaqueEvent) =>
+        this.handleOpaque(event)
+      );
     }
-
     await this.restorePool(interactive);
     this.stashOptIn = await loadStashOptIn(this.kv);
     // Restored, not reset: a control nonce we already acted on must stay acted-on across a restart,
@@ -897,6 +913,8 @@ export class LocationSharingService implements FixPublisher {
     this.profileBackfillAttempts.delete(endpointId);
     this.droppedRecipients.delete(endpointId);
     this.sessionVerdicts.delete(endpointId);
+    delete this.ratchetActivity[endpointId];
+    void saveRatchetActivity(this.kv, this.ratchetActivity);
     this.emit();
 
     const cleanup: Promise<void>[] = [];
@@ -1091,6 +1109,8 @@ export class LocationSharingService implements FixPublisher {
     this.stopPairingPolling();
     this.fixSub?.remove();
     this.fixSub = null;
+    this.opaqueSub?.remove();
+    this.opaqueSub = null;
 
     const subscriptionIds = [...(this.mySubId ? [this.mySubId] : []), ...this.friendSubs.values()];
     await Promise.allSettled(
@@ -1114,6 +1134,9 @@ export class LocationSharingService implements FixPublisher {
     this.profileEpoch = await this.safePublishProfile();
     this.profileTicketStr = await this.safeProfileTicket();
     this.fixSub = mod.addListener('onFix', (event: OnFixEvent) => this.handleFix(event));
+    this.opaqueSub = mod.addListener('onOpaque', (event: OnOpaqueEvent) =>
+      this.handleOpaque(event)
+    );
 
     await this.importFriendProfiles();
     for (const friend of pool.friendList(this.state)) await this.subscribeToFriend(friend);
@@ -1768,10 +1791,19 @@ export class LocationSharingService implements FixPublisher {
     // One read for the whole replica: every namespace holds a single overwritten slot, so there is
     // no per-author range to walk and nothing to collapse. The watermark is kept only to skip
     // re-storing a fix we have already seen — it is no longer a read bound.
-    const fixes = await this.mod.readLatest().catch(() => []);
+    const events = await this.mod.readLatest().catch(() => [] as NativeRatchetEvent[]);
 
     let recoveredFriendFixes = 0;
-    for (const nf of fixes) {
+    for (const nf of events) {
+      if (known.has(nf.author)) {
+        this.recordRatchetActivity(
+          nf.author,
+          nf.kind === 'null' ? 'null' : 'fix',
+          nf.seq,
+          'durable'
+        );
+      }
+      if (!nf.fix) continue;
       const fix = {
         lat: nf.fix.lat,
         lon: nf.fix.lon,
@@ -2444,6 +2476,8 @@ export class LocationSharingService implements FixPublisher {
     this.bgLifecycleStop = null;
     this.fixSub?.remove();
     this.fixSub = null;
+    this.opaqueSub?.remove();
+    this.opaqueSub = null;
     const mod = this.mod;
     const subscriptionIds = [...(this.mySubId ? [this.mySubId] : []), ...this.friendSubs.values()];
     this.mod = null;
@@ -2619,6 +2653,7 @@ export class LocationSharingService implements FixPublisher {
     });
     span.end();
     if (!this.state.friends[event.author] || this.removingFriends.has(event.author)) return;
+    this.recordRatchetActivity(event.author, 'fix', event.seq, event.backfill ? 'durable' : 'live');
 
     const fix: IncomingFix = {
       author: event.author,
@@ -2639,6 +2674,49 @@ export class LocationSharingService implements FixPublisher {
       .then(() => this.notifyTrailChanged())
       .catch((error: unknown) => this.reportError(error));
     this.fixListeners.forEach((l) => l(fix));
+  }
+
+  private handleOpaque(event: OnOpaqueEvent): void {
+    if (event.kind !== 'null' || !event.author || event.seq <= 0) return;
+    if (!this.state.friends[event.author] || this.removingFriends.has(event.author)) return;
+    this.recordRatchetActivity(event.author, 'null', event.seq, 'live');
+  }
+
+  private recordRatchetActivity(
+    author: string,
+    kind: RatchetAckKind,
+    seq: number,
+    source: RatchetAckSource
+  ): void {
+    const current = this.ratchetActivity[author] ?? { fix: null, null: null };
+    const previous = current[kind];
+    if (previous && seq <= previous.seq) return;
+    const receivedAt = Date.now();
+    this.ratchetActivity = {
+      ...this.ratchetActivity,
+      [author]: {
+        ...current,
+        [kind]: { seq, receivedAt, source },
+      },
+    };
+    recordEventLog({
+      timestamp: receivedAt,
+      level: 'debug',
+      category: 'ratchet',
+      action: `ratchet.ack.${kind}`,
+      summary: `${kind} ack from ${author.slice(0, 10)} at seq ${seq}`,
+      status: 'ok',
+      transport: source,
+      details: { peer: author.slice(0, 10), seq, kind, source },
+    });
+    getTelemetry().log('debug', `ratchet ${kind} response received`, {
+      'sc.peer': author.slice(0, 10),
+      'sc.seq': seq,
+      'sc.lane': kind,
+      source,
+    });
+    void saveRatchetActivity(this.kv, this.ratchetActivity);
+    this.emit();
   }
 
   /**
@@ -2718,6 +2796,7 @@ export class LocationSharingService implements FixPublisher {
       pairing: this.pairingSnapshot(),
       live: this.liveSnapshot(),
       sessions: this.sessionHealthSnapshot(),
+      ratchetActivity: { ...this.ratchetActivity },
     };
   }
 

@@ -110,3 +110,19 @@ export interface IncomingFix {
    */
   via?: FixTransport;
 }
+
+export type RatchetAckKind = 'fix' | 'null';
+export type RatchetAckSource = 'live' | 'durable';
+
+export interface RatchetAck {
+  seq: number;
+  /** When this device successfully opened the friend's response. */
+  receivedAt: number;
+  source: RatchetAckSource;
+}
+
+/** Latest signed return-envelope activity for one friend. */
+export interface RatchetActivity {
+  fix: RatchetAck | null;
+  null: RatchetAck | null;
+}

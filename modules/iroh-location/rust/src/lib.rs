@@ -197,6 +197,20 @@ pub struct IncomingFix {
     pub fix: LocationFix,
 }
 
+/// A decrypted ratcheted envelope read from the durable replica.
+///
+/// `kind` is `fix` or `null`; `fix` is present only for the fix lane. Keeping null envelopes in
+/// this result lets the app observe the symmetric return path instead of silently discarding the
+/// very messages that keep a one-directional relationship's ratchet alive.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RatchetEvent {
+    pub author: Vec<u8>,
+    pub seq: u64,
+    pub ts: u64,
+    pub kind: String,
+    pub fix: Option<LocationFix>,
+}
+
 /// Foreign (Swift/Kotlin/JS) callback for inbound events on a subscription.
 #[uniffi::export(with_foreign)]
 pub trait FixListener: Send + Sync + 'static {
@@ -964,6 +978,75 @@ impl LocationNode {
             Err(_) => GossipOpen::Failed,
         }
     }
+
+    async fn read_latest_ratcheted_events_inner(&self) -> Result<Vec<RatchetEvent>, LocationError> {
+        let sealed = {
+            let guard = self.inner.lock().await;
+            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            started
+                .trail
+                .read_latest_sealed()
+                .await
+                .map_err(|e| LocationError::Network(e.to_string()))?
+        };
+        let manager = self.session_manager().await?;
+        let now = now_ms();
+
+        let mut verified = sealed
+            .into_iter()
+            .filter_map(|bytes| crypto::verify_v3(&bytes).ok())
+            .filter(|envelope| envelope.author != self.author)
+            .collect::<Vec<_>>();
+        // The fix and null lanes occupy separate LWW slots. If both current slots address us
+        // (for example just after a sharing-direction change), open them in seq order so the
+        // newer one does not advance the ratchet past the older activity record first.
+        verified.sort_unstable_by_key(|envelope| (envelope.author, envelope.seq));
+
+        let mut out = Vec::new();
+        for verified in verified {
+            let author = verified.author.to_vec();
+            let payload = match manager.open(&author, &verified, now) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    tracing::debug!(
+                        sc.author = %telemetry::short_hex(&author),
+                        sc.seq = verified.seq,
+                        sc.drop_reason = %err,
+                        "ratcheted envelope not opened"
+                    );
+                    continue;
+                }
+            };
+            let fix = match decode_fix_payload(&payload) {
+                Ok(fix) => fix,
+                Err(err) => {
+                    tracing::debug!(
+                        sc.author = %telemetry::short_hex(&author),
+                        sc.seq = verified.seq,
+                        error = %err,
+                        "ratchet response payload could not be decoded"
+                    );
+                    continue;
+                }
+            };
+            let kind = if fix.is_some() { "fix" } else { "null" };
+            tracing::debug!(
+                sc.author = %telemetry::short_hex(&author),
+                sc.seq = verified.seq,
+                sc.lane = kind,
+                source = "durable",
+                "ratchet response received"
+            );
+            out.push(RatchetEvent {
+                author,
+                seq: verified.seq,
+                ts: verified.ts,
+                kind: kind.to_string(),
+                fix,
+            });
+        }
+        Ok(out)
+    }
 }
 
 /// What happened to an inbound gossip envelope. See [`LocationNode::open_ratcheted_envelope`].
@@ -1702,6 +1785,13 @@ impl LocationNode {
                                 match decode_fix_payload(&opened.payload) {
                                     Ok(Some(fix)) => {
                                         span.record("outcome", "delivered");
+                                        tracing::debug!(
+                                            sc.author = %telemetry::short_hex(&opened.author),
+                                            sc.seq = opened.seq,
+                                            sc.lane = "fix",
+                                            source = %via,
+                                            "ratchet response received"
+                                        );
                                         cb.on_fix(
                                             opened.author.to_vec(),
                                             opened.seq,
@@ -1716,6 +1806,14 @@ impl LocationNode {
                                     // envelope, not a failure.
                                     Ok(None) => {
                                         span.record("outcome", "null-fix");
+                                        tracing::debug!(
+                                            sc.author = %telemetry::short_hex(&opened.author),
+                                            sc.seq = opened.seq,
+                                            sc.lane = "null",
+                                            source = %via,
+                                            "ratchet response received"
+                                        );
+                                        cb.on_opaque(opened.author.to_vec(), opened.seq);
                                     }
                                     Err(_) => {
                                         span.record("outcome", "payload-decode-failed");
@@ -2363,48 +2461,23 @@ impl LocationNode {
     /// Envelopes we cannot open are skipped exactly as v2's are: addressed to someone else,
     /// replayed from the archive, or beyond the acceptance window are all "nothing to surface".
     pub async fn read_latest_ratcheted(&self) -> Result<Vec<IncomingFix>, LocationError> {
-        let sealed = {
-            let guard = self.inner.lock().await;
-            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
-            started
-                .trail
-                .read_latest_sealed()
-                .await
-                .map_err(|e| LocationError::Network(e.to_string()))?
-        };
-        let manager = self.session_manager().await?;
-        let now = now_ms();
-
-        let mut out = Vec::new();
-        for bytes in sealed {
-            let Ok(verified) = crypto::verify_v3(&bytes) else {
-                continue; // a v2 envelope, our own control entry, or corrupt
-            };
-            if verified.author == self.author {
-                continue; // our own outbound envelope
-            }
-            let author = verified.author.to_vec();
-            let payload = match manager.open(&author, &verified, now) {
-                Ok(payload) => payload,
-                Err(err) => {
-                    tracing::debug!(
-                        sc.author = %telemetry::short_hex(&author),
-                        sc.seq = verified.seq,
-                        sc.drop_reason = %err,
-                        "ratcheted envelope not opened"
-                    );
-                    continue;
-                }
-            };
-            if let Ok(Some(fix)) = decode_fix_payload(&payload) {
-                out.push(IncomingFix {
-                    author,
-                    seq: verified.seq,
+        Ok(self
+            .read_latest_ratcheted_events_inner()
+            .await?
+            .into_iter()
+            .filter_map(|event| {
+                event.fix.map(|fix| IncomingFix {
+                    author: event.author,
+                    seq: event.seq,
                     fix,
-                });
-            }
-        }
-        Ok(out)
+                })
+            })
+            .collect())
+    }
+
+    /// Read the latest ratcheted envelope per durable lane, including null responses.
+    pub async fn read_latest_ratcheted_events(&self) -> Result<Vec<RatchetEvent>, LocationError> {
+        self.read_latest_ratcheted_events_inner().await
     }
 
     /// Explicitly drop durable entries older than `older_than_ts`.

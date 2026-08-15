@@ -283,7 +283,11 @@ private final class EventBridge: FixListener {
       ])
   }
   func onOpaque(author: Data, seq: UInt64) {
-    module?.sendEvent("onOpaque", ["author": dataToHex(author), "seq": seq])
+    module?.sendEvent("onOpaque", [
+      "author": dataToHex(author),
+      "seq": seq,
+      "kind": author.isEmpty ? "opaque" : "null",
+    ])
   }
   func onStatus(status: String) {
     module?.sendEvent("onStatus", ["subscriptionId": subscriptionId, "status": status])
@@ -537,15 +541,19 @@ public final class IrohLocationModule: Module {
 
     AsyncFunction("readLatest") { () async throws -> [[String: Any]] in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      let fixes = try await node.readLatestRatcheted()
-      return fixes.map { incoming in
+      let events = try await node.readLatestRatchetedEvents()
+      return events.map { incoming in
         [
           "author": dataToHex(incoming.author),
           "seq": incoming.seq,
-          "fix": [
-            "lat": incoming.fix.lat, "lon": incoming.fix.lon, "accuracyM": incoming.fix.accuracyM,
-            "headingDeg": incoming.fix.headingDeg, "ts": incoming.fix.ts,
-          ],
+          "ts": incoming.ts,
+          "kind": incoming.kind,
+          "fix": incoming.fix.map { fix in
+            [
+              "lat": fix.lat, "lon": fix.lon, "accuracyM": fix.accuracyM,
+              "headingDeg": fix.headingDeg, "ts": fix.ts,
+            ]
+          } as Any,
         ]
       }
     }

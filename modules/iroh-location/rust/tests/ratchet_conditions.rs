@@ -1004,13 +1004,19 @@ async fn a_watch_only_friend_feeds_the_ratchet_with_null_fixes() {
         );
         replicate(&watcher, &stash, &sharer).await;
 
-        // Nulls carry no position, so nothing is *delivered* — but the read is what feeds the
-        // schedule, and a `nul` entry the reader skipped would never get here at all.
-        let delivered = sharer.read_latest_ratcheted().await.expect("sharer reads");
-        assert!(
-            !delivered.iter().any(|e| e.author == watcher.endpoint_id()),
-            "a null fix must never surface as a position"
-        );
+        // Nulls carry no position, but they are protocol activity the app needs for diagnostics.
+        let events = sharer
+            .read_latest_ratcheted_events()
+            .await
+            .expect("sharer reads");
+        let response = events
+            .iter()
+            .find(|event| event.author == watcher.endpoint_id())
+            .expect("the null response is surfaced");
+        assert_eq!(response.kind, "null");
+        assert_eq!(response.seq, seq);
+        assert_eq!(response.ts, 90_000 + seq);
+        assert!(response.fix.is_none(), "a null fix must carry no position");
         assert!(
             !sharer
                 .is_desynced(watcher_hex.clone())

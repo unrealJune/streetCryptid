@@ -119,6 +119,7 @@ class FakeNativeModule {
     seq: number;
     fix: { lat: number; lon: number; accuracyM: number; headingDeg: number; ts: number };
   }[] = [];
+  trailNulls: { author: string; seq: number; ts: number; kind: 'null'; fix?: undefined }[] = [];
   async readLatest() {
     // One overwritten slot per author: a read yields each author's current fix, nothing behind it.
     const current = new Map<string, (typeof this.trailFixes)[number]>();
@@ -128,7 +129,14 @@ class FakeNativeModule {
         current.set(f.author, f);
       }
     }
-    return [...current.values()];
+    return [
+      ...[...current.values()].map((incoming) => ({
+        ...incoming,
+        ts: incoming.fix.ts,
+        kind: 'fix' as const,
+      })),
+      ...this.trailNulls,
+    ];
   }
   async pruneTrail() {}
   addListener(name: string, cb: (e: unknown) => void) {
@@ -507,6 +515,46 @@ describe('LocationSharingService — durable trail wiring', () => {
     // Nothing new in the replica: the watermark skips the re-store, so nothing is "recovered".
     await svc.syncTrail(0);
     expect(recovered).toBe(0);
+  });
+
+  it('surfaces live fix and null ratchet responses per friend', async () => {
+    const svc = makeService();
+    let activity: SharingSnapshot['ratchetActivity'] = {};
+    svc.onChange((snapshot) => {
+      activity = snapshot.ratchetActivity;
+    });
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+
+    mockHolder.mod.emit('onFix', {
+      author: friend.endpointId,
+      seq: 21,
+      fix: { lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 900 },
+    });
+    mockHolder.mod.emit('onOpaque', { author: friend.endpointId, seq: 22, kind: 'null' });
+
+    expect(activity[friend.endpointId]).toMatchObject({
+      fix: { seq: 21, source: 'live' },
+      null: { seq: 22, source: 'live' },
+    });
+  });
+
+  it('surfaces a null ratchet response recovered from the durable lane', async () => {
+    const svc = makeService();
+    let activity: SharingSnapshot['ratchetActivity'] = {};
+    svc.onChange((snapshot) => {
+      activity = snapshot.ratchetActivity;
+    });
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+    mockHolder.mod.trailNulls = [{ author: friend.endpointId, seq: 31, ts: 1_000, kind: 'null' }];
+
+    await svc.syncTrail(0);
+
+    expect(activity[friend.endpointId]?.null).toMatchObject({
+      seq: 31,
+      source: 'durable',
+    });
   });
 
   describe('share interval', () => {

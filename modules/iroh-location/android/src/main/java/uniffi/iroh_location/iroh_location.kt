@@ -819,6 +819,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted_events(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_read_profile(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_recv_public(
@@ -1019,6 +1021,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_read_control(`ptr`: Lon
 external fun uniffi_iroh_location_fn_method_locationnode_read_latest(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_read_latest_ratcheted(`ptr`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_read_latest_ratcheted_events(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_read_profile(`ptr`: Long,`endpointId`: RustBuffer.ByValue,
 ): Long
@@ -1448,6 +1452,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted() != 45503) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted_events() != 33560) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_read_profile() != 28632) {
@@ -2850,6 +2857,11 @@ public interface LocationNodeInterface {
      * replayed from the archive, or beyond the acceptance window are all "nothing to surface".
      */
     suspend fun `readLatestRatcheted`(): List<IncomingFix>
+    
+    /**
+     * Read the latest ratcheted envelope per durable lane, including null responses.
+     */
+    suspend fun `readLatestRatchetedEvents`(): List<RatchetEvent>
     
     /**
      * Read the newest verified profile for `endpoint_id` (self or a friend) from the local
@@ -4373,6 +4385,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceTypeIncomingFix.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Read the latest ratcheted envelope per durable lane, including null responses.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `readLatestRatchetedEvents`() : List<RatchetEvent> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_read_latest_ratcheted_events(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeRatchetEvent.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -6686,6 +6722,66 @@ public object FfiConverterTypeProfileView: FfiConverterRustBuffer<ProfileView> {
 
 
 /**
+ * A decrypted ratcheted envelope read from the durable replica.
+ *
+ * `kind` is `fix` or `null`; `fix` is present only for the fix lane. Keeping null envelopes in
+ * this result lets the app observe the symmetric return path instead of silently discarding the
+ * very messages that keep a one-directional relationship's ratchet alive.
+ */
+data class RatchetEvent (
+    var `author`: kotlin.ByteArray
+    , 
+    var `seq`: kotlin.ULong
+    , 
+    var `ts`: kotlin.ULong
+    , 
+    var `kind`: kotlin.String
+    , 
+    var `fix`: LocationFix?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRatchetEvent: FfiConverterRustBuffer<RatchetEvent> {
+    override fun read(buf: ByteBuffer): RatchetEvent {
+        return RatchetEvent(
+            FfiConverterByteArray.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalTypeLocationFix.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RatchetEvent) = (
+            FfiConverterByteArray.allocationSize(value.`author`) +
+            FfiConverterULong.allocationSize(value.`seq`) +
+            FfiConverterULong.allocationSize(value.`ts`) +
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterOptionalTypeLocationFix.allocationSize(value.`fix`)
+    )
+
+    override fun write(value: RatchetEvent, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`author`, buf)
+            FfiConverterULong.write(value.`seq`, buf)
+            FfiConverterULong.write(value.`ts`, buf)
+            FfiConverterString.write(value.`kind`, buf)
+            FfiConverterOptionalTypeLocationFix.write(value.`fix`, buf)
+    }
+}
+
+
+
+/**
  * The per-session Short Authentication String challenge shown while a pair is `Verifying`.
  */
 data class SasChallenge (
@@ -7756,6 +7852,34 @@ public object FfiConverterSequenceTypeProfileView: FfiConverterRustBuffer<List<P
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeProfileView.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeRatchetEvent: FfiConverterRustBuffer<List<RatchetEvent>> {
+    override fun read(buf: ByteBuffer): List<RatchetEvent> {
+        val len = buf.getInt()
+        return List<RatchetEvent>(len) {
+            FfiConverterTypeRatchetEvent.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<RatchetEvent>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeRatchetEvent.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<RatchetEvent>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeRatchetEvent.write(it, buf)
         }
     }
 }

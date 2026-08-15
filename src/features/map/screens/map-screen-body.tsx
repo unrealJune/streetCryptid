@@ -407,6 +407,9 @@ export default function MapScreenBody() {
               )?.expiresAt ?? null)
             : null
         }
+        ratchetActivity={
+          profilePresence ? snapshot?.ratchetActivity[profilePresence.friend.endpointId] : undefined
+        }
         onClose={() => setProfileEndpoint(null)}
         onToggleShare={async (on) => {
           if (!profilePresence) return;
