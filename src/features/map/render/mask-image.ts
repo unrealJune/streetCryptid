@@ -11,9 +11,10 @@ import {
   type SkPaint,
 } from '@shopify/react-native-skia';
 
-import { RIVER_WIDTH, ROAD_VALUES } from '../core/masks';
+import { ROAD_VALUES } from '../core/masks';
 import { type RegionSpec } from '../core/region';
 import { roadWidthFor, type RoadLayerOptions } from '../core/road-lod';
+import { riverWidthFor } from '../core/water-lod';
 import type { PackedGeometry } from '../tiles/packed-geometry';
 import { buildMaskPaths } from './mask-paths';
 
@@ -63,9 +64,11 @@ export function buildMaskImage(
 
   drawFill(canvas, paths.park, 'rgb(0,255,0)');
   drawFill(canvas, paths.water, 'rgb(0,0,255)');
-  if (paths.rivers) {
+  // Zoom-aware LOD, same as the streets above — see `core/water-lod.ts`.
+  const riverWidth = riverWidthFor(spec.zoom);
+  if (paths.rivers && riverWidth !== null) {
     const rivers = Skia.Path.MakeFromSVGString(paths.rivers);
-    if (rivers) canvas.drawPath(rivers, strokePaint('rgb(0,0,255)', RIVER_WIDTH));
+    if (rivers) canvas.drawPath(rivers, strokePaint('rgb(0,0,255)', riverWidth));
   }
 
   return drawAsImageFromPicture(recorder.finishRecordingAsPicture(), {
