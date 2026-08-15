@@ -18,6 +18,12 @@ use std::sync::Arc;
 
 use iroh_location::{LocationFix, LocationNode};
 
+// These tests use real loopback QUIC, docs reconciliation, and blob transfer. Running all of
+// them concurrently creates dozens of endpoints and can starve an otherwise healthy exchange on
+// a loaded CI runner. The protocol work inside each test remains multi-threaded; only the
+// top-level scenarios are serialized.
+static NETWORK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 // ── the normative source-level check (§7 step 7) ──────────────────────────────────────────
 
 /// §4.6: "there is no code path that roots a session in static-static DH alone, and no automatic
@@ -242,12 +248,11 @@ async fn publish_and_deliver(
     );
     let author_id = from.endpoint_id();
     let deadline = std::time::Instant::now() + DELIVERY_DEADLINE;
-    let mut last = Vec::new();
     let mut passes = 0usize;
     while std::time::Instant::now() < deadline {
         passes += 1;
         replicate(from, stash, to).await;
-        last = to.read_latest_ratcheted().await.expect("read");
+        let last = to.read_latest_ratcheted().await.expect("read");
         if last.iter().any(|e| e.author == author_id) {
             return last;
         }
@@ -308,6 +313,7 @@ async fn restart(node: Arc<LocationNode>) -> Arc<LocationNode> {
 /// nothing else in the test suite would notice if it stopped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sessions_survive_an_app_restart() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
     let author = start_node().await;
     let friend = start_node().await;
     let stash = start_node().await;
@@ -343,6 +349,7 @@ async fn sessions_survive_an_app_restart() {
 /// either fail to publish or — much worse — resume at a counter it has already used.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn both_sides_survive_a_restart_and_keep_talking() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
     let a = start_node().await;
     let b = start_node().await;
     let stash = start_node().await;
@@ -393,6 +400,7 @@ async fn both_sides_survive_a_restart_and_keep_talking() {
 /// which is what reusing or losing a counter would look like from the outside.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restart_mid_publish_burns_a_counter_rather_than_reusing_one() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
     let author = start_node().await;
     let friend = start_node().await;
     let stash = start_node().await;
@@ -442,6 +450,7 @@ async fn a_restart_mid_publish_burns_a_counter_rather_than_reusing_one() {
 /// with a failure mode ("AlreadyOpen") that looks nothing like its cause.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_start_in_one_process_does_not_strand_the_writer_claim() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
     let node = start_node().await;
     let peer = start_node().await;
     let peer_id = hex(&peer.endpoint_id());
@@ -483,6 +492,7 @@ async fn stop_start_in_one_process_does_not_strand_the_writer_claim() {
 /// call, looks nothing like its cause.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_second_node_can_claim_the_store_after_the_first_shuts_down() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
     // Two instances of the same identity share a data directory (it is derived from the author
     // key), which is precisely the foreground/headless situation.
     let seed = LocationNode::new(None, None).expect("mint an identity");
@@ -536,6 +546,7 @@ async fn a_second_node_can_claim_the_store_after_the_first_shuts_down() {
 /// stored key index into the stash's archive (§9).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_friend_offline_for_many_intervals_catches_up_to_the_current_fix() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
     let author = start_node().await;
     let friend = start_node().await;
     let stash = start_node().await;
@@ -590,6 +601,7 @@ async fn a_friend_offline_for_many_intervals_catches_up_to_the_current_fix() {
 /// session stops being recoverable by fast-forward alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn beyond_the_acceptance_window_the_friend_needs_a_resync_not_patience() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
     let author = start_node().await;
     let friend = start_node().await;
     let stash = start_node().await;
@@ -633,6 +645,7 @@ async fn beyond_the_acceptance_window_the_friend_needs_a_resync_not_patience() {
 /// `send_epoch` and `recv_epoch` separately.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn crossing_envelopes_converge() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
     let a = start_node().await;
     let b = start_node().await;
     let stash = start_node().await;
@@ -700,6 +713,7 @@ async fn crossing_envelopes_converge() {
 /// fast-forward to it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn heavily_asymmetric_traffic_keeps_both_directions_alive() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
     let walker = start_node().await;
     let sitter = start_node().await;
     let stash = start_node().await;
@@ -786,6 +800,7 @@ async fn resync_pair(a: &Arc<LocationNode>, b: &Arc<LocationNode>, stash: &Arc<L
 /// — and the pair recovers by restarting the session, never by falling back to something weaker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_device_that_lost_its_state_recovers_through_resync() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
     let a = start_node().await;
     let b = start_node().await;
     let stash = start_node().await;
@@ -843,6 +858,7 @@ async fn a_device_that_lost_its_state_recovers_through_resync() {
 /// has already moved off.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_replayed_resync_record_is_refused() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
     let a = start_node().await;
     let b = start_node().await;
     let stash = start_node().await;
@@ -889,6 +905,7 @@ async fn a_replayed_resync_record_is_refused() {
 /// failing".
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repeated_failures_mark_the_session_desynced() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
     let a = start_node().await;
     let b = start_node().await;
     let stash = start_node().await;
@@ -976,6 +993,7 @@ async fn repeated_failures_mark_the_session_desynced() {
 /// envelopes never reached the schedule.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_watch_only_friend_feeds_the_ratchet_with_null_fixes() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
     let sharer = start_node().await;
     let watcher = start_node().await;
     let stash = start_node().await;
