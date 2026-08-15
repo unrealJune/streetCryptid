@@ -44,7 +44,7 @@ import {
   REVEAL_TARGET,
 } from '../src/features/map/render/reveal-mask';
 import { buildMaskPaths } from '../src/features/map/render/mask-paths';
-import { lodForZoom } from '../src/features/map/render/shader-uniforms';
+import { DOT_STEP, lodForZoom } from '../src/features/map/render/shader-uniforms';
 import { mergePacked, type PackedGeometry } from '../src/features/map/tiles/packed-geometry';
 import { BundleFetchByteSource } from '../src/features/map/tiles/bundle-fetch';
 import { DecodingGeometrySource } from '../src/features/map/tiles/decode-source';
@@ -251,7 +251,7 @@ function renderRegionCrop({
     rectH,
     spec.maskWidth,
     spec.maskHeight,
-    2.0, // DOT_STEP
+    DOT_STEP,
     palette.bg[0] / 255,
     palette.bg[1] / 255,
     palette.bg[2] / 255,
