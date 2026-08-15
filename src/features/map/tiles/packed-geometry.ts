@@ -72,6 +72,8 @@ export interface PackedTile {
   readonly originX: number;
   readonly originY: number;
   readonly streets: PackedStreets;
+  /** Label-only road lines from OpenMapTiles `transportation_name`. */
+  readonly labelStreets: PackedStreets;
   readonly transit: PackedTransit;
   readonly rivers: PackedLines;
   readonly water: PackedAreas;
@@ -87,6 +89,14 @@ export interface PackedGeometry {
 
 export const EMPTY_PACKED: PackedGeometry = { parts: [], places: [] };
 
+export const EMPTY_PACKED_STREETS: PackedStreets = {
+  count: 0,
+  roadClass: new Uint8Array(0),
+  names: [],
+  pointOff: new Uint32Array(1),
+  coords: new Float32Array(0),
+};
+
 /** Concatenate per-tile geometry into one region batch — just list joins. */
 export function mergePacked(parts: readonly PackedGeometry[]): PackedGeometry {
   if (parts.length === 1) return parts[0];
@@ -100,6 +110,7 @@ export function mergePacked(parts: readonly PackedGeometry[]): PackedGeometry {
 export function packedTileToGeometry(tile: PackedTile): PackedGeometry {
   const empty =
     tile.streets.count === 0 &&
+    tile.labelStreets.count === 0 &&
     tile.transit.count === 0 &&
     tile.rivers.count === 0 &&
     tile.water.count === 0 &&
@@ -116,28 +127,31 @@ export function packedTileToGeometry(tile: PackedTile): PackedGeometry {
 // ---------------------------------------------------------------------------
 
 export function packGeometry(g: MapGeometry): PackedGeometry {
-  const streets = (() => {
-    const count = g.streets.length;
+  const packStreets = (ways: readonly StreetWay[]): PackedStreets => {
+    const count = ways.length;
     const roadClass = new Uint8Array(count);
     const names: (string | undefined)[] = new Array(count);
     const pointOff = new Uint32Array(count + 1);
     let total = 0;
     for (let i = 0; i < count; i++) {
-      roadClass[i] = g.streets[i].roadClass;
-      names[i] = g.streets[i].name;
+      roadClass[i] = ways[i].roadClass;
+      names[i] = ways[i].name;
       pointOff[i] = total;
-      total += g.streets[i].points.length;
+      total += ways[i].points.length;
     }
     pointOff[count] = total;
     const coords = new Float32Array(total * 2);
     let k = 0;
-    for (const s of g.streets)
+    for (const s of ways)
       for (const [x, y] of s.points) {
         coords[k++] = x;
         coords[k++] = y;
       }
     return { count, roadClass, names, pointOff, coords };
-  })();
+  };
+
+  const streets = packStreets(g.streets);
+  const labelStreets = packStreets(g.labelStreets ?? []);
 
   const transit = (() => {
     const count = g.transit.length;
@@ -218,6 +232,7 @@ export function packGeometry(g: MapGeometry): PackedGeometry {
     originX: 0,
     originY: 0,
     streets,
+    labelStreets,
     transit,
     rivers: packLines(g.rivers),
     water: packAreas(g.water),
@@ -244,6 +259,7 @@ export function asTransitMode(v: number): TransitMode {
  */
 export function unpackPacked(g: PackedGeometry): MapGeometry {
   const streets: StreetWay[] = [];
+  const labelStreets: StreetWay[] = [];
   const transit: TransitWay[] = [];
   const rivers: RiverWay[] = [];
   const water: AreaFeature[] = [];
@@ -258,14 +274,17 @@ export function unpackPacked(g: PackedGeometry): MapGeometry {
       return out;
     };
 
-    const s = part.streets;
-    for (let i = 0; i < s.count; i++) {
-      streets.push({
-        roadClass: asRoadClass(s.roadClass[i]),
-        name: s.names[i],
-        points: pts(s.coords, s.pointOff[i], s.pointOff[i + 1]),
-      });
-    }
+    const unpackStreets = (s: PackedStreets, dst: StreetWay[]) => {
+      for (let i = 0; i < s.count; i++) {
+        dst.push({
+          roadClass: asRoadClass(s.roadClass[i]),
+          name: s.names[i],
+          points: pts(s.coords, s.pointOff[i], s.pointOff[i + 1]),
+        });
+      }
+    };
+    unpackStreets(part.streets, streets);
+    unpackStreets(part.labelStreets, labelStreets);
     const t = part.transit;
     for (let i = 0; i < t.count; i++) {
       transit.push({
@@ -292,5 +311,5 @@ export function unpackPacked(g: PackedGeometry): MapGeometry {
     }
   }
 
-  return { streets, transit, rivers, water, parks, places: [...g.places] };
+  return { streets, labelStreets, transit, rivers, water, parks, places: [...g.places] };
 }

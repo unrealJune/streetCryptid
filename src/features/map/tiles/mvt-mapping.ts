@@ -97,6 +97,7 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
   const spanY = rect.maxY - rect.minY;
 
   const streets: StreetWay[] = [];
+  const labelStreets: StreetWay[] = [];
   const transit: TransitWay[] = [];
   const rivers: RiverWay[] = [];
   const water: AreaFeature[] = [];
@@ -132,6 +133,17 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
     }
     for (const points of lines(layer, f)) {
       if (points.length >= 2) streets.push({ roadClass, name, points });
+    }
+  });
+
+  eachFeature('transportation_name', (f, layer) => {
+    if (f.type !== GEOM_LINE) return;
+    const name = typeof f.properties.name === 'string' ? f.properties.name : undefined;
+    if (!name) return;
+    const roadClass = roadClassOf(String(f.properties.class ?? ''));
+    if (roadClass === null) return;
+    for (const points of lines(layer, f)) {
+      if (points.length >= 2) labelStreets.push({ roadClass, name, points });
     }
   });
 
@@ -179,5 +191,5 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
     });
   });
 
-  return { streets, transit, rivers, water, parks, places };
+  return { streets, labelStreets, transit, rivers, water, parks, places };
 }

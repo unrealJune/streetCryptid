@@ -58,6 +58,11 @@ describe('wrapScg1 parity with the JS decoder', () => {
     if (named >= 0) expect(native.streets[named].name).toBe(js.streets[named].name);
   });
 
+  it('matches transportation_name label streets', () => {
+    expect(native.labelStreets).toHaveLength(js.labelStreets?.length ?? 0);
+    expect(native.labelStreets?.map((s) => s.name)).toEqual(js.labelStreets?.map((s) => s.name));
+  });
+
   it('matches the transit section (modes, counts, coordinates)', () => {
     expect(js.transit.length).toBeGreaterThan(0);
     expect(native.transit).toHaveLength(js.transit.length);
@@ -83,10 +88,19 @@ describe('wrapScg1 parity with the JS decoder', () => {
 describe('wrapScg1 on a pre-transit buffer', () => {
   const scg1 = new Uint8Array(readFileSync(join(DIR, 'z10_164_357.scg1')));
   const full = wrapScg1(scg1);
-  // The transit section is last, so dropping it is a plain truncation: rewind
-  // to the byte where readTransit() started (its coords end the buffer).
+  // Transit and label streets are append-only sections, so dropping both
+  // recreates a buffer emitted by the original SCG1 encoder.
   const transitBytes = 8 + align4(full.transit.count) + full.transit.count * 8 + 4;
-  const truncated = scg1.slice(0, scg1.byteLength - transitBytes - full.transit.coords.length * 4);
+  const labelBytes =
+    8 +
+    align4(full.labelStreets.count) +
+    full.labelStreets.count * 8 +
+    4 +
+    full.labelStreets.coords.length * 4;
+  const truncated = scg1.slice(
+    0,
+    scg1.byteLength - labelBytes - transitBytes - full.transit.coords.length * 4
+  );
 
   function align4(n: number): number {
     return (n + 3) & ~3;
