@@ -61,6 +61,9 @@ async fn main() -> Result<()> {
         config.retention.retention_ms() / trail_stash::retention::MS_PER_HOUR,
         config.prune_interval_min,
     );
+    if std::env::var("TRAIL_STASH_PRINT_TICKET").as_deref() == Ok("1") {
+        println!("TRAIL_STASH_TICKET={}", node.node_ticket());
+    }
 
     tokio::spawn(Arc::clone(&node).run_prune_loop(config.prune_interval_min));
 

@@ -64,6 +64,19 @@ Opt-in and wake registration. Presenting a read-ticket **is** the grant. When
 - **204 No Content** whether or not the subscription existed (idempotent, does not
   leak presence). The namespace stays replicated.
 
+### `GET /v1/namespaces/{namespaceId}/content/{hash}` — fetch retained ciphertext
+
+- Returns the opaque `application/octet-stream` bytes only when that namespace still references
+  the hash and the stash has completed its content transfer.
+- **404 Not Found** covers unknown namespaces, released hashes, and content still in flight without
+  revealing which case applies.
+- This is the authenticated delivery receipt/fallback for clients that reconciled entry metadata
+  but could not complete iroh-blobs transfer before a mobile background deadline.
+
+`PUT` to the same path uploads the opaque bytes from the writer. The stash verifies the BLAKE3
+content address before retaining them and returns **204 No Content**. This explicit handoff lets a
+headless mobile task sleep immediately after the request completes.
+
 ### `GET /healthz`
 
 - **200 OK**, for liveness/readiness checks, with a JSON body:

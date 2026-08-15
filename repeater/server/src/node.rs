@@ -28,6 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use axum::{
+    body::Bytes,
     extract::{Path, Request, State},
     http::StatusCode,
     middleware::{self, Next},
@@ -250,6 +251,45 @@ impl StashNode {
     pub fn content_stats(&self) -> (usize, usize) {
         let index = self.content.lock().expect("content index poisoned");
         (index.missing_count(), index.tracked_count())
+    }
+
+    /// Return retained opaque ciphertext only when the requested namespace still references it.
+    pub async fn content_bytes(&self, ns: &NsBytes, hash: Hash) -> Option<Vec<u8>> {
+        let present = self
+            .content
+            .lock()
+            .expect("content index poisoned")
+            .is_present_for(ns, hash.as_bytes());
+        if !present {
+            return None;
+        }
+        self.blobs
+            .blobs()
+            .get_bytes(hash)
+            .await
+            .ok()
+            .map(|bytes| bytes.to_vec())
+    }
+
+    /// Store opaque ciphertext uploaded by an authorized writer and verify its content address.
+    pub async fn put_content(&self, ns: &NsBytes, expected: Hash, bytes: Bytes) -> Result<bool> {
+        let tracked = self
+            .content
+            .lock()
+            .expect("content index poisoned")
+            .is_tracked_for(ns, expected.as_bytes());
+        if !self.registry.is_known(ns) || !tracked || Hash::new(&bytes) != expected {
+            return Ok(false);
+        }
+        let tag = self.blobs.blobs().add_bytes(bytes).await?;
+        if tag.hash != expected {
+            return Ok(false);
+        }
+        self.content
+            .lock()
+            .expect("content index poisoned")
+            .mark_present(*expected.as_bytes());
+        Ok(true)
     }
 
     /// The stash's endpoint ticket. Publish this as `EXPO_PUBLIC_TRAIL_STASH_TICKET`; the app
@@ -756,6 +796,10 @@ impl StashNode {
                 "/v1/namespaces/:id/subscription",
                 delete(unsubscribe_handler),
             )
+            .route(
+                "/v1/namespaces/:id/content/:hash",
+                get(content_handler).put(put_content_handler),
+            )
             // route_layer applies ONLY to the routes above, not to /healthz added after.
             .route_layer(middleware::from_fn_with_state(psk, psk_guard))
             .route("/healthz", get(healthz))
@@ -834,6 +878,54 @@ async fn register_handler(
                 (StatusCode::BAD_GATEWAY, msg).into_response()
             }
         }
+    }
+}
+
+async fn content_handler(
+    State(node): State<Arc<StashNode>>,
+    Path((id, hash)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let ns = match parse_namespace_hex(&id) {
+        Ok(ns) => ns,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let hash: Hash = match hash.parse() {
+        Ok(hash) => hash,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "content hash is malformed").into_response();
+        }
+    };
+    match node.content_bytes(&ns, hash).await {
+        Some(bytes) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        // Do not distinguish an unknown namespace, released hash, or not-yet-arrived content.
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn put_content_handler(
+    State(node): State<Arc<StashNode>>,
+    Path((id, hash)): Path<(String, String)>,
+    bytes: Bytes,
+) -> impl IntoResponse {
+    let ns = match parse_namespace_hex(&id) {
+        Ok(ns) => ns,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let hash: Hash = match hash.parse() {
+        Ok(hash) => hash,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "content hash is malformed").into_response();
+        }
+    };
+    match node.put_content(&ns, hash, bytes).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
     }
 }
 
@@ -983,6 +1075,39 @@ mod live_tests {
             }
             self.inner.accept(connection).await
         }
+    }
+
+    #[tokio::test]
+    async fn opaque_content_upload_requires_registered_referenced_hash() -> anyhow::Result<()> {
+        let stash = StashNode::spawn(
+            SecretKey::from_bytes(&[39u8; 32]),
+            RetentionPolicy::from_hours(48),
+            &[],
+            None,
+            default_delivery(),
+            default_waker(),
+        )
+        .await?;
+        let ns = [7u8; 32];
+        let other_ns = [8u8; 32];
+        let bytes = Bytes::from_static(&[0, 159, 146, 150, 255, 1, 2, 3]);
+        let hash = Hash::new(&bytes);
+        stash.registry.register(ns, None);
+        stash
+            .content
+            .lock()
+            .expect("content index poisoned")
+            .want(ns, *hash.as_bytes());
+
+        assert!(!stash.put_content(&other_ns, hash, bytes.clone()).await?);
+        assert!(
+            !stash
+                .put_content(&ns, hash, Bytes::from_static(b"wrong bytes"))
+                .await?
+        );
+        assert!(stash.put_content(&ns, hash, bytes.clone()).await?);
+        assert_eq!(stash.content_bytes(&ns, hash).await, Some(bytes.to_vec()));
+        Ok(())
     }
 
     /// Build a minimal writer node that behaves like the phone: endpoint + gossip + in-memory
