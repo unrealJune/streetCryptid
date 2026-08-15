@@ -1,0 +1,76 @@
+import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+
+import { BUILT_IN_MAP_COLOR_SCHEMES } from '@/features/map/theme/map-color-schemes';
+
+import { MapColorSchemeRow } from '../map-color-scheme-row';
+
+const mockSelect = jest.fn();
+const mockSaveCustom = jest.fn();
+
+jest.mock('@/global.css', () => ({}));
+jest.mock('@/features/map/hooks/use-map-color-scheme', () => ({
+  useMapColorScheme: () => ({
+    customJson: '{}',
+    saveCustom: mockSaveCustom,
+    schemes: jest.requireActual('@/features/map/theme/map-color-schemes')
+      .BUILT_IN_MAP_COLOR_SCHEMES,
+    select: mockSelect,
+    selectedId: 'tokyo',
+  }),
+}));
+
+describe('MapColorSchemeRow', () => {
+  let renderer: ReactTestRenderer;
+
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    jest.clearAllMocks();
+  });
+
+  function render() {
+    act(() => {
+      renderer = create(<MapColorSchemeRow />);
+    });
+    return renderer.root.findAll((node) => node.props.accessibilityRole === 'radio', {
+      deep: false,
+    });
+  }
+
+  it('offers every built-in scheme and marks the active one', () => {
+    const options = render();
+
+    expect(options).toHaveLength(BUILT_IN_MAP_COLOR_SCHEMES.length);
+    expect(
+      BUILT_IN_MAP_COLOR_SCHEMES.every(
+        (scheme) => renderer.root.findAllByProps({ testID: `${scheme.id}-map-preview` }).length > 0
+      )
+    ).toBe(true);
+    expect(
+      options.find((option) => option.props.accessibilityState.selected)?.props.accessibilityLabel
+    ).toBe('Tokyo map colors');
+  });
+
+  it('selects a scheme from settings', () => {
+    const options = render();
+    const marrakesh = options.find(
+      (option) => option.props.accessibilityLabel === 'Marrakesh map colors'
+    );
+
+    act(() => marrakesh?.props.onPress());
+
+    expect(mockSelect).toHaveBeenCalledWith('marrakesh');
+  });
+
+  it('opens the custom palette importer', () => {
+    render();
+    const importButton = renderer.root.findByProps({
+      accessibilityLabel: 'Import custom map palette',
+    });
+
+    act(() => importButton.props.onPress());
+
+    expect(
+      renderer.root.findByProps({ accessibilityLabel: 'Custom map palette JSON' })
+    ).toBeTruthy();
+  });
+});

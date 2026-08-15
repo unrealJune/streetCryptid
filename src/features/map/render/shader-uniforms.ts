@@ -7,7 +7,7 @@ import type { MapRegion } from '../engine/map-engine';
 export const DOT_STEP = 2.0;
 
 /** Total float count of the shader's numeric uniform block, in declaration order. */
-export const DOT_FIELD_UNIFORM_FLOATS = 13;
+export const DOT_FIELD_UNIFORM_FLOATS = 15;
 
 /** At/above this build zoom the field renders full street detail (LOD 0). */
 export const LOD_FULL_ZOOM = 14;
@@ -72,6 +72,8 @@ export function packDotFieldUniforms({
     reveal, // uReveal
     lodValue, // uLod
     explorationEnabled ? 1 : 0, // uExploration
+    palette.effects?.neonGlow ?? 0, // uNeonGlow
+    palette.effects?.scanlines ?? 0, // uScanlines
   ];
 }
 

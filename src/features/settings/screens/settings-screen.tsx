@@ -19,6 +19,7 @@ import { DebugLocationControls } from '../components/debug-location-controls';
 import { EventLogPanel } from '../components/event-log-panel';
 import { IdentityRow } from '../components/identity-row';
 import { LocationAccessRow } from '../components/location-access-row';
+import { MapColorSchemeRow } from '../components/map-color-scheme-row';
 import { ShareIntervalRow } from '../components/share-interval-row';
 import { TransportControls } from '../components/transport-controls';
 import { TransportDiagnostic } from '../components/transport-diagnostic';
@@ -208,6 +209,13 @@ export default function SettingsScreen() {
           intervalMs={shareIntervalMs}
           onSelect={(intervalMs) => void setShareInterval(intervalMs)}
         />
+      </View>
+
+      <View style={styles.section}>
+        <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
+          APPEARANCE
+        </ThemedText>
+        <MapColorSchemeRow />
       </View>
 
       <View style={styles.section}>

@@ -38,6 +38,8 @@ uniform float3 uBg;           // background rgb (0..1)
 uniform float  uReveal;       // load reveal 0..1 (1 = fully shown); cell-by-cell wipe
 uniform float  uLod;          // zoom LOD 0 (street detail) .. 1 (city): simplify terrain
 uniform float  uExploration;  // 1 = explored/unexplored treatment, 0 = unmasked city
+uniform float  uNeonGlow;     // additive road halo amount 0..1
+uniform float  uScanlines;    // map-anchored CRT scanline amount 0..1
 
 uniform shader maskTex;
 uniform shader cellTex;
@@ -156,6 +158,26 @@ half4 main(float2 fragCoord) {
       float4 d = dotAt(baseIx + dx, baseIy + dy, frag);
       col = mix(col, d.rgb, d.a);
     }
+  }
+
+  if (uNeonGlow > 0.001) {
+    float street = maskAt(frag).r;
+    float nearStreet = max(
+      max(maskAt(frag + float2(3.0, 0.0)).r, maskAt(frag + float2(-3.0, 0.0)).r),
+      max(maskAt(frag + float2(0.0, 3.0)).r, maskAt(frag + float2(0.0, -3.0)).r)
+    );
+    nearStreet = max(nearStreet, max(
+      max(maskAt(frag + float2(6.0, 0.0)).r, maskAt(frag + float2(-6.0, 0.0)).r),
+      max(maskAt(frag + float2(0.0, 6.0)).r, maskAt(frag + float2(0.0, -6.0)).r)
+    ));
+    float halo = clamp(nearStreet - street * 0.72, 0.0, 1.0) * uNeonGlow;
+    float3 glow = rampLut(nearStreet, 0.0);
+    col = 1.0 - (1.0 - col) * (1.0 - glow * halo * 0.28);
+  }
+
+  if (uScanlines > 0.001) {
+    float line = 0.5 + 0.5 * sin(frag.y * 3.14159265 / 2.0);
+    col *= 1.0 - uScanlines * (0.018 + line * 0.045);
   }
 
   // Cell-by-cell load reveal: cells reveal center-out (baked order channel,
