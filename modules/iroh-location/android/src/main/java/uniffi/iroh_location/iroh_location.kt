@@ -843,6 +843,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_ticket(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_trail_replica_status(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_upload_trail_content(
@@ -1039,6 +1041,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_subscribe(`ptr`: Long,`
 external fun uniffi_iroh_location_fn_method_locationnode_sync_latest(`ptr`: Long,`peerTickets`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_ticket(`ptr`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_trail_replica_status(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_transport_diagnostics(`ptr`: Long,`peerEndpointIds`: RustBuffer.ByValue,
 ): Long
@@ -1476,6 +1480,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_trail_replica_status() != 25080) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics() != 23251) {
@@ -2958,6 +2965,21 @@ public interface LocationNodeInterface {
      * A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
      */
     suspend fun `ticket`(): kotlin.String
+    
+    /**
+     * What this device's durable replica can **serve**, one record per author present in it.
+     *
+     * The diagnostic that distinguishes "the relay had nothing to give" from "the transfer
+     * failed" — a distinction `friend_latest` structurally cannot make, because the live gossip
+     * lane writes it too and a fix that arrived over gossip never enters the author's namespace
+     * (a pool member holds a READ ticket). Reconciliation serves out of the replica, so this is
+     * the only honest answer to "can this device relay author X".
+     *
+     * No decryption and no location data in the result — presence, not payload — so it is
+     * ungated, like [`Self::transport_diagnostics`]. `NamespaceId` is not an FFI type, so the
+     * exported shape reports by author endpoint id rather than by namespace.
+     */
+    suspend fun `trailReplicaStatus`(): List<TrailReplicaAuthor>
     
     /**
      * Snapshot the local endpoint's advertised addresses and iroh's retained path table for the
@@ -4721,6 +4743,40 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * What this device's durable replica can **serve**, one record per author present in it.
+     *
+     * The diagnostic that distinguishes "the relay had nothing to give" from "the transfer
+     * failed" — a distinction `friend_latest` structurally cannot make, because the live gossip
+     * lane writes it too and a fix that arrived over gossip never enters the author's namespace
+     * (a pool member holds a READ ticket). Reconciliation serves out of the replica, so this is
+     * the only honest answer to "can this device relay author X".
+     *
+     * No decryption and no location data in the result — presence, not payload — so it is
+     * ungated, like [`Self::transport_diagnostics`]. `NamespaceId` is not an FFI type, so the
+     * exported shape reports by author endpoint id rather than by namespace.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `trailReplicaStatus`() : List<TrailReplicaAuthor> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_trail_replica_status(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeTrailReplicaAuthor.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -6820,6 +6876,77 @@ public object FfiConverterTypeSasChallenge: FfiConverterRustBuffer<SasChallenge>
 
 
 /**
+ * One author's fix slot in the LOCAL durable replica — what this device could hand to a peer.
+ *
+ * Companion to [`TransportDiagnostics`]: a diagnostics read, carrying no location data, so it
+ * needs no decrypt and no gate. See [`docs::ReplicaSlot`] for why this is not the same question
+ * as "have we seen this author's fix" — app storage is written by the live gossip lane too, and
+ * reconciliation serves out of the replica.
+ */
+data class TrailReplicaAuthor (
+    /**
+     * The author's endpoint id (their ed25519 verifying key).
+     */
+    var `author`: kotlin.ByteArray
+    , 
+    /**
+     * The envelope's `seq`, from its signed plaintext header. `0` when `has_content` is false.
+     */
+    var `seq`: kotlin.ULong
+    , 
+    /**
+     * The envelope's `ts` — when the author took the fix, not when we stored it. `0` when
+     * `has_content` is false.
+     */
+    var `fixTs`: kotlin.ULong
+    , 
+    /**
+     * Whether we hold a readable signed envelope for this author, and not merely a docs record
+     * pointing at a blob that never landed. False means there is nothing to serve, which is a
+     * different failure from "the transfer broke".
+     */
+    var `hasContent`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTrailReplicaAuthor: FfiConverterRustBuffer<TrailReplicaAuthor> {
+    override fun read(buf: ByteBuffer): TrailReplicaAuthor {
+        return TrailReplicaAuthor(
+            FfiConverterByteArray.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TrailReplicaAuthor) = (
+            FfiConverterByteArray.allocationSize(value.`author`) +
+            FfiConverterULong.allocationSize(value.`seq`) +
+            FfiConverterULong.allocationSize(value.`fixTs`) +
+            FfiConverterBoolean.allocationSize(value.`hasContent`)
+    )
+
+    override fun write(value: TrailReplicaAuthor, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`author`, buf)
+            FfiConverterULong.write(value.`seq`, buf)
+            FfiConverterULong.write(value.`fixTs`, buf)
+            FfiConverterBoolean.write(value.`hasContent`, buf)
+    }
+}
+
+
+
+/**
  * One endpoint address as exposed by iroh's live path table.
  */
 data class TransportAddressDiagnostic (
@@ -7858,6 +7985,34 @@ public object FfiConverterSequenceTypeRatchetEvent: FfiConverterRustBuffer<List<
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeRatchetEvent.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeTrailReplicaAuthor: FfiConverterRustBuffer<List<TrailReplicaAuthor>> {
+    override fun read(buf: ByteBuffer): List<TrailReplicaAuthor> {
+        val len = buf.getInt()
+        return List<TrailReplicaAuthor>(len) {
+            FfiConverterTypeTrailReplicaAuthor.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<TrailReplicaAuthor>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeTrailReplicaAuthor.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<TrailReplicaAuthor>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeTrailReplicaAuthor.write(it, buf)
         }
     }
 }

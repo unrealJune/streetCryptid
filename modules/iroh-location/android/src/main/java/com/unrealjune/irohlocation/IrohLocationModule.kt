@@ -852,6 +852,20 @@ class IrohLocationModule : Module() {
         transportDiagnosticsMap(n.transportDiagnostics(peerEndpointIdsHex.map { it.hexToBytes() }))
       }
 
+    // What this replica can SERVE, per author — presence, never payload.
+    AsyncFunction("trailReplicaStatus") Coroutine
+      { ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.trailReplicaStatus().map { slot ->
+          mapOf(
+            "author" to slot.author.toHex(),
+            "seq" to slot.seq.toLong(),
+            "fixTs" to slot.fixTs.toLong(),
+            "hasContent" to slot.hasContent,
+          )
+        }
+      }
+
     // ── BLE status (honest stub off-device) — ARCHITECTURE.md §2 ───────────────────────────
 
     AsyncFunction("bleAvailable") Coroutine

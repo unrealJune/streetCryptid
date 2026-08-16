@@ -174,6 +174,21 @@ async fn a_pool_member_serves_an_absent_authors_fix() {
 
     author.shutdown().await.expect("author goes offline");
 
+    // The relay's REPLICA, not its app storage: reconciliation serves out of the former, and only
+    // this distinguishes "the relay had nothing to give" from "the transfer failed" if the
+    // assertion below goes red.
+    let servable = relay
+        .trail_replica_status()
+        .await
+        .expect("relay reports its replica");
+    assert!(
+        servable
+            .iter()
+            .any(|slot| slot.author == author_id && slot.seq == 7 && slot.has_content),
+        "the relay must hold the author's fix in its replica, with content, or it has nothing to \
+         relay: {servable:?}"
+    );
+
     // The late device asks the RELAY only. No stash, and the author is gone.
     late.import_doc_ticket(trail_ticket)
         .await
@@ -265,15 +280,19 @@ async fn a_published_fix_reaches_the_pool_without_a_reconciliation_window() {
     // exchange; the receiving side pulls the content blob afterwards, so an author that vanished
     // the instant it was told "sent" would leave the relay holding metadata it cannot serve. This
     // is a LOCAL read on the relay — it dials nobody — so it observes the push's effect rather
-    // than arranging one.
-    poll_until!(30, {
+    // than arranging one, and it asks about the REPLICA, which is what reconciliation serves from.
+    let servable = poll_until!(30, {
         relay
-            .read_latest()
+            .trail_replica_status()
             .await
-            .expect("relay reads its own replica")
+            .expect("relay reports its replica")
             .into_iter()
-            .find(|entry| entry.author == author_id && entry.seq == 11)
+            .find(|slot| slot.author == author_id && slot.has_content)
     });
+    assert_eq!(
+        servable.seq, 11,
+        "the relay must hold the fix the author published, not a stale slot"
+    );
 
     author.shutdown().await.expect("author goes offline");
 

@@ -276,6 +276,21 @@ pub struct LatestFix {
     pub payload: Zeroizing<Vec<u8>>,
 }
 
+/// One author's fix slot as it exists in the LOCAL durable replica — presence, never payload.
+///
+/// The answer to "can this device serve author X", which is a different question from "has this
+/// device seen author X's fix" (see [`TrailDocs::replica_status`]). Deliberately carries no
+/// location data, so it needs no decrypt and no gate: `seq`/`fix_ts` are lifted from the
+/// envelope's signed plaintext header, and are `0` when `has_content` is false because there was
+/// no envelope to read them from.
+#[derive(Debug, Clone)]
+pub struct ReplicaSlot {
+    pub author: Vec<u8>,
+    pub seq: u64,
+    pub fix_ts: u64,
+    pub has_content: bool,
+}
+
 /// Wraps an iroh-docs replica: our own namespace (we are its sole writer) plus any friend
 /// namespaces we've imported for replication + reads.
 pub struct TrailDocs {
@@ -607,6 +622,67 @@ impl TrailDocs {
                         payload: opened.payload,
                     });
                 }
+            }
+        }
+        Ok(out)
+    }
+
+    /// What this replica can **serve**, per author, across every known namespace — metadata only.
+    ///
+    /// `friend_latest` and the trail cache are APP storage: they are written by the live gossip
+    /// lane too, so a fix that arrived over gossip is in them while the docs replica holds nothing
+    /// (a pool member has a READ ticket and cannot write to the author's namespace). Reconciliation
+    /// serves out of the replica, so "we have seen this author's fix" and "we can hand this
+    /// author's fix to someone else" are genuinely different questions and only this one answers
+    /// the second.
+    ///
+    /// **No decryption.** `seq` and `fix_ts` come from the envelope's signed-but-plaintext header
+    /// via [`crypto::envelope_header`] — a signature check, not an unwrap — so this reports
+    /// presence for every author in the replica including the ones whose payloads are not
+    /// addressed to us. The fix lane only (`hex(author)/fix`); control, null and resync slots are
+    /// not the thing a relay is asked to serve.
+    ///
+    /// `has_content` separates the ways a slot can be useless: `content_len() == 0`, a docs record
+    /// whose blob never landed locally, and a blob that is not a readable signed envelope. In
+    /// every one of them there is nothing to hand on, and reporting the slot as present would say
+    /// "the transfer failed" when the truth is "the relay had nothing to give".
+    pub async fn replica_status(&self) -> Result<Vec<ReplicaSlot>> {
+        let mut out = Vec::new();
+        for ns in self.namespaces().await {
+            let doc = self.doc_for(ns).await?;
+            // `single_latest_per_key`, as everywhere else: the fix slot is overwritten in place,
+            // so a plain query would also report superseded versions.
+            let query = Query::single_latest_per_key().build();
+            let stream = doc.get_many(query).await?;
+            tokio::pin!(stream);
+            while let Some(entry) = stream.next().await {
+                let entry = entry?;
+                let author = match decode_key(entry.key()) {
+                    Some(author) => author,
+                    None => continue, // control, null, resync, or pre-LWW key
+                };
+                let bytes = if entry.content_len() == 0 {
+                    None
+                } else {
+                    self.blobs.blobs().get_bytes(entry.content_hash()).await.ok()
+                };
+                // Servable means "we hold an envelope we could hand over", so the header has to
+                // parse and its signature has to check out. A blob that is present but not a
+                // readable signed envelope is not something to relay, and reporting it as one
+                // would turn a corrupt slot into a mysterious downstream failure.
+                let header = bytes
+                    .as_ref()
+                    .and_then(|bytes| crypto::envelope_header(bytes).ok());
+                out.push(ReplicaSlot {
+                    // The SIGNED author, not the docs key. The key only records where the writer
+                    // filed the entry; the header is what the author's signature covers. Falls
+                    // back to the key only when there is no envelope to read, in which case the
+                    // slot is reported as unservable anyway.
+                    author: header.map(|h| h.author.to_vec()).unwrap_or(author),
+                    seq: header.map(|h| h.seq).unwrap_or(0),
+                    fix_ts: header.map(|h| h.ts).unwrap_or(0),
+                    has_content: header.is_some(),
+                });
             }
         }
         Ok(out)

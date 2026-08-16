@@ -1401,6 +1401,21 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func ticket() async throws  -> String
     
     /**
+     * What this device's durable replica can **serve**, one record per author present in it.
+     *
+     * The diagnostic that distinguishes "the relay had nothing to give" from "the transfer
+     * failed" — a distinction `friend_latest` structurally cannot make, because the live gossip
+     * lane writes it too and a fix that arrived over gossip never enters the author's namespace
+     * (a pool member holds a READ ticket). Reconciliation serves out of the replica, so this is
+     * the only honest answer to "can this device relay author X".
+     *
+     * No decryption and no location data in the result — presence, not payload — so it is
+     * ungated, like [`Self::transport_diagnostics`]. `NamespaceId` is not an FFI type, so the
+     * exported shape reports by author endpoint id rather than by namespace.
+     */
+    func trailReplicaStatus() async throws  -> [TrailReplicaAuthor]
+    
+    /**
      * Snapshot the local endpoint's advertised addresses and iroh's retained path table for the
      * requested peers. Remote path usage is point-in-time; callers should poll when displaying it.
      */
@@ -2890,6 +2905,36 @@ open func ticket()async throws  -> String  {
             completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
             freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
             liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * What this device's durable replica can **serve**, one record per author present in it.
+     *
+     * The diagnostic that distinguishes "the relay had nothing to give" from "the transfer
+     * failed" — a distinction `friend_latest` structurally cannot make, because the live gossip
+     * lane writes it too and a fix that arrived over gossip never enters the author's namespace
+     * (a pool member holds a READ ticket). Reconciliation serves out of the replica, so this is
+     * the only honest answer to "can this device relay author X".
+     *
+     * No decryption and no location data in the result — presence, not payload — so it is
+     * ungated, like [`Self::transport_diagnostics`]. `NamespaceId` is not an FFI type, so the
+     * exported shape reports by author endpoint id rather than by namespace.
+     */
+open func trailReplicaStatus()async throws  -> [TrailReplicaAuthor]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_trail_replica_status(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeTrailReplicaAuthor.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -5008,6 +5053,106 @@ public func FfiConverterTypeSasChallenge_lower(_ value: SasChallenge) -> RustBuf
 
 
 /**
+ * One author's fix slot in the LOCAL durable replica — what this device could hand to a peer.
+ *
+ * Companion to [`TransportDiagnostics`]: a diagnostics read, carrying no location data, so it
+ * needs no decrypt and no gate. See [`docs::ReplicaSlot`] for why this is not the same question
+ * as "have we seen this author's fix" — app storage is written by the live gossip lane too, and
+ * reconciliation serves out of the replica.
+ */
+public struct TrailReplicaAuthor: Equatable, Hashable {
+    /**
+     * The author's endpoint id (their ed25519 verifying key).
+     */
+    public var author: Data
+    /**
+     * The envelope's `seq`, from its signed plaintext header. `0` when `has_content` is false.
+     */
+    public var seq: UInt64
+    /**
+     * The envelope's `ts` — when the author took the fix, not when we stored it. `0` when
+     * `has_content` is false.
+     */
+    public var fixTs: UInt64
+    /**
+     * Whether we hold a readable signed envelope for this author, and not merely a docs record
+     * pointing at a blob that never landed. False means there is nothing to serve, which is a
+     * different failure from "the transfer broke".
+     */
+    public var hasContent: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The author's endpoint id (their ed25519 verifying key).
+         */author: Data, 
+        /**
+         * The envelope's `seq`, from its signed plaintext header. `0` when `has_content` is false.
+         */seq: UInt64, 
+        /**
+         * The envelope's `ts` — when the author took the fix, not when we stored it. `0` when
+         * `has_content` is false.
+         */fixTs: UInt64, 
+        /**
+         * Whether we hold a readable signed envelope for this author, and not merely a docs record
+         * pointing at a blob that never landed. False means there is nothing to serve, which is a
+         * different failure from "the transfer broke".
+         */hasContent: Bool) {
+        self.author = author
+        self.seq = seq
+        self.fixTs = fixTs
+        self.hasContent = hasContent
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TrailReplicaAuthor: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrailReplicaAuthor: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrailReplicaAuthor {
+        return
+            try TrailReplicaAuthor(
+                author: FfiConverterData.read(from: &buf), 
+                seq: FfiConverterUInt64.read(from: &buf), 
+                fixTs: FfiConverterUInt64.read(from: &buf), 
+                hasContent: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrailReplicaAuthor, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.author, into: &buf)
+        FfiConverterUInt64.write(value.seq, into: &buf)
+        FfiConverterUInt64.write(value.fixTs, into: &buf)
+        FfiConverterBool.write(value.hasContent, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrailReplicaAuthor_lift(_ buf: RustBuffer) throws -> TrailReplicaAuthor {
+    return try FfiConverterTypeTrailReplicaAuthor.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrailReplicaAuthor_lower(_ value: TrailReplicaAuthor) -> RustBuffer {
+    return FfiConverterTypeTrailReplicaAuthor.lower(value)
+}
+
+
+/**
  * One endpoint address as exposed by iroh's live path table.
  */
 public struct TransportAddressDiagnostic: Equatable, Hashable {
@@ -6121,6 +6266,31 @@ fileprivate struct FfiConverterSequenceTypeRatchetEvent: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeTrailReplicaAuthor: FfiConverterRustBuffer {
+    typealias SwiftType = [TrailReplicaAuthor]
+
+    public static func write(_ value: [TrailReplicaAuthor], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrailReplicaAuthor.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrailReplicaAuthor] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrailReplicaAuthor]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrailReplicaAuthor.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRustBuffer {
     typealias SwiftType = [TransportAddressDiagnostic]
 
@@ -6666,6 +6836,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_trail_replica_status() != 25080) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics() != 23251) {

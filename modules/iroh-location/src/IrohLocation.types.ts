@@ -323,6 +323,33 @@ export interface TransportDiagnostics {
   peers: PeerTransportDiagnostic[];
 }
 
+/**
+ * One author's fix slot as it exists in the LOCAL durable replica — what this device could hand
+ * to a peer that asks.
+ *
+ * Deliberately NOT the same question as "have we seen this author's fix": the live gossip lane
+ * writes app storage (`friend_latest`, the trail cache) too, and a fix that arrived that way never
+ * enters the author's docs namespace — a pool member holds a READ ticket and cannot write there.
+ * Reconciliation serves out of the replica, so only this answers "can this device relay author X".
+ *
+ * No location data: presence, not payload. `seq` / `fixTs` come from the envelope's signed
+ * plaintext header, so nothing here needs a decrypt.
+ */
+export interface TrailReplicaAuthor {
+  /** The author's EndpointId (hex). */
+  author: string;
+  /** The envelope's `seq`. `0` when `hasContent` is false. */
+  seq: number;
+  /** When the author took the fix, not when we stored it. `0` when `hasContent` is false. */
+  fixTs: number;
+  /**
+   * Whether we hold a readable signed envelope, and not merely a docs record pointing at a blob
+   * that never landed. False means there is nothing to serve — a different failure from "the
+   * transfer broke".
+   */
+  hasContent: boolean;
+}
+
 /** A nearby BLE peer surfaced by the transport snapshot (no RSSI — the crate discards it). */
 export interface BlePeer {
   deviceId: string;
@@ -665,6 +692,14 @@ export interface IrohLocationApi {
 
   /** Local addresses plus live path usage for the requested peer EndpointIds. */
   transportDiagnostics(peerEndpointIdsHex: string[]): Promise<TransportDiagnostics>;
+
+  /**
+   * What this device's durable replica can SERVE, one record per author present in it.
+   *
+   * OPTIONAL for the same reason as {@link pushTrail}: iOS Swift bindings regenerate only on
+   * macOS, so an installed dev client may predate the export.
+   */
+  trailReplicaStatus?(): Promise<TrailReplicaAuthor[]>;
 
   // ── BLE status (Android/Apple only; honest stub elsewhere) — ARCHITECTURE.md §2 ────────────
   /** Whether a BLE transport is wired into this node's endpoint on this platform. */

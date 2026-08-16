@@ -392,6 +392,18 @@ send_to_background() {
 }
 
 # event_log_count <events_db> <start_ms> <action> [status] — count rows since start_ms.
+# event_log_details <events_db> <action> <needle> — the `details` JSON of the newest row of
+# `action` whose details contain `needle`, or empty.
+#
+# The read half of the dev command channel (device_dev_command): the app writes its result into
+# `details` and echoes the caller's nonce there, so matching on the nonce is what makes a poller
+# wait for ITS invocation rather than accept a row left by an earlier pass.
+event_log_details() {
+  sqlite3 "$1" \
+    "SELECT details FROM event_log WHERE action = '$2' AND details LIKE '%$3%'
+     ORDER BY timestamp DESC LIMIT 1;" 2>/dev/null
+}
+
 event_log_count() {
   local events="$1" start_ms="$2" action="$3" status="${4:-}"
   if [ -n "$status" ]; then
@@ -573,10 +585,4 @@ set_stash_opt_in() {
 # second, on a flow that never reached step 0.
 warm_driver() {
   maestro_cmd "$1" hierarchy >/dev/null 2>&1 || true
-}
-
-# bring_to_foreground <udid> — launch the app and leave it in the foreground (no HOME press).
-# See .maestro/foreground-app.yaml for why this exists alongside send_to_background.
-bring_to_foreground() {
-  maestro_test "$1" "$REPO_ROOT/.maestro/foreground-app.yaml"
 }

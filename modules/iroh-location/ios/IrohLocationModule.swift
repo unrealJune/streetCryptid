@@ -694,6 +694,20 @@ public final class IrohLocationModule: Module {
       return transportDiagnosticsDict(try await node.transportDiagnostics(peerEndpointIds: peerEndpointIds))
     }
 
+    // What this replica can SERVE, per author — presence, never payload. Same bindgen caveat as
+    // `pushTrail` above: needs `just bindgen-ios` on macOS before `node.trailReplicaStatus` exists.
+    AsyncFunction("trailReplicaStatus") { () async throws -> [[String: Any]] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return (try await node.trailReplicaStatus()).map { slot in
+        [
+          "author": dataToHex(slot.author),
+          "seq": slot.seq,
+          "fixTs": slot.fixTs,
+          "hasContent": slot.hasContent,
+        ]
+      }
+    }
+
     AsyncFunction("encodePairInvite") { (invite: [String: Any]) throws -> String in
       try encodePairInvite(invite: pairInvite(from: invite))
     }

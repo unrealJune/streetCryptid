@@ -296,6 +296,23 @@ android_reset_app_state() {
 # event_log_count. There is deliberately no `sc.dev.iosLocationProfile`-equivalent kv write here:
 # Android has no per-scenario location-profile override in the app today (that's an iOS-only dev
 # knob per ios-location-benchmark.sh); Android scenarios run the app's normal default profile.
+# android_event_log_details <serial> <app_id> <action> <needle> — Android half of
+# event_log_details. Same pull_db reason as android_event_log_count: the row the caller is waiting
+# for is the newest one, so it is exactly the one still sitting in the -wal.
+android_event_log_details() {
+  local serial="$1" app_id="$2" action="$3" needle="$4"
+  local data events_remote tmp details
+  data="$(android_app_data_dir "$app_id")"
+  events_remote="$(android_events_db_path "$data")"
+  tmp="$(mktemp)"
+  android_pull_db "$serial" "$app_id" "$events_remote" "$tmp"
+  details="$(sqlite3 "$tmp" \
+    "SELECT details FROM event_log WHERE action = '$action' AND details LIKE '%$needle%'
+     ORDER BY timestamp DESC LIMIT 1;" 2>/dev/null)"
+  rm -f "$tmp" "$tmp-wal" "$tmp-shm"
+  printf '%s' "$details"
+}
+
 android_event_log_count() {
   local serial="$1" app_id="$2" start_ms="$3" action="$4" status="${5:-}"
   local data events_remote tmp

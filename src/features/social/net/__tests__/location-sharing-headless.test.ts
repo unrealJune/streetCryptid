@@ -1,3 +1,6 @@
+import { setTelemetryForTesting } from '@/features/dev/telemetry';
+import type { Telemetry } from '@/features/dev/telemetry';
+
 import type { PoolState } from '../../core/pool';
 
 /**
@@ -134,8 +137,42 @@ function stashDeps() {
   return { stash: { configured: true, registerNamespace: async () => {} } };
 }
 
+/**
+ * Capture what the service reports. `pushTrail` is best-effort by contract — it never rethrows,
+ * because a failed durable mirror must not take down the tick that already went out over gossip —
+ * so its telemetry log is the only place a caller can observe that delivery is broken.
+ */
+const warnings: string[] = [];
+
+function captureTelemetry(): void {
+  const span = {
+    context: { traceId: '0'.repeat(32), spanId: '0'.repeat(16) },
+    setAttribute: () => {},
+    setAttributes: () => {},
+    addEvent: () => {},
+    recordError: () => {},
+    setStatus: () => {},
+    end: () => {},
+  };
+  const telemetry: Telemetry = {
+    enabled: false,
+    startSpan: () => span,
+    withSpan: async (_name, _opts, fn) => fn(span),
+    log: (_severity, body) => {
+      warnings.push(body);
+    },
+    setResourceAttributes: () => {},
+    flush: async () => {},
+  };
+  setTelemetryForTesting(telemetry);
+}
+
+afterAll(() => setTelemetryForTesting(undefined));
+
 describe('LocationSharingService — headless init', () => {
   beforeEach(() => {
+    warnings.length = 0;
+    captureTelemetry();
     mockHolder.mod = new FakeNativeModule();
     mockHolder.stashConfig = null;
     mockHolder.stashOptIn = false;
@@ -190,13 +227,22 @@ describe('LocationSharingService — headless init', () => {
     expect(mockHolder.mod.calls.pushTrail).toEqual([{ peerTickets: ['ticket-b', 'ticket-c'] }]);
   });
 
-  it('degrades to a no-op against a binary whose bindings predate pushTrail', async () => {
+  /**
+   * Not a supported configuration — an iOS dev client whose Swift bindings predate the export is
+   * a build that needs `just bindgen-ios`. Silently no-oping would strand every fix on the device
+   * and present as the exact delivery bug this call exists to prevent, so it has to be loud.
+   */
+  it('reports a binary whose bindings predate pushTrail rather than silently dropping fixes', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
     mockHolder.stashOptIn = true;
-    delete (mockHolder.mod as Partial<FakeNativeModule>).pushTrail;
+    // Assigned on the INSTANCE: `pushTrail` is a prototype method, so `delete` on the instance
+    // silently does nothing and the test would pass without ever exercising the guard.
+    (mockHolder.mod as unknown as Record<string, unknown>).pushTrail = undefined;
     const svc = makeService(stashDeps());
     await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
 
-    await expect(svc.pushTrail()).resolves.toBeUndefined();
+    await svc.pushTrail();
+
+    expect(warnings.some((line) => /pushTrail is missing/.test(line))).toBe(true);
   });
 });

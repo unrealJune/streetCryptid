@@ -20,6 +20,7 @@ import {
   type ProfileView,
   type SasChallenge,
   type SasRole,
+  type TrailReplicaAuthor,
   type TransportDiagnostics,
 } from 'iroh-location';
 
@@ -1692,6 +1693,28 @@ export class LocationSharingService implements FixPublisher {
   }
 
   /**
+   * What this device's durable replica can **serve**, one record per author in it.
+   *
+   * The honest answer to "can this device relay author X". `friend_latest` and the trail cache
+   * cannot answer it: the live gossip lane writes them too, and a fix that arrived that way never
+   * enters the author's docs namespace (we hold a READ ticket and cannot write there), while
+   * reconciliation serves out of that namespace and nothing else. Used by the dev command channel
+   * so a failing relay run distinguishes "the relay had nothing to give" from "the transfer
+   * failed".
+   *
+   * No location data in the result — presence, not payload.
+   */
+  async trailReplicaStatus(): Promise<TrailReplicaAuthor[]> {
+    if (!this.mod) throw new Error('replica status: node not ready');
+    // iOS Swift bindings regenerate only on macOS (`just bindgen-ios`); a dev client without the
+    // export is a build that needs rebuilding, and saying so beats returning a misleading [].
+    if (typeof this.mod.trailReplicaStatus !== 'function') {
+      throw new Error('native module must be rebuilt: trailReplicaStatus is missing');
+    }
+    return this.mod.trailReplicaStatus();
+  }
+
+  /**
    * Every endpoint worth dialing for a durable exchange, in dial order: the trail stash when it is
    * enabled and configured, then every pool member.
    *
@@ -1784,13 +1807,10 @@ export class LocationSharingService implements FixPublisher {
    * Best-effort and cheap to repeat: once a namespace is syncing, later writes broadcast on their
    * own for the lifetime of the process, so the steady-state cost is one connection per member. A
    * headless wake pays a cold dial per member — the same cost shape the stash-only push already
-   * paid, scaled by pool size. No-op when running against an older iOS binary whose bindings
-   * predate `pushTrail`.
+   * paid, scaled by pool size.
    */
   async pushTrail(parent?: SpanContext): Promise<void> {
     if (!this.mod) return;
-    // iOS bindings only regenerate on macOS; guard rather than crash on a stale binary.
-    if (typeof this.mod.pushTrail !== 'function') return;
     const peerTickets = this.durablePeerTickets();
     const span = getTelemetry().startSpan('trail.push.app', {
       parent,
@@ -1801,6 +1821,13 @@ export class LocationSharingService implements FixPublisher {
       },
     });
     try {
+      // iOS Swift bindings regenerate only on macOS (`just bindgen-ios`), so a dev client built
+      // before this export exists will not have it. That is a broken build, not a supported
+      // configuration: silently returning would strand every fix on the device and look exactly
+      // like the delivery bug this call exists to prevent, so say so.
+      if (typeof this.mod.pushTrail !== 'function') {
+        throw new Error('native module must be rebuilt: pushTrail is missing (just bindgen-ios)');
+      }
       await this.mod.pushTrail(
         peerTickets,
         getTelemetry().enabled ? traceparentFor(span.context) : null

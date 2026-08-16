@@ -24,6 +24,7 @@ import type {
   PairStateRecord,
   ProfileView,
   SasChallenge,
+  TrailReplicaAuthor,
   TransportDiagnostics,
   TransportConfig,
 } from './IrohLocation.types';
@@ -238,16 +239,7 @@ export class IrohLocationNativeModule
 
   async pushTrail(peerTickets: string[], _traceparent?: string | null): Promise<void> {
     await ensureWasm();
-    const node = this.requireNode();
-    // `web/` is a generated build output (`just build-wasm`); a bundle built before `push_trail`
-    // existed still has `sync_latest`, which reconciles every namespace — including our own — and
-    // so performs the same `start_sync` that gets our entries to the peers, just less directly.
-    const push = (node as { push_trail?: (peerTickets: string[]) => Promise<void> }).push_trail;
-    if (typeof push === 'function') {
-      await push.call(node, peerTickets);
-      return;
-    }
-    await node.sync_latest(peerTickets);
+    await this.requireNode().push_trail(peerTickets);
   }
 
   // NOTE: `docsWriteControl` / `readControl` are deliberately NOT implemented here, and are
@@ -256,6 +248,11 @@ export class IrohLocationNativeModule
   // be a live-mode subject. It could in principle be a watcher, but this replica is in-memory and
   // ephemeral (lost on reload), so a control entry written here would be a request the sender
   // cannot reliably withdraw. Absent beats half-working.
+
+  async trailReplicaStatus(): Promise<TrailReplicaAuthor[]> {
+    await ensureWasm();
+    return (await this.requireNode().trail_replica_status()) as TrailReplicaAuthor[];
+  }
 
   async readLatest(): Promise<NativeRatchetEvent[]> {
     await ensureWasm();

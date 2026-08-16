@@ -496,6 +496,28 @@ impl WasmLocationNode {
         serde_wasm_bindgen::to_value(&incoming).map_err(JsError::from)
     }
 
+    /// What this replica can SERVE, per author — presence, never payload. Mirrors the native
+    /// `LocationNode::trail_replica_status`: app storage is written by the live gossip lane too, so
+    /// "we have seen this author's fix" and "we can hand it to someone else" are different
+    /// questions and only the replica answers the second. No decryption.
+    pub async fn trail_replica_status(&self) -> Result<JsValue, JsError> {
+        let guard = self.started.lock().await;
+        let started = guard
+            .as_ref()
+            .ok_or_else(|| JsError::new("node not started"))?;
+        let slots = started.trail.replica_status().await.map_err(to_js_err)?;
+        let out: Vec<JsReplicaSlot> = slots
+            .into_iter()
+            .map(|slot| JsReplicaSlot {
+                author: hex::encode(&slot.author),
+                seq: slot.seq as f64,
+                fix_ts: slot.fix_ts as f64,
+                has_content: slot.has_content,
+            })
+            .collect();
+        serde_wasm_bindgen::to_value(&out).map_err(JsError::from)
+    }
+
     /// Explicitly drop durable entries older than `older_than_ts`.
     pub async fn prune_trail(&self, older_than_ts: f64) -> Result<(), JsError> {
         let guard = self.started.lock().await;
@@ -544,6 +566,16 @@ struct JsIncomingFix {
     author: String,
     seq: f64,
     fix: JsLocationFix,
+}
+
+/// One author's slot in the local replica (mirrors the TS `TrailReplicaAuthor`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsReplicaSlot {
+    author: String,
+    seq: f64,
+    fix_ts: f64,
+    has_content: bool,
 }
 
 /// Encode a fix and wrap it in the constant-length frame every sealed payload uses (§4.1).

@@ -435,6 +435,60 @@ pub fn envelope_version(envelope_bytes: &[u8]) -> Option<u8> {
         .map(|(peek, _)| peek.v)
 }
 
+/// The signed, plaintext header of an envelope — **either wire version** — without decrypting.
+///
+/// `author`/`seq`/`ts` ride outside the ciphertext (they are inputs to the AAD, so they cannot be
+/// tampered with without breaking the signature) and every one of them is metadata, not location.
+/// That makes them readable by any holder of the bytes, which is what lets a device report what
+/// its replica can serve — including for authors whose payloads are not addressed to it — with no
+/// key material involved. See `LocationNode::trail_replica_status`.
+///
+/// The signature is still checked: this is cheap, and a caller reporting "we hold author X's fix"
+/// on the strength of unverified bytes would be reporting something it does not know.
+#[derive(Debug, Clone, Copy)]
+pub struct EnvelopeHeader {
+    pub author: [u8; AUTHOR_LEN],
+    pub seq: u64,
+    pub ts: u64,
+}
+
+/// Read + signature-check an envelope's [`EnvelopeHeader`], routing on the declared version.
+pub fn envelope_header(envelope_bytes: &[u8]) -> Result<EnvelopeHeader, CryptoError> {
+    match envelope_version(envelope_bytes) {
+        Some(ENVELOPE_V3) => {
+            let env = verify_v3(envelope_bytes)?;
+            Ok(EnvelopeHeader {
+                author: env.author,
+                seq: env.seq,
+                ts: env.ts,
+            })
+        }
+        Some(ENVELOPE_V) => {
+            let env: Envelope =
+                postcard::from_bytes(envelope_bytes).map_err(|_| CryptoError::Decode)?;
+            if env.author.len() != AUTHOR_LEN {
+                return Err(CryptoError::Decode);
+            }
+            let author: [u8; AUTHOR_LEN] = env
+                .author
+                .clone()
+                .try_into()
+                .map_err(|_| CryptoError::Decode)?;
+            let vk = VerifyingKey::from_bytes(&author).map_err(|_| CryptoError::BadSignature)?;
+            let sig = Signature::from_slice(&env.sig).map_err(|_| CryptoError::BadSignature)?;
+            vk.verify_strict(&signing_bytes(&env)?, &sig)
+                .map_err(|_| CryptoError::BadSignature)?;
+            Ok(EnvelopeHeader {
+                author,
+                seq: env.seq,
+                ts: env.ts,
+            })
+        }
+        Some(other) => Err(CryptoError::UnsupportedVersion(other)),
+        None => Err(CryptoError::Decode),
+    }
+}
+
 /// blake3(pubkey)[..8] — stable short id for a recipient's receiving key.
 pub fn recv_kid(recv_pub: &[u8]) -> [u8; 8] {
     let h = blake3::hash(recv_pub);

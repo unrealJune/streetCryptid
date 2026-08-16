@@ -20,7 +20,8 @@
 # HOW THE RESULT IS MADE UNAMBIGUOUS. A pass has to mean "it came from the relay", so both other
 # sources are removed before the measurement:
 #
-#   * The AUTHOR is force-quit, so it cannot serve its own trail.
+#   * The AUTHOR is force-quit, and re-quit every pass of the wait loop, so it can never serve its
+#     own trail — not even if the OS restarts its background task.
 #   * The LATE device has stash opt-in turned OFF. That is not cosmetic: `stashEnabled()` gates
 #     `stashBootstrap()`, so with it off the stash ticket is not folded into the subscription and
 #     the durable server is not a reachable source for that device at all (see
@@ -32,35 +33,21 @@
 # With the author dead and the stash disabled, the relay is the only remaining holder of that
 # fix — so a row appearing on `late` can only have come from it.
 #
-# CURRENT RESULT (2026-08-16, three iOS Release builds, verified both ways):
+# STASH_OPT_IN=1 runs the identical scenario with the stash left ON. That is the CONTROL, not a
+# weaker test: a pass there and a failure here isolates the difference to "can a third pool member
+# serve an absent author's fix" rather than to the topology, the pairing or the timing.
 #
-#   STASH_OPT_IN=1  PASS — late recovers `via=sync` with the author force-quit.
-#   STASH_OPT_IN=0  PASS once, then intermittent — see PEER-RELAY-STATUS.md.
+# WHAT THE RELAY MUST HOLD, AND WHERE. A relay can only serve what is in its REPLICA of the
+# author's iroh-docs namespace. A fix that arrived over live gossip lands in the receiver's app
+# storage (`friend_latest`) and never in that replica — a friend holds a READ ticket and cannot
+# write there. `friend_latest` therefore cannot answer "can this device serve the author"; the
+# `replica-status` dev command can, and is what this test asserts before taking the author away.
+# The author's own `pushTrail` is what puts the entry there, as it publishes.
 #
-# The control passing is what makes the failure meaningful: the topology, the pairing, the
-# publish and the timing are all sound, and the only thing that changes between the two runs is
-# whether the durable server is allowed to answer. So offline recovery today works through the
-# STASH, and a third pool member cannot serve an absent author's fix.
-#
-# That is narrower than docs/social/ARCHITECTURE.md §1.3 claims ("B recovers the trail it missed
-# from any other device in the sharing pool"). The reason is visible in two places:
-#
-#   * `subscribeToFriend` bootstraps a friend's topic from `[that friend's ticket, stash]` only —
-#     so with the author dead and the stash off there is no reachable entry point into the swarm
-#     where the relay is holding their data. Compare `ensureMySubscription`, which bootstraps our
-#     OWN topic from every recipient.
-#   * `sync_latest_inner` dials only the explicitly passed peer (the stash) — `peers` is otherwise
-#     empty, so no pool member is ever contacted for reconciliation.
-#
-# FIXED — see the commit "recover a friend's fix from any pool member". `sync_latest` now takes a
-# list of peers, a friend's topic bootstraps from the whole pool, and the trail namespace is
-# imported before subscribing. The property is proven deterministically by
-# `a_pool_member_serves_an_absent_authors_fix` in tests/pairing_integration.rs.
-#
-# THIS test still passes only intermittently, for reasons that are about arranging the scenario on
-# two simulators rather than about the property: the relay can only serve what is in its REPLICA,
-# and a fix that arrived over live gossip is in app storage only. Read
-# scripts/e2e/PEER-RELAY-STATUS.md before spending time on a red run here.
+# HOW THE APP IS DRIVEN. Through `streetcryptid://dev?cmd=…` deep links (`device_dev_command`),
+# never Maestro's `launchApp` — on iOS that force-terminates and relaunches, which would tear the
+# iroh node down at every step and leave each assertion racing a cold dial. See
+# scripts/e2e/PEER-RELAY-STATUS.md for the history.
 #
 # Usage:
 #   scripts/e2e/relay-e2e.sh <author> <relay> <late>
@@ -84,6 +71,23 @@ PUBLISH_SECONDS="${PUBLISH_SECONDS:-120}"
 
 log() { echo "[relay-e2e] $*" >&2; }
 
+# replica_has_author <details_json> <author_endpoint> — true when a `replica-status` result says
+# this device holds a SERVABLE slot for that author (content present, not just a docs record).
+replica_has_author() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+raw = sys.stdin.read().strip()
+try:
+    slots = (json.loads(raw) or {}).get("authors") or []
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if any(
+    str(slot.get("author", "")).startswith(sys.argv[1]) and slot.get("hasContent")
+    for slot in slots
+) else 1)
+' "$2"
+}
+
 device_require_tools "$AUTHOR" "$RELAY" "$LATE"
 for spec in "$AUTHOR" "$RELAY" "$LATE"; do
   device_boot "$spec"
@@ -95,9 +99,13 @@ done
 # to read its fixes at all (it needs a wrap), and a friend of `relay` so it has an address to
 # reconcile with once the author is gone.
 #
-# PRESERVE_FRIENDS keeps each pairing from wiping the previous one — pairing-e2e.sh clears friend
-# records by default so it can assert they get minted, which is right for that test and fatal here
-# on the second and third edge.
+# All three start with NO friend records. Edge 1 clears both its devices, but edges 2 and 3 run
+# PRESERVE_FRIENDS=1 (pairing-e2e.sh clears by default so it can assert records get minted, which
+# is right for that test and fatal here on the second and third edge) — so `late` would otherwise
+# carry friends from a previous run, and the endpoint intersection below could pick the wrong one.
+log "Clearing stale friend records on $LATE"
+device_reset_pairing_state "$LATE"
+
 log "Edge 1/3: $AUTHOR <-> $RELAY"
 bash "$SCRIPT_DIR/pairing-e2e.sh" "$AUTHOR" "$RELAY" >&2
 log "Edge 2/3: $AUTHOR <-> $LATE"
@@ -106,7 +114,8 @@ log "Edge 3/3: $RELAY <-> $LATE"
 PRESERVE_FRIENDS=1 bash "$SCRIPT_DIR/pairing-e2e.sh" "$RELAY" "$LATE" >&2
 
 # The author's endpoint id is the key its friends file it under — read it from the relay, whose
-# only other friend is `late`, and disambiguate by intersecting with what `late` sees.
+# only other friend is `late`, and disambiguate by intersecting with what `late` sees. Both lists
+# were minted by this run, so the intersection is exactly {author}.
 author_endpoint=""
 for candidate in $(device_friend_endpoints "$RELAY"); do
   if device_friend_endpoints "$LATE" | grep -q "^$candidate"; then
@@ -125,11 +134,6 @@ for spec in "$AUTHOR" "$RELAY" "$LATE"; do
 done
 
 # Cut the late device off from the durable server, so the relay is the only possible source.
-#
-# STASH_OPT_IN=1 runs the same scenario with the stash left ON. That is not a weaker version of
-# the test, it is the CONTROL for it: everything else is identical, so a pass there and a failure
-# here isolates the difference to "can a third pool member serve an absent author's fix" rather
-# than to anything about the harness, the pairing, or the timing.
 device_set_stash_opt_in "$LATE" "${STASH_OPT_IN:-0}"
 device_clear_friend_latest "$LATE"
 
@@ -142,14 +146,18 @@ trap cleanup EXIT
 
 START_MS="$(($(date +%s) * 1000))"
 
-log "Author publishes for ${PUBLISH_SECONDS}s with the relay online and the late device away"
-device_background "$LATE"
+log "Author publishes for up to ${PUBLISH_SECONDS}s with the relay online and the late device away"
 device_terminate_app "$LATE" # away for the whole publishing window
 # The relay stays in the FOREGROUND for the whole run. It is the one device that has to keep
 # serving: a backgrounded iOS app is suspended on the OS's schedule, so asking it to answer a dial
 # later is testing something the platform does not offer. A friend with the app open is also the
-# realistic shape of peer recovery.
-device_foreground "$RELAY"
+# realistic shape of peer recovery. The dev command both foregrounds it and proves its sharing
+# service is live before anything depends on it.
+device_dev_command "$RELAY" sync-trail >/dev/null || {
+  log "FAIL - the relay never came up, so there is nothing to relay through"
+  device_dump_event_log "$RELAY" "$START_MS" >&2
+  exit 1
+}
 device_background "$AUTHOR"
 device_drive_route "$AUTHOR" "$ROUTE"
 
@@ -158,6 +166,7 @@ published=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
   if [ "$(device_event_log_count "$AUTHOR" "$START_MS" publish.fix ok)" -gt 0 ]; then
     published=1
+    break # nothing is learned by burning the rest of the window
   fi
   sleep 10
 done
@@ -168,44 +177,32 @@ done
   exit 1
 }
 
-# Make the relay RECONCILE the author's namespace while the author is still up.
+# THE PRECONDITION, asserted against the replica rather than app storage.
 #
-# This step is not bookkeeping, it is the precondition for the whole test. A fix that arrived over
-# live gossip lands in the receiver's own app storage (`friend_latest`, labelled `via=lan`) but NOT
-# in its replica of the author's iroh-docs namespace — a friend holds a READ ticket for that
-# namespace and cannot write to it; only reconciliation puts entries there. So a relay that has
-# only ever heard the author over gossip has the fix on screen and nothing to hand on, and asking
-# it to serve one is asking for something it does not have.
-#
-# Foregrounding runs the app's resume path (drain + syncTrail), which reconciles every imported
-# namespace — including the author's, while the author is still reachable. That is exactly what a
-# friend with the app open does on its own.
-# BOTH ends must be awake for this exchange. The author has been backgrounded while it published
-# (which is the realistic shape of sharing), but a backgrounded iOS app is suspended on the OS's
-# schedule and may not answer an inbound dial — so leaving it there made this step, and therefore
-# the whole test, depend on whether the OS happened to keep it alive. That is what made an earlier
-# revision pass once and fail the next run. Foregrounding both removes the ambiguity, and mirrors
-# what actually happens in the field: two friends with the app open reconcile, then one leaves.
-log "Relay reconciles the author's namespace over docs (both awake)"
-device_foreground "$AUTHOR"
-device_foreground "$RELAY"
-sleep 25
-# A second pass: the author publishes on its own cadence, so one reconciliation can legitimately
-# land between two of its fixes. Repeating makes the relay's replica reflect a *published* fix
-# rather than whatever happened to exist at the first attempt.
-device_foreground "$AUTHOR"
-device_foreground "$RELAY"
-sleep 25
-
-# The relay must genuinely HOLD the author's fix — otherwise a later result on `late` would prove
-# nothing about relaying, only that some other path exists.
-relay_row="$(device_friend_latest_row "$RELAY" "$author_endpoint")"
-[ -n "$relay_row" ] || {
-  log "FAIL - the relay never received the author's fix, so it has nothing to hand on"
+# There is no reconciliation window to arrange any more: the author's `pushTrail` addresses every
+# pool member, so the relay's replica fills as the author publishes. The explicit `sync-trail`
+# below is a nudge that collapses the wait, not the mechanism — if it were the mechanism, this
+# test would be back to depending on both devices being awake at the same moment.
+log "Checking what the relay can actually SERVE"
+relay_status=""
+deadline="$(($(date +%s) + 120))"
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  relay_status="$(device_dev_command "$RELAY" replica-status || true)"
+  if replica_has_author "$relay_status" "$author_endpoint"; then
+    break
+  fi
+  device_dev_command "$RELAY" sync-trail >/dev/null || true
+  sleep 5
+done
+replica_has_author "$relay_status" "$author_endpoint" || {
+  log "FAIL - the relay's REPLICA holds no servable fix for the author, so it has nothing to give"
+  log "  (this is distinct from a failed transfer to the late device — nothing was ever sent to it)"
+  log "  relay replica-status: $relay_status"
   device_dump_event_log "$RELAY" "$START_MS" >&2
+  device_dump_event_log "$AUTHOR" "$START_MS" >&2
   exit 1
 }
-log "Relay holds the author's fix: $relay_row"
+log "Relay can serve the author: $relay_status"
 
 log "Author goes dark (route stopped, app force-quit)"
 device_stop_route "$AUTHOR"
@@ -216,13 +213,13 @@ if [ "${STASH_OPT_IN:-0}" = "1" ]; then
 else
   log "Late device returns, with the stash disabled — the relay is its only possible source"
 fi
-# Make sure the relay is still up and serving before we start waiting on it.
-device_foreground "$RELAY"
-device_background "$LATE"
 
 deadline="$(($(date +%s) + TIMEOUT_SECONDS))"
 row=""
 while [ "$(date +%s)" -lt "$deadline" ]; do
+  # Re-drive the late device every pass. Its own `syncTrail` only runs on a resume or during an
+  # active live-watch session, so a single cold launch used to be the whole test's one attempt.
+  device_dev_command "$LATE" sync-trail >/dev/null || true
   row="$(device_friend_latest_row "$LATE" "$author_endpoint")"
   [ -n "$row" ] && break
   # Keep the author dead: an OS restart of its background task would reopen the very source this
@@ -233,13 +230,16 @@ done
 
 [ -n "$row" ] || {
   log "FAIL - the late device never obtained the author's fix from the relay within ${TIMEOUT_SECONDS}s"
-  log "  relay held: $relay_row"
+  log "  the relay COULD serve it: $relay_status"
+  log "  so this is a transfer failure, not an empty relay"
   if [ "${STASH_OPT_IN:-0}" != "1" ]; then
     log "  NOTE: re-run with STASH_OPT_IN=1. If that passes, the scenario is sound and what is"
     log "  missing is specifically peer-to-peer relay — see this script's header."
   fi
   log "--- late device event log ---"
   device_dump_event_log "$LATE" "$START_MS" >&2
+  log "--- relay event log ---"
+  device_dump_event_log "$RELAY" "$START_MS" >&2
   exit 1
 }
 
@@ -253,4 +253,4 @@ else
   log "PASS - a POOL MEMBER served the author's fix with the author offline and the stash off"
 fi
 log "  late:  seq=$seq via=$via"
-log "  relay: $relay_row"
+log "  relay: $relay_status"

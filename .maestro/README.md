@@ -47,6 +47,14 @@ in-memory session state. None of the `pairing/*.yaml` flows that run mid-session
 `launchApp` for this reason — they rely on Maestro already being attached to the
 foregrounded app from the previous step in the same test run.
 
+The same hazard is why there is no "foreground the app" flow here any more. A
+`launchApp`-based one existed for `relay-e2e.sh`, where every use of it tore the
+iroh node down and left the next assertion racing a cold dial. Foregrounding a
+running app is done with a deep link instead — `device_dev_command` in
+`scripts/e2e/lib/device.sh` — which does not restart the process, launches the
+app when it is not running, and acknowledges through the event log so the harness
+knows the sharing service is live rather than merely that a view rendered.
+
 **The iOS Simulator's pasteboard does not reliably reflect what the Share
 Sheet's Copy action writes.** Confirmed independently, twice: `simctl pbpaste`
 (and the host `pbpaste`) read empty immediately after a verified, successful tap

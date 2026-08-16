@@ -336,7 +336,8 @@ device_dump_event_log() {
            launch_context, action, status, substr(details, 1, 200) AS details
     FROM event_log
     WHERE timestamp >= $2
-      AND action IN ('bg.wake', 'engine.ingest', 'outbox.drain', 'publish.fix', 'trail.push.app')
+      AND action IN ('bg.wake', 'engine.ingest', 'outbox.drain', 'publish.fix', 'trail.push.app',
+                     'dev.command')
     ORDER BY timestamp DESC;
   " 2>/dev/null || true
   [ "$plat" = "android" ] && rm -f "$tmp" "$tmp-wal" "$tmp-shm"
@@ -413,8 +414,47 @@ device_set_stash_opt_in() {
   fi
 }
 
-# device_foreground <spec> — foreground the app and leave it there, so this device can keep
-# serving peers. Contrast device_background, which returns the app to the background.
-device_foreground() {
-  bring_to_foreground "$(device_id "$1")"
+# device_event_log_details <spec> <action> <needle> — `details` JSON of the newest matching row.
+device_event_log_details() {
+  local plat id
+  plat="$(device_platform "$1")"
+  id="$(device_id "$1")"
+  if [ "$plat" = "android" ]; then
+    android_event_log_details "$id" "$APP_ID" "$2" "$3"
+  else
+    event_log_details "$(events_db_path "$(app_data_dir "$id" "$APP_ID")")" "$2" "$3"
+  fi
+}
+
+# device_dev_command <spec> <cmd> [timeout_seconds] — run a developer command IN the app and echo
+# the `details` JSON it wrote back. Non-zero if it never answered.
+#
+# This is how the harness drives a RUNNING app. The obvious alternative, Maestro's `launchApp`,
+# force-terminates and relaunches on iOS (.maestro/README.md), so every "foreground the device"
+# step was really "tear the iroh node down and rebuild it", after which any following assertion
+# raced a cold dial — the timing lottery scripts/e2e/PEER-RELAY-STATUS.md documents. A deep link
+# foregrounds the app instead, and launches it if it is not running, so this covers a genuine cold
+# start too.
+#
+# The acknowledgement is also a better readiness signal than `assertVisible: map-view`: the app
+# only answers once the sharing service is live, so a returned row means "this device can do the
+# work", not "something painted".
+#
+# The nonce is what makes an identical command re-fire and be observed separately; see
+# src/features/dev/commands/dev-commands.ts and src/app/+native-intent.tsx.
+device_dev_command() {
+  local spec="$1" cmd="$2" timeout="${3:-90}" nonce deadline details
+  nonce="dev$(date +%s)$$$RANDOM"
+  device_open_url "$spec" "streetcryptid://dev?cmd=$cmd&id=$nonce"
+  deadline="$(($(date +%s) + timeout))"
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    details="$(device_event_log_details "$spec" 'dev.command' "$nonce")"
+    if [ -n "$details" ]; then
+      printf '%s' "$details"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "[device] dev command '$cmd' on $spec never answered within ${timeout}s" >&2
+  return 1
 }

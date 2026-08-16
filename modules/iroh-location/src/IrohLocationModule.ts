@@ -19,6 +19,7 @@ import type {
   ProfileView,
   RatchetDropped,
   SasChallenge,
+  TrailReplicaAuthor,
   TransportDiagnostics,
   TransportConfig,
 } from './IrohLocation.types';
@@ -146,6 +147,8 @@ export declare class IrohLocationNativeModule
   encodePairInvite(invite: PairInvite): Promise<string>;
   decodePairInvite(token: string): Promise<PairInvite>;
   transportDiagnostics(peerEndpointIdsHex: string[]): Promise<TransportDiagnostics>;
+  /** Optional for compatibility with installed iOS binaries built before the replica query. */
+  trailReplicaStatus?(): Promise<TrailReplicaAuthor[]>;
 
   bleAvailable(): Promise<boolean>;
   bleCapabilities(): Promise<BleCapabilities>;

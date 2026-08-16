@@ -800,6 +800,27 @@ pub struct TransportDiagnostics {
     pub peers: Vec<PeerTransportDiagnostic>,
 }
 
+/// One author's fix slot in the LOCAL durable replica — what this device could hand to a peer.
+///
+/// Companion to [`TransportDiagnostics`]: a diagnostics read, carrying no location data, so it
+/// needs no decrypt and no gate. See [`docs::ReplicaSlot`] for why this is not the same question
+/// as "have we seen this author's fix" — app storage is written by the live gossip lane too, and
+/// reconciliation serves out of the replica.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TrailReplicaAuthor {
+    /// The author's endpoint id (their ed25519 verifying key).
+    pub author: Vec<u8>,
+    /// The envelope's `seq`, from its signed plaintext header. `0` when `has_content` is false.
+    pub seq: u64,
+    /// The envelope's `ts` — when the author took the fix, not when we stored it. `0` when
+    /// `has_content` is false.
+    pub fix_ts: u64,
+    /// Whether we hold a readable signed envelope for this author, and not merely a docs record
+    /// pointing at a blob that never landed. False means there is nothing to serve, which is a
+    /// different failure from "the transfer broke".
+    pub has_content: bool,
+}
+
 /// A nearby BLE peer surfaced by the transport snapshot (no RSSI — the crate discards it).
 ///
 /// `verified_endpoint_id` and `endpoint_hint` are deliberately separate: the former is trusted
@@ -2900,6 +2921,37 @@ impl LocationNode {
             local_addresses,
             peers,
         })
+    }
+
+    /// What this device's durable replica can **serve**, one record per author present in it.
+    ///
+    /// The diagnostic that distinguishes "the relay had nothing to give" from "the transfer
+    /// failed" — a distinction `friend_latest` structurally cannot make, because the live gossip
+    /// lane writes it too and a fix that arrived over gossip never enters the author's namespace
+    /// (a pool member holds a READ ticket). Reconciliation serves out of the replica, so this is
+    /// the only honest answer to "can this device relay author X".
+    ///
+    /// No decryption and no location data in the result — presence, not payload — so it is
+    /// ungated, like [`Self::transport_diagnostics`]. `NamespaceId` is not an FFI type, so the
+    /// exported shape reports by author endpoint id rather than by namespace.
+    pub async fn trail_replica_status(&self) -> Result<Vec<TrailReplicaAuthor>, LocationError> {
+        let guard = self.inner.lock().await;
+        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let trail = started.trail.clone();
+        drop(guard);
+        let slots = trail
+            .replica_status()
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        Ok(slots
+            .into_iter()
+            .map(|slot| TrailReplicaAuthor {
+                author: slot.author,
+                seq: slot.seq,
+                fix_ts: slot.fix_ts,
+                has_content: slot.has_content,
+            })
+            .collect())
     }
 
     // ── BLE status (Android/Apple only; honest stub elsewhere) — ARCHITECTURE.md §2 ────────
