@@ -469,7 +469,8 @@ export interface IrohLocationApi {
    */
   syncLatest(peerTickets: string[], traceparent?: string | null): Promise<void>;
   /**
-   * Push OUR trail namespace to `peerTicket` (the trail stash) and wait for the exchange to finish.
+   * Push OUR trail namespace to `peerTickets` — the trail stash when it is enabled, and **every
+   * pool member** — and wait for the exchange to finish.
    *
    * **This is what actually gets a published fix off the phone.** {@link docsWrite} only writes the
    * local replica; iroh-docs broadcasts a local insert only for namespaces that `start_sync` has
@@ -477,10 +478,16 @@ export interface IrohLocationApi {
    * publishes without it — every headless background wake — strands its envelopes on the device.
    * Call it after draining a batch.
    *
+   * The peer list is the send-side mirror of {@link syncLatest} and it is what makes the pool
+   * relay of ARCHITECTURE.md §1.3/§6 the normal flow: with a stash-only target an author's fix was
+   * broadcast to the durable server and to nobody else, so a friend could only relay it if it
+   * happened to dial the author during a reconciliation window. An empty list is valid and means
+   * "broadcast to whatever the live engine already knows".
+   *
    * OPTIONAL: absent on iOS bindings generated before this API existed (Swift bindings only
    * regenerate on macOS), so callers must guard with `typeof mod.pushTrail === 'function'`.
    */
-  pushTrail?(peerTicket: string | null, traceparent?: string | null): Promise<void>;
+  pushTrail?(peerTickets: string[], traceparent?: string | null): Promise<void>;
   /** Upload current opaque trail slots to the stash and wait for durable HTTP receipts. */
   uploadTrailContent?(baseUrl: string, psk: string | null): Promise<number>;
   /**

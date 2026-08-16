@@ -24,8 +24,8 @@ interface ControlMsgLike {
 
 class FakeNativeModule {
   calls = {
-    syncLatest: [] as { peerTicket: string | null }[],
-    pushTrail: [] as { peerTicket: string | null }[],
+    syncLatest: [] as { peerTickets: string[] }[],
+    pushTrail: [] as { peerTickets: string[] }[],
     docsWriteControl: [] as { msg: ControlMsgLike; recipients: string[] }[],
     readControl: [] as string[],
   };
@@ -53,11 +53,11 @@ class FakeNativeModule {
   async unsubscribe() {}
   async publish() {}
   async docsWrite() {}
-  async syncLatest(peerTicket: string | null) {
-    this.calls.syncLatest.push({ peerTicket });
+  async syncLatest(peerTickets: string[]) {
+    this.calls.syncLatest.push({ peerTickets });
   }
-  async pushTrail(peerTicket: string | null) {
-    this.calls.pushTrail.push({ peerTicket });
+  async pushTrail(peerTickets: string[]) {
+    this.calls.pushTrail.push({ peerTickets });
   }
   async docsWriteControl(msg: ControlMsgLike, recipients: string[]) {
     this.calls.docsWriteControl.push({ msg, recipients });
@@ -211,7 +211,9 @@ describe('live mode — sending a request', () => {
     await svc.requestLive(friend.endpointId);
 
     // docsWriteControl only touches the local replica; without the push the friend polls forever.
-    expect(mockHolder.mod.calls.pushTrail).toContainEqual({ peerTicket: 'ticket-stash' });
+    expect(mockHolder.mod.calls.pushTrail).toContainEqual({
+      peerTickets: ['ticket-stash', friend.ticket],
+    });
   });
 
   it('surfaces who we have asked', async () => {

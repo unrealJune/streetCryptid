@@ -1692,6 +1692,30 @@ export class LocationSharingService implements FixPublisher {
   }
 
   /**
+   * Every endpoint worth dialing for a durable exchange, in dial order: the trail stash when it is
+   * enabled and configured, then every pool member.
+   *
+   * Both halves of the durable path use this — {@link syncTrail} to pull and {@link pushTrail} to
+   * push — deliberately through one helper, because they drifted apart once already: the receive
+   * side was generalised to the pool and the send side was left addressing only the stash, so an
+   * author's fix went to the durable server and to nobody else and peer relay only worked when a
+   * friend happened to dial the author.
+   *
+   * No new exposure. ARCHITECTURE.md §6 is explicit that "access is the Wrap, not swarm
+   * membership", and the whole encrypted envelope is already replicated to every pool member — so
+   * exchanging with a friend reveals nothing they were not already holding, and a revoked peer
+   * still has no wrap and therefore no key.
+   *
+   * The stash goes first when enabled: it is always-on and usually answers immediately.
+   */
+  private durablePeerTickets(): string[] {
+    return [
+      ...(this.stashEnabled() && this.stashTicket ? [this.stashTicket] : []),
+      ...pool.friendList(this.state).map((friend) => friend.ticket),
+    ].filter((ticket): ticket is string => Boolean(ticket));
+  }
+
+  /**
    * Recover envelopes missed while offline. Triggers range reconciliation, then reads the durable
    * replica into the trail cache — reconciliation can land entries silently (at friend-import or via
    * live sync) without firing backfill events, so reading the replica afterwards is what actually
@@ -1707,17 +1731,7 @@ export class LocationSharingService implements FixPublisher {
     // from nobody else: with the author offline and the stash off there was no reachable source
     // at all, even when a friend beside it demonstrably held the fix. Verified by
     // scripts/e2e/relay-e2e.sh, which failed for exactly that reason.
-    //
-    // No new exposure. §6 is explicit that "access is the Wrap, not swarm membership", and that
-    // the whole encrypted envelope is already replicated to every pool member — so reconciling
-    // with a friend reveals nothing they were not already holding, and a revoked peer still has
-    // no wrap and therefore no key.
-    //
-    // The stash goes first when enabled: it is always-on and usually answers immediately.
-    const peerTickets = [
-      ...(this.stashEnabled() && this.stashTicket ? [this.stashTicket] : []),
-      ...pool.friendList(this.state).map((friend) => friend.ticket),
-    ].filter((ticket): ticket is string => Boolean(ticket));
+    const peerTickets = this.durablePeerTickets();
 
     const span = getTelemetry().startSpan('trail.sync.app', {
       parent,
@@ -1753,36 +1767,46 @@ export class LocationSharingService implements FixPublisher {
   }
 
   /**
-   * Push our own durable trail to the stash. **Call this after publishing**, or the fixes stay on
-   * this device: `docsWrite` writes the local replica, and iroh-docs only broadcasts a local insert
-   * for namespaces `start_sync` has marked as syncing — which nothing in a publish-only context
-   * does. Without it an offline friend has nothing to reconcile from, which is invisible while both
-   * phones are online (live gossip covers it) and total when they aren't.
+   * Push our own durable trail to the stash **and to every pool member**. **Call this after
+   * publishing**, or the fixes stay on this device: `docsWrite` writes the local replica, and
+   * iroh-docs only broadcasts a local insert for namespaces `start_sync` has marked as syncing —
+   * which nothing in a publish-only context does. Without it an offline friend has nothing to
+   * reconcile from, which is invisible while both phones are online (live gossip covers it) and
+   * total when they aren't.
    *
-   * Best-effort and cheap to repeat: once the namespace is syncing, later writes broadcast on their
-   * own for the lifetime of the process. No-op when the stash is off (peer-only reconciliation) or
-   * when running against an older iOS binary whose bindings predate `pushTrail`.
+   * Pushing to the pool and not only the stash is what makes peer relay (ARCHITECTURE.md §1.3/§6)
+   * the normal flow rather than luck. Addressing only the stash meant a pool member gained the
+   * author's entries solely if it happened to dial the author itself during a {@link syncTrail}
+   * window — so with the stash off there was no durable copy anywhere, and a friend could not
+   * relay a fix it had never been sent. Now a friend with the app open holds the author's entries
+   * as they are published and can hand them on the moment the author goes dark.
+   *
+   * Best-effort and cheap to repeat: once a namespace is syncing, later writes broadcast on their
+   * own for the lifetime of the process, so the steady-state cost is one connection per member. A
+   * headless wake pays a cold dial per member — the same cost shape the stash-only push already
+   * paid, scaled by pool size. No-op when running against an older iOS binary whose bindings
+   * predate `pushTrail`.
    */
   async pushTrail(parent?: SpanContext): Promise<void> {
     if (!this.mod) return;
-    if (!this.stashEnabled()) return;
     // iOS bindings only regenerate on macOS; guard rather than crash on a stale binary.
     if (typeof this.mod.pushTrail !== 'function') return;
+    const peerTickets = this.durablePeerTickets();
     const span = getTelemetry().startSpan('trail.push.app', {
       parent,
       attributes: {
         'sc.author': this.keys ? this.keys.endpointId.slice(0, 10) : undefined,
-        stash: true,
+        stash: this.stashEnabled(),
+        'sync.peers': peerTickets.length,
       },
     });
     try {
       await this.mod.pushTrail(
-        this.stashTicket,
+        peerTickets,
         getTelemetry().enabled ? traceparentFor(span.context) : null
       );
-      if (this.stashConfig && typeof this.mod.uploadTrailContent !== 'function') {
-        throw new Error('native module must be rebuilt for durable stash delivery');
-      }
+      // Content upload stays stash-only, and genuinely so: pool members reconcile blobs over iroh,
+      // the stash takes them over its authenticated HTTP API.
       if (this.stashConfig) {
         const uploadTrailContent = this.mod.uploadTrailContent;
         if (!uploadTrailContent) {
@@ -1794,12 +1818,12 @@ export class LocationSharingService implements FixPublisher {
       span.setStatus('ok');
     } catch (err) {
       // A failure means these fixes only reach friends who are online now — exactly the gap the
-      // stash exists to close — so log it, don't swallow it silently.
+      // durable path exists to close — so log it, don't swallow it silently.
       const reason = err instanceof Error ? err.message : String(err);
       span.addEvent('native.push.failed', { reason });
       getTelemetry().log(
         'warn',
-        `trail push failed (fixes not mirrored to the stash; offline friends won't see them): ${reason}`
+        `trail push failed (fixes not mirrored to the stash or the pool; offline friends won't see them): ${reason}`
       );
       span.setStatus('error', reason);
     } finally {
@@ -2258,9 +2282,9 @@ export class LocationSharingService implements FixPublisher {
       // docsWriteControl only touches the LOCAL replica — same rule as docsWrite. Without this the
       // request never leaves the phone and the friend polls forever. See §9 "push-to-stash".
       //
-      // NOTE: `pushTrail` no-ops when the stash is off, so live requests effectively REQUIRE the
-      // stash. That is inherent, not incidental: without it delivery needs both phones online and
-      // reconciling at the same moment, which is exactly what the stash exists to stop relying on.
+      // `pushTrail` now addresses the pool as well as the stash, so a request reaches the friend
+      // directly whenever they are reachable; the stash remains the path that does not need both
+      // phones online at the same moment.
       await this.pushTrail(span.context);
       this.sentRequestNonces.set(endpointId, nonce);
       // Start pulling immediately. The subject won't speed up until its next poll (up to

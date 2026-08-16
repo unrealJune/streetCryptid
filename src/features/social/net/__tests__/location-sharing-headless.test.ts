@@ -16,7 +16,7 @@ class FakeNativeModule {
     importDocTicket: [] as string[],
     subscribe: [] as { topic: string; bootstrap: string[] }[],
     syncTrail: [] as { since: number; peerTicket: string | null }[],
-    pushTrail: [] as { peerTicket: string | null }[],
+    pushTrail: [] as { peerTickets: string[] }[],
     publish: [] as unknown[][],
     docsWrite: [] as unknown[][],
   };
@@ -52,8 +52,8 @@ class FakeNativeModule {
   async syncTrail(since: number, peerTicket: string | null) {
     this.calls.syncTrail.push({ since, peerTicket });
   }
-  async pushTrail(peerTicket: string | null) {
-    this.calls.pushTrail.push({ peerTicket });
+  async pushTrail(peerTickets: string[]) {
+    this.calls.pushTrail.push({ peerTickets });
   }
   async readTrail() {
     return [];
@@ -161,7 +161,7 @@ describe('LocationSharingService — headless init', () => {
     expect(mockHolder.mod.calls.subscribe.map((s) => s.topic)).not.toContain('topic-bb22');
   });
 
-  it('pushes the durable trail to the opted-in stash', async () => {
+  it('pushes the durable trail to the opted-in stash and to every pool member', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
     mockHolder.stashOptIn = true;
     const svc = makeService(stashDeps());
@@ -169,10 +169,17 @@ describe('LocationSharingService — headless init', () => {
 
     await svc.pushTrail();
 
-    expect(mockHolder.mod.calls.pushTrail).toEqual([{ peerTicket: 'ticket-stash' }]);
+    expect(mockHolder.mod.calls.pushTrail).toEqual([
+      { peerTickets: ['ticket-stash', 'ticket-b', 'ticket-c'] },
+    ]);
   });
 
-  it('does not push when the stash is configured but not opted into', async () => {
+  /**
+   * The whole point of the pool push: with the stash off there is no durable copy anywhere else,
+   * so if this regressed to a no-op a friend could only relay a fix it had never been sent — which
+   * is exactly the peer-relay gap `scripts/e2e/relay-e2e.sh` was chasing.
+   */
+  it('still pushes to the pool when the stash is configured but not opted into', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
     mockHolder.stashOptIn = false;
     const svc = makeService(stashDeps());
@@ -180,7 +187,7 @@ describe('LocationSharingService — headless init', () => {
 
     await svc.pushTrail();
 
-    expect(mockHolder.mod.calls.pushTrail).toEqual([]);
+    expect(mockHolder.mod.calls.pushTrail).toEqual([{ peerTickets: ['ticket-b', 'ticket-c'] }]);
   });
 
   it('degrades to a no-op against a binary whose bindings predate pushTrail', async () => {

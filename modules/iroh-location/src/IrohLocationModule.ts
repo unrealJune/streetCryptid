@@ -94,7 +94,7 @@ export declare class IrohLocationNativeModule
   forgetSession?(peerEndpointHex: string): Promise<void>;
   syncLatest(peerTickets: string[], traceparent?: string | null): Promise<void>;
   /** Optional for compatibility with installed iOS binaries built before the push API. */
-  pushTrail?(peerTicket: string | null, traceparent?: string | null): Promise<void>;
+  pushTrail?(peerTickets: string[], traceparent?: string | null): Promise<void>;
   uploadTrailContent?(baseUrl: string, psk: string | null): Promise<number>;
   /** Optional for compatibility with installed iOS binaries built before the control API. */
   docsWriteControl?(msg: NativeControlMsg, recipientsHex: string[]): Promise<void>;

@@ -505,13 +505,9 @@ public final class IrohLocationModule: Module {
     // NOTE: needs `just bindgen-ios` on macOS before `node.pushTrail` exists in the generated
     // Swift bindings; until then this file will not compile on iOS. The JS side guards on the
     // export being present, so an older binary just degrades to no durable push.
-    AsyncFunction("pushTrail") { (peerTicket: String?, traceparent: String?) async throws in
+    AsyncFunction("pushTrail") { (peerTickets: [String], traceparent: String?) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      if let traceparent {
-        try await node.pushTrailTraced(peerTicket: peerTicket, traceparent: traceparent)
-      } else {
-        try await node.pushTrail(peerTicket: peerTicket)
-      }
+      try await node.pushTrail(peerTickets: peerTickets, traceparent: traceparent)
     }
 
     AsyncFunction("uploadTrailContent") { (baseUrl: String, psk: String?) async throws -> UInt64 in

@@ -1235,8 +1235,9 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func publishResync(recipientRecvPubs: [String]) async throws  -> String
     
     /**
-     * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
-     * to finish. **This is what actually gets a published fix off the phone.**
+     * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
+     * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
+     * actually gets a published fix off the phone.**
      *
      * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
      * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
@@ -1244,14 +1245,25 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * that, so its envelopes never reached the stash and an offline friend had nothing to
      * reconcile from. Call this after draining a batch.
      *
+     * The peer list is the send-side counterpart of [`Self::sync_latest`], and it is what makes
+     * ARCHITECTURE.md §1.3/§6's pool relay the normal flow rather than luck. An earlier revision
+     * took a single `Option<String>` that only ever carried the stash, so an author's published
+     * fix was broadcast over docs to the stash and to nobody else: a pool member gained the
+     * author's entries only if it happened to dial the author itself during a reconciliation
+     * window, and with the stash off there was no durable copy anywhere. Pushing to the pool
+     * means a friend with the app open holds the author's entries **as they are published**, and
+     * can hand them on the moment the author goes dark.
+     *
+     * Repeating it is cheap: `start_sync` is a no-op once a namespace is syncing, so the
+     * steady-state cost is one connection per member for the process's lifetime.
+     *
+     * Unparseable tickets are skipped rather than failing the push — one malformed friend card
+     * must not stop delivery to everyone else — but they are counted on the span.
+     *
      * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
-     * that the live gossip path or a later [`Self::sync_trail`] is broken.
+     * that the live gossip path or a later [`Self::sync_latest`] is broken.
      */
-    func pushTrail(peerTicket: String?) async throws 
-    
-    func pushTrailInner(peerTicket: String?, traceparent: String?) async throws 
-    
-    func pushTrailTraced(peerTicket: String?, traceparent: String) async throws 
+    func pushTrail(peerTickets: [String], traceparent: String?) async throws 
     
     /**
      * Read `author`'s current control message, if we can open it. Returns an empty vec when
@@ -2473,8 +2485,9 @@ open func publishResync(recipientRecvPubs: [String])async throws  -> String  {
 }
     
     /**
-     * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
-     * to finish. **This is what actually gets a published fix off the phone.**
+     * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
+     * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
+     * actually gets a published fix off the phone.**
      *
      * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
      * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
@@ -2482,50 +2495,31 @@ open func publishResync(recipientRecvPubs: [String])async throws  -> String  {
      * that, so its envelopes never reached the stash and an offline friend had nothing to
      * reconcile from. Call this after draining a batch.
      *
+     * The peer list is the send-side counterpart of [`Self::sync_latest`], and it is what makes
+     * ARCHITECTURE.md §1.3/§6's pool relay the normal flow rather than luck. An earlier revision
+     * took a single `Option<String>` that only ever carried the stash, so an author's published
+     * fix was broadcast over docs to the stash and to nobody else: a pool member gained the
+     * author's entries only if it happened to dial the author itself during a reconciliation
+     * window, and with the stash off there was no durable copy anywhere. Pushing to the pool
+     * means a friend with the app open holds the author's entries **as they are published**, and
+     * can hand them on the moment the author goes dark.
+     *
+     * Repeating it is cheap: `start_sync` is a no-op once a namespace is syncing, so the
+     * steady-state cost is one connection per member for the process's lifetime.
+     *
+     * Unparseable tickets are skipped rather than failing the push — one malformed friend card
+     * must not stop delivery to everyone else — but they are counted on the span.
+     *
      * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
-     * that the live gossip path or a later [`Self::sync_trail`] is broken.
+     * that the live gossip path or a later [`Self::sync_latest`] is broken.
      */
-open func pushTrail(peerTicket: String?)async throws   {
+open func pushTrail(peerTickets: [String], traceparent: String?)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_locationnode_push_trail(
                     self.uniffiCloneHandle(),
-                    FfiConverterOptionString.lower(peerTicket)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func pushTrailInner(peerTicket: String?, traceparent: String?)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_push_trail_inner(
-                    self.uniffiCloneHandle(),
-                    FfiConverterOptionString.lower(peerTicket),FfiConverterOptionString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func pushTrailTraced(peerTicket: String?, traceparent: String)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_push_trail_traced(
-                    self.uniffiCloneHandle(),
-                    FfiConverterOptionString.lower(peerTicket),FfiConverterString.lower(traceparent)
+                    FfiConverterSequenceString.lower(peerTickets),FfiConverterOptionString.lower(traceparent)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -6620,13 +6614,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 54563) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_push_trail() != 65355) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_push_trail_inner() != 60203) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_push_trail_traced() != 27419) {
+    if (uniffi_iroh_location_checksum_method_locationnode_push_trail() != 39469) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_read_control() != 32699) {

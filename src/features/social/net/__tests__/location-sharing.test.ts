@@ -21,7 +21,7 @@ class FakeNativeModule {
     docsWrite: [] as unknown[][],
     publishNull: [] as unknown[][],
     docsWriteNull: [] as unknown[][],
-    syncLatest: [] as { peerTicket: string | null; traceparent?: string }[],
+    syncLatest: [] as { peerTickets: string[]; traceparent?: string }[],
     importDocTicket: [] as string[],
     subscribe: [] as { topic: string; bootstrap: string[] }[],
     unsubscribe: [] as string[],
@@ -108,9 +108,9 @@ class FakeNativeModule {
   async docsWriteControl(...args: unknown[]) {
     this.calls.docsWriteControl.push(args);
   }
-  async syncLatest(peerTicket: string | null, traceparent?: string | null) {
+  async syncLatest(peerTickets: string[], traceparent?: string | null) {
     this.calls.syncLatest.push({
-      peerTicket,
+      peerTickets,
       ...(traceparent ? { traceparent } : {}),
     });
   }
@@ -355,7 +355,7 @@ describe('LocationSharingService — durable trail wiring', () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
     await svc.syncTrail(0);
-    expect(mockHolder.mod.calls.syncLatest).toEqual([{ peerTicket: null }]);
+    expect(mockHolder.mod.calls.syncLatest).toEqual([{ peerTickets: [] }]);
   });
 
   it('syncTrail explicitly targets the configured stash when opted in', async () => {
@@ -372,7 +372,7 @@ describe('LocationSharingService — durable trail wiring', () => {
     await svc.syncTrail(123);
 
     expect(mockHolder.mod.calls.syncLatest).toContainEqual({
-      peerTicket: 'ticket-stash',
+      peerTickets: ['ticket-stash'],
     });
   });
 

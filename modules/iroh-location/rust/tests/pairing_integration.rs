@@ -31,6 +31,25 @@ async fn start_node() -> Arc<LocationNode> {
     node
 }
 
+/// Poll an `Option`-returning async expression until it is `Some`, or panic after `$secs`.
+///
+/// Declared here rather than beside its other users below: `macro_rules!` resolution is textual,
+/// so a test above this point cannot see it.
+macro_rules! poll_until {
+    ($secs:expr, $body:block) => {{
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs($secs);
+        loop {
+            if let Some(v) = $body {
+                break v;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("condition not met within {}s", $secs);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }};
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
     let author = start_node().await;
@@ -181,20 +200,104 @@ async fn a_pool_member_serves_an_absent_authors_fix() {
     relay.shutdown().await.expect("relay shutdown");
 }
 
-/// Poll an `Option`-returning async expression until it is `Some`, or panic after `$secs`.
-macro_rules! poll_until {
-    ($secs:expr, $body:block) => {{
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs($secs);
-        loop {
-            if let Some(v) = $body {
-                break v;
-            }
-            if std::time::Instant::now() >= deadline {
-                panic!("condition not met within {}s", $secs);
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    }};
+/// The same relay property, with the choreography removed — because the AUTHOR pushes to the pool.
+///
+/// The sibling above has to arrange a reconciliation window: the relay dials the author *after* the
+/// fix exists, because otherwise nothing would ever put that fix in the relay's replica. That was a
+/// real gap and not merely a test contrivance — `push_trail` addressed only the trail stash, so an
+/// author's published fix was broadcast over docs to the durable server and to nobody else, and a
+/// pool member could relay it only if it happened to reconcile with the author at the right moment.
+/// On real devices that is a timing lottery, which is exactly what `scripts/e2e/relay-e2e.sh` kept
+/// losing.
+///
+/// Here the relay opens the author's namespace **before** there is anything in it, the author
+/// publishes with the relay in its push list, and the author never reconciles again. The fix lands
+/// in the relay's replica as a consequence of being published, which is the invariant that makes
+/// peer relay the normal flow rather than luck.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_published_fix_reaches_the_pool_without_a_reconciliation_window() {
+    let author = start_node().await;
+    let relay = start_node().await;
+    let late = start_node().await;
+
+    let author_id = author.endpoint_id();
+    let trail_ticket = author.doc_ticket().await.expect("author trail ticket");
+    let relay_ticket = relay.ticket().await.expect("relay endpoint ticket");
+
+    // The relay opens the author's namespace while it is still EMPTY. This is the steady state of
+    // any friend in a sharing pool: the doc ticket arrives at pairing, long before any given fix.
+    relay
+        .import_doc_ticket(trail_ticket.clone())
+        .await
+        .expect("relay imports the author's trail");
+    relay
+        .sync_latest(
+            vec![author.ticket().await.expect("author endpoint ticket")],
+            None,
+        )
+        .await
+        .expect("relay opens the author's namespace");
+
+    let fix = iroh_location::LocationFix {
+        lat: 47.6097,
+        lon: -122.3331,
+        accuracy_m: 6.0,
+        heading_deg: 271.0,
+        ts: 24_680,
+    };
+    author
+        .docs_write(
+            "push-to-pool".into(),
+            11,
+            fix,
+            vec![relay.recv_public(), late.recv_public()],
+        )
+        .await
+        .expect("author writes an encrypted fix for both friends");
+    // The publish-side half: `docs_write` only touches the local replica, and this is the call that
+    // gets it off the device — to the POOL, with no stash anywhere in this test.
+    author
+        .push_trail(vec![relay_ticket.clone()], None)
+        .await
+        .expect("author pushes its trail to the pool");
+
+    // Settle before taking the author away. `push` returns on `SyncFinished`, which is the entry
+    // exchange; the receiving side pulls the content blob afterwards, so an author that vanished
+    // the instant it was told "sent" would leave the relay holding metadata it cannot serve. This
+    // is a LOCAL read on the relay — it dials nobody — so it observes the push's effect rather
+    // than arranging one.
+    poll_until!(30, {
+        relay
+            .read_latest()
+            .await
+            .expect("relay reads its own replica")
+            .into_iter()
+            .find(|entry| entry.author == author_id && entry.seq == 11)
+    });
+
+    author.shutdown().await.expect("author goes offline");
+
+    // The late device asks the RELAY only, and the relay was never told to go and fetch anything.
+    late.import_doc_ticket(trail_ticket)
+        .await
+        .expect("late device imports the author's trail");
+    let recovered = poll_until!(30, {
+        late.sync_latest(vec![relay_ticket.clone()], None)
+            .await
+            .expect("late device reconciles with the relay");
+        late.read_latest()
+            .await
+            .expect("late device reads its replica")
+            .into_iter()
+            .find(|entry| entry.author == author_id && entry.seq == 11)
+    });
+    assert_eq!(
+        recovered.fix.ts, 24_680,
+        "the relayed entry must be the author's published fix, decryptable by the late device"
+    );
+
+    late.shutdown().await.expect("late shutdown");
+    relay.shutdown().await.expect("relay shutdown");
 }
 
 /// Wait until `node`'s session reaches the `Verifying` SAS phase (peer reveal verified), then

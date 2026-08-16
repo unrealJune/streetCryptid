@@ -809,10 +809,6 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_push_trail(
     ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_push_trail_inner(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_push_trail_traced(
-    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_read_control(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_read_latest(
@@ -1008,11 +1004,7 @@ external fun uniffi_iroh_location_fn_method_locationnode_publish_profile(`ptr`: 
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_publish_resync(`ptr`: Long,`recipientRecvPubs`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_push_trail(`ptr`: Long,`peerTicket`: RustBuffer.ByValue,
-): Long
-external fun uniffi_iroh_location_fn_method_locationnode_push_trail_inner(`ptr`: Long,`peerTicket`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
-): Long
-external fun uniffi_iroh_location_fn_method_locationnode_push_trail_traced(`ptr`: Long,`peerTicket`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_locationnode_push_trail(`ptr`: Long,`peerTickets`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_read_control(`ptr`: Long,`author`: RustBuffer.ByValue,
 ): Long
@@ -1432,13 +1424,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 54563) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail() != 65355) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail_inner() != 60203) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail_traced() != 27419) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail() != 39469) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_read_control() != 32699) {
@@ -2808,8 +2794,9 @@ public interface LocationNodeInterface {
     suspend fun `publishResync`(`recipientRecvPubs`: List<kotlin.String>): kotlin.String
     
     /**
-     * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
-     * to finish. **This is what actually gets a published fix off the phone.**
+     * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
+     * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
+     * actually gets a published fix off the phone.**
      *
      * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
      * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
@@ -2817,14 +2804,25 @@ public interface LocationNodeInterface {
      * that, so its envelopes never reached the stash and an offline friend had nothing to
      * reconcile from. Call this after draining a batch.
      *
+     * The peer list is the send-side counterpart of [`Self::sync_latest`], and it is what makes
+     * ARCHITECTURE.md §1.3/§6's pool relay the normal flow rather than luck. An earlier revision
+     * took a single `Option<String>` that only ever carried the stash, so an author's published
+     * fix was broadcast over docs to the stash and to nobody else: a pool member gained the
+     * author's entries only if it happened to dial the author itself during a reconciliation
+     * window, and with the stash off there was no durable copy anywhere. Pushing to the pool
+     * means a friend with the app open holds the author's entries **as they are published**, and
+     * can hand them on the moment the author goes dark.
+     *
+     * Repeating it is cheap: `start_sync` is a no-op once a namespace is syncing, so the
+     * steady-state cost is one connection per member for the process's lifetime.
+     *
+     * Unparseable tickets are skipped rather than failing the push — one malformed friend card
+     * must not stop delivery to everyone else — but they are counted on the span.
+     *
      * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
-     * that the live gossip path or a later [`Self::sync_trail`] is broken.
+     * that the live gossip path or a later [`Self::sync_latest`] is broken.
      */
-    suspend fun `pushTrail`(`peerTicket`: kotlin.String?)
-    
-    suspend fun `pushTrailInner`(`peerTicket`: kotlin.String?, `traceparent`: kotlin.String?)
-    
-    suspend fun `pushTrailTraced`(`peerTicket`: kotlin.String?, `traceparent`: kotlin.String)
+    suspend fun `pushTrail`(`peerTickets`: List<kotlin.String>, `traceparent`: kotlin.String?)
     
     /**
      * Read `author`'s current control message, if we can open it. Returns an empty vec when
@@ -4242,8 +4240,9 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
-     * to finish. **This is what actually gets a published fix off the phone.**
+     * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
+     * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
+     * actually gets a published fix off the phone.**
      *
      * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
      * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
@@ -4251,61 +4250,32 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
      * that, so its envelopes never reached the stash and an offline friend had nothing to
      * reconcile from. Call this after draining a batch.
      *
+     * The peer list is the send-side counterpart of [`Self::sync_latest`], and it is what makes
+     * ARCHITECTURE.md §1.3/§6's pool relay the normal flow rather than luck. An earlier revision
+     * took a single `Option<String>` that only ever carried the stash, so an author's published
+     * fix was broadcast over docs to the stash and to nobody else: a pool member gained the
+     * author's entries only if it happened to dial the author itself during a reconciliation
+     * window, and with the stash off there was no durable copy anywhere. Pushing to the pool
+     * means a friend with the app open holds the author's entries **as they are published**, and
+     * can hand them on the moment the author goes dark.
+     *
+     * Repeating it is cheap: `start_sync` is a no-op once a namespace is syncing, so the
+     * steady-state cost is one connection per member for the process's lifetime.
+     *
+     * Unparseable tickets are skipped rather than failing the push — one malformed friend card
+     * must not stop delivery to everyone else — but they are counted on the span.
+     *
      * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
-     * that the live gossip path or a later [`Self::sync_trail`] is broken.
+     * that the live gossip path or a later [`Self::sync_latest`] is broken.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `pushTrail`(`peerTicket`: kotlin.String?) {
+    override suspend fun `pushTrail`(`peerTickets`: List<kotlin.String>, `traceparent`: kotlin.String?) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_push_trail(
                 uniffiHandle,
-                FfiConverterOptionalString.lower(`peerTicket`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        LocationException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(LocationException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `pushTrailInner`(`peerTicket`: kotlin.String?, `traceparent`: kotlin.String?) {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_iroh_location_fn_method_locationnode_push_trail_inner(
-                uniffiHandle,
-                FfiConverterOptionalString.lower(`peerTicket`),FfiConverterOptionalString.lower(`traceparent`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        LocationException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(LocationException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `pushTrailTraced`(`peerTicket`: kotlin.String?, `traceparent`: kotlin.String) {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_iroh_location_fn_method_locationnode_push_trail_traced(
-                uniffiHandle,
-                FfiConverterOptionalString.lower(`peerTicket`),FfiConverterString.lower(`traceparent`),
+                FfiConverterSequenceString.lower(`peerTickets`),FfiConverterOptionalString.lower(`traceparent`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },

@@ -147,6 +147,15 @@ the JS thread, stalled tile loading, and drained the battery. See
 pool member; a rejoining B runs range-based reconciliation against C/D/A, pulls the
 envelopes it missed, and decrypts its own wraps.
 
+**That replication is A's job, on publish.** A's namespace is live-synced (`push_trail` →
+`start_sync`) to the trail stash **and to every pool member**, not to the stash alone — so C holds
+A's envelope as A publishes it, and can serve it to B the moment A goes dark. It has to work this
+way round: a pool member holds a READ ticket and cannot write to A's namespace, so an envelope that
+reached C over live gossip lands in C's app storage and never in the replica C would serve from.
+When A pushed only to the stash, C could relay a fix solely if C happened to reconcile with A while
+A was still up — recovery "against C/D/A" was true of the reader and false of the writer, and with
+the stash off there was no durable copy anywhere.
+
 **Revocation works** because access is the `Wrap`, not swarm membership: to unshare with
 C, A simply **stops emitting C's `Wrap`**. Since every fix uses a **fresh random `K`**,
 "no wrap ⇒ no key ⇒ ciphertext is useless to C," even if C keeps replicating the doc.
@@ -157,6 +166,8 @@ C, A simply **stops emitting C's `Wrap`**. Since every fix uses a **fresh random
                  ┌──────────── A (writer) ────────────┐
    GPS fix ─▶ build Envelope(active recipients) ─▶ sign ─┬─▶ gossip.broadcast(topic)   (live)
                                                          └─▶ docs.set(author/seq, bytes) (durable)
+                                                                     │  push_trail: live-sync A's namespace
+                                                                     │  to the stash AND every pool member
                                                                      │  replicate (range reconciliation)
                       B online: gossip Received ─▶ verify sig ─▶ unwrap(myWrap) ─▶ decrypt ─▶ dot
                       B rejoins: docs sync missed ─▶ (same) ─▶ backfill trail
@@ -281,13 +292,17 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   (offline / process death). A mounted runtime publishes TaskManager batches immediately; a fresh
   headless context restores the persisted profile, keys, sharing pool, and minimal iroh publisher
   before draining the queue.
-- **Push-to-stash is explicit** (`pushTrail` → native `trail.push`): `docsWrite` writes only the
-  LOCAL replica. iroh-docs broadcasts a `LocalInsert` **only** for namespaces its live engine has
-  marked as syncing, which happens on `start_sync` and nowhere else — so a context that publishes
-  without calling `pushTrail`/`syncTrail` strands every envelope on the device. Publish paths must
-  therefore **drain, then push** (`LocationEngine.flush`, `flushBackgroundOutboxHeadless`). Ordering
-  is load-bearing: syncing _before_ the drain leaves that wake's fixes for the next OS wake, which
-  is what produced hour-long gaps in friends' trails while both phones looked healthy.
+- **Push is explicit, and it addresses the whole pool** (`pushTrail` → native `trail.push`):
+  `docsWrite` writes only the LOCAL replica. iroh-docs broadcasts a `LocalInsert` **only** for
+  namespaces its live engine has marked as syncing, which happens on `start_sync` and nowhere else
+  — so a context that publishes without calling `pushTrail`/`syncTrail` strands every envelope on
+  the device. The peer list is the stash **and every pool member**, mirroring `syncTrail`'s: an
+  earlier revision pushed only to the stash, so a friend held the author's entries solely if it
+  happened to dial the author during a reconciliation window, and with the stash off nothing
+  durable existed anywhere (§6). Publish paths must therefore **drain, then push**
+  (`LocationEngine.flush`, `flushBackgroundOutboxHeadless`). Ordering is load-bearing: syncing
+  _before_ the drain leaves that wake's fixes for the next OS wake, which is what produced
+  hour-long gaps in friends' trails while both phones looked healthy.
 - **Headless must re-open friend namespaces** (`restorePool` → `importFriendTrails`): native
   `syncTrail` reconciles the namespaces in its handle cache, and a fresh node starts with only our
   own in it. Without re-importing each friend's `docTicket`, a background backfill runs, reports
@@ -509,7 +524,7 @@ B (watcher)                                     A (subject)
   build ControlMsg{kind: LiveRequest, ts, ttl, nonce}
   seal for A only  ─────────────────────────────────────────────┐
   docs_write_control → OWN namespace, key `ctl/hex(B)`          │  replicates B's namespace already
-  push_trail → stash  ─────────────────────────────────────────▶│
+  push_trail → stash + pool  ──────────────────────────────────▶│
                                                     every 5 min: syncTrail → read_control(B)
                                                     evaluate: sharing? fresh? new nonce?
                                                     → setLiveTracking(true, ttl)
@@ -542,8 +557,10 @@ B (watcher)                                     A (subject)
   and needlessly chatty on the short one, and it keeps this read traffic decoupled from the publish
   cadence (a security property, §9). A constant-rate poll reveals nothing about movement. This is
   what makes the feature "ask to watch", not "watch now" — the UI says so.
-- **Requires the stash.** `pushTrail` no-ops without one, and peer-only delivery needs both phones
-  online and reconciling simultaneously — the exact condition the stash exists to stop depending on.
+- **Better with the stash, but no longer dependent on it.** `pushTrail` addresses every pool member,
+  so a request reaches the subject directly whenever both phones are reachable at some point before
+  the next poll; the stash is what removes the "at some point" — it is always up, so delivery never
+  waits on a moment when both devices happen to be online.
 - **Polling runs only while background sharing is on**, since there is otherwise nothing to make
   live. A request to someone with sharing off fails visibly rather than hanging.
 - **iOS**: `docsWriteControl` / `readControl` are absent until `just bindgen-ios` runs on macOS, so

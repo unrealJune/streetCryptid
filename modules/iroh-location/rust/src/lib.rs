@@ -2127,8 +2127,9 @@ impl LocationNode {
         .await
     }
 
-    /// Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
-    /// to finish. **This is what actually gets a published fix off the phone.**
+    /// Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
+    /// opted into, and **every pool member** — and wait for the exchange to finish. **This is what
+    /// actually gets a published fix off the phone.**
     ///
     /// [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
     /// solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
@@ -2136,18 +2137,70 @@ impl LocationNode {
     /// that, so its envelopes never reached the stash and an offline friend had nothing to
     /// reconcile from. Call this after draining a batch.
     ///
+    /// The peer list is the send-side counterpart of [`Self::sync_latest`], and it is what makes
+    /// ARCHITECTURE.md §1.3/§6's pool relay the normal flow rather than luck. An earlier revision
+    /// took a single `Option<String>` that only ever carried the stash, so an author's published
+    /// fix was broadcast over docs to the stash and to nobody else: a pool member gained the
+    /// author's entries only if it happened to dial the author itself during a reconciliation
+    /// window, and with the stash off there was no durable copy anywhere. Pushing to the pool
+    /// means a friend with the app open holds the author's entries **as they are published**, and
+    /// can hand them on the moment the author goes dark.
+    ///
+    /// Repeating it is cheap: `start_sync` is a no-op once a namespace is syncing, so the
+    /// steady-state cost is one connection per member for the process's lifetime.
+    ///
+    /// Unparseable tickets are skipped rather than failing the push — one malformed friend card
+    /// must not stop delivery to everyone else — but they are counted on the span.
+    ///
     /// Best-effort by design: a failure means offline delivery is degraded for those fixes, not
-    /// that the live gossip path or a later [`Self::sync_trail`] is broken.
-    pub async fn push_trail(&self, peer_ticket: Option<String>) -> Result<(), LocationError> {
-        self.push_trail_inner(peer_ticket, None).await
-    }
-
-    pub async fn push_trail_traced(
+    /// that the live gossip path or a later [`Self::sync_latest`] is broken.
+    pub async fn push_trail(
         &self,
-        peer_ticket: Option<String>,
-        traceparent: String,
+        peer_tickets: Vec<String>,
+        traceparent: Option<String>,
     ) -> Result<(), LocationError> {
-        self.push_trail_inner(peer_ticket, Some(traceparent)).await
+        use tracing::Instrument;
+        let requested = peer_tickets.len();
+        let peers: Vec<EndpointAddr> = peer_tickets
+            .iter()
+            .filter_map(|ticket| ticket.parse::<EndpointTicket>().ok())
+            .map(|ticket| ticket.endpoint_addr().clone())
+            .collect();
+        let span = tracing::info_span!(
+            "trail.push",
+            sc.author = %telemetry::short_hex(&self.author),
+            sync.peers_requested = requested,
+            sync.peers_dialed = peers.len(),
+            entries_sent = tracing::field::Empty,
+            finished = tracing::field::Empty,
+        );
+        telemetry::set_parent(&span, traceparent.as_deref());
+        async move {
+            if peers.len() < requested {
+                tracing::warn!(
+                    skipped = requested - peers.len(),
+                    "trail push: some peer tickets were unparseable and were skipped"
+                );
+            }
+            let guard = self.inner.lock().await;
+            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            let trail = started.trail.clone();
+            let ns = trail.own_namespace();
+            drop(guard);
+
+            let sent = trail.push(ns, peers).await.map_err(|e| {
+                tracing::warn!(error = %e, "trail push failed");
+                LocationError::Network(e.to_string())
+            })?;
+            let current = tracing::Span::current();
+            current.record("finished", sent.is_some());
+            if let Some(sent) = sent {
+                current.record("entries_sent", sent);
+            }
+            Ok(())
+        }
+        .instrument(span)
+        .await
     }
 
     /// Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
@@ -2164,52 +2217,6 @@ impl LocationNode {
             .upload_own_latest(&base_url, psk.as_deref())
             .await
             .map_err(|error| LocationError::Network(error.to_string()))
-    }
-
-    async fn push_trail_inner(
-        &self,
-        peer_ticket: Option<String>,
-        traceparent: Option<String>,
-    ) -> Result<(), LocationError> {
-        use tracing::Instrument;
-        let span = tracing::info_span!(
-            "trail.push",
-            sc.author = %telemetry::short_hex(&self.author),
-            explicit_peer = peer_ticket.is_some(),
-            entries_sent = tracing::field::Empty,
-            finished = tracing::field::Empty,
-        );
-        telemetry::set_parent(&span, traceparent.as_deref());
-        async move {
-            let guard = self.inner.lock().await;
-            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
-            let trail = started.trail.clone();
-            let ns = trail.own_namespace();
-            drop(guard);
-
-            let peers = peer_ticket
-                .map(|ticket| {
-                    ticket
-                        .parse::<EndpointTicket>()
-                        .map(|ticket| vec![ticket.endpoint_addr().clone()])
-                        .map_err(|_| LocationError::Decode("bad sync peer endpoint ticket".into()))
-                })
-                .transpose()?
-                .unwrap_or_default();
-
-            let sent = trail.push(ns, peers).await.map_err(|e| {
-                tracing::warn!(error = %e, "trail push failed");
-                LocationError::Network(e.to_string())
-            })?;
-            let current = tracing::Span::current();
-            current.record("finished", sent.is_some());
-            if let Some(sent) = sent {
-                current.record("entries_sent", sent);
-            }
-            Ok(())
-        }
-        .instrument(span)
-        .await
     }
 
     /// Read the latest decryptable fix per author (friends who share with us) from the local

@@ -452,11 +452,14 @@ impl WasmLocationNode {
         Ok(())
     }
 
-    /// Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
-    /// to finish. `docs_write` only touches the local replica — iroh-docs broadcasts a local
-    /// insert only for namespaces `start_sync` has marked as syncing — so without this a published
-    /// fix never leaves this node. Best-effort: a failure only degrades offline delivery.
-    pub async fn push_trail(&self, peer_ticket: Option<String>) -> Result<(), JsError> {
+    /// Push our own trail namespace to `peer_tickets` — the trail stash, and every pool member —
+    /// and wait for the exchange to finish. `docs_write` only touches the local replica — iroh-docs
+    /// broadcasts a local insert only for namespaces `start_sync` has marked as syncing — so
+    /// without this a published fix never leaves this node. Mirrors the native
+    /// `LocationNode::push_trail`: pushing to the pool and not only the stash is what lets a friend
+    /// serve the author's fix once the author goes dark. Unparseable tickets are skipped rather
+    /// than failing the push. Best-effort: a failure only degrades offline delivery.
+    pub async fn push_trail(&self, peer_tickets: Vec<String>) -> Result<(), JsError> {
         let trail = {
             let guard = self.started.lock().await;
             let started = guard
@@ -464,15 +467,11 @@ impl WasmLocationNode {
                 .ok_or_else(|| JsError::new("node not started"))?;
             started.trail.clone()
         };
-        let peers = peer_ticket
-            .map(|ticket| {
-                ticket
-                    .parse::<EndpointTicket>()
-                    .map(|ticket| vec![ticket.endpoint_addr().clone()])
-                    .map_err(|_| JsError::new("bad sync peer endpoint ticket"))
-            })
-            .transpose()?
-            .unwrap_or_default();
+        let peers: Vec<_> = peer_tickets
+            .iter()
+            .filter_map(|ticket| ticket.parse::<EndpointTicket>().ok())
+            .map(|ticket| ticket.endpoint_addr().clone())
+            .collect();
         let ns = trail.own_namespace();
         trail.push(ns, peers).await.map_err(to_js_err)?;
         Ok(())
