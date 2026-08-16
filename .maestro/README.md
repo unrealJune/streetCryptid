@@ -19,7 +19,13 @@ the app already built and installed (`just run-ios`, or `bunx expo run:ios` /
   (via `scripts/e2e/lib/devices.sh`) by `run-matrix.sh` and `soak.sh` — the scenario-matrix and
   soak-test harness for background sharing. `just e2e-matrix` runs the declarative scenarios in
   `scripts/e2e/scenarios/*.yaml` across a pool of simulators; `just e2e-matrix-list` lists them;
-  `just e2e-soak` runs one long-form. See `scripts/e2e/PHYSICAL-DEVICE-CHECKLIST.md` for what
+  `just e2e-soak` runs one long-form. `pairing/pair-device.yaml` drives a whole SAS handshake as a
+  single flow (both devices concurrently, meeting through `scripts/e2e/lib/rendezvous.py`) — a
+  flow START restarts the app under both runners, so anything holding in-app session state has to
+  live in one flow. `just e2e-reconcile` proves a device recovers what it missed while away, and
+  `just e2e-relay` that a friend can serve an absent author's fix — read
+  `scripts/e2e/PEER-RELAY-STATUS.md` before trusting a red run from the latter.
+  See `scripts/e2e/PHYSICAL-DEVICE-CHECKLIST.md` for what
   that matrix structurally cannot cover on Simulator alone. `chaos-*.yaml` scenarios additionally
   need a local trail-stash (`just e2e-local-stash`) and pf (`scripts/e2e/lib/netchaos.sh`, needs
   sudo) to prove the app survives — and recovers from — the stash going unreachable mid-share.

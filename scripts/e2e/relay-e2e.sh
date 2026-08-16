@@ -34,8 +34,8 @@
 #
 # CURRENT RESULT (2026-08-16, three iOS Release builds, verified both ways):
 #
-#   STASH_OPT_IN=1  PASS — late recovers seq 1303 `via=sync` with the author force-quit.
-#   STASH_OPT_IN=0  FAIL — late never obtains it, though the relay demonstrably holds it.
+#   STASH_OPT_IN=1  PASS — late recovers `via=sync` with the author force-quit.
+#   STASH_OPT_IN=0  PASS once, then intermittent — see PEER-RELAY-STATUS.md.
 #
 # The control passing is what makes the failure meaningful: the topology, the pairing, the
 # publish and the timing are all sound, and the only thing that changes between the two runs is
@@ -52,9 +52,15 @@
 #   * `sync_latest_inner` dials only the explicitly passed peer (the stash) — `peers` is otherwise
 #     empty, so no pool member is ever contacted for reconciliation.
 #
-# Closing that gap means bootstrapping a friend's topic from other pool members too, which is a
-# deliberate change to who can observe whom in the mesh, not just a bug fix — hence recorded here
-# rather than quietly patched.
+# FIXED — see the commit "recover a friend's fix from any pool member". `sync_latest` now takes a
+# list of peers, a friend's topic bootstraps from the whole pool, and the trail namespace is
+# imported before subscribing. The property is proven deterministically by
+# `a_pool_member_serves_an_absent_authors_fix` in tests/pairing_integration.rs.
+#
+# THIS test still passes only intermittently, for reasons that are about arranging the scenario on
+# two simulators rather than about the property: the relay can only serve what is in its REPLICA,
+# and a fix that arrived over live gossip is in app storage only. Read
+# scripts/e2e/PEER-RELAY-STATUS.md before spending time on a red run here.
 #
 # Usage:
 #   scripts/e2e/relay-e2e.sh <author> <relay> <late>
