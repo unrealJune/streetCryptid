@@ -427,11 +427,15 @@ impl WasmLocationNode {
         Ok(())
     }
 
-    /// Reconcile our own + every imported friend namespace so each friend's **current** fix is
+    /// Reconcile our own + every imported friend namespace so each author's **current** fix is
     /// exchanged (the durable path is last-write-wins; there is no missed history to recover).
-    /// When `peer_ticket` is present, every namespace explicitly syncs with that endpoint. Read
-    /// the results with `read_latest`.
-    pub async fn sync_latest(&self, peer_ticket: Option<String>) -> Result<(), JsError> {
+    /// Read the results with `read_latest`.
+    ///
+    /// `peer_tickets` is every endpoint worth dialing: the trail stash, and every pool member.
+    /// Mirrors the native `LocationNode::sync_latest` — see its doc comment for why recovery has
+    /// to be able to reach a pool member and not just the author or the stash. Unparseable
+    /// tickets are skipped rather than failing the pass.
+    pub async fn sync_latest(&self, peer_tickets: Vec<String>) -> Result<(), JsError> {
         let trail = {
             let guard = self.started.lock().await;
             let started = guard
@@ -439,15 +443,11 @@ impl WasmLocationNode {
                 .ok_or_else(|| JsError::new("node not started"))?;
             started.trail.clone()
         };
-        let peers = peer_ticket
-            .map(|ticket| {
-                ticket
-                    .parse::<EndpointTicket>()
-                    .map(|ticket| vec![ticket.endpoint_addr().clone()])
-                    .map_err(|_| JsError::new("bad sync peer endpoint ticket"))
-            })
-            .transpose()?
-            .unwrap_or_default();
+        let peers: Vec<_> = peer_tickets
+            .iter()
+            .filter_map(|ticket| ticket.parse::<EndpointTicket>().ok())
+            .map(|ticket| ticket.endpoint_addr().clone())
+            .collect();
         trail.sync_all(peers).await.map_err(to_js_err)?;
         Ok(())
     }

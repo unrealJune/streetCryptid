@@ -412,3 +412,9 @@ device_set_stash_opt_in() {
     set_stash_opt_in "$(social_db_path "$(app_data_dir "$id" "$APP_ID")")" "$2"
   fi
 }
+
+# device_foreground <spec> — foreground the app and leave it there, so this device can keep
+# serving peers. Contrast device_background, which returns the app to the background.
+device_foreground() {
+  bring_to_foreground "$(device_id "$1")"
+}

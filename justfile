@@ -178,8 +178,16 @@ benchmark-ios-location device output="ios-location-benchmark.tsv":
 #   just e2e-matrix
 #   just e2e-matrix auto --only background-walking,cold-pairing-sync
 #   just e2e-matrix 5834FA5F-...,37D03B5C-...,354E950C-...
-e2e-matrix devices="auto" *args:
-    bash scripts/e2e/run-matrix.sh --devices {{devices}} {{args}}
+# NOTE the single variadic parameter: `just` (1.18) rejects "non-default parameter follows
+# default parameter", so `devices="auto" *args` will not parse. Taking everything as `*args` and
+# defaulting the first one in the body keeps all three call shapes working.
+e2e-matrix *args:
+    #!/usr/bin/env sh
+    set -eu
+    set -- {{args}}
+    devices="${1:-auto}"
+    [ $# -gt 0 ] && shift
+    bash scripts/e2e/run-matrix.sh --devices "$devices" "$@"
 
 # List every scenario the matrix runner knows about without running anything.
 e2e-matrix-list:

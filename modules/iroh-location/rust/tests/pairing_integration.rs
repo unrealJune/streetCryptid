@@ -56,7 +56,7 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
         .await
         .expect("stash imports author trail");
     stash
-        .sync_latest(Some(author.ticket().await.expect("author endpoint ticket")))
+        .sync_latest(vec![author.ticket().await.expect("author endpoint ticket")], None)
         .await
         .expect("stash explicitly reconciles with author");
     assert!(
@@ -75,7 +75,7 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
         .await
         .expect("phone imports friend trail");
     phone
-        .sync_latest(Some(stash.ticket().await.expect("stash endpoint ticket")))
+        .sync_latest(vec![stash.ticket().await.expect("stash endpoint ticket")], None)
         .await
         .expect("phone explicitly reconciles with stash");
 
@@ -92,6 +92,93 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
 
     phone.shutdown().await.expect("phone shutdown");
     stash.shutdown().await.expect("stash shutdown");
+}
+
+/// A POOL MEMBER — not the author, and not the stash — serves an absent author's fix.
+///
+/// This is ARCHITECTURE.md §1.3/§6 stated as a test: "a rejoining B runs range-based
+/// reconciliation against C/D/A". `relay` here is an ordinary peer holding nothing but a READ
+/// ticket for the author's namespace, exactly like any friend in a sharing pool; the author is
+/// shut down before the late device ever asks. Nothing in the recovery path touches the stash.
+///
+/// Two things this pins down, both of which were broken or unproven when it was written:
+///
+///  * `sync_latest` takes a LIST of peers. It used to take a single `Option<String>` that only
+///    ever carried the trail stash, so a device could recover from the author or from the durable
+///    server and from nobody else — which is strictly narrower than the design, and left a device
+///    unable to obtain a fix that a friend beside it was demonstrably holding.
+///  * A relay can only serve what is in its REPLICA. A fix that reaches it over live gossip lands
+///    in app storage, not in the author's namespace (a friend holds a read ticket and cannot write
+///    there), so the relay must have reconciled with the author at least once. That is why this
+///    test syncs `relay` against the author before taking the author away, and it is the same
+///    precondition scripts/e2e/relay-e2e.sh has to arrange on real devices.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pool_member_serves_an_absent_authors_fix() {
+    let author = start_node().await;
+    let relay = start_node().await;
+    let late = start_node().await;
+
+    let author_id = author.endpoint_id();
+    let fix = iroh_location::LocationFix {
+        lat: 47.6205,
+        lon: -122.3493,
+        accuracy_m: 5.0,
+        heading_deg: 12.0,
+        ts: 9_876,
+    };
+    // Sealed for BOTH friends: the late device must be able to decrypt what the relay hands on,
+    // which is the whole point of the wrap set (§4.1).
+    author
+        .docs_write(
+            "relay-case".into(),
+            7,
+            fix,
+            vec![relay.recv_public(), late.recv_public()],
+        )
+        .await
+        .expect("author writes an encrypted fix for both friends");
+    let trail_ticket = author.doc_ticket().await.expect("author trail ticket");
+
+    // The relay reconciles with the author while the author is still up — this is what puts the
+    // entry in its replica and therefore what makes it relayable at all.
+    relay
+        .import_doc_ticket(trail_ticket.clone())
+        .await
+        .expect("relay imports the author's trail");
+    relay
+        .sync_latest(
+            vec![author.ticket().await.expect("author endpoint ticket")],
+            None,
+        )
+        .await
+        .expect("relay reconciles with the author");
+
+    author.shutdown().await.expect("author goes offline");
+
+    // The late device asks the RELAY only. No stash, and the author is gone.
+    late.import_doc_ticket(trail_ticket)
+        .await
+        .expect("late device imports the author's trail");
+    late.sync_latest(
+        vec![relay.ticket().await.expect("relay endpoint ticket")],
+        None,
+    )
+    .await
+    .expect("late device reconciles with the relay");
+
+    let recovered = late
+        .read_latest()
+        .await
+        .expect("late device reads its replica");
+    assert!(
+        recovered
+            .iter()
+            .any(|entry| entry.author == author_id && entry.seq == 7),
+        "a pool member must be able to serve the author's fix once the author is offline"
+    );
+
+    late.shutdown().await.expect("late shutdown");
+    relay.shutdown().await.expect("relay shutdown");
 }
 
 /// Poll an `Option`-returning async expression until it is `Some`, or panic after `$secs`.

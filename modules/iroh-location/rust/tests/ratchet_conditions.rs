@@ -154,7 +154,7 @@ async fn replicate(
         .await
         .expect("stash imports");
     stash
-        .sync_latest(Some(author.ticket().await.expect("author ticket")))
+        .sync_latest(vec![author.ticket().await.expect("author ticket")], None)
         .await
         .expect("stash reconciles with author");
     reader
@@ -162,7 +162,7 @@ async fn replicate(
         .await
         .expect("reader imports");
     reader
-        .sync_latest(Some(stash.ticket().await.expect("stash ticket")))
+        .sync_latest(vec![stash.ticket().await.expect("stash ticket")], None)
         .await
         .expect("reader reconciles with stash");
 }

@@ -1699,13 +1699,37 @@ export class LocationSharingService implements FixPublisher {
    */
   async syncTrail(sinceTs = 0, parent?: SpanContext): Promise<void> {
     if (!this.mod) return;
+    // Reconcile against the stash AND every pool member.
+    //
+    // This is what ARCHITECTURE.md §1.3/§6 has always described — "a rejoining B runs range-based
+    // reconciliation against C/D/A" — and it was the missing half. Passing only the stash meant a
+    // device could recover an author's fix from the durable server or from the author itself, and
+    // from nobody else: with the author offline and the stash off there was no reachable source
+    // at all, even when a friend beside it demonstrably held the fix. Verified by
+    // scripts/e2e/relay-e2e.sh, which failed for exactly that reason.
+    //
+    // No new exposure. §6 is explicit that "access is the Wrap, not swarm membership", and that
+    // the whole encrypted envelope is already replicated to every pool member — so reconciling
+    // with a friend reveals nothing they were not already holding, and a revoked peer still has
+    // no wrap and therefore no key.
+    //
+    // The stash goes first when enabled: it is always-on and usually answers immediately.
+    const peerTickets = [
+      ...(this.stashEnabled() && this.stashTicket ? [this.stashTicket] : []),
+      ...pool.friendList(this.state).map((friend) => friend.ticket),
+    ].filter((ticket): ticket is string => Boolean(ticket));
+
     const span = getTelemetry().startSpan('trail.sync.app', {
       parent,
-      attributes: { since_ts: sinceTs, stash: this.stashEnabled() },
+      attributes: {
+        since_ts: sinceTs,
+        stash: this.stashEnabled(),
+        'sync.peers': peerTickets.length,
+      },
     });
     try {
       await this.mod.syncLatest(
-        this.stashEnabled() ? this.stashTicket : null,
+        peerTickets,
         getTelemetry().enabled ? traceparentFor(span.context) : null
       );
       span.setStatus('ok');
@@ -2632,9 +2656,32 @@ export class LocationSharingService implements FixPublisher {
   private async subscribeToFriend(card: Friend): Promise<void> {
     if (!this.mod || this.friendSubs.has(card.endpointId)) return;
     const topic = await this.mod.deriveTopic(card.endpointId);
-    const subId = await this.mod.subscribe(topic, [card.ticket, ...this.stashBootstrap()]);
-    this.friendSubs.set(card.endpointId, subId);
-    // Replicate their durable trail namespace so syncTrail can recover fixes we missed (§6).
+    // Bootstrap a friend's topic from the WHOLE pool, not just that friend.
+    //
+    // The swarm for A's topic contains everyone A shares with, so any of them is a valid entry
+    // point into it — and if A is offline, they are the ONLY entry points. Bootstrapping solely
+    // from `card.ticket` meant that when A went down, a rejoining device could not reach the
+    // swarm where A's fixes were still being held by C and D, which is the case §1.3 exists for.
+    // `ensureMySubscription` already does exactly this for our own topic; this is the same idea
+    // applied to the topics we subscribe to.
+    //
+    // Ordered with the topic's owner first: they are the authoritative source when they are up,
+    // and gossip bootstrap tries the list in order.
+    const poolBootstrap = pool
+      .friendList(this.state)
+      .filter((friend) => friend.endpointId !== card.endpointId)
+      .map((friend) => friend.ticket)
+      .filter((ticket): ticket is string => Boolean(ticket));
+    // DURABLE FIRST, LIVE SECOND. Importing the trail namespace is local bookkeeping — it opens a
+    // replica handle and needs no network — whereas `subscribe` dials this friend's bootstrap set.
+    // Doing them in the other order made offline recovery depend on a live dial succeeding: when
+    // the friend was down, `subscribe` failed, `restorePool` swallowed it per-friend ("a single
+    // bad card shouldn't block restoring the rest"), and `importDocTicket` was never reached. The
+    // device then held no replica for that author, so `syncTrail` had nothing to reconcile and
+    // reported success having recovered nothing — precisely the failure ARCHITECTURE.md §9 warns
+    // about, and the reason relay-e2e.sh could not recover a fix a friend was demonstrably
+    // holding. Offline recovery must not be contingent on the peer being reachable; that is what
+    // it is for.
     if (card.docTicket) {
       try {
         await this.mod.importDocTicket(card.docTicket);
@@ -2649,6 +2696,12 @@ export class LocationSharingService implements FixPublisher {
         });
       }
     }
+    const subId = await this.mod.subscribe(topic, [
+      card.ticket,
+      ...poolBootstrap,
+      ...this.stashBootstrap(),
+    ]);
+    this.friendSubs.set(card.endpointId, subId);
     // Replicate + live-sync their profile namespace so identity updates land automatically (§3).
     if (card.profileTicket) {
       try {

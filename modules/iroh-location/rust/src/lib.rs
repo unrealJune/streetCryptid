@@ -50,7 +50,9 @@ use std::sync::Mutex as StdMutex;
 #[cfg(target_os = "android")]
 use std::sync::OnceLock;
 
-use iroh::{address_lookup::MemoryLookup, protocol::Router, Endpoint, EndpointId, SecretKey};
+use iroh::{
+    address_lookup::MemoryLookup, protocol::Router, Endpoint, EndpointAddr, EndpointId, SecretKey,
+};
 use iroh_blobs::{store::fs::FsStore, BlobsProtocol};
 use iroh_gossip::{api::Event, net::Gossip, proto::TopicId};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
@@ -2059,49 +2061,58 @@ impl LocationNode {
             .collect())
     }
 
-    /// Reconcile our own + every imported friend namespace so each friend's **current** fix is
+    /// Reconcile our own + every imported friend namespace so each author's **current** fix is
     /// exchanged (FORWARD-SECRECY §4.4 — the durable path is last-write-wins; there is no missed
-    /// history to recover). When `peer_ticket` is present, every namespace explicitly syncs with
-    /// that endpoint (the trail stash). Read the results with [`Self::read_latest`].
-    pub async fn sync_latest(&self, peer_ticket: Option<String>) -> Result<(), LocationError> {
-        self.sync_latest_inner(peer_ticket, None).await
-    }
-
-    pub async fn sync_latest_traced(
+    /// history to recover). Read the results with [`Self::read_latest`].
+    ///
+    /// `peer_tickets` is every endpoint worth dialing for this pass: the trail stash when it is
+    /// configured and opted into, and **every pool member**. That list is the whole mechanism
+    /// behind ARCHITECTURE.md §1.3/§6 — "a rejoining B runs range-based reconciliation against
+    /// C/D/A". An earlier revision took a single `Option<String>` that only ever carried the
+    /// stash, so a device could recover an author's fix from the durable server or from the
+    /// author, and from nobody else; with the author offline and the stash off there was no
+    /// reachable source at all, even when a friend beside it demonstrably held the fix.
+    ///
+    /// The peers are handed to iroh-docs together rather than dialled one at a time, so a
+    /// namespace reconciles with whoever answers instead of paying a separate timeout per peer.
+    /// An empty list is meaningful and not an error: it reconciles with whatever the live engine
+    /// is already connected to, which is the correct degenerate case (and what a device with no
+    /// friends and no stash should do).
+    ///
+    /// Unparseable tickets are skipped rather than failing the pass — one malformed friend card
+    /// must not stop reconciliation with everyone else — but they are counted on the span, since
+    /// a silent skip is exactly the kind of thing that hides a real break.
+    pub async fn sync_latest(
         &self,
-        peer_ticket: Option<String>,
-        traceparent: String,
-    ) -> Result<(), LocationError> {
-        self.sync_latest_inner(peer_ticket, Some(traceparent)).await
-    }
-
-    async fn sync_latest_inner(
-        &self,
-        peer_ticket: Option<String>,
+        peer_tickets: Vec<String>,
         traceparent: Option<String>,
     ) -> Result<(), LocationError> {
         use tracing::Instrument;
+        let requested = peer_tickets.len();
+        let peers: Vec<EndpointAddr> = peer_tickets
+            .iter()
+            .filter_map(|ticket| ticket.parse::<EndpointTicket>().ok())
+            .map(|ticket| ticket.endpoint_addr().clone())
+            .collect();
         let span = tracing::info_span!(
             "trail.sync",
             sc.author = %telemetry::short_hex(&self.author),
-            explicit_peer = peer_ticket.is_some(),
+            sync.peers_requested = requested,
+            sync.peers_dialed = peers.len(),
         );
         telemetry::set_parent(&span, traceparent.as_deref());
         async move {
+            if peers.len() < requested {
+                tracing::warn!(
+                    skipped = requested - peers.len(),
+                    "trail sync: some peer tickets were unparseable and were skipped"
+                );
+            }
             let guard = self.inner.lock().await;
             let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
             let trail = started.trail.clone();
             drop(guard);
 
-            let peers = peer_ticket
-                .map(|ticket| {
-                    ticket
-                        .parse::<EndpointTicket>()
-                        .map(|ticket| vec![ticket.endpoint_addr().clone()])
-                        .map_err(|_| LocationError::Decode("bad sync peer endpoint ticket".into()))
-                })
-                .transpose()?
-                .unwrap_or_default();
             // No sink and no `recovered` count here any more: with one overwritten slot per author
             // there is no back-catalogue to stream, so a sync just reconciles and the app reads the
             // current fixes afterwards. The `recovered` span attribute is recorded app-side instead

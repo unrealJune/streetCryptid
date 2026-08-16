@@ -497,13 +497,9 @@ public final class IrohLocationModule: Module {
       try await node.forgetSession(peerEndpointHex: peerEndpoint)
     }
 
-    AsyncFunction("syncLatest") { (peerTicket: String?, traceparent: String?) async throws in
+    AsyncFunction("syncLatest") { (peerTickets: [String], traceparent: String?) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      if let traceparent {
-        try await node.syncLatestTraced(peerTicket: peerTicket, traceparent: traceparent)
-      } else {
-        try await node.syncLatest(peerTicket: peerTicket)
-      }
+      try await node.syncLatest(peerTickets: peerTickets, traceparent: traceparent)
     }
 
     // NOTE: needs `just bindgen-ios` on macOS before `node.pushTrail` exists in the generated

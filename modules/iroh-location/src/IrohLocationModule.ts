@@ -92,7 +92,7 @@ export declare class IrohLocationNativeModule
   pollResync?(peerEndpointHex: string, peerRecvPubHex: string): Promise<boolean>;
   clearResync?(): Promise<void>;
   forgetSession?(peerEndpointHex: string): Promise<void>;
-  syncLatest(peerTicket: string | null, traceparent?: string | null): Promise<void>;
+  syncLatest(peerTickets: string[], traceparent?: string | null): Promise<void>;
   /** Optional for compatibility with installed iOS binaries built before the push API. */
   pushTrail?(peerTicket: string | null, traceparent?: string | null): Promise<void>;
   uploadTrailContent?(baseUrl: string, psk: string | null): Promise<number>;

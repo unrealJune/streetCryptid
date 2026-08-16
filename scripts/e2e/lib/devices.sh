@@ -574,3 +574,9 @@ set_stash_opt_in() {
 warm_driver() {
   maestro_cmd "$1" hierarchy >/dev/null 2>&1 || true
 }
+
+# bring_to_foreground <udid> — launch the app and leave it in the foreground (no HOME press).
+# See .maestro/foreground-app.yaml for why this exists alongside send_to_background.
+bring_to_foreground() {
+  maestro_test "$1" "$REPO_ROOT/.maestro/foreground-app.yaml"
+}

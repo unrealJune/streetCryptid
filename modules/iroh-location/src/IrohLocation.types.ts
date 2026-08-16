@@ -455,13 +455,19 @@ export interface IrohLocationApi {
   ): Promise<RatchetDropped[]>;
   /**
    * Reconcile every replicated namespace so each author's current fix is up to date locally.
-   * `peerTicket` explicitly targets the trail stash; null retains peer-only reconciliation.
+   *
+   * `peerTickets` is every endpoint worth dialing for this pass: the trail stash when it is
+   * enabled, and **every pool member**. Recovery is supposed to work "against C/D/A"
+   * (ARCHITECTURE.md §1.3, §6), so a friend has to be a reachable source and not just the author
+   * or the stash — with a single stash-only target, a device whose friend was offline could not
+   * recover a fix that another friend was demonstrably holding. An empty list is valid and means
+   * "reconcile with whatever the live engine already knows".
    *
    * There is no `sinceTs` and no backfill stream any more: each author's namespace holds ONE
    * overwritten slot (FORWARD-SECRECY.md §4.4), so there is no back-catalogue to bound or to
    * deliver incrementally. Read the result with {@link readLatest} once this resolves.
    */
-  syncLatest(peerTicket: string | null, traceparent?: string | null): Promise<void>;
+  syncLatest(peerTickets: string[], traceparent?: string | null): Promise<void>;
   /**
    * Push OUR trail namespace to `peerTicket` (the trail stash) and wait for the exchange to finish.
    *

@@ -139,7 +139,11 @@ START_MS="$(($(date +%s) * 1000))"
 log "Author publishes for ${PUBLISH_SECONDS}s with the relay online and the late device away"
 device_background "$LATE"
 device_terminate_app "$LATE" # away for the whole publishing window
-device_background "$RELAY"   # online throughout, so it accumulates the author's fixes
+# The relay stays in the FOREGROUND for the whole run. It is the one device that has to keep
+# serving: a backgrounded iOS app is suspended on the OS's schedule, so asking it to answer a dial
+# later is testing something the platform does not offer. A friend with the app open is also the
+# realistic shape of peer recovery.
+device_foreground "$RELAY"
 device_background "$AUTHOR"
 device_drive_route "$AUTHOR" "$ROUTE"
 
@@ -157,6 +161,35 @@ done
   device_dump_event_log "$AUTHOR" "$START_MS" >&2
   exit 1
 }
+
+# Make the relay RECONCILE the author's namespace while the author is still up.
+#
+# This step is not bookkeeping, it is the precondition for the whole test. A fix that arrived over
+# live gossip lands in the receiver's own app storage (`friend_latest`, labelled `via=lan`) but NOT
+# in its replica of the author's iroh-docs namespace — a friend holds a READ ticket for that
+# namespace and cannot write to it; only reconciliation puts entries there. So a relay that has
+# only ever heard the author over gossip has the fix on screen and nothing to hand on, and asking
+# it to serve one is asking for something it does not have.
+#
+# Foregrounding runs the app's resume path (drain + syncTrail), which reconciles every imported
+# namespace — including the author's, while the author is still reachable. That is exactly what a
+# friend with the app open does on its own.
+# BOTH ends must be awake for this exchange. The author has been backgrounded while it published
+# (which is the realistic shape of sharing), but a backgrounded iOS app is suspended on the OS's
+# schedule and may not answer an inbound dial — so leaving it there made this step, and therefore
+# the whole test, depend on whether the OS happened to keep it alive. That is what made an earlier
+# revision pass once and fail the next run. Foregrounding both removes the ambiguity, and mirrors
+# what actually happens in the field: two friends with the app open reconcile, then one leaves.
+log "Relay reconciles the author's namespace over docs (both awake)"
+device_foreground "$AUTHOR"
+device_foreground "$RELAY"
+sleep 25
+# A second pass: the author publishes on its own cadence, so one reconciliation can legitimately
+# land between two of its fixes. Repeating makes the relay's replica reflect a *published* fix
+# rather than whatever happened to exist at the first attempt.
+device_foreground "$AUTHOR"
+device_foreground "$RELAY"
+sleep 25
 
 # The relay must genuinely HOLD the author's fix — otherwise a later result on `late` would prove
 # nothing about relaying, only that some other path exists.
@@ -177,6 +210,8 @@ if [ "${STASH_OPT_IN:-0}" = "1" ]; then
 else
   log "Late device returns, with the stash disabled — the relay is its only possible source"
 fi
+# Make sure the relay is still up and serving before we start waiting on it.
+device_foreground "$RELAY"
 device_background "$LATE"
 
 deadline="$(($(date +%s) + TIMEOUT_SECONDS))"

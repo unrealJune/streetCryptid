@@ -1359,16 +1359,29 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func subscribe(topic: Data, bootstrap: [String], listener: FixListener) async throws  -> Subscription
     
     /**
-     * Reconcile our own + every imported friend namespace so each friend's **current** fix is
+     * Reconcile our own + every imported friend namespace so each author's **current** fix is
      * exchanged (FORWARD-SECRECY §4.4 — the durable path is last-write-wins; there is no missed
-     * history to recover). When `peer_ticket` is present, every namespace explicitly syncs with
-     * that endpoint (the trail stash). Read the results with [`Self::read_latest`].
+     * history to recover). Read the results with [`Self::read_latest`].
+     *
+     * `peer_tickets` is every endpoint worth dialing for this pass: the trail stash when it is
+     * configured and opted into, and **every pool member**. That list is the whole mechanism
+     * behind ARCHITECTURE.md §1.3/§6 — "a rejoining B runs range-based reconciliation against
+     * C/D/A". An earlier revision took a single `Option<String>` that only ever carried the
+     * stash, so a device could recover an author's fix from the durable server or from the
+     * author, and from nobody else; with the author offline and the stash off there was no
+     * reachable source at all, even when a friend beside it demonstrably held the fix.
+     *
+     * The peers are handed to iroh-docs together rather than dialled one at a time, so a
+     * namespace reconciles with whoever answers instead of paying a separate timeout per peer.
+     * An empty list is meaningful and not an error: it reconciles with whatever the live engine
+     * is already connected to, which is the correct degenerate case (and what a device with no
+     * friends and no stash should do).
+     *
+     * Unparseable tickets are skipped rather than failing the pass — one malformed friend card
+     * must not stop reconciliation with everyone else — but they are counted on the span, since
+     * a silent skip is exactly the kind of thing that hides a real break.
      */
-    func syncLatest(peerTicket: String?) async throws 
-    
-    func syncLatestInner(peerTicket: String?, traceparent: String?) async throws 
-    
-    func syncLatestTraced(peerTicket: String?, traceparent: String) async throws 
+    func syncLatest(peerTickets: [String], traceparent: String?) async throws 
     
     /**
      * A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
@@ -2828,52 +2841,35 @@ open func subscribe(topic: Data, bootstrap: [String], listener: FixListener)asyn
 }
     
     /**
-     * Reconcile our own + every imported friend namespace so each friend's **current** fix is
+     * Reconcile our own + every imported friend namespace so each author's **current** fix is
      * exchanged (FORWARD-SECRECY §4.4 — the durable path is last-write-wins; there is no missed
-     * history to recover). When `peer_ticket` is present, every namespace explicitly syncs with
-     * that endpoint (the trail stash). Read the results with [`Self::read_latest`].
+     * history to recover). Read the results with [`Self::read_latest`].
+     *
+     * `peer_tickets` is every endpoint worth dialing for this pass: the trail stash when it is
+     * configured and opted into, and **every pool member**. That list is the whole mechanism
+     * behind ARCHITECTURE.md §1.3/§6 — "a rejoining B runs range-based reconciliation against
+     * C/D/A". An earlier revision took a single `Option<String>` that only ever carried the
+     * stash, so a device could recover an author's fix from the durable server or from the
+     * author, and from nobody else; with the author offline and the stash off there was no
+     * reachable source at all, even when a friend beside it demonstrably held the fix.
+     *
+     * The peers are handed to iroh-docs together rather than dialled one at a time, so a
+     * namespace reconciles with whoever answers instead of paying a separate timeout per peer.
+     * An empty list is meaningful and not an error: it reconciles with whatever the live engine
+     * is already connected to, which is the correct degenerate case (and what a device with no
+     * friends and no stash should do).
+     *
+     * Unparseable tickets are skipped rather than failing the pass — one malformed friend card
+     * must not stop reconciliation with everyone else — but they are counted on the span, since
+     * a silent skip is exactly the kind of thing that hides a real break.
      */
-open func syncLatest(peerTicket: String?)async throws   {
+open func syncLatest(peerTickets: [String], traceparent: String?)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_locationnode_sync_latest(
                     self.uniffiCloneHandle(),
-                    FfiConverterOptionString.lower(peerTicket)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func syncLatestInner(peerTicket: String?, traceparent: String?)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_sync_latest_inner(
-                    self.uniffiCloneHandle(),
-                    FfiConverterOptionString.lower(peerTicket),FfiConverterOptionString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func syncLatestTraced(peerTicket: String?, traceparent: String)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_sync_latest_traced(
-                    self.uniffiCloneHandle(),
-                    FfiConverterOptionString.lower(peerTicket),FfiConverterString.lower(traceparent)
+                    FfiConverterSequenceString.lower(peerTickets),FfiConverterOptionString.lower(traceparent)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -6678,13 +6674,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_subscribe() != 37204) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_sync_latest() != 10545) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_sync_latest_inner() != 59766) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_sync_latest_traced() != 3701) {
+    if (uniffi_iroh_location_checksum_method_locationnode_sync_latest() != 8256) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {

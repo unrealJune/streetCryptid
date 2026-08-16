@@ -231,9 +231,9 @@ export class IrohLocationNativeModule
     return [];
   }
 
-  async syncLatest(peerTicket: string | null, _traceparent?: string | null): Promise<void> {
+  async syncLatest(peerTickets: string[], _traceparent?: string | null): Promise<void> {
     await ensureWasm();
-    await this.requireNode().sync_latest(peerTicket ?? undefined);
+    await this.requireNode().sync_latest(peerTickets);
   }
 
   async pushTrail(peerTicket: string | null, _traceparent?: string | null): Promise<void> {
