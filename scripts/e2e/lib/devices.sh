@@ -250,7 +250,7 @@ terminate_app() {
 # The retry is deliberately narrow: it matches only transport-fault strings, so a genuine
 # assertion failure ("Assertion is false", element not found) returns on the first attempt and is
 # never retried into a false pass. If you widen these patterns, you risk exactly that.
-MAESTRO_MAX_ATTEMPTS="${MAESTRO_MAX_ATTEMPTS:-2}"
+MAESTRO_MAX_ATTEMPTS="${MAESTRO_MAX_ATTEMPTS:-3}"
 maestro_test() {
   local udid="$1"
   shift
@@ -271,7 +271,13 @@ maestro_test() {
     # everything else on stderr, matching log() throughout this harness.
     printf '%s\n' "$out" >&2
     [ "$rc" -eq 0 ] && return 0
-    if ! printf '%s' "$out" | grep -qE "device offline|DeviceServerDied|Device server died|UNAVAILABLE|device .* not found|Failed to run flow"; then
+    # `Failed to create session ... connection refused` is the iOS equivalent of the Android
+    # transport faults above: the driver (WebDriverAgent) was not listening when the flow started,
+    # which happens when a previous run left it dying or two devices are brought up at once. It is
+    # a fault in the harness's plumbing, not in the flow — the run never reaches step 0 — so it
+    # belongs in this list. Kept as narrow as the rest: only the session/connection wording, never
+    # a bare "refused" or an assertion message.
+    if ! printf '%s' "$out" | grep -qE "device offline|DeviceServerDied|Device server died|UNAVAILABLE|device .* not found|Failed to run flow|Failed to create session|failed to create session|connection refused"; then
       return "$rc" # a real flow/assertion failure — surface it immediately
     fi
     if [ "$attempt" -ge "$MAESTRO_MAX_ATTEMPTS" ]; then
@@ -539,4 +545,32 @@ set_stash_opt_in() {
     INSERT INTO kv(key, value) VALUES('sc.social.stashOptIn', '$2')
       ON CONFLICT(key) DO UPDATE SET value = excluded.value;
   "
+}
+
+# NOTE ON DEV-CLIENT BUILDS. There used to be a `suppress_dev_menu` here that wrote
+# expo-dev-menu's preferences (ShowsAtLaunch / MotionGesture / TouchGesture) to stop the dev menu
+# rendering over the app. It is gone because it never actually worked: the app REWRITES that
+# plist on exit, so the flags were back to 1 by the next launch, and the menu kept appearing
+# mid-flow — the symptom was `scrollUntilVisible: "Share a one-time pairing link"` failing on a
+# device whose hierarchy showed "Dev Menu" / "Loading source code..." over the map.
+#
+# The fix is to test a RELEASE build (see justfile's e2e-build-ios): no dev menu, no shake or
+# three-finger gesture, no expo-dev-launcher server picker, and no Metro dependency at all — the
+# JS is embedded as main.jsbundle. The DEBUG *section* of Settings that the harness reads the
+# invite token from is NOT `__DEV__`-gated, so it survives in Release; verified directly.
+
+# warm_driver <udid> — do this device's FIRST-RUN driver setup now, serially.
+#
+# It does NOT leave a driver running: WebDriverAgent is a child of the maestro-runner process and
+# dies with it (verified — port 8341 is refused the instant a `hierarchy` call returns). What it
+# does do is the expensive one-time work: installing the WDA bundle onto the simulator and
+# populating the cached build. Doing that once per device, serially, means the concurrent phase
+# that follows is only ever *starting* an already-installed driver rather than two processes
+# racing to install and build one at the same moment.
+#
+# Pair it with a stagger between the concurrent launches (see pairing-e2e.sh). Neither alone is
+# sufficient: the symptom is `failed to create session: ... connect: connection refused` inside a
+# second, on a flow that never reached step 0.
+warm_driver() {
+  maestro_cmd "$1" hierarchy >/dev/null 2>&1 || true
 }

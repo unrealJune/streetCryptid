@@ -109,6 +109,37 @@ format-check:
 test:
     bun run test
 
+# Build a RELEASE app for the e2e harness and install it on every booted iOS Simulator.
+#
+# Use this, not `run-ios`, before an e2e run. A debug/dev-client build cannot be driven reliably:
+# expo-dev-menu opens on a shake or three-finger touch — both of which a simulator driven by
+# synthetic gestures trips — and renders OVER the app, so selectors underneath silently stop
+# resolving mid-flow. Its preferences cannot be pinned off either; the app rewrites that plist on
+# exit. A Release build has no dev menu, no dev-launcher server picker, and embeds the JS bundle,
+# so it does not need Metro. The DEBUG section of Settings the harness reads the invite token
+# from is not `__DEV__`-gated and is still present.
+#
+# Needs `pod` on PATH (Homebrew's is at /opt/homebrew/bin).
+e2e-build-ios device="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="/opt/homebrew/bin:$PATH"
+    target="{{device}}"
+    if [ -z "$target" ]; then
+      target="$(xcrun simctl list devices booted -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for v in d.values() for x in v if "iPhone" in x["name"]))')"
+    fi
+    bunx expo run:ios --configuration Release --device "$target"
+    app="$(ls -d ~/Library/Developer/Xcode/DerivedData/streetCryptid-*/Build/Products/Release-iphonesimulator/streetCryptid.app | head -1)"
+    # Same binary onto every other booted simulator — no rebuild, and it guarantees the pool is
+    # running identical code.
+    for udid in $(xcrun simctl list devices booted -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(" ".join(x["udid"] for v in d.values() for x in v if "iPhone" in x["name"]))'); do
+      [ "$udid" = "$target" ] && continue
+      xcrun simctl terminate "$udid" com.unrealjune.streetcryptid >/dev/null 2>&1 || true
+      xcrun simctl uninstall "$udid" com.unrealjune.streetcryptid >/dev/null 2>&1 || true
+      xcrun simctl install "$udid" "$app"
+      echo "installed on $udid"
+    done
+
 # Two-device Maestro E2E: onboards both devices if needed, pairs them over an
 # invite link, and asserts both sides mint a friend record. Each device is
 # ios:<udid>, android:<serial>, or a bare udid (== ios:) — including a mixed

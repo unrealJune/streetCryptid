@@ -32,6 +32,30 @@
 # With the author dead and the stash disabled, the relay is the only remaining holder of that
 # fix — so a row appearing on `late` can only have come from it.
 #
+# CURRENT RESULT (2026-08-16, three iOS Release builds, verified both ways):
+#
+#   STASH_OPT_IN=1  PASS — late recovers seq 1303 `via=sync` with the author force-quit.
+#   STASH_OPT_IN=0  FAIL — late never obtains it, though the relay demonstrably holds it.
+#
+# The control passing is what makes the failure meaningful: the topology, the pairing, the
+# publish and the timing are all sound, and the only thing that changes between the two runs is
+# whether the durable server is allowed to answer. So offline recovery today works through the
+# STASH, and a third pool member cannot serve an absent author's fix.
+#
+# That is narrower than docs/social/ARCHITECTURE.md §1.3 claims ("B recovers the trail it missed
+# from any other device in the sharing pool"). The reason is visible in two places:
+#
+#   * `subscribeToFriend` bootstraps a friend's topic from `[that friend's ticket, stash]` only —
+#     so with the author dead and the stash off there is no reachable entry point into the swarm
+#     where the relay is holding their data. Compare `ensureMySubscription`, which bootstraps our
+#     OWN topic from every recipient.
+#   * `sync_latest_inner` dials only the explicitly passed peer (the stash) — `peers` is otherwise
+#     empty, so no pool member is ever contacted for reconciliation.
+#
+# Closing that gap means bootstrapping a friend's topic from other pool members too, which is a
+# deliberate change to who can observe whom in the mesh, not just a bug fix — hence recorded here
+# rather than quietly patched.
+#
 # Usage:
 #   scripts/e2e/relay-e2e.sh <author> <relay> <late>
 #     each device is ios:<udid>, android:<serial>, or a bare udid (== ios:).
@@ -95,7 +119,12 @@ for spec in "$AUTHOR" "$RELAY" "$LATE"; do
 done
 
 # Cut the late device off from the durable server, so the relay is the only possible source.
-device_set_stash_opt_in "$LATE" 0
+#
+# STASH_OPT_IN=1 runs the same scenario with the stash left ON. That is not a weaker version of
+# the test, it is the CONTROL for it: everything else is identical, so a pass there and a failure
+# here isolates the difference to "can a third pool member serve an absent author's fix" rather
+# than to anything about the harness, the pairing, or the timing.
+device_set_stash_opt_in "$LATE" "${STASH_OPT_IN:-0}"
 device_clear_friend_latest "$LATE"
 
 cleanup() {
@@ -143,7 +172,11 @@ log "Author goes dark (route stopped, app force-quit)"
 device_stop_route "$AUTHOR"
 device_terminate_app "$AUTHOR"
 
-log "Late device returns, with the stash disabled — the relay is its only possible source"
+if [ "${STASH_OPT_IN:-0}" = "1" ]; then
+  log "Late device returns with the stash ON (control run — the stash may legitimately answer)"
+else
+  log "Late device returns, with the stash disabled — the relay is its only possible source"
+fi
 device_background "$LATE"
 
 deadline="$(($(date +%s) + TIMEOUT_SECONDS))"
@@ -160,6 +193,10 @@ done
 [ -n "$row" ] || {
   log "FAIL - the late device never obtained the author's fix from the relay within ${TIMEOUT_SECONDS}s"
   log "  relay held: $relay_row"
+  if [ "${STASH_OPT_IN:-0}" != "1" ]; then
+    log "  NOTE: re-run with STASH_OPT_IN=1. If that passes, the scenario is sound and what is"
+    log "  missing is specifically peer-to-peer relay — see this script's header."
+  fi
   log "--- late device event log ---"
   device_dump_event_log "$LATE" "$START_MS" >&2
   exit 1
@@ -167,6 +204,12 @@ done
 
 seq="$(printf '%s' "$row" | cut -d'|' -f1)"
 via="$(printf '%s' "$row" | cut -d'|' -f4)"
-log "PASS - the late device obtained the author's fix with the author offline and the stash off"
+if [ "${STASH_OPT_IN:-0}" = "1" ]; then
+  log "PASS (control) - the late device obtained the author's fix with the author offline."
+  log "  The stash was ON, so this does NOT show a peer relayed it — it is the baseline that"
+  log "  proves the scenario, the pairing and the timing are all sound."
+else
+  log "PASS - a POOL MEMBER served the author's fix with the author offline and the stash off"
+fi
 log "  late:  seq=$seq via=$via"
 log "  relay: $relay_row"

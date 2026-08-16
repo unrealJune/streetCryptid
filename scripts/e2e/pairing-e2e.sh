@@ -91,6 +91,11 @@ fi
 rendezvous_start
 SESSION="pairing-$$-$RANDOM"
 
+# Bring both UI drivers up SERIALLY before the concurrent phase below — starting two
+# WebDriverAgents at the same instant races and one of them loses (see warm_driver).
+device_warm_driver "$DEVICE_A"
+device_warm_driver "$DEVICE_B"
+
 log "Pairing $DEVICE_A (invite) <-> $DEVICE_B (redeem), both flows live at once"
 PAIR_START="$(date +%s)"
 
@@ -108,6 +113,12 @@ maestro_test "$DEVICE_A_ID" \
   -e ROLE=invite -e RENDEZVOUS="$RENDEZVOUS_URL" -e SESSION="$SESSION" \
   "$FLOWS/pairing/pair-device.yaml" >"$a_out" 2>&1 &
 a_pid=$!
+# Stagger the second launch. Both flows must be LIVE at once — that is the whole point — but they
+# must not START at the same instant: each spins up its own WebDriverAgent, and two simultaneous
+# startups race to the point where one reports success and then refuses the first connection.
+# A few seconds is enough to separate the startups while leaving the two flows overlapping for the
+# whole handshake, which takes a minute.
+sleep "${PAIR_LAUNCH_STAGGER_SECONDS:-6}"
 maestro_test "$DEVICE_B_ID" \
   -e ROLE=redeem -e RENDEZVOUS="$RENDEZVOUS_URL" -e SESSION="$SESSION" \
   "$FLOWS/pairing/pair-device.yaml" >"$b_out" 2>&1 &

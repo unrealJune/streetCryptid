@@ -253,6 +253,12 @@ device_onboard() {
   ensure_onboarded "$(device_id "$1")" "$2"
 }
 
+# device_warm_driver <spec> — start this device's UI driver now, before any concurrent phase.
+# See warm_driver in lib/devices.sh for the race this avoids.
+device_warm_driver() {
+  warm_driver "$(device_id "$1")"
+}
+
 # device_background <spec> — foreground the app, assert the map, then send it to the background.
 device_background() {
   send_to_background "$(device_id "$1")"
