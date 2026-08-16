@@ -1,123 +1,146 @@
 #!/usr/bin/env bash
-# End-to-end pairing test: onboards two simulators (if they need it), pairs them
-# over an invite link exactly the way a real user would (Settings → Share → the
-# other phone opening the link), resolves the SAS visual check, and asserts both
-# sides actually mint a friend record.
+# End-to-end pairing test: onboards two devices (if they need it), pairs them over an invite link
+# exactly the way a real user would (Settings → Share → the other phone opening the link),
+# resolves the SAS visual check, and asserts both sides actually mint a friend record.
 #
-# This is the harness that found and verified the fix for the "displayer never
-# sees the SAS challenge" bug (see git history / PR description): the invite link
-# flow has no way to get the real token onto a second device without either a
-# human relaying it or reading it straight out of the accessibility tree, and the
-# iOS Simulator's pasteboard does not reliably reflect what the Share Sheet's
-# Copy action writes (confirmed independently twice) — so this reads the token via
-# `maestro hierarchy` against a DEBUG-only on-screen mirror of the invite link
-# (id: debug-invite-link, Settings → DEBUG section) instead of the clipboard.
+# HOW THIS RUNS, AND WHY
+# ----------------------
+# Both devices are driven CONCURRENTLY, each by a single `maestro test` of the same flow
+# (.maestro/pairing/pair-device.yaml), with the values that have to cross between them — the
+# invite link, the displayed SAS figure, and a "the picker has chosen" barrier — passed through a
+# host-side rendezvous (lib/rendezvous.py) rather than through this script.
+#
+# That shape is not a style preference; it is the fix for the bug that blocked the switch to
+# maestro-runner. Its flow runner creates a WebDriverAgent session once per flow, and WDA's
+# create-session defaults `forceAppLaunch` to YES, so on iOS every `maestro-runner test` against
+# an already-running app RESTARTS it. A live SAS session exists only in the native module's
+# in-memory PairCore, so the old one-invocation-per-step orchestration destroyed the handshake it
+# was trying to drive: pick-figure passed, then confirm-match failed with
+# "pairing-confirm-matched not found" against a hierarchy showing the plain map screen.
+# The restart is per FLOW, so one flow per device means one restart per device, before any
+# pairing state exists. Concurrency then follows for free — and is required, because the two
+# devices have to be live at the same time for a handshake on a 60s budget.
+#
+# It also reads the invite token via a DEBUG-only on-screen mirror (id: debug-invite-link,
+# Settings → DEBUG section) rather than the clipboard: the invite link flow has no way to get the
+# real token onto a second device without a human relaying it, and the iOS Simulator's pasteboard
+# does not reliably reflect what the Share Sheet's Copy action writes (confirmed independently
+# twice).
 #
 # Usage:
-#   scripts/e2e/pairing-e2e.sh <device-a-udid> <device-b-udid>
+#   scripts/e2e/pairing-e2e.sh <device-a> <device-b>
+#     where each device is ios:<udid>, android:<serial>, or a bare udid (== ios:).
+#     A mixed iOS<->Android pair works the same way — the SAS handshake is identical on both.
 #
-# Requires: maestro (https://maestro.mobile.dev) on PATH, both simulators booted
-# with the app already installed (see justfile's run-ios / bindgen-ios for a local
-# build). Devices should be running iOS versions built from the same
-# IrohLocationFFI.xcframework SDK target — a mismatch surfaces as an unrelated
-# crash at launch (missing Network.framework symbol), not a pairing failure.
+# Requires: a Maestro runner on PATH (see E2E_MAESTRO in lib/devices.sh) and both devices running
+# the app. iOS devices should be running builds from the same IrohLocationFFI.xcframework SDK
+# target — a mismatch surfaces as an unrelated crash at launch (missing Network.framework
+# symbol), not a pairing failure.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 FLOWS="$REPO_ROOT/.maestro"
 APP_ID="com.unrealjune.streetcryptid"
+# shellcheck source=lib/device.sh
+source "$SCRIPT_DIR/lib/device.sh"
 
-DEVICE_A="${1:?Usage: pairing-e2e.sh <device-a-udid> <device-b-udid>}"
-DEVICE_B="${2:?Usage: pairing-e2e.sh <device-a-udid> <device-b-udid>}"
+DEVICE_A="${1:?Usage: pairing-e2e.sh <device-a> <device-b>  (ios:<udid> | android:<serial> | <udid>)}"
+DEVICE_B="${2:?Usage: pairing-e2e.sh <device-a> <device-b>  (ios:<udid> | android:<serial> | <udid>)}"
 USERNAME_A="${USERNAME_A:-e2ealice$((RANDOM % 10000))}"
 USERNAME_B="${USERNAME_B:-e2eabob$((RANDOM % 10000))}"
 
-command -v maestro >/dev/null 2>&1 || {
-  echo "error: maestro not found on PATH (https://maestro.mobile.dev)" >&2
-  exit 1
-}
+device_require_tools "$DEVICE_A" "$DEVICE_B"
 
 log() { echo "[pairing-e2e] $*" >&2; }
 
-hierarchy_text() {
-  # hierarchy_text <udid> <testID>
-  maestro --udid "$1" hierarchy 2>/dev/null | python3 "$SCRIPT_DIR/hierarchy_text.py" "$2"
-}
+DEVICE_A_ID="$(device_id "$DEVICE_A")"
+DEVICE_B_ID="$(device_id "$DEVICE_B")"
 
-hierarchy_has() {
-  # hierarchy_has <udid> <testID> — exit 0 if present, 1 if not (no stdout noise)
-  maestro --udid "$1" hierarchy 2>/dev/null | python3 "$SCRIPT_DIR/hierarchy_text.py" "$2" >/dev/null 2>&1
-}
-
-ensure_nearby_location() {
-  local udid="$1" lat="$2" lon="$3"
-  xcrun simctl privacy "$udid" grant location "$APP_ID" >/dev/null 2>&1 || true
-  xcrun simctl privacy "$udid" grant location-always "$APP_ID" >/dev/null 2>&1 || true
-  xcrun simctl location "$udid" set "$lat,$lon" >/dev/null 2>&1 || true
-}
+# PROVISION FIRST, THEN ONBOARD. Provisioning is what clears the dialogs standing between a
+# launch and the app — the Android developer-menu popup, and on iOS the dev-launcher server
+# picker plus the dev-menu overlay a fresh install shows over everything (see
+# .maestro/provisioning/). Onboarding cannot run until those are gone: it asserts `map-view`, and
+# on a simulator that had never run this build it failed there every time while the app itself was
+# perfectly fine, just underneath an overlay. The old order only worked because every device in
+# the pool had already been through this by hand.
+device_provision "$DEVICE_A"
+device_provision "$DEVICE_B"
 
 log "Ensuring $DEVICE_A is onboarded as @$USERNAME_A"
-maestro --udid "$DEVICE_A" test -e USERNAME="$USERNAME_A" "$FLOWS/onboarding/ensure-onboarded.yaml"
+device_onboard "$DEVICE_A" "$USERNAME_A"
 
 log "Ensuring $DEVICE_B is onboarded as @$USERNAME_B"
-maestro --udid "$DEVICE_B" test -e USERNAME="$USERNAME_B" "$FLOWS/onboarding/ensure-onboarded.yaml"
+device_onboard "$DEVICE_B" "$USERNAME_B"
 
-# Not required for pairing itself, but keeps both devices in a realistic,
-# consistent state (a real fresh install has no location fix at all otherwise).
-ensure_nearby_location "$DEVICE_A" 47.6250 -122.3200
-ensure_nearby_location "$DEVICE_B" 47.6255 -122.3195
+# Not required for pairing itself, but keeps both devices in a realistic, consistent state (a
+# real fresh install has no location fix at all otherwise).
+device_set_location "$DEVICE_A" 47.6250 -122.3200
+device_set_location "$DEVICE_B" 47.6255 -122.3195
 
-log "Creating an invite on $DEVICE_A"
-maestro --udid "$DEVICE_A" test "$FLOWS/pairing/create-invite.yaml"
+# Start from a clean slate. This test's whole assertion is that both sides MINT a friend record,
+# which is only meaningful between devices that are not already friends — and re-pairing an
+# existing friend does not reliably re-issue a SAS challenge (see reset_pairing_state).
+# Skip with PRESERVE_FRIENDS=1 when deliberately exercising a re-pair.
+if [ "${PRESERVE_FRIENDS:-0}" != "1" ]; then
+  log "Clearing existing friend records on both devices"
+  device_reset_pairing_state "$DEVICE_A"
+  device_reset_pairing_state "$DEVICE_B"
+fi
 
-TOKEN="$(hierarchy_text "$DEVICE_A" debug-invite-link)"
-[ -n "$TOKEN" ] || {
-  log "failed to read the invite token off $DEVICE_A"
+rendezvous_start
+SESSION="pairing-$$-$RANDOM"
+
+log "Pairing $DEVICE_A (invite) <-> $DEVICE_B (redeem), both flows live at once"
+PAIR_START="$(date +%s)"
+
+a_out="$(mktemp)"
+b_out="$(mktemp)"
+cleanup_outputs() { rm -f "$a_out" "$b_out"; }
+trap cleanup_outputs EXIT
+
+# Deliberately backgrounded rather than sequential: the SAS exchange is on a HARD 60s budget
+# (SAS_TIMEOUT_MS in modules/iroh-location/rust/src/pairing.rs, plus a 10s accepted grace). That
+# bound is a security property — it limits how long an attacker has to interfere with the figure
+# comparison — so the harness has to fit inside it rather than the bound being widened to fit the
+# harness. Both devices must therefore be driven at the same time.
+maestro_test "$DEVICE_A_ID" \
+  -e ROLE=invite -e RENDEZVOUS="$RENDEZVOUS_URL" -e SESSION="$SESSION" \
+  "$FLOWS/pairing/pair-device.yaml" >"$a_out" 2>&1 &
+a_pid=$!
+maestro_test "$DEVICE_B_ID" \
+  -e ROLE=redeem -e RENDEZVOUS="$RENDEZVOUS_URL" -e SESSION="$SESSION" \
+  "$FLOWS/pairing/pair-device.yaml" >"$b_out" 2>&1 &
+b_pid=$!
+
+a_rc=0
+b_rc=0
+wait "$a_pid" || a_rc=$?
+wait "$b_pid" || b_rc=$?
+
+ELAPSED="$(($(date +%s) - PAIR_START))"
+
+if [ "$a_rc" -ne 0 ] || [ "$b_rc" -ne 0 ]; then
+  # Name the side that failed. Both transcripts are printed because a pairing failure is
+  # inherently two-sided — the interesting evidence is often on the device that "passed".
+  log "FAIL after ${ELAPSED}s — $DEVICE_A exited $a_rc, $DEVICE_B exited $b_rc"
+  log "--- $DEVICE_A (invite) ---"
+  cat "$a_out" >&2
+  log "--- $DEVICE_B (redeem) ---"
+  cat "$b_out" >&2
   exit 1
-}
-log "Read invite token (${#TOKEN} chars)"
+fi
 
-log "Redeeming the invite on $DEVICE_B"
-xcrun simctl openurl "$DEVICE_B" "$TOKEN"
+cat "$a_out" >&2
+cat "$b_out" >&2
 
-# The SAS role (displayer vs. picker) is derived from the two endpoints' raw
-# bytes, not from who created the invite or who redeemed it — so which device
-# ends up which role is not knowable in advance. Poll both for up to ~20s.
-log "Waiting for the SAS challenge to land on both devices"
-DISPLAYER=""
-PICKER=""
-for _ in $(seq 1 10); do
-  if [ -z "$DISPLAYER" ] && hierarchy_has "$DEVICE_A" pairing-target-figure; then
-    DISPLAYER="$DEVICE_A"; PICKER="$DEVICE_B"
-  elif [ -z "$DISPLAYER" ] && hierarchy_has "$DEVICE_B" pairing-target-figure; then
-    DISPLAYER="$DEVICE_B"; PICKER="$DEVICE_A"
-  fi
-  [ -n "$DISPLAYER" ] && break
-  sleep 2
+# Belt and braces: the flow only reaches this key after it dismissed the celebration, so a device
+# that somehow exited 0 without pairing cannot pass silently.
+for role in invite redeem; do
+  rendezvous_get "$SESSION.paired.$role" 5 >/dev/null || {
+    log "FAIL — the $role side never recorded a completed pairing"
+    exit 1
+  }
 done
-[ -n "$DISPLAYER" ] || {
-  log "neither device ever showed the SAS challenge — pairing handshake did not complete"
-  exit 1
-}
-log "Displayer: $DISPLAYER  Picker: $PICKER"
 
-TARGET_RAW="$(hierarchy_text "$DISPLAYER" pairing-target-figure)"
-TARGET_NAME="${TARGET_RAW% ASCII pairing figure}"
-[ -n "$TARGET_NAME" ] && [ "$TARGET_NAME" != "$TARGET_RAW" ] || {
-  log "couldn't parse a figure name out of: $TARGET_RAW"
-  exit 1
-}
-log "Target figure: $TARGET_NAME"
-
-log "Picker selects the matching figure"
-maestro --udid "$PICKER" test -e TARGET_NAME="$TARGET_NAME" "$FLOWS/pairing/pick-figure.yaml"
-
-log "Displayer confirms the match"
-maestro --udid "$DISPLAYER" test "$FLOWS/pairing/confirm-match.yaml"
-
-log "Verifying both sides discovered a friend"
-maestro --udid "$DEVICE_A" test "$FLOWS/pairing/acknowledge-friend.yaml"
-maestro --udid "$DEVICE_B" test "$FLOWS/pairing/acknowledge-friend.yaml"
-
-log "PASS — pairing completed and confirmed on both devices"
+log "PASS — pairing completed and confirmed on both devices in ${ELAPSED}s"

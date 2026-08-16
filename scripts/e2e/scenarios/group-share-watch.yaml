@@ -1,0 +1,19 @@
+name: group-share-watch
+description: "Three simulators, paired full-mesh (3 pairs), all backgrounded on a walking route simultaneously. Every device now holds two concurrent per-friend ratchet sessions and a two-recipient wrap set per docs/social/FORWARD-SECRECY.md SS4.1/SS4.5, rather than the single-friend two-device happy path -- exercises per-friend session bookkeeping and wrap-set sizing that a pairwise test can't."
+kind: group
+devices: 3
+duration_seconds: 240
+route: walking
+background: true
+force_quit_after_seconds: 0
+thrash: false
+require_stash_observer: false
+assertions:
+  - action: bg.wake
+    min_count: 1
+  - action: publish.fix
+    status: ok
+    min_count: 1
+  - action: trail.push.app
+    status: ok
+    min_count: 1

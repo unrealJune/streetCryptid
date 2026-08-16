@@ -15,12 +15,27 @@ from typing import Optional
 
 
 def find(node: object, resource_id: str) -> Optional[str]:
+    """Locate a node by test id and return its accessibility text.
+
+    Understands BOTH hierarchy dialects, so the harness works under either runner:
+
+      maestro CLI      {"attributes": {"resource-id": ..., "accessibilityText": ..., "text": ...}}
+      maestro-runner   {"id": ..., "text": ...}        (flattened; folds accessibilityText
+                       (devicelab.dev)                  into `text`, bounds become an object)
+
+    Keeping one parser that reads both is what lets the runner be swapped as a pure transport
+    decision — same flows, same selectors, same assertions — instead of a migration.
+    """
     if not isinstance(node, dict):
         return None
     attrs = node.get("attributes", {})
+    # maestro CLI shape
     if attrs.get("resource-id") == resource_id:
         return attrs.get("accessibilityText")
-    for child in node.get("children", []):
+    # maestro-runner shape: fields hoisted to the node, `text` carries the accessibility label
+    if node.get("id") == resource_id:
+        return node.get("text")
+    for child in node.get("children", []) or []:
         result = find(child, resource_id)
         if result is not None:
             return result

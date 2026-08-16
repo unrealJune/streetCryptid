@@ -5,23 +5,26 @@ appId: com.unrealjune.streetcryptid
 # already fully onboarded (both runFlow blocks below just no-op) or one that's
 # mid-onboarding (e.g. username set but location disclosure not yet accepted).
 # For a guaranteed-fresh profile instead, use fresh-onboard.yaml.
+#
+# Every `when:` carries an explicit `timeout`. maestro-runner defaults condition checks to 1000ms,
+# which is shorter than these screens take to appear on a cold start — the conditions then all
+# evaluate false, both blocks are skipped, and the flow falls through to `assertVisible: map-view`
+# and fails on a device that was merely still rendering its onboarding form. The generous values
+# cost nothing on an already-onboarded device, where the elements are genuinely absent and the
+# check returns as soon as the screen is stable.
 - launchApp:
     clearState: false
 - runFlow:
     when:
-      visible: 'This is the developer menu. It gives you access to useful tools in development builds.'
-    commands:
-      - tapOn: 'Continue'
-      - tapOn: 'Close'
-- runFlow:
-    when:
       visible: 'Go home'
+      timeout: 4000
     commands:
       - tapOn: 'Close'
 - runFlow:
     when:
       visible:
         id: 'username-input'
+      timeout: 15000
     commands:
       - tapOn:
           id: 'username-input'
@@ -32,6 +35,7 @@ appId: com.unrealjune.streetcryptid
 - runFlow:
     when:
       visible: 'Turn on location'
+      timeout: 15000
     commands:
       - tapOn: 'Turn on location'
 - assertVisible:

@@ -1,0 +1,21 @@
+name: chaos-stash-unreachable
+description: "One simulator on a walking route, backgrounded, against a local trail-stash (ensure-local-stash.sh) that goes unreachable for a window mid-route via lib/netchaos.sh's pf-based block_host. Proves two separate things: local publish keeps working while the stash is unreachable (publish.fix does not stall just because delivery can't complete), and delivery catches up once reachability returns (a later trail.push.app succeeds). Needs sudo for pfctl -- run-matrix.sh primes it once up front so the password prompt happens in the foreground, not inside the backgrounded driver."
+kind: single
+devices: 1
+duration_seconds: 240
+route: walking
+background: true
+force_quit_after_seconds: 0
+thrash: false
+require_stash_observer: false
+require_local_stash: true
+chaos: stash-unreachable
+chaos_after_seconds: 60
+chaos_restore_after_seconds: 60
+assertions:
+  - action: publish.fix
+    status: ok
+    min_count: 1
+  - action: trail.push.app
+    status: ok
+    min_count: 1

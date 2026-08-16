@@ -1,0 +1,185 @@
+appId: com.unrealjune.streetcryptid
+---
+# THE WHOLE PAIRING HANDSHAKE FOR ONE DEVICE, AS A SINGLE FLOW.
+#
+# Read this together with scripts/e2e/lib/rendezvous.py. The short version: a live SAS session
+# lives only in the native module's in-memory PairCore (modules/iroh-location/rust/src/
+# pairing.rs), and BOTH Maestro runners tear the app down when a flow starts — maestro-runner
+# because its WDA driver calls EnsureSession() per flow and WebDriverAgent defaults
+# `forceAppLaunch` to YES, maestro CLI because its launchApp does the same. That restart is
+# per-FLOW, not per-step, so as long as one device's entire handshake is one flow, the single
+# restart lands BEFORE any pairing state exists and the handshake survives.
+#
+# The old harness split this across four `maestro test` invocations (create-invite, pick-figure,
+# confirm-match, acknowledge-friend) and shuttled values through the shell between them. Each of
+# those invocations restarted the app mid-handshake; the failure surfaced as
+# "pairing-confirm-matched not found" on a device sitting innocently on the map screen.
+#
+# What used to be shell plumbing between invocations is now the rendezvous: `runScript`'s http
+# global talks to a tiny host-side key/value server with long-poll reads. It runs in the
+# maestro-runner process on the HOST, so 127.0.0.1 is right for iOS and Android alike.
+#
+# Variables (all required, passed with -e):
+#   ROLE        invite  — create the invite and publish it
+#               redeem  — wait for that invite and open it
+#               await   — neither; some other participant (the trail-stash CLI observer) delivers
+#                         the deep link out of band. Just be ready for the SAS challenge.
+#   RENDEZVOUS  base URL of scripts/e2e/lib/rendezvous.py
+#   SESSION     key namespace, unique per run
+#
+# The SAS half is deliberately role-agnostic. Which device displays and which picks is derived
+# from the two endpoints' raw bytes, so it cannot be known in advance — every participant runs
+# this same file and discovers its role from what rendered.
+- launchApp:
+    clearState: false
+
+# Publish readiness BEFORE doing anything else. The counterpart must not start delivering a deep
+# link until this device's one-and-only restart is behind it — otherwise the restart eats the
+# invite. `await` participants depend on this; the host waits for it.
+- runScript: |
+    http.post(RENDEZVOUS + '/kv/' + SESSION + '.ready.' + ROLE, { body: 'ready' });
+
+- runFlow:
+    when:
+      true: ${ROLE === 'invite'}
+    commands:
+      - tapOn: 'Settings'
+      - scrollUntilVisible:
+          element: 'Share a one-time pairing link'
+          direction: DOWN
+      - tapOn: 'Share a one-time pairing link'
+      - tapOn: 'Copy'
+      # Read the token off the DEBUG on-screen mirror, not the clipboard: the iOS Simulator's
+      # pasteboard does not reliably reflect what the Share Sheet's Copy action writes.
+      - scrollUntilVisible:
+          element:
+            id: 'debug-invite-link'
+          direction: DOWN
+      - copyTextFrom:
+          id: 'debug-invite-link'
+      - runScript: |
+          if (!maestro.copiedText) {
+            throw new Error('could not read the invite link off the DEBUG mirror');
+          }
+          http.post(RENDEZVOUS + '/kv/' + SESSION + '.invite', { body: maestro.copiedText });
+      # Deliberately NO "close settings" step here. Two reasons, both of which made an earlier
+      # revision hang on iOS:
+      #   * The app closes Settings ITSELF when a challenge lands — pairing-overlays.tsx calls
+      #     router.back() keyed on the leading session id, precisely so the challenge isn't
+      #     stranded behind Settings. A flow step racing that is redundant at best.
+      #   * The panel is a full-screen scrim (accessibilityViewIsModal) that takes over whatever
+      #     was on screen. Now that both devices run concurrently, the counterpart can redeem the
+      #     invite while this device is still in Settings — so `scrollUntilVisible: 'Close
+      #     settings'` starts scrolling a view that is being replaced underneath it and never
+      #     resolves. The old sequential harness never saw this because B could not redeem until
+      #     A's separate close-settings invocation had finished.
+
+- runFlow:
+    when:
+      true: ${ROLE === 'redeem'}
+    commands:
+      - runScript: |
+          var response = http.get(
+            RENDEZVOUS + '/kv/' + SESSION + '.invite?wait=90',
+            { timeout: 100000 }
+          );
+          if (!response.ok) throw new Error('the inviting device never published an invite link');
+          output.invite = response.body;
+      # openLink shells out to `xcrun simctl openurl` on a simulator (and `am start -a VIEW` on
+      # Android), so unlike launchApp it does NOT restart the app.
+      - openLink: ${output.invite}
+
+# Opening a custom-scheme URL can raise an OS confirmation sheet that nobody taps, leaving the
+# app on the map while the handshake never starts — which used to surface, misleadingly, as
+# "neither device ever showed the SAS challenge".
+#
+# iOS only, and deliberately so: Android's `am start -a VIEW` names the package, so it routes
+# straight into the app and no chooser is ever shown. Leaving this ungated cost a measured 4.2s
+# on Android — spent, every run, to find nothing — and it comes directly out of the 60s SAS
+# budget the rest of the flow has to fit inside.
+- runFlow:
+    when:
+      platform: iOS
+      visible: 'Open in .streetCryptid.'
+      timeout: 4000
+    commands:
+      - tapOn: 'Open'
+
+# One wait for the challenge to render, on the two headings that are mutually exclusive between
+# the roles (text selectors are regex). Doing this ONCE, before the role branch, is what keeps
+# role detection cheap: both branch conditions below then resolve on their first check instead of
+# burning the 60s SAS budget on a timeout.
+# 120s is the HARNESS's patience, deliberately longer than the protocol's own 60s SAS budget —
+# they measure different things. SAS_TIMEOUT_MS starts when the pairing session is created, i.e.
+# after the two nodes have found each other; this wait starts the moment the link is opened, and
+# has to absorb everything before that: node startup, relay discovery, and the first successful
+# dial. Against the host CLI observer that gap was measured at ~96s (the phone's connection to the
+# CLI landed well after a 60s wait had already given up), which failed as "neither device ever
+# showed the SAS challenge" — a message about the handshake, for what was really impatience.
+# Waiting longer cannot mask a real failure: an expired session never renders a challenge at all.
+- extendedWaitUntil:
+    visible: 'Which figure is on their phone|Show them this figure'
+    timeout: 120000
+
+# ROLE DETECTION IS KEYED ON THE HEADING TEXT, NOT ON testIDs.
+#
+# An earlier revision branched on `id: pairing-target-figure` / `id: pairing-figure-option-0`.
+# That worked on iOS and silently SKIPPED BOTH BRANCHES on Android — the run showed
+# `skipped: 2`, the picker never tapped anything, and the handshake died at the 60s SAS
+# expiry with the misleading error "CRYPTID DISCOVERED not visible". The headings, by contrast,
+# are the exact selector the extendedWaitUntil above just matched in ~100ms on Android, so they
+# are known-good on both platforms.
+#
+# The two headings are mutually exclusive by construction (pairing-verification-panel.tsx renders
+# one per role), and once a side confirms, its heading becomes "Waiting for the other phone" —
+# so neither branch can re-fire after the other has run.
+#
+# The explicit `timeout` matters too: maestro-runner's default condition timeout is 1000ms, which
+# is what the skipped Android branch actually hit.
+
+# Displayer — "Show them this figure".
+- runFlow:
+    when:
+      visible: 'Show them this figure'
+      timeout: 10000
+    commands:
+      - copyTextFrom:
+          id: 'pairing-target-figure'
+      - runScript: |
+          var name = maestro.copiedText.replace(/ ASCII pairing figure$/, '');
+          if (!name) throw new Error('could not read the displayed SAS figure');
+          http.post(RENDEZVOUS + '/kv/' + SESSION + '.figure', { body: name });
+          // Confirm only AFTER the picker has chosen — that ordering is the point of the check.
+          var picked = http.get(
+            RENDEZVOUS + '/kv/' + SESSION + '.picked?wait=45',
+            { timeout: 55000 }
+          );
+          if (!picked.ok) throw new Error('the picker never chose a figure');
+      - tapOn:
+          id: 'pairing-confirm-matched'
+
+# Picker — "Which figure is on their phone?".
+- runFlow:
+    when:
+      visible: 'Which figure is on their phone'
+      timeout: 10000
+    commands:
+      - runScript: |
+          var response = http.get(
+            RENDEZVOUS + '/kv/' + SESSION + '.figure?wait=45',
+            { timeout: 55000 }
+          );
+          if (!response.ok) throw new Error('the displayer never published its figure');
+          output.figure = response.body;
+      - tapOn: 'Pairing figure: ${output.figure}'
+      - runScript: |
+          http.post(RENDEZVOUS + '/kv/' + SESSION + '.picked', { body: 'yes' });
+
+# The actual proof pairing succeeded: both sides mint a friend record and fire this celebration.
+- extendedWaitUntil:
+    visible: 'CRYPTID DISCOVERED'
+    timeout: 60000
+- tapOn:
+    id: 'pairing-acknowledge-friend'
+- runScript: |
+    http.post(RENDEZVOUS + '/kv/' + SESSION + '.paired.' + ROLE, { body: 'paired' });

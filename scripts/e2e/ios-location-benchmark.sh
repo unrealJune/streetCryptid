@@ -29,14 +29,14 @@ trap cleanup EXIT
 xcrun simctl privacy "$DEVICE" grant location "$APP_ID" >/dev/null 2>&1 || true
 xcrun simctl privacy "$DEVICE" grant location-always "$APP_ID" >/dev/null 2>&1 || true
 xcrun simctl location "$DEVICE" set 47.6205,-122.3493
-maestro --udid "$DEVICE" test -e USERNAME="$USERNAME" \
+maestro_cmd "$DEVICE" test -e USERNAME="$USERNAME" \
   "$REPO_ROOT/.maestro/onboarding/ensure-onboarded.yaml"
 
 app_data="$(xcrun simctl get_app_container "$DEVICE" "$APP_ID" data)"
 social_db="$app_data/Documents/SQLite/streetcryptid.social.db"
 events_db="$app_data/Documents/SQLite/streetcryptid.events.db"
 
-observer_state="$("$SCRIPT_DIR/ensure-ios-stash-observer.sh" "$DEVICE" "$OBSERVER_STATE_DIR")"
+observer_state="$("$SCRIPT_DIR/ensure-stash-observer.sh" "$DEVICE" "$OBSERVER_STATE_DIR")"
 observer_bin="$REPO_ROOT/modules/iroh-location/rust/target/debug/trail-stash-client"
 
 observe_once() {
@@ -76,7 +76,7 @@ run_scenario() {
   observer_output="$(mktemp)"
   observe_scenario >"$observer_output" &
   observer_pid=$!
-  maestro --udid "$DEVICE" test "$REPO_ROOT/.maestro/background-location/background-app.yaml"
+  maestro_cmd "$DEVICE" test "$REPO_ROOT/.maestro/background-location/background-app.yaml"
 
   case "$scenario" in
     walking)

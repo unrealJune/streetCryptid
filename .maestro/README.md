@@ -13,6 +13,16 @@ the app already built and installed (`just run-ios`, or `bunx expo run:ios` /
 - `pairing/` — flows for driving the invite-link pairing UI. See
   `scripts/e2e/pairing-e2e.sh` for the full two-device orchestration (run via
   `just e2e-pairing <device-a-udid> <device-b-udid>`).
+- `background-location/background-app.yaml` — launches, dismisses dev-menu/backgrounding
+  dialogs if present, and backgrounds the app. Used directly by
+  `scripts/e2e/ios-background-location-e2e.sh` and `ios-location-benchmark.sh`, and indirectly
+  (via `scripts/e2e/lib/devices.sh`) by `run-matrix.sh` and `soak.sh` — the scenario-matrix and
+  soak-test harness for background sharing. `just e2e-matrix` runs the declarative scenarios in
+  `scripts/e2e/scenarios/*.yaml` across a pool of simulators; `just e2e-matrix-list` lists them;
+  `just e2e-soak` runs one long-form. See `scripts/e2e/PHYSICAL-DEVICE-CHECKLIST.md` for what
+  that matrix structurally cannot cover on Simulator alone. `chaos-*.yaml` scenarios additionally
+  need a local trail-stash (`just e2e-local-stash`) and pf (`scripts/e2e/lib/netchaos.sh`, needs
+  sudo) to prove the app survives — and recovers from — the stash going unreachable mid-share.
 
 ## Gotchas this harness works around
 

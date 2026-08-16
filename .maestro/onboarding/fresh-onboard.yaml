@@ -16,13 +16,8 @@ appId: com.unrealjune.streetcryptid
     clearState: true
 - runFlow:
     when:
-      visible: 'This is the developer menu. It gives you access to useful tools in development builds.'
-    commands:
-      - tapOn: 'Continue'
-      - tapOn: 'Close'
-- runFlow:
-    when:
       visible: 'Go home'
+      timeout: 4000
     commands:
       - tapOn: 'Close'
 - assertVisible:

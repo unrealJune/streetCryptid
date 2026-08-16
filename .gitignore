@@ -73,3 +73,9 @@ modules/iroh-location/android/build/
 modules/iroh-location/android/src/main/jniLibs/
 modules/iroh-location/ios/headers/
 modules/iroh-location/ios/IrohLocationFFI.xcframework/
+
+# Run artifacts from the e2e harness: maestro-runner writes HTML/JUnit/Allure reports per test
+# run (pointed at .e2e-reports/ by lib/devices.sh), and run-matrix.sh/soak.sh write their own
+# summaries under scripts/e2e/reports/. Both are per-run output, never source.
+.e2e-reports/
+scripts/e2e/reports/
