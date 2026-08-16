@@ -195,6 +195,14 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
 
   const startLocation = useCallback(async (service: LocationSharingService): Promise<void> => {
     if (!(await service.isBackgroundAvailable())) {
+      // Logged, not just shown: these two failures put the device in the state where it looks
+      // completely healthy — node up, friends listed, map drawn — while publishing nothing at
+      // all. Reported into React state alone, the reason lives only in a banner nobody is
+      // watching, and the durable record (the event log the e2e harness and OTEL both read) has
+      // no trace of it. Diagnosing exactly this on an Android emulator meant working backwards
+      // from "sharingEnabled flipped back to 0" with no error anywhere, because `startBackground`
+      // clears the persisted intent when it fails.
+      console.warn('[location] background sharing unavailable in this build');
       setLocationStatus('unavailable');
       setLocationError('Background location is unavailable in this build.');
       return;
@@ -206,10 +214,12 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
         setLocationStatus('running');
         setLocationError(null);
       } else {
+        console.warn(`[location] background sharing started with access=${access}`);
         setLocationStatus('permission-denied');
         setLocationError('Allow background location so your friends stay current.');
       }
     } catch (startError: unknown) {
+      console.warn(`[location] startBackground failed: ${errorMessage(startError)}`);
       setLocationStatus(locationStatusFor(startError));
       setLocationError(errorMessage(startError));
     }

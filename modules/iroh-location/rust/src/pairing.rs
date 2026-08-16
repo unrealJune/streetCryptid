@@ -53,6 +53,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -117,6 +118,10 @@ pub const SAS_OPTION_COUNT: usize = 4;
 
 /// Bounded human-verification window. Actions after the deadline are terminal.
 const SAS_TIMEOUT_MS: u64 = 60_000;
+
+/// How long to wait for the endpoint to reach a relay server before snapshotting the address we
+/// hand out in an invite. See `our_endpoint_ticket`.
+const ENDPOINT_ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Maximum time for the automatic commit/reveal exchange to reach the visual SAS gate.
 const PAIR_HANDSHAKE_TIMEOUT_MS: u64 = 60_000;
@@ -1309,9 +1314,31 @@ impl PairCore {
         ))
     }
 
+    /// The address we advertise in an invite, as a ticket.
+    ///
+    /// Awaits `Endpoint::online()` first, and that await is load-bearing rather than defensive.
+    /// `Endpoint::addr()` snapshots whatever addressing is known AT THAT MOMENT; iroh's own
+    /// documentation for it says to use `online()` beforehand "if you want to ensure that the
+    /// `EndpointAddr` will contain enough information to allow this endpoint to be dialable by a
+    /// remote endpoint over the internet". Freshly after bind, only local interface addresses are
+    /// known, so an invite minted in that window carries NO relay URL — and a peer that cannot
+    /// reach those local addresses has no way to dial back. It fails as a pairing that simply
+    /// never starts: the redeeming side dials, gets nothing, and the handshake times out well
+    /// before the SAS window opens, with no error pointing at the address.
+    ///
+    /// Observed exactly that way: an Android emulator redeeming a host CLI's invite logged
+    /// `conn::closed reason=TimedOut` for the inviter while happily reaching every other peer over
+    /// a relay. The same shape hits real users — an invite shared moments after cold start, to a
+    /// friend on cellular — which is why this is fixed here rather than papered over in the test.
+    ///
+    /// Bounded, because being offline is a legitimate state: on timeout we fall back to the
+    /// local-only address, which is still correct for same-LAN pairing.
     async fn our_endpoint_ticket(&self) -> String {
         match self.runtime_endpoint().await {
-            Ok(ep) => EndpointTicket::new(ep.addr()).to_string(),
+            Ok(ep) => {
+                let _ = tokio::time::timeout(ENDPOINT_ONLINE_TIMEOUT, ep.online()).await;
+                EndpointTicket::new(ep.addr()).to_string()
+            }
             Err(_) => String::new(),
         }
     }

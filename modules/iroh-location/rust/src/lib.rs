@@ -3072,20 +3072,38 @@ impl LocationNode {
                 .await
                 .map_err(|e| LocationError::Network(e.to_string()))?;
             let manager = self.session_manager().await?;
+            let sealed_count = sealed.len();
             let mut verified = sealed
                 .iter()
                 .filter_map(|bytes| crypto::verify_v3(bytes).ok())
                 .filter(|envelope| envelope.author != self.author)
                 .collect::<Vec<_>>();
             verified.sort_unstable_by_key(|envelope| (envelope.author, envelope.seq));
+            // Account for every blob, because EVERY reason to drop one is silent by design:
+            // a non-v3 blob fails `verify_v3`, our own echo is filtered, and `NotForUs` is the
+            // ordinary case in a pool (one wrap per recipient, only one of them ours). When a
+            // fix legitimately never arrives, the difference between "the stash served nothing",
+            // "it served something we could not verify" and "it served something not addressed
+            // to us" is the whole diagnosis — and without this line all three look identical:
+            // a watch that prints nothing at all.
+            let verified_count = verified.len();
+            let mut not_for_us = 0usize;
+            let mut not_for_us_seqs: Vec<u64> = Vec::new();
+            let mut open_failed = 0usize;
+            let mut undecodable = 0usize;
 
             let mut fixes = Vec::new();
             for envelope in verified {
                 let author = envelope.author.to_vec();
                 let payload = match manager.open(&author, &envelope, now_ms()) {
                     Ok(payload) => payload,
-                    Err(sessions::SessionError::NotForUs) => continue,
+                    Err(sessions::SessionError::NotForUs) => {
+                        not_for_us += 1;
+                        not_for_us_seqs.push(envelope.seq);
+                        continue;
+                    }
                     Err(error) => {
+                        open_failed += 1;
                         eprintln!(
                             "[watch] ratcheted envelope {} could not be opened: {error}",
                             envelope.seq
@@ -3094,6 +3112,7 @@ impl LocationNode {
                     }
                 };
                 let Ok(Some(fix)) = decode_fix_payload(&payload) else {
+                    undecodable += 1;
                     continue;
                 };
                 fixes.push(IncomingFix {
@@ -3102,6 +3121,15 @@ impl LocationNode {
                     fix,
                 });
             }
+            eprintln!(
+                "[watch] blobs={sealed_count} verified={verified_count} opened={} not_for_us={not_for_us}{} open_failed={open_failed} undecodable={undecodable}",
+                fixes.len(),
+                if not_for_us_seqs.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (seq {not_for_us_seqs:?})")
+                }
+            );
             for bytes in sealed {
                 let Ok(opened) = crypto::open(&self.recv_secret, &bytes) else {
                     continue;

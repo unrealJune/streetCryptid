@@ -2078,7 +2078,13 @@ export class LocationSharingService implements FixPublisher {
     (this.heartbeatTimer as unknown as { unref?: () => void }).unref?.();
   }
 
-  /** Stop the background location service (leaves queued fixes in the outbox). Idempotent. */
+  /**
+   * Stop background sharing because the USER turned it off. Idempotent.
+   *
+   * Clears the persisted intent and disarms the revive fence, then tears the machinery down.
+   * Use {@link teardownBackground} for a lifecycle shutdown, which must leave both alone — see
+   * the note there.
+   */
   async stopBackground(): Promise<void> {
     // Clear the intent FIRST, and unconditionally. If this ran at the end, an exception partway
     // through teardown would leave the flag set and the next headless wake would dutifully re-arm
@@ -2094,6 +2100,26 @@ export class LocationSharingService implements FixPublisher {
     } catch {
       // ignore — best-effort; the fence is inert once the intent flag is clear
     }
+    await this.teardownBackground();
+  }
+
+  /**
+   * Release the in-process background machinery WITHOUT touching the persisted intent or the
+   * revive fence.
+   *
+   * This is the difference between "the user switched sharing off" and "this process is going
+   * away", and conflating them defeats the entire self-heal design. `sc.social.sharingEnabled` is
+   * documented as the *intent*, not the current OS state, precisely so a headless wake can compare
+   * it against `isBackgroundLocationRunning()` and re-arm after a kill (see `loadSharingEnabled`
+   * and `ensureSharingArmedHeadless`). Shutdown used to route through `stopBackground`, so every
+   * teardown erased the intent it exists to preserve: sharing stayed off until the user opened the
+   * app and toggled it again, and the revive fence — the only thing that can relaunch a terminated
+   * app on iOS — was disarmed on the way out.
+   *
+   * Caught by the trio e2e harness, where an Android emulator reported `sharingEnabled=0` with an
+   * empty event log after a relaunch, having published nothing at all.
+   */
+  private async teardownBackground(): Promise<void> {
     if (this.liveTrackingTimer) {
       clearTimeout(this.liveTrackingTimer);
       this.liveTrackingTimer = null;
@@ -2507,7 +2533,9 @@ export class LocationSharingService implements FixPublisher {
     this.trailChangeListeners.clear();
     this.errorListeners.clear();
 
-    const work: Promise<unknown>[] = [this.stopBackground()];
+    // NOT stopBackground: a shutdown is not the user switching sharing off. See
+    // `teardownBackground`.
+    const work: Promise<unknown>[] = [this.teardownBackground()];
     if (mod) {
       work.push(
         (async () => {
