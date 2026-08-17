@@ -20,6 +20,7 @@ class FakeNativeModule {
     subscribe: [] as { topic: string; bootstrap: string[] }[],
     syncTrail: [] as { since: number; peerTicket: string | null }[],
     pushTrail: [] as { peerTickets: string[] }[],
+    uploadTrailContent: [] as { baseUrl: string }[],
     publish: [] as unknown[][],
     docsWrite: [] as unknown[][],
   };
@@ -58,6 +59,13 @@ class FakeNativeModule {
   async pushTrail(peerTickets: string[]) {
     this.calls.pushTrail.push({ peerTickets });
   }
+  // An arrow property, not a prototype method: the service reads this off the module and calls it
+  // unbound (Expo's native module proxy binds its own functions), so a prototype method here would
+  // lose `this` and throw into the best-effort catch instead of recording the call.
+  uploadTrailContent = async (baseUrl: string) => {
+    this.calls.uploadTrailContent.push({ baseUrl });
+    return 1;
+  };
   async readTrail() {
     return [];
   }
@@ -225,6 +233,50 @@ describe('LocationSharingService — headless init', () => {
     await svc.pushTrail();
 
     expect(mockHolder.mod.calls.pushTrail).toEqual([{ peerTickets: ['ticket-b', 'ticket-c'] }]);
+  });
+
+  it('uploads trail content to the stash when it is opted into', async () => {
+    mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
+    mockHolder.stashOptIn = true;
+    const svc = makeService(stashDeps());
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+
+    await svc.pushTrail();
+
+    expect(mockHolder.mod.calls.uploadTrailContent).toEqual([{ baseUrl: 'https://stash.test' }]);
+  });
+
+  /**
+   * `stashConfig` is build-time env; the opt-in is the user's answer. Gating the content upload on
+   * the former would PUT sealed envelopes to the durable server for someone who switched it off —
+   * into a namespace `syncStashGrants` never registered, so it would fail on every tick too and
+   * bury real push failures in the noise.
+   */
+  it('does not upload content to the stash when the user has opted out', async () => {
+    mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
+    mockHolder.stashOptIn = false;
+    const svc = makeService(stashDeps());
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+
+    await svc.pushTrail();
+
+    expect(mockHolder.mod.calls.uploadTrailContent).toEqual([]);
+    expect(mockHolder.mod.calls.pushTrail).toEqual([{ peerTickets: ['ticket-b', 'ticket-c'] }]);
+  });
+
+  /**
+   * Nothing to push to is not the same as a push that fails. `start_sync([])` still waits out the
+   * native push timeout, which on a headless wake is a multi-second hole in iOS's background
+   * budget for no work at all.
+   */
+  it('does not call into native at all when there is no stash and no pool', async () => {
+    mockHolder.pool = { friends: {}, sharingWith: [] };
+    const svc = makeService();
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+
+    await svc.pushTrail();
+
+    expect(mockHolder.mod.calls.pushTrail).toEqual([]);
   });
 
   /**

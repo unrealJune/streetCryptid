@@ -27,8 +27,16 @@
 #     the durable server is not a reachable source for that device at all (see
 #     location-sharing.ts). Leaving it on would let the stash answer and the test would prove
 #     nothing about peers.
-#   * The LATE device's stored fix for the author is cleared first, so nothing can be satisfied
-#     out of history.
+#   * The LATE device's stored fix for the author is cleared after it goes away, so nothing can be
+#     satisfied out of history.
+#
+# ONE PRECONDITION IS NOT ABOUT EXCLUSION, AND IT IS EASY TO MISS. The late device must be up, and
+# must have published, BEFORE it leaves. Sealing is per-recipient (FORWARD-SECRECY.md §4.2/§4.5):
+# the author can only wrap for a peer whose ratchet session can step, so a late device that never
+# ran in this window is dropped from every wrap set the author produces. The relay would then hand
+# over an envelope the late device has no key for — a run that looks like a relay failure while
+# proving nothing at all. The publish loop asserts a fix went out wrapped for the WHOLE pool, so
+# this cannot regress silently.
 #
 # With the author dead and the stash disabled, the relay is the only remaining holder of that
 # fix — so a row appearing on `late` can only have come from it.
@@ -135,7 +143,6 @@ done
 
 # Cut the late device off from the durable server, so the relay is the only possible source.
 device_set_stash_opt_in "$LATE" "${STASH_OPT_IN:-0}"
-device_clear_friend_latest "$LATE"
 
 cleanup() {
   device_stop_route "$AUTHOR"
@@ -147,7 +154,25 @@ trap cleanup EXIT
 START_MS="$(($(date +%s) * 1000))"
 
 log "Author publishes for up to ${PUBLISH_SECONDS}s with the relay online and the late device away"
+# The late device must be UP, and must have published, before it goes away.
+#
+# This is load-bearing and was the subtlest thing in the whole test. Sealing is per-recipient
+# (FORWARD-SECRECY.md §4.2/§4.5): the author can only wrap for a peer whose ratchet session can
+# step, which a responder cannot do until it has had the initiator's first envelope, and which
+# lapses if the peer stops contributing fresh keys. A late device that was never up in this run is
+# dropped from every wrap set the author produces — so the relay would faithfully hand over an
+# envelope the late device has no key for, and the run would look like a relay failure while
+# actually proving nothing. The assertion after the publish window catches it if it ever regresses.
+device_dev_command "$LATE" sync-trail >/dev/null || {
+  log "FAIL - the late device never came up, so the author cannot wrap for it"
+  device_dump_event_log "$LATE" "$START_MS" >&2
+  exit 1
+}
+device_background "$LATE"
 device_terminate_app "$LATE" # away for the whole publishing window
+# Cleared only NOW, with the late device down: anything it ingested while it was briefly up is
+# history, and a row appearing after this point can only have arrived during the window under test.
+device_clear_friend_latest "$LATE"
 # The relay stays in the FOREGROUND for the whole run. It is the one device that has to keep
 # serving: a backgrounded iOS app is suspended on the OS's schedule, so asking it to answer a dial
 # later is testing something the platform does not offer. A friend with the app open is also the
@@ -164,14 +189,21 @@ device_drive_route "$AUTHOR" "$ROUTE"
 deadline="$(($(date +%s) + PUBLISH_SECONDS))"
 published=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  if [ "$(device_event_log_count "$AUTHOR" "$START_MS" publish.fix ok)" -gt 0 ]; then
+  if [ "$(device_publish_to_everyone_count "$AUTHOR" "$START_MS")" -gt 0 ]; then
     published=1
     break # nothing is learned by burning the rest of the window
   fi
   sleep 10
 done
 [ "$published" -eq 1 ] || {
-  log "FAIL - the author never published, so there is nothing to relay"
+  log "FAIL - the author never published a fix wrapped for the WHOLE pool"
+  if [ "$(device_event_log_count "$AUTHOR" "$START_MS" publish.fix ok)" -gt 0 ]; then
+    log "  it did publish, but every fix left a recipient out (ratchet.recipients_dropped)."
+    log "  A fix nobody can open is not a relay problem — see FORWARD-SECRECY.md §4.2/§4.5 and the"
+    log "  note above about the late device having to contribute a ratchet key before it leaves."
+  else
+    log "  it never published at all, so there is nothing to relay"
+  fi
   device_dump_location_errors "$AUTHOR" "$START_MS" >&2
   device_dump_event_log "$AUTHOR" "$START_MS" >&2
   exit 1
@@ -232,6 +264,10 @@ done
   log "FAIL - the late device never obtained the author's fix from the relay within ${TIMEOUT_SECONDS}s"
   log "  the relay COULD serve it: $relay_status"
   log "  so this is a transfer failure, not an empty relay"
+  # Where it stopped. The replica is what reconciliation writes; `friend_latest` is what the app
+  # ingests out of it afterwards. An author present here but absent from `friend_latest` means the
+  # transfer worked and the app-side read did not — a different bug in a different place.
+  log "  late replica-status: $(device_dev_command "$LATE" replica-status 60 || true)"
   if [ "${STASH_OPT_IN:-0}" != "1" ]; then
     log "  NOTE: re-run with STASH_OPT_IN=1. If that passes, the scenario is sound and what is"
     log "  missing is specifically peer-to-peer relay — see this script's header."

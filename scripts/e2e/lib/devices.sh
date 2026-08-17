@@ -350,6 +350,9 @@ reset_pairing_state() {
   local udid="$1" app_id="$2" social
   social="$(social_db_path "$(app_data_dir "$udid" "$app_id")")"
   terminate_app "$udid" "$app_id"
+  # A freshly installed app has no database yet, which IS a clean slate — sqlite3 would otherwise
+  # fail to open it and take the run down before the first pairing.
+  [ -f "$social" ] || return 0
   sqlite3 "$social" "
     DELETE FROM kv WHERE key IN ('sc.social.pool', 'sc.social.ratchetActivity');
     DELETE FROM friend_latest;
@@ -402,6 +405,20 @@ event_log_details() {
   sqlite3 "$1" \
     "SELECT details FROM event_log WHERE action = '$2' AND details LIKE '%$3%'
      ORDER BY timestamp DESC LIMIT 1;" 2>/dev/null
+}
+
+# event_log_rows_without <events_db> <start_ms> <action> <needle> — rows of `action` since
+# `start_ms` whose details do NOT contain `needle`.
+#
+# Written for one question the relay test has to be able to ask: did the author publish a fix that
+# was wrapped for EVERY recipient? A publish that left someone out records a
+# `ratchet.recipients_dropped` event, and a fix nobody can open is not something a relay failing to
+# deliver would explain (FORWARD-SECRECY.md §4.2/§4.5).
+event_log_rows_without() {
+  sqlite3 "$1" \
+    "SELECT count(*) FROM event_log
+     WHERE timestamp >= $2 AND action = '$3' AND status = 'ok' AND details NOT LIKE '%$4%';" \
+    2>/dev/null
 }
 
 event_log_count() {

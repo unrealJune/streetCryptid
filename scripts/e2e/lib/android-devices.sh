@@ -313,6 +313,23 @@ android_event_log_details() {
   printf '%s' "$details"
 }
 
+# android_event_log_rows_without <serial> <app_id> <start_ms> <action> <needle> — Android half of
+# event_log_rows_without.
+android_event_log_rows_without() {
+  local serial="$1" app_id="$2" start_ms="$3" action="$4" needle="$5"
+  local data events_remote tmp count
+  data="$(android_app_data_dir "$app_id")"
+  events_remote="$(android_events_db_path "$data")"
+  tmp="$(mktemp)"
+  android_pull_db "$serial" "$app_id" "$events_remote" "$tmp"
+  count="$(sqlite3 "$tmp" \
+    "SELECT count(*) FROM event_log
+     WHERE timestamp >= $start_ms AND action = '$action' AND status = 'ok'
+       AND details NOT LIKE '%$needle%';" 2>/dev/null)"
+  rm -f "$tmp" "$tmp-wal" "$tmp-shm"
+  printf '%s' "${count:-0}"
+}
+
 android_event_log_count() {
   local serial="$1" app_id="$2" start_ms="$3" action="$4" status="${5:-}"
   local data events_remote tmp
@@ -340,6 +357,8 @@ android_reset_pairing_state() {
   data="$(android_app_data_dir "$app_id")"
   social_remote="$(android_social_db_path "$data")"
   android_terminate_app "$serial" "$app_id"
+  # A freshly installed app has no database yet, which IS a clean slate.
+  adb -s "$serial" exec-out run-as "$app_id" test -f "$social_remote" 2>/dev/null || return 0
   tmp="$(mktemp)"
   android_pull_db "$serial" "$app_id" "$social_remote" "$tmp"
   sqlite3 "$tmp" "

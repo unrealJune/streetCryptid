@@ -162,7 +162,12 @@ device_open_url() {
   if [ "$plat" = "android" ]; then
     # Same mechanism modules/iroh-location/rust/src/bin/trail-stash-client.rs already uses for its
     # `pair --adb` path (open_pair_link_with_adb).
-    adb -s "$id" shell am start -a android.intent.action.VIEW -d "$2" "$APP_ID" >/dev/null 2>&1
+    #
+    # Quoted for the DEVICE's shell, not just the host's: `adb shell` joins its arguments with
+    # spaces and hands the string to sh on the device, so host quoting is consumed locally. A URL
+    # with more than one query parameter (`?cmd=…&id=…`) would otherwise be split at the `&` into
+    # two device-side commands, and the app would receive a link missing everything after it.
+    adb -s "$id" shell "am start -a android.intent.action.VIEW -d '$2' $APP_ID" >/dev/null 2>&1
   else
     xcrun simctl openurl "$id" "$2"
   fi
@@ -315,6 +320,20 @@ device_event_log_count() {
     data="$(app_data_dir "$id" "$APP_ID")"
     events="$(events_db_path "$data")"
     event_log_count "$events" "$2" "$3" "${4:-}"
+  fi
+}
+
+# device_publish_to_everyone_count <spec> <start_ms> — publishes since start_ms that left NOBODY
+# out of the wrap set. See event_log_rows_without.
+device_publish_to_everyone_count() {
+  local plat id
+  plat="$(device_platform "$1")"
+  id="$(device_id "$1")"
+  if [ "$plat" = "android" ]; then
+    android_event_log_rows_without "$id" "$APP_ID" "$2" 'publish.fix' 'ratchet.recipients_dropped'
+  else
+    event_log_rows_without "$(events_db_path "$(app_data_dir "$id" "$APP_ID")")" \
+      "$2" 'publish.fix' 'ratchet.recipients_dropped'
   fi
 }
 

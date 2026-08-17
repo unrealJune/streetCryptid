@@ -1812,15 +1812,23 @@ export class LocationSharingService implements FixPublisher {
   async pushTrail(parent?: SpanContext): Promise<void> {
     if (!this.mod) return;
     const peerTickets = this.durablePeerTickets();
+    const stashEnabled = this.stashEnabled();
     const span = getTelemetry().startSpan('trail.push.app', {
       parent,
       attributes: {
         'sc.author': this.keys ? this.keys.endpointId.slice(0, 10) : undefined,
-        stash: this.stashEnabled(),
+        stash: stashEnabled,
         'sync.peers': peerTickets.length,
       },
     });
     try {
+      // Nothing to push to — no stash, no friends — so there is no durable mirror to make. Not
+      // merely an optimisation: `start_sync([])` still waits out the native push timeout, and on a
+      // headless wake that is a hard multi-second block on iOS's background budget for no work.
+      if (peerTickets.length === 0) {
+        span.setStatus('ok');
+        return;
+      }
       // iOS Swift bindings regenerate only on macOS (`just bindgen-ios`), so a dev client built
       // before this export exists will not have it. That is a broken build, not a supported
       // configuration: silently returning would strand every fix on the device and look exactly
@@ -1832,9 +1840,12 @@ export class LocationSharingService implements FixPublisher {
         peerTickets,
         getTelemetry().enabled ? traceparentFor(span.context) : null
       );
-      // Content upload stays stash-only, and genuinely so: pool members reconcile blobs over iroh,
-      // the stash takes them over its authenticated HTTP API.
-      if (this.stashConfig) {
+      // Content upload is stash-only, and gated on the OPT-IN rather than on the stash merely
+      // being configured. `stashConfig` is build-time env; `stashEnabled()` is the user's answer.
+      // Testing the former would PUT sealed envelopes to the durable server for a user who
+      // switched it off — into a namespace `syncStashGrants` never registered, so it would also
+      // fail on every tick and bury real push failures in the noise.
+      if (stashEnabled && this.stashConfig) {
         const uploadTrailContent = this.mod.uploadTrailContent;
         if (!uploadTrailContent) {
           throw new Error('native module must be rebuilt for durable stash delivery');

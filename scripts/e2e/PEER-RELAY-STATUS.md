@@ -105,6 +105,10 @@ just bindgen-ios                   # macOS only; the Swift bindings must have tr
 just e2e-build-ios                 # Release build — a dev build cannot be driven reliably
 just e2e-relay ios:<A> ios:<B> ios:<C>
 
+# The flows use `timeout:` inside a `when:` condition, which upstream Maestro does not parse
+# ("Unknown Property: timeout"). Drive them with the runner instead:
+E2E_MAESTRO=maestro-runner just e2e-relay ios:<A> ios:<B> ios:<C>
+
 # The control. Identical scenario with the durable server left ON. If this passes and the above
 # fails, the scenario is sound and what is missing is specifically peer relay.
 STASH_OPT_IN=1 bash scripts/e2e/relay-e2e.sh ios:<A> ios:<B> ios:<C>
@@ -114,6 +118,24 @@ The Rust tests are the gate for the property; `relay-e2e.sh` is the gate for it 
 devices. A failure there is now readable: if the precondition fails, the relay's `replica-status`
 is printed and the relay genuinely had nothing to give; if the wait loop fails, the relay
 demonstrably could serve it and the transfer is what broke.
+
+## The precondition that is not about excluding sources
+
+Worth writing down, because it cost a full red run to find and the failure looked exactly like a
+relay failure: **the late device must be up, and must have published, before it goes away.**
+
+Sealing is per-recipient (FORWARD-SECRECY.md §4.2/§4.5). The author can only wrap for a peer whose
+ratchet session can step — a responder cannot step until it has had the initiator's first envelope,
+and a peer that stops contributing fresh keys lapses. A late device that never ran during the
+publish window is therefore dropped from every wrap set the author produces, and the author's
+`publish.fix` span says so (`ratchet.recipients_dropped`). The relay then faithfully hands over an
+envelope the late device has no key for: `replica-status` on both devices shows the same author,
+the same `seq`, `hasContent: true` on each — and `friend_latest` on the late device stays empty.
+
+That is peer relay working perfectly and the test proving nothing. `relay-e2e.sh` now brings the
+late device up before sending it away, clears its stored fixes only afterwards, and asserts that
+the author published a fix wrapped for the WHOLE pool
+(`device_publish_to_everyone_count`) rather than merely publishing something.
 
 ## Still open
 

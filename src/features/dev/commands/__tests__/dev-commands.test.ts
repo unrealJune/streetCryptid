@@ -21,8 +21,15 @@ function context(overrides: Partial<Context> = {}): Context {
   };
 }
 
-function commandRows() {
-  return getEventLog().filter((entry) => entry.action === 'dev.command');
+// `EventLogEntry.details` is `unknown` by design (anything may be recorded), but the harness reads
+// specific keys out of it, so the tests do too.
+function commandRows(): { status: string; details: Record<string, unknown> }[] {
+  return getEventLog()
+    .filter((entry) => entry.action === 'dev.command')
+    .map((entry) => ({
+      status: entry.status,
+      details: (entry.details ?? {}) as Record<string, unknown>,
+    }));
 }
 
 describe('dev command channel', () => {

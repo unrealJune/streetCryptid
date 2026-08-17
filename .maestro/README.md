@@ -32,6 +32,13 @@ the app already built and installed (`just run-ios`, or `bunx expo run:ios` /
 
 ## Gotchas this harness works around
 
+**These flows need `maestro-runner`, not upstream `maestro`.** Several `when:` conditions carry an
+explicit `timeout:` (see `onboarding/ensure-onboarded.yaml` for why). Upstream Maestro has never
+supported that property on a condition and rejects the whole flow with
+`Unknown Property: timeout` — confirmed against 2.8.0 — while `maestro-runner` parses and honours
+it (`maestro-runner lint .maestro/` passes clean). Run the harness with
+`E2E_MAESTRO=maestro-runner`, or rewrite the conditions before using the upstream CLI.
+
 **`tapOn` by label/placeholder text does not focus TextInputs.** It works fine
 for `Pressable` buttons, but under Maestro's synthetic iOS taps, this app's
 `TextInput`s never actually gain focus that way (no keyboard, no cursor, no
