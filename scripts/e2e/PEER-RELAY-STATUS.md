@@ -114,6 +114,11 @@ E2E_MAESTRO=maestro-runner just e2e-relay ios:<A> ios:<B> ios:<C>
 STASH_OPT_IN=1 bash scripts/e2e/relay-e2e.sh ios:<A> ios:<B> ios:<C>
 ```
 
+Measured 2026-08-16 on three booted iOS Release simulators (iPhone 17 Pro / 17 Pro Max / 17,
+iOS 26.3): **five consecutive green runs with the stash off**, recovering `via=sync` from the relay
+each time at a fresh `seq` (1372, 1377, 1382, 1387, 1400 — a stale hit would repeat one), plus the
+`STASH_OPT_IN=1` control (`seq=1392`). One green run is what the previous write-up had.
+
 The Rust tests are the gate for the property; `relay-e2e.sh` is the gate for it working on real
 devices. A failure there is now readable: if the precondition fails, the relay's `replica-status`
 is printed and the relay genuinely had nothing to give; if the wait loop fails, the relay
