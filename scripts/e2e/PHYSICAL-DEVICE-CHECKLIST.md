@@ -27,7 +27,7 @@ Run these by hand, on real hardware, before trusting a background-sharing change
 - **Real background-suspension timing.** iOS's actual background execution budget, and how long
   the OS keeps a `CLLocationManager`-holding process alive before suspending it, is not
   reproduced by the Simulator's background state. A multi-hour soak (`soak.sh`) on the Simulator
-  measures wake *cadence* under the OS's simulated background delivery, not real suspension
+  measures wake _cadence_ under the OS's simulated background delivery, not real suspension
   pressure — pair it with an actual overnight soak on a physical device before shipping a cadence
   or battery-profile change.
 - **`launchApp` force-kills and cold-relaunches on iOS, even with `clearState: false`**

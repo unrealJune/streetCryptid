@@ -1,5 +1,5 @@
 name: cold-pairing-sync
-description: "Two fresh simulators pair over an invite link and confirm a friend record. Proxy for first-sync health: pairing.poll activity on the initiating device is the earliest signal the control channel is alive post-pairing."
+description: 'Two fresh simulators pair over an invite link and confirm a friend record. Proxy for first-sync health: pairing.poll activity on the initiating device is the earliest signal the control channel is alive post-pairing.'
 kind: pairing
 devices: 2
 duration_seconds: 60
