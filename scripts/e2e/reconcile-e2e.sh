@@ -45,6 +45,7 @@ PROFILE="${PROFILE:-balanced}"
 ROUTE="${ROUTE:-walking}"
 MODE="${MODE:-background}"
 AWAY_SECONDS="${AWAY_SECONDS:-90}"
+WARM_SECONDS="${WARM_SECONDS:-180}"
 
 log() { echo "[reconcile-e2e] $*" >&2; }
 
@@ -73,18 +74,66 @@ for spec in "$SENDER" "$RECEIVER"; do
   device_reset_app_state "$spec" "$SHARE_INTERVAL_MS" "$PROFILE"
 done
 
-# Clear any fix the receiver already holds from the sender, so the assertion cannot be satisfied
-# by history. This is the control that makes the result mean something.
+cleanup() {
+  device_stop_route "$SENDER"
+}
+trap cleanup EXIT
+
+# WARM THE RATCHET BEFORE ANYONE GOES AWAY.
+#
+# Sealing is per-recipient (FORWARD-SECRECY.md §4.2/§4.5), and a freshly paired responder has no
+# sending chain until it has had the initiator's first envelope. Send the receiver away immediately
+# after pairing and the sender drops it from every wrap set it produces — `no_sending_chain`, one
+# line in the sender's log and nothing at all in the receiver's — so the fixes the receiver is
+# later asked to "recover" were never addressed to it. That failure is indistinguishable from a
+# reconciliation failure at the point where the test measures, and it is not what this test is for.
+#
+# So: both devices up, sender moving, until a publish goes out wrapped for EVERYONE.
+WARM_FROM_MS="$(($(date +%s) * 1000))"
+log "Warming the ratchet: both devices up until the sender publishes a fix wrapped for everyone"
+device_dev_command "$RECEIVER" sync-trail >/dev/null || {
+  log "FAIL - the receiver never came up, so the sender cannot wrap for it"
+  device_dump_event_log "$RECEIVER" "$WARM_FROM_MS" >&2
+  exit 1
+}
+# BOTH in the foreground for the warm-up, which is the whole reason this step is separate from the
+# away window. A backgrounded app on the iOS Simulator has no background execution at all (see the
+# `bg.wake` note in the receiver's log), so it publishes once on the way down and then stops — and
+# a single publish that happens to land a second before the peer's first envelope arrives leaves
+# the sending chain unestablished with no second chance. Foregrounded, both keep to their cadence.
+device_dev_command "$SENDER" sync-trail >/dev/null || {
+  log "FAIL - the sender never came up"
+  device_dump_event_log "$SENDER" "$WARM_FROM_MS" >&2
+  exit 1
+}
+device_drive_route "$SENDER" "$ROUTE"
+warmed=0
+deadline="$(($(date +%s) + WARM_SECONDS))"
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  if [ "$(device_publish_to_everyone_count "$SENDER" "$WARM_FROM_MS")" -gt 0 ]; then
+    warmed=1
+    break
+  fi
+  sleep 10
+done
+device_stop_route "$SENDER"
+[ "$warmed" -eq 1 ] || {
+  log "FAIL - the sender never published a fix wrapped for the receiver within ${WARM_SECONDS}s"
+  log "  Every publish left the receiver out (ratchet.recipients_dropped), so nothing it is later"
+  log "  asked to recover would have been addressed to it. See FORWARD-SECRECY.md §4.2/§4.5."
+  device_dump_location_errors "$SENDER" "$WARM_FROM_MS" >&2
+  device_dump_event_log "$SENDER" "$WARM_FROM_MS" >&2
+  exit 1
+}
+
+# Clear any fix the receiver already holds from the sender — including everything the warm-up just
+# delivered — so the assertion cannot be satisfied by history. This is the control that makes the
+# result mean something, and it has to come AFTER the warm-up for that reason.
 device_clear_friend_latest "$RECEIVER"
 [ -z "$(device_friend_latest_row "$RECEIVER" "$SENDER_ENDPOINT")" ] || {
   log "FAIL - could not clear the receiver's stored fix for the sender"
   exit 1
 }
-
-cleanup() {
-  device_stop_route "$SENDER"
-}
-trap cleanup EXIT
 
 AWAY_FROM_MS="$(($(date +%s) * 1000))"
 
@@ -111,14 +160,16 @@ device_drive_route "$SENDER" "$ROUTE"
 sender_published=0
 deadline="$(($(date +%s) + AWAY_SECONDS))"
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  if [ "$(device_event_log_count "$SENDER" "$AWAY_FROM_MS" publish.fix ok)" -gt 0 ]; then
+  # Wrapped for everyone, not merely published: a fix the receiver has no key for is not
+  # something a recovery could ever surface. See the warm-up above.
+  if [ "$(device_publish_to_everyone_count "$SENDER" "$AWAY_FROM_MS")" -gt 0 ]; then
     sender_published=1
     break
   fi
   sleep 5
 done
 [ "$sender_published" -eq 1 ] || {
-  log "FAIL - the sender never published while the receiver was away, so there is nothing to recover"
+  log "FAIL - the sender never published a fix the receiver could open while it was away"
   device_dump_location_errors "$SENDER" "$AWAY_FROM_MS" >&2
   device_dump_event_log "$SENDER" "$AWAY_FROM_MS" >&2
   exit 1
