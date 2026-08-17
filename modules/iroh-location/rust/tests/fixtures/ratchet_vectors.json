@@ -1,0 +1,21 @@
+{
+  "comment": "Frozen Double Ratchet schedule vectors — regenerate with `cargo test --test ratchet_vectors -- --ignored --nocapture print_fixture`. See docs/social/FORWARD-SECRECY.md §4.2.",
+  "rk0": "0707070707070707070707070707070707070707070707070707070707070707",
+  "session_id": "01010101010101010101010101010101",
+  "primitives": {
+    "kdf_rk_root": "3d367e42ac7d4048b3adb509c4a6fbc2a9d3523bae6f778cc0c4218e2dca6399",
+    "kdf_rk_chain": "b911d4302a8375c985138bd4a3bdffdc379c0c208e623090067e3df114e5bfc6",
+    "kdf_ck": "088b66432cf167bc3e7c78a8b149c2d17ac0fe058dcc4172bc7295eced3fea47",
+    "kdf_mk": "851487654d17b4d9d17a50cbafdb090590cb2fa0320d29fd44d3411ba7b62a4c",
+    "kdf_kid": "1839a3bd375cec6e"
+  },
+  "transcript": [
+    { "label": "a_send_0_lost", "epoch": 0, "counter": 0, "kid": "2097db684e649470", "mk": "0cffc993c7fe78f39821717bdd5cf8ed6a7665a659d7decb67e115b92f836049" },
+    { "label": "a_send_1_lost", "epoch": 0, "counter": 1, "kid": "a66bde3e7dd2eb61", "mk": "11a771ddefc1e2695b3574cf626fe58fa39f2fcf9c0847ae9364a1eff80aafc9" },
+    { "label": "a_send_2_delivered", "epoch": 0, "counter": 2, "kid": "e004db496da953a7", "mk": "c6e055e73da6671fc79025b0f76269f476ae21741cf9ec53f0f4d8d1789c5943" },
+    { "label": "b_send_0", "epoch": 1, "counter": 0, "kid": "26289e99887389bb", "mk": "23272d2b073d38fedfaf78aae878f303f40fa4e1cc475aadcec23697364e090d" },
+    { "label": "b_send_1", "epoch": 1, "counter": 1, "kid": "aae82763ba077ea2", "mk": "a6ad82fe53fc47fed0f0fa1b7bf44071df19242788b8423f343e068632ca0c01" },
+    { "label": "a_send_after_ratchet_0", "epoch": 1, "counter": 0, "kid": "387f041350adefcd", "mk": "843afb6f7ca57b73cc9a7d5963de1ee450965614bb43daeedc0dd269bf4fc75b" },
+    { "label": "a_send_after_ratchet_1", "epoch": 1, "counter": 1, "kid": "d7e4ac9d2d1c0357", "mk": "bc97149d6d37ee71d099b0e688254f2705426fe587c7637f6eb078419836cdac" }
+  ]
+}

@@ -13,8 +13,31 @@ the app already built and installed (`just run-ios`, or `bunx expo run:ios` /
 - `pairing/` — flows for driving the invite-link pairing UI. See
   `scripts/e2e/pairing-e2e.sh` for the full two-device orchestration (run via
   `just e2e-pairing <device-a-udid> <device-b-udid>`).
+- `background-location/background-app.yaml` — launches, dismisses dev-menu/backgrounding
+  dialogs if present, and backgrounds the app. Used directly by
+  `scripts/e2e/ios-background-location-e2e.sh` and `ios-location-benchmark.sh`, and indirectly
+  (via `scripts/e2e/lib/devices.sh`) by `run-matrix.sh` and `soak.sh` — the scenario-matrix and
+  soak-test harness for background sharing. `just e2e-matrix` runs the declarative scenarios in
+  `scripts/e2e/scenarios/*.yaml` across a pool of simulators; `just e2e-matrix-list` lists them;
+  `just e2e-soak` runs one long-form. `pairing/pair-device.yaml` drives a whole SAS handshake as a
+  single flow (both devices concurrently, meeting through `scripts/e2e/lib/rendezvous.py`) — a
+  flow START restarts the app under both runners, so anything holding in-app session state has to
+  live in one flow. `just e2e-reconcile` proves a device recovers what it missed while away, and
+  `just e2e-relay` that a friend can serve an absent author's fix — read
+  `scripts/e2e/PEER-RELAY-STATUS.md` before trusting a red run from the latter.
+  See `scripts/e2e/PHYSICAL-DEVICE-CHECKLIST.md` for what
+  that matrix structurally cannot cover on Simulator alone. `chaos-*.yaml` scenarios additionally
+  need a local trail-stash (`just e2e-local-stash`) and pf (`scripts/e2e/lib/netchaos.sh`, needs
+  sudo) to prove the app survives — and recovers from — the stash going unreachable mid-share.
 
 ## Gotchas this harness works around
+
+**These flows need `maestro-runner`, not upstream `maestro`.** Several `when:` conditions carry an
+explicit `timeout:` (see `onboarding/ensure-onboarded.yaml` for why). Upstream Maestro has never
+supported that property on a condition and rejects the whole flow with
+`Unknown Property: timeout` — confirmed against 2.8.0 — while `maestro-runner` parses and honours
+it (`maestro-runner lint .maestro/` passes clean). Run the harness with
+`E2E_MAESTRO=maestro-runner`, or rewrite the conditions before using the upstream CLI.
 
 **`tapOn` by label/placeholder text does not focus TextInputs.** It works fine
 for `Pressable` buttons, but under Maestro's synthetic iOS taps, this app's
@@ -30,6 +53,14 @@ in-memory session state. None of the `pairing/*.yaml` flows that run mid-session
 (`pick-figure.yaml`, `confirm-match.yaml`, `acknowledge-friend.yaml`) call
 `launchApp` for this reason — they rely on Maestro already being attached to the
 foregrounded app from the previous step in the same test run.
+
+The same hazard is why there is no "foreground the app" flow here any more. A
+`launchApp`-based one existed for `relay-e2e.sh`, where every use of it tore the
+iroh node down and left the next assertion racing a cold dial. Foregrounding a
+running app is done with a deep link instead — `device_dev_command` in
+`scripts/e2e/lib/device.sh` — which does not restart the process, launches the
+app when it is not running, and acknowledges through the event log so the harness
+knows the sharing service is live rather than merely that a view rendered.
 
 **The iOS Simulator's pasteboard does not reliably reflect what the Share
 Sheet's Copy action writes.** Confirmed independently, twice: `simctl pbpaste`

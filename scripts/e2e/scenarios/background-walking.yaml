@@ -1,0 +1,19 @@
+name: background-walking
+description: 'One simulator on a scripted walking route, backgrounded. The baseline: OS location delivery -> TaskManager -> engine/outbox -> native publish -> stash push, with a stash-only friend observer confirming real decrypt. Promoted from the original ios-background-location-e2e.sh.'
+kind: single
+devices: 1
+duration_seconds: 180
+route: walking
+background: true
+force_quit_after_seconds: 0
+thrash: false
+require_stash_observer: true
+assertions:
+  - action: bg.wake
+    min_count: 1
+  - action: publish.fix
+    status: ok
+    min_count: 1
+  - action: trail.push.app
+    status: ok
+    min_count: 1

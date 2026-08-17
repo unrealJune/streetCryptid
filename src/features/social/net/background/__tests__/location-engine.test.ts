@@ -8,7 +8,7 @@ import {
   type FixPublisher,
 } from '../location-engine';
 import { createSamplingPolicy } from '../sampling-policy';
-import { createTrailStore, InMemoryTrailStorage, SELF_AUTHOR } from '../trail-store';
+import { createTrailStore, InMemoryTrailStorage } from '../trail-store';
 import type { BatteryState } from '../types';
 
 /** The default cadence, and therefore the width of one publish slot in these tests. */
@@ -138,7 +138,7 @@ describe('location engine', () => {
     await engine.ingest(fix(SLOT, { lat: 41 }));
 
     expect(await outbox.pending()).toBe(2);
-    expect(await trail.rangeFor(SELF_AUTHOR, 0)).toHaveLength(0);
+    expect(await trail.selfTrail()).toHaveLength(0);
     expect(engine.getState().pending).toBe(2);
 
     publisher.setReady(true);
@@ -146,7 +146,7 @@ describe('location engine', () => {
     expect(n).toBe(2);
     expect(await outbox.pending()).toBe(0);
 
-    const points = await trail.rangeFor(SELF_AUTHOR, 0);
+    const points = await trail.selfTrail();
     expect(points.map((p) => p.seq)).toEqual([1, 2]);
     expect(publisher.seqs).toEqual([1, 2]);
     expect(engine.getState().pending).toBe(0);
@@ -184,7 +184,7 @@ describe('location engine', () => {
 
     await engine.ingest(fix(0));
     expect(await outbox.pending()).toBe(0);
-    expect(await trail.rangeFor(SELF_AUTHOR, 0)).toHaveLength(1);
+    expect(await trail.selfTrail()).toHaveLength(1);
     expect(engine.getState().pending).toBe(0);
   });
 

@@ -1,5 +1,5 @@
 import type { LocationFix } from '@/features/social/core/types';
-import { SELF_AUTHOR, type TrailStorage } from '@/features/social/net/background/trail-store';
+import { type TrailStorage } from '@/features/social/net/background/trail-store';
 
 import { H3_DISPLAY_RES } from '../core/cell-ladder';
 import type { CellIndex, H3Grid } from '../core/h3-grid';
@@ -121,7 +121,7 @@ class DbExplorationStore implements ExplorationStore {
   async backfillFromTrail(storage: TrailStorage): Promise<CellIndex[]> {
     const db = await this.db();
     const cursor = Number((await db.getKv(BACKFILL_CURSOR_KEY)) ?? 0);
-    const points = await storage.range(SELF_AUTHOR, cursor);
+    const points = await storage.selfRange(cursor);
     const added: CellIndex[] = [];
     let maxTs = cursor - 1;
     for (const point of points) {
@@ -130,7 +130,7 @@ class DbExplorationStore implements ExplorationStore {
       if (point.fix.ts > maxTs) maxTs = point.fix.ts;
     }
     if (points.length) {
-      // range() is inclusive, so resume strictly after the newest folded fix.
+      // selfRange() is inclusive, so resume strictly after the newest folded fix.
       await db.setKv(BACKFILL_CURSOR_KEY, String(maxTs + 1));
     }
     return added;

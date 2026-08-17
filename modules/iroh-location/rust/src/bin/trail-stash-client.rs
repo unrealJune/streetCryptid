@@ -20,15 +20,16 @@ const STATE_VERSION: u8 = 1;
 const APP_PACKAGE: &str = "com.unrealjune.streetcryptid";
 const DEFAULT_PAIR_TTL_SECONDS: u64 = 900;
 const DEFAULT_WATCH_INTERVAL_SECONDS: u64 = 10;
-const DEFAULT_SINCE_MINUTES: u64 = 60;
 const HTTP_TIMEOUT_SECONDS: u64 = 10;
+const NODE_OPERATION_TIMEOUT_SECONDS: u64 = 15;
+const SYNC_ATTEMPT_TIMEOUT_SECONDS: u64 = 15;
 const ONCE_RETRY_SECONDS: u64 = 2;
 const ONCE_MAX_ATTEMPTS: u64 = 15;
 
 #[derive(Parser)]
 #[command(
     name = "trail-stash-client",
-    about = "Pair with a streetCryptid phone and observe its location trail through trail-stash only"
+    about = "Pair with streetCryptid phones and observe their location trails through trail-stash only"
 )]
 struct Cli {
     /// Persistent keys, pair metadata, and isolated iroh replicas.
@@ -47,7 +48,12 @@ enum ClientCommand {
         #[arg(long)]
         adb: bool,
 
-        /// Replace an existing paired phone while retaining this CLI's identity.
+        /// Open the invite on an iOS Simulator with this UDID.
+        #[arg(long)]
+        simulator: Option<String>,
+
+        /// Re-pair a phone this CLI already knows, resetting its watch cursor. Pairing an
+        /// ADDITIONAL phone does not need this — the CLI holds many peers at once.
         #[arg(long)]
         force: bool,
 
@@ -60,7 +66,7 @@ enum ClientCommand {
         auto_sas: bool,
     },
 
-    /// Reconcile the paired phone's namespace with only the configured stash endpoint.
+    /// Reconcile every paired phone's namespace with only the configured stash endpoint.
     Watch {
         /// Sync once and exit instead of polling.
         #[arg(long)]
@@ -74,9 +80,9 @@ enum ClientCommand {
         #[arg(long, default_value_t = DEFAULT_WATCH_INTERVAL_SECONDS)]
         interval_seconds: u64,
 
-        /// Initial history window. Subsequent runs resume by sequence number.
-        #[arg(long, default_value_t = DEFAULT_SINCE_MINUTES)]
-        since_minutes: u64,
+        /// With --once, keep polling for a new fix until this timeout expires.
+        #[arg(long, default_value_t = 0)]
+        timeout_seconds: u64,
     },
 
     /// Show local pairing state, configured endpoints, and stash health.
@@ -88,7 +94,25 @@ struct ClientState {
     version: u8,
     identity_secret: String,
     recv_secret: String,
-    peer: Option<PeerState>,
+    /// Every phone this CLI is paired with. One identity, many friends — the same shape a real
+    /// device has, which is what makes it useful for validating a device that must serve several
+    /// peers at once (per-friend ratchet sessions and a multi-recipient wrap set, see
+    /// `docs/social/FORWARD-SECRECY.md` §4.1/§4.5).
+    ///
+    /// No migration from the older single-`peer` field: this is a developer debug client, and a
+    /// stale state directory simply reads as unpaired and re-pairs. `#[serde(default)]` is what
+    /// makes that self-healing rather than a parse error.
+    #[serde(default)]
+    peers: Vec<PeerState>,
+}
+
+impl ClientState {
+    /// Index of the peer with this endpoint id, if paired.
+    fn peer_index(&self, endpoint_id: &str) -> Option<usize> {
+        self.peers
+            .iter()
+            .position(|peer| peer.endpoint_id == endpoint_id)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -192,15 +216,27 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         ClientCommand::Pair {
             adb,
+            simulator,
             force,
             ttl_seconds,
             auto_sas,
-        } => run_pair(&state_dir, &config, adb, force, ttl_seconds, auto_sas).await,
+        } => {
+            run_pair(
+                &state_dir,
+                &config,
+                adb,
+                simulator.as_deref(),
+                force,
+                ttl_seconds,
+                auto_sas,
+            )
+            .await
+        }
         ClientCommand::Watch {
             once,
             json,
             interval_seconds,
-            since_minutes,
+            timeout_seconds,
         } => {
             run_watch(
                 &state_dir,
@@ -208,7 +244,7 @@ async fn run(cli: Cli) -> Result<()> {
                 once,
                 json,
                 interval_seconds,
-                since_minutes,
+                timeout_seconds,
             )
             .await
         }
@@ -220,6 +256,7 @@ async fn run_pair(
     state_dir: &Path,
     config: &RuntimeConfig,
     open_adb: bool,
+    simulator: Option<&str>,
     force: bool,
     ttl_seconds: u64,
     auto_sas: bool,
@@ -227,17 +264,16 @@ async fn run_pair(
     if ttl_seconds == 0 {
         bail!("pair invite TTL must be greater than zero");
     }
+    if open_adb && simulator.is_some() {
+        bail!("choose only one invite target: --adb or --simulator");
+    }
 
     let state_path = state_path(state_dir);
     let existing = load_state(&state_path)?;
-    if existing
-        .as_ref()
-        .and_then(|state| state.peer.as_ref())
-        .is_some()
-        && !force
-    {
-        bail!("a phone is already paired; pass --force to replace it");
-    }
+    // Pairing an ADDITIONAL phone is now the normal case, so an existing peer is not on its own a
+    // reason to refuse. `--force` is only needed to re-pair a phone this CLI already knows, which
+    // is checked after the handshake, once we actually know which endpoint answered.
+    let _ = &existing;
 
     let pair_replica = state_dir.join("pairing-replica");
     let (node, mut state) = create_node(existing.as_ref(), pair_replica)?;
@@ -276,9 +312,14 @@ async fn run_pair(
     if open_adb {
         open_pair_link_with_adb(&link)?;
         println!("Opened the invite on the ADB-connected phone.");
+    } else if let Some(udid) = simulator {
+        open_pair_link_with_simctl(udid, &link)?;
+        println!("Opened the invite on iOS Simulator {udid}.");
     } else {
         println!("ADB command:");
         println!("adb shell am start -a android.intent.action.VIEW -d \"{link}\" {APP_PACKAGE}");
+        println!("iOS Simulator command:");
+        println!("xcrun simctl openurl <udid> \"{link}\"");
     }
 
     let session_id = wait_for_pair_session(&node, Duration::from_secs(ttl_seconds)).await?;
@@ -300,7 +341,16 @@ async fn run_pair(
         last_seq: 0,
         last_fix_ts: None,
     };
-    state.peer = Some(peer.clone());
+    match state.peer_index(&peer.endpoint_id) {
+        // Re-pairing a phone we already know discards its `last_seq`, so require --force: without
+        // it a stray second pair would silently rewind the watch cursor and replay old fixes.
+        Some(_) if !force => bail!(
+            "phone {} is already paired; pass --force to re-pair it (pairing a DIFFERENT phone needs no flag)",
+            short_hex(&peer.endpoint_id)
+        ),
+        Some(index) => state.peers[index] = peer.clone(),
+        None => state.peers.push(peer.clone()),
+    }
     save_state(&state_path, &state)?;
 
     let stash_replica = state_dir.join("stash-replica");
@@ -337,42 +387,70 @@ async fn run_watch(
     once: bool,
     json: bool,
     interval_seconds: u64,
-    since_minutes: u64,
+    timeout_seconds: u64,
 ) -> Result<()> {
     if !once && interval_seconds == 0 {
         bail!("watch interval must be greater than zero");
     }
+    if !once && timeout_seconds > 0 {
+        bail!("watch timeout requires --once");
+    }
+    let deadline =
+        (timeout_seconds > 0).then(|| Instant::now() + Duration::from_secs(timeout_seconds));
 
     let state_path = state_path(state_dir);
     let mut state = load_state(&state_path)?.ok_or_else(|| anyhow!("no CLI state; pair first"))?;
-    let peer = state
-        .peer
-        .clone()
-        .ok_or_else(|| anyhow!("no paired phone; run the pair command first"))?;
-    let peer_author =
-        hex_decode(&peer.endpoint_id).context("stored phone endpoint id is invalid")?;
+    if state.peers.is_empty() {
+        bail!("no paired phone; run the pair command first");
+    }
+    let peers = state.peers.clone();
+    // Decode every author up front so a corrupt state file fails before we start a node.
+    let peer_authors = peers
+        .iter()
+        .map(|peer| {
+            hex_decode(&peer.endpoint_id).with_context(|| {
+                format!(
+                    "stored phone endpoint id is invalid: {}",
+                    short_hex(&peer.endpoint_id)
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let watch_root = state_dir.join("stash-replica");
     if watch_root.exists() {
         fs::remove_dir_all(&watch_root)
             .with_context(|| format!("clearing {}", watch_root.display()))?;
     }
 
-    register_namespace(config, &peer.trail_ticket)
-        .await
-        .context("registering the phone namespace with trail-stash")?;
+    // One namespace per paired phone — each device writes its own trail, so they must all be
+    // registered with the stash before we can reconcile any of them.
+    for peer in &peers {
+        register_namespace(config, &peer.trail_ticket)
+            .await
+            .with_context(|| {
+                format!(
+                    "registering namespace for phone {}",
+                    short_hex(&peer.endpoint_id)
+                )
+            })?;
+    }
 
     let stash_endpoint = config.stash_endpoint_short()?;
-    println!(
-        "Watching phone {} through stash {} only. No gossip subscription or phone ticket is used.",
-        short_hex(&peer.endpoint_id),
+    let watch_message = format!(
+        "Watching {} phone(s) [{}] through stash {} only. No gossip subscription or phone ticket is used.",
+        peers.len(),
+        peers
+            .iter()
+            .map(|peer| short_hex(&peer.endpoint_id))
+            .collect::<Vec<_>>()
+            .join(", "),
         stash_endpoint
     );
-
-    let initial_since = if peer.last_seq == 0 && since_minutes > 0 {
-        now_ms().saturating_sub(since_minutes.saturating_mul(60_000))
+    if json {
+        eprintln!("{watch_message}");
     } else {
-        0
-    };
+        println!("{watch_message}");
+    }
 
     let mut sync_attempt = 0u64;
     loop {
@@ -380,48 +458,79 @@ async fn run_watch(
         // store per attempt ensures the configured stash remains the only possible dial target.
         sync_attempt += 1;
         let watch_replica = watch_root.join(format!("attempt-{}-{sync_attempt}", now_ms()));
-        let (node, _) = create_node(Some(&state), watch_replica.clone())?;
+        let pairing_replica = watch_root
+            .parent()
+            .ok_or_else(|| anyhow!("observer state directory has no parent"))?
+            .join("pairing-replica");
+        let node = create_watch_node(&state, pairing_replica)?;
         configure_node_telemetry(&node, config);
-        node.start(
-            config.relay_urls.clone(),
-            config.relay_token.clone(),
-            true,
-            true,
-            true,
+        eprintln!("[watch] starting isolated iroh node (attempt {sync_attempt})");
+        tokio::time::timeout(
+            Duration::from_secs(NODE_OPERATION_TIMEOUT_SECONDS),
+            node.start(
+                config.relay_urls.clone(),
+                config.relay_token.clone(),
+                true,
+                true,
+                true,
+            ),
         )
         .await
+        .context("starting the stash-only node timed out")?
         .context("starting the stash-only node")?;
+        eprintln!("[watch] isolated iroh node ready (attempt {sync_attempt})");
 
         let attempt = async {
-            let fixes = node
-                .sync_trail_via_only(
-                    initial_since,
-                    peer.trail_ticket.clone(),
-                    config.stash_ticket.clone(),
+            // Reconcile each paired phone's namespace in turn and merge the results. Every fix is
+            // still checked against the author of the namespace it came from, so one phone's trail
+            // can never be attributed to another.
+            let mut fixes = Vec::new();
+            for (peer, peer_author) in peers.iter().zip(peer_authors.iter()) {
+                let peer_fixes = tokio::time::timeout(
+                    Duration::from_secs(SYNC_ATTEMPT_TIMEOUT_SECONDS),
+                    node.sync_latest_via_only(
+                        peer.trail_ticket.clone(),
+                        config.stash_ticket.clone(),
+                        config.stash_url.clone(),
+                        config.stash_psk.clone(),
+                    ),
                 )
                 .await
-                .context("direct stash-only trail reconciliation")?;
-            if fixes
-                .iter()
-                .any(|fix| fix.author.as_slice() != peer_author.as_slice())
-            {
-                bail!("stash returned a decryptable fix for an unexpected author");
+                .with_context(|| {
+                    format!(
+                        "direct stash-only trail reconciliation timed out for phone {}",
+                        short_hex(&peer.endpoint_id)
+                    )
+                })?
+                .with_context(|| {
+                    format!(
+                        "direct stash-only trail reconciliation for phone {}",
+                        short_hex(&peer.endpoint_id)
+                    )
+                })?;
+                if peer_fixes
+                    .iter()
+                    .any(|fix| fix.author.as_slice() != peer_author.as_slice())
+                {
+                    bail!(
+                        "stash returned a decryptable fix for an unexpected author in phone {}'s namespace",
+                        short_hex(&peer.endpoint_id)
+                    );
+                }
+                fixes.extend(peer_fixes);
             }
             Ok::<_, anyhow::Error>(fixes)
         }
         .await;
-        let shutdown = node.shutdown().await.context("shutting down watcher node");
-        if let Err(error) = fs::remove_dir_all(&watch_replica) {
-            tracing::warn!(
-                path = %watch_replica.display(),
-                error = %error,
-                "could not remove the isolated watch replica"
-            );
-        }
-        shutdown?;
         let mut fixes = match attempt {
             Ok(fixes) => fixes,
             Err(error) => {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(NODE_OPERATION_TIMEOUT_SECONDS),
+                    node.shutdown(),
+                )
+                .await;
+                let _ = fs::remove_dir_all(&watch_replica);
                 eprintln!(
                     "[sync-error] attempt={} stash={} error={error:#}",
                     sync_attempt, stash_endpoint
@@ -432,7 +541,10 @@ async fn run_watch(
                     error = %error,
                     "stash.cli.sync_failed"
                 );
-                if once && sync_attempt >= ONCE_MAX_ATTEMPTS {
+                if once
+                    && (sync_attempt >= ONCE_MAX_ATTEMPTS
+                        || deadline.is_some_and(|deadline| Instant::now() >= deadline))
+                {
                     return Err(error).context("stash-only sync retry budget exhausted");
                 }
                 tokio::time::sleep(Duration::from_secs(if once {
@@ -447,14 +559,18 @@ async fn run_watch(
         fixes.sort_by_key(|fix| fix.seq);
         let recovered = fixes.len() as u64;
 
-        let last_seq = state
-            .peer
-            .as_ref()
-            .map(|saved| saved.last_seq)
-            .unwrap_or_default();
+        // `seq` is monotonic PER AUTHOR, not globally, so the cursor has to be per peer. A single
+        // shared `last_seq` would let a chatty phone's sequence number suppress a quieter phone's
+        // genuinely new fixes (and vice versa) — the fixes would arrive, be filtered out, and the
+        // watch would look idle while the pipeline was healthy.
         let new_fixes = fixes
             .into_iter()
-            .filter(|fix| fix.seq > last_seq)
+            .filter(|fix| {
+                let author = hex_encode(&fix.author);
+                state
+                    .peer_index(&author)
+                    .is_some_and(|index| fix.seq > state.peers[index].last_seq)
+            })
             .collect::<Vec<_>>();
 
         for incoming in &new_fixes {
@@ -484,30 +600,71 @@ async fn run_watch(
             );
         }
 
-        if let Some(latest) = new_fixes.last() {
-            if let Some(saved) = state.peer.as_mut() {
-                saved.last_seq = latest.seq;
-                saved.last_fix_ts = Some(latest.fix.ts);
+        if !new_fixes.is_empty() {
+            // Advance each phone's own cursor to the highest seq seen for it this round. `fixes`
+            // was sorted by seq across all authors, so take a max per author rather than assuming
+            // the last element belongs to any particular phone.
+            for fix in &new_fixes {
+                let author = hex_encode(&fix.author);
+                if let Some(index) = state.peer_index(&author) {
+                    let saved = &mut state.peers[index];
+                    if fix.seq > saved.last_seq {
+                        saved.last_seq = fix.seq;
+                        saved.last_fix_ts = Some(fix.fix.ts);
+                    }
+                }
             }
             save_state(&state_path, &state)?;
         }
 
         if !json {
             println!(
-                "[sync] strict_peer={} recovered={} new={} last_seq={}",
+                "[sync] strict_peer={} recovered={} new={} cursors=[{}]",
                 stash_endpoint,
                 recovered,
                 new_fixes.len(),
                 state
-                    .peer
-                    .as_ref()
-                    .map(|saved| saved.last_seq)
-                    .unwrap_or_default()
+                    .peers
+                    .iter()
+                    .map(|saved| format!(
+                        "{}:{}",
+                        short_hex(&saved.endpoint_id),
+                        saved.last_seq
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
         }
 
-        if once {
+        if once && !new_fixes.is_empty() {
+            io::stdout().flush().context("flushing fix output")?;
+            return Ok(());
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(NODE_OPERATION_TIMEOUT_SECONDS),
+            node.shutdown(),
+        )
+        .await
+        .context("shutting down watcher node timed out")?
+        .context("shutting down watcher node")?;
+        if let Err(error) = fs::remove_dir_all(&watch_replica) {
+            tracing::warn!(
+                path = %watch_replica.display(),
+                error = %error,
+                "could not remove the isolated watch replica"
+            );
+        }
+
+        if once && (!new_fixes.is_empty() || deadline.is_none()) {
             break;
+        }
+        if once {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                bail!("no new stash fix received within {timeout_seconds} seconds");
+            }
+            tokio::time::sleep(Duration::from_secs(ONCE_RETRY_SECONDS)).await;
+            continue;
         }
 
         tokio::select! {
@@ -532,24 +689,35 @@ async fn run_status(state_dir: &Path, config: &RuntimeConfig) -> Result<()> {
     println!("stash_url={}", config.stash_url);
     println!("stash_endpoint={}", config.stash_endpoint_short()?);
     println!("otel_configured={}", config.otel_endpoint.is_some());
+    // Our OWN endpoint id, so a caller can ask the other side of a pairing whether it still
+    // lists us. `paired=` only reflects what THIS state dir believes; a phone whose friend
+    // records were cleared (scripts/e2e reset the pool between runs) leaves the CLI claiming a
+    // pairing that no longer exists, and the failure then shows up much later as a peer that
+    // never decrypts anything. Cheap to derive — the endpoint id is just the ed25519 public key
+    // of the stored identity secret, so no node has to be constructed to print it.
+    if let Some(saved) = state.as_ref() {
+        println!("self_endpoint={}", self_endpoint_short(saved)?);
+    }
 
-    match state.and_then(|saved| saved.peer) {
-        Some(peer) => {
-            println!("paired=true");
-            println!("phone_endpoint={}", short_hex(&peer.endpoint_id));
-            println!(
-                "phone_handle={}",
-                peer.profile_handle.as_deref().unwrap_or("unknown")
-            );
-            println!("last_seq={}", peer.last_seq);
-            println!(
-                "last_fix_ts={}",
-                peer.last_fix_ts
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".into())
-            );
-        }
-        None => println!("paired=false"),
+    let peers = state.map(|saved| saved.peers).unwrap_or_default();
+    // `paired=` stays a plain true/false so existing scripts that grep for `^paired=true` keep
+    // working (see scripts/e2e/ensure-stash-observer.sh); the per-phone lines are indexed because
+    // there can now be several.
+    println!("paired={}", !peers.is_empty());
+    println!("peer_count={}", peers.len());
+    for (index, peer) in peers.iter().enumerate() {
+        println!("phone{index}_endpoint={}", short_hex(&peer.endpoint_id));
+        println!(
+            "phone{index}_handle={}",
+            peer.profile_handle.as_deref().unwrap_or("unknown")
+        );
+        println!("phone{index}_last_seq={}", peer.last_seq);
+        println!(
+            "phone{index}_last_fix_ts={}",
+            peer.last_fix_ts
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".into())
+        );
     }
 
     let response = http_client()?
@@ -584,9 +752,30 @@ fn create_node(
         version: STATE_VERSION,
         identity_secret: hex_encode(&node.identity_secret()),
         recv_secret: hex_encode(&node.recv_secret()),
-        peer: None,
+        peers: Vec::new(),
     });
     Ok((node, next_state))
+}
+
+/// Short form of this client's own endpoint id, derived from the stored identity secret.
+fn self_endpoint_short(state: &ClientState) -> Result<String> {
+    let secret = hex_decode(&state.identity_secret).context("stored identity secret is invalid")?;
+    let bytes: [u8; 32] = secret
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("stored identity secret is not 32 bytes"))?;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&bytes);
+    Ok(short_hex(&hex_encode(signing.verifying_key().as_bytes())))
+}
+
+fn create_watch_node(state: &ClientState, data_dir: PathBuf) -> Result<Arc<LocationNode>> {
+    fs::create_dir_all(&data_dir)
+        .with_context(|| format!("creating replica directory {}", data_dir.display()))?;
+    let identity =
+        hex_decode(&state.identity_secret).context("stored identity secret is invalid")?;
+    let recv = hex_decode(&state.recv_secret).context("stored receiving secret is invalid")?;
+    LocationNode::new_with_data_dir(Some(identity), Some(recv), data_dir)
+        .context("constructing the ephemeral stash watcher")
 }
 
 fn configure_node_telemetry(node: &LocationNode, config: &RuntimeConfig) {
@@ -596,7 +785,7 @@ fn configure_node_telemetry(node: &LocationNode, config: &RuntimeConfig) {
     let instance = format!("stash-cli-{}", short_hex(&hex_encode(&node.endpoint_id())));
     let active = configure_telemetry(endpoint.clone(), instance);
     if active {
-        println!("OTEL export enabled for the CLI core.");
+        eprintln!("OTEL export enabled for the CLI core.");
     }
 }
 
@@ -766,6 +955,17 @@ fn open_pair_link_with_adb(link: &str) -> Result<()> {
         )?;
     if !status.success() {
         bail!("adb failed to open the pairing link ({status})");
+    }
+    Ok(())
+}
+
+fn open_pair_link_with_simctl(udid: &str, link: &str) -> Result<()> {
+    let status = Command::new("xcrun")
+        .args(["simctl", "openurl", udid, link])
+        .status()
+        .context("running xcrun simctl; verify Xcode is installed and the simulator is booted")?;
+    if !status.success() {
+        bail!("simctl failed to open the pairing link ({status})");
     }
     Ok(())
 }
@@ -1039,17 +1239,44 @@ mod tests {
             version: STATE_VERSION,
             identity_secret: "11".repeat(32),
             recv_secret: "22".repeat(32),
-            peer: Some(PeerState {
-                endpoint_id: "33".repeat(32),
-                trail_ticket: "doc-ticket".into(),
-                profile_handle: Some("@phone".into()),
-                paired_at_ms: 1,
-                last_seq: 2,
-                last_fix_ts: Some(3),
-            }),
+            peers: vec![
+                PeerState {
+                    endpoint_id: "33".repeat(32),
+                    trail_ticket: "doc-ticket".into(),
+                    profile_handle: Some("@phone".into()),
+                    paired_at_ms: 1,
+                    last_seq: 2,
+                    last_fix_ts: Some(3),
+                },
+                PeerState {
+                    endpoint_id: "44".repeat(32),
+                    trail_ticket: "doc-ticket-2".into(),
+                    profile_handle: Some("@phone2".into()),
+                    paired_at_ms: 4,
+                    last_seq: 5,
+                    last_fix_ts: Some(6),
+                },
+            ],
         };
         let encoded = serde_json::to_vec(&state).unwrap();
         let decoded: ClientState = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(decoded.peer.unwrap().last_seq, 2);
+        assert_eq!(decoded.peers.len(), 2);
+        assert_eq!(decoded.peers[0].last_seq, 2);
+        assert_eq!(decoded.peers[1].last_seq, 5);
+        // Cursors are addressed by endpoint id, which is what keeps one phone's seq from
+        // advancing another's.
+        assert_eq!(decoded.peer_index(&"44".repeat(32)), Some(1));
+        assert_eq!(decoded.peer_index(&"99".repeat(32)), None);
+    }
+
+    #[test]
+    fn state_without_peers_field_reads_as_unpaired() {
+        // A state directory written before multi-peer support has `peer`, not `peers`. There is
+        // deliberately no migration (this is a debug client): serde ignores the unknown field and
+        // `#[serde(default)]` yields an empty list, so the CLI reports unpaired and re-pairs
+        // rather than failing to parse.
+        let legacy = r#"{"version":1,"identity_secret":"aa","recv_secret":"bb","peer":null}"#;
+        let decoded: ClientState = serde_json::from_str(legacy).unwrap();
+        assert!(decoded.peers.is_empty());
     }
 }

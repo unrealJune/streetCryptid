@@ -147,6 +147,15 @@ the JS thread, stalled tile loading, and drained the battery. See
 pool member; a rejoining B runs range-based reconciliation against C/D/A, pulls the
 envelopes it missed, and decrypts its own wraps.
 
+**That replication is A's job, on publish.** A's namespace is live-synced (`push_trail` →
+`start_sync`) to the trail stash **and to every pool member**, not to the stash alone — so C holds
+A's envelope as A publishes it, and can serve it to B the moment A goes dark. It has to work this
+way round: a pool member holds a READ ticket and cannot write to A's namespace, so an envelope that
+reached C over live gossip lands in C's app storage and never in the replica C would serve from.
+When A pushed only to the stash, C could relay a fix solely if C happened to reconcile with A while
+A was still up — recovery "against C/D/A" was true of the reader and false of the writer, and with
+the stash off there was no durable copy anywhere.
+
 **Revocation works** because access is the `Wrap`, not swarm membership: to unshare with
 C, A simply **stops emitting C's `Wrap`**. Since every fix uses a **fresh random `K`**,
 "no wrap ⇒ no key ⇒ ciphertext is useless to C," even if C keeps replicating the doc.
@@ -157,6 +166,8 @@ C, A simply **stops emitting C's `Wrap`**. Since every fix uses a **fresh random
                  ┌──────────── A (writer) ────────────┐
    GPS fix ─▶ build Envelope(active recipients) ─▶ sign ─┬─▶ gossip.broadcast(topic)   (live)
                                                          └─▶ docs.set(author/seq, bytes) (durable)
+                                                                     │  push_trail: live-sync A's namespace
+                                                                     │  to the stash AND every pool member
                                                                      │  replicate (range reconciliation)
                       B online: gossip Received ─▶ verify sig ─▶ unwrap(myWrap) ─▶ decrypt ─▶ dot
                       B rejoins: docs sync missed ─▶ (same) ─▶ backfill trail
@@ -204,25 +215,24 @@ both the live (gossip) and durable (docs) paths. Design of the JS layer lives un
 GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ LocationSharingService.publishFix
    expo-location            │ slot gate +      │ durable queue,   ├─▶ gossip.broadcast   (live)
    + TaskManager            │ SamplingPolicy   │ survives resume  └─▶ docs.write(a/seq)  (durable)
-   + Android FG service     │ (fixed cadence)  ▼                        │ range reconciliation
+   + Android FG service     │ (slot cadence)   ▼                        │ range reconciliation
    ▲                        │        ▲    TrailStore (local, history) ◀─ backfill onFix (sync)
    └── CadenceController ◀──┘   BatterySource
        re-arms OS on decision change   (expo-battery)
 ```
 
-- **Fixed cadence is a security property, not a tuning choice.** Envelopes are E2E-encrypted, but
-  the trail-stash and any network observer still see when they arrive. The old ladder (~18s driving
-  / ~45s walking / ~180s stationary, ×3 under Low-Power Mode) therefore published _what the user was
-  doing_ in the clear alongside the ciphertext — inter-arrival timing alone separates driving from
-  walking from sitting still. Everything below follows from closing that channel: nothing about
-  movement, app state, or battery may change the publish rate.
+- **The slot grid bounds publication; the OS wake cadence is movement-driven.** Envelopes are
+  E2E-encrypted, but their arrival timing is visible. A perfectly fixed wire cadence hid motion at
+  the cost of effectively continuous Core Location on iOS, because iOS ignores `timeInterval`.
+  Ambient sharing now accepts that movement timing is observable, as it is in Life360-class
+  products, and prioritizes sustainable battery use. Live mode remains explicit and bounded.
 - **Sampling** (`sampling-policy.ts`): one fix per `intervalMs` — user-selectable 1/5/15 min,
   default 5 — at balanced (~100m) accuracy, tuned as an _ambient_ sharer (Life360 / Find-My class),
   not a navigator. Battery moves **accuracy only** (→ `low` under ≤20% or Low-Power Mode, cancelled
   by charging) and, below 5% unplugged, suspends outright — a hard stop that reads as "the phone
   died" rather than a slow-down that would encode the charge level in the cadence. There is
-  deliberately **no distance filter and no deferred-updates batching**: both gate delivery on
-  movement, which would re-open the leak at the platform layer. A bounded, on-demand **live mode**
+  uses a 100 m distance filter, background deferral up to the chosen interval, and iOS automatic
+  pausing so a stationary phone does not keep GPS and JS hot. A bounded, on-demand **live mode**
   (`SamplingInputs.live` → `LocationEngine.setLiveMode` → `LocationSharingService.setLiveTracking`)
   swaps in a real-time ~4s/high cadence for the "a friend is actively watching" case. It is the one
   sanctioned exception and it _is_ visible on the wire as such. Authorisation is **the sharing grant
@@ -239,26 +249,22 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   fixes' combined error radii, so a stationary phone's jitter is not mistaken for a teleport. After
   `acceptAnythingAfterMs` (15 min) with nothing accepted it takes what it can get, because a coarse
   position beats a frozen trail. **A rejected fix must never silence a slot**: the gate sits before
-  `lastKnownFix`, never before the publish, so a stretch of bad GPS looks exactly like a stretch of
-  sitting still on the wire. Were it otherwise, "no envelope" would mean "this person is indoors /
-  underground", which is the same class of inference the fixed cadence exists to prevent. The
-  requested accuracy tier must never be coarser than `maxAccuracyM`, or we would spend battery on
-  fixes we then discard — which is why `lowBatteryAccuracy` is `balanced` and not `low`.
+  `lastKnownFix`, never before the publish, so an awake runtime can reuse the last good coordinate
+  rather than emit a known-bad one. The requested accuracy tier must never be coarser than
+  `maxAccuracyM`, or we would spend battery on fixes we then discard — which is why
+  `lowBatteryAccuracy` is `balanced` and not `low`.
 - **Slot quantisation** (`location-engine.ts`): the engine publishes on wall-clock boundaries of
   `intervalMs`, not on fix arrival. Extra fixes within a slot are absorbed into `lastKnownFix`; a
-  slot that produces no fix re-publishes `lastKnownFix` **verbatim, original `ts` intact**, so
-  silence never means "stationary" while friends still see a stale position as stale. Missed slots
-  are backfilled on the next wake up to `MAX_BACKFILL_MS` (30 min) — beyond that the arrival burst
-  reveals the outage anyway, so filling hours of duplicates buys nothing. `LocationEngine.heartbeat`
-  drives this from a timer at the interval and from every OS background wake. Note the outbox's
+  slot that produces no fix can re-publish `lastKnownFix` **verbatim, original `ts` intact**, while
+  the runtime remains awake. Missed slots are backfilled on the next wake up to `MAX_BACKFILL_MS`
+  (30 min). `LocationEngine.heartbeat` drives this from a timer and every OS background wake. Note
+  the outbox's
   near-duplicate **coalescing is disabled** (`background-outbox.ts`): left on, it would collapse a
   backfill replay into a single envelope.
-- **iOS/Android parity is a correctness requirement.** If a stationary iPhone went quiet while a
-  stationary Android kept emitting, silence would still mean "not moving" on iOS and the leak would
-  be only half closed. `timeInterval` is Android-only, so parity comes from `distanceInterval: 0`
-  plus `pausesUpdatesAutomatically: false` on both: the OS keeps delivering while stationary, the
-  process stays alive, and the JS slot gate produces the identical uniform series. What differs is
-  cost, not behaviour — Android's OS paces natively, iOS delivers continuously and we discard in JS.
+- **iOS is event-driven, not timer-driven.** `timeInterval` is Android-only. On iOS the ambient
+  task uses `distanceInterval: 100`, deferred updates, and `pausesUpdatesAutomatically: true`.
+  The 200 m revive fence can relaunch a normally terminated app after movement, while periodic
+  refresh is a best-effort stationary backstop. A user force-quit remains an iOS hard stop.
 - **The visible indicators** are where the platforms genuinely diverge. iOS: we set
   `showsBackgroundLocationIndicator: false`; per Apple QA1965 the blue pill is mandatory only for
   _when-in-use_ apps, so an "Always"-authorized app can leave it off (we were opting in). Android:
@@ -286,13 +292,17 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   (offline / process death). A mounted runtime publishes TaskManager batches immediately; a fresh
   headless context restores the persisted profile, keys, sharing pool, and minimal iroh publisher
   before draining the queue.
-- **Push-to-stash is explicit** (`pushTrail` → native `trail.push`): `docsWrite` writes only the
-  LOCAL replica. iroh-docs broadcasts a `LocalInsert` **only** for namespaces its live engine has
-  marked as syncing, which happens on `start_sync` and nowhere else — so a context that publishes
-  without calling `pushTrail`/`syncTrail` strands every envelope on the device. Publish paths must
-  therefore **drain, then push** (`LocationEngine.flush`, `flushBackgroundOutboxHeadless`). Ordering
-  is load-bearing: syncing _before_ the drain leaves that wake's fixes for the next OS wake, which
-  is what produced hour-long gaps in friends' trails while both phones looked healthy.
+- **Push is explicit, and it addresses the whole pool** (`pushTrail` → native `trail.push`):
+  `docsWrite` writes only the LOCAL replica. iroh-docs broadcasts a `LocalInsert` **only** for
+  namespaces its live engine has marked as syncing, which happens on `start_sync` and nowhere else
+  — so a context that publishes without calling `pushTrail`/`syncTrail` strands every envelope on
+  the device. The peer list is the stash **and every pool member**, mirroring `syncTrail`'s: an
+  earlier revision pushed only to the stash, so a friend held the author's entries solely if it
+  happened to dial the author during a reconciliation window, and with the stash off nothing
+  durable existed anywhere (§6). Publish paths must therefore **drain, then push**
+  (`LocationEngine.flush`, `flushBackgroundOutboxHeadless`). Ordering is load-bearing: syncing
+  _before_ the drain leaves that wake's fixes for the next OS wake, which is what produced
+  hour-long gaps in friends' trails while both phones looked healthy.
 - **Headless must re-open friend namespaces** (`restorePool` → `importFriendTrails`): native
   `syncTrail` reconciles the namespaces in its handle cache, and a fresh node starts with only our
   own in it. Without re-importing each friend's `docTicket`, a background backfill runs, reports
@@ -514,7 +524,7 @@ B (watcher)                                     A (subject)
   build ControlMsg{kind: LiveRequest, ts, ttl, nonce}
   seal for A only  ─────────────────────────────────────────────┐
   docs_write_control → OWN namespace, key `ctl/hex(B)`          │  replicates B's namespace already
-  push_trail → stash  ─────────────────────────────────────────▶│
+  push_trail → stash + pool  ──────────────────────────────────▶│
                                                     every 5 min: syncTrail → read_control(B)
                                                     evaluate: sharing? fresh? new nonce?
                                                     → setLiveTracking(true, ttl)
@@ -547,8 +557,10 @@ B (watcher)                                     A (subject)
   and needlessly chatty on the short one, and it keeps this read traffic decoupled from the publish
   cadence (a security property, §9). A constant-rate poll reveals nothing about movement. This is
   what makes the feature "ask to watch", not "watch now" — the UI says so.
-- **Requires the stash.** `pushTrail` no-ops without one, and peer-only delivery needs both phones
-  online and reconciling simultaneously — the exact condition the stash exists to stop depending on.
+- **Better with the stash, but no longer dependent on it.** `pushTrail` addresses every pool member,
+  so a request reaches the subject directly whenever both phones are reachable at some point before
+  the next poll; the stash is what removes the "at some point" — it is always up, so delivery never
+  waits on a moment when both devices happen to be online.
 - **Polling runs only while background sharing is on**, since there is otherwise nothing to make
   live. A request to someone with sharing off fails visibly rather than hanging.
 - **iOS**: `docsWriteControl` / `readControl` are absent until `just bindgen-ios` runs on macOS, so

@@ -22,15 +22,11 @@ import type { BatteryState, SamplingDecision } from './types';
  *     → for each whole interval slot that has elapsed: outbox.enqueue
  *     → if publisher.isReady: flush → for each: publisher.publishFix(fix) → trail.appendOwn(fix, seq)
  *
- * **Slot quantisation is the privacy mechanism.** Fixes arrive at whatever rate the OS feels like —
- * every few seconds from the foreground watch, in batches from the background task, not at all when
- * a phone is asleep. Publishing them as they arrive would put that rhythm on the wire, and the
- * rhythm is a readout of what the user is doing (walking/driving/still/app-open). So the engine
- * publishes on wall-clock boundaries of `policy.config.intervalMs` instead: exactly one envelope per
- * slot, whatever happened during it. Extra fixes in a slot are absorbed into `lastKnownFix`; a slot
- * with no fix at all re-publishes `lastKnownFix` verbatim as a heartbeat, so silence never means
- * "stationary". Payload timestamps are untouched, so a stale heartbeat still reads as stale to
- * friends — only the *cadence* is synthetic, and only the cadence is what an observer can see.
+ * **Slot quantisation bounds publication.** Fixes arrive at whatever rate the OS feels like. The
+ * engine publishes at most once per wall-clock interval slot; extra fixes are absorbed into
+ * `lastKnownFix`. When the runtime is awake, an elapsed slot with no new fix may reuse that fix as a
+ * heartbeat. iOS may suspend the runtime while stationary, so ambient wire timing is intentionally
+ * movement-influenced in exchange for sustainable battery use.
  *
  * Trail append happens at *publish* time (not capture) so our own trail uses the same `seq` that
  * goes on the wire — keeping it consistent with what friends receive/backfill. Offline captures
@@ -119,10 +115,8 @@ export interface LocationEngine {
    */
   ingest(fix: LocationFix, parent?: SpanContext): Promise<SamplingDecision>;
   /**
-   * Publish any due slots *without* a new fix, re-using the last known position. This is what keeps
-   * the cadence constant while the user is stationary — without it, standing still would stop the
-   * envelopes and silence would be as informative as movement. Call it on a timer at the sampling
-   * interval, and on every OS background wake.
+   * Publish due slots *without* a new fix, re-using the last known position. Called on a timer while
+   * the runtime is alive and on every OS background wake; iOS may suspend the timer while stationary.
    *
    * No-op before the first fix, when suspended, or when the current slot is already published.
    * Returns the number of envelopes enqueued.

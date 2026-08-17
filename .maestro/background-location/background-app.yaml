@@ -1,0 +1,12 @@
+appId: com.unrealjune.streetcryptid
+---
+- launchApp:
+    clearState: false
+- runFlow:
+    when:
+      visible: 'Go home'
+    commands:
+      - tapOn: 'Close'
+- assertVisible:
+    id: 'map-view'
+- pressKey: HOME

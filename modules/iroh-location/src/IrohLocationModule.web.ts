@@ -15,6 +15,7 @@ import type {
   BluetoothRadioState,
   BumpResolution,
   NativeIncomingFix,
+  NativeRatchetEvent,
   NativeLocationFix,
   NodeKeys,
   PairEvent,
@@ -24,6 +25,7 @@ import type {
   PairStateRecord,
   ProfileView,
   SasChallenge,
+  TrailReplicaAuthor,
   TransportDiagnostics,
   TransportConfig,
 } from './IrohLocation.types';
@@ -143,18 +145,52 @@ export class IrohLocationNativeModule
     return id;
   }
 
+  // ── NO FORWARD SECRECY ON WEB ───────────────────────────────────────────────────────────────
+  //
+  // Native moved every fix lane to envelope v3 (ratcheted, FORWARD-SECRECY.md §4.7). This path
+  // did not, and cannot as it stands: a Double Ratchet needs sequential state that survives a
+  // reload, and the WASM build has no filesystem — its replica and blob store are both in-memory
+  // and vanish with the tab. Sequential state kept there would rewind on every reload, which is
+  // key reuse rather than a missing feature.
+  //
+  // So web still seals v2/HPKE to long-term receiving keys, and `recipientsHex` here really is
+  // receiving keys, not endpoint ids. Consequences, stated rather than buried:
+  //
+  //   * a web peer's fixes are NOT forward-secret, and a native peer cannot open them at all
+  //     (native reads v3 only) — web is a development surface, not a way to share location;
+  //   * the dropped-recipient array these return is always empty, because nothing here can be
+  //     dropped for want of a session.
+  //
+  // Making web a real peer again means either a persistent store (IndexedDB-backed, with the
+  // rollback problem solved) or accepting that it only ever watches. That is a product decision,
+  // not a port.
+
   async publish(
     subscriptionId: string,
     seq: number,
-    epoch: number,
     fix: NativeLocationFix,
     recipientsHex: string[],
     _traceparent?: string | null
-  ): Promise<void> {
+  ): Promise<string[]> {
     await ensureWasm();
     const sub = this.subscriptions.get(subscriptionId)?.sub;
     if (!sub) throw new Error(`Unknown IrohLocation subscription: ${subscriptionId}`);
-    await sub.publish(seq, epoch, fix, recipientsHex);
+    await sub.publish(seq, fix, recipientsHex);
+    return [];
+  }
+
+  async publishNull(
+    subscriptionId: string,
+    seq: number,
+    ts: number,
+    recipientsHex: string[],
+    _traceparent?: string | null
+  ): Promise<string[]> {
+    await ensureWasm();
+    const sub = this.subscriptions.get(subscriptionId)?.sub;
+    if (!sub) throw new Error(`Unknown IrohLocation subscription: ${subscriptionId}`);
+    await sub.publish_null(seq, ts, recipientsHex);
+    return [];
   }
 
   async unsubscribe(subscriptionId: string): Promise<void> {
@@ -176,36 +212,35 @@ export class IrohLocationNativeModule
   async docsWrite(
     subscriptionId: string,
     seq: number,
-    epoch: number,
     fix: NativeLocationFix,
     recipientsHex: string[],
     _traceparent?: string | null
-  ): Promise<void> {
+  ): Promise<string[]> {
     await ensureWasm();
-    await this.requireNode().docs_write(subscriptionId, seq, epoch, fix, recipientsHex);
+    await this.requireNode().docs_write(subscriptionId, seq, fix, recipientsHex);
+    return [];
   }
 
-  async syncTrail(
-    sinceTs: number,
-    peerTicket: string | null,
+  async docsWriteNull(
+    subscriptionId: string,
+    seq: number,
+    ts: number,
+    recipientsHex: string[],
     _traceparent?: string | null
-  ): Promise<void> {
+  ): Promise<string[]> {
     await ensureWasm();
-    await this.requireNode().sync_trail(sinceTs, peerTicket ?? undefined);
+    await this.requireNode().docs_write_null(subscriptionId, seq, ts, recipientsHex);
+    return [];
   }
 
-  async pushTrail(peerTicket: string | null, _traceparent?: string | null): Promise<void> {
+  async syncLatest(peerTickets: string[], _traceparent?: string | null): Promise<void> {
     await ensureWasm();
-    const node = this.requireNode();
-    // `web/` is a generated build output (`just build-wasm`); a bundle built before `push_trail`
-    // existed still has `sync_trail`, which reconciles every namespace — including our own — and
-    // so performs the same `start_sync` that gets our entries to the stash, just less directly.
-    const push = (node as { push_trail?: (peerTicket?: string) => Promise<void> }).push_trail;
-    if (typeof push === 'function') {
-      await push.call(node, peerTicket ?? undefined);
-      return;
-    }
-    await node.sync_trail(0, peerTicket ?? undefined);
+    await this.requireNode().sync_latest(peerTickets);
+  }
+
+  async pushTrail(peerTickets: string[], _traceparent?: string | null): Promise<void> {
+    await ensureWasm();
+    await this.requireNode().push_trail(peerTickets);
   }
 
   // NOTE: `docsWriteControl` / `readControl` are deliberately NOT implemented here, and are
@@ -215,9 +250,19 @@ export class IrohLocationNativeModule
   // ephemeral (lost on reload), so a control entry written here would be a request the sender
   // cannot reliably withdraw. Absent beats half-working.
 
-  async readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]> {
+  async trailReplicaStatus(): Promise<TrailReplicaAuthor[]> {
     await ensureWasm();
-    return (await this.requireNode().read_trail(author, sinceTs)) as NativeIncomingFix[];
+    return (await this.requireNode().trail_replica_status()) as TrailReplicaAuthor[];
+  }
+
+  async readLatest(): Promise<NativeRatchetEvent[]> {
+    await ensureWasm();
+    const fixes = (await this.requireNode().read_latest()) as NativeIncomingFix[];
+    return fixes.map((incoming) => ({
+      ...incoming,
+      ts: incoming.fix.ts,
+      kind: 'fix',
+    }));
   }
 
   async pruneTrail(olderThanTs: number): Promise<void> {
@@ -403,7 +448,7 @@ export class IrohLocationNativeModule
             backfill: event.backfill,
           });
         } else if (event.type === 'opaque') {
-          this.emit('onOpaque', { author: event.author, seq: event.seq });
+          this.emit('onOpaque', { author: event.author, seq: event.seq, kind: 'opaque' });
         } else if (event.type === 'sync') {
           this.emit('onSync', {
             author: event.author,

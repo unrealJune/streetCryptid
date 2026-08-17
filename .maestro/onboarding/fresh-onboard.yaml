@@ -14,6 +14,12 @@ appId: com.unrealjune.streetcryptid
 # testID and select it by id, not by label/placeholder text.
 - launchApp:
     clearState: true
+- runFlow:
+    when:
+      visible: 'Go home'
+      timeout: 4000
+    commands:
+      - tapOn: 'Close'
 - assertVisible:
     id: 'username-input'
 - tapOn:

@@ -22,6 +22,13 @@ use wasm_streams::ReadableStream;
 mod crypto;
 #[path = "../../rust/src/docs.rs"]
 mod docs;
+#[path = "../../rust/src/pad.rs"]
+mod pad;
+// crypto.rs's v3 envelope wraps under a Double Ratchet message key, so the schedule comes with
+// it. Pure and dependency-light (rand, serde, x25519-dalek, zeroize), so it costs the web bundle
+// very little and keeps the two crates on one wire format.
+#[path = "../../rust/src/ratchet.rs"]
+mod ratchet;
 #[path = "../../rust/src/relay.rs"]
 mod relay;
 
@@ -35,9 +42,14 @@ mod telemetry {
     }
 }
 
-use docs::{TrailDocs, TrailFix, TrailSink};
+use docs::{LatestFix, TrailDocs};
 
 const TOPIC_PREFIX: &[u8] = b"streetcryptid.loc";
+
+/// The `mesh_epoch` every docs/gossip envelope carries. Mirrors `iroh_location::DOCS_MESH_EPOCH`
+/// — this crate includes `crypto.rs` by path rather than depending on the mobile crate, so the
+/// constant is restated rather than imported. There is no mesh path in the browser build.
+const DOCS_MESH_EPOCH: u32 = 0;
 
 #[wasm_bindgen(start)]
 fn wasm_start() {
@@ -96,12 +108,6 @@ enum JsLocationEvent {
     Status {
         status: String,
     },
-    /// Durable-trail sync progress: `started` | `completed` | `error` (+ recovered count).
-    Sync {
-        author: String,
-        status: String,
-        recovered: Option<f64>,
-    },
 }
 
 struct Started {
@@ -118,9 +124,6 @@ pub struct WasmLocationNode {
     recv_secret: Vec<u8>,
     recv_public: Vec<u8>,
     started: Arc<Mutex<Option<Started>>>,
-    /// Sender for durable-trail (backfill / sync) events, merged into the most recent
-    /// subscription's event stream. Set on `subscribe`, drained by the TS pump.
-    docs_events: Arc<Mutex<Option<async_channel::Sender<JsLocationEvent>>>>,
 }
 
 #[wasm_bindgen]
@@ -157,7 +160,6 @@ impl WasmLocationNode {
             recv_secret,
             recv_public,
             started: Arc::new(Mutex::new(None)),
-            docs_events: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -200,11 +202,9 @@ impl WasmLocationNode {
         // direct (unusable) addresses → peers get "IP unsupported"/dial timeouts. Wait until we're
         // relay-connected so tickets carry a dialable relay address. Bounded so a dead relay can't
         // hang startup (we proceed best-effort on timeout).
-        let _ = n0_future::time::timeout(
-            n0_future::time::Duration::from_secs(10),
-            endpoint.online(),
-        )
-        .await;
+        let _ =
+            n0_future::time::timeout(n0_future::time::Duration::from_secs(10), endpoint.online())
+                .await;
         let gossip = Gossip::builder().spawn(endpoint.clone());
 
         // Durable trail: browsers have no filesystem, so both the blobs content store and the
@@ -282,8 +282,11 @@ impl WasmLocationNode {
         let stream = receiver.map(move |event| match event {
             Ok(Event::Received(message)) => match crypto::open(&recv_secret, &message.content) {
                 Ok(opened) => {
-                    let payload = postcard::from_bytes::<WireLocationFix>(&opened.payload)
-                        .map_err(|err| JsValue::from_str(&err.to_string()))?;
+                    let payload = decode_fix_payload(&opened.payload)
+                        .map_err(|err| JsValue::from_str(&err))?
+                        // A null fix (§4.1) carries no position. The browser build has no
+                        // watcher cadence of its own, but it must still tolerate a peer's.
+                        .ok_or_else(|| JsValue::from_str("null fix"))?;
                     serde_wasm_bindgen::to_value(&JsLocationEvent::Fix {
                         author: hex::encode(opened.author),
                         seq: opened.seq as f64,
@@ -322,16 +325,7 @@ impl WasmLocationNode {
             Err(err) => Err(JsValue::from_str(&err.to_string())),
         });
 
-        // Durable-trail (backfill / sync) events are pushed here by `sync_trail` and merged into
-        // this subscription's stream so the TS pump surfaces them as onFix{backfill} / onSync.
-        let (docs_tx, docs_rx) = async_channel::unbounded::<JsLocationEvent>();
-        *self.docs_events.lock().await = Some(docs_tx);
-        let docs_stream = docs_rx.map(|event| {
-            serde_wasm_bindgen::to_value(&event).map_err(|err| JsValue::from_str(&err.to_string()))
-        });
-
-        let merged = n0_future::stream::or(stream, docs_stream);
-        let receiver = ReadableStream::from_stream(merged).into_raw();
+        let receiver = ReadableStream::from_stream(stream).into_raw();
 
         Ok(WasmLocationSubscription {
             sender: Arc::new(Mutex::new(sender)),
@@ -345,13 +339,13 @@ impl WasmLocationNode {
     // In-memory store (no browser fs); the sealed envelope bytes are identical to native, so a
     // web peer's durable entries interoperate with native peers.
 
-    /// Seal `fix` for `recipients_hex` and write it to OUR docs namespace under key `author/seq`,
-    /// mirroring the gossip broadcast (identical sealed bytes, so revocation carries over).
+    /// Seal `fix` for `recipients_hex` and write it to OUR docs namespace under the single
+    /// last-write-wins fix key, mirroring the gossip broadcast (identical sealed bytes, so
+    /// revocation carries over). The previous fix is superseded — the replica holds no history.
     pub async fn docs_write(
         &self,
         _subscription_id: String,
         seq: f64,
-        epoch: u32,
         fix: JsValue,
         recipients_hex: JsValue,
     ) -> Result<(), JsError> {
@@ -369,7 +363,7 @@ impl WasmLocationNode {
             heading_deg: fix.heading_deg,
             ts: fix.ts as u64,
         };
-        let payload = postcard::to_allocvec(&wire_fix)
+        let payload = pad_encoded(&wire_fix)
             .context("encode fix")
             .map_err(to_js_err)?;
         let envelope = crypto::seal(
@@ -377,7 +371,7 @@ impl WasmLocationNode {
             &self.author,
             seq as u64,
             wire_fix.ts,
-            epoch,
+            DOCS_MESH_EPOCH,
             &payload,
             &recipients,
         )
@@ -390,51 +384,58 @@ impl WasmLocationNode {
         let ns = started.trail.own_namespace();
         started
             .trail
-            .write(ns, &self.author, seq as u64, envelope)
+            .write(ns, &self.author, envelope)
             .await
             .map_err(to_js_err)?;
         Ok(())
     }
 
-    /// Kick off range-based set reconciliation across our own + imported friend namespaces to
-    /// recover envelopes missed while offline. When `peer_ticket` is present, every namespace
-    /// explicitly syncs with that endpoint. Recovered, decryptable fixes are surfaced through the
-    /// current subscription's event stream as `Fix { backfill: true }`; progress as `Sync`.
-    pub async fn sync_trail(
+    /// Seal a **null fix** for `recipients_hex` and write it to our namespace's null slot (§4.1).
+    ///
+    /// Separate LWW key from the fix lane: a tick's two envelopes are wrapped for disjoint
+    /// recipient sets, so sharing one slot would make each supersede the other.
+    pub async fn docs_write_null(
         &self,
-        since_ts: f64,
-        peer_ticket: Option<String>,
+        _subscription_id: String,
+        seq: f64,
+        ts: f64,
+        recipients_hex: JsValue,
     ) -> Result<(), JsError> {
-        let trail = {
-            let guard = self.started.lock().await;
-            let started = guard
-                .as_ref()
-                .ok_or_else(|| JsError::new("node not started"))?;
-            started.trail.clone()
-        };
-        let peers = peer_ticket
-            .map(|ticket| {
-                ticket
-                    .parse::<EndpointTicket>()
-                    .map(|ticket| vec![ticket.endpoint_addr().clone()])
-                    .map_err(|_| JsError::new("bad sync peer endpoint ticket"))
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let tx = self.docs_events.lock().await.clone();
-        let sink = ChannelSink { tx };
-        trail
-            .sync_all(since_ts as u64, peers, &sink, &self.recv_secret)
+        let recipients = decode_recipients(recipients_hex)?;
+        let payload = pad_null().map_err(to_js_err)?;
+        let envelope = crypto::seal(
+            &self.identity_seed,
+            &self.author,
+            seq as u64,
+            ts as u64,
+            DOCS_MESH_EPOCH,
+            &payload,
+            &recipients,
+        )
+        .map_err(to_js_err)?;
+
+        let guard = self.started.lock().await;
+        let started = guard
+            .as_ref()
+            .ok_or_else(|| JsError::new("node not started"))?;
+        let ns = started.trail.own_namespace();
+        started
+            .trail
+            .write_nul(ns, &self.author, envelope)
             .await
             .map_err(to_js_err)?;
         Ok(())
     }
 
-    /// Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
-    /// to finish. `docs_write` only touches the local replica — iroh-docs broadcasts a local
-    /// insert only for namespaces `start_sync` has marked as syncing — so without this a published
-    /// fix never leaves this node. Best-effort: a failure only degrades offline delivery.
-    pub async fn push_trail(&self, peer_ticket: Option<String>) -> Result<(), JsError> {
+    /// Reconcile our own + every imported friend namespace so each author's **current** fix is
+    /// exchanged (the durable path is last-write-wins; there is no missed history to recover).
+    /// Read the results with `read_latest`.
+    ///
+    /// `peer_tickets` is every endpoint worth dialing: the trail stash, and every pool member.
+    /// Mirrors the native `LocationNode::sync_latest` — see its doc comment for why recovery has
+    /// to be able to reach a pool member and not just the author or the stash. Unparseable
+    /// tickets are skipped rather than failing the pass.
+    pub async fn sync_latest(&self, peer_tickets: Vec<String>) -> Result<(), JsError> {
         let trail = {
             let guard = self.started.lock().await;
             let started = guard
@@ -442,38 +443,79 @@ impl WasmLocationNode {
                 .ok_or_else(|| JsError::new("node not started"))?;
             started.trail.clone()
         };
-        let peers = peer_ticket
-            .map(|ticket| {
-                ticket
-                    .parse::<EndpointTicket>()
-                    .map(|ticket| vec![ticket.endpoint_addr().clone()])
-                    .map_err(|_| JsError::new("bad sync peer endpoint ticket"))
-            })
-            .transpose()?
-            .unwrap_or_default();
+        let peers: Vec<_> = peer_tickets
+            .iter()
+            .filter_map(|ticket| ticket.parse::<EndpointTicket>().ok())
+            .map(|ticket| ticket.endpoint_addr().clone())
+            .collect();
+        trail.sync_all(peers).await.map_err(to_js_err)?;
+        Ok(())
+    }
+
+    /// Push our own trail namespace to `peer_tickets` — the trail stash, and every pool member —
+    /// and wait for the exchange to finish. `docs_write` only touches the local replica — iroh-docs
+    /// broadcasts a local insert only for namespaces `start_sync` has marked as syncing — so
+    /// without this a published fix never leaves this node. Mirrors the native
+    /// `LocationNode::push_trail`: pushing to the pool and not only the stash is what lets a friend
+    /// serve the author's fix once the author goes dark. Unparseable tickets are skipped rather
+    /// than failing the push. Best-effort: a failure only degrades offline delivery.
+    pub async fn push_trail(&self, peer_tickets: Vec<String>) -> Result<(), JsError> {
+        let trail = {
+            let guard = self.started.lock().await;
+            let started = guard
+                .as_ref()
+                .ok_or_else(|| JsError::new("node not started"))?;
+            started.trail.clone()
+        };
+        let peers: Vec<_> = peer_tickets
+            .iter()
+            .filter_map(|ticket| ticket.parse::<EndpointTicket>().ok())
+            .map(|ticket| ticket.endpoint_addr().clone())
+            .collect();
         let ns = trail.own_namespace();
         trail.push(ns, peers).await.map_err(to_js_err)?;
         Ok(())
     }
 
-    /// Read decrypted fixes for `author_hex` (self or a friend) from the local replica,
-    /// `fix.ts >= since_ts`. Returns an array of `{ author, seq, fix }`.
-    pub async fn read_trail(&self, author_hex: String, since_ts: f64) -> Result<JsValue, JsError> {
-        let author = hex::decode(&author_hex)
-            .context("bad author hex")
-            .map_err(to_js_err)?;
+    /// Read the latest decryptable fix per author from the local replica. One entry per author —
+    /// the durable path holds no history. Returns an array of `{ author, seq, fix }`.
+    pub async fn read_latest(&self) -> Result<JsValue, JsError> {
         let guard = self.started.lock().await;
         let started = guard
             .as_ref()
             .ok_or_else(|| JsError::new("node not started"))?;
         let fixes = started
             .trail
-            .read_trail(&author, since_ts as u64, &self.recv_secret)
+            .read_latest(&self.recv_secret)
             .await
             .map_err(to_js_err)?;
-        let incoming: Vec<JsIncomingFix> =
-            fixes.into_iter().filter_map(trail_fix_to_incoming).collect();
+        let incoming: Vec<JsIncomingFix> = fixes
+            .into_iter()
+            .filter_map(latest_fix_to_incoming)
+            .collect();
         serde_wasm_bindgen::to_value(&incoming).map_err(JsError::from)
+    }
+
+    /// What this replica can SERVE, per author — presence, never payload. Mirrors the native
+    /// `LocationNode::trail_replica_status`: app storage is written by the live gossip lane too, so
+    /// "we have seen this author's fix" and "we can hand it to someone else" are different
+    /// questions and only the replica answers the second. No decryption.
+    pub async fn trail_replica_status(&self) -> Result<JsValue, JsError> {
+        let guard = self.started.lock().await;
+        let started = guard
+            .as_ref()
+            .ok_or_else(|| JsError::new("node not started"))?;
+        let slots = started.trail.replica_status().await.map_err(to_js_err)?;
+        let out: Vec<JsReplicaSlot> = slots
+            .into_iter()
+            .map(|slot| JsReplicaSlot {
+                author: hex::encode(&slot.author),
+                seq: slot.seq as f64,
+                fix_ts: slot.fix_ts as f64,
+                has_content: slot.has_content,
+            })
+            .collect();
+        serde_wasm_bindgen::to_value(&out).map_err(JsError::from)
     }
 
     /// Explicitly drop durable entries older than `older_than_ts`.
@@ -501,8 +543,8 @@ impl WasmLocationNode {
         started.trail.read_ticket(ns).await.map_err(to_js_err)
     }
 
-    /// Import a friend's docs read-ticket so we replicate their trail namespace and can recover
-    /// their missed fixes via `sync_trail`.
+    /// Import a friend's docs read-ticket so we replicate their trail namespace and can refresh
+    /// their current fix via `sync_latest`.
     pub async fn import_doc_ticket(&self, ticket: String) -> Result<(), JsError> {
         let guard = self.started.lock().await;
         let started = guard
@@ -526,12 +568,55 @@ struct JsIncomingFix {
     fix: JsLocationFix,
 }
 
-/// Convert a decrypted [`TrailFix`] into [`JsIncomingFix`], decoding the payload.
-fn trail_fix_to_incoming(tf: TrailFix) -> Option<JsIncomingFix> {
-    let payload = postcard::from_bytes::<WireLocationFix>(&tf.payload).ok()?;
+/// One author's slot in the local replica (mirrors the TS `TrailReplicaAuthor`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsReplicaSlot {
+    author: String,
+    seq: f64,
+    fix_ts: f64,
+    has_content: bool,
+}
+
+/// Encode a fix and wrap it in the constant-length frame every sealed payload uses (§4.1).
+fn pad_encoded(wire_fix: &WireLocationFix) -> Result<Vec<u8>> {
+    let encoded = postcard::to_allocvec(wire_fix)?;
+    pad::pad(&encoded).map_err(|e| anyhow!(e.to_string()))
+}
+
+/// The empty padded frame a null fix carries (§4.1) — same length on the wire as [`pad_encoded`].
+fn pad_null() -> Result<Vec<u8>> {
+    pad::pad(&[]).map_err(|e| anyhow!(e.to_string()))
+}
+
+/// Decode `recipients_hex` (a JS array of hex-encoded X25519 receiving keys) into raw bytes.
+fn decode_recipients(recipients_hex: JsValue) -> std::result::Result<Vec<Vec<u8>>, JsError> {
+    let recipient_strings: Vec<String> = serde_wasm_bindgen::from_value(recipients_hex)?;
+    recipient_strings
+        .iter()
+        .map(|hex| hex::decode(hex).context("bad recipient key hex"))
+        .collect::<Result<Vec<_>>>()
+        .map_err(to_js_err)
+}
+
+/// Unpad and decode a sealed fix payload. `Ok(None)` is a null fix — a watcher publishing on
+/// cadence so the ratchet has a return contribution (§4.1); it carries no position.
+fn decode_fix_payload(payload: &[u8]) -> std::result::Result<Option<WireLocationFix>, String> {
+    let inner = pad::unpad(payload).map_err(|e| e.to_string())?;
+    if inner.is_empty() {
+        return Ok(None);
+    }
+    postcard::from_bytes::<WireLocationFix>(inner)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// Convert a decrypted [`LatestFix`] into [`JsIncomingFix`], decoding the payload.
+fn latest_fix_to_incoming(lf: LatestFix) -> Option<JsIncomingFix> {
+    let payload = decode_fix_payload(&lf.payload).ok().flatten()?;
     Some(JsIncomingFix {
-        author: hex::encode(&tf.author),
-        seq: tf.seq as f64,
+        author: hex::encode(&lf.author),
+        seq: lf.seq as f64,
         fix: JsLocationFix {
             lat: payload.lat,
             lon: payload.lon,
@@ -540,45 +625,6 @@ fn trail_fix_to_incoming(tf: TrailFix) -> Option<JsIncomingFix> {
             ts: payload.ts as f64,
         },
     })
-}
-
-/// Bridges [`docs::TrailSink`] callbacks into the subscription event stream, surfacing backfilled
-/// fixes as `Fix { backfill: true }` and reconciliation progress as `Sync`.
-struct ChannelSink {
-    tx: Option<async_channel::Sender<JsLocationEvent>>,
-}
-
-impl TrailSink for ChannelSink {
-    // `_from` (the endpoint that served the entry) is unused here: the browser build has no
-    // per-fix transport label, so the TS side falls back to the coarse live/sync split.
-    fn on_backfill(&self, author: Vec<u8>, seq: u64, payload: Vec<u8>, _from: Vec<u8>) {
-        if let Some(tx) = &self.tx {
-            if let Ok(fix) = postcard::from_bytes::<WireLocationFix>(&payload) {
-                let _ = tx.try_send(JsLocationEvent::Fix {
-                    author: hex::encode(&author),
-                    seq: seq as f64,
-                    fix: JsLocationFix {
-                        lat: fix.lat,
-                        lon: fix.lon,
-                        accuracy_m: fix.accuracy_m,
-                        heading_deg: fix.heading_deg,
-                        ts: fix.ts as f64,
-                    },
-                    backfill: true,
-                });
-            }
-        }
-    }
-
-    fn on_sync_status(&self, author: Vec<u8>, status: String, recovered: Option<u64>) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.try_send(JsLocationEvent::Sync {
-                author: hex::encode(&author),
-                status,
-                recovered: recovered.map(|r| r as f64),
-            });
-        }
-    }
 }
 
 #[wasm_bindgen]
@@ -598,7 +644,6 @@ impl WasmLocationSubscription {
     pub async fn publish(
         &self,
         seq: f64,
-        epoch: u32,
         fix: JsValue,
         recipients_hex: JsValue,
     ) -> Result<(), JsError> {
@@ -616,7 +661,7 @@ impl WasmLocationSubscription {
             heading_deg: fix.heading_deg,
             ts: fix.ts as u64,
         };
-        let payload = postcard::to_allocvec(&wire_fix)
+        let payload = pad_encoded(&wire_fix)
             .context("encode fix")
             .map_err(to_js_err)?;
         let envelope = crypto::seal(
@@ -624,7 +669,37 @@ impl WasmLocationSubscription {
             &self.author,
             seq as u64,
             wire_fix.ts,
-            epoch,
+            DOCS_MESH_EPOCH,
+            &payload,
+            &recipients,
+        )
+        .map_err(to_js_err)?;
+        self.sender
+            .lock()
+            .await
+            .broadcast(envelope.into())
+            .await
+            .map_err(to_js_err)?;
+        Ok(())
+    }
+
+    /// Broadcast a **null fix** — an envelope with an empty padded payload (§4.1). The watcher
+    /// half of the symmetric lanes: same signing, same AAD, same ciphertext length as
+    /// [`Self::publish`], carrying no position.
+    pub async fn publish_null(
+        &self,
+        seq: f64,
+        ts: f64,
+        recipients_hex: JsValue,
+    ) -> Result<(), JsError> {
+        let recipients = decode_recipients(recipients_hex)?;
+        let payload = pad_null().map_err(to_js_err)?;
+        let envelope = crypto::seal(
+            &self.identity_seed,
+            &self.author,
+            seq as u64,
+            ts as u64,
+            DOCS_MESH_EPOCH,
             &payload,
             &recipients,
         )

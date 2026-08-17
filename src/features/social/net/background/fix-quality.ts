@@ -9,11 +9,8 @@ import type { LocationFix } from '../../core/types';
  * it was taken, or a lone sample that teleports a few kilometres and back. Published as-is they
  * scatter a friend across town.
  *
- * **A rejected fix must never silence a slot.** The engine keeps publishing on its fixed cadence
- * using the last *accepted* position — see `location-engine.ts`. If rejection produced a gap
- * instead, then "no envelope" would mean "this person is somewhere with bad GPS" (indoors, a
- * basement, the Underground), which is exactly the kind of inference the fixed cadence exists to
- * prevent. The gate decides *what* we publish, never *whether* we publish.
+ * A rejected fix never replaces the last accepted position. When the engine is awake, due slots
+ * can still reuse that last good fix instead of publishing a known-bad coordinate.
  */
 
 export interface FixQualityConfig {

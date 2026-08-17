@@ -621,12 +621,6 @@ public protocol FixListener: AnyObject, Sendable {
      */
     func onStatus(status: String) 
     
-    /**
-     * Durable-trail sync progress for an author/namespace: `started` | `completed` | `error`,
-     * with the number of recovered envelopes on completion.
-     */
-    func onSync(author: Data, status: String, recovered: UInt64?) 
-    
 }
 /**
  * Foreign (Swift/Kotlin/JS) callback for inbound events on a subscription.
@@ -726,20 +720,6 @@ open func onStatus(status: String)  {try! rustCall() {
     uniffi_iroh_location_fn_method_fixlistener_on_status(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(status),$0
-    )
-}
-}
-    
-    /**
-     * Durable-trail sync progress for an author/namespace: `started` | `completed` | `error`,
-     * with the number of recovered envelopes on completion.
-     */
-open func onSync(author: Data, status: String, recovered: UInt64?)  {try! rustCall() {
-    uniffi_iroh_location_fn_method_fixlistener_on_sync(
-            self.uniffiCloneHandle(),
-        FfiConverterData.lower(author),
-        FfiConverterString.lower(status),
-        FfiConverterOptionUInt64.lower(recovered),$0
     )
 }
 }
@@ -853,34 +833,6 @@ fileprivate struct UniffiCallbackInterfaceFixListener {
                 makeCall: makeCall,
                 writeReturn: writeReturn
             )
-        },
-        onSync: { (
-            uniffiHandle: UInt64,
-            author: RustBuffer,
-            status: RustBuffer,
-            recovered: RustBuffer,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterTypeFixListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onSync(
-                     author: try FfiConverterData.lift(author),
-                     status: try FfiConverterString.lift(status),
-                     recovered: try FfiConverterOptionUInt64.lift(recovered)
-                )
-            }
-
-            
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
         }
     )
 
@@ -968,6 +920,19 @@ public func FfiConverterTypeFixListener_lower(_ value: FixListener) -> UInt64 {
 public protocol LocationNodeProtocol: AnyObject, Sendable {
     
     /**
+     * Begin a session bootstrap with `peer_endpoint_hex`: mint a fresh ephemeral X25519 keypair
+     * and return its **public** half as hex, to be carried to the peer.
+     *
+     * This is one half of the §4.6 primitive. In production both halves ride the pairing
+     * connection during the in-person SAS bump, identity-signed and transcript-bound; the
+     * signing and transport are step 7's, and until they land this is the seam a caller drives.
+     *
+     * Calling it again for the same peer replaces the pending ephemeral — an abandoned bootstrap
+     * leaves nothing behind but one unused secret, which drops with the process.
+     */
+    func beginSession(peerEndpointHex: String) async throws  -> String
+    
+    /**
      * Whether a BLE transport is wired into this node's endpoint on this platform.
      */
     func bleAvailable() async  -> Bool
@@ -988,6 +953,25 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
      */
     func cancelPair(sessionId: Data) async throws 
+    
+    /**
+     * Drop our in-flight resync ephemeral once every peer has been restarted.
+     */
+    func clearResync() async 
+    
+    /**
+     * Complete the bootstrap with the peer's ephemeral public half, installing the session.
+     *
+     * `RK₀` is derived from the ephemeral-ephemeral DH and a transcript over both endpoint ids
+     * and both ephemerals — **never** from static-static DH, which a seized device could
+     * recompute from long-term keys it still holds (§3, §4.6 "no code path roots a session in
+     * static-static DH alone"). The transcript is canonically ordered, so both devices derive
+     * the same root and the same session id without negotiating either.
+     *
+     * The role is fixed by endpoint-id ordering, so the two sides take opposite halves of the
+     * standard asymmetric bootstrap with no extra round trip.
+     */
+    func completeSession(peerEndpointHex: String, peerEphemeralHex: String) async throws 
     
     /**
      * Displayer action: confirm whether the other human matched the shown figure. `true` latches
@@ -1013,7 +997,7 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * ties the write to our own topic/namespace; a node owns a single trail namespace, so it is
      * accepted for API parity with the TS contract but not otherwise needed.
      */
-    func docsWrite(subscriptionId: String, seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data]) async throws 
+    func docsWrite(subscriptionId: String, seq: UInt64, fix: LocationFix, recipients: [Data]) async throws 
     
     /**
      * Seal `msg` for `recipients` and write it to our own namespace's control slot
@@ -1029,14 +1013,79 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      */
     func docsWriteControl(msg: ControlMsg, recipients: [Data]) async throws 
     
-    func docsWriteInner(subscriptionId: String, seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String?) async throws 
+    func docsWriteInner(subscriptionId: String, seq: UInt64, fix: LocationFix?, ts: UInt64, recipients: [Data], traceparent: String?) async throws 
     
-    func docsWriteTraced(subscriptionId: String, seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String) async throws 
+    /**
+     * Seal a **null fix** for `recipients` and write it to our namespace's null slot
+     * (FORWARD-SECRECY §4.1) — the watcher half of the symmetric lanes.
+     *
+     * A null fix is an ordinary envelope carrying an empty padded payload: same signature, same
+     * AAD binding, same `seq` monotonicity, same ciphertext length as a real fix. It exists so a
+     * friend we do not share position with still receives our envelopes on cadence, which is
+     * what carries our ratchet contribution once envelope v3 lands (§4.2). `ts` is the tick's
+     * timestamp — it rides in the signed header exactly as a real fix's does.
+     *
+     * Written to a separate LWW key from the fix lane so the two envelopes a tick produces,
+     * wrapped for disjoint recipient sets, do not supersede each other (see `docs::encode_nul_key`).
+     */
+    func docsWriteNull(subscriptionId: String, seq: UInt64, ts: UInt64, recipients: [Data]) async throws 
+    
+    /**
+     * Seal a **ratcheted null fix** for `watcher_endpoints` and write it to the null slot.
+     *
+     * The v3 counterpart of [`Self::docs_write_null`], and the half of §4.1 that makes the
+     * symmetric-lane argument true rather than aspirational. A watcher who only ever *reads* our
+     * position still publishes on cadence, and once that envelope is ratcheted it carries their
+     * ratchet contribution — which is what advances our `peer_advanced_ms` for them and stops
+     * `next_wraps` dropping them as `Lapsed` after 24 h. On the v2 null lane the contribution did
+     * not exist, so every one-directional watch edge expired after a day.
+     */
+    func docsWriteNullRatcheted(subscriptionId: String, seq: UInt64, ts: UInt64, watcherEndpoints: [String]) async throws  -> [String]
+    
+    func docsWriteNullRatchetedTraced(subscriptionId: String, seq: UInt64, ts: UInt64, watcherEndpoints: [String], traceparent: String) async throws  -> [String]
+    
+    func docsWriteNullTraced(subscriptionId: String, seq: UInt64, ts: UInt64, recipients: [Data], traceparent: String) async throws 
+    
+    /**
+     * Seal `fix` under **envelope v3** for each recipient's ratchet session and write it to our
+     * durable namespace (FORWARD-SECRECY §4.7).
+     *
+     * Recipients are **endpoint ids**, not receiving keys: a v3 wrap is addressed by session,
+     * and sessions are keyed by who the peer is rather than by a long-term key of theirs. That
+     * difference is the point — the long-term receiving key is exactly what a seized device
+     * still holds.
+     *
+     * Returns the recipients that were left out, as `endpoint_hex:reason` — lapsed (§4.5),
+     * un-bootstrapped, or unpersistable. A short wrap list is never silent.
+     */
+    func docsWriteRatcheted(subscriptionId: String, seq: UInt64, fix: LocationFix, recipientEndpoints: [String]) async throws  -> [String]
+    
+    /**
+     * Both ratcheted durable lanes. `fix.is_none()` is the null lane, which differs only in
+     * carrying an empty padded payload and landing in a separate LWW slot — the two envelopes a
+     * tick produces are wrapped for disjoint recipient sets, so sharing a slot would have them
+     * supersede each other.
+     */
+    func docsWriteRatchetedInner(subscriptionId: String, seq: UInt64, fix: LocationFix?, nullTs: UInt64, recipientEndpoints: [String], traceparent: String?) async throws  -> [String]
+    
+    func docsWriteRatchetedTraced(subscriptionId: String, seq: UInt64, fix: LocationFix, recipientEndpoints: [String], traceparent: String) async throws  -> [String]
+    
+    func docsWriteTraced(subscriptionId: String, seq: UInt64, fix: LocationFix, recipients: [Data], traceparent: String) async throws 
     
     /**
      * This device's EndpointId (== envelope `author`).
      */
     func endpointId()  -> Data
+    
+    /**
+     * Forget the session with this peer (un-friending, or a §4.6 restart).
+     */
+    func forgetSession(peerEndpointHex: String) async throws 
+    
+    /**
+     * Whether a ratchet session exists for this peer.
+     */
+    func hasSession(peerEndpointHex: String) async throws  -> Bool
     
     /**
      * The ed25519 identity secret — persist in the OS secure store.
@@ -1071,6 +1120,11 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * pairing-ready). Returns the deterministic session id.
      */
     func initiatePairNearby(peerEndpointId: Data) async throws  -> Data
+    
+    /**
+     * Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+     */
+    func isDesynced(peerEndpointHex: String) async throws  -> Bool
     
     /**
      * List all known pairing sessions.
@@ -1136,6 +1190,18 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func pollProfileEvents() async  -> [ProfileView]
     
     /**
+     * Look for `peer`'s resync record and, if one is there, restart the session from it.
+     *
+     * Publishes our own half first when we have not already, so a single call from each side
+     * completes the exchange without either having to go first — which matters because the
+     * side that noticed the desync and the side that caused it are usually not the same one.
+     *
+     * Returns whether a session was installed. `false` covers "no record yet", "stale record",
+     * and "already applied" — all ordinary, none an error.
+     */
+    func pollResync(peerEndpointHex: String, peerRecvPubHex: String) async throws  -> Bool
+    
+    /**
      * A shareable **read**-ticket for our profile namespace. Also exchanged automatically inside
      * a pairing Accept, so friends usually don't need to import it by hand.
      */
@@ -1155,8 +1221,23 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func publishProfile(handle: String, cryptidName: String, sigil: String, color: String) async throws  -> UInt64
     
     /**
-     * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
-     * to finish. **This is what actually gets a published fix off the phone.**
+     * Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+     *
+     * Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
+     * re-establishes a ratchet, so it cannot require one. That is also why it is the one place
+     * the design has to be most careful: **recovery must never become the bypass**. The record
+     * carries only an ephemeral public key. It cannot downgrade anything, because a root is
+     * only ever derived when *both* ephemerals are in hand.
+     *
+     * Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
+     * than minting a new one, so a peer that already saw our half does not have to see a second.
+     */
+    func publishResync(recipientRecvPubs: [String]) async throws  -> String
+    
+    /**
+     * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
+     * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
+     * actually gets a published fix off the phone.**
      *
      * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
      * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
@@ -1164,14 +1245,25 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * that, so its envelopes never reached the stash and an offline friend had nothing to
      * reconcile from. Call this after draining a batch.
      *
+     * The peer list is the send-side counterpart of [`Self::sync_latest`], and it is what makes
+     * ARCHITECTURE.md §1.3/§6's pool relay the normal flow rather than luck. An earlier revision
+     * took a single `Option<String>` that only ever carried the stash, so an author's published
+     * fix was broadcast over docs to the stash and to nobody else: a pool member gained the
+     * author's entries only if it happened to dial the author itself during a reconciliation
+     * window, and with the stash off there was no durable copy anywhere. Pushing to the pool
+     * means a friend with the app open holds the author's entries **as they are published**, and
+     * can hand them on the moment the author goes dark.
+     *
+     * Repeating it is cheap: `start_sync` is a no-op once a namespace is syncing, so the
+     * steady-state cost is one connection per member for the process's lifetime.
+     *
+     * Unparseable tickets are skipped rather than failing the push — one malformed friend card
+     * must not stop delivery to everyone else — but they are counted on the span.
+     *
      * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
-     * that the live gossip path or a later [`Self::sync_trail`] is broken.
+     * that the live gossip path or a later [`Self::sync_latest`] is broken.
      */
-    func pushTrail(peerTicket: String?) async throws 
-    
-    func pushTrailInner(peerTicket: String?, traceparent: String?) async throws 
-    
-    func pushTrailTraced(peerTicket: String?, traceparent: String) async throws 
+    func pushTrail(peerTickets: [String], traceparent: String?) async throws 
     
     /**
      * Read `author`'s current control message, if we can open it. Returns an empty vec when
@@ -1183,16 +1275,31 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func readControl(author: Data) async throws  -> [ControlMsg]
     
     /**
+     * Read the latest decryptable fix per author (friends who share with us) from the local
+     * replica. One entry per author — the durable path holds no history (FORWARD-SECRECY §4.4).
+     */
+    func readLatest() async throws  -> [IncomingFix]
+    
+    /**
+     * Read the latest **ratcheted** fix per author from the local replica.
+     *
+     * Signature first, then session state — `verify_v3` returns a type that the session manager
+     * is the only consumer of, so no unauthenticated byte can reach the ratchet (§4.2).
+     * Envelopes we cannot open are skipped exactly as v2's are: addressed to someone else,
+     * replayed from the archive, or beyond the acceptance window are all "nothing to surface".
+     */
+    func readLatestRatcheted() async throws  -> [IncomingFix]
+    
+    /**
+     * Read the latest ratcheted envelope per durable lane, including null responses.
+     */
+    func readLatestRatchetedEvents() async throws  -> [RatchetEvent]
+    
+    /**
      * Read the newest verified profile for `endpoint_id` (self or a friend) from the local
      * replica. `None` if absent or not yet replicated.
      */
     func readProfile(endpointId: Data) async throws  -> ProfileView?
-    
-    /**
-     * Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >=
-     * since_ts`.
-     */
-    func readTrail(author: Data, sinceTs: UInt64) async throws  -> [IncomingFix]
     
     /**
      * The X25519 receiving PUBLIC key — this is the "receiving key" you hand to a friend
@@ -1225,6 +1332,15 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func respondPair(sessionId: Data, accept: Bool) async throws 
     
     /**
+     * How many resyncs we have driven with this peer.
+     *
+     * §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+     * retrying forever, so this is deliberately a count rather than a boolean: the UI decides
+     * where patience runs out, and the crypto layer does not pretend to know.
+     */
+    func resyncCount(peerEndpointHex: String) async throws  -> UInt32
+    
+    /**
      * Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. Invite-based
      * pairing is always allowed. This is an app-level acceptance gate, not a radio control.
      */
@@ -1255,17 +1371,29 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func subscribe(topic: Data, bootstrap: [String], listener: FixListener) async throws  -> Subscription
     
     /**
-     * Kick off range-based set reconciliation across our own + imported friend namespaces to
-     * recover envelopes missed while offline. When `peer_ticket` is present, every namespace
-     * explicitly syncs with that endpoint (the trail stash). Recovered, decryptable fixes are
-     * surfaced via the attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via
-     * `on_sync`.
+     * Reconcile our own + every imported friend namespace so each author's **current** fix is
+     * exchanged (FORWARD-SECRECY §4.4 — the durable path is last-write-wins; there is no missed
+     * history to recover). Read the results with [`Self::read_latest`].
+     *
+     * `peer_tickets` is every endpoint worth dialing for this pass: the trail stash when it is
+     * configured and opted into, and **every pool member**. That list is the whole mechanism
+     * behind ARCHITECTURE.md §1.3/§6 — "a rejoining B runs range-based reconciliation against
+     * C/D/A". An earlier revision took a single `Option<String>` that only ever carried the
+     * stash, so a device could recover an author's fix from the durable server or from the
+     * author, and from nobody else; with the author offline and the stash off there was no
+     * reachable source at all, even when a friend beside it demonstrably held the fix.
+     *
+     * The peers are handed to iroh-docs together rather than dialled one at a time, so a
+     * namespace reconciles with whoever answers instead of paying a separate timeout per peer.
+     * An empty list is meaningful and not an error: it reconciles with whatever the live engine
+     * is already connected to, which is the correct degenerate case (and what a device with no
+     * friends and no stash should do).
+     *
+     * Unparseable tickets are skipped rather than failing the pass — one malformed friend card
+     * must not stop reconciliation with everyone else — but they are counted on the span, since
+     * a silent skip is exactly the kind of thing that hides a real break.
      */
-    func syncTrail(sinceTs: UInt64, peerTicket: String?) async throws 
-    
-    func syncTrailInner(sinceTs: UInt64, peerTicket: String?, traceparent: String?) async throws 
-    
-    func syncTrailTraced(sinceTs: UInt64, peerTicket: String?, traceparent: String) async throws 
+    func syncLatest(peerTickets: [String], traceparent: String?) async throws 
     
     /**
      * A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
@@ -1273,10 +1401,30 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func ticket() async throws  -> String
     
     /**
+     * What this device's durable replica can **serve**, one record per author present in it.
+     *
+     * The diagnostic that distinguishes "the relay had nothing to give" from "the transfer
+     * failed" — a distinction `friend_latest` structurally cannot make, because the live gossip
+     * lane writes it too and a fix that arrived over gossip never enters the author's namespace
+     * (a pool member holds a READ ticket). Reconciliation serves out of the replica, so this is
+     * the only honest answer to "can this device relay author X".
+     *
+     * No decryption and no location data in the result — presence, not payload — so it is
+     * ungated, like [`Self::transport_diagnostics`]. `NamespaceId` is not an FFI type, so the
+     * exported shape reports by author endpoint id rather than by namespace.
+     */
+    func trailReplicaStatus() async throws  -> [TrailReplicaAuthor]
+    
+    /**
      * Snapshot the local endpoint's advertised addresses and iroh's retained path table for the
      * requested peers. Remote path usage is point-in-time; callers should poll when displaying it.
      */
     func transportDiagnostics(peerEndpointIds: [Data]) async throws  -> TransportDiagnostics
+    
+    /**
+     * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
+     */
+    func uploadTrailContent(baseUrl: String, psk: String?) async throws  -> UInt64
     
 }
 /**
@@ -1348,7 +1496,64 @@ public convenience init(identitySecret: Data?, recvSecret: Data?)throws  {
     }
 
     
+    /**
+     * Create a node under host-supplied storage roots. **This is the constructor mobile must
+     * use**; [`new`](Self::new) puts everything in the OS temp dir, which is right for host tests
+     * and wrong for a device.
+     *
+     * Both roots are scoped per identity internally (`<root>/<author hex>`), because the host
+     * cannot know the endpoint id before the node that derives it exists.
+     *
+     * - `data_root` — the recoverable trail replica and blobs. Cache is the correct home: it is
+     * large, it is re-fetchable, and it must never be restored from a backup.
+     * - `state_root` — ratchet session state, which is **not** recoverable. This must be the
+     * app's private data dir (Android `filesDir`, iOS Application Support) *and* excluded from
+     * backup, since restoring an old copy rewinds send counters into key reuse. See
+     * [`LocationNode::state_dir`].
+     *
+     * Passing the same root for both is a bug on device in one direction and a break in the
+     * other; the two have opposite requirements.
+     */
+public static func newAtDirs(identitySecret: Data?, recvSecret: Data?, dataRoot: String, stateRoot: String)throws  -> LocationNode  {
+    return try  FfiConverterTypeLocationNode_lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_constructor_locationnode_new_at_dirs(
+        FfiConverterOptionData.lower(identitySecret),
+        FfiConverterOptionData.lower(recvSecret),
+        FfiConverterString.lower(dataRoot),
+        FfiConverterString.lower(stateRoot),$0
+    )
+})
+}
+    
 
+    
+    /**
+     * Begin a session bootstrap with `peer_endpoint_hex`: mint a fresh ephemeral X25519 keypair
+     * and return its **public** half as hex, to be carried to the peer.
+     *
+     * This is one half of the §4.6 primitive. In production both halves ride the pairing
+     * connection during the in-person SAS bump, identity-signed and transcript-bound; the
+     * signing and transport are step 7's, and until they land this is the seam a caller drives.
+     *
+     * Calling it again for the same peer replaces the pending ephemeral — an abandoned bootstrap
+     * leaves nothing behind but one unused secret, which drops with the process.
+     */
+open func beginSession(peerEndpointHex: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_begin_session(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
     
     /**
      * Whether a BLE transport is wired into this node's endpoint on this platform.
@@ -1436,6 +1641,56 @@ open func cancelPair(sessionId: Data)async throws   {
 }
     
     /**
+     * Drop our in-flight resync ephemeral once every peer has been restarted.
+     */
+open func clearResync()async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_clear_resync(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
+        )
+}
+    
+    /**
+     * Complete the bootstrap with the peer's ephemeral public half, installing the session.
+     *
+     * `RK₀` is derived from the ephemeral-ephemeral DH and a transcript over both endpoint ids
+     * and both ephemerals — **never** from static-static DH, which a seized device could
+     * recompute from long-term keys it still holds (§3, §4.6 "no code path roots a session in
+     * static-static DH alone"). The transcript is canonically ordered, so both devices derive
+     * the same root and the same session id without negotiating either.
+     *
+     * The role is fixed by endpoint-id ordering, so the two sides take opposite halves of the
+     * standard asymmetric bootstrap with no extra round trip.
+     */
+open func completeSession(peerEndpointHex: String, peerEphemeralHex: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_complete_session(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex),FfiConverterString.lower(peerEphemeralHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Displayer action: confirm whether the other human matched the shown figure. `true` latches
      * the local SAS and sends `Accept`; `false` (or a late action) is terminal.
      */
@@ -1504,13 +1759,13 @@ open func docTicket()async throws  -> String  {
      * ties the write to our own topic/namespace; a node owns a single trail namespace, so it is
      * accepted for API parity with the TS contract but not otherwise needed.
      */
-open func docsWrite(subscriptionId: String, seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data])async throws   {
+open func docsWrite(subscriptionId: String, seq: UInt64, fix: LocationFix, recipients: [Data])async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_locationnode_docs_write(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt32.lower(epoch),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients)
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -1550,13 +1805,13 @@ open func docsWriteControl(msg: ControlMsg, recipients: [Data])async throws   {
         )
 }
     
-open func docsWriteInner(subscriptionId: String, seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String?)async throws   {
+open func docsWriteInner(subscriptionId: String, seq: UInt64, fix: LocationFix?, ts: UInt64, recipients: [Data], traceparent: String?)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_locationnode_docs_write_inner(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt32.lower(epoch),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients),FfiConverterOptionString.lower(traceparent)
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterOptionTypeLocationFix.lower(fix),FfiConverterUInt64.lower(ts),FfiConverterSequenceData.lower(recipients),FfiConverterOptionString.lower(traceparent)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -1567,13 +1822,173 @@ open func docsWriteInner(subscriptionId: String, seq: UInt64, epoch: UInt32, fix
         )
 }
     
-open func docsWriteTraced(subscriptionId: String, seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String)async throws   {
+    /**
+     * Seal a **null fix** for `recipients` and write it to our namespace's null slot
+     * (FORWARD-SECRECY §4.1) — the watcher half of the symmetric lanes.
+     *
+     * A null fix is an ordinary envelope carrying an empty padded payload: same signature, same
+     * AAD binding, same `seq` monotonicity, same ciphertext length as a real fix. It exists so a
+     * friend we do not share position with still receives our envelopes on cadence, which is
+     * what carries our ratchet contribution once envelope v3 lands (§4.2). `ts` is the tick's
+     * timestamp — it rides in the signed header exactly as a real fix's does.
+     *
+     * Written to a separate LWW key from the fix lane so the two envelopes a tick produces,
+     * wrapped for disjoint recipient sets, do not supersede each other (see `docs::encode_nul_key`).
+     */
+open func docsWriteNull(subscriptionId: String, seq: UInt64, ts: UInt64, recipients: [Data])async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_null(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceData.lower(recipients)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Seal a **ratcheted null fix** for `watcher_endpoints` and write it to the null slot.
+     *
+     * The v3 counterpart of [`Self::docs_write_null`], and the half of §4.1 that makes the
+     * symmetric-lane argument true rather than aspirational. A watcher who only ever *reads* our
+     * position still publishes on cadence, and once that envelope is ratcheted it carries their
+     * ratchet contribution — which is what advances our `peer_advanced_ms` for them and stops
+     * `next_wraps` dropping them as `Lapsed` after 24 h. On the v2 null lane the contribution did
+     * not exist, so every one-directional watch edge expired after a day.
+     */
+open func docsWriteNullRatcheted(subscriptionId: String, seq: UInt64, ts: UInt64, watcherEndpoints: [String])async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(watcherEndpoints)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func docsWriteNullRatchetedTraced(subscriptionId: String, seq: UInt64, ts: UInt64, watcherEndpoints: [String], traceparent: String)async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted_traced(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(watcherEndpoints),FfiConverterString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func docsWriteNullTraced(subscriptionId: String, seq: UInt64, ts: UInt64, recipients: [Data], traceparent: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_null_traced(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceData.lower(recipients),FfiConverterString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Seal `fix` under **envelope v3** for each recipient's ratchet session and write it to our
+     * durable namespace (FORWARD-SECRECY §4.7).
+     *
+     * Recipients are **endpoint ids**, not receiving keys: a v3 wrap is addressed by session,
+     * and sessions are keyed by who the peer is rather than by a long-term key of theirs. That
+     * difference is the point — the long-term receiving key is exactly what a seized device
+     * still holds.
+     *
+     * Returns the recipients that were left out, as `endpoint_hex:reason` — lapsed (§4.5),
+     * un-bootstrapped, or unpersistable. A short wrap list is never silent.
+     */
+open func docsWriteRatcheted(subscriptionId: String, seq: UInt64, fix: LocationFix, recipientEndpoints: [String])async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceString.lower(recipientEndpoints)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Both ratcheted durable lanes. `fix.is_none()` is the null lane, which differs only in
+     * carrying an empty padded payload and landing in a separate LWW slot — the two envelopes a
+     * tick produces are wrapped for disjoint recipient sets, so sharing a slot would have them
+     * supersede each other.
+     */
+open func docsWriteRatchetedInner(subscriptionId: String, seq: UInt64, fix: LocationFix?, nullTs: UInt64, recipientEndpoints: [String], traceparent: String?)async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_inner(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterOptionTypeLocationFix.lower(fix),FfiConverterUInt64.lower(nullTs),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterOptionString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func docsWriteRatchetedTraced(subscriptionId: String, seq: UInt64, fix: LocationFix, recipientEndpoints: [String], traceparent: String)async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_traced(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func docsWriteTraced(subscriptionId: String, seq: UInt64, fix: LocationFix, recipients: [Data], traceparent: String)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_locationnode_docs_write_traced(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt32.lower(epoch),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients),FfiConverterString.lower(traceparent)
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients),FfiConverterString.lower(traceparent)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -1593,6 +2008,46 @@ open func endpointId() -> Data  {
             self.uniffiCloneHandle(),$0
     )
 })
+}
+    
+    /**
+     * Forget the session with this peer (un-friending, or a §4.6 restart).
+     */
+open func forgetSession(peerEndpointHex: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_forget_session(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Whether a ratchet session exists for this peer.
+     */
+open func hasSession(peerEndpointHex: String)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_has_session(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_i8,
+            completeFunc: ffi_iroh_location_rust_future_complete_i8,
+            freeFunc: ffi_iroh_location_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
 }
     
     /**
@@ -1706,6 +2161,26 @@ open func initiatePairNearby(peerEndpointId: Data)async throws  -> Data  {
             completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
             freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
             liftFunc: FfiConverterData.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+     */
+open func isDesynced(peerEndpointHex: String)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_is_desynced(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_i8,
+            completeFunc: ffi_iroh_location_rust_future_complete_i8,
+            freeFunc: ffi_iroh_location_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -1905,6 +2380,33 @@ open func pollProfileEvents()async  -> [ProfileView]  {
 }
     
     /**
+     * Look for `peer`'s resync record and, if one is there, restart the session from it.
+     *
+     * Publishes our own half first when we have not already, so a single call from each side
+     * completes the exchange without either having to go first — which matters because the
+     * side that noticed the desync and the side that caused it are usually not the same one.
+     *
+     * Returns whether a session was installed. `false` covers "no record yet", "stale record",
+     * and "already applied" — all ordinary, none an error.
+     */
+open func pollResync(peerEndpointHex: String, peerRecvPubHex: String)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_poll_resync(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex),FfiConverterString.lower(peerRecvPubHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_i8,
+            completeFunc: ffi_iroh_location_rust_future_complete_i8,
+            freeFunc: ffi_iroh_location_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * A shareable **read**-ticket for our profile namespace. Also exchanged automatically inside
      * a pairing Accept, so friends usually don't need to import it by hand.
      */
@@ -1969,8 +2471,38 @@ open func publishProfile(handle: String, cryptidName: String, sigil: String, col
 }
     
     /**
-     * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
-     * to finish. **This is what actually gets a published fix off the phone.**
+     * Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+     *
+     * Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
+     * re-establishes a ratchet, so it cannot require one. That is also why it is the one place
+     * the design has to be most careful: **recovery must never become the bypass**. The record
+     * carries only an ephemeral public key. It cannot downgrade anything, because a root is
+     * only ever derived when *both* ephemerals are in hand.
+     *
+     * Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
+     * than minting a new one, so a peer that already saw our half does not have to see a second.
+     */
+open func publishResync(recipientRecvPubs: [String])async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_publish_resync(
+                    self.uniffiCloneHandle(),
+                    FfiConverterSequenceString.lower(recipientRecvPubs)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
+     * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
+     * actually gets a published fix off the phone.**
      *
      * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
      * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
@@ -1978,50 +2510,31 @@ open func publishProfile(handle: String, cryptidName: String, sigil: String, col
      * that, so its envelopes never reached the stash and an offline friend had nothing to
      * reconcile from. Call this after draining a batch.
      *
+     * The peer list is the send-side counterpart of [`Self::sync_latest`], and it is what makes
+     * ARCHITECTURE.md §1.3/§6's pool relay the normal flow rather than luck. An earlier revision
+     * took a single `Option<String>` that only ever carried the stash, so an author's published
+     * fix was broadcast over docs to the stash and to nobody else: a pool member gained the
+     * author's entries only if it happened to dial the author itself during a reconciliation
+     * window, and with the stash off there was no durable copy anywhere. Pushing to the pool
+     * means a friend with the app open holds the author's entries **as they are published**, and
+     * can hand them on the moment the author goes dark.
+     *
+     * Repeating it is cheap: `start_sync` is a no-op once a namespace is syncing, so the
+     * steady-state cost is one connection per member for the process's lifetime.
+     *
+     * Unparseable tickets are skipped rather than failing the push — one malformed friend card
+     * must not stop delivery to everyone else — but they are counted on the span.
+     *
      * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
-     * that the live gossip path or a later [`Self::sync_trail`] is broken.
+     * that the live gossip path or a later [`Self::sync_latest`] is broken.
      */
-open func pushTrail(peerTicket: String?)async throws   {
+open func pushTrail(peerTickets: [String], traceparent: String?)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_locationnode_push_trail(
                     self.uniffiCloneHandle(),
-                    FfiConverterOptionString.lower(peerTicket)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func pushTrailInner(peerTicket: String?, traceparent: String?)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_push_trail_inner(
-                    self.uniffiCloneHandle(),
-                    FfiConverterOptionString.lower(peerTicket),FfiConverterOptionString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func pushTrailTraced(peerTicket: String?, traceparent: String)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_push_trail_traced(
-                    self.uniffiCloneHandle(),
-                    FfiConverterOptionString.lower(peerTicket),FfiConverterString.lower(traceparent)
+                    FfiConverterSequenceString.lower(peerTickets),FfiConverterOptionString.lower(traceparent)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -2057,6 +2570,72 @@ open func readControl(author: Data)async throws  -> [ControlMsg]  {
 }
     
     /**
+     * Read the latest decryptable fix per author (friends who share with us) from the local
+     * replica. One entry per author — the durable path holds no history (FORWARD-SECRECY §4.4).
+     */
+open func readLatest()async throws  -> [IncomingFix]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_read_latest(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeIncomingFix.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Read the latest **ratcheted** fix per author from the local replica.
+     *
+     * Signature first, then session state — `verify_v3` returns a type that the session manager
+     * is the only consumer of, so no unauthenticated byte can reach the ratchet (§4.2).
+     * Envelopes we cannot open are skipped exactly as v2's are: addressed to someone else,
+     * replayed from the archive, or beyond the acceptance window are all "nothing to surface".
+     */
+open func readLatestRatcheted()async throws  -> [IncomingFix]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_read_latest_ratcheted(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeIncomingFix.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Read the latest ratcheted envelope per durable lane, including null responses.
+     */
+open func readLatestRatchetedEvents()async throws  -> [RatchetEvent]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_read_latest_ratcheted_events(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeRatchetEvent.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Read the newest verified profile for `endpoint_id` (self or a friend) from the local
      * replica. `None` if absent or not yet replicated.
      */
@@ -2073,27 +2652,6 @@ open func readProfile(endpointId: Data)async throws  -> ProfileView?  {
             completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
             freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeProfileView.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >=
-     * since_ts`.
-     */
-open func readTrail(author: Data, sinceTs: UInt64)async throws  -> [IncomingFix]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_read_trail(
-                    self.uniffiCloneHandle(),
-                    FfiConverterData.lower(author),FfiConverterUInt64.lower(sinceTs)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceTypeIncomingFix.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -2167,6 +2725,30 @@ open func respondPair(sessionId: Data, accept: Bool)async throws   {
             completeFunc: ffi_iroh_location_rust_future_complete_void,
             freeFunc: ffi_iroh_location_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * How many resyncs we have driven with this peer.
+     *
+     * §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+     * retrying forever, so this is deliberately a count rather than a boolean: the UI decides
+     * where patience runs out, and the crypto layer does not pretend to know.
+     */
+open func resyncCount(peerEndpointHex: String)async throws  -> UInt32  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_resync_count(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_u32,
+            completeFunc: ffi_iroh_location_rust_future_complete_u32,
+            freeFunc: ffi_iroh_location_rust_future_free_u32,
+            liftFunc: FfiConverterUInt32.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -2268,53 +2850,35 @@ open func subscribe(topic: Data, bootstrap: [String], listener: FixListener)asyn
 }
     
     /**
-     * Kick off range-based set reconciliation across our own + imported friend namespaces to
-     * recover envelopes missed while offline. When `peer_ticket` is present, every namespace
-     * explicitly syncs with that endpoint (the trail stash). Recovered, decryptable fixes are
-     * surfaced via the attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via
-     * `on_sync`.
+     * Reconcile our own + every imported friend namespace so each author's **current** fix is
+     * exchanged (FORWARD-SECRECY §4.4 — the durable path is last-write-wins; there is no missed
+     * history to recover). Read the results with [`Self::read_latest`].
+     *
+     * `peer_tickets` is every endpoint worth dialing for this pass: the trail stash when it is
+     * configured and opted into, and **every pool member**. That list is the whole mechanism
+     * behind ARCHITECTURE.md §1.3/§6 — "a rejoining B runs range-based reconciliation against
+     * C/D/A". An earlier revision took a single `Option<String>` that only ever carried the
+     * stash, so a device could recover an author's fix from the durable server or from the
+     * author, and from nobody else; with the author offline and the stash off there was no
+     * reachable source at all, even when a friend beside it demonstrably held the fix.
+     *
+     * The peers are handed to iroh-docs together rather than dialled one at a time, so a
+     * namespace reconciles with whoever answers instead of paying a separate timeout per peer.
+     * An empty list is meaningful and not an error: it reconciles with whatever the live engine
+     * is already connected to, which is the correct degenerate case (and what a device with no
+     * friends and no stash should do).
+     *
+     * Unparseable tickets are skipped rather than failing the pass — one malformed friend card
+     * must not stop reconciliation with everyone else — but they are counted on the span, since
+     * a silent skip is exactly the kind of thing that hides a real break.
      */
-open func syncTrail(sinceTs: UInt64, peerTicket: String?)async throws   {
+open func syncLatest(peerTickets: [String], traceparent: String?)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_sync_trail(
+                uniffi_iroh_location_fn_method_locationnode_sync_latest(
                     self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(sinceTs),FfiConverterOptionString.lower(peerTicket)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func syncTrailInner(sinceTs: UInt64, peerTicket: String?, traceparent: String?)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_sync_trail_inner(
-                    self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(sinceTs),FfiConverterOptionString.lower(peerTicket),FfiConverterOptionString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func syncTrailTraced(sinceTs: UInt64, peerTicket: String?, traceparent: String)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_sync_trail_traced(
-                    self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(sinceTs),FfiConverterOptionString.lower(peerTicket),FfiConverterString.lower(traceparent)
+                    FfiConverterSequenceString.lower(peerTickets),FfiConverterOptionString.lower(traceparent)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -2346,6 +2910,36 @@ open func ticket()async throws  -> String  {
 }
     
     /**
+     * What this device's durable replica can **serve**, one record per author present in it.
+     *
+     * The diagnostic that distinguishes "the relay had nothing to give" from "the transfer
+     * failed" — a distinction `friend_latest` structurally cannot make, because the live gossip
+     * lane writes it too and a fix that arrived over gossip never enters the author's namespace
+     * (a pool member holds a READ ticket). Reconciliation serves out of the replica, so this is
+     * the only honest answer to "can this device relay author X".
+     *
+     * No decryption and no location data in the result — presence, not payload — so it is
+     * ungated, like [`Self::transport_diagnostics`]. `NamespaceId` is not an FFI type, so the
+     * exported shape reports by author endpoint id rather than by namespace.
+     */
+open func trailReplicaStatus()async throws  -> [TrailReplicaAuthor]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_trail_replica_status(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeTrailReplicaAuthor.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Snapshot the local endpoint's advertised addresses and iroh's retained path table for the
      * requested peers. Remote path usage is point-in-time; callers should poll when displaying it.
      */
@@ -2362,6 +2956,26 @@ open func transportDiagnostics(peerEndpointIds: [Data])async throws  -> Transpor
             completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
             freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeTransportDiagnostics_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
+     */
+open func uploadTrailContent(baseUrl: String, psk: String?)async throws  -> UInt64  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_upload_trail_content(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(baseUrl),FfiConverterOptionString.lower(psk)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_u64,
+            completeFunc: ffi_iroh_location_rust_future_complete_u64,
+            freeFunc: ffi_iroh_location_rust_future_free_u64,
+            liftFunc: FfiConverterUInt64.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -2417,6 +3031,236 @@ public func FfiConverterTypeLocationNode_lower(_ value: LocationNode) -> UInt64 
 
 
 /**
+ * A mailbox: capsules indexed by rotating tag, newest-first, bounded per tag and overall.
+ *
+ * Held by the phone (what it has fetched, so a Query can carry a `have` set) and — once W4
+ * lands — by a smart node. Capsule interiors are opaque here, exactly as in firmware.
+ */
+public protocol MeshCapsuleStoreProtocol: AnyObject, Sendable {
+    
+    /**
+     * Capsules matching `tags` minus everything in `have` — the Deliver set a node would send.
+     */
+    func deliver(tags: [Data], have: [Data])  -> [Data]
+    
+    /**
+     * Dedup keys already held for `tags` — the `have` set sent with a BLE Query.
+     */
+    func have(tags: [Data])  -> [Data]
+    
+    /**
+     * Offer a capsule. A drop here is a drop-decision point: the returned `reason` is the
+     * `sc.drop_reason` value to stamp.
+     */
+    func insert(capsule: Data, nowSecs: UInt64)  -> MeshInsert
+    
+    /**
+     * The live position for a tag — the most recently arrived capsule.
+     */
+    func latest(tag: Data)  -> Data?
+    
+    /**
+     * Drop everything that has fallen out of the acceptance window. Returns the count removed.
+     */
+    func prune(nowSecs: UInt64)  -> UInt64
+    
+    func stats(nowSecs: UInt64)  -> MeshStats
+    
+}
+/**
+ * A mailbox: capsules indexed by rotating tag, newest-first, bounded per tag and overall.
+ *
+ * Held by the phone (what it has fetched, so a Query can carry a `have` set) and — once W4
+ * lands — by a smart node. Capsule interiors are opaque here, exactly as in firmware.
+ */
+open class MeshCapsuleStore: MeshCapsuleStoreProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_iroh_location_fn_clone_meshcapsulestore(self.handle, $0) }
+    }
+    /**
+     * `capacity` bounds the number of distinct tags held; each holds up to `ring_depth`
+     * capsules. This is the PSRAM/RAM knob (DESIGN Q6).
+     */
+public convenience init(capacity: UInt32) {
+    let handle =
+        try! rustCall() {
+    uniffi_iroh_location_fn_constructor_meshcapsulestore_new(
+        FfiConverterUInt32.lower(capacity),$0
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_iroh_location_fn_free_meshcapsulestore(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Capsules matching `tags` minus everything in `have` — the Deliver set a node would send.
+     */
+open func deliver(tags: [Data], have: [Data]) -> [Data]  {
+    return try!  FfiConverterSequenceData.lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_meshcapsulestore_deliver(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceData.lower(tags),
+        FfiConverterSequenceData.lower(have),$0
+    )
+})
+}
+    
+    /**
+     * Dedup keys already held for `tags` — the `have` set sent with a BLE Query.
+     */
+open func have(tags: [Data]) -> [Data]  {
+    return try!  FfiConverterSequenceData.lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_meshcapsulestore_have(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceData.lower(tags),$0
+    )
+})
+}
+    
+    /**
+     * Offer a capsule. A drop here is a drop-decision point: the returned `reason` is the
+     * `sc.drop_reason` value to stamp.
+     */
+open func insert(capsule: Data, nowSecs: UInt64) -> MeshInsert  {
+    return try!  FfiConverterTypeMeshInsert_lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_meshcapsulestore_insert(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(capsule),
+        FfiConverterUInt64.lower(nowSecs),$0
+    )
+})
+}
+    
+    /**
+     * The live position for a tag — the most recently arrived capsule.
+     */
+open func latest(tag: Data) -> Data?  {
+    return try!  FfiConverterOptionData.lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_meshcapsulestore_latest(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(tag),$0
+    )
+})
+}
+    
+    /**
+     * Drop everything that has fallen out of the acceptance window. Returns the count removed.
+     */
+open func prune(nowSecs: UInt64) -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_meshcapsulestore_prune(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(nowSecs),$0
+    )
+})
+}
+    
+open func stats(nowSecs: UInt64) -> MeshStats  {
+    return try!  FfiConverterTypeMeshStats_lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_meshcapsulestore_stats(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(nowSecs),$0
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshCapsuleStore: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = MeshCapsuleStore
+
+    public static func lift(_ handle: UInt64) throws -> MeshCapsuleStore {
+        return MeshCapsuleStore(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: MeshCapsuleStore) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshCapsuleStore {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: MeshCapsuleStore, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshCapsuleStore_lift(_ handle: UInt64) throws -> MeshCapsuleStore {
+    return try FfiConverterTypeMeshCapsuleStore.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshCapsuleStore_lower(_ value: MeshCapsuleStore) -> UInt64 {
+    return FfiConverterTypeMeshCapsuleStore.lower(value)
+}
+
+
+
+
+
+
+/**
  * A live topic subscription; publish fixes through it.
  */
 public protocol SubscriptionProtocol: AnyObject, Sendable {
@@ -2426,11 +3270,22 @@ public protocol SubscriptionProtocol: AnyObject, Sendable {
      * broadcast it on the topic. Recipients NOT in this list cannot decrypt it —
      * that's how revocation works.
      */
-    func publish(seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data]) async throws 
+    func publish(seq: UInt64, fix: LocationFix, recipientEndpoints: [String]) async throws  -> [String]
     
-    func publishInner(seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String?) async throws 
+    func publishInner(seq: UInt64, fix: LocationFix?, ts: UInt64, recipientEndpoints: [String], traceparent: String?) async throws  -> [String]
     
-    func publishTraced(seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String) async throws 
+    /**
+     * Broadcast a **null fix** — an envelope with an empty padded payload (FORWARD-SECRECY §4.1).
+     *
+     * The live half of the watcher lane: identical in shape, length, and signing discipline to
+     * [`Self::publish`], carrying no position. Recipients decode it as a healthy envelope with
+     * nothing to deliver.
+     */
+    func publishNull(seq: UInt64, ts: UInt64, recipientEndpoints: [String]) async throws  -> [String]
+    
+    func publishNullTraced(seq: UInt64, ts: UInt64, recipientEndpoints: [String], traceparent: String) async throws  -> [String]
+    
+    func publishTraced(seq: UInt64, fix: LocationFix, recipientEndpoints: [String], traceparent: String) async throws  -> [String]
     
 }
 /**
@@ -2494,53 +3349,94 @@ open class Subscription: SubscriptionProtocol, @unchecked Sendable {
      * broadcast it on the topic. Recipients NOT in this list cannot decrypt it —
      * that's how revocation works.
      */
-open func publish(seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data])async throws   {
+open func publish(seq: UInt64, fix: LocationFix, recipientEndpoints: [String])async throws  -> [String]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_subscription_publish(
                     self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(seq),FfiConverterUInt32.lower(epoch),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients)
+                    FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceString.lower(recipientEndpoints)
                 )
             },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
     
-open func publishInner(seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String?)async throws   {
+open func publishInner(seq: UInt64, fix: LocationFix?, ts: UInt64, recipientEndpoints: [String], traceparent: String?)async throws  -> [String]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_subscription_publish_inner(
                     self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(seq),FfiConverterUInt32.lower(epoch),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients),FfiConverterOptionString.lower(traceparent)
+                    FfiConverterUInt64.lower(seq),FfiConverterOptionTypeLocationFix.lower(fix),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterOptionString.lower(traceparent)
                 )
             },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
     
-open func publishTraced(seq: UInt64, epoch: UInt32, fix: LocationFix, recipients: [Data], traceparent: String)async throws   {
+    /**
+     * Broadcast a **null fix** — an envelope with an empty padded payload (FORWARD-SECRECY §4.1).
+     *
+     * The live half of the watcher lane: identical in shape, length, and signing discipline to
+     * [`Self::publish`], carrying no position. Recipients decode it as a healthy envelope with
+     * nothing to deliver.
+     */
+open func publishNull(seq: UInt64, ts: UInt64, recipientEndpoints: [String])async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_subscription_publish_null(
+                    self.uniffiCloneHandle(),
+                    FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(recipientEndpoints)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func publishNullTraced(seq: UInt64, ts: UInt64, recipientEndpoints: [String], traceparent: String)async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_subscription_publish_null_traced(
+                    self.uniffiCloneHandle(),
+                    FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+open func publishTraced(seq: UInt64, fix: LocationFix, recipientEndpoints: [String], traceparent: String)async throws  -> [String]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_subscription_publish_traced(
                     self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(seq),FfiConverterUInt32.lower(epoch),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients),FfiConverterString.lower(traceparent)
+                    FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterString.lower(traceparent)
                 )
             },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -3084,6 +3980,444 @@ public func FfiConverterTypeLocationFix_lower(_ value: LocationFix) -> RustBuffe
 
 
 /**
+ * Wire + policy constants for the mesh, so the TS orchestration layer never hardcodes them.
+ */
+public struct MeshConstants: Equatable, Hashable {
+    /**
+     * Capsule wire version currently emitted.
+     */
+    public var capsuleV: UInt8
+    /**
+     * Epoch length in seconds (900 = 15 min).
+     */
+    public var epochSecs: UInt64
+    public var tagLen: UInt32
+    public var dedupLen: UInt32
+    /**
+     * Bytes of plaintext header (`v || epoch || tag`) — all a bare antenna parses.
+     */
+    public var headerLen: UInt32
+    /**
+     * Capsules retained per tag by a mailbox.
+     */
+    public var ringDepth: UInt32
+    /**
+     * Cap on tags in one BLE Query message (§4.1).
+     */
+    public var maxQueryTags: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Capsule wire version currently emitted.
+         */capsuleV: UInt8, 
+        /**
+         * Epoch length in seconds (900 = 15 min).
+         */epochSecs: UInt64, tagLen: UInt32, dedupLen: UInt32, 
+        /**
+         * Bytes of plaintext header (`v || epoch || tag`) — all a bare antenna parses.
+         */headerLen: UInt32, 
+        /**
+         * Capsules retained per tag by a mailbox.
+         */ringDepth: UInt32, 
+        /**
+         * Cap on tags in one BLE Query message (§4.1).
+         */maxQueryTags: UInt32) {
+        self.capsuleV = capsuleV
+        self.epochSecs = epochSecs
+        self.tagLen = tagLen
+        self.dedupLen = dedupLen
+        self.headerLen = headerLen
+        self.ringDepth = ringDepth
+        self.maxQueryTags = maxQueryTags
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MeshConstants: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshConstants: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshConstants {
+        return
+            try MeshConstants(
+                capsuleV: FfiConverterUInt8.read(from: &buf), 
+                epochSecs: FfiConverterUInt64.read(from: &buf), 
+                tagLen: FfiConverterUInt32.read(from: &buf), 
+                dedupLen: FfiConverterUInt32.read(from: &buf), 
+                headerLen: FfiConverterUInt32.read(from: &buf), 
+                ringDepth: FfiConverterUInt32.read(from: &buf), 
+                maxQueryTags: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshConstants, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.capsuleV, into: &buf)
+        FfiConverterUInt64.write(value.epochSecs, into: &buf)
+        FfiConverterUInt32.write(value.tagLen, into: &buf)
+        FfiConverterUInt32.write(value.dedupLen, into: &buf)
+        FfiConverterUInt32.write(value.headerLen, into: &buf)
+        FfiConverterUInt32.write(value.ringDepth, into: &buf)
+        FfiConverterUInt32.write(value.maxQueryTags, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshConstants_lift(_ buf: RustBuffer) throws -> MeshConstants {
+    return try FfiConverterTypeMeshConstants.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshConstants_lower(_ value: MeshConstants) -> RustBuffer {
+    return FfiConverterTypeMeshConstants.lower(value)
+}
+
+
+/**
+ * The plaintext prefix of a capsule.
+ */
+public struct MeshHeader: Equatable, Hashable {
+    public var v: UInt8
+    public var epoch: UInt32
+    public var tag: Data
+    /**
+     * `blake3(capsule)[..16]` — the dedup key every relay tier keys on.
+     */
+    public var dedupKey: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(v: UInt8, epoch: UInt32, tag: Data, 
+        /**
+         * `blake3(capsule)[..16]` — the dedup key every relay tier keys on.
+         */dedupKey: Data) {
+        self.v = v
+        self.epoch = epoch
+        self.tag = tag
+        self.dedupKey = dedupKey
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MeshHeader: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshHeader: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshHeader {
+        return
+            try MeshHeader(
+                v: FfiConverterUInt8.read(from: &buf), 
+                epoch: FfiConverterUInt32.read(from: &buf), 
+                tag: FfiConverterData.read(from: &buf), 
+                dedupKey: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshHeader, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.v, into: &buf)
+        FfiConverterUInt32.write(value.epoch, into: &buf)
+        FfiConverterData.write(value.tag, into: &buf)
+        FfiConverterData.write(value.dedupKey, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshHeader_lift(_ buf: RustBuffer) throws -> MeshHeader {
+    return try FfiConverterTypeMeshHeader.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshHeader_lower(_ value: MeshHeader) -> RustBuffer {
+    return FfiConverterTypeMeshHeader.lower(value)
+}
+
+
+/**
+ * Outcome of offering a capsule to a [`MeshCapsuleStore`].
+ */
+public struct MeshInsert: Equatable, Hashable {
+    public var accepted: Bool
+    /**
+     * `accepted` | `malformed` | `bad_version` | `stale_epoch` | `future_epoch` | `duplicate`.
+     * Stamp this as `sc.drop_reason` on the caller's span (`infra/otel/README.md`).
+     */
+    public var reason: String
+    public var dedupKey: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(accepted: Bool, 
+        /**
+         * `accepted` | `malformed` | `bad_version` | `stale_epoch` | `future_epoch` | `duplicate`.
+         * Stamp this as `sc.drop_reason` on the caller's span (`infra/otel/README.md`).
+         */reason: String, dedupKey: Data) {
+        self.accepted = accepted
+        self.reason = reason
+        self.dedupKey = dedupKey
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MeshInsert: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshInsert: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshInsert {
+        return
+            try MeshInsert(
+                accepted: FfiConverterBool.read(from: &buf), 
+                reason: FfiConverterString.read(from: &buf), 
+                dedupKey: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshInsert, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.accepted, into: &buf)
+        FfiConverterString.write(value.reason, into: &buf)
+        FfiConverterData.write(value.dedupKey, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshInsert_lift(_ buf: RustBuffer) throws -> MeshInsert {
+    return try FfiConverterTypeMeshInsert.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshInsert_lower(_ value: MeshInsert) -> RustBuffer {
+    return FfiConverterTypeMeshInsert.lower(value)
+}
+
+
+/**
+ * A friend as the mesh needs them: the two public halves of their contact card.
+ */
+public struct MeshPeer: Equatable, Hashable {
+    /**
+     * 32-byte ed25519 EndpointId (the envelope author id).
+     */
+    public var endpointId: Data
+    /**
+     * 32-byte X25519 receiving public key.
+     */
+    public var recvPublic: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 32-byte ed25519 EndpointId (the envelope author id).
+         */endpointId: Data, 
+        /**
+         * 32-byte X25519 receiving public key.
+         */recvPublic: Data) {
+        self.endpointId = endpointId
+        self.recvPublic = recvPublic
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MeshPeer: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshPeer: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshPeer {
+        return
+            try MeshPeer(
+                endpointId: FfiConverterData.read(from: &buf), 
+                recvPublic: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshPeer, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.endpointId, into: &buf)
+        FfiConverterData.write(value.recvPublic, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshPeer_lift(_ buf: RustBuffer) throws -> MeshPeer {
+    return try FfiConverterTypeMeshPeer.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshPeer_lower(_ value: MeshPeer) -> RustBuffer {
+    return FfiConverterTypeMeshPeer.lower(value)
+}
+
+
+/**
+ * Mailbox occupancy, for the dev screen and the BLE Node Info characteristic.
+ */
+public struct MeshStats: Equatable, Hashable {
+    public var capsules: UInt64
+    public var tags: UInt64
+    public var epoch: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(capsules: UInt64, tags: UInt64, epoch: UInt32) {
+        self.capsules = capsules
+        self.tags = tags
+        self.epoch = epoch
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MeshStats: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshStats: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshStats {
+        return
+            try MeshStats(
+                capsules: FfiConverterUInt64.read(from: &buf), 
+                tags: FfiConverterUInt64.read(from: &buf), 
+                epoch: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshStats, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.capsules, into: &buf)
+        FfiConverterUInt64.write(value.tags, into: &buf)
+        FfiConverterUInt32.write(value.epoch, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshStats_lift(_ buf: RustBuffer) throws -> MeshStats {
+    return try FfiConverterTypeMeshStats.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshStats_lower(_ value: MeshStats) -> RustBuffer {
+    return FfiConverterTypeMeshStats.lower(value)
+}
+
+
+/**
+ * A mailbox address we expect traffic on, plus who/when it belongs to.
+ */
+public struct MeshTag: Equatable, Hashable {
+    public var tag: Data
+    public var author: Data
+    public var epoch: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(tag: Data, author: Data, epoch: UInt32) {
+        self.tag = tag
+        self.author = author
+        self.epoch = epoch
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MeshTag: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshTag: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshTag {
+        return
+            try MeshTag(
+                tag: FfiConverterData.read(from: &buf), 
+                author: FfiConverterData.read(from: &buf), 
+                epoch: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MeshTag, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.tag, into: &buf)
+        FfiConverterData.write(value.author, into: &buf)
+        FfiConverterUInt32.write(value.epoch, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshTag_lift(_ buf: RustBuffer) throws -> MeshTag {
+    return try FfiConverterTypeMeshTag.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshTag_lower(_ value: MeshTag) -> RustBuffer {
+    return FfiConverterTypeMeshTag.lower(value)
+}
+
+
+/**
  * A polled pairing event (node-level queue; see `poll_pair_events`).
  */
 public struct PairEvent: Equatable, Hashable {
@@ -3563,6 +4897,79 @@ public func FfiConverterTypeProfileView_lower(_ value: ProfileView) -> RustBuffe
 
 
 /**
+ * A decrypted ratcheted envelope read from the durable replica.
+ *
+ * `kind` is `fix` or `null`; `fix` is present only for the fix lane. Keeping null envelopes in
+ * this result lets the app observe the symmetric return path instead of silently discarding the
+ * very messages that keep a one-directional relationship's ratchet alive.
+ */
+public struct RatchetEvent: Equatable, Hashable {
+    public var author: Data
+    public var seq: UInt64
+    public var ts: UInt64
+    public var kind: String
+    public var fix: LocationFix?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(author: Data, seq: UInt64, ts: UInt64, kind: String, fix: LocationFix?) {
+        self.author = author
+        self.seq = seq
+        self.ts = ts
+        self.kind = kind
+        self.fix = fix
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RatchetEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRatchetEvent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RatchetEvent {
+        return
+            try RatchetEvent(
+                author: FfiConverterData.read(from: &buf), 
+                seq: FfiConverterUInt64.read(from: &buf), 
+                ts: FfiConverterUInt64.read(from: &buf), 
+                kind: FfiConverterString.read(from: &buf), 
+                fix: FfiConverterOptionTypeLocationFix.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RatchetEvent, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.author, into: &buf)
+        FfiConverterUInt64.write(value.seq, into: &buf)
+        FfiConverterUInt64.write(value.ts, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterOptionTypeLocationFix.write(value.fix, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRatchetEvent_lift(_ buf: RustBuffer) throws -> RatchetEvent {
+    return try FfiConverterTypeRatchetEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRatchetEvent_lower(_ value: RatchetEvent) -> RustBuffer {
+    return FfiConverterTypeRatchetEvent.lower(value)
+}
+
+
+/**
  * The per-session Short Authentication String challenge shown while a pair is `Verifying`.
  */
 public struct SasChallenge: Equatable, Hashable {
@@ -3642,6 +5049,106 @@ public func FfiConverterTypeSasChallenge_lift(_ buf: RustBuffer) throws -> SasCh
 #endif
 public func FfiConverterTypeSasChallenge_lower(_ value: SasChallenge) -> RustBuffer {
     return FfiConverterTypeSasChallenge.lower(value)
+}
+
+
+/**
+ * One author's fix slot in the LOCAL durable replica — what this device could hand to a peer.
+ *
+ * Companion to [`TransportDiagnostics`]: a diagnostics read, carrying no location data, so it
+ * needs no decrypt and no gate. See [`docs::ReplicaSlot`] for why this is not the same question
+ * as "have we seen this author's fix" — app storage is written by the live gossip lane too, and
+ * reconciliation serves out of the replica.
+ */
+public struct TrailReplicaAuthor: Equatable, Hashable {
+    /**
+     * The author's endpoint id (their ed25519 verifying key).
+     */
+    public var author: Data
+    /**
+     * The envelope's `seq`, from its signed plaintext header. `0` when `has_content` is false.
+     */
+    public var seq: UInt64
+    /**
+     * The envelope's `ts` — when the author took the fix, not when we stored it. `0` when
+     * `has_content` is false.
+     */
+    public var fixTs: UInt64
+    /**
+     * Whether we hold a readable signed envelope for this author, and not merely a docs record
+     * pointing at a blob that never landed. False means there is nothing to serve, which is a
+     * different failure from "the transfer broke".
+     */
+    public var hasContent: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The author's endpoint id (their ed25519 verifying key).
+         */author: Data, 
+        /**
+         * The envelope's `seq`, from its signed plaintext header. `0` when `has_content` is false.
+         */seq: UInt64, 
+        /**
+         * The envelope's `ts` — when the author took the fix, not when we stored it. `0` when
+         * `has_content` is false.
+         */fixTs: UInt64, 
+        /**
+         * Whether we hold a readable signed envelope for this author, and not merely a docs record
+         * pointing at a blob that never landed. False means there is nothing to serve, which is a
+         * different failure from "the transfer broke".
+         */hasContent: Bool) {
+        self.author = author
+        self.seq = seq
+        self.fixTs = fixTs
+        self.hasContent = hasContent
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TrailReplicaAuthor: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrailReplicaAuthor: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrailReplicaAuthor {
+        return
+            try TrailReplicaAuthor(
+                author: FfiConverterData.read(from: &buf), 
+                seq: FfiConverterUInt64.read(from: &buf), 
+                fixTs: FfiConverterUInt64.read(from: &buf), 
+                hasContent: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrailReplicaAuthor, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.author, into: &buf)
+        FfiConverterUInt64.write(value.seq, into: &buf)
+        FfiConverterUInt64.write(value.fixTs, into: &buf)
+        FfiConverterBool.write(value.hasContent, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrailReplicaAuthor_lift(_ buf: RustBuffer) throws -> TrailReplicaAuthor {
+    return try FfiConverterTypeTrailReplicaAuthor.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrailReplicaAuthor_lower(_ value: TrailReplicaAuthor) -> RustBuffer {
+    return FfiConverterTypeTrailReplicaAuthor.lower(value)
 }
 
 
@@ -4217,30 +5724,6 @@ fileprivate struct FfiConverterOptionInt16: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
-    typealias SwiftType = UInt64?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterUInt64.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterUInt64.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
     typealias SwiftType = Bool?
 
@@ -4305,6 +5788,30 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeLocationFix: FfiConverterRustBuffer {
+    typealias SwiftType = LocationFix?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeLocationFix.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeLocationFix.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -4584,6 +6091,56 @@ fileprivate struct FfiConverterSequenceTypeIncomingFix: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeMeshPeer: FfiConverterRustBuffer {
+    typealias SwiftType = [MeshPeer]
+
+    public static func write(_ value: [MeshPeer], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeMeshPeer.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MeshPeer] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [MeshPeer]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeMeshPeer.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeMeshTag: FfiConverterRustBuffer {
+    typealias SwiftType = [MeshTag]
+
+    public static func write(_ value: [MeshTag], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeMeshTag.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MeshTag] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [MeshTag]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeMeshTag.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePairEvent: FfiConverterRustBuffer {
     typealias SwiftType = [PairEvent]
 
@@ -4676,6 +6233,56 @@ fileprivate struct FfiConverterSequenceTypeProfileView: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeProfileView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeRatchetEvent: FfiConverterRustBuffer {
+    typealias SwiftType = [RatchetEvent]
+
+    public static func write(_ value: [RatchetEvent], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRatchetEvent.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RatchetEvent] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RatchetEvent]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeRatchetEvent.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTrailReplicaAuthor: FfiConverterRustBuffer {
+    typealias SwiftType = [TrailReplicaAuthor]
+
+    public static func write(_ value: [TrailReplicaAuthor], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrailReplicaAuthor.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrailReplicaAuthor] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrailReplicaAuthor]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrailReplicaAuthor.read(from: &buf))
         }
         return seq
     }
@@ -4829,6 +6436,108 @@ public func h3CellsForPolygon(coordinates: [Double], resolution: UInt8)throws  -
 })
 }
 /**
+ * Parse `{v, epoch, tag}` + dedup key from a capsule. No key material involved — this is
+ * exactly what a bare antenna does.
+ */
+public func meshCapsuleHeader(capsule: Data)throws  -> MeshHeader  {
+    return try  FfiConverterTypeMeshHeader_lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_func_mesh_capsule_header(
+        FfiConverterData.lower(capsule),$0
+    )
+})
+}
+/**
+ * Unwrap a capsule to the inner envelope bytes. The envelope's ed25519 signature is **not**
+ * checked here — that happens in `crypto::open`, i.e. in [`mesh_open_fix`].
+ */
+public func meshCapsuleOpen(recvSecret: Data, author: MeshPeer, capsule: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_func_mesh_capsule_open(
+        FfiConverterData.lower(recvSecret),
+        FfiConverterTypeMeshPeer_lower(author),
+        FfiConverterData.lower(capsule),$0
+    )
+})
+}
+/**
+ * Wrap one already-sealed envelope for one recipient.
+ */
+public func meshCapsuleSeal(recvSecret: Data, authorEndpointId: Data, recipientRecvPublic: Data, envelope: Data, epoch: UInt32)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_func_mesh_capsule_seal(
+        FfiConverterData.lower(recvSecret),
+        FfiConverterData.lower(authorEndpointId),
+        FfiConverterData.lower(recipientRecvPublic),
+        FfiConverterData.lower(envelope),
+        FfiConverterUInt32.lower(epoch),$0
+    )
+})
+}
+public func meshConstants() -> MeshConstants  {
+    return try!  FfiConverterTypeMeshConstants_lift(try! rustCall() {
+    uniffi_iroh_location_fn_func_mesh_constants($0
+    )
+})
+}
+/**
+ * Which 15-minute epoch a unix timestamp (seconds) falls in.
+ */
+public func meshEpoch(nowSecs: UInt64) -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+    uniffi_iroh_location_fn_func_mesh_epoch(
+        FfiConverterUInt64.lower(nowSecs),$0
+    )
+})
+}
+/**
+ * Every mailbox address addressed **to me** across `{e-1, e, e+1}` — the BLE Query set.
+ *
+ * Peers whose card fails key-length validation are skipped rather than failing the sweep. The
+ * caller chunks the result to [`MeshConstants::max_query_tags`] per Query message.
+ */
+public func meshExpectedTags(recvSecret: Data, peers: [MeshPeer], nowSecs: UInt64) -> [MeshTag]  {
+    return try!  FfiConverterSequenceTypeMeshTag.lift(try! rustCall() {
+    uniffi_iroh_location_fn_func_mesh_expected_tags(
+        FfiConverterData.lower(recvSecret),
+        FfiConverterSequenceTypeMeshPeer.lower(peers),
+        FfiConverterUInt64.lower(nowSecs),$0
+    )
+})
+}
+/**
+ * Capsule -> envelope -> verified, decrypted fix. The inverse of [`mesh_seal_fix`] for one
+ * capsule; feeds the **existing** friend-presence path, so the map needs no mesh awareness.
+ */
+public func meshOpenFix(recvSecret: Data, author: MeshPeer, capsule: Data)throws  -> IncomingFix  {
+    return try  FfiConverterTypeIncomingFix_lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_func_mesh_open_fix(
+        FfiConverterData.lower(recvSecret),
+        FfiConverterTypeMeshPeer_lower(author),
+        FfiConverterData.lower(capsule),$0
+    )
+})
+}
+/**
+ * Seal one fix into **one capsule per recipient**, ready for Submit over BLE.
+ *
+ * Each capsule carries its own envelope wrapped for that recipient alone (DESIGN §3.2): smaller
+ * frames, and group membership never leaves the device. Going through this function rather than
+ * [`mesh_capsule_seal`] is what makes that structural instead of a convention.
+ */
+public func meshSealFix(identitySecret: Data, recvSecret: Data, authorEndpointId: Data, seq: UInt64, meshEpoch: UInt32, fix: LocationFix, recipients: [MeshPeer])throws  -> [Data]  {
+    return try  FfiConverterSequenceData.lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_func_mesh_seal_fix(
+        FfiConverterData.lower(identitySecret),
+        FfiConverterData.lower(recvSecret),
+        FfiConverterData.lower(authorEndpointId),
+        FfiConverterUInt64.lower(seq),
+        FfiConverterUInt32.lower(meshEpoch),
+        FfiConverterTypeLocationFix_lower(fix),
+        FfiConverterSequenceTypeMeshPeer.lower(recipients),$0
+    )
+})
+}
+/**
  * Point developer telemetry at an OTLP/HTTP collector (`http://<lan-ip>:4318`), or disable it by
  * passing an empty endpoint. Returns whether export is active — always `false` when the crate was
  * built without the `otel` feature (store builds), so the uniffi surface is identical either way
@@ -4901,6 +6610,30 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_func_h3_cells_for_polygon() != 51742) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_func_mesh_capsule_header() != 56669) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_capsule_open() != 22247) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_capsule_seal() != 18327) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_constants() != 6729) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_epoch() != 9095) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_expected_tags() != 41685) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_open_fix() != 58136) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_mesh_seal_fix() != 60001) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4916,7 +6649,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_fixlistener_on_status() != 49613) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_fixlistener_on_sync() != 58565) {
+    if (uniffi_iroh_location_checksum_method_locationnode_begin_session() != 25232) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_ble_available() != 5831) {
@@ -4931,6 +6664,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 49013) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_clear_resync() != 52312) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_complete_session() != 30383) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_confirm_pair_display() != 2067) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4940,19 +6679,46 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_doc_ticket() != 34643) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write() != 8784) {
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write() != 25294) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_docs_write_control() != 23232) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_inner() != 3042) {
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_inner() != 15200) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_traced() != 40920) {
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_null() != 46772) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted() != 18657) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted_traced() != 10230) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_null_traced() != 22862) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted() != 14176) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_inner() != 59600) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_traced() != 56484) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_traced() != 47616) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_endpoint_id() != 34847) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_forget_session() != 58135) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_has_session() != 16365) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_identity_secret() != 6853) {
@@ -4971,6 +6737,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby() != 64589) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 60716) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_list_pair_sessions() != 11581) {
@@ -5000,6 +6769,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_poll_profile_events() != 11150) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_poll_resync() != 5911) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_profile_ticket() != 35099) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5009,22 +6781,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_publish_profile() != 57330) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_push_trail() != 65355) {
+    if (uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 54563) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_push_trail_inner() != 60203) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_push_trail_traced() != 27419) {
+    if (uniffi_iroh_location_checksum_method_locationnode_push_trail() != 39469) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_read_control() != 32699) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_read_profile() != 28632) {
+    if (uniffi_iroh_location_checksum_method_locationnode_read_latest() != 16725) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_read_trail() != 11856) {
+    if (uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted() != 45503) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted_events() != 33560) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_read_profile() != 28632) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_recv_public() != 14228) {
@@ -5037,6 +6812,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_respond_pair() != 4487) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_resync_count() != 62719) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
@@ -5054,31 +6832,61 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_subscribe() != 37204) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_sync_trail() != 30653) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_sync_trail_inner() != 39894) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_sync_trail_traced() != 35925) {
+    if (uniffi_iroh_location_checksum_method_locationnode_sync_latest() != 8256) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_trail_replica_status() != 25080) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics() != 23251) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_subscription_publish() != 60528) {
+    if (uniffi_iroh_location_checksum_method_locationnode_upload_trail_content() != 549) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_subscription_publish_inner() != 23224) {
+    if (uniffi_iroh_location_checksum_method_meshcapsulestore_deliver() != 47836) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_subscription_publish_traced() != 24737) {
+    if (uniffi_iroh_location_checksum_method_meshcapsulestore_have() != 26291) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_meshcapsulestore_insert() != 1404) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_meshcapsulestore_latest() != 19517) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_meshcapsulestore_prune() != 57364) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_subscription_publish() != 18306) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_subscription_publish_inner() != 62762) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_subscription_publish_null() != 2917) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_subscription_publish_null_traced() != 48794) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_subscription_publish_traced() != 2036) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_constructor_locationnode_new() != 52316) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_constructor_locationnode_new_at_dirs() != 15584) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_constructor_meshcapsulestore_new() != 52560) {
         return InitializationResult.apiChecksumMismatch
     }
 

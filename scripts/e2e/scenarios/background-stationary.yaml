@@ -1,0 +1,13 @@
+name: background-stationary
+description: "One simulator at a fixed point, backgrounded. Confirms the background pipeline keeps waking on the app's normal cadence when the device isn't moving, rather than silently going quiet. Deliberately does NOT assert publish.fix: with no motion the fix-quality/sampling gates may legitimately suppress publishing, and asserting a hard minimum there would make this scenario test a policy detail rather than 'still alive.'"
+kind: single
+devices: 1
+duration_seconds: 180
+route: stationary
+background: true
+force_quit_after_seconds: 0
+thrash: false
+require_stash_observer: false
+assertions:
+  - action: bg.wake
+    min_count: 1

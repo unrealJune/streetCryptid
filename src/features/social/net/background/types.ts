@@ -37,23 +37,19 @@ export type ActivityKind = 'other' | 'fitness' | 'automotive' | 'navigation';
 /**
  * Tunables for {@link SamplingPolicy}; all durations in ms, distances in metres.
  *
- * The cadence is a **constant**, and that is a security property rather than a simplification.
- * Envelopes are E2E-encrypted, but the trail-stash and any network observer still see their
- * arrival times, and an interval that tracked motion (the old 18s driving / 45s walking / 180s
- * stationary ladder) published "what the user is doing" in the clear alongside the ciphertext.
- * Nothing here may vary with movement; battery may only move {@link normalAccuracy} →
- * {@link lowBatteryAccuracy} or, below {@link suspendBelowLevel}, stop sampling entirely — a hard
- * stop that reads as "the phone died", not as an activity class.
+ * The slot interval is constant, but ambient OS delivery is movement-driven so iOS can power down
+ * Core Location while stationary. Battery may move {@link normalAccuracy} →
+ * {@link lowBatteryAccuracy} or, below {@link suspendBelowLevel}, stop sampling entirely.
  */
 export interface SamplingConfig {
   /** The fixed cadence. User-selectable; see `loadShareIntervalMs` in `../persistence.ts`. */
   intervalMs: number;
+  /** Ambient OS movement filter in metres. */
+  ambientDistanceM: number;
+  /** Ambient iOS TaskManager delivery batching window in ms. */
+  ambientDeliveryIntervalMs: number;
   /**
    * Accuracy tier at normal battery.
-   *
-   * There is deliberately no distance filter to pair with this: distance-gated delivery is
-   * motion-gated delivery, so the OS would stop waking us the moment the user stopped moving —
-   * re-opening at the platform layer exactly the leak this policy closes. Time is the only gate.
    */
   normalAccuracy: AccuracyTier;
   /** Accuracy tier under low battery / Low-Power Mode. */

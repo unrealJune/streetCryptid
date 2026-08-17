@@ -1,0 +1,15 @@
+name: long-idle-background
+description: 'One simulator, backgrounded and stationary for just over one backfill interval (infra/otel/README.md documents the periodic bg.backfill wake as ~15 min). Confirms the app keeps waking and checking in over a longer idle stretch rather than only across a short scripted route.'
+kind: single
+devices: 1
+duration_seconds: 1000
+route: stationary
+background: true
+force_quit_after_seconds: 0
+thrash: false
+require_stash_observer: false
+assertions:
+  - action: bg.wake
+    min_count: 2
+  - action: bg.backfill
+    min_count: 1

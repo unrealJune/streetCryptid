@@ -1,0 +1,14 @@
+name: force-quit-relaunch
+description: 'Backgrounds the app, then force-quits it (xcrun simctl terminate) partway through and waits to see whether the OS relaunches it via a significant-location-change event. iOS Simulator cannot reproduce a real SLC-triggered relaunch after a user force-quit (this is a documented Simulator limitation, not an app bug) — see scripts/e2e/PHYSICAL-DEVICE-CHECKLIST.md. Marked simulator_limited so run-matrix.sh reports a failure here as a warning, not a build-breaking result.'
+kind: single
+devices: 1
+duration_seconds: 240
+route: walking
+background: true
+force_quit_after_seconds: 60
+thrash: false
+require_stash_observer: false
+simulator_limited: true
+assertions:
+  - action: bg.wake
+    min_count: 2

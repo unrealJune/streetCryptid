@@ -58,6 +58,8 @@ export interface OnFixEvent {
 export interface OnOpaqueEvent {
   author: string;
   seq: number;
+  /** `null` means a decrypted null-lane response; `opaque` means no payload was opened. */
+  kind?: 'null' | 'opaque';
 }
 
 export interface OnStatusEvent {
@@ -74,11 +76,39 @@ export interface OnSyncEvent {
   recovered?: number;
 }
 
-/** A decrypted fix read back from the local durable replica (see {@link IrohLocationApi.readTrail}). */
+/**
+ * Recipients left out of a ratcheted publish, as `"<endpointIdHex>:<reason>"`.
+ *
+ * A short wrap list is never silently fine: a friend in here did **not** receive that fix. The
+ * reasons come from `DropReason` in `sessions.rs`:
+ *
+ * - `no_session` — never bootstrapped, or the session was forgotten. Needs an in-person re-pair;
+ *   sessions are only ever rooted by the SAS bump (FORWARD-SECRECY.md §4.2).
+ * - `lapsed` — no fresh ratchet key from them within `T_lapse` (24 h). Structurally identical to
+ *   a revocation until they open the app and publish again (§4.5).
+ * - `no_sending_chain` — a responder that has not yet received the initiator's first envelope.
+ *   Resolves itself on the next tick; not worth surfacing to a human.
+ * - `state_unavailable` — their session state could not be read or persisted. Recoverable via
+ *   §4.6 resync, which `isDesynced` will also be reporting.
+ */
+export type RatchetDropped = string;
+
+/** A decrypted fix read back from the local durable replica (see {@link IrohLocationApi.readLatest}). */
 export interface NativeIncomingFix {
   author: string;
   seq: number;
   fix: NativeLocationFix;
+}
+
+/** A decrypted v3 envelope from the durable replica, including the position-less null lane. */
+export interface NativeRatchetEvent {
+  author: string;
+  seq: number;
+  /** Sender timestamp from the signed envelope header. */
+  ts?: number;
+  /** Absent on installed native binaries from before null-lane activity was surfaced. */
+  kind?: 'fix' | 'null';
+  fix?: NativeLocationFix;
 }
 
 // ── Control messages (docs/social/ARCHITECTURE.md §9c) ──────────────────────────────────────
@@ -302,6 +332,33 @@ export interface TransportDiagnostics {
   peers: PeerTransportDiagnostic[];
 }
 
+/**
+ * One author's fix slot as it exists in the LOCAL durable replica — what this device could hand
+ * to a peer that asks.
+ *
+ * Deliberately NOT the same question as "have we seen this author's fix": the live gossip lane
+ * writes app storage (`friend_latest`, the trail cache) too, and a fix that arrived that way never
+ * enters the author's docs namespace — a pool member holds a READ ticket and cannot write there.
+ * Reconciliation serves out of the replica, so only this answers "can this device relay author X".
+ *
+ * No location data: presence, not payload. `seq` / `fixTs` come from the envelope's signed
+ * plaintext header, so nothing here needs a decrypt.
+ */
+export interface TrailReplicaAuthor {
+  /** The author's EndpointId (hex). */
+  author: string;
+  /** The envelope's `seq`. `0` when `hasContent` is false. */
+  seq: number;
+  /** When the author took the fix, not when we stored it. `0` when `hasContent` is false. */
+  fixTs: number;
+  /**
+   * Whether we hold a readable signed envelope, and not merely a docs record pointing at a blob
+   * that never landed. False means there is nothing to serve — a different failure from "the
+   * transfer broke".
+   */
+  hasContent: boolean;
+}
+
 /** A nearby BLE peer surfaced by the transport snapshot (no RSSI — the crate discards it). */
 export interface BlePeer {
   deviceId: string;
@@ -358,17 +415,47 @@ export interface IrohLocationApi {
   deriveTopic(authorEndpointIdHex: string): Promise<string>;
   /** Join a topic; returns a subscription id. Inbound fixes arrive via `onFix`. */
   subscribe(topicHex: string, bootstrapTickets: string[]): Promise<string>;
-  /** Seal `fix` for `recipientsHex` (X25519 pubkeys) and broadcast on the topic. */
+  /**
+   * Seal `fix` under each recipient's **ratchet session** and broadcast it on the topic
+   * (envelope v3 — FORWARD-SECRECY.md §4.7).
+   *
+   * Recipients are **endpoint ids**, not receiving keys. A v3 wrap is keyed by the per-friend
+   * Double Ratchet session, and sessions are keyed by endpoint id; the long-term receiving key
+   * plays no part in the fix lanes any more. Passing recv keys here fails at the hex decode.
+   *
+   * Returns the recipients that were **left out** — see {@link RatchetDropped}. An empty array
+   * means everyone asked for got a wrap.
+   */
   publish(
     subscriptionId: string,
     seq: number,
-    epoch: number,
     fix: NativeLocationFix,
-    recipientsHex: string[],
+    recipientEndpointsHex: string[],
     traceparent?: string | null
-  ): Promise<void>;
+  ): Promise<RatchetDropped[]>;
   /** Leave a topic. */
   unsubscribe(subscriptionId: string): Promise<void>;
+  /**
+   * Broadcast a **null fix**: an envelope carrying an empty padded payload rather than a position
+   * (FORWARD-SECRECY.md §4.1). Wrapped for the friends we do NOT share position with, so every
+   * sharing relationship runs the protocol in both directions and a watcher's device contributes
+   * fresh key material on the same cadence a sharer does.
+   *
+   * Identical to {@link publish} in signing, AAD binding, `seq` monotonicity and — because the
+   * plaintext is padded to a fixed size class — ciphertext length, so the stash cannot tell the
+   * two lanes apart. `ts` is the tick's timestamp; it rides in the signed header exactly as a
+   * real fix's does.
+   *
+   * OPTIONAL: absent on iOS bindings generated before this API existed (Swift bindings only
+   * regenerate on macOS), so callers must guard with `typeof mod.publishNull === 'function'`.
+   */
+  publishNull?(
+    subscriptionId: string,
+    seq: number,
+    ts: number,
+    watcherEndpointsHex: string[],
+    traceparent?: string | null
+  ): Promise<RatchetDropped[]>;
 
   // ── Durable trail (iroh-docs) — see docs/social/ARCHITECTURE.md §5–6, §9 ────────────────────
   /**
@@ -380,31 +467,65 @@ export interface IrohLocationApi {
   docsWrite(
     subscriptionId: string,
     seq: number,
-    epoch: number,
     fix: NativeLocationFix,
-    recipientsHex: string[],
+    recipientEndpointsHex: string[],
     traceparent?: string | null
-  ): Promise<void>;
+  ): Promise<RatchetDropped[]>;
   /**
-   * Kick off range-based set reconciliation to recover envelopes we missed while offline. Recovered
-   * fixes we can decrypt arrive as `onFix` with `backfill: true`; progress via `onSync`. `sinceTs`
-   * bounds how far back to reconcile (0 = full history). `peerTicket` explicitly targets the trail
-   * stash; null retains peer-only reconciliation.
+   * Durable mirror of {@link publishNull}, written to a **separate** last-write-wins slot from the
+   * fix lane. The two envelopes a tick produces are wrapped for disjoint recipient sets, so a
+   * shared slot would make each silently supersede the other and a device that both shares and
+   * watches could keep only one lane durable.
+   *
+   * Same write-then-push rule as {@link docsWrite}: call {@link pushTrail} afterwards or it never
+   * leaves the device.
+   *
+   * OPTIONAL: same iOS bindgen caveat as {@link publishNull}.
    */
-  syncTrail(sinceTs: number, peerTicket: string | null, traceparent?: string | null): Promise<void>;
+  docsWriteNull?(
+    subscriptionId: string,
+    seq: number,
+    ts: number,
+    watcherEndpointsHex: string[],
+    traceparent?: string | null
+  ): Promise<RatchetDropped[]>;
   /**
-   * Push OUR trail namespace to `peerTicket` (the trail stash) and wait for the exchange to finish.
+   * Reconcile every replicated namespace so each author's current fix is up to date locally.
+   *
+   * `peerTickets` is every endpoint worth dialing for this pass: the trail stash when it is
+   * enabled, and **every pool member**. Recovery is supposed to work "against C/D/A"
+   * (ARCHITECTURE.md §1.3, §6), so a friend has to be a reachable source and not just the author
+   * or the stash — with a single stash-only target, a device whose friend was offline could not
+   * recover a fix that another friend was demonstrably holding. An empty list is valid and means
+   * "reconcile with whatever the live engine already knows".
+   *
+   * There is no `sinceTs` and no backfill stream any more: each author's namespace holds ONE
+   * overwritten slot (FORWARD-SECRECY.md §4.4), so there is no back-catalogue to bound or to
+   * deliver incrementally. Read the result with {@link readLatest} once this resolves.
+   */
+  syncLatest(peerTickets: string[], traceparent?: string | null): Promise<void>;
+  /**
+   * Push OUR trail namespace to `peerTickets` — the trail stash when it is enabled, and **every
+   * pool member** — and wait for the exchange to finish.
    *
    * **This is what actually gets a published fix off the phone.** {@link docsWrite} only writes the
    * local replica; iroh-docs broadcasts a local insert only for namespaces that `start_sync` has
-   * marked as syncing, and nothing but this call (or {@link syncTrail}) does that. A context that
+   * marked as syncing, and nothing but this call (or {@link syncLatest}) does that. A context that
    * publishes without it — every headless background wake — strands its envelopes on the device.
    * Call it after draining a batch.
+   *
+   * The peer list is the send-side mirror of {@link syncLatest} and it is what makes the pool
+   * relay of ARCHITECTURE.md §1.3/§6 the normal flow: with a stash-only target an author's fix was
+   * broadcast to the durable server and to nobody else, so a friend could only relay it if it
+   * happened to dial the author during a reconciliation window. An empty list is valid and means
+   * "broadcast to whatever the live engine already knows".
    *
    * OPTIONAL: absent on iOS bindings generated before this API existed (Swift bindings only
    * regenerate on macOS), so callers must guard with `typeof mod.pushTrail === 'function'`.
    */
-  pushTrail?(peerTicket: string | null, traceparent?: string | null): Promise<void>;
+  pushTrail?(peerTickets: string[], traceparent?: string | null): Promise<void>;
+  /** Upload current opaque trail slots to the stash and wait for durable HTTP receipts. */
+  uploadTrailContent?(baseUrl: string, psk: string | null): Promise<number>;
   /**
    * Seal `msg` for `recipientsHex` and write it to OUR namespace's single control slot,
    * superseding any previous control message from us (ARCHITECTURE §9c). `recipientsHex` is
@@ -428,8 +549,57 @@ export interface IrohLocationApi {
    * OPTIONAL: same iOS bindgen caveat as {@link docsWriteControl}.
    */
   readControl?(author: string): Promise<NativeControlMsg[]>;
-  /** Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >= sinceTs`. */
-  readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]>;
+  /**
+   * Read every author's CURRENT decrypted fix out of the local replica — at most one per author,
+   * ours included. Replaces the old per-author range read: with a single last-write-wins slot per
+   * author there is no range left to ask for, so this is one call instead of a loop.
+   */
+  readLatest(): Promise<NativeRatchetEvent[]>;
+
+  // ── ratchet sessions + §4.6 recovery ────────────────────────────────────────────────────────
+  //
+  // There is deliberately no `beginSession` / `completeSession` here. A session is bootstrapped by
+  // the SAS bump itself, from ephemerals that are signed, connection-pinned, and folded into the
+  // figure the two humans compare — so there is no JS-callable seam that could root a session from
+  // anything weaker (FORWARD-SECRECY.md §4.2, §4.6's "no automatic downgrade of any kind"). What
+  // JS drives is recovery, and only recovery.
+  //
+  // All OPTIONAL: absent on iOS bindings generated before this API existed (Swift bindings only
+  // regenerate on macOS), so callers must guard with `typeof mod.<name> === 'function'`.
+
+  /**
+   * Whether this peer's session needs §4.6 recovery — a run of signature-valid envelopes we could
+   * not open, or state we cannot read at all. `false` for a peer we simply have no session with:
+   * that is un-bootstrapped, which a resync cannot fix and a re-pair can.
+   */
+  isDesynced?(peerEndpointHex: string): Promise<boolean>;
+  /**
+   * How many resyncs we have driven with this peer. Recovery that keeps recovering is not
+   * recovering — past a small number, surface "re-pair with this friend" instead of retrying.
+   */
+  resyncCount?(peerEndpointHex: string): Promise<number>;
+  /**
+   * Publish our half of a resync exchange, addressed to these friends' **receiving keys**.
+   *
+   * HPKE-sealed rather than ratcheted, necessarily: this is the message that re-establishes a
+   * ratchet, so it cannot depend on one already working. Idempotent while the record is fresh,
+   * re-minted once it ages past half its acceptance window. Returns our ephemeral's public half.
+   */
+  publishResync?(recipientRecvPubsHex: string[]): Promise<string>;
+  /**
+   * Look for this peer's resync record and restart the session from it, publishing our own half
+   * first if we have not — so one call from each side completes the exchange without either
+   * having to go first.
+   *
+   * Returns whether a session was installed. `false` covers "no record yet", "stale record", and
+   * "already applied": all ordinary, none an error.
+   */
+  pollResync?(peerEndpointHex: string, peerRecvPubHex: string): Promise<boolean>;
+  /** Drop our in-flight resync ephemeral once every peer has been restarted. */
+  clearResync?(): Promise<void>;
+  /** Forget a peer's ratchet session entirely — unfriend, or revoke. */
+  forgetSession?(peerEndpointHex: string): Promise<void>;
+
   /** Explicitly drop durable entries older than `olderThanTs`. */
   pruneTrail(olderThanTs: number): Promise<void>;
   /**
@@ -439,7 +609,7 @@ export interface IrohLocationApi {
   docTicket(): Promise<string>;
   /**
    * Import a friend's docs read-ticket (their card's `docTicket`) so we replicate their trail
-   * namespace and can recover their missed fixes via {@link syncTrail}. Grants replication only;
+   * namespace and can recover their missed fixes via {@link syncLatest}. Grants replication only;
    * reading still needs our per-recipient wrap in each envelope. See ARCHITECTURE §6.
    */
   importDocTicket(ticket: string): Promise<void>;
@@ -531,6 +701,14 @@ export interface IrohLocationApi {
 
   /** Local addresses plus live path usage for the requested peer EndpointIds. */
   transportDiagnostics(peerEndpointIdsHex: string[]): Promise<TransportDiagnostics>;
+
+  /**
+   * What this device's durable replica can SERVE, one record per author present in it.
+   *
+   * OPTIONAL for the same reason as {@link pushTrail}: iOS Swift bindings regenerate only on
+   * macOS, so an installed dev client may predate the export.
+   */
+  trailReplicaStatus?(): Promise<TrailReplicaAuthor[]>;
 
   // ── BLE status (Android/Apple only; honest stub elsewhere) — ARCHITECTURE.md §2 ────────────
   /** Whether a BLE transport is wired into this node's endpoint on this platform. */

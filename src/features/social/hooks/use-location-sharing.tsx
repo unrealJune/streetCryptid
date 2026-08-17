@@ -11,9 +11,10 @@ import {
 import { AppState, Platform } from 'react-native';
 
 import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
+import { runDevCommand as runDevCommandImpl } from '@/features/dev/commands/dev-commands';
 import { buildFriendPresence, type FriendPresence } from '@/features/social/core/presence';
 import type { IncomingFix, LocationFix } from '@/features/social/core/types';
-import { SELF_AUTHOR, type TrailPoint } from '@/features/social/net/background/trail-store';
+import { type TrailPoint } from '@/features/social/net/background/trail-store';
 import {
   BLUETOOTH_OFF_MESSAGE,
   BLUETOOTH_UNSUPPORTED_MESSAGE,
@@ -83,6 +84,12 @@ interface LocationSharingContextValue {
   setShareInterval(intervalMs: number): Promise<void>;
   /** Capture and publish a fresh GPS fix immediately, bypassing normal sampling. */
   forceLocationPush(trigger?: 'manual' | 'scheduled'): Promise<number>;
+  /**
+   * Run a developer command from `streetcryptid://dev?cmd=…&id=…` and write the outcome to the
+   * event log. Exposed the same way {@link forceLocationPush} is, and for the same reason: it
+   * drives ordinary service methods from outside the UI. See `features/dev/commands`.
+   */
+  runDevCommand(name: string, id: string): Promise<void>;
   /** Honest, live diagnostic of every transport (for the Settings tab). */
   transportReport: TransportReport;
   acknowledgeDiscoveredFriend(): void;
@@ -143,7 +150,9 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   const publishedProfileSignature = useRef('');
   const [kv] = useState(() => createPersistentKV());
   const [snapshot, setSnapshot] = useState<SharingSnapshot | null>(null);
+  // Two reads, not one filtered list: our own trail is history, a friend is a single current fix.
   const [trail, setTrail] = useState<TrailPoint[]>([]);
+  const [friendFixes, setFriendFixes] = useState<TrailPoint[]>([]);
   const [persistedSelfFix, setPersistedSelfFix] = useState<LocationFix | null>(null);
   const [liveSelfFix, setLiveSelfFix] = useState<LocationFix | null>(null);
   const [locationStatus, setLocationStatus] = useState<LocationRuntimeStatus>('starting');
@@ -175,14 +184,15 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
 
   const refreshTrail = useCallback(async (service: LocationSharingService): Promise<void> => {
     const requestId = ++trailRefreshId.current;
-    const latest = await service.trailAll();
+    const [selfTrail, friendLatest] = await Promise.all([
+      service.selfTrail(),
+      service.friendLatest(),
+    ]);
     if (requestId !== trailRefreshId.current) return;
-    setTrail(latest);
-    const persistedSelf = latest.reduce<LocationFix | null>(
-      (current, point) =>
-        point.author === SELF_AUTHOR && (!current || point.fix.ts > current.ts)
-          ? point.fix
-          : current,
+    setTrail(selfTrail);
+    setFriendFixes(friendLatest);
+    const persistedSelf = selfTrail.reduce<LocationFix | null>(
+      (current, point) => (!current || point.fix.ts > current.ts ? point.fix : current),
       null
     );
     if (persistedSelf) {
@@ -194,6 +204,14 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
 
   const startLocation = useCallback(async (service: LocationSharingService): Promise<void> => {
     if (!(await service.isBackgroundAvailable())) {
+      // Logged, not just shown: these two failures put the device in the state where it looks
+      // completely healthy — node up, friends listed, map drawn — while publishing nothing at
+      // all. Reported into React state alone, the reason lives only in a banner nobody is
+      // watching, and the durable record (the event log the e2e harness and OTEL both read) has
+      // no trace of it. Diagnosing exactly this on an Android emulator meant working backwards
+      // from "sharingEnabled flipped back to 0" with no error anywhere, because `startBackground`
+      // clears the persisted intent when it fails.
+      console.warn('[location] background sharing unavailable in this build');
       setLocationStatus('unavailable');
       setLocationError('Background location is unavailable in this build.');
       return;
@@ -205,10 +223,12 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
         setLocationStatus('running');
         setLocationError(null);
       } else {
+        console.warn(`[location] background sharing started with access=${access}`);
         setLocationStatus('permission-denied');
         setLocationError('Allow background location so your friends stay current.');
       }
     } catch (startError: unknown) {
+      console.warn(`[location] startBackground failed: ${errorMessage(startError)}`);
       setLocationStatus(locationStatusFor(startError));
       setLocationError(errorMessage(startError));
     }
@@ -513,6 +533,24 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       throw pushError;
     }
   }, []);
+  /**
+   * The e2e command channel. Never rejects: the harness reads the outcome out of the event log,
+   * so a thrown error here would replace a diagnosable row with a silent timeout. A missing
+   * service is itself the answer — "the app is up but sharing is not live yet".
+   */
+  const runDevCommand = useCallback(async (name: string, id: string) => {
+    const service = serviceRef.current;
+    await runDevCommandImpl(name, id, {
+      syncTrail: async (sinceTs = 0) => {
+        if (!service) throw new Error('dev command: friend sync is not ready');
+        await service.syncTrail(sinceTs);
+      },
+      trailReplicaStatus: async () => {
+        if (!service) throw new Error('dev command: friend sync is not ready');
+        return service.trailReplicaStatus();
+      },
+    });
+  }, []);
   const toggleShare = useCallback(
     (endpointId: string, on: boolean) => {
       setServiceError(null);
@@ -569,10 +607,10 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     () =>
       buildFriendPresence({
         friends: snapshot?.friends ?? [],
-        latest: trail.filter((point) => point.author !== SELF_AUTHOR),
+        latest: friendFixes,
         selfFix: hasLiveSelfFix ? selfFix : null,
       }),
-    [snapshot?.friends, trail, hasLiveSelfFix, selfFix]
+    [snapshot?.friends, friendFixes, hasLiveSelfFix, selfFix]
   );
   const error = locationError ?? serviceError;
 
@@ -637,6 +675,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       setTransportEnabled,
       setShareInterval,
       forceLocationPush,
+      runDevCommand,
       transportReport,
       acknowledgeDiscoveredFriend,
       rejectDiscoveredFriend,
@@ -671,6 +710,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       setTransportEnabled,
       setShareInterval,
       forceLocationPush,
+      runDevCommand,
       transportReport,
       acknowledgeDiscoveredFriend,
       rejectDiscoveredFriend,

@@ -1,3 +1,6 @@
+import { setTelemetryForTesting } from '@/features/dev/telemetry';
+import type { Telemetry } from '@/features/dev/telemetry';
+
 import type { PoolState } from '../../core/pool';
 
 /**
@@ -16,7 +19,8 @@ class FakeNativeModule {
     importDocTicket: [] as string[],
     subscribe: [] as { topic: string; bootstrap: string[] }[],
     syncTrail: [] as { since: number; peerTicket: string | null }[],
-    pushTrail: [] as { peerTicket: string | null }[],
+    pushTrail: [] as { peerTickets: string[] }[],
+    uploadTrailContent: [] as { baseUrl: string }[],
     publish: [] as unknown[][],
     docsWrite: [] as unknown[][],
   };
@@ -52,9 +56,16 @@ class FakeNativeModule {
   async syncTrail(since: number, peerTicket: string | null) {
     this.calls.syncTrail.push({ since, peerTicket });
   }
-  async pushTrail(peerTicket: string | null) {
-    this.calls.pushTrail.push({ peerTicket });
+  async pushTrail(peerTickets: string[]) {
+    this.calls.pushTrail.push({ peerTickets });
   }
+  // An arrow property, not a prototype method: the service reads this off the module and calls it
+  // unbound (Expo's native module proxy binds its own functions), so a prototype method here would
+  // lose `this` and throw into the best-effort catch instead of recording the call.
+  uploadTrailContent = async (baseUrl: string) => {
+    this.calls.uploadTrailContent.push({ baseUrl });
+    return 1;
+  };
   async readTrail() {
     return [];
   }
@@ -134,8 +145,42 @@ function stashDeps() {
   return { stash: { configured: true, registerNamespace: async () => {} } };
 }
 
+/**
+ * Capture what the service reports. `pushTrail` is best-effort by contract — it never rethrows,
+ * because a failed durable mirror must not take down the tick that already went out over gossip —
+ * so its telemetry log is the only place a caller can observe that delivery is broken.
+ */
+const warnings: string[] = [];
+
+function captureTelemetry(): void {
+  const span = {
+    context: { traceId: '0'.repeat(32), spanId: '0'.repeat(16) },
+    setAttribute: () => {},
+    setAttributes: () => {},
+    addEvent: () => {},
+    recordError: () => {},
+    setStatus: () => {},
+    end: () => {},
+  };
+  const telemetry: Telemetry = {
+    enabled: false,
+    startSpan: () => span,
+    withSpan: async (_name, _opts, fn) => fn(span),
+    log: (_severity, body) => {
+      warnings.push(body);
+    },
+    setResourceAttributes: () => {},
+    flush: async () => {},
+  };
+  setTelemetryForTesting(telemetry);
+}
+
+afterAll(() => setTelemetryForTesting(undefined));
+
 describe('LocationSharingService — headless init', () => {
   beforeEach(() => {
+    warnings.length = 0;
+    captureTelemetry();
     mockHolder.mod = new FakeNativeModule();
     mockHolder.stashConfig = null;
     mockHolder.stashOptIn = false;
@@ -161,7 +206,7 @@ describe('LocationSharingService — headless init', () => {
     expect(mockHolder.mod.calls.subscribe.map((s) => s.topic)).not.toContain('topic-bb22');
   });
 
-  it('pushes the durable trail to the opted-in stash', async () => {
+  it('pushes the durable trail to the opted-in stash and to every pool member', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
     mockHolder.stashOptIn = true;
     const svc = makeService(stashDeps());
@@ -169,10 +214,17 @@ describe('LocationSharingService — headless init', () => {
 
     await svc.pushTrail();
 
-    expect(mockHolder.mod.calls.pushTrail).toEqual([{ peerTicket: 'ticket-stash' }]);
+    expect(mockHolder.mod.calls.pushTrail).toEqual([
+      { peerTickets: ['ticket-stash', 'ticket-b', 'ticket-c'] },
+    ]);
   });
 
-  it('does not push when the stash is configured but not opted into', async () => {
+  /**
+   * The whole point of the pool push: with the stash off there is no durable copy anywhere else,
+   * so if this regressed to a no-op a friend could only relay a fix it had never been sent — which
+   * is exactly the peer-relay gap `scripts/e2e/relay-e2e.sh` was chasing.
+   */
+  it('still pushes to the pool when the stash is configured but not opted into', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
     mockHolder.stashOptIn = false;
     const svc = makeService(stashDeps());
@@ -180,16 +232,69 @@ describe('LocationSharingService — headless init', () => {
 
     await svc.pushTrail();
 
-    expect(mockHolder.mod.calls.pushTrail).toEqual([]);
+    expect(mockHolder.mod.calls.pushTrail).toEqual([{ peerTickets: ['ticket-b', 'ticket-c'] }]);
   });
 
-  it('degrades to a no-op against a binary whose bindings predate pushTrail', async () => {
+  it('uploads trail content to the stash when it is opted into', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
     mockHolder.stashOptIn = true;
-    delete (mockHolder.mod as Partial<FakeNativeModule>).pushTrail;
     const svc = makeService(stashDeps());
     await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
 
-    await expect(svc.pushTrail()).resolves.toBeUndefined();
+    await svc.pushTrail();
+
+    expect(mockHolder.mod.calls.uploadTrailContent).toEqual([{ baseUrl: 'https://stash.test' }]);
+  });
+
+  /**
+   * `stashConfig` is build-time env; the opt-in is the user's answer. Gating the content upload on
+   * the former would PUT sealed envelopes to the durable server for someone who switched it off —
+   * into a namespace `syncStashGrants` never registered, so it would fail on every tick too and
+   * bury real push failures in the noise.
+   */
+  it('does not upload content to the stash when the user has opted out', async () => {
+    mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
+    mockHolder.stashOptIn = false;
+    const svc = makeService(stashDeps());
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+
+    await svc.pushTrail();
+
+    expect(mockHolder.mod.calls.uploadTrailContent).toEqual([]);
+    expect(mockHolder.mod.calls.pushTrail).toEqual([{ peerTickets: ['ticket-b', 'ticket-c'] }]);
+  });
+
+  /**
+   * Nothing to push to is not the same as a push that fails. `start_sync([])` still waits out the
+   * native push timeout, which on a headless wake is a multi-second hole in iOS's background
+   * budget for no work at all.
+   */
+  it('does not call into native at all when there is no stash and no pool', async () => {
+    mockHolder.pool = { friends: {}, sharingWith: [] };
+    const svc = makeService();
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+
+    await svc.pushTrail();
+
+    expect(mockHolder.mod.calls.pushTrail).toEqual([]);
+  });
+
+  /**
+   * Not a supported configuration — an iOS dev client whose Swift bindings predate the export is
+   * a build that needs `just bindgen-ios`. Silently no-oping would strand every fix on the device
+   * and present as the exact delivery bug this call exists to prevent, so it has to be loud.
+   */
+  it('reports a binary whose bindings predate pushTrail rather than silently dropping fixes', async () => {
+    mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
+    mockHolder.stashOptIn = true;
+    // Assigned on the INSTANCE: `pushTrail` is a prototype method, so `delete` on the instance
+    // silently does nothing and the test would pass without ever exercising the guard.
+    (mockHolder.mod as unknown as Record<string, unknown>).pushTrail = undefined;
+    const svc = makeService(stashDeps());
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+
+    await svc.pushTrail();
+
+    expect(warnings.some((line) => /pushTrail is missing/.test(line))).toBe(true);
   });
 });

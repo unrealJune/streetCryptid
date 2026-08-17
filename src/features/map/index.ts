@@ -1,7 +1,6 @@
 /** Public surface of the map feature. */
 
 export { CoverageIsland } from './components/coverage-island';
-export { FriendHistoryIsland } from './components/friend-history-island';
 export { FriendsIsland } from './components/friends-island';
 export type { MapRosterFriend } from './components/friends-island';
 export { IslandTabs } from './components/island-tabs';
@@ -16,6 +15,7 @@ export {
 export { SettingsControl } from './components/settings-control';
 export { MapView } from './render/map-view';
 export type { MapFriendLocation, MapTrailLocation } from './render/map-view';
+export { sampleTrailForMap } from './core/trail-sampling';
 export { hexToRgb, rgbToHex } from './core/color';
 export { useMapColorScheme } from './hooks/use-map-color-scheme';
 export { useMapTheme } from './hooks/use-map-theme';

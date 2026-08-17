@@ -109,13 +109,104 @@ format-check:
 test:
     bun run test
 
-# Two-device Maestro E2E: onboards both simulators if needed, pairs them over an
-# invite link, and asserts both sides mint a friend record. Needs `maestro`
-# (https://maestro.mobile.dev) on PATH and two booted simulators with the app
-# already installed. See .maestro/README.md for what this works around.
-# Example: `just e2e-pairing 5834FA5F-... 37D03B5C-...`
+# Build a RELEASE app for the e2e harness and install it on every booted iOS Simulator.
+#
+# Use this, not `run-ios`, before an e2e run. A debug/dev-client build cannot be driven reliably:
+# expo-dev-menu opens on a shake or three-finger touch — both of which a simulator driven by
+# synthetic gestures trips — and renders OVER the app, so selectors underneath silently stop
+# resolving mid-flow. Its preferences cannot be pinned off either; the app rewrites that plist on
+# exit. A Release build has no dev menu, no dev-launcher server picker, and embeds the JS bundle,
+# so it does not need Metro. The DEBUG section of Settings the harness reads the invite token
+# from is not `__DEV__`-gated and is still present.
+#
+# Needs `pod` on PATH (Homebrew's is at /opt/homebrew/bin).
+e2e-build-ios device="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="/opt/homebrew/bin:$PATH"
+    target="{{device}}"
+    if [ -z "$target" ]; then
+      target="$(xcrun simctl list devices booted -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for v in d.values() for x in v if "iPhone" in x["name"]))')"
+    fi
+    bunx expo run:ios --configuration Release --device "$target"
+    app="$(ls -d ~/Library/Developer/Xcode/DerivedData/streetCryptid-*/Build/Products/Release-iphonesimulator/streetCryptid.app | head -1)"
+    # Same binary onto every other booted simulator — no rebuild, and it guarantees the pool is
+    # running identical code.
+    for udid in $(xcrun simctl list devices booted -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(" ".join(x["udid"] for v in d.values() for x in v if "iPhone" in x["name"]))'); do
+      [ "$udid" = "$target" ] && continue
+      xcrun simctl terminate "$udid" com.unrealjune.streetcryptid >/dev/null 2>&1 || true
+      xcrun simctl uninstall "$udid" com.unrealjune.streetcryptid >/dev/null 2>&1 || true
+      xcrun simctl install "$udid" "$app"
+      echo "installed on $udid"
+    done
+
+# Two-device Maestro E2E: onboards both devices if needed, pairs them over an
+# invite link, and asserts both sides mint a friend record. Each device is
+# ios:<udid>, android:<serial>, or a bare udid (== ios:) — including a mixed
+# iOS<->Android pair. Needs `maestro` on PATH and both devices running the app.
+# Example: `just e2e-pairing 5834FA5F-... android:emulator-5554`
 e2e-pairing device-a device-b:
     bash scripts/e2e/pairing-e2e.sh {{device-a}} {{device-b}}
+
+# One-device background pipeline smoke test, iOS or Android. `device` is ios:<udid>,
+# android:<serial>, or a bare udid (== ios:). The device needs a current local build.
+# Examples: `just e2e-background 354E950C-...` / `just e2e-background android:emulator-5554`
+e2e-background device:
+    bash scripts/e2e/background-location-e2e.sh {{device}}
+
+# Create/reuse the stash-only host observer (works against either platform).
+e2e-observer device:
+    bash scripts/e2e/ensure-stash-observer.sh {{device}}
+
+# Three-party test: pair device-a <-> device-b, plus a CLI observer against each, then verify
+# every edge (both pipelines + both friend-side decryptions). Each device is ios:<udid>,
+# android:<serial>, or a bare udid. A mixed iOS<->Android pair is supported.
+# Example: `just e2e-trio 354E950C-... android:emulator-5554`
+e2e-trio device-a device-b:
+    bash scripts/e2e/trio-e2e.sh {{device-a}} {{device-b}}
+
+# Compare battery, balanced, and fidelity profiles on identical simulator routes.
+# Defaults to six minutes each for walking + driving (~36 minutes total).
+benchmark-ios-location device output="ios-location-benchmark.tsv":
+    bash scripts/e2e/ios-location-benchmark.sh {{device}} {{output}}
+
+# Run the declarative scenario matrix (scripts/e2e/scenarios/*.yaml) across a pool of simulators.
+# `devices` is "auto" (default — boots/reuses enough simulators automatically) or a comma-separated
+# UDID list. See scripts/e2e/run-matrix.sh --help and scripts/e2e/PHYSICAL-DEVICE-CHECKLIST.md for
+# what it can't cover. Extra args pass straight through to run-matrix.sh.
+# Examples:
+#   just e2e-matrix
+#   just e2e-matrix auto --only background-walking,cold-pairing-sync
+#   just e2e-matrix 5834FA5F-...,37D03B5C-...,354E950C-...
+# NOTE the single variadic parameter: `just` (1.18) rejects "non-default parameter follows
+# default parameter", so `devices="auto" *args` will not parse. Taking everything as `*args` and
+# defaulting the first one in the body keeps all three call shapes working.
+e2e-matrix *args:
+    #!/usr/bin/env sh
+    set -eu
+    set -- {{args}}
+    devices="${1:-auto}"
+    [ $# -gt 0 ] && shift
+    bash scripts/e2e/run-matrix.sh --devices "$devices" "$@"
+
+# List every scenario the matrix runner knows about without running anything.
+e2e-matrix-list:
+    bash scripts/e2e/run-matrix.sh --list
+
+# Long-running soak: repeatedly drives one or more single-device scenarios for `hours`, sampling
+# event_log every `sample-minutes` instead of asserting once at the end. Meant to be left running.
+# Example: `just e2e-soak auto background-walking 6`
+e2e-soak devices="auto" scenarios="background-walking" hours="2":
+    bash scripts/e2e/soak.sh --devices {{devices}} --scenarios {{scenarios}} --hours {{hours}}
+
+# Start/reuse (default), check, or stop the local trail-stash used by network-chaos scenarios
+# (scripts/e2e/scenarios/chaos-*.yaml — see run-matrix.sh's `require_local_stash` handling and
+# lib/netchaos.sh). Needs a local github.com/unrealJune/trail-stash checkout (default: ~/trail-stash,
+# override with TRAIL_STASH_REPO). Prints the .env.local lines + rebuild reminder needed to point
+# a dev-client build at it — run-matrix.sh does NOT rebuild the app for you.
+# Example: `just e2e-local-stash` / `just e2e-local-stash status` / `just e2e-local-stash stop`
+e2e-local-stash cmd="start":
+    bash scripts/e2e/ensure-local-stash.sh {{cmd}}
 
 # Profile the deterministic launch/zoom/pan region-build sequence (fixture by default).
 profile-map source="":
@@ -414,3 +505,19 @@ ios-dev-install device="":
       --freeze-credentials
     xcrun devicectl device install app --device "$dev" "$ipa"
     xcrun devicectl device process launch --device "$dev" com.unrealjune.streetcryptid
+
+# Prove a device that was AWAY recovers what it missed (goal 4): the sender moves while the
+# receiver is backgrounded (MODE=background) or force-quit (MODE=terminate), then the receiver
+# returns and must hold a fix it demonstrably did not have. Each device is ios:<udid>,
+# android:<serial>, or a bare udid.
+# Example: `just e2e-reconcile 354E950C-... android:emulator-5554`
+e2e-reconcile sender receiver:
+    bash scripts/e2e/reconcile-e2e.sh {{sender}} {{receiver}}
+
+# Prove a friend can hand on an author's fix after the author goes dark (goal 5). Three devices in
+# one sharing pool: the author publishes and is force-quit, the relay stays online, and the late
+# device — with the stash switched OFF, so the durable server cannot answer — must still obtain
+# the author's fix. See scripts/e2e/relay-e2e.sh for why each source is excluded.
+# Example: `just e2e-relay 354E950C-... android:emulator-5554 C9171FC5-...`
+e2e-relay author relay late:
+    bash scripts/e2e/relay-e2e.sh {{author}} {{relay}} {{late}}

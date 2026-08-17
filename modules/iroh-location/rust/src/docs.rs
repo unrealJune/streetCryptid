@@ -1,23 +1,26 @@
-//! Durable trail path — the iroh-docs half of the location core.
+//! Durable **last-write-wins** fix path — the iroh-docs half of the location core.
 //!
-//! See `docs/social/ARCHITECTURE.md` §2, §5–6. Alongside the live iroh-gossip broadcast
-//! (in [`crate`]'s [`Subscription`](crate::Subscription)), every fix is *also* written to a
-//! replicated iroh-docs namespace under key `author/seq`. Because docs stores the **exact
-//! same sealed envelope bytes** as gossip (see [`crate::crypto`]), per-recipient revocation
+//! See `docs/social/ARCHITECTURE.md` §2, §5–6 and `docs/social/FORWARD-SECRECY.md` §4.4.
+//! Alongside the live iroh-gossip broadcast (in [`crate`]'s
+//! [`Subscription`](crate::Subscription)), the current fix is *also* written to a replicated
+//! iroh-docs namespace under a **single key per author** (`hex(author)/fix`), each write
+//! superseding the last. There is deliberately no durable history: the replica answers
+//! "where is this friend now", never "where have they been" — offline recovery of missed
+//! fixes was removed with the forward-secrecy work. Because docs stores the **exact same
+//! sealed envelope bytes** as gossip (see [`crate::crypto`]), per-recipient revocation
 //! carries over unchanged: a dropped recipient may keep replicating the ciphertext but has
 //! no wrap, so the bytes are opaque to it.
 //!
 //! ## What lives here
 //! * [`TrailDocs`] — wraps the persistent `Docs` replica store (own namespace + imported
 //!   friend namespaces) and the iroh-blobs content store the entries point at.
-//! * A set of **pure** helpers ([`encode_key`], [`decode_key`], [`author_prefix`],
-//!   [`keys_to_prune`], [`is_within_since`]) that hold the key-encoding, explicit-pruning and
-//!   range-filtering logic. These are `#[cfg(test)]`-covered without a live iroh node.
+//! * **Pure** helpers ([`encode_key`], [`decode_key`], [`encode_ctl_key`],
+//!   [`keys_to_prune`]) holding the key-encoding and explicit-pruning logic, covered by
+//!   `#[cfg(test)]` without a live iroh node.
 //!
-//! ## Build status
-//! The live-node methods target iroh-docs `0.101` / iroh-blobs `0.103`; the exact wiring of
-//! range reconciliation over an already-connected swarm is best-effort until the mobile
-//! cross-compile gate is unblocked (see `README.md`). The pure logic above is fully tested.
+//! Superseded versions of an overwritten key still exist in the replica (same reason
+//! `single_latest_per_key` is load-bearing for control messages) — reclaiming them is the
+//! retention work of FORWARD-SECRECY.md §5.1/§7 step 2, not this module's keying.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,21 +41,20 @@ use iroh_docs::{
 use n0_future::time::{timeout, Duration};
 use n0_future::StreamExt;
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
 use crate::crypto;
 
 #[cfg(feature = "cli")]
-use iroh_blobs::HashAndFormat;
-#[cfg(feature = "cli")]
 use iroh_docs::{
     actor::{OpenOpts, SyncHandle},
     net::connect_and_sync,
-    store::Store as DocsStore,
+    store::{DownloadPolicy, Store as DocsStore},
     DocTicket,
 };
 
 /// Stop a reconciliation after this many seconds without a new event (peer likely unreachable),
-/// so `sync` always returns instead of hanging on a stalled connection.
+/// so `sync_all` always returns instead of hanging on a stalled connection.
 const SYNC_IDLE_TIMEOUT_SECS: u64 = 8;
 
 /// How long to wait for the *first* event of a reconciliation. Deliberately much longer than
@@ -99,10 +101,6 @@ pub fn write_ns_file(path: &Path, id: &[u8; 32]) -> std::io::Result<()> {
     std::fs::write(path, id)
 }
 
-/// Width of the zero-padded decimal sequence number. `u64::MAX` has 20 digits, so this keeps
-/// keys lexicographically sortable in the same order as the numeric `seq`.
-pub const SEQ_WIDTH: usize = 20;
-
 // ── Pure, unit-testable helpers ─────────────────────────────────────────────────────────
 
 /// Lowercase-hex encode bytes (no external dep, so it round-trips with [`hex_decode`]).
@@ -132,47 +130,43 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Encode the docs entry key for an `(author, seq)` pair as `hex(author)/{seq:020}`.
+/// Literal trailing segment of the single per-author fix key.
+pub const FIX_TAG: &str = "fix";
+
+/// Encode the **single last-write-wins** docs key holding `author`'s current fix:
+/// `hex(author)/fix`.
 ///
-/// The hex author + `/` form a stable per-author prefix (see [`author_prefix`]) so a friend's
-/// slice of a namespace can be range-queried; the zero-padded seq keeps entries ordered.
-pub fn encode_key(author: &[u8], seq: u64) -> Vec<u8> {
+/// The envelope `seq` deliberately left the key (FORWARD-SECRECY.md §4.4): it stays inside the
+/// signed envelope for replay rejection, but the replica holds one overwritten slot per author —
+/// structurally identical to the control-message path — so there is no durable history to key.
+pub fn encode_key(author: &[u8]) -> Vec<u8> {
     let mut key = hex_encode(author).into_bytes();
     key.push(KEY_SEP);
-    key.extend_from_slice(format!("{seq:0width$}", width = SEQ_WIDTH).as_bytes());
+    key.extend_from_slice(FIX_TAG.as_bytes());
     key
 }
 
-/// The `hex(author)/` key prefix used to range-query a single author's entries.
-pub fn author_prefix(author: &[u8]) -> Vec<u8> {
-    let mut key = hex_encode(author).into_bytes();
-    key.push(KEY_SEP);
-    key
-}
-
-/// Decode a key produced by [`encode_key`] back into `(author_bytes, seq)`.
+/// Decode a key produced by [`encode_key`] back into the author bytes.
 ///
-/// Returns `None` for a control key (see [`encode_ctl_key`]): those lead with the literal `ctl`,
-/// which is not valid hex, so every existing fix-reading call site skips them without change.
-pub fn decode_key(key: &[u8]) -> Option<(Vec<u8>, u64)> {
+/// Returns `None` for a control key (see [`encode_ctl_key`]: the literal `ctl` lead is not valid
+/// hex) and for pre-LWW `hex(author)/{seq:020}` keys left in a replica by older builds — their
+/// history is deliberately invisible to current readers.
+pub fn decode_key(key: &[u8]) -> Option<Vec<u8>> {
     let pos = key.iter().position(|&b| b == KEY_SEP)?;
+    if &key[pos + 1..] != FIX_TAG.as_bytes() {
+        return None;
+    }
     let author_hex = std::str::from_utf8(&key[..pos]).ok()?;
-    let author = hex_decode(author_hex)?;
-    let seq = std::str::from_utf8(&key[pos + 1..])
-        .ok()?
-        .parse::<u64>()
-        .ok()?;
-    Some((author, seq))
+    hex_decode(author_hex)
 }
 
 /// Literal leading segment marking a **control** entry rather than a location fix.
 ///
 /// Control entries (live-mode requests — ARCHITECTURE §9c) are written to the author's OWN
-/// namespace next to their fixes, but must never be mistaken for one. The `ctl` lead gives that
-/// for free in both directions: [`author_prefix`] range queries cannot match a key starting with
-/// `ctl/`, and [`decode_key`] rejects `"ctl"` as a hex author. Chosen deliberately over a
-/// `hex(author)/ctl/seq` layout, which WOULD match the fix prefix and force every reader to
-/// filter.
+/// namespace next to their fix slot, but must never be mistaken for one. The `ctl` lead gives
+/// that for free: [`decode_key`] rejects `"ctl"` as a hex author, so every fix reader skips
+/// control entries without change. Chosen deliberately over a `hex(author)/ctl` layout, which
+/// would share the fix key's author prefix and force every reader to filter.
 pub const CTL_TAG: &str = "ctl";
 
 /// Encode a control entry key as `ctl/hex(author)` — deliberately **one slot per author**.
@@ -194,10 +188,67 @@ pub fn encode_ctl_key(author: &[u8]) -> Vec<u8> {
 // nothing needs the inverse. The invariant that matters — that fix readers cannot see these keys
 // — is asserted in `fix_readers_ignore_control_keys` below.
 
-/// Range test: a fix at `fix_ts` is surfaced iff `fix_ts >= since_ts`
-/// (`since_ts == 0` ⇒ full history).
-pub fn is_within_since(fix_ts: u64, since_ts: u64) -> bool {
-    fix_ts >= since_ts
+/// Literal leading segment marking a **null fix** — a watcher's cadence keep-alive
+/// (FORWARD-SECRECY.md §4.1) rather than a position.
+///
+/// Null fixes need their own slot because the durable path is last-write-wins with exactly one
+/// fix key per author (§4.4), and the two lanes are wrapped for *disjoint* recipient sets: the
+/// fix lane for the friends we share position with, the null lane for the friends we do not.
+/// Sharing one slot would mean each tick's second envelope silently supersedes the first, so a
+/// device that both shares and watches could never keep both lanes durable.
+///
+/// Like [`CTL_TAG`], the `nul` lead is not valid hex, so [`decode_key`] rejects it and every fix
+/// reader skips null entries without change.
+pub const NUL_TAG: &str = "nul";
+
+/// Encode the null-fix key as `nul/hex(author)` — one overwritten slot per author.
+///
+/// Latest-wins is the right semantics here for the same reason as the fix lane: a null fix
+/// carries no position and no history, only the sender's current ratchet contribution (§4.1), and
+/// only the most recent one is ever of use.
+pub fn encode_nul_key(author: &[u8]) -> Vec<u8> {
+    let mut key = NUL_TAG.as_bytes().to_vec();
+    key.push(KEY_SEP);
+    key.extend_from_slice(hex_encode(author).as_bytes());
+    key
+}
+
+/// Decode a key produced by [`encode_nul_key`] back into the author bytes.
+///
+/// The mirror of [`decode_key`] for the null lane. Both are needed by
+/// [`TrailDocs::read_latest_sealed`], which must return the two lanes and no others: the control
+/// and resync lanes are not fix envelopes and would fail `verify_v3` anyway, but skipping them by
+/// key is cheaper and states the intent.
+pub fn decode_nul_key(key: &[u8]) -> Option<Vec<u8>> {
+    let pos = key.iter().position(|&b| b == KEY_SEP)?;
+    if &key[..pos] != NUL_TAG.as_bytes() {
+        return None;
+    }
+    let author_hex = std::str::from_utf8(&key[pos + 1..]).ok()?;
+    hex_decode(author_hex)
+}
+
+/// Literal leading segment marking a **resync record** (FORWARD-SECRECY.md §4.6).
+///
+/// Its own lane rather than the control lane, for the same reason the null fix needed one: both
+/// are one overwritten slot per author, and a resync record sharing a slot with a live-mode
+/// request would mean asking to watch someone cancels your attempt to re-establish a session
+/// with them. Not valid hex, so fix readers skip it.
+pub const RSY_TAG: &str = "rsy";
+
+/// Encode the resync key as `rsy/hex(author)` — **one slot per author, not per pair**.
+///
+/// Deliberately not keyed by peer. A per-pair key would put the peer's endpoint id in a doc key
+/// the stash replicates in clear, handing it the author's entire friend list — the §1.1 leak
+/// that §4.7's rotating kids exist to close, reintroduced through the back door. One slot works
+/// because a single fresh ephemeral serves every peer at once: each peer's root is
+/// `KDF(DH(eph_ours, eph_theirs), transcript)`, so the transcript separates them even though our
+/// half is shared. The record is wrapped per recipient, so only intended peers can read it.
+pub fn encode_rsy_key(author: &[u8]) -> Vec<u8> {
+    let mut key = RSY_TAG.as_bytes().to_vec();
+    key.push(KEY_SEP);
+    key.extend_from_slice(hex_encode(author).as_bytes());
+    key
 }
 
 /// Explicit-pruning selection: given `(key, entry_ts)` pairs, return the keys whose entry is
@@ -210,54 +261,34 @@ pub fn keys_to_prune(entries: &[(Vec<u8>, u64)], older_than_ts: u64) -> Vec<Vec<
         .collect()
 }
 
-/// Latest-only selection: from `keys`, return the ones belonging to `author` whose seq is **below**
-/// `keep_seq` — i.e. every fix of ours that a newer fix has superseded.
-///
-/// We publish a fix and then immediately drop the one before it, so our namespace holds exactly one
-/// location entry. That is the whole point of the change: iroh-docs reconciliation does not
-/// trickle, so a peer that has been offline used to receive our entire back-catalogue in a single
-/// burst the moment it caught up — 956 entries in ten seconds on the device this was diagnosed
-/// from, enough to pin the receiver's JS thread and stall its map. One entry cannot burst.
-///
-/// The key format deliberately stays `hex(author)/{seq:020}` rather than collapsing to a single
-/// per-author slot like [`encode_ctl_key`] does. A separator-less key would not match
-/// [`author_prefix`], so peers on older builds would range-query our namespace and find nothing at
-/// all. Keeping the format means they just find one entry where they used to find many.
-///
-/// Selection is by *key*, not by entry timestamp, and only for keys that [`decode_key`] accepts:
-/// control entries (`ctl/…`) are load-bearing live-mode state and are rejected by construction,
-/// and another author's entries are not ours to delete.
-pub fn superseded_keys(keys: &[Vec<u8>], author: &[u8], keep_seq: u64) -> Vec<Vec<u8>> {
-    keys.iter()
-        .filter(|key| match decode_key(key) {
-            Some((key_author, seq)) => key_author == author && seq < keep_seq,
-            None => false,
-        })
-        .cloned()
-        .collect()
-}
-
 // ── Live-node wrapper ───────────────────────────────────────────────────────────────────
 
-/// A decrypted fix read back from (or reconciled into) the durable replica. `payload` is the
+/// The latest decrypted fix for one author, read from the durable replica. `payload` is the
 /// still-encoded [`crate::LocationFix`] bytes — the caller (lib.rs) owns the postcard decode so
-/// this module stays decoupled from the UniFFI record type.
+/// this module stays decoupled from the UniFFI record type. `author`/`seq` come from the opened
+/// envelope (signed), not from the docs key.
 #[derive(Debug, Clone)]
-pub struct TrailFix {
+pub struct LatestFix {
     pub author: Vec<u8>,
     pub seq: u64,
-    pub payload: Vec<u8>,
+    /// Decrypted fix bytes. Zeroizing so a friend's coordinates are scrubbed when this drops
+    /// rather than left in freed heap; see [`crypto::Opened::payload`].
+    pub payload: Zeroizing<Vec<u8>>,
 }
 
-/// Sink for reconciliation progress + backfilled fixes. Implemented in lib.rs to forward to the
-/// foreign [`crate::FixListener`]. Kept here so [`TrailDocs::sync`] owns the decrypt loop.
-pub trait TrailSink: Send + Sync {
-    /// A missed envelope, reconciled and decrypted for us. `payload` = encoded `LocationFix`;
-    /// `from` is the endpoint that served the entry (the stash or a friend's own node), which is
-    /// what lets the app say where a backfilled fix actually came from.
-    fn on_backfill(&self, author: Vec<u8>, seq: u64, payload: Vec<u8>, from: Vec<u8>);
-    /// Progress for a namespace sync: `started` | `completed` | `error` (+ recovered count).
-    fn on_sync_status(&self, author: Vec<u8>, status: String, recovered: Option<u64>);
+/// One author's fix slot as it exists in the LOCAL durable replica — presence, never payload.
+///
+/// The answer to "can this device serve author X", which is a different question from "has this
+/// device seen author X's fix" (see [`TrailDocs::replica_status`]). Deliberately carries no
+/// location data, so it needs no decrypt and no gate: `seq`/`fix_ts` are lifted from the
+/// envelope's signed plaintext header, and are `0` when `has_content` is false because there was
+/// no envelope to read them from.
+#[derive(Debug, Clone)]
+pub struct ReplicaSlot {
+    pub author: Vec<u8>,
+    pub seq: u64,
+    pub fix_ts: u64,
+    pub has_content: bool,
 }
 
 /// Wraps an iroh-docs replica: our own namespace (we are its sole writer) plus any friend
@@ -322,6 +353,57 @@ impl TrailDocs {
         self.own_ns
     }
 
+    /// Upload every current slot in our namespace to the stash's authenticated opaque-content API.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn upload_own_latest(&self, base_url: &str, psk: Option<&str>) -> Result<u64> {
+        let doc = self.doc_for(self.own_ns).await?;
+        let stream = doc.get_many(Query::single_latest_per_key().build()).await?;
+        tokio::pin!(stream);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+        let namespace = hex_encode(self.own_ns.as_bytes());
+        let mut uploaded = 0;
+        while let Some(entry) = stream.next().await {
+            let entry = entry?;
+            if entry.content_len() == 0 {
+                continue;
+            }
+            let hash = entry.content_hash();
+            let bytes = self.blobs.blobs().get_bytes(hash).await?;
+            let request = client
+                .put(format!(
+                    "{}/v1/namespaces/{namespace}/content/{hash}",
+                    base_url.trim_end_matches('/')
+                ))
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(bytes);
+            let request = match psk {
+                Some(psk) => request.bearer_auth(psk),
+                None => request,
+            };
+            let mut response = request
+                .try_clone()
+                .expect("byte-backed request is cloneable")
+                .send()
+                .await?;
+            for _ in 0..4 {
+                if response.status() != reqwest::StatusCode::NOT_FOUND {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                response = request
+                    .try_clone()
+                    .expect("byte-backed request is cloneable")
+                    .send()
+                    .await?;
+            }
+            response.error_for_status()?;
+            uploaded += 1;
+        }
+        Ok(uploaded)
+    }
+
     /// Fetch a cached [`Doc`] handle for `ns`, or open it from the local replica store.
     async fn doc_for(&self, ns: NamespaceId) -> Result<Doc> {
         if let Some(doc) = self.handles.lock().await.get(&ns.to_bytes()).cloned() {
@@ -347,86 +429,14 @@ impl TrailDocs {
         Ok(ns)
     }
 
-    /// Write a sealed envelope to `ns` under key `author/seq` (ARCHITECTURE §5). `envelope` must
-    /// be the identical bytes broadcast on gossip so revocation carries over.
-    ///
-    /// Immediately drops our own now-superseded entries, so our namespace holds exactly one
-    /// location fix — see [`superseded_keys`] for why that matters and why the key format did not
-    /// change. Best-effort: a failed prune leaves a stale entry that the next write will clear, so
-    /// it must not fail the publish that already succeeded.
-    pub async fn write(
-        &self,
-        ns: NamespaceId,
-        author: &[u8],
-        seq: u64,
-        envelope: Vec<u8>,
-    ) -> Result<()> {
+    /// Write a sealed envelope to `ns` under the author's single LWW key (FORWARD-SECRECY §4.4),
+    /// superseding the previous fix. `envelope` must be the identical bytes broadcast on gossip
+    /// so revocation carries over.
+    pub async fn write(&self, ns: NamespaceId, author: &[u8], envelope: Vec<u8>) -> Result<()> {
         let doc = self.doc_for(ns).await?;
-        doc.set_bytes(self.author, encode_key(author, seq), envelope)
+        doc.set_bytes(self.author, encode_key(author), envelope)
             .await?;
-        if let Err(err) = self.prune_superseded(&doc, author, seq).await {
-            tracing::debug!(?err, "trail prune after publish failed; next write will retry");
-        }
         Ok(())
-    }
-
-    /// Delete our own fixes in this doc with a seq below `keep_seq`.
-    ///
-    /// Scoped to `author_prefix(author)` rather than scanning the namespace so a friend's entries
-    /// and the `ctl/` control slot are never even enumerated, and re-checked per key by
-    /// [`superseded_keys`].
-    async fn prune_superseded(&self, doc: &Doc, author: &[u8], keep_seq: u64) -> Result<u64> {
-        let query = Query::key_prefix(author_prefix(author)).build();
-        let stream = doc.get_many(query).await?;
-        tokio::pin!(stream);
-        let mut keys: Vec<Vec<u8>> = Vec::new();
-        while let Some(entry) = stream.next().await {
-            keys.push(entry?.key().to_vec());
-        }
-        let mut removed = 0u64;
-        for key in superseded_keys(&keys, author, keep_seq) {
-            removed += doc.del(self.author, key).await? as u64;
-        }
-        Ok(removed)
-    }
-
-    /// Read + decrypt entries for `author` in `ns` with `fix.ts >= since_ts`. Entries we can't
-    /// open (not addressed to us / revoked) are silently skipped.
-    pub async fn read_range(
-        &self,
-        ns: NamespaceId,
-        author: &[u8],
-        since_ts: u64,
-        recv_secret: &[u8],
-    ) -> Result<Vec<TrailFix>> {
-        let doc = self.doc_for(ns).await?;
-        let query = Query::key_prefix(author_prefix(author)).build();
-        let stream = doc.get_many(query).await?;
-        tokio::pin!(stream);
-        let mut out = Vec::new();
-        while let Some(entry) = stream.next().await {
-            let entry = entry?;
-            let bytes = match self.blobs.blobs().get_bytes(entry.content_hash()).await {
-                Ok(b) => b,
-                Err(_) => continue, // content not yet available locally
-            };
-            let opened = match crypto::open(recv_secret, &bytes) {
-                Ok(o) => o,
-                Err(_) => continue, // opaque to us
-            };
-            if let Some((author_bytes, seq)) = decode_key(entry.key()) {
-                // We rely on the payload's own ts; peek it from the LocationFix header the caller
-                // will decode — but bound by since_ts here by decoding the ts field only.
-                if fix_ts_at_least(&opened.payload, since_ts) {
-                    out.push(TrailFix {
-                        author: author_bytes,
-                        seq,
-                        payload: opened.payload,
-                    });
-                }
-            }
-        }
-        Ok(out)
     }
 
     /// Write a sealed **control** envelope to `ns` under `ctl/hex(author)` (ARCHITECTURE §9c).
@@ -435,14 +445,22 @@ impl TrailDocs {
     /// only for the recipient it addresses, so the stash and every other pool member see opaque
     /// bytes. Writers use their OWN namespace: a user is the sole writer of their trail, and the
     /// recipient already replicates it, so this needs no new grant or transport.
-    pub async fn write_ctl(
-        &self,
-        ns: NamespaceId,
-        author: &[u8],
-        envelope: Vec<u8>,
-    ) -> Result<()> {
+    pub async fn write_ctl(&self, ns: NamespaceId, author: &[u8], envelope: Vec<u8>) -> Result<()> {
         let doc = self.doc_for(ns).await?;
         doc.set_bytes(self.author, encode_ctl_key(author), envelope)
+            .await?;
+        Ok(())
+    }
+
+    /// Write a sealed **null fix** to `ns` under `nul/hex(author)` (FORWARD-SECRECY §4.1).
+    ///
+    /// Identical sealing to a fix — the plaintext is an empty padded frame, so the envelope is
+    /// byte-for-byte the same length as a real one and the stash cannot tell the lanes apart by
+    /// ciphertext size. The separate key is what keeps this from superseding the fix lane; see
+    /// [`encode_nul_key`].
+    pub async fn write_nul(&self, ns: NamespaceId, author: &[u8], envelope: Vec<u8>) -> Result<()> {
+        let doc = self.doc_for(ns).await?;
+        doc.set_bytes(self.author, encode_nul_key(author), envelope)
             .await?;
         Ok(())
     }
@@ -453,7 +471,11 @@ impl TrailDocs {
     /// author's own namespace). Entries we cannot open are skipped — a control message addressed
     /// to someone else is indistinguishable from noise, by design. No `since_ts` filtering here:
     /// the payload is a `ControlMsg`, so freshness is the caller's to judge after decoding.
-    pub async fn read_ctl(&self, author: &[u8], recv_secret: &[u8]) -> Result<Vec<Vec<u8>>> {
+    pub async fn read_ctl(
+        &self,
+        author: &[u8],
+        recv_secret: &[u8],
+    ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
         let namespaces: Vec<NamespaceId> = {
             let handles = self.handles.lock().await;
             handles.keys().map(|b| NamespaceId::from(*b)).collect()
@@ -465,7 +487,9 @@ impl TrailDocs {
             // `single_latest_per_key` is load-bearing: the control key is overwritten in place, so
             // superseded versions still exist in the replica and a plain query would resurrect a
             // cancelled request. Same shape as `profile::read_latest`.
-            let query = Query::single_latest_per_key().key_exact(key.clone()).build();
+            let query = Query::single_latest_per_key()
+                .key_exact(key.clone())
+                .build();
             let entry = match doc.get_one(query).await? {
                 Some(e) => e,
                 None => continue,
@@ -481,110 +505,216 @@ impl TrailDocs {
         Ok(out)
     }
 
-    /// Read + decrypt `author`'s fixes across **every** known namespace (own + friends). Used by
-    /// the `readTrail` API, which is only given an envelope `author`, not a namespace.
-    pub async fn read_trail(
-        &self,
-        author: &[u8],
-        since_ts: u64,
-        recv_secret: &[u8],
-    ) -> Result<Vec<TrailFix>> {
-        let namespaces: Vec<NamespaceId> = {
-            let handles = self.handles.lock().await;
-            handles.keys().map(|b| NamespaceId::from(*b)).collect()
-        };
+    /// Read the **still-sealed** current envelope per author from both fix lanes, across every
+    /// known namespace.
+    ///
+    /// The v3 counterpart of [`Self::read_latest`]. Opening a ratcheted envelope needs the
+    /// per-friend session state (FORWARD-SECRECY §4.7), which lives above this module — so this
+    /// hands back bytes and lets the caller decide. Skipping the decrypt here also keeps the
+    /// §4.2 ordering intact: the caller verifies the signature before any session state moves.
+    ///
+    /// **Both** the `hex(author)/fix` and `nul/hex(author)` lanes are returned, and that is
+    /// load-bearing rather than convenient. §4.1's symmetric lanes only manufacture the
+    /// bidirectionality forward secrecy needs if a watcher's null fix actually reaches the
+    /// sharer's ratchet — a reader that skipped the null lane would never call `accept` for a
+    /// watch-only friend, never move their `peer_advanced_ms`, and drop them as `Lapsed` at
+    /// `T_lapse`. Every one-directional watch edge would die after a day.
+    ///
+    /// Our own outbound envelopes are included; the caller filters them by author, since it is
+    /// the one that knows who we are.
+    pub async fn read_latest_sealed(&self) -> Result<Vec<Vec<u8>>> {
         let mut out = Vec::new();
-        for ns in namespaces {
-            out.extend(self.read_range(ns, author, since_ts, recv_secret).await?);
+        for ns in self.namespaces().await {
+            let doc = self.doc_for(ns).await?;
+            let query = Query::single_latest_per_key().build();
+            let stream = doc.get_many(query).await?;
+            tokio::pin!(stream);
+            while let Some(entry) = stream.next().await {
+                let entry = entry?;
+                let is_fix = decode_key(entry.key()).is_some();
+                let is_null = decode_nul_key(entry.key()).is_some();
+                if !is_fix && !is_null {
+                    continue; // control entry, resync record, or pre-LWW key
+                }
+                match self.blobs.blobs().get_bytes(entry.content_hash()).await {
+                    Ok(bytes) => out.push(bytes.to_vec()),
+                    Err(_) => continue, // content not yet available locally
+                }
+            }
         }
         Ok(out)
     }
 
-    /// Trigger range-based set reconciliation for `ns` and surface backfilled, decryptable fixes
-    /// to `sink`. `since_ts` bounds which reconciled fixes we emit (0 = full history).
+    /// Write a sealed **resync record** to `ns` under `rsy/hex(author)` (FORWARD-SECRECY §4.6).
     ///
-    /// NOTE: iroh-docs reconciles the whole namespace; `since_ts` is applied when surfacing
-    /// entries, not to bound the wire protocol. Peers are the already-connected swarm members.
-    pub async fn sync(
-        &self,
-        ns: NamespaceId,
-        since_ts: u64,
-        peers: Vec<EndpointAddr>,
-        sink: &dyn TrailSink,
-        recv_secret: &[u8],
-    ) -> Result<u64> {
+    /// HPKE-sealed like a control message rather than ratcheted, necessarily: this is the message
+    /// that re-establishes a ratchet, so it cannot depend on one existing.
+    pub async fn write_rsy(&self, ns: NamespaceId, author: &[u8], envelope: Vec<u8>) -> Result<()> {
         let doc = self.doc_for(ns).await?;
-        let author_label = ns.to_bytes().to_vec();
-        sink.on_sync_status(author_label.clone(), "started".to_string(), None);
+        doc.set_bytes(self.author, encode_rsy_key(author), envelope)
+            .await?;
+        Ok(())
+    }
 
+    /// Read + decrypt `author`'s current resync record across every known namespace.
+    ///
+    /// Same shape as [`Self::read_ctl`], including the load-bearing `single_latest_per_key`: the
+    /// slot is overwritten in place, so a plain query would resurrect a superseded record and
+    /// walk the session backwards into a root the peer has already moved off.
+    pub async fn read_rsy(
+        &self,
+        author: &[u8],
+        recv_secret: &[u8],
+    ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+        let namespaces: Vec<NamespaceId> = {
+            let handles = self.handles.lock().await;
+            handles.keys().map(|b| NamespaceId::from(*b)).collect()
+        };
+        let key = encode_rsy_key(author);
+        let mut out = Vec::new();
+        for ns in namespaces {
+            let doc = self.doc_for(ns).await?;
+            let query = Query::single_latest_per_key()
+                .key_exact(key.clone())
+                .build();
+            let entry = match doc.get_one(query).await? {
+                Some(e) => e,
+                None => continue,
+            };
+            let bytes = match self.blobs.blobs().get_bytes(entry.content_hash()).await {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            if let Ok(opened) = crypto::open(recv_secret, &bytes) {
+                out.push(opened.payload);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Read + decrypt the **latest** fix per author across every known namespace (own + imported
+    /// friends). Entries we cannot open (not addressed to us / revoked / our own outbound
+    /// envelopes) and non-fix keys (control entries, pre-LWW keys) are silently skipped.
+    ///
+    /// `single_latest_per_key` is load-bearing here for the same reason as on the control path:
+    /// the fix key is overwritten in place, so superseded versions still exist in the replica and
+    /// a plain query would resurrect them.
+    pub async fn read_latest(&self, recv_secret: &[u8]) -> Result<Vec<LatestFix>> {
+        let mut out = Vec::new();
+        for ns in self.namespaces().await {
+            let doc = self.doc_for(ns).await?;
+            let query = Query::single_latest_per_key().build();
+            let stream = doc.get_many(query).await?;
+            tokio::pin!(stream);
+            while let Some(entry) = stream.next().await {
+                let entry = entry?;
+                if decode_key(entry.key()).is_none() {
+                    continue; // control entry or pre-LWW key
+                }
+                let bytes = match self.blobs.blobs().get_bytes(entry.content_hash()).await {
+                    Ok(b) => b,
+                    Err(_) => continue, // content not yet available locally
+                };
+                if let Ok(opened) = crypto::open(recv_secret, &bytes) {
+                    out.push(LatestFix {
+                        author: opened.author.to_vec(),
+                        seq: opened.seq,
+                        payload: opened.payload,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// What this replica can **serve**, per author, across every known namespace — metadata only.
+    ///
+    /// `friend_latest` and the trail cache are APP storage: they are written by the live gossip
+    /// lane too, so a fix that arrived over gossip is in them while the docs replica holds nothing
+    /// (a pool member has a READ ticket and cannot write to the author's namespace). Reconciliation
+    /// serves out of the replica, so "we have seen this author's fix" and "we can hand this
+    /// author's fix to someone else" are genuinely different questions and only this one answers
+    /// the second.
+    ///
+    /// **No decryption.** `seq` and `fix_ts` come from the envelope's signed-but-plaintext header
+    /// via [`crypto::envelope_header`] — a signature check, not an unwrap — so this reports
+    /// presence for every author in the replica including the ones whose payloads are not
+    /// addressed to us. The fix lane only (`hex(author)/fix`); control, null and resync slots are
+    /// not the thing a relay is asked to serve.
+    ///
+    /// `has_content` separates the ways a slot can be useless: `content_len() == 0`, a docs record
+    /// whose blob never landed locally, and a blob that is not a readable signed envelope. In
+    /// every one of them there is nothing to hand on, and reporting the slot as present would say
+    /// "the transfer failed" when the truth is "the relay had nothing to give".
+    pub async fn replica_status(&self) -> Result<Vec<ReplicaSlot>> {
+        let mut out = Vec::new();
+        for ns in self.namespaces().await {
+            let doc = self.doc_for(ns).await?;
+            // `single_latest_per_key`, as everywhere else: the fix slot is overwritten in place,
+            // so a plain query would also report superseded versions.
+            let query = Query::single_latest_per_key().build();
+            let stream = doc.get_many(query).await?;
+            tokio::pin!(stream);
+            while let Some(entry) = stream.next().await {
+                let entry = entry?;
+                let author = match decode_key(entry.key()) {
+                    Some(author) => author,
+                    None => continue, // control, null, resync, or pre-LWW key
+                };
+                let bytes = if entry.content_len() == 0 {
+                    None
+                } else {
+                    self.blobs.blobs().get_bytes(entry.content_hash()).await.ok()
+                };
+                // Servable means "we hold an envelope we could hand over", so the header has to
+                // parse and its signature has to check out. A blob that is present but not a
+                // readable signed envelope is not something to relay, and reporting it as one
+                // would turn a corrupt slot into a mysterious downstream failure.
+                let header = bytes
+                    .as_ref()
+                    .and_then(|bytes| crypto::envelope_header(bytes).ok());
+                out.push(ReplicaSlot {
+                    // The SIGNED author, not the docs key. The key only records where the writer
+                    // filed the entry; the header is what the author's signature covers. Falls
+                    // back to the key only when there is no envelope to read, in which case the
+                    // slot is reported as unservable anyway.
+                    author: header.map(|h| h.author.to_vec()).unwrap_or(author),
+                    seq: header.map(|h| h.seq).unwrap_or(0),
+                    fix_ts: header.map(|h| h.ts).unwrap_or(0),
+                    has_content: header.is_some(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Reconcile `ns` with `peers` and wait (bounded) for the exchange + content transfer to
+    /// settle. Pull-only plumbing: decrypt/read happens afterwards via [`Self::read_latest`],
+    /// so there is no per-entry surfacing and no sink.
+    async fn sync_ns(&self, ns: NamespaceId, peers: Vec<EndpointAddr>) -> Result<()> {
+        let doc = self.doc_for(ns).await?;
         let mut events = doc.subscribe().await?;
         doc.start_sync(peers).await?;
 
-        let mut recovered: u64 = 0;
-        let mut pending_entries = HashMap::new();
+        // Bound the reconciliation: with no reachable peer `SyncFinished` may never arrive, which
+        // would hang this call forever. The first event gets a longer grace period — a cold node's
+        // dial (net_report + hole-punch or relay fallback) routinely outlasts the idle gap.
         let mut saw_event = false;
-        // Bound the reconciliation: with no reachable peer (e.g. relay-only web where direct-IP
-        // transmits are dropped) `SyncFinished` may never arrive, which would hang this call — and
-        // therefore the `syncTrail` promise — forever. Break after an idle gap and report what we
-        // recovered so the UI always gets a `completed` (with count), never a dead button.
-        //
-        // The first event gets a longer grace period than subsequent ones — see
-        // [`SYNC_FIRST_EVENT_TIMEOUT_SECS`]; a cold node's dial can outlast the idle gap.
         loop {
             let wait = if saw_event {
                 SYNC_IDLE_TIMEOUT_SECS
             } else {
                 SYNC_FIRST_EVENT_TIMEOUT_SECS
             };
-            let next = timeout(Duration::from_secs(wait), events.next()).await;
-            if matches!(next, Ok(Some(_))) {
-                saw_event = true;
-            }
-            let entry_to_process = match next {
-                Ok(Some(Ok(LiveEvent::InsertRemote { from, entry, .. }))) => Some((from, entry)),
-                Ok(Some(Ok(LiveEvent::ContentReady { hash }))) => pending_entries.remove(&hash),
-                Ok(Some(Ok(LiveEvent::SyncFinished(_)))) => None,
+            match timeout(Duration::from_secs(wait), events.next()).await {
+                // All reconciled entries have their content locally — the clean finish.
                 Ok(Some(Ok(LiveEvent::PendingContentReady))) => break,
-                Ok(Some(Ok(_))) => None,
-                Ok(Some(Err(_))) => break,
-                Ok(None) => break, // stream ended
-                Err(_) => break,   // idle timeout — stop waiting, report what we have
-            };
-            if let Some((from, entry)) = entry_to_process {
-                let bytes = match self.blobs.blobs().get_bytes(entry.content_hash()).await {
-                    Ok(b) => b,
-                    Err(_) => {
-                        pending_entries.insert(entry.content_hash(), (from, entry));
-                        continue;
-                    }
-                };
-                if let Ok(opened) = crypto::open(recv_secret, &bytes) {
-                    if let Some((author_bytes, seq)) = decode_key(entry.key()) {
-                        if fix_ts_at_least(&opened.payload, since_ts) {
-                            recovered += 1;
-                            // Same short content hash the sender's publish span and the
-                            // stash's entry.received span carry — the cross-device join key.
-                            tracing::info!(
-                                sc.entry_hash = %crate::telemetry::short_hex(entry.content_hash().as_bytes()),
-                                sc.author = %crate::telemetry::short_hex(&author_bytes),
-                                sc.seq = seq,
-                                entry.origin = %from.fmt_short(),
-                                "trail.backfill: recovered envelope via reconciliation"
-                            );
-                            sink.on_backfill(
-                                author_bytes,
-                                seq,
-                                opened.payload,
-                                from.as_bytes().to_vec(),
-                            );
-                        }
-                    }
-                }
+                Ok(Some(Ok(_))) => saw_event = true,
+                Ok(Some(Err(_))) | Ok(None) => break,
+                Err(_) => break, // idle timeout — settle for what transferred
             }
         }
-
-        sink.on_sync_status(author_label, "completed".to_string(), Some(recovered));
-        Ok(recovered)
+        Ok(())
     }
 
     /// Put `ns` into the iroh-docs live engine with `peers` and wait for one reconciliation to
@@ -639,19 +769,29 @@ impl TrailDocs {
         endpoint: &iroh::Endpoint,
         ticket: DocTicket,
         peer: EndpointAddr,
-        since_ts: u64,
-        recv_secret: &[u8],
-    ) -> Result<Vec<TrailFix>> {
+        stash_url: &str,
+        stash_psk: Option<&str>,
+    ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+        eprintln!("[watch] creating metadata-only sync actor");
         let sync = SyncHandle::spawn(
             DocsStore::memory(),
             None,
             format!("stash-cli-{}", endpoint.id().fmt_short()),
         );
+        eprintln!("[watch] importing trail capability");
         let namespace = sync.import_namespace(ticket.capability).await?;
+        // The stash intentionally releases ciphertext for superseded entries while retaining their
+        // signed docs records. Automatic download would request every historical hash and abort on
+        // the first released blob. Reconcile metadata only, then fetch the latest retained slot for
+        // each key explicitly below.
+        sync.set_download_policy(namespace, DownloadPolicy::NothingExcept(Vec::new()))
+            .await?;
         sync.open(namespace, OpenOpts::default().sync()).await?;
+        eprintln!("[watch] reconciling metadata with stash");
 
         let result = async {
             let finished = connect_and_sync(endpoint, &sync, namespace, peer.clone(), None).await?;
+            eprintln!("[watch] metadata reconciliation finished");
             if finished.peer != peer.id {
                 return Err(anyhow!(
                     "direct trail sync expected {}, got {}",
@@ -661,41 +801,43 @@ impl TrailDocs {
             }
 
             let (tx, mut rx) = irpc::channel::mpsc::channel(256);
-            sync.get_many(namespace, Query::all().build(), tx).await?;
-            let downloader = self.blobs.downloader(endpoint);
+            sync.get_many(namespace, Query::single_latest_per_key().build(), tx)
+                .await?;
             let mut out = Vec::new();
             while let Some(entry) = rx.recv().await? {
                 let entry = entry?;
-                if entry.content_len() == 0 {
+                if entry.content_len() == 0 || decode_key(entry.key()).is_none() {
                     continue;
                 }
                 let hash = entry.content_hash();
-                if self.blobs.blobs().get_bytes(hash).await.is_err() {
-                    downloader
-                        .download(HashAndFormat::raw(hash), [peer.id])
-                        .await?;
-                }
-                let bytes = self.blobs.blobs().get_bytes(hash).await?;
-                let opened = match crypto::open(recv_secret, &bytes) {
-                    Ok(opened) => opened,
-                    Err(_) => continue,
-                };
-                if let Some((author, seq)) = decode_key(entry.key()) {
-                    if fix_ts_at_least(&opened.payload, since_ts) {
-                        tracing::info!(
-                            sc.entry_hash = %crate::telemetry::short_hex(hash.as_bytes()),
-                            sc.author = %crate::telemetry::short_hex(&author),
-                            sc.seq = seq,
-                            sync.peer = %peer.id.fmt_short(),
-                            "trail.backfill: recovered envelope via direct stash reconciliation"
-                        );
-                        out.push(TrailFix {
-                            author,
-                            seq,
-                            payload: opened.payload,
-                        });
+                let bytes = match self.blobs.blobs().get_bytes(hash).await {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        eprintln!(
+                        "[watch] fetching latest retained blob {} through the stash receipt API",
+                        crate::telemetry::short_hex(hash.as_bytes())
+                    );
+                        let namespace_hex = hex_encode(namespace.as_bytes());
+                        let request = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(10))
+                            .build()?
+                            .get(format!(
+                                "{}/v1/namespaces/{namespace_hex}/content/{hash}",
+                                stash_url.trim_end_matches('/')
+                            ));
+                        let request = match stash_psk {
+                            Some(psk) => request.bearer_auth(psk),
+                            None => request,
+                        };
+                        let response = request.send().await?.error_for_status()?;
+                        let bytes = response.bytes().await?;
+                        if iroh_blobs::Hash::new(&bytes) != hash {
+                            return Err(anyhow!("stash receipt returned bytes for the wrong hash"));
+                        }
+                        bytes
                     }
-                }
+                };
+                out.push(Zeroizing::new(bytes.to_vec()));
             }
             Ok(out)
         }
@@ -750,89 +892,33 @@ impl TrailDocs {
             .collect()
     }
 
-    /// Reconcile **every** known namespace (own + friends), surfacing backfill to `sink`.
-    /// Returns the total number of recovered, decryptable fixes.
+    /// Reconcile **every** known namespace (own + friends) with `peers`, so each friend's latest
+    /// fix (and our own outbound slot) is exchanged. Read the results afterwards with
+    /// [`Self::read_latest`].
     ///
     /// A namespace that fails is logged and skipped rather than aborting the run: these are
     /// independent replicas, and short-circuiting on the first error meant one friend whose doc
-    /// couldn't be opened silently blocked backfill for everyone after them in the map.
-    pub async fn sync_all(
-        &self,
-        since_ts: u64,
-        peers: Vec<EndpointAddr>,
-        sink: &dyn TrailSink,
-        recv_secret: &[u8],
-    ) -> Result<u64> {
+    /// couldn't be opened silently blocked the refresh for everyone after them in the map.
+    pub async fn sync_all(&self, peers: Vec<EndpointAddr>) -> Result<()> {
         let namespaces = self.namespaces().await;
-        let mut total = 0u64;
         let mut failed = 0usize;
         for ns in &namespaces {
-            match self
-                .sync(*ns, since_ts, peers.clone(), sink, recv_secret)
-                .await
-            {
-                Ok(recovered) => total += recovered,
-                Err(err) => {
-                    failed += 1;
-                    tracing::warn!(
-                        sc.namespace = %crate::telemetry::short_hex(&ns.to_bytes()),
-                        error = %err,
-                        "trail.sync: namespace failed; continuing with the rest"
-                    );
-                    sink.on_sync_status(ns.to_bytes().to_vec(), "error".to_string(), None);
-                }
+            if let Err(err) = self.sync_ns(*ns, peers.clone()).await {
+                failed += 1;
+                tracing::warn!(
+                    sc.namespace = %crate::telemetry::short_hex(&ns.to_bytes()),
+                    error = %err,
+                    "trail.sync: namespace failed; continuing with the rest"
+                );
             }
         }
         // Only a total wipeout is an error worth failing the call for — otherwise the caller gets
-        // whatever was recoverable, which is the point of a best-effort backfill.
+        // whatever was reachable, which is the point of a best-effort refresh.
         if failed > 0 && failed == namespaces.len() {
             return Err(anyhow!("all {failed} trail namespaces failed to sync"));
         }
-        Ok(total)
+        Ok(())
     }
-}
-
-/// Decode just the `ts` field of a postcard-encoded `LocationFix` and test `>= since_ts`.
-///
-/// `LocationFix` is `{ lat: f64, lon: f64, accuracy_m: f64, heading_deg: f64, ts: u64 }`; the
-/// four f64s are fixed-width (8B each in postcard), so `ts` is the trailing varint. To avoid a
-/// dependency cycle with the UniFFI record we decode leniently and, on any parse hiccup, fall
-/// back to "within window" so a decryptable fix is never dropped.
-fn fix_ts_at_least(payload: &[u8], since_ts: u64) -> bool {
-    if since_ts == 0 {
-        return true;
-    }
-    match decode_fix_ts(payload) {
-        Some(ts) => is_within_since(ts, since_ts),
-        None => true,
-    }
-}
-
-/// Best-effort extraction of the trailing `u64 ts` varint from a postcard `LocationFix`.
-fn decode_fix_ts(payload: &[u8]) -> Option<u64> {
-    const F64_BYTES: usize = 8 * 4; // lat, lon, accuracy_m, heading_deg
-    if payload.len() <= F64_BYTES {
-        return None;
-    }
-    let (varint, _) = read_varint_u64(&payload[F64_BYTES..])?;
-    Some(varint)
-}
-
-/// Minimal postcard/LEB128-style varint decoder for a single `u64`.
-fn read_varint_u64(bytes: &[u8]) -> Option<(u64, usize)> {
-    let mut result: u64 = 0;
-    let mut shift = 0u32;
-    for (i, &byte) in bytes.iter().enumerate() {
-        if shift >= 64 {
-            return None;
-        }
-        result |= ((byte & 0x7f) as u64) << shift;
-        if byte & 0x80 == 0 {
-            return Some((result, i + 1));
-        }
-        shift += 7;
-    }
-    None
 }
 
 #[cfg(test)]
@@ -843,50 +929,39 @@ mod tests {
     #[test]
     fn key_round_trip() {
         let author = [0xabu8; 32];
-        for seq in [0u64, 1, 42, 999_999, u64::MAX] {
-            let key = encode_key(&author, seq);
-            let (a, s) = decode_key(&key).expect("decodes");
-            assert_eq!(a, author.to_vec());
-            assert_eq!(s, seq);
-        }
+        let key = encode_key(&author);
+        assert_eq!(decode_key(&key), Some(author.to_vec()));
     }
 
     #[test]
-    fn keys_sort_by_seq_lexicographically() {
-        let author = [1u8; 32];
-        let k1 = encode_key(&author, 2);
-        let k2 = encode_key(&author, 10);
-        // zero-padding means numeric order == byte order.
-        assert!(k1 < k2, "seq 2 should sort before seq 10");
+    fn fix_key_is_one_slot_per_author() {
+        // LWW hinges on the key being independent of anything per-publish.
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        assert_eq!(encode_key(&a), encode_key(&a));
+        assert_ne!(encode_key(&a), encode_key(&b));
     }
 
     #[test]
-    fn author_prefix_is_key_prefix() {
-        let author = [7u8; 32];
-        let prefix = author_prefix(&author);
-        let key = encode_key(&author, 5);
-        assert!(key.starts_with(&prefix));
-    }
-
-    #[test]
-    fn decode_key_rejects_garbage() {
+    fn decode_key_rejects_garbage_and_legacy_keys() {
         assert!(decode_key(b"no-separator-here").is_none());
-        assert!(decode_key(b"zz/00000000000000000001").is_none()); // non-hex author
+        assert!(decode_key(b"zz/fix").is_none()); // non-hex author
+                                                  // Pre-LWW `hex(author)/{seq:020}` keys left by older builds stay invisible.
+        assert!(decode_key(b"abab/00000000000000000001").is_none());
     }
 
     // ── control-entry keys (ARCHITECTURE §9c) ────────────────────────────────────────────
 
     /// The whole point of the `ctl/` lead: fix readers must skip control entries untouched.
-    /// If this ever fails, control payloads start reaching `read_range` and the trail UI, which
-    /// would try to decode a `ControlMsg` as a `LocationFix`.
+    /// If this ever fails, control payloads start reaching `read_latest` and the presence UI,
+    /// which would try to decode a `ControlMsg` as a `LocationFix`.
     #[test]
     fn fix_readers_ignore_control_keys() {
         let author = [0x11u8; 32];
         let ctl = encode_ctl_key(&author);
-        // `decode_key` refuses it, so `read_range` / `sync` / the trail UI drop it on the floor.
+        // `decode_key` refuses it, so `read_latest` / `sync_direct` drop it on the floor.
         assert!(decode_key(&ctl).is_none());
-        // ...and a fix-prefix range query cannot even reach it.
-        assert!(!ctl.starts_with(&author_prefix(&author)));
+        assert_ne!(ctl, encode_key(&author));
     }
 
     /// One slot per author: the key must not vary, or superseding would not work.
@@ -898,43 +973,25 @@ mod tests {
         assert_ne!(encode_ctl_key(&a), encode_ctl_key(&b));
     }
 
-    // ── latest-only selection ─────────────────────────────────────────────────────────────
+    /// The null lane must be invisible to fix readers and must not collide with either other
+    /// lane — the whole point of giving it its own key is that a tick's two envelopes, wrapped
+    /// for disjoint recipient sets, both survive.
     #[test]
-    fn superseded_keeps_only_the_newest_fix() {
-        let author = vec![0xAAu8; 4];
-        let keys: Vec<Vec<u8>> = (1..=5).map(|seq| encode_key(&author, seq)).collect();
-
-        let pruned = superseded_keys(&keys, &author, 5);
-
-        assert_eq!(pruned.len(), 4);
-        assert!(!pruned.contains(&encode_key(&author, 5)));
-        assert!(pruned.contains(&encode_key(&author, 1)));
+    fn null_keys_are_their_own_lane() {
+        let author = [0x11u8; 32];
+        let nul = encode_nul_key(&author);
+        assert!(decode_key(&nul).is_none());
+        assert_ne!(nul, encode_key(&author));
+        assert_ne!(nul, encode_ctl_key(&author));
     }
 
+    /// One overwritten slot per author, same as the fix and control lanes.
     #[test]
-    fn superseded_is_empty_for_a_lone_entry() {
-        let author = vec![0xAAu8; 4];
-        let keys = vec![encode_key(&author, 7)];
-        assert!(superseded_keys(&keys, &author, 7).is_empty());
-    }
-
-    #[test]
-    fn superseded_never_selects_control_or_foreign_keys() {
-        let author = vec![0xAAu8; 4];
-        let other = vec![0xBBu8; 4];
-        let keys = vec![
-            encode_ctl_key(&author),
-            encode_ctl_key(&other),
-            encode_key(&other, 1),
-            encode_key(&author, 1),
-            b"garbage".to_vec(),
-        ];
-
-        // Control entries carry live-mode state and are overwritten in place, not superseded; a
-        // friend's entries are not ours to delete.
-        let pruned = superseded_keys(&keys, &author, 9);
-
-        assert_eq!(pruned, vec![encode_key(&author, 1)]);
+    fn nul_key_is_stable_per_author() {
+        let a = [5u8; 32];
+        let b = [6u8; 32];
+        assert_eq!(encode_nul_key(&a), encode_nul_key(&a));
+        assert_ne!(encode_nul_key(&a), encode_nul_key(&b));
     }
 
     // ── prune-threshold selection ────────────────────────────────────────────────────────
@@ -955,39 +1012,6 @@ mod tests {
         assert!(keys_to_prune(&entries, 100).is_empty());
     }
 
-    #[test]
-    fn since_window_boundaries() {
-        assert!(is_within_since(100, 100));
-        assert!(is_within_since(101, 100));
-        assert!(!is_within_since(99, 100));
-        assert!(is_within_since(0, 0));
-    }
-
-    // ── ts extraction from a postcard LocationFix ────────────────────────────────────────
-    #[test]
-    fn decode_fix_ts_matches_postcard() {
-        // Mirror crate::LocationFix layout so we don't need to import it here.
-        #[derive(serde::Serialize)]
-        struct Fix {
-            lat: f64,
-            lon: f64,
-            accuracy_m: f64,
-            heading_deg: f64,
-            ts: u64,
-        }
-        for ts in [0u64, 1, 127, 128, 300, 1_000_000, u64::MAX] {
-            let f = Fix {
-                lat: 1.0,
-                lon: 2.0,
-                accuracy_m: 3.0,
-                heading_deg: 4.0,
-                ts,
-            };
-            let bytes = postcard::to_allocvec(&f).unwrap();
-            assert_eq!(decode_fix_ts(&bytes), Some(ts), "ts={ts}");
-        }
-    }
-
     // ── revocation carries over to the durable path (reuses crypto.rs) ───────────────────
     // The durable path stores the SAME sealed bytes as gossip, so an envelope written to docs
     // still decrypts for a recipient and is opaque to a non-recipient / revoked peer.
@@ -1003,15 +1027,21 @@ mod tests {
         let (b_sk, b_pk) = crypto::generate_recv_keypair(); // active recipient
         let (c_sk, c_pk) = crypto::generate_recv_keypair(); // will be revoked
 
-        // fix #1 shared with B and C, written to docs under author/seq.
+        // fix #1 shared with B and C, written to docs under the author's LWW slot.
         let payload = b"durable trail point";
         let envelope =
             crypto::seal(&seed, &author, 1, 1000, 0, payload, &[b_pk.clone(), c_pk]).unwrap();
-        let _key = encode_key(&author, 1); // exercises the docs key path
+        let _key = encode_key(&author); // exercises the docs key path
 
         // Both recipients can open the SAME stored bytes.
-        assert_eq!(crypto::open(&b_sk, &envelope).unwrap().payload, payload);
-        assert_eq!(crypto::open(&c_sk, &envelope).unwrap().payload, payload);
+        assert_eq!(
+            crypto::open(&b_sk, &envelope).unwrap().payload.as_slice(),
+            payload
+        );
+        assert_eq!(
+            crypto::open(&c_sk, &envelope).unwrap().payload.as_slice(),
+            payload
+        );
 
         // fix #2: C revoked (dropped from wraps). The durable bytes are opaque to C, still
         // readable by B — no docs node required to prove it.
@@ -1071,6 +1101,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // ── LWW: a second publish leaves exactly one readable entry per author ───────────────────
+    // The FORWARD-SECRECY.md §7 step 1 acceptance test: the replica answers "current fix",
+    // never history. `read_latest` must yield one entry per author, carrying the newest seq.
+    #[tokio::test]
+    async fn second_publish_leaves_one_readable_entry_per_author() {
+        use ed25519_dalek::SigningKey;
+        use rand::rngs::OsRng;
+
+        let dir = scratch_dir("lww");
+        let fx = spawn_docs(&dir).await;
+        let td = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone())
+            .await
+            .unwrap();
+        let ns = td.own_namespace();
+
+        let signing = SigningKey::generate(&mut OsRng);
+        let seed = signing.to_bytes();
+        let author = signing.verifying_key().to_bytes();
+        let (b_sk, b_pk) = crypto::generate_recv_keypair();
+
+        let e1 = crypto::seal(&seed, &author, 1, 1000, 0, b"first", &[b_pk.clone()]).unwrap();
+        let e2 = crypto::seal(&seed, &author, 2, 2000, 0, b"second", &[b_pk.clone()]).unwrap();
+        td.write(ns, &author, e1).await.unwrap();
+        td.write(ns, &author, e2).await.unwrap();
+
+        let latest = td.read_latest(&b_sk).await.unwrap();
+        assert_eq!(
+            latest.len(),
+            1,
+            "one readable entry per author, not history"
+        );
+        assert_eq!(latest[0].author, author.to_vec());
+        assert_eq!(latest[0].seq, 2, "the second publish supersedes the first");
+        assert_eq!(latest[0].payload.as_slice(), b"second");
+
+        // A control entry in the same namespace stays invisible to fix readers.
+        let ctl = crypto::seal(&seed, &author, 0, 3000, 0, b"ctl-msg", &[b_pk]).unwrap();
+        td.write_ctl(ns, &author, ctl).await.unwrap();
+        let latest = td.read_latest(&b_sk).await.unwrap();
+        assert_eq!(latest.len(), 1, "control entries must not read as fixes");
+        assert_eq!(latest[0].payload.as_slice(), b"second");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

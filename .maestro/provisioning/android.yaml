@@ -1,0 +1,67 @@
+appId: com.unrealjune.streetcryptid
+---
+# ANDROID-ONLY PROVISIONING. Handles the OS / Google-Play-Services / dev-client dialogs that have
+# no iOS counterpart, so the SHARED onboarding and background flows can stay platform-neutral.
+#
+# Everything here is conditional on purpose: which of these appear depends on the emulator image,
+# GMS version, and whether an earlier run already answered them. A missing dialog is the normal
+# case, not a failure.
+#
+# Prefer suppressing a dialog in scripts/e2e/lib/android-devices.sh (via `pm grant` or
+# `settings put`) over tapping it here — a dialog that never renders costs nothing and cannot race
+# the flow. This file is for the ones with no settings-level off switch.
+
+# Launch so the dialogs below can actually be on screen; provisioning runs before onboarding, and
+# both of these only surface once the app is up.
+- launchApp:
+    clearState: false
+
+# The dev-client "developer menu" popup. This is a ONE-TIME onboarding popup per install (it sets
+# expo.modules.devmenu's isOnboardingFinished/showsAtLaunch, verified: absent on every cold launch
+# afterwards) — which is exactly why it belongs here rather than in the shared flows. It was
+# previously handled per-launch in ensure-onboarded/background-app, costing a fixed
+# `extendedWaitUntil` timeout on EVERY launch, on BOTH platforms, to wait for something that
+# happens once and never on iOS at all.
+#
+# Note the trailing `.*`: Maestro text selectors are full-string regex, so the dialog's full
+# sentence must match or be wildcarded. An earlier revision used the sentence with one word
+# missing and silently never fired.
+- extendedWaitUntil:
+    visible: 'This is the developer menu.*'
+    timeout: 8000
+    optional: true
+- runFlow:
+    when:
+      visible: 'This is the developer menu.*'
+    commands:
+      - tapOn: 'Continue'
+      - tapOn: 'Close'
+
+# Google Play Services' "Location Accuracy" sheet. Shown by GMS, NOT by the app and NOT an Android
+# runtime permission, so `pm grant` cannot pre-empt it. It appears after the app first requests
+# location and, left up, covers the map and fails every later assertion. "Turn on" (rather than
+# "No thanks") records the GMS opt-in permanently, so this stops recurring after the first run.
+- runFlow:
+    when:
+      visible: 'Turn on'
+    commands:
+      - tapOn: 'Turn on'
+- runFlow:
+    when:
+      visible: 'No thanks'
+    commands:
+      - tapOn: 'No thanks'
+
+# Android 11+ splits background location into a second, Settings-based grant. `pm grant` covers it
+# (verified: ACCESS_BACKGROUND_LOCATION granted=true), so these only catch images that still route
+# through the UI.
+- runFlow:
+    when:
+      visible: 'Allow all the time'
+    commands:
+      - tapOn: 'Allow all the time'
+- runFlow:
+    when:
+      visible: 'While using the app'
+    commands:
+      - tapOn: 'While using the app'

@@ -9,6 +9,7 @@ import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import { useTheme } from '@/hooks/use-theme';
 import { fixTransportBadge, fixTransportDescription } from '../core/fix-transport';
 import { formatDistance, formatPresenceAge, type FriendPresence } from '../core/presence';
+import type { RatchetActivity } from '../core/types';
 
 interface FriendProfileSheetProps {
   presence: FriendPresence | null;
@@ -18,6 +19,7 @@ interface FriendProfileSheetProps {
   watching: boolean;
   /** When this friend's live window on US ends (ms since epoch), or null if they are not watching. */
   watchedUntil: number | null;
+  ratchetActivity?: RatchetActivity;
   onClose(): void;
   onToggleShare(on: boolean): Promise<void>;
   /** Ask this friend to switch to the real-time cadence, or withdraw the ask. */
@@ -57,6 +59,7 @@ export function FriendProfileSheet({
   sharing,
   watching,
   watchedUntil,
+  ratchetActivity,
   onClose,
   onToggleShare,
   onToggleWatch,
@@ -165,6 +168,8 @@ export function FriendProfileSheet({
             />
           ) : null}
           <DetailRow label="CONNECTION" value={pairingLabel(presence.friend.pairingMethod)} />
+          <DetailRow label="LAST FIX ACK" value={formatAckAge(ratchetActivity?.fix)} />
+          <DetailRow label="LAST NULL ACK" value={formatAckAge(ratchetActivity?.null)} />
           <DetailRow label="YOUR LOCATION" value={sharing ? 'Shared' : 'Paused'} />
         </View>
 
@@ -300,6 +305,19 @@ export function FriendProfileSheet({
       </ScrollView>
     </Modal>
   );
+}
+
+function formatAckAge(ack: RatchetActivity['fix'] | undefined): string {
+  if (!ack) return 'Never';
+  const ageMs = Math.max(0, Date.now() - ack.receivedAt);
+  const path = ack.source === 'live' ? 'live' : 'sync';
+  if (ageMs < 60_000) return `Now · ${path}`;
+  const minutes = Math.floor(ageMs / 60_000);
+  if (minutes < 60) return `${minutes} min ago · ${path}`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr ago · ${path}`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago · ${path}`;
 }
 
 function DetailRow({

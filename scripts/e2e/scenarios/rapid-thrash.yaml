@@ -1,0 +1,16 @@
+name: rapid-thrash
+description: "One simulator on a walking route, repeatedly kill+cold-relaunch+backgrounded instead of a single dip (per .maestro/README.md, Maestro's launchApp force-kills and cold-relaunches on iOS even with clearState:false -- there is no lighter same-process foreground/background primitive available, so this scenario is honestly a repeated-restart stress test, not a live-process race test). Targets the persist-before-publish/fsync discipline in docs/social/FORWARD-SECRECY.md SS4.2 -- each kill is a crash-adjacent event, and a burned counter on restart should be recoverable, never a stall or a reused key."
+kind: single
+devices: 1
+duration_seconds: 180
+route: walking
+background: true
+force_quit_after_seconds: 0
+thrash: true
+require_stash_observer: true
+assertions:
+  - action: bg.wake
+    min_count: 1
+  - action: publish.fix
+    status: ok
+    min_count: 1

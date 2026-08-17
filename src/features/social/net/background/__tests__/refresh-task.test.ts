@@ -4,12 +4,12 @@ import * as TaskManager from 'expo-task-manager';
 import { setTelemetryForTesting, type Telemetry } from '@/features/dev/telemetry';
 
 import {
-  BACKGROUND_BACKFILL_TASK,
-  cancelBackgroundBackfill,
-  defineBackgroundBackfillTask,
-  isBackgroundBackfillAvailable,
-  scheduleBackgroundBackfill,
-} from '../backfill-task';
+  BACKGROUND_REFRESH_TASK,
+  cancelBackgroundRefresh,
+  defineBackgroundRefreshTask,
+  isBackgroundRefreshAvailable,
+  scheduleBackgroundRefresh,
+} from '../refresh-task';
 
 // Hoisted above the imports by babel-plugin-jest-hoist, so the modules resolve to these mocks.
 jest.mock('expo-task-manager', () => ({
@@ -50,33 +50,33 @@ function fakeTelemetry() {
   return { instance, flush, span };
 }
 
-describe('backfill-task', () => {
+describe('refresh-task', () => {
   afterEach(() => {
     jest.clearAllMocks();
     setTelemetryForTesting(undefined);
   });
 
   it('reports availability when both native modules are present', () => {
-    expect(isBackgroundBackfillAvailable()).toBe(true);
+    expect(isBackgroundRefreshAvailable()).toBe(true);
   });
 
   it('schedules with the requested minimum interval', async () => {
-    await scheduleBackgroundBackfill(15);
-    expect(registerTaskAsync).toHaveBeenCalledWith(BACKGROUND_BACKFILL_TASK, {
+    await scheduleBackgroundRefresh(15);
+    expect(registerTaskAsync).toHaveBeenCalledWith(BACKGROUND_REFRESH_TASK, {
       minimumInterval: 15,
     });
   });
 
   it('cancels only when the task is registered', async () => {
     isTaskRegisteredAsync.mockResolvedValueOnce(true);
-    await cancelBackgroundBackfill();
-    expect(isTaskRegisteredAsync).toHaveBeenCalledWith(BACKGROUND_BACKFILL_TASK);
-    expect(unregisterTaskAsync).toHaveBeenCalledWith(BACKGROUND_BACKFILL_TASK);
+    await cancelBackgroundRefresh();
+    expect(isTaskRegisteredAsync).toHaveBeenCalledWith(BACKGROUND_REFRESH_TASK);
+    expect(unregisterTaskAsync).toHaveBeenCalledWith(BACKGROUND_REFRESH_TASK);
   });
 
   it('skips unregister when the task is not registered', async () => {
     isTaskRegisteredAsync.mockResolvedValueOnce(false);
-    await cancelBackgroundBackfill();
+    await cancelBackgroundRefresh();
     expect(unregisterTaskAsync).not.toHaveBeenCalled();
   });
 
@@ -85,7 +85,7 @@ describe('backfill-task', () => {
     setTelemetryForTesting(instance);
     const run = jest.fn(async () => {});
 
-    defineBackgroundBackfillTask(run);
+    defineBackgroundRefreshTask(run);
     const executor = defineTask.mock.calls[0][1] as () => Promise<number>;
     const result = await executor();
 
@@ -102,7 +102,7 @@ describe('backfill-task', () => {
       throw new Error('boom');
     });
 
-    defineBackgroundBackfillTask(run);
+    defineBackgroundRefreshTask(run);
     const executor = defineTask.mock.calls[0][1] as () => Promise<number>;
     const result = await executor();
 

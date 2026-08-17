@@ -37,6 +37,16 @@ tracing-subscriber-wasm = "0.1"
 wasm-bindgen = "=0.2.122"
 wasm-bindgen-futures = "0.4"
 wasm-streams = "0.5"
+# Shared with the mobile crate by `#[path]` (src/lib.rs): the Double Ratchet schedule the v3
+# envelope wraps under. Same versions/features as modules/iroh-location/rust/Cargo.toml — the two
+# crates must produce byte-identical envelopes or a web peer cannot talk to a phone.
+x25519-dalek = { version = "2", default-features = false, features = [
+    "alloc",
+    "precomputed-tables",
+    "static_secrets",
+    "zeroize",
+] }
+zeroize = { version = "1", features = ["derive"] }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["--enable-nontrapping-float-to-int", "--enable-bulk-memory"]

@@ -1,5 +1,11 @@
 import { DEFAULT_FIX_QUALITY_CONFIG } from '../fix-quality';
-import { createSamplingPolicy, DEFAULT_SAMPLING_CONFIG } from '../sampling-policy';
+import {
+  AMBIENT_DELIVERY_INTERVAL_MS,
+  AMBIENT_DISTANCE_INTERVAL_M,
+  benchmarkProfileOverrides,
+  createSamplingPolicy,
+  DEFAULT_SAMPLING_CONFIG,
+} from '../sampling-policy';
 import type { AccuracyTier, BatteryState } from '../types';
 
 const healthy: BatteryState = { level: 0.9, charging: false, lowPower: false };
@@ -15,6 +21,17 @@ describe('createSamplingPolicy', () => {
     expect(policy.config.normalAccuracy).toBe(DEFAULT_SAMPLING_CONFIG.normalAccuracy);
   });
 
+  it.each([
+    ['battery', 100, 300_000],
+    ['balanced', 50, 60_000],
+    ['fidelity', 25, 30_000],
+  ] as const)('provides the %s simulator benchmark profile', (profile, distance, delivery) => {
+    const policy = createSamplingPolicy(benchmarkProfileOverrides(profile));
+    const decision = policy.decide({ battery: healthy });
+    expect(decision.distanceIntervalM).toBe(distance);
+    expect(decision.deferredUpdatesIntervalMs).toBe(delivery);
+  });
+
   it('defaults to a 5-minute cadence', () => {
     expect(createSamplingPolicy().decide({ battery: healthy }).timeIntervalMs).toBe(300_000);
   });
@@ -28,17 +45,20 @@ describe('createSamplingPolicy', () => {
     }
   });
 
-  it('never sets a distance filter, which would gate delivery on movement', () => {
+  it('uses a moderate movement filter so iOS does not run continuous GPS', () => {
     const policy = createSamplingPolicy();
     for (const battery of [healthy, low, lowPower, charging]) {
-      expect(policy.decide({ battery }).distanceIntervalM).toBe(0);
+      expect(policy.decide({ battery }).distanceIntervalM).toBe(AMBIENT_DISTANCE_INTERVAL_M);
+      expect(policy.decide({ battery }).distanceIntervalM).toBe(50);
     }
   });
 
-  it('never defers/batches updates, which would bunch quiet periods into bursts', () => {
+  it('batches ambient background callbacks to at most one JS wake per minute while moving', () => {
     const policy = createSamplingPolicy();
     for (const battery of [healthy, low, lowPower, charging]) {
-      expect(policy.decide({ battery }).deferredUpdatesIntervalMs).toBe(0);
+      expect(policy.decide({ battery }).deferredUpdatesIntervalMs).toBe(
+        AMBIENT_DELIVERY_INTERVAL_MS
+      );
     }
   });
 

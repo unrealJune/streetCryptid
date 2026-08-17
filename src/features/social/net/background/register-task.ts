@@ -3,7 +3,7 @@ import { Platform } from 'react-native';
 import type { SpanContext } from '@/features/dev/telemetry';
 import { backgroundOutbox } from './background-outbox';
 import { defineBackgroundLocationTask, isBackgroundLocationAvailable } from './background-task';
-import { defineBackgroundBackfillTask, isBackgroundBackfillAvailable } from './backfill-task';
+import { defineBackgroundRefreshTask, isBackgroundRefreshAvailable } from './refresh-task';
 import { defineReviveTask, isReviveFenceAvailable } from './revive-task';
 import {
   createBackgroundFixDispatcher,
@@ -50,40 +50,40 @@ export function registerActiveBackgroundFixHandler(
   return dispatcher.registerActiveHandler(handler);
 }
 
-// The mounted runtime's RECEIVE-side backfill (syncTrail + outbox drain), registered while
-// background sharing runs. The periodic backfill task routes here whenever a mounted runtime is
+// The mounted runtime's periodic refresh (heartbeat + outbox drain + current-fix sync), registered
+// while background sharing runs. The periodic refresh task routes here whenever a mounted runtime is
 // alive so it reuses the live native node. On Android the mounted runtime stays alive while
 // backgrounded (the location foreground service), so `AppState` is NOT 'active' and a headless
-// backfill would call `createNode → clearRuntime()` — tearing the live node's subscriptions down
+// refresh would call `createNode → clearRuntime()` — tearing the live node's subscriptions down
 // and silently stopping outgoing publishes + live receive until the app is relaunched.
-let activeBackfillHandler: ((parent?: SpanContext) => Promise<void>) | null = null;
+let activeRefreshHandler: ((parent?: SpanContext) => Promise<void>) | null = null;
 
-/** Register the mounted runtime's backfill runner. Returns an unregister fn (last writer wins). */
-export function registerActiveBackfillHandler(
+/** Register the mounted runtime's refresh runner. Returns an unregister fn (last writer wins). */
+export function registerActiveRefreshHandler(
   handler: (parent?: SpanContext) => Promise<void>
 ): () => void {
-  activeBackfillHandler = handler;
+  activeRefreshHandler = handler;
   return () => {
-    if (activeBackfillHandler === handler) activeBackfillHandler = null;
+    if (activeRefreshHandler === handler) activeRefreshHandler = null;
   };
 }
 
-/** The mounted runtime's backfill runner, or null on a fresh headless launch (no runtime alive). */
-export function getActiveBackfillHandler(): ((parent?: SpanContext) => Promise<void>) | null {
-  return activeBackfillHandler;
+/** The mounted runtime's refresh runner, or null on a fresh headless launch (no runtime alive). */
+export function getActiveRefreshHandler(): ((parent?: SpanContext) => Promise<void>) | null {
+  return activeRefreshHandler;
 }
 
 if (Platform.OS !== 'web' && isBackgroundLocationAvailable()) {
   ensureBackgroundTaskRegistered();
 }
 
-if (Platform.OS !== 'web' && isBackgroundBackfillAvailable()) {
-  // The periodic RECEIVE-side backfill task. Defined at module scope (like the location task) so a
+if (Platform.OS !== 'web' && isBackgroundRefreshAvailable()) {
+  // The periodic refresh task. Defined at module scope (like the location task) so a
   // fresh headless launch can run it; scheduling on/off is driven by startBackground/stopBackground.
   // The runner is lazily imported so this module's load stays light and headless-safe.
-  defineBackgroundBackfillTask(async (parent) => {
-    const { runBackgroundBackfillHeadless } = await import('./headless-runtime');
-    await runBackgroundBackfillHeadless(parent);
+  defineBackgroundRefreshTask(async (parent) => {
+    const { runBackgroundRefreshHeadless } = await import('./headless-runtime');
+    await runBackgroundRefreshHeadless(parent);
   });
 }
 

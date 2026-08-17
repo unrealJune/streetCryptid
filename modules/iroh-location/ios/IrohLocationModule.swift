@@ -76,6 +76,47 @@ private func dataToHex(_ data: Data) -> String {
   data.map { String(format: "%02x", $0) }.joined()
 }
 
+/// The node's two storage roots, which have opposite requirements (FORWARD-SECRECY.md §4.2).
+///
+/// - `data` → the temp dir. The docs/blobs replica: large, re-fetchable from the stash and from
+///   friends, and something the OS is welcome to reclaim. This is byte-for-byte the path the
+///   Rust `default_data_dir` used before the roots were split (`temp_dir()/streetcryptid/<id>`),
+///   deliberately — moving it would abandon every existing install's replica for no benefit.
+/// - `state` → Application Support. Ratchet session state, which is **not** recoverable — losing
+///   it desyncs every friend at once, so it cannot live anywhere iOS purges. Application Support
+///   *is* backed up by default, and restoring an old copy would rewind send counters into key
+///   reuse, so `excludeFromBackup` below is not optional decoration; it is the other half of
+///   putting the state here at all.
+private func nodeStorageRoots() -> (data: URL, state: URL) {
+  let fm = FileManager.default
+  let tmp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+  // Application Support is not guaranteed to exist; createDirectory below makes it.
+  let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+  return (
+    tmp.appendingPathComponent("streetcryptid", isDirectory: true),
+    support.appendingPathComponent("streetcryptid", isDirectory: true)
+  )
+}
+
+/// Create `dir` and stamp `NSURLIsExcludedFromBackupKey` on it.
+///
+/// The flag is inherited by everything created underneath, so stamping the root covers the
+/// per-identity subdirectory the Rust side creates. Best-effort on the *creation* — the node
+/// re-creates what it needs on `start()` — but a failure here means the state root may be
+/// backed up, so it is logged loudly rather than swallowed.
+private func excludeFromBackup(_ dir: URL) {
+  var dir = dir
+  do {
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var values = URLResourceValues()
+    values.isExcludedFromBackup = true
+    try dir.setResourceValues(values)
+  } catch {
+    NSLog("IrohLocation: could not exclude %@ from backup: %@",
+          dir.path, error.localizedDescription)
+  }
+}
+
 /// Build the UniFFI `LocationFix` from the JS bridge dict.
 private func locationFix(from fix: [String: Double]) -> LocationFix {
   LocationFix(
@@ -294,17 +335,20 @@ private final class EventBridge: FixListener {
       ])
   }
   func onOpaque(author: Data, seq: UInt64) {
-    module?.sendEvent("onOpaque", ["author": dataToHex(author), "seq": seq])
+    module?.sendEvent("onOpaque", [
+      "author": dataToHex(author),
+      "seq": seq,
+      "kind": author.isEmpty ? "opaque" : "null",
+    ])
   }
   func onStatus(status: String) {
     module?.sendEvent("onStatus", ["subscriptionId": subscriptionId, "status": status])
   }
-  // Durable-trail sync progress for an author/namespace: `started` | `completed` | `error`.
-  func onSync(author: Data, status: String, recovered: UInt64?) {
-    var payload: [String: Any] = ["author": dataToHex(author), "status": status]
-    if let recovered = recovered { payload["recovered"] = recovered }
-    module?.sendEvent("onSync", payload)
-  }
+  // No `onSync`: the Rust `FixListener` trait has no `on_sync`, so nothing ever calls it. It went
+  // when the durable path collapsed to last-write-wins (FORWARD-SECRECY.md §4.4) — with one
+  // overwritten slot per author there is no backfill stream to report progress on. Swift tolerated
+  // the leftover method because a protocol conformance ignores extras; Kotlin's `override` did not,
+  // which is what actually broke the Android build.
 }
 
 public final class IrohLocationModule: Module {
@@ -325,9 +369,18 @@ public final class IrohLocationModule: Module {
 
     AsyncFunction("createNode") { (identityHex: String?, recvHex: String?) async throws -> [String: String] in
       try await self.clearRuntime()
-      let node = try LocationNode(
+      let roots = nodeStorageRoots()
+      // Stamp the exclusion *before* the node can write a session into it — a blob that is
+      // created and then backed up before the flag lands is exactly the rollback we are
+      // preventing. Both roots are marked: Caches is already outside backup, but the exclusion
+      // should be structural rather than an artifact of where the dir happens to live.
+      excludeFromBackup(roots.state)
+      excludeFromBackup(roots.data)
+      let node = try LocationNode.newAtDirs(
         identitySecret: identityHex.map(hexToData),
-        recvSecret: recvHex.map(hexToData))
+        recvSecret: recvHex.map(hexToData),
+        dataRoot: roots.data.path,
+        stateRoot: roots.state.path)
       self.node = node
       return [
         "endpointId": dataToHex(node.endpointId()),
@@ -385,17 +438,39 @@ public final class IrohLocationModule: Module {
       return subscriptionId
     }
 
+    // Recipients are **endpoint ids**, not receiving keys: every fix lane is envelope v3 now, and
+    // a v3 wrap is keyed by the per-friend ratchet session, which is keyed by endpoint id
+    // (FORWARD-SECRECY.md 4.7). Returns the recipients left out, as "<endpointHex>:<reason>" —
+    // a friend with no session yet, a lapsed one, or one whose state could not be read. The
+    // caller must surface these rather than treat a short wrap list as success.
     AsyncFunction("publish") {
-      (subscriptionId: String, seq: Double, epoch: Double, fix: [String: Double], recipients: [String], traceparent: String?) async throws in
-      guard let sub = self.subscriptions[subscriptionId] else { return }
+      (subscriptionId: String, seq: Double, fix: [String: Double], recipientEndpoints: [String], traceparent: String?) async throws -> [String] in
+      guard let sub = self.subscriptions[subscriptionId] else { return [] }
       if let traceparent {
-        try await sub.publishTraced(
-          seq: UInt64(seq), epoch: UInt32(epoch), fix: locationFix(from: fix),
-          recipients: recipients.map(hexToData), traceparent: traceparent)
+        return try await sub.publishTraced(
+          seq: UInt64(seq), fix: locationFix(from: fix),
+          recipientEndpoints: recipientEndpoints, traceparent: traceparent)
       } else {
-        try await sub.publish(
-          seq: UInt64(seq), epoch: UInt32(epoch), fix: locationFix(from: fix),
-          recipients: recipients.map(hexToData))
+        return try await sub.publish(
+          seq: UInt64(seq), fix: locationFix(from: fix),
+          recipientEndpoints: recipientEndpoints)
+      }
+    }
+
+    // A null fix is an ordinary envelope with an empty padded payload (FORWARD-SECRECY.md §4.1) —
+    // the watcher half of the symmetric lanes. No fix dictionary: there is no position, only the
+    // tick's timestamp, which rides in the signed header as usual.
+    AsyncFunction("publishNull") {
+      (subscriptionId: String, seq: Double, ts: Double, watcherEndpoints: [String], traceparent: String?) async throws -> [String] in
+      guard let sub = self.subscriptions[subscriptionId] else { return [] }
+      if let traceparent {
+        return try await sub.publishNullTraced(
+          seq: UInt64(seq), ts: UInt64(ts),
+          recipientEndpoints: watcherEndpoints, traceparent: traceparent)
+      } else {
+        return try await sub.publishNull(
+          seq: UInt64(seq), ts: UInt64(ts),
+          recipientEndpoints: watcherEndpoints)
       }
     }
 
@@ -407,40 +482,89 @@ public final class IrohLocationModule: Module {
     // ── Durable trail (iroh-docs) — see docs/social/ARCHITECTURE.md §5–6 ──────────────────
 
     AsyncFunction("docsWrite") {
-      (subscriptionId: String, seq: Double, epoch: Double, fix: [String: Double], recipients: [String], traceparent: String?) async throws in
+      (subscriptionId: String, seq: Double, fix: [String: Double], recipientEndpoints: [String], traceparent: String?) async throws -> [String] in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       if let traceparent {
-        try await node.docsWriteTraced(
-          subscriptionId: subscriptionId, seq: UInt64(seq), epoch: UInt32(epoch),
-          fix: locationFix(from: fix), recipients: recipients.map(hexToData),
+        return try await node.docsWriteRatchetedTraced(
+          subscriptionId: subscriptionId, seq: UInt64(seq),
+          fix: locationFix(from: fix), recipientEndpoints: recipientEndpoints,
           traceparent: traceparent)
       } else {
-        try await node.docsWrite(
-          subscriptionId: subscriptionId, seq: UInt64(seq), epoch: UInt32(epoch),
-          fix: locationFix(from: fix), recipients: recipients.map(hexToData))
+        return try await node.docsWriteRatcheted(
+          subscriptionId: subscriptionId, seq: UInt64(seq),
+          fix: locationFix(from: fix), recipientEndpoints: recipientEndpoints)
       }
     }
 
-    AsyncFunction("syncTrail") { (sinceTs: Double, peerTicket: String?, traceparent: String?) async throws in
+    // Separate LWW slot from the fix lane (`docs::encode_nul_key`): a tick's two envelopes are
+    // wrapped for disjoint recipient sets, so one slot would make each supersede the other.
+    AsyncFunction("docsWriteNull") {
+      (subscriptionId: String, seq: Double, ts: Double, watcherEndpoints: [String], traceparent: String?) async throws -> [String] in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       if let traceparent {
-        try await node.syncTrailTraced(
-          sinceTs: UInt64(sinceTs), peerTicket: peerTicket, traceparent: traceparent)
+        return try await node.docsWriteNullRatchetedTraced(
+          subscriptionId: subscriptionId, seq: UInt64(seq), ts: UInt64(ts),
+          watcherEndpoints: watcherEndpoints, traceparent: traceparent)
       } else {
-        try await node.syncTrail(sinceTs: UInt64(sinceTs), peerTicket: peerTicket)
+        return try await node.docsWriteNullRatcheted(
+          subscriptionId: subscriptionId, seq: UInt64(seq), ts: UInt64(ts),
+          watcherEndpoints: watcherEndpoints)
       }
+    }
+
+    // Ratchet sessions + 4.6 recovery.
+    //
+    // There is deliberately no `beginSession`/`completeSession` here. A session is bootstrapped by
+    // the SAS bump itself (pairing.rs), from ephemerals that are signed, connection-pinned and
+    // folded into the figure the two humans compared — so there is no JS-callable seam that could
+    // root a session from anything weaker. What JS drives is only recovery.
+
+    AsyncFunction("isDesynced") { (peerEndpoint: String) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.isDesynced(peerEndpointHex: peerEndpoint)
+    }
+
+    AsyncFunction("resyncCount") { (peerEndpoint: String) async throws -> Int in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Int(try await node.resyncCount(peerEndpointHex: peerEndpoint))
+    }
+
+    AsyncFunction("publishResync") { (recipientRecvPubs: [String]) async throws -> String in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.publishResync(recipientRecvPubs: recipientRecvPubs)
+    }
+
+    AsyncFunction("pollResync") { (peerEndpoint: String, peerRecvPub: String) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.pollResync(peerEndpointHex: peerEndpoint, peerRecvPubHex: peerRecvPub)
+    }
+
+    AsyncFunction("clearResync") { () async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.clearResync()
+    }
+
+    AsyncFunction("forgetSession") { (peerEndpoint: String) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.forgetSession(peerEndpointHex: peerEndpoint)
+    }
+
+    AsyncFunction("syncLatest") { (peerTickets: [String], traceparent: String?) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.syncLatest(peerTickets: peerTickets, traceparent: traceparent)
     }
 
     // NOTE: needs `just bindgen-ios` on macOS before `node.pushTrail` exists in the generated
     // Swift bindings; until then this file will not compile on iOS. The JS side guards on the
     // export being present, so an older binary just degrades to no durable push.
-    AsyncFunction("pushTrail") { (peerTicket: String?, traceparent: String?) async throws in
+    AsyncFunction("pushTrail") { (peerTickets: [String], traceparent: String?) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      if let traceparent {
-        try await node.pushTrailTraced(peerTicket: peerTicket, traceparent: traceparent)
-      } else {
-        try await node.pushTrail(peerTicket: peerTicket)
-      }
+      try await node.pushTrail(peerTickets: peerTickets, traceparent: traceparent)
+    }
+
+    AsyncFunction("uploadTrailContent") { (baseUrl: String, psk: String?) async throws -> UInt64 in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.uploadTrailContent(baseUrl: baseUrl, psk: psk)
     }
 
     // Live-mode request channel (ARCHITECTURE §9c). Same bindgen caveat as `pushTrail` above:
@@ -464,17 +588,21 @@ public final class IrohLocationModule: Module {
       }
     }
 
-    AsyncFunction("readTrail") { (author: String, sinceTs: Double) async throws -> [[String: Any]] in
+    AsyncFunction("readLatest") { () async throws -> [[String: Any]] in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      let fixes = try await node.readTrail(author: hexToData(author), sinceTs: UInt64(sinceTs))
-      return fixes.map { incoming in
+      let events = try await node.readLatestRatchetedEvents()
+      return events.map { incoming in
         [
           "author": dataToHex(incoming.author),
           "seq": incoming.seq,
-          "fix": [
-            "lat": incoming.fix.lat, "lon": incoming.fix.lon, "accuracyM": incoming.fix.accuracyM,
-            "headingDeg": incoming.fix.headingDeg, "ts": incoming.fix.ts,
-          ],
+          "ts": incoming.ts,
+          "kind": incoming.kind,
+          "fix": incoming.fix.map { fix in
+            [
+              "lat": fix.lat, "lon": fix.lon, "accuracyM": fix.accuracyM,
+              "headingDeg": fix.headingDeg, "ts": fix.ts,
+            ]
+          } as Any,
         ]
       }
     }
@@ -616,6 +744,20 @@ public final class IrohLocationModule: Module {
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       let peerEndpointIds = peerEndpointIdsHex.map { hexToData($0) }
       return transportDiagnosticsDict(try await node.transportDiagnostics(peerEndpointIds: peerEndpointIds))
+    }
+
+    // What this replica can SERVE, per author — presence, never payload. Same bindgen caveat as
+    // `pushTrail` above: needs `just bindgen-ios` on macOS before `node.trailReplicaStatus` exists.
+    AsyncFunction("trailReplicaStatus") { () async throws -> [[String: Any]] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return (try await node.trailReplicaStatus()).map { slot in
+        [
+          "author": dataToHex(slot.author),
+          "seq": slot.seq,
+          "fixTs": slot.fixTs,
+          "hasContent": slot.hasContent,
+        ]
+      }
     }
 
     AsyncFunction("encodePairInvite") { (invite: [String: Any]) throws -> String in

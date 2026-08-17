@@ -629,17 +629,13 @@ internal interface UniffiCallbackInterfaceFixListenerMethod1 : com.sun.jna.Callb
 internal interface UniffiCallbackInterfaceFixListenerMethod2 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`status`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-internal interface UniffiCallbackInterfaceFixListenerMethod3 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,`recovered`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onFix", "onOpaque", "onStatus", "onSync")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onFix", "onOpaque", "onStatus")
 internal open class UniffiVTableCallbackInterfaceFixListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
     @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
     @JvmField internal var `onFix`: UniffiCallbackInterfaceFixListenerMethod0? = null,
     @JvmField internal var `onOpaque`: UniffiCallbackInterfaceFixListenerMethod1? = null,
     @JvmField internal var `onStatus`: UniffiCallbackInterfaceFixListenerMethod2? = null,
-    @JvmField internal var `onSync`: UniffiCallbackInterfaceFixListenerMethod3? = null,
 ) : Structure() {
     class UniffiByValue(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -647,8 +643,7 @@ internal open class UniffiVTableCallbackInterfaceFixListener(
         `onFix`: UniffiCallbackInterfaceFixListenerMethod0? = null,
         `onOpaque`: UniffiCallbackInterfaceFixListenerMethod1? = null,
         `onStatus`: UniffiCallbackInterfaceFixListenerMethod2? = null,
-        `onSync`: UniffiCallbackInterfaceFixListenerMethod3? = null,
-    ): UniffiVTableCallbackInterfaceFixListener(`uniffiFree`,`uniffiClone`,`onFix`,`onOpaque`,`onStatus`,`onSync`,), Structure.ByValue
+    ): UniffiVTableCallbackInterfaceFixListener(`uniffiFree`,`uniffiClone`,`onFix`,`onOpaque`,`onStatus`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceFixListener) {
         `uniffiFree` = other.`uniffiFree`
@@ -656,7 +651,6 @@ internal open class UniffiVTableCallbackInterfaceFixListener(
         `onFix` = other.`onFix`
         `onOpaque` = other.`onOpaque`
         `onStatus` = other.`onStatus`
-        `onSync` = other.`onSync`
     }
 
 }
@@ -697,6 +691,22 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_func_h3_cells_for_polygon(
     ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_capsule_header(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_capsule_open(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_capsule_seal(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_constants(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_epoch(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_expected_tags(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_open_fix(
+    ): Int
+    external fun uniffi_iroh_location_checksum_func_mesh_seal_fix(
+    ): Int
     external fun uniffi_iroh_location_checksum_func_configure_telemetry(
     ): Int
     external fun uniffi_iroh_location_checksum_func_flush_telemetry(
@@ -707,7 +717,7 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_fixlistener_on_status(
     ): Int
-    external fun uniffi_iroh_location_checksum_method_fixlistener_on_sync(
+    external fun uniffi_iroh_location_checksum_method_locationnode_begin_session(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_ble_available(
     ): Int
@@ -716,6 +726,10 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_iroh_location_checksum_method_locationnode_ble_has_scan_hint(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_cancel_pair(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_clear_resync(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_complete_session(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_confirm_pair_display(
     ): Int
@@ -729,9 +743,27 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_inner(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted_traced(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null_traced(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_inner(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_traced(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_traced(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_endpoint_id(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_forget_session(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_has_session(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_identity_secret(
     ): Int
@@ -744,6 +776,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair_by_ticket(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_is_desynced(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_list_pair_sessions(
     ): Int
@@ -763,23 +797,27 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_poll_profile_events(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_poll_resync(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_profile_ticket(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_prune_trail(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_publish_profile(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_publish_resync(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_push_trail(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_push_trail_inner(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_push_trail_traced(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_read_control(
     ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_read_profile(
+    external fun uniffi_iroh_location_checksum_method_locationnode_read_latest(
     ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_read_trail(
+    external fun uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted_events(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_read_profile(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_recv_public(
     ): Int
@@ -788,6 +826,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_iroh_location_checksum_method_locationnode_resolve_bump_peer(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_respond_pair(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_resync_count(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready(
     ): Int
@@ -799,23 +839,43 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_subscribe(
     ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_sync_trail(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_sync_trail_inner(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_sync_trail_traced(
+    external fun uniffi_iroh_location_checksum_method_locationnode_sync_latest(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_ticket(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_trail_replica_status(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_upload_trail_content(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_deliver(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_have(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_insert(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_latest(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_prune(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_stats(
     ): Int
     external fun uniffi_iroh_location_checksum_method_subscription_publish(
     ): Int
     external fun uniffi_iroh_location_checksum_method_subscription_publish_inner(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_subscription_publish_null(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_subscription_publish_null_traced(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_subscription_publish_traced(
     ): Int
     external fun uniffi_iroh_location_checksum_constructor_locationnode_new(
+    ): Int
+    external fun uniffi_iroh_location_checksum_constructor_locationnode_new_at_dirs(
+    ): Int
+    external fun uniffi_iroh_location_checksum_constructor_meshcapsulestore_new(
     ): Int
     external fun ffi_iroh_location_uniffi_contract_version(
     ): Int
@@ -848,13 +908,15 @@ external fun uniffi_iroh_location_fn_method_fixlistener_on_opaque(`ptr`: Long,`a
 ): Unit
 external fun uniffi_iroh_location_fn_method_fixlistener_on_status(`ptr`: Long,`status`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_iroh_location_fn_method_fixlistener_on_sync(`ptr`: Long,`author`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,`recovered`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
 external fun uniffi_iroh_location_fn_clone_locationnode(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_iroh_location_fn_free_locationnode(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_iroh_location_fn_constructor_locationnode_new(`identitySecret`: RustBuffer.ByValue,`recvSecret`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_iroh_location_fn_constructor_locationnode_new_at_dirs(`identitySecret`: RustBuffer.ByValue,`recvSecret`: RustBuffer.ByValue,`dataRoot`: RustBuffer.ByValue,`stateRoot`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_begin_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_ble_available(`ptr`: Long,
 ): Long
@@ -864,22 +926,44 @@ external fun uniffi_iroh_location_fn_method_locationnode_ble_has_scan_hint(`ptr`
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_cancel_pair(`ptr`: Long,`sessionId`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_clear_resync(`ptr`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_complete_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,`peerEphemeralHex`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_confirm_pair_display(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`matched`: Byte,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_create_invite(`ptr`: Long,`ttlSecs`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_doc_ticket(`ptr`: Long,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_docs_write(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_docs_write_control(`ptr`: Long,`msg`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_docs_write_inner(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_inner(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`ts`: Long,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_docs_write_traced(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_null(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`ts`: Long,`recipients`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`ts`: Long,`watcherEndpoints`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted_traced(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`ts`: Long,`watcherEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_null_traced(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`ts`: Long,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`recipientEndpoints`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_inner(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`nullTs`: Long,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_traced(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_docs_write_traced(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_endpoint_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_locationnode_forget_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_has_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_identity_secret(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_method_locationnode_import_doc_ticket(`ptr`: Long,`ticket`: RustBuffer.ByValue,
@@ -891,6 +975,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_initiate_pair(`ptr`: Lo
 external fun uniffi_iroh_location_fn_method_locationnode_initiate_pair_by_ticket(`ptr`: Long,`token`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_initiate_pair_nearby(`ptr`: Long,`peerEndpointId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_is_desynced(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_list_pair_sessions(`ptr`: Long,
 ): Long
@@ -910,23 +996,27 @@ external fun uniffi_iroh_location_fn_method_locationnode_poll_pair_events(`ptr`:
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_poll_profile_events(`ptr`: Long,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_poll_resync(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,`peerRecvPubHex`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_profile_ticket(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_prune_trail(`ptr`: Long,`olderThanTs`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_publish_profile(`ptr`: Long,`handle`: RustBuffer.ByValue,`cryptidName`: RustBuffer.ByValue,`sigil`: RustBuffer.ByValue,`color`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_push_trail(`ptr`: Long,`peerTicket`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_locationnode_publish_resync(`ptr`: Long,`recipientRecvPubs`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_push_trail_inner(`ptr`: Long,`peerTicket`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
-): Long
-external fun uniffi_iroh_location_fn_method_locationnode_push_trail_traced(`ptr`: Long,`peerTicket`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_locationnode_push_trail(`ptr`: Long,`peerTickets`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_read_control(`ptr`: Long,`author`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_read_profile(`ptr`: Long,`endpointId`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_locationnode_read_latest(`ptr`: Long,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_read_trail(`ptr`: Long,`author`: RustBuffer.ByValue,`sinceTs`: Long,
+external fun uniffi_iroh_location_fn_method_locationnode_read_latest_ratcheted(`ptr`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_read_latest_ratcheted_events(`ptr`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_read_profile(`ptr`: Long,`endpointId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_recv_public(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -935,6 +1025,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_recv_secret(`ptr`: Long
 external fun uniffi_iroh_location_fn_method_locationnode_resolve_bump_peer(`ptr`: Long,`timeoutMs`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_respond_pair(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`accept`: Byte,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_resync_count(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_set_pairing_ready(`ptr`: Long,`ready`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -946,25 +1038,47 @@ external fun uniffi_iroh_location_fn_method_locationnode_submit_pair_choice(`ptr
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_subscribe(`ptr`: Long,`topic`: RustBuffer.ByValue,`bootstrap`: RustBuffer.ByValue,`listener`: Long,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_sync_trail(`ptr`: Long,`sinceTs`: Long,`peerTicket`: RustBuffer.ByValue,
-): Long
-external fun uniffi_iroh_location_fn_method_locationnode_sync_trail_inner(`ptr`: Long,`sinceTs`: Long,`peerTicket`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
-): Long
-external fun uniffi_iroh_location_fn_method_locationnode_sync_trail_traced(`ptr`: Long,`sinceTs`: Long,`peerTicket`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_locationnode_sync_latest(`ptr`: Long,`peerTickets`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_ticket(`ptr`: Long,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_trail_replica_status(`ptr`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_transport_diagnostics(`ptr`: Long,`peerEndpointIds`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_upload_trail_content(`ptr`: Long,`baseUrl`: RustBuffer.ByValue,`psk`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_clone_meshcapsulestore(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_iroh_location_fn_free_meshcapsulestore(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_iroh_location_fn_constructor_meshcapsulestore_new(`capacity`: Int,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_iroh_location_fn_method_meshcapsulestore_deliver(`ptr`: Long,`tags`: RustBuffer.ByValue,`have`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_meshcapsulestore_have(`ptr`: Long,`tags`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_meshcapsulestore_insert(`ptr`: Long,`capsule`: RustBuffer.ByValue,`nowSecs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_meshcapsulestore_latest(`ptr`: Long,`tag`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_meshcapsulestore_prune(`ptr`: Long,`nowSecs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_iroh_location_fn_method_meshcapsulestore_stats(`ptr`: Long,`nowSecs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_clone_subscription(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_iroh_location_fn_free_subscription(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_iroh_location_fn_method_subscription_publish(`ptr`: Long,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_subscription_publish(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`recipientEndpoints`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_subscription_publish_inner(`ptr`: Long,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_subscription_publish_inner(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`ts`: Long,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_subscription_publish_traced(`ptr`: Long,`seq`: Long,`epoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_subscription_publish_null(`ptr`: Long,`seq`: Long,`ts`: Long,`recipientEndpoints`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_subscription_publish_null_traced(`ptr`: Long,`seq`: Long,`ts`: Long,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_subscription_publish_traced(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_func_decode_mvt_bundle(`bundle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -979,6 +1093,22 @@ external fun uniffi_iroh_location_fn_func_encode_pair_invite(`invite`: RustBuffe
 external fun uniffi_iroh_location_fn_func_generate_recv_keypair(uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_h3_cells_for_polygon(`coordinates`: RustBuffer.ByValue,`resolution`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_capsule_header(`capsule`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_capsule_open(`recvSecret`: RustBuffer.ByValue,`author`: RustBuffer.ByValue,`capsule`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_capsule_seal(`recvSecret`: RustBuffer.ByValue,`authorEndpointId`: RustBuffer.ByValue,`recipientRecvPublic`: RustBuffer.ByValue,`envelope`: RustBuffer.ByValue,`epoch`: Int,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_constants(uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_epoch(`nowSecs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Int
+external fun uniffi_iroh_location_fn_func_mesh_expected_tags(`recvSecret`: RustBuffer.ByValue,`peers`: RustBuffer.ByValue,`nowSecs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_open_fix(`recvSecret`: RustBuffer.ByValue,`author`: RustBuffer.ByValue,`capsule`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_mesh_seal_fix(`identitySecret`: RustBuffer.ByValue,`recvSecret`: RustBuffer.ByValue,`authorEndpointId`: RustBuffer.ByValue,`seq`: Long,`meshEpoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_configure_telemetry(`endpoint`: RustBuffer.ByValue,`instanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
@@ -1124,6 +1254,30 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_func_h3_cells_for_polygon() != 51742) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_capsule_header() != 56669) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_capsule_open() != 22247) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_capsule_seal() != 18327) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_constants() != 6729) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_epoch() != 9095) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_expected_tags() != 41685) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_open_fix() != 58136) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_mesh_seal_fix() != 60001) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1139,7 +1293,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_status() != 49613) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_sync() != 58565) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_begin_session() != 25232) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ble_available() != 5831) {
@@ -1154,6 +1308,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 49013) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_clear_resync() != 52312) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_complete_session() != 30383) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_confirm_pair_display() != 2067) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1163,19 +1323,46 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_doc_ticket() != 34643) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write() != 8784) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write() != 25294) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_control() != 23232) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_inner() != 3042) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_inner() != 15200) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_traced() != 40920) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_null() != 46772) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted() != 18657) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted_traced() != 10230) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_null_traced() != 22862) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted() != 14176) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_inner() != 59600) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_traced() != 56484) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_docs_write_traced() != 47616) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_endpoint_id() != 34847) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_forget_session() != 58135) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_has_session() != 16365) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_identity_secret() != 6853) {
@@ -1194,6 +1381,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby() != 64589) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 60716) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_list_pair_sessions() != 11581) {
@@ -1223,6 +1413,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_poll_profile_events() != 11150) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_poll_resync() != 5911) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_profile_ticket() != 35099) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1232,22 +1425,25 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_profile() != 57330) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail() != 65355) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 54563) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail_inner() != 60203) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail_traced() != 27419) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail() != 39469) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_read_control() != 32699) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_read_profile() != 28632) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_read_latest() != 16725) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_read_trail() != 11856) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted() != 45503) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted_events() != 33560) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_read_profile() != 28632) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_recv_public() != 14228) {
@@ -1260,6 +1456,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_respond_pair() != 4487) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_resync_count() != 62719) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
@@ -1277,31 +1476,61 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_subscribe() != 37204) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_sync_trail() != 30653) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_sync_trail_inner() != 39894) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_sync_trail_traced() != 35925) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_sync_latest() != 8256) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_trail_replica_status() != 25080) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics() != 23251) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_subscription_publish() != 60528) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_upload_trail_content() != 549) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_inner() != 23224) {
+    if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_deliver() != 47836) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_traced() != 24737) {
+    if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_have() != 26291) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_insert() != 1404) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_latest() != 19517) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_prune() != 57364) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_subscription_publish() != 18306) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_inner() != 62762) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_null() != 2917) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_null_traced() != 48794) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_traced() != 2036) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_constructor_locationnode_new() != 52316) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_constructor_locationnode_new_at_dirs() != 15584) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_constructor_meshcapsulestore_new() != 52560) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1874,12 +2103,6 @@ public interface FixListener {
      */
     fun `onStatus`(`status`: kotlin.String)
     
-    /**
-     * Durable-trail sync progress for an author/namespace: `started` | `completed` | `error`,
-     * with the number of recovered envelopes on completion.
-     */
-    fun `onSync`(`author`: kotlin.ByteArray, `status`: kotlin.String, `recovered`: kotlin.ULong?)
-    
     companion object
 }
 
@@ -2036,22 +2259,6 @@ open class FixListenerImpl: Disposable, AutoCloseable, FixListener
     
 
     
-    /**
-     * Durable-trail sync progress for an author/namespace: `started` | `completed` | `error`,
-     * with the number of recovered envelopes on completion.
-     */override fun `onSync`(`author`: kotlin.ByteArray, `status`: kotlin.String, `recovered`: kotlin.ULong?)
-        = 
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_iroh_location_fn_method_fixlistener_on_sync(
-        it,
-        FfiConverterByteArray.lower(`author`),FfiConverterString.lower(`status`),FfiConverterOptionalULong.lower(`recovered`),_status)
-}
-    }
-    
-    
-
-    
 
     
 
@@ -2110,20 +2317,6 @@ internal object uniffiCallbackInterfaceFixListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onSync`: UniffiCallbackInterfaceFixListenerMethod3 {
-        override fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,`recovered`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeFixListener.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`onSync`(
-                    FfiConverterByteArray.lift(`author`),
-                    FfiConverterString.lift(`status`),
-                    FfiConverterOptionalULong.lift(`recovered`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
 
     internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
@@ -2143,7 +2336,6 @@ internal object uniffiCallbackInterfaceFixListener {
         `onFix`,
         `onOpaque`,
         `onStatus`,
-        `onSync`,
     )
 
     // Registers the foreign callback with the Rust side.
@@ -2294,6 +2486,19 @@ public object FfiConverterTypeFixListener: FfiConverter<FixListener, Long> {
 public interface LocationNodeInterface {
     
     /**
+     * Begin a session bootstrap with `peer_endpoint_hex`: mint a fresh ephemeral X25519 keypair
+     * and return its **public** half as hex, to be carried to the peer.
+     *
+     * This is one half of the §4.6 primitive. In production both halves ride the pairing
+     * connection during the in-person SAS bump, identity-signed and transcript-bound; the
+     * signing and transport are step 7's, and until they land this is the seam a caller drives.
+     *
+     * Calling it again for the same peer replaces the pending ephemeral — an abandoned bootstrap
+     * leaves nothing behind but one unused secret, which drops with the process.
+     */
+    suspend fun `beginSession`(`peerEndpointHex`: kotlin.String): kotlin.String
+    
+    /**
      * Whether a BLE transport is wired into this node's endpoint on this platform.
      */
     suspend fun `bleAvailable`(): kotlin.Boolean
@@ -2314,6 +2519,25 @@ public interface LocationNodeInterface {
      * Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
      */
     suspend fun `cancelPair`(`sessionId`: kotlin.ByteArray)
+    
+    /**
+     * Drop our in-flight resync ephemeral once every peer has been restarted.
+     */
+    suspend fun `clearResync`()
+    
+    /**
+     * Complete the bootstrap with the peer's ephemeral public half, installing the session.
+     *
+     * `RK₀` is derived from the ephemeral-ephemeral DH and a transcript over both endpoint ids
+     * and both ephemerals — **never** from static-static DH, which a seized device could
+     * recompute from long-term keys it still holds (§3, §4.6 "no code path roots a session in
+     * static-static DH alone"). The transcript is canonically ordered, so both devices derive
+     * the same root and the same session id without negotiating either.
+     *
+     * The role is fixed by endpoint-id ordering, so the two sides take opposite halves of the
+     * standard asymmetric bootstrap with no extra round trip.
+     */
+    suspend fun `completeSession`(`peerEndpointHex`: kotlin.String, `peerEphemeralHex`: kotlin.String)
     
     /**
      * Displayer action: confirm whether the other human matched the shown figure. `true` latches
@@ -2339,7 +2563,7 @@ public interface LocationNodeInterface {
      * ties the write to our own topic/namespace; a node owns a single trail namespace, so it is
      * accepted for API parity with the TS contract but not otherwise needed.
      */
-    suspend fun `docsWrite`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>)
+    suspend fun `docsWrite`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>)
     
     /**
      * Seal `msg` for `recipients` and write it to our own namespace's control slot
@@ -2355,14 +2579,79 @@ public interface LocationNodeInterface {
      */
     suspend fun `docsWriteControl`(`msg`: ControlMsg, `recipients`: List<kotlin.ByteArray>)
     
-    suspend fun `docsWriteInner`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String?)
+    suspend fun `docsWriteInner`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix?, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String?)
     
-    suspend fun `docsWriteTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String)
+    /**
+     * Seal a **null fix** for `recipients` and write it to our namespace's null slot
+     * (FORWARD-SECRECY §4.1) — the watcher half of the symmetric lanes.
+     *
+     * A null fix is an ordinary envelope carrying an empty padded payload: same signature, same
+     * AAD binding, same `seq` monotonicity, same ciphertext length as a real fix. It exists so a
+     * friend we do not share position with still receives our envelopes on cadence, which is
+     * what carries our ratchet contribution once envelope v3 lands (§4.2). `ts` is the tick's
+     * timestamp — it rides in the signed header exactly as a real fix's does.
+     *
+     * Written to a separate LWW key from the fix lane so the two envelopes a tick produces,
+     * wrapped for disjoint recipient sets, do not supersede each other (see `docs::encode_nul_key`).
+     */
+    suspend fun `docsWriteNull`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>)
+    
+    /**
+     * Seal a **ratcheted null fix** for `watcher_endpoints` and write it to the null slot.
+     *
+     * The v3 counterpart of [`Self::docs_write_null`], and the half of §4.1 that makes the
+     * symmetric-lane argument true rather than aspirational. A watcher who only ever *reads* our
+     * position still publishes on cadence, and once that envelope is ratcheted it carries their
+     * ratchet contribution — which is what advances our `peer_advanced_ms` for them and stops
+     * `next_wraps` dropping them as `Lapsed` after 24 h. On the v2 null lane the contribution did
+     * not exist, so every one-directional watch edge expired after a day.
+     */
+    suspend fun `docsWriteNullRatcheted`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `watcherEndpoints`: List<kotlin.String>): List<kotlin.String>
+    
+    suspend fun `docsWriteNullRatchetedTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `watcherEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String): List<kotlin.String>
+    
+    suspend fun `docsWriteNullTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String)
+    
+    /**
+     * Seal `fix` under **envelope v3** for each recipient's ratchet session and write it to our
+     * durable namespace (FORWARD-SECRECY §4.7).
+     *
+     * Recipients are **endpoint ids**, not receiving keys: a v3 wrap is addressed by session,
+     * and sessions are keyed by who the peer is rather than by a long-term key of theirs. That
+     * difference is the point — the long-term receiving key is exactly what a seized device
+     * still holds.
+     *
+     * Returns the recipients that were left out, as `endpoint_hex:reason` — lapsed (§4.5),
+     * un-bootstrapped, or unpersistable. A short wrap list is never silent.
+     */
+    suspend fun `docsWriteRatcheted`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>): List<kotlin.String>
+    
+    /**
+     * Both ratcheted durable lanes. `fix.is_none()` is the null lane, which differs only in
+     * carrying an empty padded payload and landing in a separate LWW slot — the two envelopes a
+     * tick produces are wrapped for disjoint recipient sets, so sharing a slot would have them
+     * supersede each other.
+     */
+    suspend fun `docsWriteRatchetedInner`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix?, `nullTs`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String?): List<kotlin.String>
+    
+    suspend fun `docsWriteRatchetedTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String): List<kotlin.String>
+    
+    suspend fun `docsWriteTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String)
     
     /**
      * This device's EndpointId (== envelope `author`).
      */
     fun `endpointId`(): kotlin.ByteArray
+    
+    /**
+     * Forget the session with this peer (un-friending, or a §4.6 restart).
+     */
+    suspend fun `forgetSession`(`peerEndpointHex`: kotlin.String)
+    
+    /**
+     * Whether a ratchet session exists for this peer.
+     */
+    suspend fun `hasSession`(`peerEndpointHex`: kotlin.String): kotlin.Boolean
     
     /**
      * The ed25519 identity secret — persist in the OS secure store.
@@ -2397,6 +2686,11 @@ public interface LocationNodeInterface {
      * pairing-ready). Returns the deterministic session id.
      */
     suspend fun `initiatePairNearby`(`peerEndpointId`: kotlin.ByteArray): kotlin.ByteArray
+    
+    /**
+     * Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+     */
+    suspend fun `isDesynced`(`peerEndpointHex`: kotlin.String): kotlin.Boolean
     
     /**
      * List all known pairing sessions.
@@ -2462,6 +2756,18 @@ public interface LocationNodeInterface {
     suspend fun `pollProfileEvents`(): List<ProfileView>
     
     /**
+     * Look for `peer`'s resync record and, if one is there, restart the session from it.
+     *
+     * Publishes our own half first when we have not already, so a single call from each side
+     * completes the exchange without either having to go first — which matters because the
+     * side that noticed the desync and the side that caused it are usually not the same one.
+     *
+     * Returns whether a session was installed. `false` covers "no record yet", "stale record",
+     * and "already applied" — all ordinary, none an error.
+     */
+    suspend fun `pollResync`(`peerEndpointHex`: kotlin.String, `peerRecvPubHex`: kotlin.String): kotlin.Boolean
+    
+    /**
      * A shareable **read**-ticket for our profile namespace. Also exchanged automatically inside
      * a pairing Accept, so friends usually don't need to import it by hand.
      */
@@ -2481,8 +2787,23 @@ public interface LocationNodeInterface {
     suspend fun `publishProfile`(`handle`: kotlin.String, `cryptidName`: kotlin.String, `sigil`: kotlin.String, `color`: kotlin.String): kotlin.ULong
     
     /**
-     * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
-     * to finish. **This is what actually gets a published fix off the phone.**
+     * Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+     *
+     * Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
+     * re-establishes a ratchet, so it cannot require one. That is also why it is the one place
+     * the design has to be most careful: **recovery must never become the bypass**. The record
+     * carries only an ephemeral public key. It cannot downgrade anything, because a root is
+     * only ever derived when *both* ephemerals are in hand.
+     *
+     * Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
+     * than minting a new one, so a peer that already saw our half does not have to see a second.
+     */
+    suspend fun `publishResync`(`recipientRecvPubs`: List<kotlin.String>): kotlin.String
+    
+    /**
+     * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
+     * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
+     * actually gets a published fix off the phone.**
      *
      * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
      * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
@@ -2490,14 +2811,25 @@ public interface LocationNodeInterface {
      * that, so its envelopes never reached the stash and an offline friend had nothing to
      * reconcile from. Call this after draining a batch.
      *
+     * The peer list is the send-side counterpart of [`Self::sync_latest`], and it is what makes
+     * ARCHITECTURE.md §1.3/§6's pool relay the normal flow rather than luck. An earlier revision
+     * took a single `Option<String>` that only ever carried the stash, so an author's published
+     * fix was broadcast over docs to the stash and to nobody else: a pool member gained the
+     * author's entries only if it happened to dial the author itself during a reconciliation
+     * window, and with the stash off there was no durable copy anywhere. Pushing to the pool
+     * means a friend with the app open holds the author's entries **as they are published**, and
+     * can hand them on the moment the author goes dark.
+     *
+     * Repeating it is cheap: `start_sync` is a no-op once a namespace is syncing, so the
+     * steady-state cost is one connection per member for the process's lifetime.
+     *
+     * Unparseable tickets are skipped rather than failing the push — one malformed friend card
+     * must not stop delivery to everyone else — but they are counted on the span.
+     *
      * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
-     * that the live gossip path or a later [`Self::sync_trail`] is broken.
+     * that the live gossip path or a later [`Self::sync_latest`] is broken.
      */
-    suspend fun `pushTrail`(`peerTicket`: kotlin.String?)
-    
-    suspend fun `pushTrailInner`(`peerTicket`: kotlin.String?, `traceparent`: kotlin.String?)
-    
-    suspend fun `pushTrailTraced`(`peerTicket`: kotlin.String?, `traceparent`: kotlin.String)
+    suspend fun `pushTrail`(`peerTickets`: List<kotlin.String>, `traceparent`: kotlin.String?)
     
     /**
      * Read `author`'s current control message, if we can open it. Returns an empty vec when
@@ -2509,16 +2841,31 @@ public interface LocationNodeInterface {
     suspend fun `readControl`(`author`: kotlin.ByteArray): List<ControlMsg>
     
     /**
+     * Read the latest decryptable fix per author (friends who share with us) from the local
+     * replica. One entry per author — the durable path holds no history (FORWARD-SECRECY §4.4).
+     */
+    suspend fun `readLatest`(): List<IncomingFix>
+    
+    /**
+     * Read the latest **ratcheted** fix per author from the local replica.
+     *
+     * Signature first, then session state — `verify_v3` returns a type that the session manager
+     * is the only consumer of, so no unauthenticated byte can reach the ratchet (§4.2).
+     * Envelopes we cannot open are skipped exactly as v2's are: addressed to someone else,
+     * replayed from the archive, or beyond the acceptance window are all "nothing to surface".
+     */
+    suspend fun `readLatestRatcheted`(): List<IncomingFix>
+    
+    /**
+     * Read the latest ratcheted envelope per durable lane, including null responses.
+     */
+    suspend fun `readLatestRatchetedEvents`(): List<RatchetEvent>
+    
+    /**
      * Read the newest verified profile for `endpoint_id` (self or a friend) from the local
      * replica. `None` if absent or not yet replicated.
      */
     suspend fun `readProfile`(`endpointId`: kotlin.ByteArray): ProfileView?
-    
-    /**
-     * Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >=
-     * since_ts`.
-     */
-    suspend fun `readTrail`(`author`: kotlin.ByteArray, `sinceTs`: kotlin.ULong): List<IncomingFix>
     
     /**
      * The X25519 receiving PUBLIC key — this is the "receiving key" you hand to a friend
@@ -2551,6 +2898,15 @@ public interface LocationNodeInterface {
     suspend fun `respondPair`(`sessionId`: kotlin.ByteArray, `accept`: kotlin.Boolean)
     
     /**
+     * How many resyncs we have driven with this peer.
+     *
+     * §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+     * retrying forever, so this is deliberately a count rather than a boolean: the UI decides
+     * where patience runs out, and the crypto layer does not pretend to know.
+     */
+    suspend fun `resyncCount`(`peerEndpointHex`: kotlin.String): kotlin.UInt
+    
+    /**
      * Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. Invite-based
      * pairing is always allowed. This is an app-level acceptance gate, not a radio control.
      */
@@ -2581,17 +2937,29 @@ public interface LocationNodeInterface {
     suspend fun `subscribe`(`topic`: kotlin.ByteArray, `bootstrap`: List<kotlin.String>, `listener`: FixListener): Subscription
     
     /**
-     * Kick off range-based set reconciliation across our own + imported friend namespaces to
-     * recover envelopes missed while offline. When `peer_ticket` is present, every namespace
-     * explicitly syncs with that endpoint (the trail stash). Recovered, decryptable fixes are
-     * surfaced via the attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via
-     * `on_sync`.
+     * Reconcile our own + every imported friend namespace so each author's **current** fix is
+     * exchanged (FORWARD-SECRECY §4.4 — the durable path is last-write-wins; there is no missed
+     * history to recover). Read the results with [`Self::read_latest`].
+     *
+     * `peer_tickets` is every endpoint worth dialing for this pass: the trail stash when it is
+     * configured and opted into, and **every pool member**. That list is the whole mechanism
+     * behind ARCHITECTURE.md §1.3/§6 — "a rejoining B runs range-based reconciliation against
+     * C/D/A". An earlier revision took a single `Option<String>` that only ever carried the
+     * stash, so a device could recover an author's fix from the durable server or from the
+     * author, and from nobody else; with the author offline and the stash off there was no
+     * reachable source at all, even when a friend beside it demonstrably held the fix.
+     *
+     * The peers are handed to iroh-docs together rather than dialled one at a time, so a
+     * namespace reconciles with whoever answers instead of paying a separate timeout per peer.
+     * An empty list is meaningful and not an error: it reconciles with whatever the live engine
+     * is already connected to, which is the correct degenerate case (and what a device with no
+     * friends and no stash should do).
+     *
+     * Unparseable tickets are skipped rather than failing the pass — one malformed friend card
+     * must not stop reconciliation with everyone else — but they are counted on the span, since
+     * a silent skip is exactly the kind of thing that hides a real break.
      */
-    suspend fun `syncTrail`(`sinceTs`: kotlin.ULong, `peerTicket`: kotlin.String?)
-    
-    suspend fun `syncTrailInner`(`sinceTs`: kotlin.ULong, `peerTicket`: kotlin.String?, `traceparent`: kotlin.String?)
-    
-    suspend fun `syncTrailTraced`(`sinceTs`: kotlin.ULong, `peerTicket`: kotlin.String?, `traceparent`: kotlin.String)
+    suspend fun `syncLatest`(`peerTickets`: List<kotlin.String>, `traceparent`: kotlin.String?)
     
     /**
      * A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
@@ -2599,10 +2967,30 @@ public interface LocationNodeInterface {
     suspend fun `ticket`(): kotlin.String
     
     /**
+     * What this device's durable replica can **serve**, one record per author present in it.
+     *
+     * The diagnostic that distinguishes "the relay had nothing to give" from "the transfer
+     * failed" — a distinction `friend_latest` structurally cannot make, because the live gossip
+     * lane writes it too and a fix that arrived over gossip never enters the author's namespace
+     * (a pool member holds a READ ticket). Reconciliation serves out of the replica, so this is
+     * the only honest answer to "can this device relay author X".
+     *
+     * No decryption and no location data in the result — presence, not payload — so it is
+     * ungated, like [`Self::transport_diagnostics`]. `NamespaceId` is not an FFI type, so the
+     * exported shape reports by author endpoint id rather than by namespace.
+     */
+    suspend fun `trailReplicaStatus`(): List<TrailReplicaAuthor>
+    
+    /**
      * Snapshot the local endpoint's advertised addresses and iroh's retained path table for the
      * requested peers. Remote path usage is point-in-time; callers should poll when displaying it.
      */
     suspend fun `transportDiagnostics`(`peerEndpointIds`: List<kotlin.ByteArray>): TransportDiagnostics
+    
+    /**
+     * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
+     */
+    suspend fun `uploadTrailContent`(`baseUrl`: kotlin.String, `psk`: kotlin.String?): kotlin.ULong
     
     companion object
 }
@@ -2722,6 +3110,38 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Begin a session bootstrap with `peer_endpoint_hex`: mint a fresh ephemeral X25519 keypair
+     * and return its **public** half as hex, to be carried to the peer.
+     *
+     * This is one half of the §4.6 primitive. In production both halves ride the pairing
+     * connection during the in-person SAS bump, identity-signed and transcript-bound; the
+     * signing and transport are step 7's, and until they land this is the seam a caller drives.
+     *
+     * Calling it again for the same peer replaces the pending ephemeral — an abandoned bootstrap
+     * leaves nothing behind but one unused secret, which drops with the process.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `beginSession`(`peerEndpointHex`: kotlin.String) : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_begin_session(
+                uniffiHandle,
+                FfiConverterString.lower(`peerEndpointHex`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Whether a BLE transport is wired into this node's endpoint on this platform.
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -2803,6 +3223,64 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_cancel_pair(
                 uniffiHandle,
                 FfiConverterByteArray.lower(`sessionId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Drop our in-flight resync ephemeral once every peer has been restarted.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `clearResync`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_clear_resync(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Complete the bootstrap with the peer's ephemeral public half, installing the session.
+     *
+     * `RK₀` is derived from the ephemeral-ephemeral DH and a transcript over both endpoint ids
+     * and both ephemerals — **never** from static-static DH, which a seized device could
+     * recompute from long-term keys it still holds (§3, §4.6 "no code path roots a session in
+     * static-static DH alone"). The transcript is canonically ordered, so both devices derive
+     * the same root and the same session id without negotiating either.
+     *
+     * The role is fixed by endpoint-id ordering, so the two sides take opposite halves of the
+     * standard asymmetric bootstrap with no extra round trip.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `completeSession`(`peerEndpointHex`: kotlin.String, `peerEphemeralHex`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_complete_session(
+                uniffiHandle,
+                FfiConverterString.lower(`peerEndpointHex`),FfiConverterString.lower(`peerEphemeralHex`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
@@ -2901,12 +3379,12 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `docsWrite`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>) {
+    override suspend fun `docsWrite`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write(
                 uniffiHandle,
-                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`epoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
@@ -2957,12 +3435,12 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `docsWriteInner`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String?) {
+    override suspend fun `docsWriteInner`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix?, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String?) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_inner(
                 uniffiHandle,
-                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`epoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterOptionalString.lower(`traceparent`),
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterOptionalTypeLocationFix.lower(`fix`),FfiConverterULong.lower(`ts`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterOptionalString.lower(`traceparent`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
@@ -2977,14 +3455,204 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     }
 
     
+    /**
+     * Seal a **null fix** for `recipients` and write it to our namespace's null slot
+     * (FORWARD-SECRECY §4.1) — the watcher half of the symmetric lanes.
+     *
+     * A null fix is an ordinary envelope carrying an empty padded payload: same signature, same
+     * AAD binding, same `seq` monotonicity, same ciphertext length as a real fix. It exists so a
+     * friend we do not share position with still receives our envelopes on cadence, which is
+     * what carries our ratchet contribution once envelope v3 lands (§4.2). `ts` is the tick's
+     * timestamp — it rides in the signed header exactly as a real fix's does.
+     *
+     * Written to a separate LWW key from the fix lane so the two envelopes a tick produces,
+     * wrapped for disjoint recipient sets, do not supersede each other (see `docs::encode_nul_key`).
+     */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `docsWriteTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String) {
+    override suspend fun `docsWriteNull`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_null(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterULong.lower(`ts`),FfiConverterSequenceByteArray.lower(`recipients`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Seal a **ratcheted null fix** for `watcher_endpoints` and write it to the null slot.
+     *
+     * The v3 counterpart of [`Self::docs_write_null`], and the half of §4.1 that makes the
+     * symmetric-lane argument true rather than aspirational. A watcher who only ever *reads* our
+     * position still publishes on cadence, and once that envelope is ratcheted it carries their
+     * ratchet contribution — which is what advances our `peer_advanced_ms` for them and stops
+     * `next_wraps` dropping them as `Lapsed` after 24 h. On the v2 null lane the contribution did
+     * not exist, so every one-directional watch edge expired after a day.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `docsWriteNullRatcheted`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `watcherEndpoints`: List<kotlin.String>) : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterULong.lower(`ts`),FfiConverterSequenceString.lower(`watcherEndpoints`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `docsWriteNullRatchetedTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `watcherEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String) : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted_traced(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterULong.lower(`ts`),FfiConverterSequenceString.lower(`watcherEndpoints`),FfiConverterString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `docsWriteNullTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_null_traced(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterULong.lower(`ts`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Seal `fix` under **envelope v3** for each recipient's ratchet session and write it to our
+     * durable namespace (FORWARD-SECRECY §4.7).
+     *
+     * Recipients are **endpoint ids**, not receiving keys: a v3 wrap is addressed by session,
+     * and sessions are keyed by who the peer is rather than by a long-term key of theirs. That
+     * difference is the point — the long-term receiving key is exactly what a seized device
+     * still holds.
+     *
+     * Returns the recipients that were left out, as `endpoint_hex:reason` — lapsed (§4.5),
+     * un-bootstrapped, or unpersistable. A short wrap list is never silent.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `docsWriteRatcheted`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>) : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceString.lower(`recipientEndpoints`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Both ratcheted durable lanes. `fix.is_none()` is the null lane, which differs only in
+     * carrying an empty padded payload and landing in a separate LWW slot — the two envelopes a
+     * tick produces are wrapped for disjoint recipient sets, so sharing a slot would have them
+     * supersede each other.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `docsWriteRatchetedInner`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix?, `nullTs`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String?) : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_inner(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterOptionalTypeLocationFix.lower(`fix`),FfiConverterULong.lower(`nullTs`),FfiConverterSequenceString.lower(`recipientEndpoints`),FfiConverterOptionalString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `docsWriteRatchetedTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String) : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_traced(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceString.lower(`recipientEndpoints`),FfiConverterString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `docsWriteTraced`(`subscriptionId`: kotlin.String, `seq`: kotlin.ULong, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_docs_write_traced(
                 uniffiHandle,
-                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`epoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterString.lower(`traceparent`),
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterString.lower(`traceparent`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
@@ -3013,6 +3681,55 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     )
     }
     
+
+    
+    /**
+     * Forget the session with this peer (un-friending, or a §4.6 restart).
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `forgetSession`(`peerEndpointHex`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_forget_session(
+                uniffiHandle,
+                FfiConverterString.lower(`peerEndpointHex`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Whether a ratchet session exists for this peer.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `hasSession`(`peerEndpointHex`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_has_session(
+                uniffiHandle,
+                FfiConverterString.lower(`peerEndpointHex`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
 
     
     /**
@@ -3151,6 +3868,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterByteArray.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `isDesynced`(`peerEndpointHex`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_is_desynced(
+                uniffiHandle,
+                FfiConverterString.lower(`peerEndpointHex`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -3380,6 +4121,37 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Look for `peer`'s resync record and, if one is there, restart the session from it.
+     *
+     * Publishes our own half first when we have not already, so a single call from each side
+     * completes the exchange without either having to go first — which matters because the
+     * side that noticed the desync and the side that caused it are usually not the same one.
+     *
+     * Returns whether a session was installed. `false` covers "no record yet", "stale record",
+     * and "already applied" — all ordinary, none an error.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `pollResync`(`peerEndpointHex`: kotlin.String, `peerRecvPubHex`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_poll_resync(
+                uniffiHandle,
+                FfiConverterString.lower(`peerEndpointHex`),FfiConverterString.lower(`peerRecvPubHex`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * A shareable **read**-ticket for our profile namespace. Also exchanged automatically inside
      * a pairing Accept, so friends usually don't need to import it by hand.
      */
@@ -3457,8 +4229,42 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Push our own trail namespace to `peer_ticket` (the trail stash) and wait for the exchange
-     * to finish. **This is what actually gets a published fix off the phone.**
+     * Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+     *
+     * Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
+     * re-establishes a ratchet, so it cannot require one. That is also why it is the one place
+     * the design has to be most careful: **recovery must never become the bypass**. The record
+     * carries only an ephemeral public key. It cannot downgrade anything, because a root is
+     * only ever derived when *both* ephemerals are in hand.
+     *
+     * Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
+     * than minting a new one, so a peer that already saw our half does not have to see a second.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishResync`(`recipientRecvPubs`: List<kotlin.String>) : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_publish_resync(
+                uniffiHandle,
+                FfiConverterSequenceString.lower(`recipientRecvPubs`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
+     * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
+     * actually gets a published fix off the phone.**
      *
      * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
      * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
@@ -3466,61 +4272,32 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
      * that, so its envelopes never reached the stash and an offline friend had nothing to
      * reconcile from. Call this after draining a batch.
      *
+     * The peer list is the send-side counterpart of [`Self::sync_latest`], and it is what makes
+     * ARCHITECTURE.md §1.3/§6's pool relay the normal flow rather than luck. An earlier revision
+     * took a single `Option<String>` that only ever carried the stash, so an author's published
+     * fix was broadcast over docs to the stash and to nobody else: a pool member gained the
+     * author's entries only if it happened to dial the author itself during a reconciliation
+     * window, and with the stash off there was no durable copy anywhere. Pushing to the pool
+     * means a friend with the app open holds the author's entries **as they are published**, and
+     * can hand them on the moment the author goes dark.
+     *
+     * Repeating it is cheap: `start_sync` is a no-op once a namespace is syncing, so the
+     * steady-state cost is one connection per member for the process's lifetime.
+     *
+     * Unparseable tickets are skipped rather than failing the push — one malformed friend card
+     * must not stop delivery to everyone else — but they are counted on the span.
+     *
      * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
-     * that the live gossip path or a later [`Self::sync_trail`] is broken.
+     * that the live gossip path or a later [`Self::sync_latest`] is broken.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `pushTrail`(`peerTicket`: kotlin.String?) {
+    override suspend fun `pushTrail`(`peerTickets`: List<kotlin.String>, `traceparent`: kotlin.String?) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_push_trail(
                 uniffiHandle,
-                FfiConverterOptionalString.lower(`peerTicket`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        LocationException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(LocationException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `pushTrailInner`(`peerTicket`: kotlin.String?, `traceparent`: kotlin.String?) {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_iroh_location_fn_method_locationnode_push_trail_inner(
-                uniffiHandle,
-                FfiConverterOptionalString.lower(`peerTicket`),FfiConverterOptionalString.lower(`traceparent`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        LocationException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(LocationException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `pushTrailTraced`(`peerTicket`: kotlin.String?, `traceparent`: kotlin.String) {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_iroh_location_fn_method_locationnode_push_trail_traced(
-                uniffiHandle,
-                FfiConverterOptionalString.lower(`peerTicket`),FfiConverterString.lower(`traceparent`),
+                FfiConverterSequenceString.lower(`peerTickets`),FfiConverterOptionalString.lower(`traceparent`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
@@ -3564,6 +4341,84 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Read the latest decryptable fix per author (friends who share with us) from the local
+     * replica. One entry per author — the durable path holds no history (FORWARD-SECRECY §4.4).
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `readLatest`() : List<IncomingFix> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_read_latest(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeIncomingFix.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Read the latest **ratcheted** fix per author from the local replica.
+     *
+     * Signature first, then session state — `verify_v3` returns a type that the session manager
+     * is the only consumer of, so no unauthenticated byte can reach the ratchet (§4.2).
+     * Envelopes we cannot open are skipped exactly as v2's are: addressed to someone else,
+     * replayed from the archive, or beyond the acceptance window are all "nothing to surface".
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `readLatestRatcheted`() : List<IncomingFix> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_read_latest_ratcheted(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeIncomingFix.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Read the latest ratcheted envelope per durable lane, including null responses.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `readLatestRatchetedEvents`() : List<RatchetEvent> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_read_latest_ratcheted_events(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeRatchetEvent.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Read the newest verified profile for `endpoint_id` (self or a friend) from the local
      * replica. `None` if absent or not yet replicated.
      */
@@ -3582,31 +4437,6 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypeProfileView.lift(it) },
-        // Error FFI converter
-        LocationException.ErrorHandler,
-    )
-    }
-
-    
-    /**
-     * Read decrypted fixes for `author` (self or a friend) from the local replica, `fix.ts >=
-     * since_ts`.
-     */
-    @Throws(LocationException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `readTrail`(`author`: kotlin.ByteArray, `sinceTs`: kotlin.ULong) : List<IncomingFix> {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_iroh_location_fn_method_locationnode_read_trail(
-                uniffiHandle,
-                FfiConverterByteArray.lower(`author`),FfiConverterULong.lower(`sinceTs`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterSequenceTypeIncomingFix.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -3697,6 +4527,34 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         // lift function
         { Unit },
         
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * How many resyncs we have driven with this peer.
+     *
+     * §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+     * retrying forever, so this is deliberately a count rather than a boolean: the UI decides
+     * where patience runs out, and the crypto layer does not pretend to know.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `resyncCount`(`peerEndpointHex`: kotlin.String) : kotlin.UInt {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_resync_count(
+                uniffiHandle,
+                FfiConverterString.lower(`peerEndpointHex`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_u32(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_u32(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_u32(future) },
+        // lift function
+        { FfiConverterUInt.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -3823,64 +4681,36 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Kick off range-based set reconciliation across our own + imported friend namespaces to
-     * recover envelopes missed while offline. When `peer_ticket` is present, every namespace
-     * explicitly syncs with that endpoint (the trail stash). Recovered, decryptable fixes are
-     * surfaced via the attached [`FixListener`] as `on_fix(.., backfill = true)`; progress via
-     * `on_sync`.
+     * Reconcile our own + every imported friend namespace so each author's **current** fix is
+     * exchanged (FORWARD-SECRECY §4.4 — the durable path is last-write-wins; there is no missed
+     * history to recover). Read the results with [`Self::read_latest`].
+     *
+     * `peer_tickets` is every endpoint worth dialing for this pass: the trail stash when it is
+     * configured and opted into, and **every pool member**. That list is the whole mechanism
+     * behind ARCHITECTURE.md §1.3/§6 — "a rejoining B runs range-based reconciliation against
+     * C/D/A". An earlier revision took a single `Option<String>` that only ever carried the
+     * stash, so a device could recover an author's fix from the durable server or from the
+     * author, and from nobody else; with the author offline and the stash off there was no
+     * reachable source at all, even when a friend beside it demonstrably held the fix.
+     *
+     * The peers are handed to iroh-docs together rather than dialled one at a time, so a
+     * namespace reconciles with whoever answers instead of paying a separate timeout per peer.
+     * An empty list is meaningful and not an error: it reconciles with whatever the live engine
+     * is already connected to, which is the correct degenerate case (and what a device with no
+     * friends and no stash should do).
+     *
+     * Unparseable tickets are skipped rather than failing the pass — one malformed friend card
+     * must not stop reconciliation with everyone else — but they are counted on the span, since
+     * a silent skip is exactly the kind of thing that hides a real break.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `syncTrail`(`sinceTs`: kotlin.ULong, `peerTicket`: kotlin.String?) {
+    override suspend fun `syncLatest`(`peerTickets`: List<kotlin.String>, `traceparent`: kotlin.String?) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_iroh_location_fn_method_locationnode_sync_trail(
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_sync_latest(
                 uniffiHandle,
-                FfiConverterULong.lower(`sinceTs`),FfiConverterOptionalString.lower(`peerTicket`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        LocationException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(LocationException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `syncTrailInner`(`sinceTs`: kotlin.ULong, `peerTicket`: kotlin.String?, `traceparent`: kotlin.String?) {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_iroh_location_fn_method_locationnode_sync_trail_inner(
-                uniffiHandle,
-                FfiConverterULong.lower(`sinceTs`),FfiConverterOptionalString.lower(`peerTicket`),FfiConverterOptionalString.lower(`traceparent`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        LocationException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(LocationException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `syncTrailTraced`(`sinceTs`: kotlin.ULong, `peerTicket`: kotlin.String?, `traceparent`: kotlin.String) {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_iroh_location_fn_method_locationnode_sync_trail_traced(
-                uniffiHandle,
-                FfiConverterULong.lower(`sinceTs`),FfiConverterOptionalString.lower(`peerTicket`),FfiConverterString.lower(`traceparent`),
+                FfiConverterSequenceString.lower(`peerTickets`),FfiConverterOptionalString.lower(`traceparent`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
@@ -3920,6 +4750,40 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * What this device's durable replica can **serve**, one record per author present in it.
+     *
+     * The diagnostic that distinguishes "the relay had nothing to give" from "the transfer
+     * failed" — a distinction `friend_latest` structurally cannot make, because the live gossip
+     * lane writes it too and a fix that arrived over gossip never enters the author's namespace
+     * (a pool member holds a READ ticket). Reconciliation serves out of the replica, so this is
+     * the only honest answer to "can this device relay author X".
+     *
+     * No decryption and no location data in the result — presence, not payload — so it is
+     * ungated, like [`Self::transport_diagnostics`]. `NamespaceId` is not an FFI type, so the
+     * exported shape reports by author endpoint id rather than by namespace.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `trailReplicaStatus`() : List<TrailReplicaAuthor> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_trail_replica_status(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeTrailReplicaAuthor.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Snapshot the local endpoint's advertised addresses and iroh's retained path table for the
      * requested peers. Remote path usage is point-in-time; callers should poll when displaying it.
      */
@@ -3944,16 +4808,68 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     }
 
     
-
-    
-
-
-    
-    
     /**
-     * @suppress
+     * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
      */
-    companion object
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `uploadTrailContent`(`baseUrl`: kotlin.String, `psk`: kotlin.String?) : kotlin.ULong {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_upload_trail_content(
+                uniffiHandle,
+                FfiConverterString.lower(`baseUrl`),FfiConverterOptionalString.lower(`psk`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterULong.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    /**
+     * Create a node under host-supplied storage roots. **This is the constructor mobile must
+     * use**; [`new`](Self::new) puts everything in the OS temp dir, which is right for host tests
+     * and wrong for a device.
+     *
+     * Both roots are scoped per identity internally (`<root>/<author hex>`), because the host
+     * cannot know the endpoint id before the node that derives it exists.
+     *
+     * - `data_root` — the recoverable trail replica and blobs. Cache is the correct home: it is
+     * large, it is re-fetchable, and it must never be restored from a backup.
+     * - `state_root` — ratchet session state, which is **not** recoverable. This must be the
+     * app's private data dir (Android `filesDir`, iOS Application Support) *and* excluded from
+     * backup, since restoring an old copy rewinds send counters into key reuse. See
+     * [`LocationNode::state_dir`].
+     *
+     * Passing the same root for both is a bug on device in one direction and a break in the
+     * other; the two have opposite requirements.
+     */
+    @Throws(LocationException::class) fun `newAtDirs`(`identitySecret`: kotlin.ByteArray?, `recvSecret`: kotlin.ByteArray?, `dataRoot`: kotlin.String, `stateRoot`: kotlin.String): LocationNode {
+            return FfiConverterTypeLocationNode.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_constructor_locationnode_new_at_dirs(
+    
+        FfiConverterOptionalByteArray.lower(`identitySecret`),FfiConverterOptionalByteArray.lower(`recvSecret`),FfiConverterString.lower(`dataRoot`),FfiConverterString.lower(`stateRoot`),_status)
+}
+    )
+    }
+    
+
+        
+    }
     
 }
 
@@ -4078,6 +4994,387 @@ public object FfiConverterTypeLocationNode: FfiConverter<LocationNode, Long> {
 
 
 /**
+ * A mailbox: capsules indexed by rotating tag, newest-first, bounded per tag and overall.
+ *
+ * Held by the phone (what it has fetched, so a Query can carry a `have` set) and — once W4
+ * lands — by a smart node. Capsule interiors are opaque here, exactly as in firmware.
+ */
+public interface MeshCapsuleStoreInterface {
+    
+    /**
+     * Capsules matching `tags` minus everything in `have` — the Deliver set a node would send.
+     */
+    fun `deliver`(`tags`: List<kotlin.ByteArray>, `have`: List<kotlin.ByteArray>): List<kotlin.ByteArray>
+    
+    /**
+     * Dedup keys already held for `tags` — the `have` set sent with a BLE Query.
+     */
+    fun `have`(`tags`: List<kotlin.ByteArray>): List<kotlin.ByteArray>
+    
+    /**
+     * Offer a capsule. A drop here is a drop-decision point: the returned `reason` is the
+     * `sc.drop_reason` value to stamp.
+     */
+    fun `insert`(`capsule`: kotlin.ByteArray, `nowSecs`: kotlin.ULong): MeshInsert
+    
+    /**
+     * The live position for a tag — the most recently arrived capsule.
+     */
+    fun `latest`(`tag`: kotlin.ByteArray): kotlin.ByteArray?
+    
+    /**
+     * Drop everything that has fallen out of the acceptance window. Returns the count removed.
+     */
+    fun `prune`(`nowSecs`: kotlin.ULong): kotlin.ULong
+    
+    fun `stats`(`nowSecs`: kotlin.ULong): MeshStats
+    
+    companion object
+}
+
+/**
+ * A mailbox: capsules indexed by rotating tag, newest-first, bounded per tag and overall.
+ *
+ * Held by the phone (what it has fetched, so a Query can carry a `have` set) and — once W4
+ * lands — by a smart node. Capsule interiors are opaque here, exactly as in firmware.
+ */
+open class MeshCapsuleStore: Disposable, AutoCloseable, MeshCapsuleStoreInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+    /**
+     * `capacity` bounds the number of distinct tags held; each holds up to `ring_depth`
+     * capsules. This is the PSRAM/RAM knob (DESIGN Q6).
+     */
+    constructor(`capacity`: kotlin.UInt) :
+        this(UniffiWithHandle, 
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_constructor_meshcapsulestore_new(
+    
+        FfiConverterUInt.lower(`capacity`),_status)
+}
+    )
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_iroh_location_fn_free_meshcapsulestore(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_iroh_location_fn_clone_meshcapsulestore(handle, status)
+        }
+    }
+
+    
+    /**
+     * Capsules matching `tags` minus everything in `have` — the Deliver set a node would send.
+     */override fun `deliver`(`tags`: List<kotlin.ByteArray>, `have`: List<kotlin.ByteArray>): List<kotlin.ByteArray> {
+            return FfiConverterSequenceByteArray.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_meshcapsulestore_deliver(
+        it,
+        FfiConverterSequenceByteArray.lower(`tags`),FfiConverterSequenceByteArray.lower(`have`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Dedup keys already held for `tags` — the `have` set sent with a BLE Query.
+     */override fun `have`(`tags`: List<kotlin.ByteArray>): List<kotlin.ByteArray> {
+            return FfiConverterSequenceByteArray.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_meshcapsulestore_have(
+        it,
+        FfiConverterSequenceByteArray.lower(`tags`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Offer a capsule. A drop here is a drop-decision point: the returned `reason` is the
+     * `sc.drop_reason` value to stamp.
+     */override fun `insert`(`capsule`: kotlin.ByteArray, `nowSecs`: kotlin.ULong): MeshInsert {
+            return FfiConverterTypeMeshInsert.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_meshcapsulestore_insert(
+        it,
+        FfiConverterByteArray.lower(`capsule`),FfiConverterULong.lower(`nowSecs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The live position for a tag — the most recently arrived capsule.
+     */override fun `latest`(`tag`: kotlin.ByteArray): kotlin.ByteArray? {
+            return FfiConverterOptionalByteArray.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_meshcapsulestore_latest(
+        it,
+        FfiConverterByteArray.lower(`tag`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Drop everything that has fallen out of the acceptance window. Returns the count removed.
+     */override fun `prune`(`nowSecs`: kotlin.ULong): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_meshcapsulestore_prune(
+        it,
+        FfiConverterULong.lower(`nowSecs`),_status)
+}
+    }
+    )
+    }
+    
+
+    override fun `stats`(`nowSecs`: kotlin.ULong): MeshStats {
+            return FfiConverterTypeMeshStats.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_meshcapsulestore_stats(
+        it,
+        FfiConverterULong.lower(`nowSecs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshCapsuleStore: FfiConverter<MeshCapsuleStore, Long> {
+    override fun lower(value: MeshCapsuleStore): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): MeshCapsuleStore {
+        return MeshCapsuleStore(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): MeshCapsuleStore {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: MeshCapsuleStore) = 8UL
+
+    override fun write(value: MeshCapsuleStore, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
  * A live topic subscription; publish fixes through it.
  */
 public interface SubscriptionInterface {
@@ -4087,11 +5384,22 @@ public interface SubscriptionInterface {
      * broadcast it on the topic. Recipients NOT in this list cannot decrypt it —
      * that's how revocation works.
      */
-    suspend fun `publish`(`seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>)
+    suspend fun `publish`(`seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>): List<kotlin.String>
     
-    suspend fun `publishInner`(`seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String?)
+    suspend fun `publishInner`(`seq`: kotlin.ULong, `fix`: LocationFix?, `ts`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String?): List<kotlin.String>
     
-    suspend fun `publishTraced`(`seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String)
+    /**
+     * Broadcast a **null fix** — an envelope with an empty padded payload (FORWARD-SECRECY §4.1).
+     *
+     * The live half of the watcher lane: identical in shape, length, and signing discipline to
+     * [`Self::publish`], carrying no position. Recipients decode it as a healthy envelope with
+     * nothing to deliver.
+     */
+    suspend fun `publishNull`(`seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>): List<kotlin.String>
+    
+    suspend fun `publishNullTraced`(`seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String): List<kotlin.String>
+    
+    suspend fun `publishTraced`(`seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String): List<kotlin.String>
     
     companion object
 }
@@ -4203,20 +5511,19 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `publish`(`seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>) {
+    override suspend fun `publish`(`seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>) : List<kotlin.String> {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_subscription_publish(
                 uniffiHandle,
-                FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`epoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),
+                FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceString.lower(`recipientEndpoints`),
             )
         },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
-        { Unit },
-        
+        { FfiConverterSequenceString.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -4225,20 +5532,47 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
     
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `publishInner`(`seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String?) {
+    override suspend fun `publishInner`(`seq`: kotlin.ULong, `fix`: LocationFix?, `ts`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String?) : List<kotlin.String> {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_subscription_publish_inner(
                 uniffiHandle,
-                FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`epoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterOptionalString.lower(`traceparent`),
+                FfiConverterULong.lower(`seq`),FfiConverterOptionalTypeLocationFix.lower(`fix`),FfiConverterULong.lower(`ts`),FfiConverterSequenceString.lower(`recipientEndpoints`),FfiConverterOptionalString.lower(`traceparent`),
             )
         },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
-        { Unit },
-        
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Broadcast a **null fix** — an envelope with an empty padded payload (FORWARD-SECRECY §4.1).
+     *
+     * The live half of the watcher lane: identical in shape, length, and signing discipline to
+     * [`Self::publish`], carrying no position. Recipients decode it as a healthy envelope with
+     * nothing to deliver.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishNull`(`seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>) : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_subscription_publish_null(
+                uniffiHandle,
+                FfiConverterULong.lower(`seq`),FfiConverterULong.lower(`ts`),FfiConverterSequenceString.lower(`recipientEndpoints`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -4247,20 +5581,40 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
     
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `publishTraced`(`seq`: kotlin.ULong, `epoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<kotlin.ByteArray>, `traceparent`: kotlin.String) {
+    override suspend fun `publishNullTraced`(`seq`: kotlin.ULong, `ts`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String) : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_subscription_publish_null_traced(
+                uniffiHandle,
+                FfiConverterULong.lower(`seq`),FfiConverterULong.lower(`ts`),FfiConverterSequenceString.lower(`recipientEndpoints`),FfiConverterString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishTraced`(`seq`: kotlin.ULong, `fix`: LocationFix, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String) : List<kotlin.String> {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_subscription_publish_traced(
                 uniffiHandle,
-                FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`epoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceByteArray.lower(`recipients`),FfiConverterString.lower(`traceparent`),
+                FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceString.lower(`recipientEndpoints`),FfiConverterString.lower(`traceparent`),
             )
         },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
-        { Unit },
-        
+        { FfiConverterSequenceString.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -4687,6 +6041,330 @@ public object FfiConverterTypeLocationFix: FfiConverterRustBuffer<LocationFix> {
 
 
 /**
+ * Wire + policy constants for the mesh, so the TS orchestration layer never hardcodes them.
+ */
+data class MeshConstants (
+    /**
+     * Capsule wire version currently emitted.
+     */
+    var `capsuleV`: kotlin.UByte
+    , 
+    /**
+     * Epoch length in seconds (900 = 15 min).
+     */
+    var `epochSecs`: kotlin.ULong
+    , 
+    var `tagLen`: kotlin.UInt
+    , 
+    var `dedupLen`: kotlin.UInt
+    , 
+    /**
+     * Bytes of plaintext header (`v || epoch || tag`) — all a bare antenna parses.
+     */
+    var `headerLen`: kotlin.UInt
+    , 
+    /**
+     * Capsules retained per tag by a mailbox.
+     */
+    var `ringDepth`: kotlin.UInt
+    , 
+    /**
+     * Cap on tags in one BLE Query message (§4.1).
+     */
+    var `maxQueryTags`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshConstants: FfiConverterRustBuffer<MeshConstants> {
+    override fun read(buf: ByteBuffer): MeshConstants {
+        return MeshConstants(
+            FfiConverterUByte.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshConstants) = (
+            FfiConverterUByte.allocationSize(value.`capsuleV`) +
+            FfiConverterULong.allocationSize(value.`epochSecs`) +
+            FfiConverterUInt.allocationSize(value.`tagLen`) +
+            FfiConverterUInt.allocationSize(value.`dedupLen`) +
+            FfiConverterUInt.allocationSize(value.`headerLen`) +
+            FfiConverterUInt.allocationSize(value.`ringDepth`) +
+            FfiConverterUInt.allocationSize(value.`maxQueryTags`)
+    )
+
+    override fun write(value: MeshConstants, buf: ByteBuffer) {
+            FfiConverterUByte.write(value.`capsuleV`, buf)
+            FfiConverterULong.write(value.`epochSecs`, buf)
+            FfiConverterUInt.write(value.`tagLen`, buf)
+            FfiConverterUInt.write(value.`dedupLen`, buf)
+            FfiConverterUInt.write(value.`headerLen`, buf)
+            FfiConverterUInt.write(value.`ringDepth`, buf)
+            FfiConverterUInt.write(value.`maxQueryTags`, buf)
+    }
+}
+
+
+
+/**
+ * The plaintext prefix of a capsule.
+ */
+data class MeshHeader (
+    var `v`: kotlin.UByte
+    , 
+    var `epoch`: kotlin.UInt
+    , 
+    var `tag`: kotlin.ByteArray
+    , 
+    /**
+     * `blake3(capsule)[..16]` — the dedup key every relay tier keys on.
+     */
+    var `dedupKey`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshHeader: FfiConverterRustBuffer<MeshHeader> {
+    override fun read(buf: ByteBuffer): MeshHeader {
+        return MeshHeader(
+            FfiConverterUByte.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshHeader) = (
+            FfiConverterUByte.allocationSize(value.`v`) +
+            FfiConverterUInt.allocationSize(value.`epoch`) +
+            FfiConverterByteArray.allocationSize(value.`tag`) +
+            FfiConverterByteArray.allocationSize(value.`dedupKey`)
+    )
+
+    override fun write(value: MeshHeader, buf: ByteBuffer) {
+            FfiConverterUByte.write(value.`v`, buf)
+            FfiConverterUInt.write(value.`epoch`, buf)
+            FfiConverterByteArray.write(value.`tag`, buf)
+            FfiConverterByteArray.write(value.`dedupKey`, buf)
+    }
+}
+
+
+
+/**
+ * Outcome of offering a capsule to a [`MeshCapsuleStore`].
+ */
+data class MeshInsert (
+    var `accepted`: kotlin.Boolean
+    , 
+    /**
+     * `accepted` | `malformed` | `bad_version` | `stale_epoch` | `future_epoch` | `duplicate`.
+     * Stamp this as `sc.drop_reason` on the caller's span (`infra/otel/README.md`).
+     */
+    var `reason`: kotlin.String
+    , 
+    var `dedupKey`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshInsert: FfiConverterRustBuffer<MeshInsert> {
+    override fun read(buf: ByteBuffer): MeshInsert {
+        return MeshInsert(
+            FfiConverterBoolean.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshInsert) = (
+            FfiConverterBoolean.allocationSize(value.`accepted`) +
+            FfiConverterString.allocationSize(value.`reason`) +
+            FfiConverterByteArray.allocationSize(value.`dedupKey`)
+    )
+
+    override fun write(value: MeshInsert, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`accepted`, buf)
+            FfiConverterString.write(value.`reason`, buf)
+            FfiConverterByteArray.write(value.`dedupKey`, buf)
+    }
+}
+
+
+
+/**
+ * A friend as the mesh needs them: the two public halves of their contact card.
+ */
+data class MeshPeer (
+    /**
+     * 32-byte ed25519 EndpointId (the envelope author id).
+     */
+    var `endpointId`: kotlin.ByteArray
+    , 
+    /**
+     * 32-byte X25519 receiving public key.
+     */
+    var `recvPublic`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshPeer: FfiConverterRustBuffer<MeshPeer> {
+    override fun read(buf: ByteBuffer): MeshPeer {
+        return MeshPeer(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshPeer) = (
+            FfiConverterByteArray.allocationSize(value.`endpointId`) +
+            FfiConverterByteArray.allocationSize(value.`recvPublic`)
+    )
+
+    override fun write(value: MeshPeer, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`endpointId`, buf)
+            FfiConverterByteArray.write(value.`recvPublic`, buf)
+    }
+}
+
+
+
+/**
+ * Mailbox occupancy, for the dev screen and the BLE Node Info characteristic.
+ */
+data class MeshStats (
+    var `capsules`: kotlin.ULong
+    , 
+    var `tags`: kotlin.ULong
+    , 
+    var `epoch`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshStats: FfiConverterRustBuffer<MeshStats> {
+    override fun read(buf: ByteBuffer): MeshStats {
+        return MeshStats(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshStats) = (
+            FfiConverterULong.allocationSize(value.`capsules`) +
+            FfiConverterULong.allocationSize(value.`tags`) +
+            FfiConverterUInt.allocationSize(value.`epoch`)
+    )
+
+    override fun write(value: MeshStats, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`capsules`, buf)
+            FfiConverterULong.write(value.`tags`, buf)
+            FfiConverterUInt.write(value.`epoch`, buf)
+    }
+}
+
+
+
+/**
+ * A mailbox address we expect traffic on, plus who/when it belongs to.
+ */
+data class MeshTag (
+    var `tag`: kotlin.ByteArray
+    , 
+    var `author`: kotlin.ByteArray
+    , 
+    var `epoch`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMeshTag: FfiConverterRustBuffer<MeshTag> {
+    override fun read(buf: ByteBuffer): MeshTag {
+        return MeshTag(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MeshTag) = (
+            FfiConverterByteArray.allocationSize(value.`tag`) +
+            FfiConverterByteArray.allocationSize(value.`author`) +
+            FfiConverterUInt.allocationSize(value.`epoch`)
+    )
+
+    override fun write(value: MeshTag, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`tag`, buf)
+            FfiConverterByteArray.write(value.`author`, buf)
+            FfiConverterUInt.write(value.`epoch`, buf)
+    }
+}
+
+
+
+/**
  * A polled pairing event (node-level queue; see `poll_pair_events`).
  */
 data class PairEvent (
@@ -5078,6 +6756,66 @@ public object FfiConverterTypeProfileView: FfiConverterRustBuffer<ProfileView> {
 
 
 /**
+ * A decrypted ratcheted envelope read from the durable replica.
+ *
+ * `kind` is `fix` or `null`; `fix` is present only for the fix lane. Keeping null envelopes in
+ * this result lets the app observe the symmetric return path instead of silently discarding the
+ * very messages that keep a one-directional relationship's ratchet alive.
+ */
+data class RatchetEvent (
+    var `author`: kotlin.ByteArray
+    , 
+    var `seq`: kotlin.ULong
+    , 
+    var `ts`: kotlin.ULong
+    , 
+    var `kind`: kotlin.String
+    , 
+    var `fix`: LocationFix?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRatchetEvent: FfiConverterRustBuffer<RatchetEvent> {
+    override fun read(buf: ByteBuffer): RatchetEvent {
+        return RatchetEvent(
+            FfiConverterByteArray.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalTypeLocationFix.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RatchetEvent) = (
+            FfiConverterByteArray.allocationSize(value.`author`) +
+            FfiConverterULong.allocationSize(value.`seq`) +
+            FfiConverterULong.allocationSize(value.`ts`) +
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterOptionalTypeLocationFix.allocationSize(value.`fix`)
+    )
+
+    override fun write(value: RatchetEvent, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`author`, buf)
+            FfiConverterULong.write(value.`seq`, buf)
+            FfiConverterULong.write(value.`ts`, buf)
+            FfiConverterString.write(value.`kind`, buf)
+            FfiConverterOptionalTypeLocationFix.write(value.`fix`, buf)
+    }
+}
+
+
+
+/**
  * The per-session Short Authentication String challenge shown while a pair is `Verifying`.
  */
 data class SasChallenge (
@@ -5132,6 +6870,77 @@ public object FfiConverterTypeSasChallenge: FfiConverterRustBuffer<SasChallenge>
             FfiConverterUInt.write(value.`targetIndex`, buf)
             FfiConverterSequenceUInt.write(value.`optionIndices`, buf)
             FfiConverterULong.write(value.`deadlineMs`, buf)
+    }
+}
+
+
+
+/**
+ * One author's fix slot in the LOCAL durable replica — what this device could hand to a peer.
+ *
+ * Companion to [`TransportDiagnostics`]: a diagnostics read, carrying no location data, so it
+ * needs no decrypt and no gate. See [`docs::ReplicaSlot`] for why this is not the same question
+ * as "have we seen this author's fix" — app storage is written by the live gossip lane too, and
+ * reconciliation serves out of the replica.
+ */
+data class TrailReplicaAuthor (
+    /**
+     * The author's endpoint id (their ed25519 verifying key).
+     */
+    var `author`: kotlin.ByteArray
+    , 
+    /**
+     * The envelope's `seq`, from its signed plaintext header. `0` when `has_content` is false.
+     */
+    var `seq`: kotlin.ULong
+    , 
+    /**
+     * The envelope's `ts` — when the author took the fix, not when we stored it. `0` when
+     * `has_content` is false.
+     */
+    var `fixTs`: kotlin.ULong
+    , 
+    /**
+     * Whether we hold a readable signed envelope for this author, and not merely a docs record
+     * pointing at a blob that never landed. False means there is nothing to serve, which is a
+     * different failure from "the transfer broke".
+     */
+    var `hasContent`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTrailReplicaAuthor: FfiConverterRustBuffer<TrailReplicaAuthor> {
+    override fun read(buf: ByteBuffer): TrailReplicaAuthor {
+        return TrailReplicaAuthor(
+            FfiConverterByteArray.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TrailReplicaAuthor) = (
+            FfiConverterByteArray.allocationSize(value.`author`) +
+            FfiConverterULong.allocationSize(value.`seq`) +
+            FfiConverterULong.allocationSize(value.`fixTs`) +
+            FfiConverterBoolean.allocationSize(value.`hasContent`)
+    )
+
+    override fun write(value: TrailReplicaAuthor, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`author`, buf)
+            FfiConverterULong.write(value.`seq`, buf)
+            FfiConverterULong.write(value.`fixTs`, buf)
+            FfiConverterBoolean.write(value.`hasContent`, buf)
     }
 }
 
@@ -5538,38 +7347,6 @@ public object FfiConverterOptionalShort: FfiConverterRustBuffer<kotlin.Short?> {
 /**
  * @suppress
  */
-public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
-    override fun read(buf: ByteBuffer): kotlin.ULong? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterULong.read(buf)
-    }
-
-    override fun allocationSize(value: kotlin.ULong?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterULong.allocationSize(value)
-        }
-    }
-
-    override fun write(value: kotlin.ULong?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterULong.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
 public object FfiConverterOptionalBoolean: FfiConverterRustBuffer<kotlin.Boolean?> {
     override fun read(buf: ByteBuffer): kotlin.Boolean? {
         if (buf.get().toInt() == 0) {
@@ -5656,6 +7433,38 @@ public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteA
         } else {
             buf.put(1)
             FfiConverterByteArray.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeLocationFix: FfiConverterRustBuffer<LocationFix?> {
+    override fun read(buf: ByteBuffer): LocationFix? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeLocationFix.read(buf)
+    }
+
+    override fun allocationSize(value: LocationFix?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeLocationFix.allocationSize(value)
+        }
+    }
+
+    override fun write(value: LocationFix?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeLocationFix.write(value, buf)
         }
     }
 }
@@ -5990,6 +7799,62 @@ public object FfiConverterSequenceTypeIncomingFix: FfiConverterRustBuffer<List<I
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeMeshPeer: FfiConverterRustBuffer<List<MeshPeer>> {
+    override fun read(buf: ByteBuffer): List<MeshPeer> {
+        val len = buf.getInt()
+        return List<MeshPeer>(len) {
+            FfiConverterTypeMeshPeer.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<MeshPeer>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeMeshPeer.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<MeshPeer>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeMeshPeer.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeMeshTag: FfiConverterRustBuffer<List<MeshTag>> {
+    override fun read(buf: ByteBuffer): List<MeshTag> {
+        val len = buf.getInt()
+        return List<MeshTag>(len) {
+            FfiConverterTypeMeshTag.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<MeshTag>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeMeshTag.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<MeshTag>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeMeshTag.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypePairEvent: FfiConverterRustBuffer<List<PairEvent>> {
     override fun read(buf: ByteBuffer): List<PairEvent> {
         val len = buf.getInt()
@@ -6092,6 +7957,62 @@ public object FfiConverterSequenceTypeProfileView: FfiConverterRustBuffer<List<P
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeProfileView.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeRatchetEvent: FfiConverterRustBuffer<List<RatchetEvent>> {
+    override fun read(buf: ByteBuffer): List<RatchetEvent> {
+        val len = buf.getInt()
+        return List<RatchetEvent>(len) {
+            FfiConverterTypeRatchetEvent.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<RatchetEvent>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeRatchetEvent.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<RatchetEvent>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeRatchetEvent.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeTrailReplicaAuthor: FfiConverterRustBuffer<List<TrailReplicaAuthor>> {
+    override fun read(buf: ByteBuffer): List<TrailReplicaAuthor> {
+        val len = buf.getInt()
+        return List<TrailReplicaAuthor>(len) {
+            FfiConverterTypeTrailReplicaAuthor.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<TrailReplicaAuthor>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeTrailReplicaAuthor.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<TrailReplicaAuthor>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeTrailReplicaAuthor.write(it, buf)
         }
     }
 }
@@ -6223,6 +8144,122 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
     UniffiLib.uniffi_iroh_location_fn_func_h3_cells_for_polygon(
     
         FfiConverterSequenceDouble.lower(`coordinates`),FfiConverterUByte.lower(`resolution`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Parse `{v, epoch, tag}` + dedup key from a capsule. No key material involved — this is
+         * exactly what a bare antenna does.
+         */
+    @Throws(LocationException::class) fun `meshCapsuleHeader`(`capsule`: kotlin.ByteArray): MeshHeader {
+            return FfiConverterTypeMeshHeader.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_capsule_header(
+    
+        FfiConverterByteArray.lower(`capsule`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Unwrap a capsule to the inner envelope bytes. The envelope's ed25519 signature is **not**
+         * checked here — that happens in `crypto::open`, i.e. in [`mesh_open_fix`].
+         */
+    @Throws(LocationException::class) fun `meshCapsuleOpen`(`recvSecret`: kotlin.ByteArray, `author`: MeshPeer, `capsule`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_capsule_open(
+    
+        FfiConverterByteArray.lower(`recvSecret`),FfiConverterTypeMeshPeer.lower(`author`),FfiConverterByteArray.lower(`capsule`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Wrap one already-sealed envelope for one recipient.
+         */
+    @Throws(LocationException::class) fun `meshCapsuleSeal`(`recvSecret`: kotlin.ByteArray, `authorEndpointId`: kotlin.ByteArray, `recipientRecvPublic`: kotlin.ByteArray, `envelope`: kotlin.ByteArray, `epoch`: kotlin.UInt): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_capsule_seal(
+    
+        FfiConverterByteArray.lower(`recvSecret`),FfiConverterByteArray.lower(`authorEndpointId`),FfiConverterByteArray.lower(`recipientRecvPublic`),FfiConverterByteArray.lower(`envelope`),FfiConverterUInt.lower(`epoch`),_status)
+}
+    )
+    }
+    
+ fun `meshConstants`(): MeshConstants {
+            return FfiConverterTypeMeshConstants.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_constants(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * Which 15-minute epoch a unix timestamp (seconds) falls in.
+         */ fun `meshEpoch`(`nowSecs`: kotlin.ULong): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_epoch(
+    
+        FfiConverterULong.lower(`nowSecs`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Every mailbox address addressed **to me** across `{e-1, e, e+1}` — the BLE Query set.
+         *
+         * Peers whose card fails key-length validation are skipped rather than failing the sweep. The
+         * caller chunks the result to [`MeshConstants::max_query_tags`] per Query message.
+         */ fun `meshExpectedTags`(`recvSecret`: kotlin.ByteArray, `peers`: List<MeshPeer>, `nowSecs`: kotlin.ULong): List<MeshTag> {
+            return FfiConverterSequenceTypeMeshTag.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_expected_tags(
+    
+        FfiConverterByteArray.lower(`recvSecret`),FfiConverterSequenceTypeMeshPeer.lower(`peers`),FfiConverterULong.lower(`nowSecs`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Capsule -> envelope -> verified, decrypted fix. The inverse of [`mesh_seal_fix`] for one
+         * capsule; feeds the **existing** friend-presence path, so the map needs no mesh awareness.
+         */
+    @Throws(LocationException::class) fun `meshOpenFix`(`recvSecret`: kotlin.ByteArray, `author`: MeshPeer, `capsule`: kotlin.ByteArray): IncomingFix {
+            return FfiConverterTypeIncomingFix.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_open_fix(
+    
+        FfiConverterByteArray.lower(`recvSecret`),FfiConverterTypeMeshPeer.lower(`author`),FfiConverterByteArray.lower(`capsule`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Seal one fix into **one capsule per recipient**, ready for Submit over BLE.
+         *
+         * Each capsule carries its own envelope wrapped for that recipient alone (DESIGN §3.2): smaller
+         * frames, and group membership never leaves the device. Going through this function rather than
+         * [`mesh_capsule_seal`] is what makes that structural instead of a convention.
+         */
+    @Throws(LocationException::class) fun `meshSealFix`(`identitySecret`: kotlin.ByteArray, `recvSecret`: kotlin.ByteArray, `authorEndpointId`: kotlin.ByteArray, `seq`: kotlin.ULong, `meshEpoch`: kotlin.UInt, `fix`: LocationFix, `recipients`: List<MeshPeer>): List<kotlin.ByteArray> {
+            return FfiConverterSequenceByteArray.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_mesh_seal_fix(
+    
+        FfiConverterByteArray.lower(`identitySecret`),FfiConverterByteArray.lower(`recvSecret`),FfiConverterByteArray.lower(`authorEndpointId`),FfiConverterULong.lower(`seq`),FfiConverterUInt.lower(`meshEpoch`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterSequenceTypeMeshPeer.lower(`recipients`),_status)
 }
     )
     }

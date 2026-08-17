@@ -24,8 +24,8 @@ interface ControlMsgLike {
 
 class FakeNativeModule {
   calls = {
-    syncTrail: [] as { since: number; peerTicket: string | null }[],
-    pushTrail: [] as { peerTicket: string | null }[],
+    syncLatest: [] as { peerTickets: string[] }[],
+    pushTrail: [] as { peerTickets: string[] }[],
     docsWriteControl: [] as { msg: ControlMsgLike; recipients: string[] }[],
     readControl: [] as string[],
   };
@@ -53,11 +53,11 @@ class FakeNativeModule {
   async unsubscribe() {}
   async publish() {}
   async docsWrite() {}
-  async syncTrail(since: number, peerTicket: string | null) {
-    this.calls.syncTrail.push({ since, peerTicket });
+  async syncLatest(peerTickets: string[]) {
+    this.calls.syncLatest.push({ peerTickets });
   }
-  async pushTrail(peerTicket: string | null) {
-    this.calls.pushTrail.push({ peerTicket });
+  async pushTrail(peerTickets: string[]) {
+    this.calls.pushTrail.push({ peerTickets });
   }
   async docsWriteControl(msg: ControlMsgLike, recipients: string[]) {
     this.calls.docsWriteControl.push({ msg, recipients });
@@ -66,7 +66,7 @@ class FakeNativeModule {
     this.calls.readControl.push(author);
     return this.control[author] ?? [];
   }
-  async readTrail() {
+  async readLatest() {
     return [];
   }
   async pruneTrail() {}
@@ -211,7 +211,9 @@ describe('live mode — sending a request', () => {
     await svc.requestLive(friend.endpointId);
 
     // docsWriteControl only touches the local replica; without the push the friend polls forever.
-    expect(mockHolder.mod.calls.pushTrail).toContainEqual({ peerTicket: 'ticket-stash' });
+    expect(mockHolder.mod.calls.pushTrail).toContainEqual({
+      peerTickets: ['ticket-stash', friend.ticket],
+    });
   });
 
   it('surfaces who we have asked', async () => {
@@ -253,11 +255,11 @@ describe('live mode — receiving a request', () => {
   it('reconciles before reading — an unpulled request is invisible', async () => {
     const svc = makeService(stashDeps());
     await svc.init('@me', 'mothman');
-    mockHolder.mod.calls.syncTrail.length = 0;
+    mockHolder.mod.calls.syncLatest.length = 0;
 
     await poll(svc);
 
-    expect(mockHolder.mod.calls.syncTrail.length).toBeGreaterThan(0);
+    expect(mockHolder.mod.calls.syncLatest.length).toBeGreaterThan(0);
     expect(mockHolder.mod.calls.readControl).toContain(friend.endpointId);
   });
 

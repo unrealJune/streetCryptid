@@ -1,9 +1,11 @@
 import type { PoolState } from '../core/pool';
+import type { RatchetActivity } from '../core/types';
 import { InMemoryKV, type PersistentKV } from './background/fix-outbox';
 import type { HandledNonce } from './live-requests';
 import { DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
 import {
   InMemoryTrailStorage,
+  SELF_AUTHOR,
   UNRESOLVED_VIA,
   type TrailPoint,
   type TrailStorage,
@@ -11,11 +13,18 @@ import {
 
 /**
  * On-device persistence so the social feature survives JS reloads and app restarts. Backs the
- * `PersistentKV` (outbox + pool) and `TrailStorage` (trail cache) ports with expo-sqlite. The DB is
+ * `PersistentKV` (outbox + pool) and `TrailStorage` ports with expo-sqlite. The DB is
  * opened lazily and every access is guarded, so a build without the native module (or web/Expo Go)
  * transparently falls back to in-memory instead of crashing — matching the lazy-native pattern in
- * secure-keys.ts / background-task.ts. Two tables: `kv(key,value)` and
- * `trail(author,seq,fix,received_at,fix_ts,via)` keyed by `(author,seq)`.
+ * secure-keys.ts / background-task.ts.
+ *
+ * Three tables: `kv(key,value)`, `self_trail(seq,…)` — our own published points, retained as
+ * history — and `friend_latest(author,…)` — exactly one current fix per friend. The split is the
+ * schema-level form of FORWARD-SECRECY.md §4.4/§5.3: there is no table a friend's *older* fix
+ * could be read back out of. The migration drops the old combined `trail` table, which held every
+ * author's fixes as plaintext JSON forever and was the dominant term for the device-seizure
+ * threat — but carries OUR OWN rows across first, because that half is the user's own data to
+ * keep and dropping it would silently erase their history on upgrade.
  */
 
 const DB_NAME = 'streetcryptid.social.db';
@@ -54,20 +63,40 @@ function getDb(): Promise<SqliteDb | null> {
       const db = await mod.openDatabaseAsync(DB_NAME);
       await db.execAsync(
         `CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
-         CREATE TABLE IF NOT EXISTS trail (
-           author TEXT NOT NULL,
+         CREATE TABLE IF NOT EXISTS self_trail (
+           seq INTEGER PRIMARY KEY NOT NULL,
+           fix TEXT NOT NULL,
+           received_at INTEGER NOT NULL,
+           fix_ts INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS self_trail_ts ON self_trail (fix_ts);
+         CREATE TABLE IF NOT EXISTS friend_latest (
+           author TEXT PRIMARY KEY NOT NULL,
            seq INTEGER NOT NULL,
            fix TEXT NOT NULL,
            received_at INTEGER NOT NULL,
            fix_ts INTEGER NOT NULL,
-           PRIMARY KEY (author, seq)
-         );
-         CREATE INDEX IF NOT EXISTS trail_author_ts ON trail (author, fix_ts);`
+           via TEXT
+         );`
       );
-      // Added after the table shipped, and there is no schema version to branch on, so add the
-      // column unconditionally and swallow the "duplicate column name" error on installs that
-      // already have it. Rows written before this read back as NULL → provenance unknown.
-      await db.execAsync('ALTER TABLE trail ADD COLUMN via TEXT').catch(() => {});
+      // One-shot migration off the old combined `trail` table. Our own rows move across — that
+      // half is the user's own history and dropping it would erase their trail on upgrade — while
+      // every friend row is left behind and destroyed with the table, which is the point: their
+      // retained movements are erased rather than pruned (FORWARD-SECRECY.md §5.3).
+      //
+      // Guarded rather than branched on a schema version because there is none. On a fresh install
+      // (and on every launch after the migration has run) the SELECT throws "no such table" and
+      // the DROP is skipped, so this is idempotent.
+      try {
+        await db.runAsync(
+          `INSERT OR IGNORE INTO self_trail (seq, fix, received_at, fix_ts)
+             SELECT seq, fix, received_at, fix_ts FROM trail WHERE author = ?`,
+          SELF_AUTHOR
+        );
+        await db.execAsync('DROP TABLE trail');
+      } catch {
+        // No legacy table to migrate.
+      }
       return db;
     } catch {
       return null;
@@ -142,20 +171,64 @@ function rowToPoint(row: TrailRow): TrailPoint {
   };
 }
 
-/** expo-sqlite–backed {@link TrailStorage} with SQL range/latest/prune; in-memory fallback. */
+/** expo-sqlite–backed {@link TrailStorage}; in-memory fallback when SQLite is unavailable. */
 class SqliteTrailStorage implements TrailStorage {
   private readonly fallback = new InMemoryTrailStorage();
 
-  async put(point: TrailPoint): Promise<void> {
+  async putSelf(point: TrailPoint): Promise<void> {
     const db = await getDb();
-    if (!db) return this.fallback.put(point);
+    if (!db) return this.fallback.putSelf(point);
     try {
       await db.runAsync(
-        `INSERT INTO trail (author, seq, fix, received_at, fix_ts, via) VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(author, seq) DO UPDATE SET
-           fix = excluded.fix, received_at = excluded.received_at, fix_ts = excluded.fix_ts,
-           via = CASE WHEN trail.via IS NULL OR trail.via = ?
-                      THEN COALESCE(excluded.via, trail.via) ELSE trail.via END`,
+        `INSERT INTO self_trail (seq, fix, received_at, fix_ts) VALUES (?, ?, ?, ?)
+         ON CONFLICT(seq) DO UPDATE SET
+           fix = excluded.fix, received_at = excluded.received_at, fix_ts = excluded.fix_ts`,
+        point.seq,
+        JSON.stringify(point.fix),
+        point.receivedAt,
+        point.fix.ts
+      );
+    } catch {
+      await this.fallback.putSelf(point);
+    }
+  }
+
+  async selfRange(sinceTs: number): Promise<TrailPoint[]> {
+    const db = await getDb();
+    if (!db) return this.fallback.selfRange(sinceTs);
+    try {
+      const rows = await db.getAllAsync<Omit<TrailRow, 'author'>>(
+        'SELECT seq, fix, received_at FROM self_trail WHERE fix_ts >= ? ORDER BY seq ASC',
+        sinceTs
+      );
+      return rows.map((row) => rowToPoint({ ...row, author: SELF_AUTHOR }));
+    } catch {
+      return this.fallback.selfRange(sinceTs);
+    }
+  }
+
+  async putFriendLatest(point: TrailPoint): Promise<void> {
+    const db = await getDb();
+    if (!db) return this.fallback.putFriendLatest(point);
+    try {
+      // The WHERE guard is the last-write-wins rule in SQL: a delivery carrying an OLDER payload
+      // than the row we hold is dropped, so out-of-order arrival (gossip racing a docs
+      // reconciliation) cannot rewind a friend's position on the map. It orders by `(fix_ts, seq)`
+      // rather than fix_ts alone so a tie cannot turn on row order.
+      //
+      // The tie admits `seq >=`, not `>`, so that RE-delivery of the fix we already hold still
+      // reaches the `via` merge below: `refreshTrailFromReplica` re-reads the whole replica after
+      // each sync and routinely beats the callback carrying the precise label. Nothing else in the
+      // row changes on that path — equal `(fix_ts, seq)` is the same fix.
+      await db.runAsync(
+        `INSERT INTO friend_latest (author, seq, fix, received_at, fix_ts, via) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(author) DO UPDATE SET
+           seq = excluded.seq, fix = excluded.fix, received_at = excluded.received_at,
+           fix_ts = excluded.fix_ts,
+           via = CASE WHEN friend_latest.via IS NULL OR friend_latest.via = ?
+                      THEN COALESCE(excluded.via, friend_latest.via) ELSE friend_latest.via END
+         WHERE excluded.fix_ts > friend_latest.fix_ts
+            OR (excluded.fix_ts = friend_latest.fix_ts AND excluded.seq >= friend_latest.seq)`,
         // Bound positionally, left-to-right across the whole statement: the six VALUES first,
         // then the CASE's comparison value.
         point.author,
@@ -167,102 +240,42 @@ class SqliteTrailStorage implements TrailStorage {
         UNRESOLVED_VIA
       );
     } catch {
-      await this.fallback.put(point);
+      await this.fallback.putFriendLatest(point);
     }
   }
 
-  async putLatest(point: TrailPoint): Promise<void> {
+  async friendLatest(): Promise<TrailPoint[]> {
     const db = await getDb();
-    if (!db) return this.fallback.putLatest(point);
-    try {
-      await this.put(point);
-      // Keep exactly one row for this author — the newest by (fix_ts, seq). Deciding it in SQL
-      // rather than from `point` is deliberate: reconciliation delivers old entries after new
-      // ones, so the point we just wrote is often NOT the newest.
-      await db.runAsync(
-        `DELETE FROM trail WHERE author = ? AND rowid NOT IN (
-           SELECT rowid FROM trail WHERE author = ? ORDER BY fix_ts DESC, seq DESC LIMIT 1
-         )`,
-        point.author,
-        point.author
-      );
-    } catch {
-      await this.fallback.putLatest(point);
-    }
-  }
-
-  async collapseToLatest(exceptAuthor: string): Promise<number> {
-    const db = await getDb();
-    if (!db) return this.fallback.collapseToLatest(exceptAuthor);
-    try {
-      const res = await db.runAsync(
-        `DELETE FROM trail WHERE author <> ? AND rowid NOT IN (
-           SELECT rowid FROM (
-             SELECT rowid, ROW_NUMBER() OVER (
-               PARTITION BY author ORDER BY fix_ts DESC, seq DESC
-             ) AS rank FROM trail WHERE author <> ?
-           ) WHERE rank = 1
-         )`,
-        exceptAuthor,
-        exceptAuthor
-      );
-      return res.changes;
-    } catch {
-      return this.fallback.collapseToLatest(exceptAuthor);
-    }
-  }
-
-  async range(author: string, sinceTs: number): Promise<TrailPoint[]> {
-    const db = await getDb();
-    if (!db) return this.fallback.range(author, sinceTs);
+    if (!db) return this.fallback.friendLatest();
     try {
       const rows = await db.getAllAsync<TrailRow>(
-        `SELECT author, seq, fix, received_at, via FROM trail
-         WHERE author = ? AND fix_ts >= ? ORDER BY seq ASC`,
-        author,
-        sinceTs
+        'SELECT author, seq, fix, received_at, via FROM friend_latest'
       );
       return rows.map(rowToPoint);
     } catch {
-      return this.fallback.range(author, sinceTs);
+      return this.fallback.friendLatest();
     }
   }
 
-  async latest(): Promise<TrailPoint[]> {
+  async removeFriend(author: string): Promise<number> {
     const db = await getDb();
-    if (!db) return this.fallback.latest();
+    if (!db) return this.fallback.removeFriend(author);
     try {
-      const rows = await db.getAllAsync<TrailRow>(
-        `SELECT t.author, t.seq, t.fix, t.received_at, t.via FROM trail t
-         JOIN (SELECT author, MAX(fix_ts) AS mt FROM trail GROUP BY author) m
-           ON t.author = m.author AND t.fix_ts = m.mt
-         GROUP BY t.author`
-      );
-      return rows.map(rowToPoint);
-    } catch {
-      return this.fallback.latest();
-    }
-  }
-
-  async removeAuthor(author: string): Promise<number> {
-    const db = await getDb();
-    if (!db) return this.fallback.removeAuthor(author);
-    try {
-      const res = await db.runAsync('DELETE FROM trail WHERE author = ?', author);
+      const res = await db.runAsync('DELETE FROM friend_latest WHERE author = ?', author);
       return res.changes;
     } catch {
-      return this.fallback.removeAuthor(author);
+      return this.fallback.removeFriend(author);
     }
   }
 
-  async prune(olderThanTs: number): Promise<number> {
+  async pruneSelf(olderThanTs: number): Promise<number> {
     const db = await getDb();
-    if (!db) return this.fallback.prune(olderThanTs);
+    if (!db) return this.fallback.pruneSelf(olderThanTs);
     try {
-      const res = await db.runAsync('DELETE FROM trail WHERE fix_ts < ?', olderThanTs);
+      const res = await db.runAsync('DELETE FROM self_trail WHERE fix_ts < ?', olderThanTs);
       return res.changes;
     } catch {
-      return this.fallback.prune(olderThanTs);
+      return this.fallback.pruneSelf(olderThanTs);
     }
   }
 }
@@ -295,6 +308,30 @@ export async function savePool(kv: PersistentKV, state: PoolState): Promise<void
     POOL_KEY,
     JSON.stringify({ friends: state.friends, sharingWith: state.sharingWith })
   );
+}
+
+const RATCHET_ACTIVITY_KEY = 'sc.social.ratchetActivity';
+
+export async function loadRatchetActivity(
+  kv: PersistentKV
+): Promise<Record<string, RatchetActivity>> {
+  const raw = await kv.get(RATCHET_ACTIVITY_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as Record<string, RatchetActivity>;
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, activity]) => activity && typeof activity === 'object')
+    );
+  } catch {
+    return {};
+  }
+}
+
+export async function saveRatchetActivity(
+  kv: PersistentKV,
+  activity: Readonly<Record<string, RatchetActivity>>
+): Promise<void> {
+  await kv.set(RATCHET_ACTIVITY_KEY, JSON.stringify(activity));
 }
 
 const HANDLED_CTL_KEY = 'sc.social.handledControlNonces';
@@ -366,6 +403,7 @@ export async function saveLocationDisclosureChoice(
 }
 
 const SHARE_INTERVAL_KEY = 'sc.social.shareIntervalMs';
+const IOS_LOCATION_BENCHMARK_PROFILE_KEY = 'sc.dev.iosLocationProfile';
 
 /**
  * The cadences offered in settings, in ms. A closed set rather than a free-form number, for two
@@ -393,6 +431,15 @@ export async function loadShareIntervalMs(kv: PersistentKV): Promise<number> {
 export async function saveShareIntervalMs(kv: PersistentKV, intervalMs: number): Promise<void> {
   if (!SHARE_INTERVAL_OPTIONS_MS.some((option) => option === intervalMs)) return;
   await kv.set(SHARE_INTERVAL_KEY, String(intervalMs));
+}
+
+/** Dev-only simulator benchmark selection. Invalid or absent values use production defaults. */
+export async function loadIosLocationBenchmarkProfile(
+  kv: PersistentKV
+): Promise<'battery' | 'balanced' | 'fidelity' | null> {
+  if (!__DEV__) return null;
+  const raw = await kv.get(IOS_LOCATION_BENCHMARK_PROFILE_KEY);
+  return raw === 'battery' || raw === 'balanced' || raw === 'fidelity' ? raw : null;
 }
 
 const SHARING_ENABLED_KEY = 'sc.social.sharingEnabled';

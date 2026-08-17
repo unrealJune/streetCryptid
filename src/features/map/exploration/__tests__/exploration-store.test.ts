@@ -26,7 +26,12 @@ function makeStore(db = new InMemoryExplorationDb()) {
 
 async function seedTrail(storage: TrailStorage, fixes: LocationFix[]): Promise<void> {
   for (let i = 0; i < fixes.length; i++) {
-    await storage.put({ author: SELF_AUTHOR, seq: i + 1, fix: fixes[i], receivedAt: fixes[i].ts });
+    await storage.putSelf({
+      author: SELF_AUTHOR,
+      seq: i + 1,
+      fix: fixes[i],
+      receivedAt: fixes[i].ts,
+    });
   }
 }
 
@@ -103,20 +108,20 @@ describe('backfillFromTrail', () => {
   it('resumes strictly after the cursor without rescanning', async () => {
     const { store } = makeStore();
     const trail = new InMemoryTrailStorage();
-    const rangeSpy = jest.spyOn(trail, 'range');
+    const rangeSpy = jest.spyOn(trail, 'selfRange');
     await seedTrail(trail, [fixAt(47.62, -122.32, 1000)]);
 
     await store.backfillFromTrail(trail);
-    expect(rangeSpy).toHaveBeenLastCalledWith(SELF_AUTHOR, 0);
+    expect(rangeSpy).toHaveBeenLastCalledWith(0);
 
-    await trail.put({
+    await trail.putSelf({
       author: SELF_AUTHOR,
       seq: 2,
       fix: fixAt(47.64, -122.35, 4000),
       receivedAt: 4000,
     });
     const added = await store.backfillFromTrail(trail);
-    expect(rangeSpy).toHaveBeenLastCalledWith(SELF_AUTHOR, 1001);
+    expect(rangeSpy).toHaveBeenLastCalledWith(1001);
     expect(added).toHaveLength(1);
   });
 

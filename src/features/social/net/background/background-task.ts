@@ -87,9 +87,7 @@ export interface BackgroundStartConfig {
   activityType?: ActivityKind;
   /**
    * iOS: allow the system to pause updates for battery when it detects the device is stationary.
-   * Ignored on Android. Default `false`: Core Location does not reliably RESUME after an auto-pause,
-   * so leaving it on silently stops background location sharing until the app is next foregrounded
-   * (the "pings only arrive when the app is opened" bug). Continuous sharing keeps this off.
+   * Ignored on Android. Ambient sharing enables this; live tracking overrides it.
    */
   pausesUpdatesAutomatically?: boolean;
 }
@@ -178,10 +176,7 @@ export async function rearmBackgroundLocationTask(
   await api.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
     accuracy: mapAccuracy(cfg.accuracy),
     timeInterval: cfg.timeIntervalMs,
-    // 0 outside live mode, and load-bearing on iOS: `timeInterval` is Android-only, so a distance
-    // filter would be the ONLY gate Core Location applied — a stationary iPhone would stop being
-    // woken, stop emitting, and its silence would mean "not moving". 0 keeps delivery time-driven
-    // on both platforms, which is what makes the published cadence identical across them.
+    // `timeInterval` is Android-only. On iOS this movement filter is the primary battery control.
     distanceInterval: cfg.distanceIntervalM,
     deferredUpdatesInterval: cfg.deferredUpdatesIntervalMs ?? 0,
     activityType: mapActivity(cfg.activityType ?? 'other'),
@@ -189,7 +184,7 @@ export async function rearmBackgroundLocationTask(
     // pill. Per Apple QA1965 it is mandatory for when-in-use apps and optional for "Always" ones,
     // which is why other sharing apps don't show it: they ask for Always and leave this off.
     showsBackgroundLocationIndicator: false,
-    pausesUpdatesAutomatically: cfg.pausesUpdatesAutomatically ?? false,
+    pausesUpdatesAutomatically: cfg.pausesUpdatesAutomatically ?? true,
     foregroundService: {
       notificationTitle: cfg.notificationTitle,
       notificationBody: cfg.notificationBody,

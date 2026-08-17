@@ -36,7 +36,7 @@ describe('live exploration source', () => {
     const db = new InMemoryExplorationDb();
     db.cells.set(grid.cellAt(HOME, H3_DISPLAY_RES), { firstTs: 1, lastTs: 1 });
     const trail = new InMemoryTrailStorage();
-    await trail.put({
+    await trail.putSelf({
       author: SELF_AUTHOR,
       seq: 1,
       fix: fixAt(47.64, -122.35, 2000),
@@ -86,7 +86,7 @@ describe('live exploration source', () => {
     await source.ready;
     expect(source.index().cells.size).toBe(0);
 
-    await trail.put({
+    await trail.putSelf({
       author: SELF_AUTHOR,
       seq: 1,
       fix: fixAt(47.63, -122.33, 5000),

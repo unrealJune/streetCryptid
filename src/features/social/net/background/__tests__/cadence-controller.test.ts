@@ -106,12 +106,11 @@ beforeEach(() => {
 });
 
 describe('cadence pure helpers', () => {
-  it('cfgFromDecision carries accuracy, cadence, disabled auto-pause and notification', () => {
+  it('cfgFromDecision carries accuracy, cadence, ambient auto-pause and notification', () => {
     const cfg = cfgFor(fullBattery);
     expect(cfg.accuracy).toBe('balanced');
     expect(cfg.timeIntervalMs).toBe(300_000);
-    // Auto-pause is always OFF so iOS keeps delivering background fixes (does not reliably resume).
-    expect(cfg.pausesUpdatesAutomatically).toBe(false);
+    expect(cfg.pausesUpdatesAutomatically).toBe(true);
     expect(cfg.notificationTitle).toBe('streetCryptid');
     expect(cfg.notificationColor).toBe('#C6791A');
   });
@@ -122,9 +121,9 @@ describe('cadence pure helpers', () => {
     expect(cfgFor(fullBattery, 60_000).activityType).toBe('other');
   });
 
-  it('never asks the OS for a distance filter', () => {
-    expect(cfgFor(fullBattery).distanceIntervalM).toBe(0);
-    expect(cfgFor(lowBattery).distanceIntervalM).toBe(0);
+  it('keeps the ambient OS movement filter stable across battery states', () => {
+    expect(cfgFor(fullBattery).distanceIntervalM).toBe(50);
+    expect(cfgFor(lowBattery).distanceIntervalM).toBe(50);
   });
 
   it('cadenceDiffers ignores notification text but catches accuracy + interval changes', () => {

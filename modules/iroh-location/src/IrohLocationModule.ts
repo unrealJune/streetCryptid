@@ -9,7 +9,7 @@ import type {
   BluetoothRadioState,
   BumpResolution,
   NativeControlMsg,
-  NativeIncomingFix,
+  NativeRatchetEvent,
   NativeLocationFix,
   NodeKeys,
   PairEvent,
@@ -18,7 +18,9 @@ import type {
   PairResult,
   PairStateRecord,
   ProfileView,
+  RatchetDropped,
   SasChallenge,
+  TrailReplicaAuthor,
   TransportDiagnostics,
   TransportConfig,
 } from './IrohLocation.types';
@@ -43,28 +45,64 @@ export declare class IrohLocationNativeModule
   publish(
     subscriptionId: string,
     seq: number,
-    epoch: number,
     fix: NativeLocationFix,
-    recipientsHex: string[],
+    recipientEndpointsHex: string[],
     traceparent?: string | null
-  ): Promise<void>;
+  ): Promise<RatchetDropped[]>;
   unsubscribe(subscriptionId: string): Promise<void>;
   docsWrite(
     subscriptionId: string,
     seq: number,
-    epoch: number,
     fix: NativeLocationFix,
-    recipientsHex: string[],
+    recipientEndpointsHex: string[],
     traceparent?: string | null
-  ): Promise<void>;
-  syncTrail(sinceTs: number, peerTicket: string | null, traceparent?: string | null): Promise<void>;
+  ): Promise<RatchetDropped[]>;
+  /**
+   * Broadcast a **null fix**: an envelope with an empty padded payload, wrapped for the friends we
+   * do NOT share position with (FORWARD-SECRECY.md §4.1). Same signing, AAD, and ciphertext length
+   * as {@link publish} — only the tick timestamp, no coordinates.
+   *
+   * Optional for compatibility with installed iOS binaries built before the null-fix API (Swift
+   * bindings regenerate only on macOS, `just bindgen-ios`). Guard with `typeof … === 'function'`.
+   */
+  publishNull?(
+    subscriptionId: string,
+    seq: number,
+    ts: number,
+    watcherEndpointsHex: string[],
+    traceparent?: string | null
+  ): Promise<RatchetDropped[]>;
+  /**
+   * Durable mirror of {@link publishNull}. Writes to a **separate** last-write-wins slot from the
+   * fix lane, because a tick's two envelopes are wrapped for disjoint recipient sets and would
+   * otherwise supersede each other. Optional for the same reason as {@link publishNull}.
+   */
+  docsWriteNull?(
+    subscriptionId: string,
+    seq: number,
+    ts: number,
+    watcherEndpointsHex: string[],
+    traceparent?: string | null
+  ): Promise<RatchetDropped[]>;
+  /**
+   * §4.6 recovery. Optional for the same reason as the other recent additions: iOS Swift bindings
+   * regenerate only on macOS, so an installed binary may predate these exports.
+   */
+  isDesynced?(peerEndpointHex: string): Promise<boolean>;
+  resyncCount?(peerEndpointHex: string): Promise<number>;
+  publishResync?(recipientRecvPubsHex: string[]): Promise<string>;
+  pollResync?(peerEndpointHex: string, peerRecvPubHex: string): Promise<boolean>;
+  clearResync?(): Promise<void>;
+  forgetSession?(peerEndpointHex: string): Promise<void>;
+  syncLatest(peerTickets: string[], traceparent?: string | null): Promise<void>;
   /** Optional for compatibility with installed iOS binaries built before the push API. */
-  pushTrail?(peerTicket: string | null, traceparent?: string | null): Promise<void>;
+  pushTrail?(peerTickets: string[], traceparent?: string | null): Promise<void>;
+  uploadTrailContent?(baseUrl: string, psk: string | null): Promise<number>;
   /** Optional for compatibility with installed iOS binaries built before the control API. */
   docsWriteControl?(msg: NativeControlMsg, recipientsHex: string[]): Promise<void>;
   /** Optional for compatibility with installed iOS binaries built before the control API. */
   readControl?(author: string): Promise<NativeControlMsg[]>;
-  readTrail(author: string, sinceTs: number): Promise<NativeIncomingFix[]>;
+  readLatest(): Promise<NativeRatchetEvent[]>;
   pruneTrail(olderThanTs: number): Promise<void>;
   docTicket(): Promise<string>;
   importDocTicket(ticket: string): Promise<void>;
@@ -110,6 +148,8 @@ export declare class IrohLocationNativeModule
   encodePairInvite(invite: PairInvite): Promise<string>;
   decodePairInvite(token: string): Promise<PairInvite>;
   transportDiagnostics(peerEndpointIdsHex: string[]): Promise<TransportDiagnostics>;
+  /** Optional for compatibility with installed iOS binaries built before the replica query. */
+  trailReplicaStatus?(): Promise<TrailReplicaAuthor[]>;
 
   bleAvailable(): Promise<boolean>;
   bleCapabilities(): Promise<BleCapabilities>;
