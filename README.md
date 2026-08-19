@@ -1,7 +1,7 @@
 # streetCryptid
- 
+
 A cross-platform (iOS · Android · Web) fog-of-war city atlas for people who want
-to **walk every street**. The native app records explored sectors, broadcasts
+to **walk every street**. The app records explored sectors, broadcasts
 encrypted location updates directly to paired friends, discovers nearby phones
 over BLE, and renders current friend presence on the map.
 
