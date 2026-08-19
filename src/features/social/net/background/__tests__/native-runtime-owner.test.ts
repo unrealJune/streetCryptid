@@ -4,6 +4,7 @@ import {
   isNativeRuntimeClaimed,
   releaseNativeRuntime,
   resetNativeRuntimeOwnerForTesting,
+  setNativeRuntimeSessionWatchdogHandler,
   withNativeRuntimeSession,
 } from '../native-runtime-owner';
 
@@ -62,6 +63,69 @@ describe('native-runtime-owner', () => {
     it('passes the session result back to the caller', async () => {
       await expect(withNativeRuntimeSession(async () => 42)).resolves.toBe(42);
     });
+
+    // The regression this whole watchdog exists for. A session that never settles used to leave
+    // `sessionChain` pending forever: every later wake queued behind it and did nothing, and the
+    // next mounted launch hung on `awaitNativeRuntimeIdle`. Only killing the process cleared it.
+    it('lets the next session run when one hangs and never settles', async () => {
+      jest.useFakeTimers();
+      try {
+        const ran: string[] = [];
+        // Deliberately never resolved — this models a native `shutdown` that does not return.
+        void withNativeRuntimeSession(async () => {
+          ran.push('hung:start');
+          await new Promise<void>(() => {});
+        }, 1_000);
+
+        const next = withNativeRuntimeSession(async () => {
+          ran.push('next');
+          return 'ok';
+        }, 1_000);
+
+        await Promise.resolve();
+        expect(ran).toEqual(['hung:start']);
+
+        jest.advanceTimersByTime(1_000);
+        await expect(next).resolves.toBe('ok');
+        expect(ran).toEqual(['hung:start', 'next']);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('reports the overrun so a hang is visible instead of silent', async () => {
+      jest.useFakeTimers();
+      try {
+        const trips: number[] = [];
+        setNativeRuntimeSessionWatchdogHandler((elapsedMs) => trips.push(elapsedMs));
+        void withNativeRuntimeSession(async () => {
+          await new Promise<void>(() => {});
+        }, 2_000);
+
+        await Promise.resolve();
+        expect(trips).toEqual([]);
+
+        jest.advanceTimersByTime(2_000);
+        await Promise.resolve();
+        expect(trips).toEqual([2_000]);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('does not trip the watchdog for a session that finishes in time', async () => {
+      jest.useFakeTimers();
+      try {
+        const trips: number[] = [];
+        setNativeRuntimeSessionWatchdogHandler((elapsedMs) => trips.push(elapsedMs));
+        await withNativeRuntimeSession(async () => 'quick', 5_000);
+        jest.advanceTimersByTime(10_000);
+        await Promise.resolve();
+        expect(trips).toEqual([]);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
   });
 
   describe('awaitNativeRuntimeIdle', () => {
@@ -88,6 +152,30 @@ describe('native-runtime-owner', () => {
 
     it('resolves immediately when nothing is running', async () => {
       await expect(awaitNativeRuntimeIdle()).resolves.toBeUndefined();
+    });
+
+    // The launch-hang half of the same bug: a mounted `init` awaits this before `createNode`, so a
+    // session that never settles used to mean the app never got past the splash screen.
+    it('still resolves once the watchdog releases a hung session', async () => {
+      jest.useFakeTimers();
+      try {
+        let idle = false;
+        void withNativeRuntimeSession(async () => {
+          await new Promise<void>(() => {});
+        }, 1_000);
+        const waiting = awaitNativeRuntimeIdle().then(() => {
+          idle = true;
+        });
+
+        await Promise.resolve();
+        expect(idle).toBe(false);
+
+        jest.advanceTimersByTime(1_000);
+        await waiting;
+        expect(idle).toBe(true);
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 });

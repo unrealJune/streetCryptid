@@ -322,7 +322,8 @@ surface, **test vectors**. No radio. As built:
   contact card cannot pin a friend onto a predictable tag stream.
 - Bindings: Kotlin **and** Swift sources regenerated (the generator runs on any host — only
   the Android `.so` cross-compile and the iOS XCFramework need NDK/macOS, and neither is
-  tracked). The native `mesh*` symbols reach iOS only after `just bindgen-ios` on a Mac.
+  tracked). CI regenerates both binding sets on every PR, so the native `mesh*` symbols reach iOS without a
+  Mac in the loop; only the XCFramework compile still needs one (EAS does it for cloud builds).
 
 **W2 — Antenna firmware v1** (`firmware/antenna/`, esp-idf/C): BLE peripheral (adv +
 iBeacon + MAILBX GATT + chunking), capsule LRU keyed by tag (opaque bytes — firmware

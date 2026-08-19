@@ -66,11 +66,21 @@ jest.mock('../background-task', () => ({
 }));
 
 const mockLoadSharingEnabled = jest.fn(async () => true);
+// The teardown watermark is the durable breadcrumb a hung session leaves behind — it is the only
+// evidence such a session can produce, so these are real spies, not no-ops.
+const mockSaveWatermark = jest.fn(async (_kv: unknown, _trigger: string) => {});
+const mockClearWatermark = jest.fn(async (_kv: unknown) => {});
+const mockLoadWatermark = jest.fn(
+  async (_kv: unknown): Promise<{ startedAt: number; trigger: string } | null> => null
+);
 jest.mock('../../persistence', () => ({
   createPersistentKV: jest.fn(() => ({})),
   loadSharingEnabled: () => mockLoadSharingEnabled(),
   loadShareIntervalMs: jest.fn(async () => 300_000),
   loadIosLocationBenchmarkProfile: jest.fn(async () => null),
+  saveTeardownWatermark: (kv: unknown, trigger: string) => mockSaveWatermark(kv, trigger),
+  clearTeardownWatermark: (kv: unknown) => mockClearWatermark(kv),
+  loadTeardownWatermark: (kv: unknown) => mockLoadWatermark(kv),
 }));
 
 jest.mock('../battery-source', () => ({
@@ -117,6 +127,10 @@ describe('headless-runtime', () => {
     });
     backgroundOutbox.pending.mockImplementation(async () => 0);
     backgroundOutbox.drain.mockImplementation(async () => 0);
+    mockShutdownAsync.mockImplementation(async () => {});
+    mockSaveWatermark.mockClear();
+    mockClearWatermark.mockClear();
+    mockLoadWatermark.mockImplementation(async () => null);
   });
 
   afterEach(() => {
@@ -312,6 +326,69 @@ describe('headless-runtime', () => {
       });
 
       await expect(ensureSharingArmedHeadless('geofence')).resolves.toBe(false);
+    });
+  });
+
+  // A headless session that wedges inside native teardown produces no telemetry of its own: its
+  // span never ends and its batch never flushes. These cover the two things that make it visible
+  // and survivable — a bounded wait, and a breadcrumb the NEXT session reports.
+  describe('bounded teardown', () => {
+    it('clears the watermark once native shutdown returns', async () => {
+      setAppState('background');
+      queueFixes(1);
+
+      await flushBackgroundOutboxHeadless();
+
+      expect(mockSaveWatermark).toHaveBeenCalledWith(expect.anything(), 'drain');
+      expect(mockShutdownAsync).toHaveBeenCalled();
+      expect(mockClearWatermark).toHaveBeenCalled();
+    });
+
+    it('stops waiting on a shutdown that never returns, and leaves the watermark standing', async () => {
+      jest.useFakeTimers();
+      try {
+        setAppState('background');
+        queueFixes(1);
+        // Models the 2026-08-18 iPhone: teardown entered, never came back.
+        mockShutdownAsync.mockImplementation(() => new Promise<void>(() => {}));
+
+        const session = flushBackgroundOutboxHeadless();
+        // Let every await before the teardown race settle, then trip the deadline.
+        await Promise.resolve();
+        await jest.advanceTimersByTimeAsync(11_000);
+
+        await expect(session).resolves.toBe(1);
+        expect(mockSaveWatermark).toHaveBeenCalledWith(expect.anything(), 'drain');
+        // Still pending, so it must NOT be cleared — the next wake reports it as stranded.
+        expect(mockClearWatermark).not.toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('clears the watermark when shutdown fails, because a failed teardown still finished', async () => {
+      setAppState('background');
+      queueFixes(1);
+      mockShutdownAsync.mockImplementation(async () => {
+        throw new Error('router closed twice');
+      });
+
+      await expect(flushBackgroundOutboxHeadless()).resolves.toBe(1);
+      expect(mockClearWatermark).toHaveBeenCalled();
+    });
+
+    it('reports a stranded teardown left by a previous process, exactly once', async () => {
+      setAppState('background');
+      mockLoadWatermark.mockImplementation(async () => ({
+        startedAt: Date.now() - 60_000,
+        trigger: 'refresh',
+      }));
+
+      await runBackgroundRefreshHeadless();
+
+      expect(mockLoadWatermark).toHaveBeenCalled();
+      // Cleared on report, so the same outage is not re-reported on every later wake.
+      expect(mockClearWatermark).toHaveBeenCalled();
     });
   });
 });

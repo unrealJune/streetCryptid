@@ -4,16 +4,24 @@ import { getTelemetry, type SpanContext } from '@/features/dev/telemetry';
 import { createCryptidProfileStore } from '@/features/account/storage/profile-store';
 import { LocationSharingService } from '../location-sharing';
 import {
+  clearTeardownWatermark,
   createPersistentKV,
   loadIosLocationBenchmarkProfile,
   loadShareIntervalMs,
   loadSharingEnabled,
+  saveTeardownWatermark,
 } from '../persistence';
 import { backgroundOutbox } from './background-outbox';
+import type { PersistentKV } from './fix-outbox';
+import { reportStrandedTeardown } from './teardown-watermark';
 import { isBackgroundLocationRunning, startBackgroundLocation } from './background-task';
 import { createBatterySource } from './battery-source';
 import { cfgFromDecision } from './cadence-controller';
-import { isNativeRuntimeClaimed, withNativeRuntimeSession } from './native-runtime-owner';
+import {
+  isNativeRuntimeClaimed,
+  setNativeRuntimeSessionWatchdogHandler,
+  withNativeRuntimeSession,
+} from './native-runtime-owner';
 import { getActiveRefreshHandler } from './register-task';
 import { benchmarkProfileOverrides, createSamplingPolicy } from './sampling-policy';
 
@@ -21,7 +29,69 @@ interface HeadlessSession<T> {
   /** Cheap precondition checked BEFORE a node is spun up; `false` ⇒ skip and return `fallback`. */
   precheck?: () => Promise<boolean>;
   fallback: T;
+  /** Names this session on the teardown watermark, so a stranded one says what it was doing. */
+  trigger: string;
   run: (service: LocationSharingService) => Promise<T>;
+}
+
+/**
+ * How long native teardown may take before we stop waiting on it.
+ *
+ * `shutdownAsync` awaits the Rust `shutdown`, which closes the iroh router and takes three async
+ * mutexes. Any of those can block indefinitely — on 2026-08-18 one did, with the last native log
+ * line reporting a still-open relay connection, and the pending await took the whole app down with
+ * it for 19 hours (see `native-runtime-owner.ts`). Teardown is best-effort by nature: the OS is
+ * about to freeze or kill this context anyway, so an unfinished cleanup costs nothing, while an
+ * unbounded wait costs everything.
+ */
+export const HEADLESS_TEARDOWN_TIMEOUT_MS = 10_000;
+
+/**
+ * Await native teardown, but never longer than {@link HEADLESS_TEARDOWN_TIMEOUT_MS}.
+ *
+ * On timeout the watermark is deliberately LEFT in place: teardown is still pending, and the next
+ * wake reporting it as stranded is exactly the signal we want. A clean return clears it.
+ */
+async function teardownBounded(
+  service: LocationSharingService,
+  kv: PersistentKV,
+  trigger: string
+): Promise<void> {
+  await saveTeardownWatermark(kv, trigger).catch(() => undefined);
+  let failure: unknown;
+  // Folded to a value rather than left rejectable: `shutdown` is not cancellable, so once we stop
+  // waiting on it a later rejection would have no handler and would surface as an unhandled
+  // rejection in a headless context that is otherwise healthy.
+  const done = service.shutdownAsync().then(
+    () => 'done' as const,
+    (err: unknown) => {
+      failure = err;
+      return 'failed' as const;
+    }
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), HEADLESS_TEARDOWN_TIMEOUT_MS);
+    (timer as unknown as { unref?: () => void }).unref?.();
+  });
+
+  const outcome = await Promise.race([done, timeout]);
+  clearTimeout(timer);
+  if (outcome === 'timeout') {
+    getTelemetry()
+      .startSpan('bg.teardown.timeout', {
+        attributes: {
+          trigger,
+          timeout_ms: HEADLESS_TEARDOWN_TIMEOUT_MS,
+          'sc.drop_reason': 'teardown-timeout',
+        },
+      })
+      .end();
+    return;
+  }
+  // A teardown that FAILED still finished — the node is gone either way, so it is not stranded.
+  if (outcome === 'failed') console.warn('[headless-runtime] shutdown failed', failure);
+  await clearTeardownWatermark(kv).catch(() => undefined);
 }
 
 /**
@@ -45,6 +115,9 @@ function refusalReason(): string | null {
 }
 
 async function session<T>(opts: HeadlessSession<T>): Promise<T> {
+  // Before anything else, and before any refusal: a previous session that hung in teardown left a
+  // watermark and no telemetry, so this is the earliest point at which that outage can be reported.
+  await reportStrandedTeardown(createPersistentKV(), 'headless');
   // Never run headless while a mounted runtime owns the node: it does this work itself. Spinning up
   // a second node would call createNode → clearRuntime and tear down the FOREGROUND node mid-flight
   // (breaking its gossip subscription and pairing poll). The batch is already persisted (senders
@@ -97,10 +170,11 @@ async function session<T>(opts: HeadlessSession<T>): Promise<T> {
     throw err;
   } finally {
     // Drain telemetry before the node goes away — this short-lived context is exactly the one
-    // whose batches die unexported if we skip it.
+    // whose batches die unexported if we skip it. Teardown comes after the flush and is bounded,
+    // so a native `shutdown` that never returns can no longer swallow this session or the next one.
     span.end();
     await service.flushDevTelemetry();
-    await service.shutdownAsync();
+    await teardownBounded(service, createPersistentKV(), opts.trigger);
   }
 }
 
@@ -108,6 +182,19 @@ async function session<T>(opts: HeadlessSession<T>): Promise<T> {
 function runHeadless<T>(opts: HeadlessSession<T>): Promise<T> {
   return withNativeRuntimeSession(() => session(opts));
 }
+
+// Report a watchdog trip the same way a stranded teardown is reported: the session holding the
+// chain cannot say anything about itself, so the owner module hands the fact back here.
+setNativeRuntimeSessionWatchdogHandler((elapsedMs) => {
+  const span = getTelemetry().startSpan('bg.session.watchdog', {
+    attributes: {
+      elapsed_ms: elapsedMs,
+      platform: Platform.OS,
+      'sc.drop_reason': 'session-watchdog',
+    },
+  });
+  span.end();
+});
 
 /** What woke us. Recorded on the span, because the trigger decides whether we are even allowed. */
 export type SelfHealTrigger = 'refresh' | 'geofence';
@@ -209,6 +296,7 @@ export function flushBackgroundOutboxHeadless(parent?: SpanContext): Promise<num
   return runHeadless({
     precheck: async () => (await backgroundOutbox.pending()) > 0,
     fallback: 0,
+    trigger: 'drain',
     run: async (service) => {
       const published = await backgroundOutbox.drain(async (fix, drainParent) => {
         await service.publishFix(fix, drainParent);
@@ -245,6 +333,7 @@ export function runBackgroundRefreshHeadless(parent?: SpanContext): Promise<void
   if (runMounted) return runMounted(parent);
   return runHeadless<void>({
     fallback: undefined,
+    trigger: 'refresh',
     run: async (service) => {
       // Drain FIRST, then sync. `syncTrail` is bidirectional, so the one call both pushes what we
       // just published and pulls what friends left at the stash. Syncing first (as this did) meant

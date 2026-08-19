@@ -95,6 +95,7 @@ import {
   releaseNativeRuntime,
 } from './background/native-runtime-owner';
 import { DEFAULT_SAMPLING_CONFIG, DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
+import { reportStrandedTeardown } from './background/teardown-watermark';
 import { createDefaultStashClient, type StashClient } from './stash-client';
 import {
   activeWatchers,
@@ -114,6 +115,12 @@ import {
 } from './live-requests';
 import { loadKeys, saveKeys } from './secure-keys';
 import { loadSeq, saveSeq } from './state-store';
+
+/**
+ * How long a mounted launch waits for an in-flight headless session before building its node anyway.
+ * See {@link LocationSharingService.awaitRuntimeIdleBounded}.
+ */
+const RUNTIME_IDLE_WAIT_TIMEOUT_MS = 5_000;
 
 /**
  * A single live SAS verification the UI must resolve before a pair can complete. One entry per
@@ -779,7 +786,12 @@ export class LocationSharingService implements FixPublisher {
       this.ownsNativeRuntime = true;
       // And if a session is already in flight, let it finish — including its own `shutdown` — so it
       // cannot nil our node out from under us a moment after we create it.
-      await awaitNativeRuntimeIdle();
+      //
+      // Bounded, and the wait is measured. This await used to be unbounded, and when a headless
+      // session hung in native teardown it never returned: the app sat on the splash screen until
+      // it was force-quit. Waiting is the safe default (a clobbered node is the alternative), but
+      // it is not safer than not launching at all — past the deadline we proceed and say so.
+      await this.awaitRuntimeIdleBounded();
     }
     this.keys = await this.mod.createNode(persisted.identitySecret, persisted.recvSecret);
     await saveKeys({
@@ -2576,6 +2588,45 @@ export class LocationSharingService implements FixPublisher {
     if (!this.liveRequestPollTimer) return;
     clearInterval(this.liveRequestPollTimer);
     this.liveRequestPollTimer = null;
+  }
+
+  /**
+   * Wait for an in-flight headless session, but never long enough to be mistaken for a broken app.
+   *
+   * The chain has its own (much longer) watchdog — see `native-runtime-owner.ts` — which is about
+   * keeping later *sessions* alive. This deadline is about the person holding the phone: five
+   * seconds of splash is a slow launch, ninety is a bug report. Overrunning it is recorded rather
+   * than swallowed, because proceeding means accepting the clobber risk this await exists to avoid.
+   */
+  private async awaitRuntimeIdleBounded(): Promise<void> {
+    // A force-quit relaunch is the most likely thing to follow a teardown hang — the user kills the
+    // frozen app and reopens it — so this launch is often the first context able to report it.
+    await reportStrandedTeardown(this.kv, 'mounted').catch(() => null);
+    const startedAt = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), RUNTIME_IDLE_WAIT_TIMEOUT_MS);
+      (timer as unknown as { unref?: () => void }).unref?.();
+    });
+    const outcome = await Promise.race([
+      awaitNativeRuntimeIdle().then(() => 'idle' as const),
+      deadline,
+    ]);
+    clearTimeout(timer);
+    const waitedMs = Date.now() - startedAt;
+    // Only worth a span when it actually cost something; a healthy launch resolves in ~0ms and
+    // would otherwise emit one of these on every single start.
+    if (outcome === 'timeout' || waitedMs > 1_000) {
+      getTelemetry()
+        .startSpan('runtime.idle_wait', {
+          attributes: {
+            'runtime.idle_wait_ms': waitedMs,
+            timed_out: outcome === 'timeout',
+            ...(outcome === 'timeout' ? { 'sc.drop_reason': 'idle-wait-timeout' } : {}),
+          },
+        })
+        .end();
+    }
   }
 
   shutdown(): void {

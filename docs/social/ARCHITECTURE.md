@@ -563,8 +563,10 @@ B (watcher)                                     A (subject)
   waits on a moment when both devices happen to be online.
 - **Polling runs only while background sharing is on**, since there is otherwise nothing to make
   live. A request to someone with sharing off fails visibly rather than hanging.
-- **iOS**: `docsWriteControl` / `readControl` are absent until `just bindgen-ios` runs on macOS, so
-  both are optional on `IrohLocationApi` and guarded at every call site.
+- **iOS**: `docsWriteControl` / `readControl` are optional on `IrohLocationApi` and guarded at
+  every call site. CI regenerates the Swift bindings on every PR, so the exports are no longer
+  gated on a Mac — but a device can still be running a binary older than the JS bundle, which is
+  the reason the guards stay.
 
 Open risk: this all assumes the ~4s fixes actually reach the watcher once both phones are up. That
 is the gossip path, and the delivery story in `infra/otel/README.md` is stash-mediated — measure

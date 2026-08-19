@@ -1622,15 +1622,28 @@ impl LocationNode {
     }
 
     /// Shut down protocol handlers and close the endpoint before releasing this node.
+    /// Tear the node down.
+    ///
+    /// Every step here is logged, and that is not incidental. This function awaits four things that
+    /// can each block forever — the router shutdown and three async mutexes — and when one of them
+    /// did (2026-08-18, an iPhone stuck with a relay connection still open) the JS caller was left
+    /// with a promise that never settled, which wedged the process-wide session chain and left the
+    /// phone dark for 19 hours. The callers now bound their wait, but a bounded wait only tells you
+    /// *that* teardown hung. These markers tell you **where**: the last one logged is the await
+    /// that did not return.
     pub async fn shutdown(&self) -> Result<(), LocationError> {
+        tracing::info!("shutdown: taking inner lock");
         let started = self.inner.lock().await.take();
         if let Some(started) = started {
+            tracing::info!("shutdown: closing router");
             started
                 ._router
                 .shutdown()
                 .await
                 .map_err(|e| LocationError::Network(e.to_string()))?;
+            tracing::info!("shutdown: router closed");
         }
+        tracing::info!("shutdown: taking listener lock");
         *self.listener.lock().await = None;
         // Release the session-store writer claim, or `start` can never succeed again: the claim is
         // process-global (§4.2 requires that — a per-module flag cannot see across the fresh JS
@@ -1645,8 +1658,11 @@ impl LocationNode {
         // the claim is released only when the *last* `Arc` drops — so clearing our slot alone
         // would leak it and make every restart `AlreadyOpen`. Detaching also matches what the
         // runtime is: live endpoint + docs handles that are about to become invalid anyway.
+        tracing::info!("shutdown: detaching pair runtime");
         self.pair.detach_runtime().await;
+        tracing::info!("shutdown: taking sessions lock");
         *self.sessions.lock().await = None;
+        tracing::info!("shutdown: complete");
         Ok(())
     }
 

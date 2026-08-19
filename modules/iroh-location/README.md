@@ -92,6 +92,13 @@ propagates the Rust archive's `Network`, `CoreBluetooth`, and `SystemConfigurati
 dependencies to the app linker. Local device and simulator builds still use
 `just bindgen-ios`.
 
+CI closes the last gap: the `native` job in `.github/workflows/ci.yml` runs
+`scripts/generate-uniffi-bindings.sh all` on Linux, and if the tracked Kotlin/Swift
+sources have drifted from the Rust API it commits the refreshed ones back to the pull
+request. So a Rust API change does **not** need a macOS session to land — only a local
+iOS build does. (Fork PRs and pushes to `main` get no write access, and there CI still
+fails with the manual `just bindgen-*` instruction.)
+
 The Apple-managed `com.apple.developer.networking.multicast` capability is approved for
 `com.unrealjune.streetcryptid` and declared under `expo.ios.entitlements`. After changing
 this entitlement, regenerate every affected EAS provisioning profile; profiles created

@@ -464,6 +464,51 @@ export async function saveSharingEnabled(kv: PersistentKV, enabled: boolean): Pr
   await kv.set(SHARING_ENABLED_KEY, enabled ? '1' : '0');
 }
 
+const TEARDOWN_WATERMARK_KEY = 'sc.social.headlessTeardown';
+
+/** An in-progress headless teardown, as recorded on disk just before the native `shutdown` call. */
+export interface TeardownWatermark {
+  /** When the teardown was entered (epoch ms). */
+  startedAt: number;
+  /** What the session was doing, so a stranded one names its own trigger (`drain` / `refresh`). */
+  trigger: string;
+}
+
+/**
+ * Mark that a headless session has entered native teardown.
+ *
+ * This is the one piece of evidence a hung session can leave, and that is the whole reason it is on
+ * disk rather than in a span. A session that wedges inside `shutdown` never ends its span and never
+ * flushes its batch, so it is structurally invisible to in-process telemetry — every trace simply
+ * stops mid-sentence and nothing says why. Writing the intent *before* the risky await, and
+ * clearing it after, turns "no telemetry at all" into a fact the next launch can report.
+ *
+ * Cleared by {@link clearTeardownWatermark} on a normal return, so a value still present on a later
+ * wake means the previous teardown never came back. See `headless-runtime.ts`.
+ */
+export async function saveTeardownWatermark(kv: PersistentKV, trigger: string): Promise<void> {
+  await kv.set(TEARDOWN_WATERMARK_KEY, JSON.stringify({ startedAt: Date.now(), trigger }));
+}
+
+/** Read a stranded teardown, or null when the last one completed (or none has run). */
+export async function loadTeardownWatermark(kv: PersistentKV): Promise<TeardownWatermark | null> {
+  const raw = await kv.get(TEARDOWN_WATERMARK_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<TeardownWatermark>;
+    if (typeof parsed?.startedAt !== 'number') return null;
+    return { startedAt: parsed.startedAt, trigger: parsed.trigger ?? 'unknown' };
+  } catch {
+    // A corrupt watermark must not make every later session report a phantom hang.
+    return null;
+  }
+}
+
+/** Clear the watermark once native teardown has returned. */
+export async function clearTeardownWatermark(kv: PersistentKV): Promise<void> {
+  await kv.remove(TEARDOWN_WATERMARK_KEY);
+}
+
 const RELAY_ONLY_KEY = 'sc.social.relayOnly';
 const TRANSPORT_CONFIG_KEY = 'sc.social.transportConfig';
 
