@@ -1464,7 +1464,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_shutdown() != 37069) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_shutdown() != 36520) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_start() != 8886) {
@@ -2914,6 +2914,15 @@ public interface LocationNodeInterface {
     
     /**
      * Shut down protocol handlers and close the endpoint before releasing this node.
+     * Tear the node down.
+     *
+     * Every step here is logged, and that is not incidental. This function awaits four things that
+     * can each block forever — the router shutdown and three async mutexes — and when one of them
+     * did (2026-08-18, an iPhone stuck with a relay connection still open) the JS caller was left
+     * with a promise that never settled, which wedged the process-wide session chain and left the
+     * phone dark for 19 hours. The callers now bound their wait, but a bounded wait only tells you
+     * *that* teardown hung. These markers tell you **where**: the last one logged is the await
+     * that did not return.
      */
     suspend fun `shutdown`()
     
@@ -4579,6 +4588,15 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     
     /**
      * Shut down protocol handlers and close the endpoint before releasing this node.
+     * Tear the node down.
+     *
+     * Every step here is logged, and that is not incidental. This function awaits four things that
+     * can each block forever — the router shutdown and three async mutexes — and when one of them
+     * did (2026-08-18, an iPhone stuck with a relay connection still open) the JS caller was left
+     * with a promise that never settled, which wedged the process-wide session chain and left the
+     * phone dark for 19 hours. The callers now bound their wait, but a bounded wait only tells you
+     * *that* teardown hung. These markers tell you **where**: the last one logged is the await
+     * that did not return.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
