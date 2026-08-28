@@ -33,6 +33,7 @@ type EventLogListener = (entries: EventLogEntry[]) => void;
 interface SqliteDb {
   execAsync(sql: string): Promise<void>;
   runAsync(sql: string, ...params: (string | number | null)[]): Promise<unknown>;
+  getFirstAsync<T>(sql: string, ...params: (string | number | null)[]): Promise<T | null>;
   getAllAsync<T>(sql: string, ...params: (string | number | null)[]): Promise<T[]>;
 }
 
@@ -68,6 +69,11 @@ let persistenceQueue: Promise<void> = Promise.resolve();
 let clearGeneration = 0;
 let writesSinceTrim = 0;
 let backgroundContextDepth = 0;
+/**
+ * Ids already handed to the shipper. Mirrors the `shipped` column, and is the ONLY record of it
+ * when SQLite is unavailable (jest, web, Expo Go) — where the journal is the in-memory list alone.
+ */
+const shippedIds = new Set<string>();
 const listeners = new Set<EventLogListener>();
 
 function trySqlite(): SqliteModule | null {
@@ -98,13 +104,26 @@ function getDb(): Promise<SqliteDb | null> {
         status TEXT NOT NULL,
         launch_context TEXT,
         transport TEXT,
-        details TEXT NOT NULL
+        details TEXT NOT NULL,
+        shipped INTEGER NOT NULL DEFAULT 0
       );
-      CREATE INDEX IF NOT EXISTS event_log_timestamp ON event_log (timestamp DESC);`);
+      CREATE INDEX IF NOT EXISTS event_log_timestamp ON event_log (timestamp DESC);
+      CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY NOT NULL,
+        value TEXT NOT NULL
+      );`);
       const columns = await db.getAllAsync<SqliteColumn>('PRAGMA table_info(event_log)');
       if (!columns.some((column) => column.name === 'launch_context')) {
         await db.execAsync('ALTER TABLE event_log ADD COLUMN launch_context TEXT');
       }
+      if (!columns.some((column) => column.name === 'shipped')) {
+        await db.execAsync('ALTER TABLE event_log ADD COLUMN shipped INTEGER NOT NULL DEFAULT 0');
+      }
+      // The shipper's hot query is "oldest unshipped first"; without this it is a full scan of a
+      // 10 000-row table on every background wake.
+      await db.execAsync(
+        'CREATE INDEX IF NOT EXISTS event_log_shipped ON event_log (shipped, timestamp ASC)'
+      );
       return db;
     } catch {
       return null;
@@ -124,7 +143,15 @@ function sanitizeText(value: string): string {
 }
 
 function sanitize(value: unknown, key = '', seen = new WeakSet<object>()): unknown {
-  if (SENSITIVE_KEY.test(key)) return '[REDACTED]';
+  // A key match plus a non-scalar value is a secret; a key match on a boolean or a number is
+  // almost always a FLAG about a secret rather than the secret itself (`stash.ticket_configured`,
+  // `sas_verified_sessions`). Redacting those cost real diagnostic value — they are exactly the
+  // attributes that say whether a device was configured to reach the stash at all — and gave up
+  // nothing, since a boolean carries no key material. Location stays redacted at every type: a
+  // latitude is a number, and that is the point.
+  if (SENSITIVE_KEY.test(key) && typeof value !== 'boolean' && typeof value !== 'number') {
+    return '[REDACTED]';
+  }
   if (LOCATION_KEY.test(key)) return '[LOCATION REDACTED]';
   if (
     value === null ||
@@ -148,6 +175,17 @@ function sanitize(value: unknown, key = '', seen = new WeakSet<object>()): unkno
       sanitize(childValue, childKey, seen),
     ])
   );
+}
+
+function rowToEntry(row: EventLogRow): EventLogEntry {
+  const { launch_context, transport, details, ...rest } = row;
+  return {
+    ...rest,
+    timestamp: Number(row.timestamp),
+    launchContext: launch_context === 'background' ? 'background' : 'foreground',
+    ...(transport ? { transport } : {}),
+    details: sanitize(JSON.parse(details) as unknown),
+  };
 }
 
 function notify(): void {
@@ -281,16 +319,7 @@ export async function loadEventLog(): Promise<EventLogEntry[]> {
        FROM event_log ORDER BY timestamp DESC, rowid DESC LIMIT ?`,
       EVENT_LOG_MAX_ENTRIES
     );
-    const persisted: EventLogEntry[] = rows.map((row) => {
-      const { launch_context, transport, details, ...rest } = row;
-      return {
-        ...rest,
-        timestamp: Number(row.timestamp),
-        launchContext: launch_context === 'background' ? 'background' : 'foreground',
-        ...(transport ? { transport } : {}),
-        details: sanitize(JSON.parse(details) as unknown),
-      };
-    });
+    const persisted: EventLogEntry[] = rows.map(rowToEntry);
     if (generation !== clearGeneration) return getEventLog();
     const merged = new Map(entries.map((entry) => [entry.id, entry]));
     persisted.forEach((entry) => {
@@ -318,6 +347,7 @@ export function flushEventLog(): Promise<void> {
 
 export async function clearEventLog(): Promise<void> {
   clearGeneration += 1;
+  shippedIds.clear();
   entries = [];
   notify();
   await enqueuePersistence(async () => {
@@ -331,8 +361,119 @@ export async function clearEventLog(): Promise<void> {
   });
 }
 
+/**
+ * Read a small durable value from the journal database.
+ *
+ * The journal owns the only storage this module is allowed to touch: telemetry must not depend on
+ * `net/persistence.ts` (that would make the dependency graph circular, since persistence reports
+ * its own degradation through telemetry) and must stay self-contained so the build-time strip can
+ * remove the whole directory in one piece. Returns null when SQLite is unavailable — every caller
+ * has to cope with that anyway.
+ */
+export async function readMeta(key: string): Promise<string | null> {
+  const db = await getDb();
+  if (!db) return null;
+  try {
+    const row = await db.getFirstAsync<{ value: string }>(
+      'SELECT value FROM meta WHERE key = ?',
+      key
+    );
+    return row?.value ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Write a small durable value to the journal database. Best-effort; never throws. */
+export async function writeMeta(key: string, value: string): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  try {
+    await db.runAsync(
+      'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      key,
+      value
+    );
+  } catch {
+    // A device id we cannot persist is regenerated next launch — degraded, not broken.
+  }
+}
+
+/**
+ * Hand the shipper the oldest entries it has not taken yet, oldest first.
+ *
+ * Reads through SQLite when it is available, because that is the only place a backlog survives:
+ * a headless background context starts with an empty in-memory list while the database still
+ * holds everything the last few wakes recorded. The in-memory list is the fallback, not the
+ * preference.
+ *
+ * Entries are NOT marked here. The shipper marks them only once the collector has accepted them
+ * ({@link markShipped}), which is the whole point — a failed POST leaves them queued for the next
+ * attempt instead of dropping them on the floor.
+ */
+export async function takeUnshipped(limit: number): Promise<EventLogEntry[]> {
+  const db = await getDb();
+  if (db) {
+    try {
+      const rows = await db.getAllAsync<EventLogRow>(
+        `SELECT id, timestamp, level, category, action, summary, status, launch_context, transport, details
+         FROM event_log WHERE shipped = 0 ORDER BY timestamp ASC, rowid ASC LIMIT ?`,
+        limit
+      );
+      // A row can be marked in memory but not yet in the database if a previous mark failed
+      // mid-flight; filtering here keeps that from re-sending.
+      return rows.map(rowToEntry).filter((entry) => !shippedIds.has(entry.id));
+    } catch {
+      // Fall through to the in-memory journal.
+    }
+  }
+  const pending: EventLogEntry[] = [];
+  // `entries` is newest-first; walk it backwards so the oldest go out first and a partial drain
+  // leaves a contiguous, ordered backlog.
+  for (let i = entries.length - 1; i >= 0 && pending.length < limit; i -= 1) {
+    const entry = entries[i];
+    if (!shippedIds.has(entry.id)) pending.push(entry);
+  }
+  return pending;
+}
+
+/** Mark entries as delivered. Best-effort in the database; authoritative in memory. */
+export async function markShipped(ids: readonly string[]): Promise<void> {
+  if (ids.length === 0) return;
+  ids.forEach((id) => shippedIds.add(id));
+  await enqueuePersistence(async () => {
+    const db = await getDb();
+    if (!db) return;
+    try {
+      const placeholders = ids.map(() => '?').join(',');
+      await db.runAsync(`UPDATE event_log SET shipped = 1 WHERE id IN (${placeholders})`, ...ids);
+    } catch {
+      // The in-memory set still prevents a re-send this process; a restart may re-send these
+      // rows once, which the collector tolerates (same trace and span ids, so it is a rewrite,
+      // not a duplicate).
+    }
+  });
+}
+
+/** How many entries are still waiting to be shipped, for the `device.health` record. */
+export async function unshippedCount(): Promise<number> {
+  const db = await getDb();
+  if (db) {
+    try {
+      const row = await db.getFirstAsync<{ n: number }>(
+        'SELECT COUNT(*) AS n FROM event_log WHERE shipped = 0'
+      );
+      if (row) return Number(row.n);
+    } catch {
+      // Fall through.
+    }
+  }
+  return entries.reduce((n, entry) => (shippedIds.has(entry.id) ? n : n + 1), 0);
+}
+
 export function resetEventLogForTesting(): void {
   clearGeneration += 1;
+  shippedIds.clear();
   entries = [];
   sequence = 0;
   writesSinceTrim = 0;

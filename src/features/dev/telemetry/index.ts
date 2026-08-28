@@ -25,10 +25,17 @@ export {
   flushEventLog,
   getEventLog,
   loadEventLog,
+  markShipped,
   recordEventLog,
+  resetEventLogForTesting,
   subscribeEventLog,
+  takeUnshipped,
+  unshippedCount,
   withEventLogLaunchContext,
 } from './event-log';
+export { getBuildResource, getResolvedDeviceId, resolveDeviceId } from './identity';
+export { createShipper } from './shipper';
+export type { Shipper, ShipperOptions } from './shipper';
 export type {
   EventLogEntry,
   EventLogLaunchContext,
@@ -37,3 +44,13 @@ export type {
   RecordEventLogEntry,
 } from './event-log';
 export type { Attributes, AttrValue, LogSeverity, Span, SpanContext, SpanStatus } from './types';
+
+/**
+ * Whether developer telemetry is compiled into this bundle at all.
+ *
+ * `true` here and `false` in `index.noop.ts` — the two files are swapped by a Metro resolver rule
+ * (see `metro.config.js`), so this is a build-time constant, not a runtime setting. UI that only
+ * exists to show telemetry (the Settings DEBUG section, the event-log viewer) gates on it, since
+ * in a stripped build those surfaces would otherwise render permanently empty.
+ */
+export const DEV_TELEMETRY_ENABLED = true;

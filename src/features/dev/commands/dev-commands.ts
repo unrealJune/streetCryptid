@@ -1,6 +1,6 @@
 import type { TrailReplicaAuthor } from 'iroh-location';
 
-import { flushEventLog, recordEventLog } from '@/features/dev/telemetry/event-log';
+import { flushEventLog, recordEventLog } from '@/features/dev/telemetry';
 
 /**
  * The developer command channel: `streetcryptid://dev?cmd=<name>&id=<nonce>`.
