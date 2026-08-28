@@ -95,7 +95,9 @@ import {
   releaseNativeRuntime,
 } from './background/native-runtime-owner';
 import { DEFAULT_SAMPLING_CONFIG, DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
+import { recordDeviceHealth } from './background/device-health';
 import { reportStrandedTeardown } from './background/teardown-watermark';
+import { stampWatermark } from './background/watermarks';
 import { createDefaultStashClient, type StashClient } from './stash-client';
 import {
   activeWatchers,
@@ -563,6 +565,7 @@ export class LocationSharingService implements FixPublisher {
   private engine: LocationEngine | null = null;
   private bgProvider: BackgroundLocationProvider | null = null;
   private bgTaskHandlerStop: (() => void) | null = null;
+  private engineStateStop: (() => void) | null = null;
   private bgRefreshHandlerStop: (() => void) | null = null;
   private bgLifecycleStop: (() => void) | null = null;
   private bgCadenceStop: (() => Promise<void>) | null = null;
@@ -1504,6 +1507,9 @@ export class LocationSharingService implements FixPublisher {
       // After both lanes, so a session the resync exchange just restored is used from the next
       // tick rather than this one — and so a slow driver pass never delays the fix itself.
       await this.runResyncDriver();
+      // Stamped only on the success path: the whole value of `last_publish_age_ms` is that it
+      // says when a fix last actually made it out, not when one was last attempted.
+      await stampWatermark(this.kv, 'publish').catch(() => undefined);
       span.setStatus('ok');
       return seq;
     } catch (err) {
@@ -1886,6 +1892,7 @@ export class LocationSharingService implements FixPublisher {
         const uploaded = await uploadTrailContent(this.stashConfig.baseUrl, this.stashConfig.psk);
         span.setAttribute('content_uploaded', uploaded);
       }
+      await stampWatermark(this.kv, 'push').catch(() => undefined);
       span.setStatus('ok');
     } catch (err) {
       // A failure means these fixes only reach friends who are online now — exactly the gap the
@@ -2036,6 +2043,21 @@ export class LocationSharingService implements FixPublisher {
         battery: () => battery.read(),
       });
       await this.engine.start();
+      // Stamp "a fix last passed the confidence gate" from the engine's own state rather than
+      // from inside it: the engine is a pure unit built on injected ports, and giving it a
+      // storage dependency to write one timestamp would cost more than the timestamp is worth.
+      //
+      // It answers the question the other watermarks cannot. A phone being woken (`wake`) but
+      // publishing nothing (`publish`) has two very different causes — GPS handing us only fixes
+      // the quality gate rejects, or a send path that is broken — and the gap between `fix` and
+      // `publish` is what separates them.
+      let stampedFixAt: number | null = null;
+      this.engineStateStop = this.engine.onState((engineState) => {
+        const at = engineState.lastFixAt;
+        if (at === null || at === stampedFixAt) return;
+        stampedFixAt = at;
+        void stampWatermark(this.kv, 'fix', at).catch(() => undefined);
+      });
       this.bgTaskHandlerStop = registerActiveBackgroundFixHandler(async (fix, parent) => {
         await this.ingestAndTrackLocal(fix, parent);
       });
@@ -2103,6 +2125,15 @@ export class LocationSharingService implements FixPublisher {
         onForeground: () => {
           void this.engine?.flush();
           void this.syncTrail(0);
+          // A foreground record is the fastest way to learn what state a phone came back in —
+          // notably whether the OS still has its location task running, which is exactly what a
+          // process kill takes away. Self-throttled to one per
+          // DEVICE_HEALTH_MIN_INTERVAL_MS, so app-switching does not flood the pipeline.
+          void recordDeviceHealth('foreground');
+          // Coming back to the foreground is the best network opportunity a phone gets, and the
+          // moment a background backlog should leave. `flush` drains the journal, so this is where
+          // everything recorded while the app was frozen or offline finally ships.
+          void getTelemetry().flush();
           // Re-center the revive fence on wherever we are now. A stale fence still works (being far
           // outside it only makes the exit fire sooner), but keeping it current stops a user who
           // never leaves a 200 m radius from having a tripwire they can't trip.
@@ -2255,6 +2286,8 @@ export class LocationSharingService implements FixPublisher {
     this.bgCadenceStop = null;
     this.bgTaskHandlerStop?.();
     this.bgTaskHandlerStop = null;
+    this.engineStateStop?.();
+    this.engineStateStop = null;
     this.bgRefreshHandlerStop?.();
     this.bgRefreshHandlerStop = null;
     this.bgLifecycleStop?.();
@@ -2671,6 +2704,8 @@ export class LocationSharingService implements FixPublisher {
     }
     this.bgTaskHandlerStop?.();
     this.bgTaskHandlerStop = null;
+    this.engineStateStop?.();
+    this.engineStateStop = null;
     this.bgRefreshHandlerStop?.();
     this.bgRefreshHandlerStop = null;
     this.bgLifecycleStop?.();

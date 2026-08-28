@@ -355,8 +355,14 @@ device_dump_event_log() {
            launch_context, action, status, substr(details, 1, 200) AS details
     FROM event_log
     WHERE timestamp >= $2
-      AND action IN ('bg.wake', 'engine.ingest', 'outbox.drain', 'publish.fix', 'trail.push.app',
-                     'dev.command')
+      AND action IN ('bg.wake', 'bg.dispatch', 'engine.ingest', 'outbox.drain', 'publish.fix',
+                     'trail.push.app', 'dev.command',
+                     -- The silent-path spans. These are the rows that explain an EMPTY pipeline:
+                     -- storage running in memory, an unreadable outbox, a cadence the OS refused,
+                     -- an engine stuck in error. Without them a broken device dumps nothing and
+                     -- looks identical to an idle one.
+                     'device.health', 'storage.degraded', 'outbox.load', 'cadence.rearm',
+                     'engine.failed', 'bg.selfheal', 'bg.session', 'revive.arm')
     ORDER BY timestamp DESC;
   " 2>/dev/null || true
   [ "$plat" = "android" ] && rm -f "$tmp" "$tmp-wal" "$tmp-shm"

@@ -1,4 +1,4 @@
-import type { SpanContext } from '@/features/dev/telemetry';
+import { getTelemetry, type SpanContext } from '@/features/dev/telemetry';
 import type { LocationFix } from '../../core/types';
 import type { FixOutbox } from './fix-outbox';
 
@@ -29,6 +29,7 @@ export function createBackgroundFixDispatcher(
     async dispatch(fixes, parent): Promise<void> {
       const queued: LocationFix[] = [];
       const handler = activeHandler;
+      let activeFailures = 0;
 
       for (const fix of fixes) {
         if (!handler) {
@@ -38,10 +39,27 @@ export function createBackgroundFixDispatcher(
         try {
           await handler(fix, parent);
         } catch (error) {
+          activeFailures += 1;
           options.onActiveError?.(error);
           queued.push(fix);
         }
       }
+
+      // Which branch a wake took decides everything after it — whether the mounted node published
+      // directly or a short-lived headless node had to be built — and it was previously
+      // reconstructible only by inferring it from which spans happened to follow. Recording it
+      // makes "the mounted runtime silently stopped accepting fixes" a single query.
+      getTelemetry()
+        .startSpan('bg.dispatch', {
+          parent,
+          attributes: {
+            branch: handler ? 'mounted' : 'headless',
+            fixes: fixes.length,
+            queued: queued.length,
+            active_failures: activeFailures,
+          },
+        })
+        .end();
 
       if (queued.length === 0) return;
       for (const fix of queued) {

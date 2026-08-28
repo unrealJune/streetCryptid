@@ -12,6 +12,7 @@ import {
   saveTeardownWatermark,
 } from '../persistence';
 import { backgroundOutbox } from './background-outbox';
+import { recordDeviceHealth } from './device-health';
 import type { PersistentKV } from './fix-outbox';
 import { reportStrandedTeardown } from './teardown-watermark';
 import { isBackgroundLocationRunning, startBackgroundLocation } from './background-task';
@@ -135,7 +136,21 @@ async function session<T>(opts: HeadlessSession<T>): Promise<T> {
       .end();
     return opts.fallback;
   }
-  if (opts.precheck && !(await opts.precheck())) return opts.fallback;
+  if (opts.precheck && !(await opts.precheck())) {
+    // Without this the commonest benign outcome is indistinguishable from the OS never having
+    // woken us at all — both are silence. It is cheap and it makes "did this phone wake?" a
+    // question the collector can answer.
+    getTelemetry()
+      .startSpan('bg.session', {
+        attributes: {
+          app_state: String(AppState.currentState),
+          trigger: opts.trigger,
+          'sc.drop_reason': 'precheck-empty',
+        },
+      })
+      .end();
+    return opts.fallback;
+  }
 
   const profile = await createCryptidProfileStore().load();
   if (!profile) {
@@ -238,10 +253,20 @@ export async function ensureSharingArmedHeadless(
   parent?: SpanContext
 ): Promise<boolean> {
   const kv = createPersistentKV();
-  if (!(await loadSharingEnabled(kv))) return false;
-  // Not a fallback for the platform's own restore — if the OS already brought the task back (boot
-  // receiver, START_REDELIVER_INTENT), there is nothing to do and nothing to report.
-  if (await isBackgroundLocationRunning()) return false;
+  const skip = (reason: string): false => {
+    getTelemetry()
+      .startSpan('bg.selfheal', {
+        parent,
+        attributes: { trigger, platform: Platform.OS, 'sc.drop_reason': reason },
+      })
+      .end();
+    return false;
+  };
+  if (!(await loadSharingEnabled(kv))) return skip('sharing-disabled');
+  // The OS may have brought the task back on its own (boot receiver, START_REDELIVER_INTENT), in
+  // which case there is nothing to do — but "nothing to do" and "never ran" are different
+  // diagnoses on a phone that has gone quiet, so both are recorded.
+  if (await isBackgroundLocationRunning()) return skip('already-running');
 
   const span = getTelemetry().startSpan('bg.selfheal', {
     parent,
@@ -317,7 +342,7 @@ export function flushBackgroundOutboxHeadless(parent?: SpanContext): Promise<num
  * then publish anything still queued. Driven by the `expo-background-task` scheduler — see
  * `refresh-task.ts`. No-op while the app is active (the foreground lifecycle already syncs).
  */
-export function runBackgroundRefreshHeadless(parent?: SpanContext): Promise<void> {
+export async function runBackgroundRefreshHeadless(parent?: SpanContext): Promise<void> {
   // If a mounted runtime is alive it owns the process-wide native node. On Android that runtime
   // stays alive while backgrounded (the location foreground service), so `AppState` is NOT 'active'
   // and the `session()` guard alone would let us spin up a SECOND node here — whose `createNode`
@@ -327,10 +352,26 @@ export function runBackgroundRefreshHeadless(parent?: SpanContext): Promise<void
   // periodic wake is a regular opportunity to notice that the location task died with a previous
   // process. On Android it is only a backstop — boot and process-kill are already covered by the
   // platform (see `ensureSharingArmedHeadless`) — and is expected to be refused when it does fire.
-  void ensureSharingArmedHeadless('refresh', parent);
+  // Deliberately not awaited before the work below — the self-heal is a backstop and must not
+  // delay a refresh. It IS awaited before the health record, so what that record says about
+  // `task.location_running` reflects the state this wake left the phone in, not the one it
+  // found. `ensureSharingArmedHeadless` never rejects.
+  const selfHeal = ensureSharingArmedHeadless('refresh', parent);
 
-  const runMounted = getActiveRefreshHandler();
-  if (runMounted) return runMounted(parent);
+  try {
+    const runMounted = getActiveRefreshHandler();
+    if (runMounted) return await runMounted(parent);
+    return await runRefresh(parent);
+  } finally {
+    // The periodic wake is the only moment we are reliably given on a backgrounded phone, so it
+    // is where liveness gets asserted. In `finally` because a refresh that FAILED is exactly when
+    // the state record is most worth having.
+    await selfHeal.catch(() => false);
+    await recordDeviceHealth('refresh', parent);
+  }
+}
+
+function runRefresh(parent?: SpanContext): Promise<void> {
   return runHeadless<void>({
     fallback: undefined,
     trigger: 'refresh',
