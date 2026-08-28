@@ -6,8 +6,10 @@ import {
   type SpanContext,
   withEventLogLaunchContext,
 } from '@/features/dev/telemetry';
+import { createPersistentKV } from '../persistence';
 import type { LocationFix } from '../../core/types';
 import type { AccuracyTier, ActivityKind } from './types';
+import { stampWatermark } from './watermarks';
 
 /**
  * Lazily resolve `expo-task-manager`. Its module eval calls `requireNativeModule('ExpoTaskManager')`,
@@ -64,6 +66,18 @@ function taskManager(): typeof import('expo-task-manager') {
 /** TaskManager task name. Must be stable across app launches. */
 export const BACKGROUND_LOCATION_TASK = 'streetcryptid.background-location';
 
+/**
+ * Record that the OS delivered to us, whatever it delivered.
+ *
+ * Stamped for EVERY wake including the empty and errored ones, because the question this answers
+ * is "is the OS still calling us?" — and a phone being woken but handed nothing is a completely
+ * different fault from one that is no longer being woken. Best-effort; a missed stamp costs a
+ * stale age on the next `device.health` record and nothing else.
+ */
+async function stampWake(): Promise<void> {
+  await stampWatermark(createPersistentKV(), 'wake').catch(() => undefined);
+}
+
 /** Batch sink used by the globally registered TaskManager handler. */
 export interface BackgroundFixSink {
   onBackgroundFixes(fixes: readonly LocationFix[], parent?: SpanContext): Promise<void>;
@@ -101,14 +115,32 @@ export function defineBackgroundLocationTask(makeSink: () => BackgroundFixSink):
   taskManager().defineTask(BACKGROUND_LOCATION_TASK, ({ data, error }) =>
     withEventLogLaunchContext('background', async () => {
       const telemetry = getTelemetry();
+      // Both of the early exits below emit a `bg.wake` span. They used to emit none, which made
+      // an errored or empty delivery indistinguishable from the OS never having woken us — and
+      // "did this phone wake at all?" is the first question every background investigation asks.
+      // A wake is a wake even when it carried nothing; the drop reason says what kind.
       if (error) {
         console.warn('[background-location] task error', error);
         telemetry.log('error', `background task error: ${error.message}`);
+        const span = telemetry.startSpan('bg.wake', {
+          attributes: { fixes: 0, 'sc.drop_reason': 'os-task-error' },
+        });
+        span.recordError(error);
+        span.setAttributes(await getSystemSnapshot());
+        span.end();
+        await stampWake();
         await telemetry.flush();
         return;
       }
       const locations = (data as { locations?: Location.LocationObject[] } | undefined)?.locations;
       if (!locations || locations.length === 0) {
+        const span = telemetry.startSpan('bg.wake', {
+          attributes: { fixes: 0, 'sc.drop_reason': 'no-fixes' },
+        });
+        span.setAttributes(await getSystemSnapshot());
+        span.end();
+        await stampWake();
+        await telemetry.flush();
         return;
       }
       // One `bg.wake` span per OS delivery — THE anchor when debugging dropped pings: it says the
@@ -116,6 +148,7 @@ export function defineBackgroundLocationTask(makeSink: () => BackgroundFixSink):
       // explicitly so outbox/publish/native spans form one hierarchy without AsyncLocalStorage.
       const span = telemetry.startSpan('bg.wake', { attributes: { fixes: locations.length } });
       span.setAttributes(await getSystemSnapshot());
+      await stampWake();
       try {
         await makeSink().onBackgroundFixes(locations.map(toFix), span.context);
         span.setStatus('ok');

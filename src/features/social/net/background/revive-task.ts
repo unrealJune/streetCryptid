@@ -134,6 +134,19 @@ function parseLastArm(raw: string | null): LastArm | null {
 }
 
 /**
+ * When the fence was last successfully armed, or null if it never has been.
+ *
+ * Read by the `device.health` record. An armed-at age that keeps growing while the app believes
+ * sharing is on means the tripwire is stale — on iOS that is the difference between a phone that
+ * can be resurrected after a process kill and one that cannot, and it is otherwise invisible
+ * until the day it fails to fire.
+ */
+export async function loadReviveFenceArmedAt(kv: PersistentKV): Promise<number | null> {
+  const last = parseLastArm(await kv.get(LAST_ARM_KEY).catch(() => null));
+  return last?.at ?? null;
+}
+
+/**
  * Great-circle distance in metres. A local copy, as in `fix-outbox.ts` / `fix-quality.ts` — the
  * alternative is exporting one of those and dragging its module into the cold-launch graph.
  */

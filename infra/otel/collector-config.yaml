@@ -21,21 +21,71 @@ processors:
     spike_limit_mib: 128
   batch: {}
 
+connectors:
+  # Derives RED metrics from the spans already flowing through, so every existing instrumentation
+  # point gains a long-horizon time series with no app change at all.
+  #
+  # This is what makes absence answerable. Traces expire (7 days, below), and the ping-flow
+  # dashboard's "rate" panels are TraceQL queries over that window — so "has this phone woken at
+  # all this week?" had nothing to answer it. A counter per (device, span name) kept for 90 days
+  # does, and it is what the device-health dashboard's top row reads to surface the 2026-08-18
+  # class of outage on the first morning rather than the second day.
+  spanmetrics:
+    # Pinned rather than left to the connector's default, because the default has moved between
+    # collector releases and every dashboard query is written against the resulting Prometheus
+    # names (`traces_span_metrics_calls_total`,
+    # `traces_span_metrics_duration_milliseconds_bucket`). A silent rename would not break anything
+    # loudly — it would just make every panel go quiet, which is the one failure mode this stack
+    # must not have.
+    namespace: traces.span.metrics
+    # `service.name` and `span.name` are always included. These are the cuts we actually query by.
+    # A dimension is looked up on the span first, then on its resource — so `device.id` and
+    # `service.version` (resource) and `sc.drop_reason` / `trigger` (span) all resolve.
+    dimensions:
+      - name: device.id
+      - name: service.instance.id
+      - name: os.name
+      - name: service.version
+      - name: sc.drop_reason
+      - name: trigger
+    # Deliberately NOT `sc.author`, `sc.seq` or `sc.entry_hash`: those are per-envelope and would
+    # make a new time series for every ping. Follow one envelope in Tempo; count them here.
+    histogram:
+      explicit:
+        buckets: [10ms, 100ms, 250ms, 1s, 5s, 15s, 60s]
+    exemplars:
+      enabled: true
+    metrics_flush_interval: 15s
+
 exporters:
   otlp/tempo:
     endpoint: tempo:4317
     tls:
       insecure: true
-  # Loki ≥3.0 ingests OTLP natively at /otlp — no legacy loki exporter / label mapping needed.
+  # Loki >= 3.0 ingests OTLP natively at /otlp — no legacy loki exporter / label mapping needed.
   otlphttp/loki:
     endpoint: http://loki:3100/otlp
+  prometheusremotewrite:
+    endpoint: http://prometheus:9090/api/v1/write
+    tls:
+      insecure: true
+    # Without this the resource attributes are dropped and every series looks identical across
+    # devices — which would defeat the point of adding them.
+    resource_to_telemetry_conversion:
+      enabled: true
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [otlp/tempo]
+      exporters: [otlp/tempo, spanmetrics]
+    metrics:
+      # `otlp` is listed so a component that ever emits real metrics is already wired; today
+      # everything on this pipeline comes from the spanmetrics connector.
+      receivers: [otlp, spanmetrics]
+      processors: [memory_limiter, batch]
+      exporters: [prometheusremotewrite]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]

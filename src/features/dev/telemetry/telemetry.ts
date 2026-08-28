@@ -1,5 +1,7 @@
-import { createOtlpExporter, type OtlpExporter, type OtlpTransport } from './exporter';
+import type { OtlpTransport } from './exporter';
+import { createShipper, type Shipper } from './shipper';
 import { flushEventLog, recordEventLog } from './event-log';
+import { getBuildResource, resolveDeviceId } from './identity';
 import { newSpanId, newTraceId } from './ids';
 import { getOtelConfig } from './otel-config';
 import { getDeviceResource } from './resource';
@@ -110,14 +112,36 @@ function recordSpan(span: FinishedSpan): void {
 /** Build a live telemetry instance. Exported for tests; app code uses {@link getTelemetry}. */
 export function createTelemetry(options: CreateTelemetryOptions): Telemetry {
   const now = options.now ?? Date.now;
-  const exporter: OtlpExporter | undefined = options.endpoint
-    ? createOtlpExporter({
+  // Held here rather than inside the shipper because `setResourceAttributes` can land late (the
+  // iroh endpoint id only exists once keys do) and the shipper reads this at SEND time — so a
+  // batch drained after identity resolved is stamped with it, including rows recorded before.
+  const resource: Attributes = { 'service.name': 'streetcryptid-app', ...options.resource };
+  const shipper: Shipper | undefined = options.endpoint
+    ? createShipper({
         endpoint: options.endpoint,
-        resource: { 'service.name': 'streetcryptid-app', ...options.resource },
+        resource: () => resource,
         transport: options.transport,
         now,
       })
     : undefined;
+
+  // The stable device id lives in SQLite, so it cannot be read synchronously — but OTLP resource
+  // attributes are serialized per BATCH at flush time, not when a span is created. Starting the
+  // read here and awaiting it in `flush()` therefore attributes every span in the first batch,
+  // including the ones recorded before this settled. Failure is swallowed: telemetry that cannot
+  // name the device is still far better than no telemetry.
+  let identity: Promise<void> | undefined;
+  function ensureIdentity(): Promise<void> {
+    if (!shipper) return Promise.resolve();
+    identity ??= resolveDeviceId().then(
+      (id) => {
+        if (id) resource['device.id'] = id;
+      },
+      () => {}
+    );
+    return identity;
+  }
+  void ensureIdentity();
 
   function startSpan(name: string, opts: StartSpanOptions = {}): Span {
     const context: SpanContext = {
@@ -171,14 +195,15 @@ export function createTelemetry(options: CreateTelemetryOptions): Telemetry {
           status,
           statusMessage,
         };
+        // The journal IS the export queue now — `recordSpan` persisting this row is what makes it
+        // shippable. There is no second in-memory copy to lose.
         recordSpan(finished);
-        exporter?.enqueueSpan(finished);
       },
     };
   }
 
   return {
-    enabled: exporter !== undefined,
+    enabled: shipper !== undefined,
     startSpan,
     async withSpan<T>(
       name: string,
@@ -208,13 +233,16 @@ export function createTelemetry(options: CreateTelemetryOptions): Telemetry {
         status: severity === 'error' ? 'error' : 'unset',
         details: { attributes, context },
       });
-      exporter?.enqueueLog({ timeMs, severity, body, attributes, context });
     },
     setResourceAttributes(attrs: Attributes): void {
-      exporter?.setResourceAttributes(attrs);
+      Object.assign(resource, attrs);
     },
     async flush(): Promise<void> {
-      await Promise.all([exporter?.flush() ?? Promise.resolve(), flushEventLog()]);
+      await ensureIdentity();
+      // Persist first, then ship: the shipper reads the journal, so draining before the pending
+      // writes have landed would leave this wake's own spans behind for the next one.
+      await flushEventLog();
+      await shipper?.drain();
     },
   };
 }
@@ -230,7 +258,7 @@ export function getTelemetry(): Telemetry {
     const config = getOtelConfig();
     singleton = createTelemetry({
       endpoint: config?.endpoint,
-      resource: getDeviceResource(),
+      resource: { ...getDeviceResource(), ...getBuildResource() },
     });
   }
   return singleton;

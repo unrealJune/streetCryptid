@@ -3,6 +3,7 @@ import { AppState } from 'react-native';
 import type { ContactCard, IncomingFix } from '../../core/types';
 import {
   createTelemetry,
+  resetEventLogForTesting,
   setTelemetryForTesting,
   type SpanContext,
 } from '@/features/dev/telemetry';
@@ -228,6 +229,9 @@ describe('LocationSharingService — durable trail wiring', () => {
     mockHolder.mod = new FakeNativeModule();
     mockHolder.stashConfig = null;
     setTelemetryForTesting(undefined);
+    // The durable journal is what the shipper drains, so spans carry between tests unless it is
+    // cleared here too — the telemetry singleton is no longer the whole of the exported state.
+    resetEventLogForTesting();
   });
 
   it('imports a friend docs namespace (their docTicket) when added', async () => {
@@ -610,6 +614,9 @@ describe('LocationSharingService — live watch pull', () => {
     mockHolder.mod = new FakeNativeModule();
     mockHolder.stashConfig = null;
     setTelemetryForTesting(undefined);
+    // The durable journal is what the shipper drains, so spans carry between tests unless it is
+    // cleared here too — the telemetry singleton is no longer the whole of the exported state.
+    resetEventLogForTesting();
     appStateListeners.clear();
     jest.spyOn(AppState, 'addEventListener').mockImplementation(((
       _event: string,
@@ -761,6 +768,9 @@ describe('LocationSharingService — symmetric lanes (null fixes)', () => {
     mockHolder.mod = new FakeNativeModule();
     mockHolder.stashConfig = null;
     setTelemetryForTesting(undefined);
+    // The durable journal is what the shipper drains, so spans carry between tests unless it is
+    // cleared here too — the telemetry singleton is no longer the whole of the exported state.
+    resetEventLogForTesting();
   });
 
   /** A pool where we share with `friend` and merely watch `watcherFriend`. */
@@ -886,6 +896,9 @@ describe('LocationSharingService — session health and resync', () => {
     mockHolder.mod = new FakeNativeModule();
     mockHolder.stashConfig = null;
     setTelemetryForTesting(undefined);
+    // The durable journal is what the shipper drains, so spans carry between tests unless it is
+    // cleared here too — the telemetry singleton is no longer the whole of the exported state.
+    resetEventLogForTesting();
   });
 
   async function shared(): Promise<LocationSharingService> {

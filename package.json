@@ -74,6 +74,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
+    "check:release-telemetry": "node scripts/check-release-telemetry.mjs",
     "test": "jest",
     "reset-project": "node ./scripts/reset-project.js"
   },

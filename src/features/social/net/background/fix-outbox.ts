@@ -100,13 +100,42 @@ export function createFixOutbox(opts: OutboxOptions): FixOutbox {
     return result;
   }
 
+  /**
+   * Report that the durable queue could not be read back.
+   *
+   * Deliberately a span rather than only a log: this is silent data loss on the send path — the
+   * fixes are gone and the next drain will find nothing — and it needs to be countable and
+   * alertable, not just findable by someone already reading logs.
+   */
+  function reportOutboxLost(reason: string, rawLength: number, error?: unknown): void {
+    getTelemetry()
+      .startSpan('outbox.load', {
+        attributes: {
+          storage_key: storageKey,
+          raw_length: rawLength,
+          'sc.drop_reason': `outbox-${reason}`,
+          ...(error !== undefined
+            ? { 'exception.message': error instanceof Error ? error.message : String(error) }
+            : {}),
+        },
+      })
+      .end();
+  }
+
   async function load(): Promise<OutboxItem[]> {
     const raw = await opts.kv.get(storageKey);
     if (raw === null) return [];
     try {
       const parsed = JSON.parse(raw) as OutboxItem[];
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
+      if (Array.isArray(parsed)) return parsed;
+      reportOutboxLost('not-an-array', raw.length);
+      return [];
+    } catch (error) {
+      // Every fix captured since the last successful drain is gone, and the old behaviour was to
+      // return an empty list and carry on — so the phone went quiet with no error anywhere. The
+      // recovery is still to start from empty (there is nothing else to do with unparseable
+      // bytes), but it is no longer invisible.
+      reportOutboxLost('parse-failed', raw.length, error);
       return [];
     }
   }

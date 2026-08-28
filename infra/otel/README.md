@@ -1,14 +1,31 @@
 # Developer observability (OTEL) — "who dropped my ping?"
 
-A self-hosted OpenTelemetry stack that receives **traces + logs from every component of
-streetCryptid**: the app's JS layer, the native Rust core (`iroh-location`, including iroh's own
-relay/`net_report`/magicsock diagnostics), and the [trail-stash](https://github.com/unrealJune/trail-stash)
-server. Its whole purpose is to reconstruct the life of a single location ping across
-device A → stash → devices B/C/D, and to show exactly where and why one died.
+A self-hosted OpenTelemetry stack that receives **traces, logs and span-derived metrics from every
+component of streetCryptid**: the app's JS layer, the native Rust core (`iroh-location`, including
+iroh's own relay/`net_report`/magicsock diagnostics), and the
+[trail-stash](https://github.com/unrealJune/trail-stash) server.
 
-**Developer-only.** Telemetry code is inert unless an endpoint is configured, production builds
-never configure one, and the mobile Rust cores can compile it out entirely
-(`--no-default-features`). Nothing here runs in production.
+It answers two different questions, and it is worth knowing which one you have:
+
+1. **"Where did this ping die?"** — follow one envelope across device A → stash → devices B/C/D.
+   That is the correlation model and the cookbook below, and the `ping flow` dashboard.
+2. **"Why is this phone doing nothing at all?"** — the harder one, because a phone that has stopped
+   being woken emits no spans, no logs and no errors. It looks exactly like a phone whose owner is
+   sitting still. That is what `device.health`, the metrics pipeline and the
+   `device health` dashboard are for; see [Reading silence](#reading-silence).
+
+**Strippable, and provably so.** `EXPO_PUBLIC_DEV_TELEMETRY=1` is what compiles telemetry into the
+app at all: without it `metro.config.js` resolves `@/features/dev/telemetry` to `index.noop.ts` and
+the encoder, shipper, journal and console bridge are **not in the bundle**. The mobile Rust core has
+the same property via `--no-default-features`.
+
+**But it is currently ON for every profile, `production` included** — deliberately and temporarily,
+because production _is_ TestFlight for us right now and the phones we debug are the ones we install
+the store build on. `scripts/check-release-telemetry.mjs` fails CI if a store-bound profile enables
+telemetry _without_ a matching entry in its `ACKNOWLEDGED` map; the entry there records why and what
+ends it. Deleting that entry is how the exception gets revoked — the check re-arms immediately.
+Before the app reaches anyone outside our own TestFlight group this has to be settled one way or the
+other: strip it, or declare the collection in App Store Connect and the privacy policy.
 
 ## Quick start
 
@@ -17,15 +34,21 @@ cd infra/otel
 docker compose up -d
 ```
 
-- Grafana: <http://localhost:3000> (anonymous admin — LAN-only dev tool)
+- Grafana: <http://localhost:3000> (anonymous admin — LAN-only dev tool). Both dashboards are
+  provisioned from `grafana/`, so a fresh stack comes up with them already loaded — edits made in
+  the UI are overwritten on restart, so commit them to `grafana/dashboards/`.
 - Collector OTLP intake: `http://<lan-ip>:4318` (HTTP) / `:4317` (gRPC)
+
+Retention: traces 7 days (Tempo), logs 30 days (Loki), span-derived metrics 90 days (Prometheus).
+The split is deliberate — traces are big and are only ever read while investigating something
+recent; the metrics are what answer "when did this last work?", which is usually asked days later.
 
 Point the components at it (use the machine's **LAN IP**, not `localhost` — phones must reach it):
 
-| Component              | How                                                                                                                                                                                                                                                              |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| App (JS + native core) | `.env.local`: `EXPO_PUBLIC_OTEL_ENDPOINT=http://192.168.1.10:4318` — restart Metro. For internal/TestFlight builds set the same key in the `development`/`preview` profile `env` in `eas.json` (a publicly reachable collector URL). Production leaves it unset. |
-| trail-stash            | env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<host>:4318` (Helm: `config.otel.endpoint`). Dormant when unset.                                                                                                                                                         |
+| Component              | How                                                                                                                                                                                                                                                                |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| App (JS + native core) | `.env.local`: `EXPO_PUBLIC_DEV_TELEMETRY=1` **and** `EXPO_PUBLIC_OTEL_ENDPOINT=http://192.168.1.10:4318` — restart Metro (both are inlined at bundle time). every profile in `eas.json` currently sets them, `production` included — see **Developer-only** above. |
+| trail-stash            | env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<host>:4318` (Helm: `config.otel.endpoint`). Dormant when unset.                                                                                                                                                           |
 
 ## The correlation model
 
@@ -64,19 +87,19 @@ and `service.instance.id` (short endpoint id) — so "device A" vs "device B" is
 ```
 device A                                stash                       device B
 ────────                                ─────                       ────────
-bg.wake            (fixes, net/battery/app state)
-└ engine.ingest    (motion, decision, sc.drop_reason?)
-  └ outbox.enqueue (coalesced / overflow?)
-  └ outbox.drain   (published/retained, publish.failed reason)
-    └ publish.fix        (sc.seq)
-      ├ gossip.publish*  (sc.entry_hash)   ─ live path ─────────►  gossip.receive (sc.entry_hash, outcome)
-      └ docs.write*      (sc.entry_hash)   ─ LOCAL replica only
-  └ trail.push.app                         ─ durable path ─►  stash.entry.received (sc.entry_hash)
-    └ trail.push*        (entries_sent, finished)
-                                            └ stash.wake.push ──►  push.wake (LINK to stash trace)
-                                                                   └ trail.sync.app (recovered)
-                                                                     └ trail.backfill logs (sc.entry_hash)
-                                                                     └ fix.received.app (sc.seq, sc.drop_reason?)
+bg.wake            (fixes, net/battery/app state; ALSO emitted with fixes=0 for an
+│                    empty or errored delivery — a wake is a wake)
+└ bg.dispatch      (branch: mounted | headless)
+  └ engine.ingest  (motion, decision, sc.drop_reason?)
+    └ outbox.enqueue (coalesced / overflow?)
+    └ outbox.drain   (published/retained, publish.failed reason)
+      └ publish.fix        (sc.seq)
+        ├ gossip.publish*  (sc.entry_hash)  ─ live path ───────►  gossip.receive (sc.entry_hash, outcome)
+        └ docs.write*      (sc.entry_hash)  ─ LOCAL replica only
+    └ trail.push.app                        ─ durable path ─►  stash.entry.received (sc.entry_hash)
+      └ trail.push*        (entries_sent, finished)
+                                                                  └ trail.sync.app (recovered)
+                                                                    └ fix.received.app (sc.seq, drop?)
 ```
 
 `docs.write` does **not** reach the stash on its own — it writes the local replica, and iroh-docs
@@ -85,6 +108,27 @@ broadcasts a local insert only for namespaces `start_sync` has marked as syncing
 `trail.push.app` after it in the same wake is a fix that never left the phone.
 
 `*` Native spans are direct children of `publish.fix` on Android and iOS.
+
+Device B is no longer woken by the stash: push-token upload was removed (ARCHITECTURE §10), so
+there is no `stash.wake.push` → `push.wake` hop any more. B pulls on its own schedule — the
+periodic refresh or the live-request poll — which is why a gap of up to one refresh interval
+between a push and the friend seeing it is normal rather than a fault.
+
+### Spans that fire when the pipeline does NOT run
+
+These exist because their absence was indistinguishable from a phone that was never woken. None of
+them describe a ping; all of them describe why there wasn't one.
+
+| Span                                                   | Says                                                                               |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `device.health`                                        | the periodic liveness record — OS permissions, task registration, `last_*_age_ms`  |
+| `storage.degraded`                                     | persistence fell back to memory; nothing this device saves survives a restart      |
+| `outbox.load` (`sc.drop_reason=outbox-*`)              | the durable queue was unreadable, so every fix waiting in it is gone               |
+| `cadence.rearm`                                        | the OS refused a cadence change, so sampling is pinned at an interval nobody chose |
+| `engine.failed`                                        | `doFlush` / `heartbeat` threw; the engine is in `error` and only the UI knew       |
+| `bg.selfheal` (`sharing-disabled` / `already-running`) | the self-heal ran and had nothing to do — distinct from never running              |
+| `bg.session` (`precheck-empty`)                        | a headless wake found an empty outbox — distinct from no wake at all               |
+| `revive.arm`                                           | whether the iOS tripwire is actually armed, rather than only believed to be        |
 
 ## Follow-one-ping cookbook (TraceQL, in Grafana → Explore → Tempo)
 
@@ -198,6 +242,42 @@ From any span, "Logs for this span" (trace→logs) jumps to that instance's logs
    where `sc.drop_reason=unknown-or-removing-author` is the last gate that can silently eat a fix.
    A gap of up to a backfill interval between steps 5 and 6 is now normal.
 
+## Reading silence
+
+A phone that has stopped working produces _less_ signal, not more, so the usual "search for the
+error" reflex finds nothing and reads as "everything is fine". Two mechanisms make that legible,
+and it is worth knowing what each rules out.
+
+**1. Late data still arrives.** The app ships telemetry from its durable SQLite journal
+(`shipper.ts`), not from an in-memory queue, and marks a row sent only once the collector has
+accepted it. A background wake with no network keeps its telemetry and delivers it hours later
+**with the original timestamps** — so a gap that later fills in retrospectively was a connectivity
+problem, and a gap that stays empty is a phone that genuinely did nothing. Before this, both cases
+produced the same permanent hole, because the old exporter discarded any batch it could not POST.
+
+**2. Liveness is asserted, not inferred.** `device.health` is emitted every periodic refresh and on
+foreground resume. Its value is in the _mismatches_:
+
+| Read                                                   | Means                                                               |
+| ------------------------------------------------------ | ------------------------------------------------------------------- |
+| `sharing.enabled=true` + `task.location_running=false` | the OS is not delivering location — the core background failure     |
+| `perm.background` not `granted`                        | "Always" was refused or revoked; iOS can downgrade it silently      |
+| `perm.accuracy=reduced`                                | precise location off; every fix will fail the quality gate          |
+| `task.refresh_status=restricted`                       | Background App Refresh is off — the periodic task will never run    |
+| `storage.backend=memory`                               | outbox, friend pool and sharing intent are lost on every restart    |
+| `telemetry.queued` large and growing                   | the device is fine; it cannot reach **us**                          |
+| `last_wake_age_ms` much larger than the publish age    | it is being woken and choosing not to publish — read the drop spans |
+
+The top row of the device-health dashboard carries those checks as counts — devices with no
+`bg.wake` in 6h, no `device.health` in 2h, any terminal native-runtime state, and publishes with no
+pushes. They are **deliberately not alerts**: nothing routes to Alertmanager or Discord. The
+conditions are worth seeing when you open the page, not worth waking someone for, and a rule that
+pages at 3am for a phone in a pocket would be turned off within a week anyway.
+
+Each tile ends in `or vector(0)`, which matters more than it looks: an empty PromQL result renders
+as "No data", which is indistinguishable from a broken query — precisely the ambiguity this
+dashboard exists to remove. A hard `0` says the check ran and found nothing.
+
 ## Privacy posture
 
 - Join keys are 10-hex-char truncations — enough to correlate a dev session, not full identities.
@@ -205,4 +285,14 @@ From any span, "Logs for this span" (trace→logs) jumps to that instance's logs
   Span/log _attributes_ from dependencies (e.g. iroh's socket addresses on the phones' logs) are
   NOT redacted — which is exactly why this endpoint must always be a developer-controlled
   collector, never a hosted log service, and why production builds never configure one.
-- Location coordinates are never put on spans by our instrumentation.
+- Location coordinates are never put on spans by our instrumentation. Since the shipper drains the
+  journal rather than exporting directly, everything sent is additionally run through the journal's
+  redaction (`sanitize` in `event-log.ts`) on the way in — a strict improvement over the old path,
+  which shipped raw attributes.
+- **An OTLP collector accepts whatever is POSTed to it unless you put auth in front.** Fine for a
+  LAN stack that only exists while you are looking at it. Any collector reachable from the public
+  internet wants a bearer token or mTLS in front of it before phones are pointed at it, or it will
+  eventually be found and written to.
+  Note that the endpoint cannot be kept secret by hiding it: `EXPO_PUBLIC_*` values are inlined
+  into the app bundle, so anyone with the binary can read it out. Not publishing it narrows
+  drive-by discovery; only auth on the collector actually closes it.

@@ -1,5 +1,6 @@
 import type { BatterySource } from './battery-source';
 import type { BackgroundStartConfig } from './background-task';
+import { getTelemetry } from '@/features/dev/telemetry';
 import type { EngineState } from './location-engine';
 import type { SamplingDecision } from './types';
 
@@ -113,6 +114,22 @@ export function createCadenceController(opts: CadenceControllerOptions): Cadence
                 await provider.reprogram(target);
                 armed = target;
               } catch (error) {
+                // This is not a dropped fix, it is a WRONG CADENCE that persists: the OS keeps
+                // delivering at whatever interval was last successfully armed, so a phone can look
+                // perfectly healthy while sampling at a rate nobody chose. Nothing downstream can
+                // infer it, which is why it gets its own span rather than only `onError`.
+                getTelemetry()
+                  .startSpan('cadence.rearm', {
+                    attributes: {
+                      'requested.interval_ms': target.timeIntervalMs,
+                      'requested.distance_m': target.distanceIntervalM,
+                      'armed.interval_ms': armed?.timeIntervalMs,
+                      'armed.distance_m': armed?.distanceIntervalM,
+                      'sc.drop_reason': 'cadence-rearm-failed',
+                      'exception.message': error instanceof Error ? error.message : String(error),
+                    },
+                  })
+                  .end();
                 onError?.(error);
                 break; // don't spin on a failing re-arm; the next decision reschedules
               }

@@ -25,3 +25,17 @@ datasources:
     uid: loki
     access: proxy
     url: http://loki:3100
+
+  # Span-derived RED metrics (see the spanmetrics connector in collector-config.yaml), kept far
+  # longer than traces. This is what the device-health dashboard — and every absence check on it —
+  # is built on.
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    jsonData:
+      timeInterval: '15s'
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo

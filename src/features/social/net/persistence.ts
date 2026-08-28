@@ -1,3 +1,4 @@
+import { reportStorageDegraded } from './storage-health';
 import type { PoolState } from '../core/pool';
 import type { RatchetActivity } from '../core/types';
 import { InMemoryKV, type PersistentKV } from './background/fix-outbox';
@@ -45,8 +46,9 @@ function trySqlite(): SqliteModule | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports -- lazy native load; see above
     sqlite = require('expo-sqlite') as SqliteModule;
-  } catch {
+  } catch (error) {
     sqlite = null;
+    reportStorageDegraded({ scope: 'open', reason: 'module-missing', fatal: true, error });
   }
   return sqlite;
 }
@@ -98,7 +100,8 @@ function getDb(): Promise<SqliteDb | null> {
         // No legacy table to migrate.
       }
       return db;
-    } catch {
+    } catch (error) {
+      reportStorageDegraded({ scope: 'open', reason: 'open-failed', fatal: true, error });
       return null;
     }
   })();
@@ -118,7 +121,8 @@ class SqliteKV implements PersistentKV {
         key
       );
       return row?.value ?? null;
-    } catch {
+    } catch (error) {
+      reportStorageDegraded({ scope: 'kv.get', reason: 'statement-failed', error });
       return this.fallback.get(key);
     }
   }
@@ -132,7 +136,8 @@ class SqliteKV implements PersistentKV {
         key,
         value
       );
-    } catch {
+    } catch (error) {
+      reportStorageDegraded({ scope: 'kv.set', reason: 'statement-failed', error });
       await this.fallback.set(key, value);
     }
   }
@@ -142,7 +147,8 @@ class SqliteKV implements PersistentKV {
     if (!db) return this.fallback.remove(key);
     try {
       await db.runAsync('DELETE FROM kv WHERE key = ?', key);
-    } catch {
+    } catch (error) {
+      reportStorageDegraded({ scope: 'kv.remove', reason: 'statement-failed', error });
       await this.fallback.remove(key);
     }
   }
@@ -188,7 +194,8 @@ class SqliteTrailStorage implements TrailStorage {
         point.receivedAt,
         point.fix.ts
       );
-    } catch {
+    } catch (error) {
+      reportStorageDegraded({ scope: 'trail.putSelf', reason: 'statement-failed', error });
       await this.fallback.putSelf(point);
     }
   }
@@ -202,7 +209,8 @@ class SqliteTrailStorage implements TrailStorage {
         sinceTs
       );
       return rows.map((row) => rowToPoint({ ...row, author: SELF_AUTHOR }));
-    } catch {
+    } catch (error) {
+      reportStorageDegraded({ scope: 'trail.selfRange', reason: 'statement-failed', error });
       return this.fallback.selfRange(sinceTs);
     }
   }
@@ -239,7 +247,8 @@ class SqliteTrailStorage implements TrailStorage {
         point.via ?? null,
         UNRESOLVED_VIA
       );
-    } catch {
+    } catch (error) {
+      reportStorageDegraded({ scope: 'trail.putFriendLatest', reason: 'statement-failed', error });
       await this.fallback.putFriendLatest(point);
     }
   }
@@ -252,7 +261,8 @@ class SqliteTrailStorage implements TrailStorage {
         'SELECT author, seq, fix, received_at, via FROM friend_latest'
       );
       return rows.map(rowToPoint);
-    } catch {
+    } catch (error) {
+      reportStorageDegraded({ scope: 'trail.friendLatest', reason: 'statement-failed', error });
       return this.fallback.friendLatest();
     }
   }
@@ -263,7 +273,8 @@ class SqliteTrailStorage implements TrailStorage {
     try {
       const res = await db.runAsync('DELETE FROM friend_latest WHERE author = ?', author);
       return res.changes;
-    } catch {
+    } catch (error) {
+      reportStorageDegraded({ scope: 'trail.removeFriend', reason: 'statement-failed', error });
       return this.fallback.removeFriend(author);
     }
   }
@@ -274,7 +285,8 @@ class SqliteTrailStorage implements TrailStorage {
     try {
       const res = await db.runAsync('DELETE FROM self_trail WHERE fix_ts < ?', olderThanTs);
       return res.changes;
-    } catch {
+    } catch (error) {
+      reportStorageDegraded({ scope: 'trail.pruneSelf', reason: 'statement-failed', error });
       return this.fallback.pruneSelf(olderThanTs);
     }
   }
@@ -297,7 +309,8 @@ export async function loadPool(kv: PersistentKV): Promise<PoolState | null> {
       friends: parsed.friends ?? {},
       sharingWith: Array.isArray(parsed.sharingWith) ? parsed.sharingWith : [],
     };
-  } catch {
+  } catch (error) {
+    reportStorageDegraded({ scope: 'pool.load', reason: 'corrupt', error });
     return null;
   }
 }

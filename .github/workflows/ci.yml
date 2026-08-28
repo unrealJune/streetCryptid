@@ -30,6 +30,10 @@ jobs:
             script: lint
           - name: Format
             script: format:check
+          # Guards the one invariant a comment could not: a store build ships no developer
+          # telemetry. See scripts/check-release-telemetry.mjs.
+          - name: Release telemetry
+            script: check:release-telemetry
           - name: Jest
             script: test
     steps:

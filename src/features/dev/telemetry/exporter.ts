@@ -1,31 +1,19 @@
 import type { Attributes, AttrValue, FinishedSpan, LogRecord, LogSeverity } from './types';
 
 /**
- * Minimal OTLP/HTTP JSON exporter. We deliberately do NOT use `@opentelemetry/sdk-trace-*`:
+ * Minimal OTLP/HTTP JSON encoding. We deliberately do NOT use `@opentelemetry/sdk-trace-*`:
  * it assumes web/node globals, drags in ~200KB, and its batch processors misbehave in Hermes
  * headless JS contexts (timers may never fire again once the task returns). This is ~150 lines of
- * proto3-JSON mapping we fully control, with an explicit `flush()` the background task awaits
- * before returning — the one guarantee an SDK can't give us.
+ * proto3-JSON mapping we fully control.
  *
- * Failure policy: telemetry must never break the app. Export errors are swallowed after a single
- * `console.warn` per session; queued items are dropped on failure rather than retried (the
- * collector is a LAN dev tool; unreachable usually means "not running right now").
+ * This module is now pure encoding only. Batching, retry, and the decision about *when* to send
+ * live in `shipper.ts`, which drains the durable journal — the previous in-module queue dropped
+ * whole batches on the first failed POST, which meant a background wake with no network lost its
+ * telemetry permanently. That was precisely the case worth seeing.
  */
 
-/** Injectable transport so tests capture payloads without a network. */
+/** Injectable transport so tests capture payloads without a network. Rejects on failure. */
 export type OtlpTransport = (url: string, jsonBody: string) => Promise<void>;
-
-export interface ExporterOptions {
-  endpoint: string;
-  /** Resource attributes stamped on every batch (service.name etc.). */
-  resource: Attributes;
-  transport?: OtlpTransport;
-  /** Queue length that triggers an eager flush. Default 64. */
-  maxQueue?: number;
-  /** Timer flush interval (ms). Default 5000. */
-  flushIntervalMs?: number;
-  now?: () => number;
-}
 
 const SEVERITY_NUMBER: Record<LogSeverity, number> = {
   debug: 5,
@@ -65,154 +53,79 @@ function toKeyValues(
 
 const SCOPE = { name: 'streetcryptid.dev-telemetry', version: '1' };
 
-export interface OtlpExporter {
-  enqueueSpan(span: FinishedSpan): void;
-  enqueueLog(record: LogRecord): void;
-  /** Serialize + POST everything queued. Awaited by background tasks before they return. */
-  flush(): Promise<void>;
-  /** Merge late-known resource attributes (e.g. service.instance.id after node start). */
-  setResourceAttributes(attrs: Attributes): void;
+/** OTLP `/v1/traces` request body for `batch`, stamped with `resource`. */
+export function spanPayload(resource: Attributes, batch: readonly FinishedSpan[]): string {
+  return JSON.stringify({
+    resourceSpans: [
+      {
+        resource: { attributes: toKeyValues(resource) },
+        scopeSpans: [
+          {
+            scope: SCOPE,
+            spans: batch.map((s) => ({
+              traceId: s.context.traceId,
+              spanId: s.context.spanId,
+              ...(s.parentSpanId ? { parentSpanId: s.parentSpanId } : {}),
+              name: s.name,
+              kind: 1, // INTERNAL — the transport topology is expressed via links/attrs instead
+              startTimeUnixNano: nanos(s.startMs),
+              endTimeUnixNano: nanos(s.endMs),
+              attributes: toKeyValues(s.attributes),
+              events: s.events.map((e) => ({
+                timeUnixNano: nanos(e.timeMs),
+                name: e.name,
+                attributes: toKeyValues(e.attributes),
+              })),
+              links: s.links.map((l) => ({ traceId: l.traceId, spanId: l.spanId })),
+              status:
+                s.status === 'error'
+                  ? { code: 2, ...(s.statusMessage ? { message: s.statusMessage } : {}) }
+                  : s.status === 'ok'
+                    ? { code: 1 }
+                    : {},
+            })),
+          },
+        ],
+      },
+    ],
+  });
 }
 
-export function createOtlpExporter(options: ExporterOptions): OtlpExporter {
-  const maxQueue = options.maxQueue ?? 64;
-  const flushIntervalMs = options.flushIntervalMs ?? 5000;
-  const resource: Attributes = { ...options.resource };
-  const transport: OtlpTransport =
-    options.transport ??
-    (async (url, body) => {
-      await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-      });
-    });
-
-  let spans: FinishedSpan[] = [];
-  let logs: LogRecord[] = [];
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let warned = false;
-  let inflight: Promise<void> = Promise.resolve();
-
-  function scheduleFlush(): void {
-    if (timer !== null) return;
-    timer = setTimeout(() => {
-      timer = null;
-      void flush();
-    }, flushIntervalMs);
-    // Never let a pending batch hold the process open. On device this is a no-op (Hermes has no
-    // `unref`), but under Node — jest — a live exporter that recorded even one span would otherwise
-    // keep the run alive for the whole flush interval after the tests finished. Same idiom as every
-    // timer in `location-sharing.ts`.
-    (timer as unknown as { unref?: () => void }).unref?.();
-  }
-
-  function spanPayload(batch: FinishedSpan[]): string {
-    return JSON.stringify({
-      resourceSpans: [
-        {
-          resource: { attributes: toKeyValues(resource) },
-          scopeSpans: [
-            {
-              scope: SCOPE,
-              spans: batch.map((s) => ({
-                traceId: s.context.traceId,
-                spanId: s.context.spanId,
-                ...(s.parentSpanId ? { parentSpanId: s.parentSpanId } : {}),
-                name: s.name,
-                kind: 1, // INTERNAL — the transport topology is expressed via links/attrs instead
-                startTimeUnixNano: nanos(s.startMs),
-                endTimeUnixNano: nanos(s.endMs),
-                attributes: toKeyValues(s.attributes),
-                events: s.events.map((e) => ({
-                  timeUnixNano: nanos(e.timeMs),
-                  name: e.name,
-                  attributes: toKeyValues(e.attributes),
-                })),
-                links: s.links.map((l) => ({ traceId: l.traceId, spanId: l.spanId })),
-                status:
-                  s.status === 'error'
-                    ? { code: 2, ...(s.statusMessage ? { message: s.statusMessage } : {}) }
-                    : s.status === 'ok'
-                      ? { code: 1 }
-                      : {},
-              })),
-            },
-          ],
-        },
-      ],
-    });
-  }
-
-  function logPayload(batch: LogRecord[]): string {
-    return JSON.stringify({
-      resourceLogs: [
-        {
-          resource: { attributes: toKeyValues(resource) },
-          scopeLogs: [
-            {
-              scope: SCOPE,
-              logRecords: batch.map((r) => ({
-                timeUnixNano: nanos(r.timeMs),
-                severityNumber: SEVERITY_NUMBER[r.severity],
-                severityText: r.severity.toUpperCase(),
-                body: { stringValue: r.body },
-                attributes: toKeyValues(r.attributes),
-                ...(r.context ? { traceId: r.context.traceId, spanId: r.context.spanId } : {}),
-              })),
-            },
-          ],
-        },
-      ],
-    });
-  }
-
-  async function flush(): Promise<void> {
-    if (timer !== null) {
-      clearTimeout(timer);
-      timer = null;
-    }
-    // Chain onto the previous flush so payloads arrive in order and callers can await "everything
-    // enqueued so far is out".
-    inflight = inflight.then(async () => {
-      const spanBatch = spans;
-      const logBatch = logs;
-      spans = [];
-      logs = [];
-      try {
-        if (spanBatch.length > 0) {
-          await transport(`${options.endpoint}/v1/traces`, spanPayload(spanBatch));
-        }
-        if (logBatch.length > 0) {
-          await transport(`${options.endpoint}/v1/logs`, logPayload(logBatch));
-        }
-      } catch (err) {
-        if (!warned) {
-          warned = true;
-          console.warn(
-            `[dev-telemetry] OTLP export to ${options.endpoint} failed (further failures silent):`,
-            err
-          );
-        }
-      }
-    });
-    return inflight;
-  }
-
-  return {
-    enqueueSpan(span: FinishedSpan): void {
-      spans.push(span);
-      if (spans.length >= maxQueue) void flush();
-      else scheduleFlush();
-    },
-    enqueueLog(record: LogRecord): void {
-      logs.push(record);
-      if (logs.length >= maxQueue) void flush();
-      else scheduleFlush();
-    },
-    flush,
-    setResourceAttributes(attrs: Attributes): void {
-      Object.assign(resource, attrs);
-    },
-  };
+/** OTLP `/v1/logs` request body for `batch`, stamped with `resource`. */
+export function logPayload(resource: Attributes, batch: readonly LogRecord[]): string {
+  return JSON.stringify({
+    resourceLogs: [
+      {
+        resource: { attributes: toKeyValues(resource) },
+        scopeLogs: [
+          {
+            scope: SCOPE,
+            logRecords: batch.map((r) => ({
+              timeUnixNano: nanos(r.timeMs),
+              severityNumber: SEVERITY_NUMBER[r.severity],
+              severityText: r.severity.toUpperCase(),
+              body: { stringValue: r.body },
+              attributes: toKeyValues(r.attributes),
+              ...(r.context ? { traceId: r.context.traceId, spanId: r.context.spanId } : {}),
+            })),
+          },
+        ],
+      },
+    ],
+  });
 }
+
+/** The real network transport. Rejects on a non-2xx so the shipper keeps the batch for a retry. */
+export const fetchTransport: OtlpTransport = async (url, body) => {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
+  // A collector that answers 503 has NOT taken the batch. The old exporter ignored the status
+  // entirely and discarded the payload regardless, so a struggling collector silently ate
+  // telemetry that a retry would have delivered.
+  if (!response.ok) {
+    throw new Error(`OTLP export to ${url} failed: HTTP ${response.status}`);
+  }
+};

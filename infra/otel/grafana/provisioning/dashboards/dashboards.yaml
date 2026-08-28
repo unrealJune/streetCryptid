@@ -1,0 +1,16 @@
+# Loads everything in grafana/dashboards/ on startup. Previously the ping-flow dashboard had to be
+# imported by hand, which meant a fresh stack came up without it and each person's copy drifted.
+apiVersion: 1
+
+providers:
+  - name: streetcryptid
+    orgId: 1
+    type: file
+    disableDeletion: false
+    # Edits made in the UI are overwritten on restart, deliberately: the files in git are the
+    # source of truth, so a panel someone fixes has to be committed to survive.
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

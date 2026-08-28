@@ -13,6 +13,26 @@ import type { TrailStore } from './trail-store';
 import type { BatteryState, SamplingDecision } from './types';
 
 /**
+ * Report an engine failure that would otherwise only reach the UI.
+ *
+ * `setState({status:'error'})` is visible on the settings screen and nowhere else, so a
+ * backgrounded phone whose flush or heartbeat keeps throwing is indistinguishable from a
+ * perfectly healthy idle one — and the background case is the only one that matters here,
+ * because there is nobody looking at the screen.
+ */
+function reportEngineFailure(stage: string, message: string): void {
+  getTelemetry()
+    .startSpan('engine.failed', {
+      attributes: {
+        stage,
+        'sc.drop_reason': `engine-${stage}-failed`,
+        'exception.message': message,
+      },
+    })
+    .end();
+}
+
+/**
  * The testable heart of the background service. It owns the loop:
  *
  *   fix (foreground watch OR background task)
@@ -260,6 +280,9 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
       } catch {
         // ignore secondary failure reading pending
       }
+      // The engine going to 'error' is visible in the UI and nowhere else — so a backgrounded
+      // phone whose drain keeps failing looks, from the collector, exactly like one that is idle.
+      reportEngineFailure('flush', message);
       setState({ status: 'error', error: message, pending });
       return 0;
     }
@@ -432,6 +455,7 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
           return 1;
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
+          reportEngineFailure('heartbeat-live', message);
           setState({ status: 'error', error: message });
           return 0;
         }
@@ -446,6 +470,7 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
         return published;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        reportEngineFailure('heartbeat-ambient', message);
         setState({ status: 'error', error: message });
         return 0;
       }

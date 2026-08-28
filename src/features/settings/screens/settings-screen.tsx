@@ -16,6 +16,7 @@ import { ProfileOnboardingPreview } from '@/features/account/components/profile-
 import { AppProvenanceDetails } from '../components/app-provenance';
 import { AuthorIdRow } from '../components/author-id-row';
 import { DebugLocationControls } from '../components/debug-location-controls';
+import { DEV_TELEMETRY_ENABLED } from '@/features/dev/telemetry';
 import { EventLogPanel } from '../components/event-log-panel';
 import { IdentityRow } from '../components/identity-row';
 import { LocationAccessRow } from '../components/location-access-row';
@@ -164,7 +165,11 @@ export default function SettingsScreen() {
           onPush={forceLocationPush}
         />
         <ProfileOnboardingPreview accent={chrome.green} />
-        <EventLogPanel activeColor={chrome.green} warningColor={chrome.amber} />
+        {/* The journal does not exist in a stripped build, so the viewer would render a
+            permanently empty list and read as a bug rather than as an absent feature. */}
+        {DEV_TELEMETRY_ENABLED ? (
+          <EventLogPanel activeColor={chrome.green} warningColor={chrome.amber} />
+        ) : null}
         {pairing?.inviteLink ? (
           // Plain-text mirror of the most recently created invite link. The Share
           // Sheet's "Copy" action doesn't reliably surface on the iOS Simulator's
