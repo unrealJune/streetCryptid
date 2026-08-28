@@ -19,6 +19,7 @@ services:
     depends_on:
       - tempo
       - loki
+      - prometheus
     restart: unless-stopped
 
   tempo:
@@ -37,6 +38,22 @@ services:
       - loki-data:/loki
     restart: unless-stopped
 
+  # Long-horizon home for the metrics the collector derives from spans. Traces answer "what
+  # happened to this ping"; these answer "has this phone done anything in the last week", which is
+  # the question a silent device makes urgent and which no 7-day trace store can answer.
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yaml'
+      - '--storage.tsdb.path=/prometheus'
+      # The collector pushes; Prometheus does not scrape the phones (it cannot reach them).
+      - '--web.enable-remote-write-receiver'
+      - '--storage.tsdb.retention.time=90d'
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
   grafana:
     image: grafana/grafana:11.4.0
     environment:
@@ -46,15 +63,18 @@ services:
       GF_AUTH_DISABLE_LOGIN_FORM: 'true'
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
       - '3000:3000'
     depends_on:
       - tempo
       - loki
+      - prometheus
     restart: unless-stopped
 
 volumes:
   tempo-data:
   loki-data:
+  prometheus-data:
   grafana-data:

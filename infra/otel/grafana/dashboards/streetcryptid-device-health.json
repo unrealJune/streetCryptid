@@ -1,0 +1,680 @@
+{
+  "uid": "sc-device-health",
+  "title": "streetCryptid — device health (is each phone alive?)",
+  "description": "The absence dashboard. Every other view explains a ping that happened; this one is about phones that have stopped producing pings at all. The top row carries the checks that would otherwise be alert rules — surfaced here rather than sent anywhere. Built on span-derived Prometheus metrics (90d) rather than traces (7d), because the question is usually \"when did this last work?\" and by the time anyone asks, the traces are gone.",
+  "tags": ["streetcryptid", "background", "health"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {
+          "text": "Prometheus",
+          "value": "prometheus"
+        },
+        "hide": 0
+      },
+      {
+        "name": "tempo",
+        "type": "datasource",
+        "query": "tempo",
+        "current": {
+          "text": "Tempo",
+          "value": "tempo"
+        },
+        "hide": 0
+      },
+      {
+        "name": "device",
+        "label": "device.id",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prometheus}"
+        },
+        "query": "label_values(traces_span_metrics_calls_total{service_name=\"streetcryptid-app\"}, device_id)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Conditions worth noticing — deliberately not alerts",
+      "description": "These are the checks that would otherwise page someone. They are counts, on a page, on purpose: nothing here sends a notification. Zero across the row means every phone that has reported recently is behaving.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Phones not waking (6h)",
+      "description": "Devices that have had no bg.wake for six hours. This is the core background failure: the OS has stopped delivering location and nothing else on the device will say so. Six hours is chosen against the platform floor — the periodic refresh is ~15 min at best and both OSes defer it much further under battery pressure, so a shorter window would be noise. Confirm in the state table below: sharing.enabled=true with task.location_running=false is the bug.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "none",
+                  "color": "green",
+                  "index": 0
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "count(sum by (device_id) (increase(traces_span_metrics_calls_total{service_name=\"streetcryptid-app\", span_name=\"bg.wake\"}[6h])) < 1) or vector(0)",
+          "instant": true,
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Phones not reporting state (2h)",
+      "description": "Devices that have emitted no device.health for two hours. Either the periodic task itself has stopped, or the device cannot reach the collector — and those two are told apart by what arrives NEXT. The app ships from a durable journal, so a phone that was merely offline delivers its backlog later with the ORIGINAL timestamps and a large telemetry.queued, and the gap fills in retrospectively. A gap that stays empty is a phone that genuinely stopped.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "none",
+                  "color": "green",
+                  "index": 0
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "count(sum by (device_id) (increase(traces_span_metrics_calls_total{service_name=\"streetcryptid-app\", span_name=\"device.health\"}[2h])) < 1) or vector(0)",
+          "instant": true,
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Runtime wedged / storage gone (1h)",
+      "description": "bg.session.stranded, bg.session.watchdog, bg.teardown.timeout or storage.degraded in the last hour. These are terminal and none of them are self-healing. A hung native teardown once wedged every later session and cost an iPhone 19 hours of silence; storage.degraded means persistence fell back to memory, so the outbox, friend pool and sharing intent are lost on every process death. Any non-zero value here deserves a look.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "none",
+                  "color": "green",
+                  "index": 0
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "count(sum by (device_id) (increase(traces_span_metrics_calls_total{service_name=\"streetcryptid-app\", span_name=~\"bg.session.stranded|bg.session.watchdog|bg.teardown.timeout|storage.degraded\"}[1h])) > 0) or vector(0)",
+          "instant": true,
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Publishing but not pushing (1h)",
+      "description": "Devices sealing and publishing envelopes without pushing them to the stash, so the fixes exist only in the local replica. Friends online at that exact moment still see them live; everyone else never will — the precise gap the stash exists to close, and completely invisible from the sending side. Check trail.push.app for native.push.failed, and whether the device has any durable peer tickets at all.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "none",
+                  "color": "green",
+                  "index": 0
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "count((sum by (device_id) (increase(traces_span_metrics_calls_total{service_name=\"streetcryptid-app\", span_name=\"publish.fix\"}[1h])) > 5) and (sum by (device_id) (increase(traces_span_metrics_calls_total{service_name=\"streetcryptid-app\", span_name=\"trail.push.app\"}[1h])) < 1)) or vector(0)",
+          "instant": true,
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Is anything alive? — start here",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      }
+    },
+    {
+      "type": "table",
+      "title": "Last seen — minutes since each device last emitted ANY span",
+      "description": "The first panel to read. A device whose value keeps climbing has stopped talking to the collector entirely: either it is not being woken, or it cannot reach us. `device.health` records tell the two apart — see the state table below, whose `telemetry.queued` grows in the second case and does not exist in the first.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "custom": {
+            "align": "left"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 120
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "(time() - max by (device_id, os_name, service_version) (timestamp(traces_span_metrics_calls_total{service_name=\"streetcryptid-app\", device_id=~\"$device\"}))) / 60",
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{device_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Background wakes — bg.wake /min by device",
+      "description": "Flat zero on a device whose last `device.health` said sharing.enabled=true is the core failure this whole dashboard exists for: the OS has stopped delivering location to us and nothing else will say so. Empty and errored wakes are included on purpose — being woken and handed nothing is a different fault from not being woken, and both are wakes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpm",
+          "custom": {
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (device_id) (rate(traces_span_metrics_calls_total{span_name=\"bg.wake\", device_id=~\"$device\"}[15m])) * 60",
+          "legendFormat": "{{device_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "The pipeline, per device — wake → fix → publish → push",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Publishes — publish.fix /min by device",
+      "description": "A device waking but not publishing has passed the OS gate and failed one of ours: read `Drops by reason` below, then the `engine.ingest` spans in Tempo.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 15
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpm",
+          "custom": {
+            "fillOpacity": 8,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (device_id) (rate(traces_span_metrics_calls_total{span_name=\"publish.fix\", device_id=~\"$device\"}[15m])) * 60",
+          "legendFormat": "{{device_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Pushes — trail.push.app /min by device",
+      "description": "Publishing without pushing means envelopes are being written to the LOCAL replica and never leaving the phone — a friend who was not online at that exact moment never sees them, which is the whole reason the stash exists. Compare against the publish rate beside it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 15
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpm",
+          "custom": {
+            "fillOpacity": 8,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (device_id) (rate(traces_span_metrics_calls_total{span_name=\"trail.push.app\", device_id=~\"$device\"}[15m])) * 60",
+          "legendFormat": "{{device_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Health records — device.health /min by device",
+      "description": "The liveness assertion itself, emitted once per periodic refresh and on foreground resume. A gap here with no gap in bg.wake means the periodic task (BGTaskScheduler / WorkManager) has stopped, not location.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 15
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpm",
+          "custom": {
+            "fillOpacity": 8,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (device_id) (rate(traces_span_metrics_calls_total{span_name=\"device.health\", device_id=~\"$device\"}[30m])) * 60",
+          "legendFormat": "{{device_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Why — drops, terminal states, and the last known device state",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Drops by reason /min",
+      "description": "Every sc.drop_reason across the pipeline. Some are benign and expected (sampling-suspended, coalesced, fgs-start-blocked on a refresh trigger); the ones worth chasing are storage-*, outbox-*, cadence-rearm-failed and engine-*-failed, which are all silent on the device itself.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 23
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpm",
+          "custom": {
+            "fillOpacity": 8,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (sc_drop_reason, device_id) (rate(traces_span_metrics_calls_total{sc_drop_reason!=\"\", device_id=~\"$device\"}[15m])) * 60",
+          "legendFormat": "{{device_id}} · {{sc_drop_reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Terminal native-runtime states /h — these should always be zero",
+      "description": "bg.session.stranded, bg.session.watchdog, bg.teardown.timeout and storage.degraded. Each one means the process-wide native chain hung or the device is running with no durable storage — the 2026-08-18 class of failure, where a single wedged teardown cost an iPhone 19 hours of silence. Any non-zero value here deserves a look, not a threshold.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 23
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cph",
+          "custom": {
+            "fillOpacity": 20,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (span_name, device_id) (rate(traces_span_metrics_calls_total{span_name=~\"bg.session.stranded|bg.session.watchdog|bg.teardown.timeout|storage.degraded\", device_id=~\"$device\"}[1h])) * 3600",
+          "legendFormat": "{{device_id}} · {{span_name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Last known device state — permissions, OS tasks, and ages (newest device.health per device)",
+      "description": "What the OS actually thinks, as of each device's most recent health record. Read it for MISMATCHES rather than for any single value: sharing.enabled=true with task.location_running=false is the bug; perm.background=denied or perm.accuracy=reduced explains a phone that wakes but never produces a usable fix; storage.backend=memory means nothing that device persists survives a restart; a large telemetry.queued means the data is fine and our collector is what it cannot reach.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "query": "{ name = \"device.health\" } | select(resource.device.id, resource.service.version, span.trigger, span.sharing.enabled, span.sharing.recipients, span.task.location_running, span.task.refresh_registered, span.task.fence_registered, span.task.refresh_status, span.perm.background, span.perm.ios_scope, span.perm.accuracy, span.storage.backend, span.outbox.pending, span.telemetry.queued, span.last_wake_age_ms, span.last_fix_age_ms, span.last_publish_age_ms, span.last_push_age_ms, span.battery.low_power, span.net.connected)",
+          "queryType": "traceql",
+          "limit": 50,
+          "tableType": "spans",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

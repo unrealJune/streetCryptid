@@ -19,5 +19,9 @@ storage:
 
 compactor:
   compaction:
-    # Two days of traces is plenty to debug "yesterday's dropped ping".
-    block_retention: 48h
+    # A week, not two days. 48h was too short for the failures that actually cost us time: the
+    # 2026-08-18 iOS outage was a phone that went silent overnight and was not looked at until the
+    # following day, by which point the traces bracketing the failure had already been compacted
+    # away. Volume here is a handful of phones, so the extra retention is nearly free — and the
+    # long-horizon questions are answered by Prometheus (90d) rather than by growing this further.
+    block_retention: 168h

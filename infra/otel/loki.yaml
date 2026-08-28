@@ -29,7 +29,9 @@ schema_config:
 
 limits_config:
   allow_structured_metadata: true
-  retention_period: 48h
+  # Logs are the cheapest signal here and the one most often needed retrospectively — iroh's relay
+  # and magicsock diagnostics around a failure are frequently the only explanation of it.
+  retention_period: 720h
 
 compactor:
   working_directory: /loki/compactor

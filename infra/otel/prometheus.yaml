@@ -1,0 +1,11 @@
+# Prometheus exists here purely as a long-retention sink for the span-derived metrics the
+# collector remote-writes (see the `spanmetrics` connector in collector-config.yaml). It scrapes
+# nothing: the sources are phones on cellular networks that no server can reach, so every sample
+# arrives by push.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+# Deliberately empty. Adding a scrape job here would only be useful for the collector's own
+# internal metrics; the signal this stack exists for arrives via remote write.
+scrape_configs: []

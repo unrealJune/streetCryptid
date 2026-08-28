@@ -30,14 +30,34 @@ Conventions when changing that code:
   contexts). Rust (both `modules/iroh-location/rust` and the trail-stash repo) uses plain
   `tracing` spans; OTLP is a subscriber layer behind the `otel` cargo feature (default-on in
   the mobile crate; keep call sites free of `#[cfg]`).
-- Everything is gated on `EXPO_PUBLIC_OTEL_ENDPOINT` (read statically — see the
-  `stash-config.ts` convention). **TEMPORARY:** it is currently set on the `production` EAS
-  profile too (and so inherited by `production-internal-*`), deliberately, so that builds we
-  actually install report traces. That profile is what `release.yml` builds and what
-  `submit.production` sends to App Store Connect and the Play internal track — so this ships
-  telemetry to `otlp.junephilip.com` from real users' devices, which must be disclosed in the
-  privacy policy or stripped before the first public submission. Strip the `env` block from
-  `production` in `eas.json` to revert.
+- **Two gates, and the build-time one is the real one.** `EXPO_PUBLIC_DEV_TELEMETRY=1` compiles
+  telemetry in: without it `metro.config.js` resolves `@/features/dev/telemetry` to
+  `index.noop.ts` and the whole graph (encoder, shipper, SQLite journal, console bridge) is absent
+  from the bundle — the JS counterpart of the crate's `otel` cargo feature.
+  `EXPO_PUBLIC_OTEL_ENDPOINT` then decides where it ships. Both are read statically (the
+  `stash-config.ts` convention). `index-parity.test.ts` keeps the two barrels in step;
+  `scripts/check-release-telemetry.mjs` fails CI if a store profile sets either variable. The
+  `production` profile (what `release.yml` builds and `submit.production` uploads) currently sets
+  BOTH, deliberately and temporarily: production IS TestFlight for us right now, so the profile we
+  install from is the store profile, and a build we cannot observe is not worth shipping while the
+  background pipeline is still being diagnosed. The exception is recorded in `ACKNOWLEDGED` in
+  `scripts/check-release-telemetry.mjs` — deleting that entry re-arms the CI failure, which is how
+  it gets turned back off. **Before the app reaches anyone outside our own TestFlight group**,
+  either strip both variables from `production` or declare the collection in App Store Connect and
+  the privacy policy.
+- **Telemetry ships from the durable journal, not from memory.** Every finished span is mirrored
+  into `streetcryptid.events.db` by `recordSpan`, and `shipper.ts` drains it with a
+  mark-on-success cursor and backoff. A failed POST leaves entries queued, so a background wake
+  with no network no longer destroys the telemetry describing it — and recovered data keeps its
+  ORIGINAL timestamps. Anything added on the background path must still `flush()` before
+  returning, which now means "persist, then drain".
+- **`device.health` is how absence is made visible.** Emitted once per periodic refresh and on
+  foreground resume, it records OS truth (permission scope + accuracy, whether each task is
+  actually registered and running, background-refresh status) alongside `last_*_age_ms`
+  watermarks, the storage backend, and the telemetry backlog. It exists because a phone that has
+  stopped waking emits nothing by construction: a gap between records is a thing that can be
+  measured and shown, and no other span can be. The device-health dashboard's top row turns those
+  gaps into counts; they are deliberately not wired to Alertmanager.
 - **Do not add a battery-optimisation prompt to "fix" Android background reliability without
   re-checking this first.** Android already restores sharing on its own: expo-task-manager's
   `TaskBroadcastReceiver` is registered for `BOOT_COMPLETED` (and `RECEIVE_BOOT_COMPLETED` is
