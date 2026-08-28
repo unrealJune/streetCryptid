@@ -222,7 +222,11 @@ map-shot *args:
     bun scripts/map-shot.ts {{args}}
 
 # Run the full local gate: types, lint, formatting, and tests (JS/TS only).
-check: typecheck lint format-check test
+check: typecheck lint format-check release-telemetry-check test
+
+# Fail if a store-bound EAS profile would ship developer telemetry.
+release-telemetry-check:
+    node scripts/check-release-telemetry.mjs
 
 # Full gate including the native iroh-location Rust crate and generated bindings.
 check-all: check test-rust check-bindings

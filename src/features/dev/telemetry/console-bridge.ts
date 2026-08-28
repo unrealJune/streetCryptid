@@ -9,7 +9,13 @@ import type { LogSeverity } from './types';
  * without an OTLP endpoint; remote export is still developer-only. Idempotent.
  *
  * Developer-only, like the rest of this folder: the collector is a developer-controlled endpoint and
- * these bodies are the same lines already printed to the dev console. Never enable in production.
+ * these bodies are the same lines already printed to the dev console. Bodies from dependencies
+ * (iroh's relay / magicsock diagnostics) can carry socket addresses and are NOT redacted, which is
+ * why the endpoint must always be a collector we control.
+ *
+ * Store builds do not contain this module: `metro.config.js` swaps the barrel for `index.noop.ts`
+ * unless `EXPO_PUBLIC_DEV_TELEMETRY=1`, so the bridge is never installed rather than installed and
+ * inert.
  */
 
 type ConsoleMethod = (...args: unknown[]) => void;
