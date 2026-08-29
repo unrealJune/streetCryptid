@@ -4,10 +4,12 @@
 //! this file drives the manager directly, because the properties here are about what happens when
 //! storage or the stash misbehaves, and neither is reachable by being a well-behaved peer.
 //!
-//! The three cases:
+//! The cases:
 //!
 //! * a state file that will not decrypt must report **desynced**, not "no session" — it is the one
 //!   cause of desync that miss-counting structurally cannot see;
+//! * a peer lapsed past `T_lapse` must report **desynced** for the same structural reason, because
+//!   a mutual lapse produces no envelopes to miss and sustains itself indefinitely;
 //! * a resync record may only replace a session **older than itself**, so a record replayed out of
 //!   the stash after a restart cannot restart a working session;
 //! * the freshness bound and the re-mint interval must stay in the relationship that keeps a
@@ -87,7 +89,7 @@ fn an_unreadable_state_file_reports_desynced_rather_than_unbootstrapped() {
     assert!(apply(&manager, 1, 1_000, 1_000), "record should apply");
     assert!(manager.has_session(PEER));
     assert!(
-        !manager.is_desynced(PEER),
+        !manager.is_desynced(PEER, 1_000),
         "a freshly installed session is healthy"
     );
 
@@ -103,8 +105,50 @@ fn an_unreadable_state_file_reports_desynced_rather_than_unbootstrapped() {
         "a blob that will not decrypt is not a usable session"
     );
     assert!(
-        manager.is_desynced(PEER),
+        manager.is_desynced(PEER, 1_000),
         "...but it IS a desync, and must be visible as one so recovery can run"
+    );
+}
+
+#[test]
+fn a_lapsed_peer_reports_desynced_so_recovery_can_break_a_mutual_lapse() {
+    // The failure this exists to prevent, observed in the field: two paired phones each past
+    // `T_lapse` for the other, both publishing fixes every few minutes, every fix sealed for zero
+    // recipients, for ~22 hours.
+    //
+    // It sustains itself by construction. `next_wraps` drops a lapsed recipient before deriving a
+    // slot, so they receive nothing; `peer_advanced_ms` only moves when an envelope from them is
+    // accepted. Nothing arrives, so no miss is recorded and the miss threshold is never crossed —
+    // and the state file is perfectly readable, so the damaged-file route does not fire either.
+    // Both existing routes into §4.6 are structurally unreachable, which is exactly why lapse
+    // needs its own.
+    let scratch = Scratch::new("lapsed-desync");
+    let manager = scratch.manager().with_t_lapse_ms(10_000);
+
+    assert!(apply(&manager, 1, 1_000, 1_000), "record should apply");
+    assert!(
+        !manager.is_desynced(PEER, 5_000),
+        "inside T_lapse the session is healthy"
+    );
+
+    assert!(
+        manager.has_session(PEER),
+        "the state file is intact — this is not the damaged-file case"
+    );
+    assert!(
+        manager.is_desynced(PEER, 11_000),
+        "past T_lapse the session must be visible to the resync driver, or nothing ever clears it"
+    );
+
+    // And recovery genuinely resolves it: a fresh record re-roots the session and stamps
+    // `peer_advanced_ms` at the bootstrap, so the lapse is gone rather than merely reported.
+    assert!(
+        apply(&manager, 2, 11_000, 11_000),
+        "recovery record applies"
+    );
+    assert!(
+        !manager.is_desynced(PEER, 11_500),
+        "a resync must actually clear the lapse, not just re-report it next tick"
     );
 }
 
@@ -117,7 +161,7 @@ fn a_peer_we_never_bootstrapped_is_not_desynced() {
     let manager = scratch.manager();
 
     assert!(!manager.has_session(PEER));
-    assert!(!manager.is_desynced(PEER));
+    assert!(!manager.is_desynced(PEER, 1_000));
 }
 
 #[test]

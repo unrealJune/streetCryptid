@@ -170,6 +170,44 @@ describe('journal shipper', () => {
       expect.arrayContaining([{ key: 'device.id', value: { stringValue: 'a1b2c3d4e5f6' } }])
     );
   });
+
+  it('keeps each row under the build that recorded it, across an upgrade', async () => {
+    // The counterpart to the test above, and the distinction the original design missed: identity
+    // resolves late and belongs at send time, but build provenance is fixed when the row is
+    // written. A journal outlives the upgrade that changes the build, so reading provenance at
+    // send time relabelled every backlogged row with the draining build — producing spans stamped
+    // with a commit that did not exist when they were recorded, and making `app.commit` answer for
+    // the wrong binary precisely on the delayed background rows the journal exists to preserve.
+    const { shipper, sent } = harness();
+
+    const before = createTelemetry({
+      now: () => 5_000,
+      resource: { 'service.version': '1.5.1', 'app.commit': 'aaaaaaaaaaaa' },
+    });
+    before.startSpan('bg.wake').end();
+
+    // The upgrade lands while that row is still queued — an unreachable collector, a frozen
+    // background process, any of the reasons the journal is durable in the first place.
+    const after = createTelemetry({
+      now: () => 6_000,
+      resource: { 'service.version': '1.6.0', 'app.commit': 'bbbbbbbbbbbb' },
+    });
+    after.startSpan('bg.refresh').end();
+
+    await shipper.drain();
+
+    const versionsBySpan = new Map<string, string>();
+    for (const capture of sent) {
+      const resource: { key: string; value: { stringValue?: string } }[] =
+        capture.body.resourceSpans[0].resource.attributes;
+      const version = resource.find((a) => a.key === 'service.version')?.value.stringValue;
+      for (const span of spansOf(capture)) versionsBySpan.set(span.name, version ?? '');
+    }
+
+    expect(versionsBySpan.get('bg.wake')).toBe('1.5.1');
+    expect(versionsBySpan.get('bg.refresh')).toBe('1.6.0');
+    expect(sent.length).toBeGreaterThan(1); // one OTLP resource per build, necessarily
+  });
 });
 
 describe('journal shipper — failure containment', () => {

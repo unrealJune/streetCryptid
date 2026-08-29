@@ -163,8 +163,9 @@ pub struct SessionManager {
 enum SessionPresence {
     /// Nothing on disk: never bootstrapped, or deliberately forgotten. Waiting on a bump.
     Absent,
-    /// A session that loads.
-    Present,
+    /// A session that loads, carrying when the peer last contributed a ratchet key so the caller
+    /// can apply the §4.5 lapse bound without a second load under the critical section.
+    Present { peer_advanced_ms: u64 },
     /// A session file that will not decrypt or will not parse. Unrecoverable in place — a blob
     /// that fails AEAD is not going to start working — so it is a desync verdict on its own,
     /// without waiting for `R` misses that can never accumulate.
@@ -212,7 +213,7 @@ impl SessionManager {
     }
 
     pub fn has_session(&self, peer: &[u8]) -> bool {
-        matches!(self.presence(peer), SessionPresence::Present)
+        matches!(self.presence(peer), SessionPresence::Present { .. })
     }
 
     /// What is actually on disk for this peer — the distinction `has_session` alone cannot make.
@@ -229,7 +230,9 @@ impl SessionManager {
     fn presence(&self, peer: &[u8]) -> SessionPresence {
         let _guard = self.critical.lock();
         match self.store.load(peer) {
-            Ok(Some(_)) => SessionPresence::Present,
+            Ok(Some(state)) => SessionPresence::Present {
+                peer_advanced_ms: state.peer_advanced_ms(),
+            },
             Ok(None) => SessionPresence::Absent,
             Err(err) => {
                 tracing::warn!(error = %err, "ratchet session state is unreadable; treating the \
@@ -436,12 +439,33 @@ impl SessionManager {
 
     /// Whether this peer's session needs §4.6 recovery.
     ///
-    /// Two ways in, because there are two ways a session breaks:
+    /// Three ways in, because there are three ways a session stops working:
     ///
     /// - **`R` consecutive misses** against a session that loads fine — we are talking past each
     ///   other, the classic desync.
     /// - **A damaged state file**, which reports desynced immediately. Misses cannot accumulate
     ///   here (every `open` fails before it can miss), so waiting for `R` would wait forever.
+    /// - **A lapsed peer** (§4.5), for the same reason as a damaged one: misses cannot accumulate
+    ///   against a peer we are not receiving from, and a mutual lapse is *self-sustaining*.
+    ///
+    /// That third case is not hypothetical. [`Self::next_wraps`] drops a lapsed recipient before
+    /// it derives a slot, so they get no wrap and no envelope; `peer_advanced_ms` only moves when
+    /// we accept an envelope *from* them. Once both devices are past `T_lapse` for each other,
+    /// neither can send the thing that would un-lapse it, nothing arrives to be missed, the state
+    /// file is intact — and the old two-way test answered "not desynced" forever while both phones
+    /// published fixes that were sealed for nobody. Two paired devices sat in exactly that state
+    /// for ~22 hours with every layer reporting healthy.
+    ///
+    /// Recovery is legitimate here rather than a lapse bypass: [`Self::apply_resync`] re-roots the
+    /// session from two fresh ephemerals and stamps `peer_advanced_ms` at the bootstrap, so it
+    /// re-establishes the very liveness proof the lapse bound is asserting — a peer that cannot
+    /// produce a fresh ephemeral does not get un-lapsed by being asked.
+    ///
+    /// Reporting a merely-absent friend costs nothing, which is what makes this safe to widen.
+    /// `resyncs` increments only where a record is *applied*, so a friend who is simply away never
+    /// climbs toward `RESYNC_ATTEMPT_LIMIT` and is never escalated to a "re-pair in person"
+    /// prompt: they stay desynced, the driver re-publishes one idempotent ephemeral per re-mint
+    /// interval, and the exchange completes by itself the day they open the app.
     ///
     /// With nothing on disk the answer is "not desynced, un-bootstrapped": there is no session to
     /// be out of step with, and the fix is a bump rather than a resync.
@@ -449,7 +473,7 @@ impl SessionManager {
     /// **Lock order.** `health` is taken and released before `presence` takes `critical`; see the
     /// note on [`SessionManager::critical`]. The `let` below must keep its guard temporary
     /// confined to the statement — do not hoist it.
-    pub fn is_desynced(&self, peer: &[u8]) -> bool {
+    pub fn is_desynced(&self, peer: &[u8], now_ms: u64) -> bool {
         let misses = self
             .health
             .lock()
@@ -458,7 +482,10 @@ impl SessionManager {
             .unwrap_or(0);
         match self.presence(peer) {
             SessionPresence::Damaged => true,
-            SessionPresence::Present => misses >= self.desync_threshold,
+            SessionPresence::Present { peer_advanced_ms } => {
+                misses >= self.desync_threshold
+                    || now_ms.saturating_sub(peer_advanced_ms) >= self.t_lapse_ms
+            }
             SessionPresence::Absent => false,
         }
     }

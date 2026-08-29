@@ -1383,7 +1383,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby() != 64589) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 60716) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 27631) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_list_pair_sessions() != 11581) {
@@ -1488,7 +1488,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics() != 23251) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_upload_trail_content() != 549) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_upload_trail_content() != 56184) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_deliver() != 47836) {
@@ -2688,7 +2688,8 @@ public interface LocationNodeInterface {
     suspend fun `initiatePairNearby`(`peerEndpointId`: kotlin.ByteArray): kotlin.ByteArray
     
     /**
-     * Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+     * Whether this peer's session needs §4.6 recovery: `R` consecutive missed envelopes, an
+     * unreadable state file, or a peer lapsed past `T_lapse` (§4.5).
      */
     suspend fun `isDesynced`(`peerEndpointHex`: kotlin.String): kotlin.Boolean
     
@@ -2998,6 +2999,11 @@ public interface LocationNodeInterface {
     
     /**
      * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
+     *
+     * Returns the number of slots the stash **accepted**. The other outcomes are on the
+     * `trail.content.upload` span rather than in the return value, deliberately: the UniFFI
+     * signature stays `u64` so a phone running an older binary than the JS bundle keeps working,
+     * and `untracked` is a number you want to watch over time rather than branch on.
      */
     suspend fun `uploadTrailContent`(`baseUrl`: kotlin.String, `psk`: kotlin.String?): kotlin.ULong
     
@@ -3884,7 +3890,8 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+     * Whether this peer's session needs §4.6 recovery: `R` consecutive missed envelopes, an
+     * unreadable state file, or a peer lapsed past `T_lapse` (§4.5).
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -4828,6 +4835,11 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     
     /**
      * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
+     *
+     * Returns the number of slots the stash **accepted**. The other outcomes are on the
+     * `trail.content.upload` span rather than in the return value, deliberately: the UniFFI
+     * signature stays `u64` so a phone running an older binary than the JS bundle keeps working,
+     * and `untracked` is a number you want to watch over time rather than branch on.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")

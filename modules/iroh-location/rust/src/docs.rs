@@ -38,7 +38,7 @@ use iroh_docs::{
     store::Query,
     AuthorId, NamespaceId,
 };
-use n0_future::time::{timeout, Duration};
+use n0_future::time::{timeout, Duration, Instant};
 use n0_future::StreamExt;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
@@ -291,6 +291,43 @@ pub struct ReplicaSlot {
     pub has_content: bool,
 }
 
+/// What one pass of [`TrailDocs::upload_own_latest`] actually managed to hand the stash.
+///
+/// Four outcomes rather than a count, because "nothing uploaded" has four causes that call for
+/// opposite responses and used to be indistinguishable — the loop reported the first failure and
+/// abandoned the rest, so the numbers never existed to tell them apart. `untracked` is the
+/// expected steady state for a slot the stash has not reconciled yet; `transport_failed` is the
+/// only one that says anything about the stash being reachable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContentUploadReport {
+    /// Slots the stash accepted and can now serve.
+    pub uploaded: u64,
+    /// Slots the stash is not tracking yet (`404`/`409`) — its entry has not reconciled in.
+    pub untracked: u64,
+    /// Slots whose bytes are no longer in the local blob store, so there was nothing to offer.
+    pub unreadable: u64,
+    /// Slots that failed for a reason that is about the stash, not the slot.
+    pub transport_failed: u64,
+}
+
+/// What one [`TrailDocs::push`] actually reconciled, across every peer it was given.
+///
+/// Previously this was a bare `entries_sent` taken from the **first** `SyncFinished` to arrive,
+/// which made the number close to meaningless with more than one peer: whichever peer happened to
+/// finish first decided the answer, and the stash — usually already up to date — reported `0`
+/// while entries were moving to the others. The documented cookbook query
+/// `{ name = "trail.push" && span.entries_sent > 0 }` therefore matched almost nothing on a
+/// healthy fleet, which is worse than no signal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PushReport {
+    /// Entries handed to peers, summed over every peer that finished.
+    pub entries_sent: u64,
+    /// Peers that completed a reconciliation.
+    pub peers_finished: usize,
+    /// Peers that reported an error instead — unreachable, or refused.
+    pub peers_failed: usize,
+}
+
 /// Wraps an iroh-docs replica: our own namespace (we are its sole writer) plus any friend
 /// namespaces we've imported for replication + reads.
 pub struct TrailDocs {
@@ -354,8 +391,31 @@ impl TrailDocs {
     }
 
     /// Upload every current slot in our namespace to the stash's authenticated opaque-content API.
+    ///
+    /// **Per-slot outcomes, never a batch abort.** The stash only accepts content for a
+    /// `(namespace, hash)` pair it already holds the *entry* for — the record arrives by
+    /// reconciliation, the bytes by this call, and the two are separate transfers. A slot whose
+    /// entry has not reached the stash yet is therefore answered `404`, and that is an ordinary,
+    /// self-correcting state rather than a failure of this upload.
+    ///
+    /// It stopped being ordinary when one such slot aborted the whole loop: `single_latest_per_key`
+    /// yields the fix lane and the null lane together, so a single permanently-unreconciled slot
+    /// sat at the front of the iteration and every *newer* slot behind it was never offered. The
+    /// phone reported `trail push failed` on every tick, always naming the same hash, while the
+    /// fixes an offline friend actually needed sat locally with their bytes never pushed. Skipping
+    /// is the whole fix: the entry either reconciles later and the next tick uploads it, or it
+    /// never does and it was never deliverable anyway.
+    ///
+    /// Transport failures are different in kind — an unreachable or refusing stash is not a
+    /// property of one slot — so they are counted and the last one is returned once the loop has
+    /// still given every slot a chance. That keeps `trail.push.app` reporting a genuine stash
+    /// outage while no longer reporting a backlog of untracked slots as one.
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn upload_own_latest(&self, base_url: &str, psk: Option<&str>) -> Result<u64> {
+    pub async fn upload_own_latest(
+        &self,
+        base_url: &str,
+        psk: Option<&str>,
+    ) -> Result<ContentUploadReport> {
         let doc = self.doc_for(self.own_ns).await?;
         let stream = doc.get_many(Query::single_latest_per_key().build()).await?;
         tokio::pin!(stream);
@@ -363,14 +423,28 @@ impl TrailDocs {
             .timeout(std::time::Duration::from_secs(10))
             .build()?;
         let namespace = hex_encode(self.own_ns.as_bytes());
-        let mut uploaded = 0;
+        let mut report = ContentUploadReport::default();
+        let mut last_transport_error: Option<anyhow::Error> = None;
         while let Some(entry) = stream.next().await {
             let entry = entry?;
             if entry.content_len() == 0 {
                 continue;
             }
             let hash = entry.content_hash();
-            let bytes = self.blobs.blobs().get_bytes(hash).await?;
+            // A slot whose bytes we no longer hold cannot be offered, and cannot be fixed by
+            // retrying it: skip it rather than failing the slots that follow.
+            let bytes = match self.blobs.blobs().get_bytes(hash).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!(
+                        hash = %crate::telemetry::short_hex(hash.as_bytes()),
+                        error = %error,
+                        "trail content upload: local bytes are gone for this slot; skipping"
+                    );
+                    report.unreadable += 1;
+                    continue;
+                }
+            };
             let request = client
                 .put(format!(
                     "{}/v1/namespaces/{namespace}/content/{hash}",
@@ -382,26 +456,66 @@ impl TrailDocs {
                 Some(psk) => request.bearer_auth(psk),
                 None => request,
             };
-            let mut response = request
-                .try_clone()
-                .expect("byte-backed request is cloneable")
-                .send()
-                .await?;
+            let send = || async {
+                request
+                    .try_clone()
+                    .expect("byte-backed request is cloneable")
+                    .send()
+                    .await
+            };
+            let mut response = match send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    report.transport_failed += 1;
+                    last_transport_error = Some(error.into());
+                    continue;
+                }
+            };
+            // The entry may still be in flight to the stash; a short retry covers that race
+            // without turning a genuinely untracked slot into a stall.
             for _ in 0..4 {
                 if response.status() != reqwest::StatusCode::NOT_FOUND {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                response = request
-                    .try_clone()
-                    .expect("byte-backed request is cloneable")
-                    .send()
-                    .await?;
+                match send().await {
+                    Ok(next) => response = next,
+                    Err(error) => {
+                        report.transport_failed += 1;
+                        last_transport_error = Some(error.into());
+                        break;
+                    }
+                }
             }
-            response.error_for_status()?;
-            uploaded += 1;
+            let status = response.status();
+            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::CONFLICT {
+                // 404: this stash has no entry for the pair (or does not know the namespace).
+                // 409: newer stashes say "known namespace, untracked hash" specifically. Both mean
+                // the record has not landed yet, which the next reconciliation may fix.
+                tracing::debug!(
+                    hash = %crate::telemetry::short_hex(hash.as_bytes()),
+                    status = status.as_u16(),
+                    "trail content upload: stash is not tracking this slot yet; skipping"
+                );
+                report.untracked += 1;
+                continue;
+            }
+            match response.error_for_status() {
+                Ok(_) => report.uploaded += 1,
+                Err(error) => {
+                    report.transport_failed += 1;
+                    last_transport_error = Some(error.into());
+                }
+            }
         }
-        Ok(uploaded)
+        // Only a transport problem is worth failing the push over, and only when it stopped us
+        // getting anything at all through — a partial upload still moved fixes off the phone.
+        if report.uploaded == 0 {
+            if let Some(error) = last_transport_error {
+                return Err(error);
+            }
+        }
+        Ok(report)
     }
 
     /// Fetch a cached [`Doc`] handle for `ns`, or open it from the local replica store.
@@ -664,7 +778,11 @@ impl TrailDocs {
                 let bytes = if entry.content_len() == 0 {
                     None
                 } else {
-                    self.blobs.blobs().get_bytes(entry.content_hash()).await.ok()
+                    self.blobs
+                        .blobs()
+                        .get_bytes(entry.content_hash())
+                        .await
+                        .ok()
                 };
                 // Servable means "we hold an envelope we could hand over", so the header has to
                 // parse and its signature has to check out. A blob that is present but not a
@@ -730,34 +848,61 @@ impl TrailDocs {
     ///
     /// Calling it repeatedly is cheap: `start_sync` is a no-op once the namespace is already
     /// syncing, and the engine keeps broadcasting subsequent writes for the process's lifetime.
-    pub async fn push(&self, ns: NamespaceId, peers: Vec<EndpointAddr>) -> Result<Option<u64>> {
+    pub async fn push(
+        &self,
+        ns: NamespaceId,
+        peers: Vec<EndpointAddr>,
+    ) -> Result<Option<PushReport>> {
         let doc = self.doc_for(ns).await?;
         let mut events = doc.subscribe().await?;
+        let expected_peers = peers.len();
         doc.start_sync(peers).await?;
 
-        let deadline = Duration::from_secs(PUSH_TIMEOUT_SECS);
+        // One overall budget rather than one per event. The old per-event timeout was harmless
+        // while this returned at the first `SyncFinished`; now that it waits for the others, a
+        // per-event bound would multiply by the peer count and blow a headless wake's budget.
+        let deadline = Instant::now() + Duration::from_secs(PUSH_TIMEOUT_SECS);
+        let mut report = PushReport::default();
         loop {
-            match timeout(deadline, events.next()).await {
-                Ok(Some(Ok(LiveEvent::SyncFinished(ev)))) => match &ev.result {
-                    Ok(details) => return Ok(Some(details.entries_sent as u64)),
-                    Err(err) => {
-                        // One unreachable peer isn't the end of the exchange — keep waiting for
-                        // another to finish rather than reporting the whole push as done.
-                        tracing::warn!(
-                            peer = %ev.peer.fmt_short(),
-                            error = %err,
-                            "trail.push: reconciliation with peer failed"
-                        );
-                        continue;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match timeout(remaining, events.next()).await {
+                Ok(Some(Ok(LiveEvent::SyncFinished(ev)))) => {
+                    match &ev.result {
+                        Ok(details) => {
+                            report.entries_sent += details.entries_sent as u64;
+                            report.peers_finished += 1;
+                        }
+                        Err(err) => {
+                            // One unreachable peer isn't the end of the exchange — keep waiting
+                            // for the others rather than reporting the whole push as done.
+                            tracing::warn!(
+                                peer = %ev.peer.fmt_short(),
+                                error = %err,
+                                "trail.push: reconciliation with peer failed"
+                            );
+                            report.peers_failed += 1;
+                        }
                     }
-                },
+                    // Every peer we dialled has now reported one way or the other.
+                    if report.peers_finished + report.peers_failed >= expected_peers {
+                        break;
+                    }
+                }
                 Ok(Some(Ok(_))) => continue,
                 Ok(Some(Err(err))) => return Err(err),
-                // Stream ended or nothing finished in time. The namespace is still marked syncing,
-                // so later writes in this process broadcast — we just can't confirm this one.
-                Ok(None) | Err(_) => return Ok(None),
+                // Stream ended or nothing more arrived in time. The namespace is still marked
+                // syncing, so later writes in this process broadcast — we just cannot confirm the
+                // peers that stayed silent.
+                Ok(None) | Err(_) => break,
             }
         }
+        if report.peers_finished == 0 && report.peers_failed == 0 {
+            return Ok(None);
+        }
+        Ok(Some(report))
     }
 
     /// Perform one direct range-reconciliation exchange with `peer` without opening the namespace

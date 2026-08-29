@@ -1,6 +1,6 @@
 import type { OtlpTransport } from './exporter';
 import { createShipper, type Shipper } from './shipper';
-import { flushEventLog, recordEventLog } from './event-log';
+import { flushEventLog, recordEventLog, setJournalBuildResource } from './event-log';
 import { getBuildResource, resolveDeviceId } from './identity';
 import { newSpanId, newTraceId } from './ids';
 import { getOtelConfig } from './otel-config';
@@ -116,6 +116,11 @@ export function createTelemetry(options: CreateTelemetryOptions): Telemetry {
   // iroh endpoint id only exists once keys do) and the shipper reads this at SEND time — so a
   // batch drained after identity resolved is stamped with it, including rows recorded before.
   const resource: Attributes = { 'service.name': 'streetcryptid-app', ...options.resource };
+  // Everything the caller passed describes the running build and device — all of it true at the
+  // moment a row is written, none of it true of a row this process merely drains. Hand it to the
+  // journal so each row keeps its own copy; `resource` above stays the home of the late-resolved
+  // install identity, which is the only part that is legitimately read at send time.
+  setJournalBuildResource(options.resource ?? {});
   const shipper: Shipper | undefined = options.endpoint
     ? createShipper({
         endpoint: options.endpoint,

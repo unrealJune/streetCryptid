@@ -8,7 +8,7 @@ import {
   type Attributes,
   type SpanContext,
 } from '@/features/dev/telemetry';
-import { createPersistentKV, loadPool, loadSharingEnabled } from '../persistence';
+import { createPersistentKV, loadPool, loadRatchetDrops, loadSharingEnabled } from '../persistence';
 import { getStorageBackend, getStorageDegradationCount } from '../storage-health';
 import { backgroundOutbox } from './background-outbox';
 import { BACKGROUND_LOCATION_TASK, isBackgroundLocationRunning } from './background-task';
@@ -193,6 +193,20 @@ async function intentAttributes(): Promise<Attributes> {
     attrs['outbox.pending'] = await backgroundOutbox.pending();
   } catch {
     attrs['outbox.pending'] = undefined;
+  }
+  try {
+    // How many recipients the last publish was sealed for and dropped anyway. Read alongside
+    // `sharing.recipients`, this is the difference between "publishing to two friends" and
+    // "publishing to nobody, twice" — states that are otherwise identical in every other span the
+    // device emits, and which stayed indistinguishable through a day-long mutual lapse.
+    const drops = await loadRatchetDrops(kv);
+    if (drops) {
+      attrs['ratchet.dropped'] = drops.total;
+      attrs['ratchet.dropped_lapsed'] = drops.lapsed;
+      attrs['ratchet.dropped_no_session'] = drops.noSession;
+    }
+  } catch {
+    // Unreadable — omitted rather than reported as zero, which would read as "all fine".
   }
   try {
     // How much telemetry this phone is still holding. A backlog that only grows says the collector

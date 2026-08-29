@@ -15,6 +15,22 @@ export interface EventLogEntry {
   launchContext: EventLogLaunchContext;
   transport?: string;
   details: unknown;
+  /**
+   * Build provenance as it was **when this row was written**, JSON-encoded, or undefined for rows
+   * written before this column existed.
+   *
+   * Recorded rather than read at send time because the two differ exactly where it matters. The
+   * shipper drains a durable journal, so a row survives the upgrade that changes the build — and
+   * stamping the *current* build on it at send time produced spans dated two days before the
+   * commit they claimed to come from. That is not a cosmetic error: `app.commit` and
+   * `service.version` exist to answer "which build is this phone actually running?", and the
+   * backlogged background rows this journal exists to preserve were the ones it answered wrongly.
+   *
+   * Late-resolved identity (`device.id`, `service.instance.id`) is deliberately NOT captured here.
+   * It is constant for the install and simply unknown early, so send time is the right moment for
+   * it — which is what made the original single-resource design look correct.
+   */
+  buildResource?: string;
 }
 
 export interface RecordEventLogEntry {
@@ -50,6 +66,7 @@ interface EventLogRow {
   transport: string | null;
   launch_context: EventLogLaunchContext | null;
   details: string;
+  build_resource: string | null;
 }
 
 interface SqliteColumn {
@@ -75,6 +92,27 @@ let backgroundContextDepth = 0;
  */
 const shippedIds = new Set<string>();
 const listeners = new Set<EventLogListener>();
+/**
+ * Build provenance stamped on rows written from now on, JSON-encoded once (this is on the path of
+ * every recorded span, and it does not change within a process).
+ */
+let buildResourceJson: string | undefined;
+
+/**
+ * Declare the build that is writing rows, so each one carries its own provenance to the collector
+ * rather than borrowing whatever build happens to drain it. See {@link EventLogEntry.buildResource}.
+ *
+ * Idempotent and safe to call before SQLite is up: it only affects rows recorded after it.
+ */
+export function setJournalBuildResource(attributes: Record<string, unknown>): void {
+  const keys = Object.keys(attributes);
+  buildResourceJson = keys.length > 0 ? JSON.stringify(attributes) : undefined;
+}
+
+/** Test seam. */
+export function resetJournalBuildResourceForTesting(): void {
+  buildResourceJson = undefined;
+}
 
 function trySqlite(): SqliteModule | null {
   if (sqlite !== undefined) return sqlite;
@@ -105,7 +143,8 @@ function getDb(): Promise<SqliteDb | null> {
         launch_context TEXT,
         transport TEXT,
         details TEXT NOT NULL,
-        shipped INTEGER NOT NULL DEFAULT 0
+        shipped INTEGER NOT NULL DEFAULT 0,
+        build_resource TEXT
       );
       CREATE INDEX IF NOT EXISTS event_log_timestamp ON event_log (timestamp DESC);
       CREATE TABLE IF NOT EXISTS meta (
@@ -118,6 +157,9 @@ function getDb(): Promise<SqliteDb | null> {
       }
       if (!columns.some((column) => column.name === 'shipped')) {
         await db.execAsync('ALTER TABLE event_log ADD COLUMN shipped INTEGER NOT NULL DEFAULT 0');
+      }
+      if (!columns.some((column) => column.name === 'build_resource')) {
+        await db.execAsync('ALTER TABLE event_log ADD COLUMN build_resource TEXT');
       }
       // The shipper's hot query is "oldest unshipped first"; without this it is a full scan of a
       // 10 000-row table on every background wake.
@@ -178,13 +220,14 @@ function sanitize(value: unknown, key = '', seen = new WeakSet<object>()): unkno
 }
 
 function rowToEntry(row: EventLogRow): EventLogEntry {
-  const { launch_context, transport, details, ...rest } = row;
+  const { launch_context, transport, details, build_resource, ...rest } = row;
   return {
     ...rest,
     timestamp: Number(row.timestamp),
     launchContext: launch_context === 'background' ? 'background' : 'foreground',
     ...(transport ? { transport } : {}),
     details: sanitize(JSON.parse(details) as unknown),
+    ...(build_resource ? { buildResource: build_resource } : {}),
   };
 }
 
@@ -205,8 +248,9 @@ async function persist(entry: EventLogEntry): Promise<void> {
   try {
     await db.runAsync(
       `INSERT OR REPLACE INTO event_log
-       (id, timestamp, level, category, action, summary, status, launch_context, transport, details)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, timestamp, level, category, action, summary, status, launch_context, transport, details,
+        build_resource)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       entry.id,
       entry.timestamp,
       entry.level,
@@ -216,7 +260,8 @@ async function persist(entry: EventLogEntry): Promise<void> {
       entry.status,
       entry.launchContext,
       entry.transport ?? null,
-      JSON.stringify(entry.details)
+      JSON.stringify(entry.details),
+      entry.buildResource ?? null
     );
     writesSinceTrim += 1;
     if (writesSinceTrim >= 100) {
@@ -297,6 +342,7 @@ export function recordEventLog(input: RecordEventLogEntry): EventLogEntry {
     launchContext: currentLaunchContext(),
     ...(input.transport ? { transport: input.transport } : {}),
     details: sanitize(input.details ?? {}),
+    ...(buildResourceJson ? { buildResource: buildResourceJson } : {}),
   };
   entries.unshift(entry);
   if (entries.length > EVENT_LOG_MAX_ENTRIES) entries.pop();
@@ -315,7 +361,8 @@ export async function loadEventLog(): Promise<EventLogEntry[]> {
   if (!db) return getEventLog();
   try {
     const rows = await db.getAllAsync<EventLogRow>(
-      `SELECT id, timestamp, level, category, action, summary, status, launch_context, transport, details
+      `SELECT id, timestamp, level, category, action, summary, status, launch_context, transport,
+              details, build_resource
        FROM event_log ORDER BY timestamp DESC, rowid DESC LIMIT ?`,
       EVENT_LOG_MAX_ENTRIES
     );
@@ -416,7 +463,8 @@ export async function takeUnshipped(limit: number): Promise<EventLogEntry[]> {
   if (db) {
     try {
       const rows = await db.getAllAsync<EventLogRow>(
-        `SELECT id, timestamp, level, category, action, summary, status, launch_context, transport, details
+        `SELECT id, timestamp, level, category, action, summary, status, launch_context, transport,
+                details, build_resource
          FROM event_log WHERE shipped = 0 ORDER BY timestamp ASC, rowid ASC LIMIT ?`,
         limit
       );

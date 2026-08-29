@@ -1122,7 +1122,8 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func initiatePairNearby(peerEndpointId: Data) async throws  -> Data
     
     /**
-     * Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+     * Whether this peer's session needs §4.6 recovery: `R` consecutive missed envelopes, an
+     * unreadable state file, or a peer lapsed past `T_lapse` (§4.5).
      */
     func isDesynced(peerEndpointHex: String) async throws  -> Bool
     
@@ -1432,6 +1433,11 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     
     /**
      * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
+     *
+     * Returns the number of slots the stash **accepted**. The other outcomes are on the
+     * `trail.content.upload` span rather than in the return value, deliberately: the UniFFI
+     * signature stays `u64` so a phone running an older binary than the JS bundle keeps working,
+     * and `untracked` is a number you want to watch over time rather than branch on.
      */
     func uploadTrailContent(baseUrl: String, psk: String?) async throws  -> UInt64
     
@@ -2175,7 +2181,8 @@ open func initiatePairNearby(peerEndpointId: Data)async throws  -> Data  {
 }
     
     /**
-     * Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+     * Whether this peer's session needs §4.6 recovery: `R` consecutive missed envelopes, an
+     * unreadable state file, or a peer lapsed past `T_lapse` (§4.5).
      */
 open func isDesynced(peerEndpointHex: String)async throws  -> Bool  {
     return
@@ -2980,6 +2987,11 @@ open func transportDiagnostics(peerEndpointIds: [Data])async throws  -> Transpor
     
     /**
      * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
+     *
+     * Returns the number of slots the stash **accepted**. The other outcomes are on the
+     * `trail.content.upload` span rather than in the return value, deliberately: the UniFFI
+     * signature stays `u64` so a phone running an older binary than the JS bundle keeps working,
+     * and `untracked` is a number you want to watch over time rather than branch on.
      */
 open func uploadTrailContent(baseUrl: String, psk: String?)async throws  -> UInt64  {
     return
@@ -6757,7 +6769,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby() != 64589) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 60716) {
+    if (uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 27631) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_list_pair_sessions() != 11581) {
@@ -6862,7 +6874,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics() != 23251) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_upload_trail_content() != 549) {
+    if (uniffi_iroh_location_checksum_method_locationnode_upload_trail_content() != 56184) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_meshcapsulestore_deliver() != 47836) {

@@ -20,7 +20,9 @@ import type { Attributes, FinishedSpan, LogRecord, LogSeverity, SpanContext } fr
  * ## Consequences worth knowing
  * - **Late data arrives with its ORIGINAL timestamps.** A wake at 03:12 that could not reach the
  *   collector until 09:40 appears at 03:12 in Tempo, which is the only way the timeline is worth
- *   reading.
+ *   reading. It also arrives with its ORIGINAL BUILD: rows carry their own provenance and are
+ *   grouped by it here, because a backlog that outlives an upgrade would otherwise be relabelled
+ *   with the draining build and make `app.commit` answer for the wrong binary.
  * - **Everything exported is sanitized**, because the journal sanitizes on write. That is a
  *   privacy improvement over the old direct path, which shipped raw attributes.
  * - **Entries recorded outside the tracer now reach the collector too.** `recordEventLog` calls in
@@ -49,7 +51,14 @@ export const SHIP_BACKOFF_MAX_MS = 30 * 60_000;
 
 export interface ShipperOptions {
   endpoint: string;
-  /** Resource attributes stamped on every batch. Read at send time, so late-resolved ids apply. */
+  /**
+   * Resource attributes that are constant for the *install* but resolve late — `device.id` and
+   * `service.instance.id`. Read at send time so a row recorded before identity existed still
+   * carries it.
+   *
+   * Build provenance deliberately does NOT belong here; it travels on the row. See
+   * {@link EventLogEntry.buildResource}.
+   */
   resource: () => Attributes;
   transport?: OtlpTransport;
   now?: () => number;
@@ -160,17 +169,59 @@ export function createShipper(options: ShipperOptions): Shipper {
     return Math.min(SHIP_BACKOFF_MAX_MS, scaled);
   }
 
-  async function sendBatch(entries: EventLogEntry[]): Promise<void> {
-    const resource = options.resource();
-    const spans = entries.filter(isSpanEntry).map(toFinishedSpan);
-    const logs = entries.filter((entry) => !isSpanEntry(entry)).map(toLogRecord);
-    // Traces first: they are what the dashboards are built on, and if the second POST fails the
-    // whole batch is retried anyway.
-    if (spans.length > 0) {
-      await transport(`${options.endpoint}/v1/traces`, spanPayload(resource, spans));
+  /**
+   * Split a batch by the build that recorded each row.
+   *
+   * One drain can straddle an upgrade — that is the normal case for the backlog this journal
+   * exists to keep — and OTLP carries one resource per request, so those rows cannot share a
+   * payload. Grouping is by the raw JSON string, which is stable because it is written once per
+   * process from one object.
+   */
+  function groupByBuild(entries: EventLogEntry[]): Map<string | undefined, EventLogEntry[]> {
+    const groups = new Map<string | undefined, EventLogEntry[]>();
+    for (const entry of entries) {
+      const key = entry.buildResource;
+      const group = groups.get(key);
+      if (group) group.push(entry);
+      else groups.set(key, [entry]);
     }
-    if (logs.length > 0) {
-      await transport(`${options.endpoint}/v1/logs`, logPayload(resource, logs));
+    return groups;
+  }
+
+  /**
+   * Resolve the resource for one group: send-time attributes for the parts that are constant for
+   * the install and merely resolve late (`device.id`, `service.instance.id`), overlaid with the
+   * provenance the row itself recorded.
+   *
+   * The overlay direction is the whole point. Reading provenance at send time made every
+   * backlogged row claim the *draining* build, so an upgraded phone retroactively relabelled two
+   * days of history as the new commit. Rows written before this column existed have no provenance
+   * to overlay and keep the old behaviour — they are the only ones that still lie, and they age
+   * out with the journal.
+   */
+  function resourceFor(buildResource: string | undefined): Attributes {
+    const base = options.resource();
+    if (!buildResource) return base;
+    try {
+      return { ...base, ...(JSON.parse(buildResource) as Attributes) };
+    } catch {
+      return base;
+    }
+  }
+
+  async function sendBatch(entries: EventLogEntry[]): Promise<void> {
+    for (const [buildResource, group] of groupByBuild(entries)) {
+      const resource = resourceFor(buildResource);
+      const spans = group.filter(isSpanEntry).map(toFinishedSpan);
+      const logs = group.filter((entry) => !isSpanEntry(entry)).map(toLogRecord);
+      // Traces first: they are what the dashboards are built on, and if the second POST fails the
+      // whole batch is retried anyway.
+      if (spans.length > 0) {
+        await transport(`${options.endpoint}/v1/traces`, spanPayload(resource, spans));
+      }
+      if (logs.length > 0) {
+        await transport(`${options.endpoint}/v1/logs`, logPayload(resource, logs));
+      }
     }
   }
 
