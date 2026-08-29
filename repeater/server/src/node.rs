@@ -87,6 +87,24 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Why an opaque-content upload was or was not stored.
+///
+/// One variant per response the writer should behave differently about — see
+/// [`StashNode::put_content`] for why the read path stays deliberately opaque and this one does
+/// not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PutOutcome {
+    /// Accepted; the stash can now serve these bytes.
+    Stored,
+    /// This stash holds no grant for the namespace. Register it before offering content.
+    UnknownNamespace,
+    /// The namespace is known, but no entry references this hash yet — the record has not
+    /// reconciled in. Transient by nature: skip the slot and try the others.
+    UntrackedHash,
+    /// The body does not hash to the address in the URL. Never retryable as-is.
+    HashMismatch,
+}
+
 /// The always-on, ciphertext-blind stash node.
 pub struct StashNode {
     endpoint: Endpoint,
@@ -272,24 +290,46 @@ impl StashNode {
     }
 
     /// Store opaque ciphertext uploaded by an authorized writer and verify its content address.
-    pub async fn put_content(&self, ns: &NsBytes, expected: Hash, bytes: Bytes) -> Result<bool> {
+    ///
+    /// The three rejections are reported separately, unlike the read path's deliberate opacity.
+    /// That is safe here and unsafe there: `PUT` sits behind the PSK guard and the caller already
+    /// knows the namespace and the hash — it is offering them — so naming the reason tells an
+    /// authorized writer nothing it did not supply, while `GET` must not become an oracle for
+    /// which namespaces and hashes a stash holds.
+    ///
+    /// It is worth the distinction because these three want opposite responses from the writer,
+    /// and a single `404` cost us a real outage: two phones spent a day retrying an upload for an
+    /// entry that had never reconciled in, reading the reply as "the stash lost my namespace" when
+    /// it meant "that record has not arrived yet, and your other slots would have been accepted".
+    pub async fn put_content(
+        &self,
+        ns: &NsBytes,
+        expected: Hash,
+        bytes: Bytes,
+    ) -> Result<PutOutcome> {
+        if !self.registry.is_known(ns) {
+            return Ok(PutOutcome::UnknownNamespace);
+        }
         let tracked = self
             .content
             .lock()
             .expect("content index poisoned")
             .is_tracked_for(ns, expected.as_bytes());
-        if !self.registry.is_known(ns) || !tracked || Hash::new(&bytes) != expected {
-            return Ok(false);
+        if !tracked {
+            return Ok(PutOutcome::UntrackedHash);
+        }
+        if Hash::new(&bytes) != expected {
+            return Ok(PutOutcome::HashMismatch);
         }
         let tag = self.blobs.blobs().add_bytes(bytes).await?;
         if tag.hash != expected {
-            return Ok(false);
+            return Ok(PutOutcome::HashMismatch);
         }
         self.content
             .lock()
             .expect("content index poisoned")
             .mark_present(*expected.as_bytes());
-        Ok(true)
+        Ok(PutOutcome::Stored)
     }
 
     /// The stash's endpoint ticket. Publish this as `EXPO_PUBLIC_TRAIL_STASH_TICKET`; the app
@@ -923,8 +963,18 @@ async fn put_content_handler(
         }
     };
     match node.put_content(&ns, hash, bytes).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Ok(PutOutcome::Stored) => StatusCode::NO_CONTENT.into_response(),
+        // The namespace was never granted (or the grant is gone): the writer should re-register
+        // before retrying, and retrying the bytes alone will never work.
+        Ok(PutOutcome::UnknownNamespace) => StatusCode::NOT_FOUND.into_response(),
+        // Known namespace, but no entry references this hash yet. Ordinary and self-correcting —
+        // the record arrives by reconciliation, on its own schedule. The writer should skip this
+        // slot and offer the rest rather than treating the batch as failed.
+        Ok(PutOutcome::UntrackedHash) => StatusCode::CONFLICT.into_response(),
+        // The bytes are not what the URL claims. Never retry this one.
+        Ok(PutOutcome::HashMismatch) => {
+            (StatusCode::BAD_REQUEST, "content does not match its hash").into_response()
+        }
         Err(error) => (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
     }
 }
@@ -1099,13 +1149,30 @@ mod live_tests {
             .expect("content index poisoned")
             .want(ns, *hash.as_bytes());
 
-        assert!(!stash.put_content(&other_ns, hash, bytes.clone()).await?);
-        assert!(
-            !stash
-                .put_content(&ns, hash, Bytes::from_static(b"wrong bytes"))
-                .await?
+        // Each rejection names itself: the writer's correct next move differs for all three, and
+        // collapsing them into one `404` is what let an unreconciled slot read as a lost grant.
+        assert_eq!(
+            stash.put_content(&other_ns, hash, bytes.clone()).await?,
+            PutOutcome::UnknownNamespace
         );
-        assert!(stash.put_content(&ns, hash, bytes.clone()).await?);
+        let untracked = Bytes::from_static(b"an entry nobody referenced");
+        assert_eq!(
+            stash
+                .put_content(&ns, Hash::new(&untracked), untracked)
+                .await?,
+            PutOutcome::UntrackedHash,
+            "a known namespace with no entry for the hash is not the same as an unknown namespace"
+        );
+        assert_eq!(
+            stash
+                .put_content(&ns, hash, Bytes::from_static(b"wrong bytes"))
+                .await?,
+            PutOutcome::HashMismatch
+        );
+        assert_eq!(
+            stash.put_content(&ns, hash, bytes.clone()).await?,
+            PutOutcome::Stored
+        );
         assert_eq!(stash.content_bytes(&ns, hash).await, Some(bytes.to_vec()));
         Ok(())
     }
