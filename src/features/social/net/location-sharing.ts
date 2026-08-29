@@ -80,6 +80,8 @@ import {
   saveHandledNonces,
   savePool,
   saveRatchetActivity,
+  saveRatchetDrops,
+  type RatchetDropCounts,
   saveShareIntervalMs,
   saveSharingEnabled,
   saveStashOptIn,
@@ -1611,6 +1613,7 @@ export class LocationSharingService implements FixPublisher {
    */
   private noteDroppedRecipients(dropped: string[], span: Span): void {
     if (dropped.length === 0) {
+      void this.persistDropCounts({ total: 0, lapsed: 0, noSession: 0 });
       if (this.droppedRecipients.size > 0) {
         this.droppedRecipients.clear();
         this.emit();
@@ -1618,6 +1621,8 @@ export class LocationSharingService implements FixPublisher {
       return;
     }
     const next = new Map<string, RatchetDropReason>();
+    let lapsed = 0;
+    let noSession = 0;
     for (const entry of dropped) {
       const sep = entry.lastIndexOf(':');
       if (sep <= 0) continue;
@@ -1625,6 +1630,8 @@ export class LocationSharingService implements FixPublisher {
       const reason = entry.slice(sep + 1) as RatchetDropReason;
       const actionable = reason === 'no_session' || reason === 'lapsed';
       if (actionable) next.set(endpointId, reason);
+      if (reason === 'lapsed') lapsed += 1;
+      if (reason === 'no_session') noSession += 1;
       // `no_sending_chain` is a responder waiting for the initiator's first envelope and clears
       // itself next tick, so it stays at debug; everything else means a friend missed this fix.
       getTelemetry().log(
@@ -1633,11 +1640,37 @@ export class LocationSharingService implements FixPublisher {
         { 'sc.peer': endpointId.slice(0, 10), 'sc.drop_reason': reason }
       );
     }
+    // On the span as well as in the logs. A log line is only findable by someone who already
+    // suspects this; span attributes are what the span-derived metrics and the device-health
+    // dashboard can count, and "this publish reached nobody" deserves to be countable.
+    span.setAttribute('ratchet.dropped', dropped.length);
+    span.setAttribute('ratchet.dropped_lapsed', lapsed);
+    span.setAttribute('ratchet.dropped_no_session', noSession);
+    if (lapsed > 0 || noSession > 0) {
+      span.setAttribute('sc.drop_reason', lapsed >= noSession ? 'lapsed' : 'no_session');
+    }
     span.addEvent('ratchet.recipients_dropped', { count: dropped.length });
+    void this.persistDropCounts({ total: dropped.length, lapsed, noSession });
     this.droppedRecipients = next;
     // Emit rather than coalesce: this is once-per-tick, and "your friend is not receiving your
     // location" is exactly the kind of change a 250 ms debounce should not sit on.
     this.emit();
+  }
+
+  /**
+   * Mirror the drop counts to storage so `device.health` can report them.
+   *
+   * `device.health` is emitted from the periodic refresh, which does not necessarily share a
+   * process with the publish that dropped the recipients — so it cannot read them off this
+   * instance. Best-effort by design: failing to record the count must never fail the publish it
+   * describes.
+   */
+  private async persistDropCounts(counts: RatchetDropCounts): Promise<void> {
+    try {
+      await saveRatchetDrops(this.kv, counts);
+    } catch {
+      /* best-effort: telemetry must not be able to fail the tick */
+    }
   }
 
   /**

@@ -386,6 +386,15 @@ impl RatchetState {
         self.recv_epoch
     }
 
+    /// When the peer last contributed a fresh ratchet key (ms since epoch).
+    ///
+    /// Exposed so a caller holding the session open can apply the §4.5 bound *and* another
+    /// judgement to the same load — `SessionManager::is_desynced` needs both "does it load" and
+    /// "has it lapsed" under one pass of the critical section.
+    pub fn peer_advanced_ms(&self) -> u64 {
+        self.peer_advanced_ms
+    }
+
     /// Whether the peer has gone quiet past `t_lapse_ms` (§4.5). A lapsed recipient is treated
     /// exactly like a revoked one — dropped from the wrap set until they check back in.
     pub fn is_lapsed(&self, now_ms: u64, t_lapse_ms: u64) -> bool {

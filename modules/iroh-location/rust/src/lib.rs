@@ -1088,10 +1088,11 @@ enum GossipOpen {
 /// Desync detection and the §4.6 resync primitive.
 #[uniffi::export(async_runtime = "tokio")]
 impl LocationNode {
-    /// Whether this peer has missed `R` consecutive envelopes — desynced per §4.6.
+    /// Whether this peer's session needs §4.6 recovery: `R` consecutive missed envelopes, an
+    /// unreadable state file, or a peer lapsed past `T_lapse` (§4.5).
     pub async fn is_desynced(&self, peer_endpoint_hex: String) -> Result<bool, LocationError> {
         let peer = decode_endpoint(&peer_endpoint_hex)?;
-        Ok(self.session_manager().await?.is_desynced(&peer))
+        Ok(self.session_manager().await?.is_desynced(&peer, now_ms()))
     }
 
     /// How many resyncs we have driven with this peer.
@@ -2209,6 +2210,8 @@ impl LocationNode {
             sync.peers_requested = requested,
             sync.peers_dialed = peers.len(),
             entries_sent = tracing::field::Empty,
+            peers_finished = tracing::field::Empty,
+            peers_failed = tracing::field::Empty,
             finished = tracing::field::Empty,
         );
         telemetry::set_parent(&span, traceparent.as_deref());
@@ -2231,8 +2234,11 @@ impl LocationNode {
             })?;
             let current = tracing::Span::current();
             current.record("finished", sent.is_some());
-            if let Some(sent) = sent {
-                current.record("entries_sent", sent);
+            if let Some(report) = sent {
+                // Summed across every peer that reported, not taken from whichever finished first.
+                current.record("entries_sent", report.entries_sent);
+                current.record("peers_finished", report.peers_finished);
+                current.record("peers_failed", report.peers_failed);
             }
             Ok(())
         }
@@ -2241,19 +2247,53 @@ impl LocationNode {
     }
 
     /// Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
+    ///
+    /// Returns the number of slots the stash **accepted**. The other outcomes are on the
+    /// `trail.content.upload` span rather than in the return value, deliberately: the UniFFI
+    /// signature stays `u64` so a phone running an older binary than the JS bundle keeps working,
+    /// and `untracked` is a number you want to watch over time rather than branch on.
     pub async fn upload_trail_content(
         &self,
         base_url: String,
         psk: Option<String>,
     ) -> Result<u64, LocationError> {
+        use tracing::Instrument;
         let guard = self.inner.lock().await;
         let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
         let trail = started.trail.clone();
         drop(guard);
-        trail
-            .upload_own_latest(&base_url, psk.as_deref())
-            .await
-            .map_err(|error| LocationError::Network(error.to_string()))
+        let span = tracing::info_span!(
+            "trail.content.upload",
+            sc.author = %telemetry::short_hex(&self.author),
+            uploaded = tracing::field::Empty,
+            untracked = tracing::field::Empty,
+            unreadable = tracing::field::Empty,
+            transport_failed = tracing::field::Empty,
+        );
+        async move {
+            let report = trail
+                .upload_own_latest(&base_url, psk.as_deref())
+                .await
+                .map_err(|error| LocationError::Network(error.to_string()))?;
+            let current = tracing::Span::current();
+            current.record("uploaded", report.uploaded);
+            current.record("untracked", report.untracked);
+            current.record("unreadable", report.unreadable);
+            current.record("transport_failed", report.transport_failed);
+            // Worth a log line, not just a span field: a backlog that never drains is the
+            // signature of entries that are not reconciling to the stash at all.
+            if report.untracked > 0 {
+                tracing::warn!(
+                    untracked = report.untracked,
+                    uploaded = report.uploaded,
+                    "trail content upload: the stash is not tracking some slots; their bytes are \
+                     not available for offline friends yet"
+                );
+            }
+            Ok(report.uploaded)
+        }
+        .instrument(span)
+        .await
     }
 
     /// Read the latest decryptable fix per author (friends who share with us) from the local

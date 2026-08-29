@@ -347,6 +347,49 @@ export async function saveRatchetActivity(
   await kv.set(RATCHET_ACTIVITY_KEY, JSON.stringify(activity));
 }
 
+const RATCHET_DROPS_KEY = 'sc.social.ratchetDrops';
+
+/**
+ * How many recipients the last ratcheted publish left out, by reason (FORWARD-SECRECY §4.5).
+ *
+ * Persisted purely so `device.health` can report it. "Every fix I publish is sealed for nobody" is
+ * the most consequential state this system has, and it lived only in a Loki log line written by the
+ * publishing process — so the device-health dashboard showed a green fleet through a day-long
+ * mutual lapse in which two phones published on schedule and neither could see the other. A count
+ * on the periodic record makes it a thing you can graph the absence of, which is the whole premise
+ * of that dashboard.
+ */
+export interface RatchetDropCounts {
+  /** Recipients left out of the most recent publish, for any reason. */
+  total: number;
+  /** …of which had gone quiet past `T_lapse`. */
+  lapsed: number;
+  /** …of which have no session at all, which only an in-person re-pair fixes. */
+  noSession: number;
+}
+
+export async function loadRatchetDrops(kv: PersistentKV): Promise<RatchetDropCounts | null> {
+  const raw = await kv.get(RATCHET_DROPS_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<RatchetDropCounts>;
+    return {
+      total: typeof parsed.total === 'number' ? parsed.total : 0,
+      lapsed: typeof parsed.lapsed === 'number' ? parsed.lapsed : 0,
+      noSession: typeof parsed.noSession === 'number' ? parsed.noSession : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function saveRatchetDrops(
+  kv: PersistentKV,
+  counts: Readonly<RatchetDropCounts>
+): Promise<void> {
+  await kv.set(RATCHET_DROPS_KEY, JSON.stringify(counts));
+}
+
 const HANDLED_CTL_KEY = 'sc.social.handledControlNonces';
 
 /**
