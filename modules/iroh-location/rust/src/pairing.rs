@@ -259,7 +259,7 @@ fn b64url_decode(s: &str) -> Result<Vec<u8>> {
             out.push(((n >> (16 - 8 * i)) & 0xff) as u8);
         }
         // Bits below the decoded bytes are padding and must be zero.
-        if chunk.len() < 4 && (n & ((1 << (24 - 8 * full)) - 1)) != 0 {
+        if chunk.len() < 4 && (n & ((1u32 << (24 - 8 * full)) - 1)) != 0 {
             bail!("non-canonical base64url tail");
         }
     }
