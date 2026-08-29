@@ -495,7 +495,7 @@ declined prompt left the strip with no action to offer.
 
 ### Remote: link or blind short code
 
-- A shareable `streetcryptid:///social?token=scpair1:…` link opens the map with the friends
+- A shareable `streetcryptid:///social?token=scpair2:…` link opens the map with the friends
   island showing and carries the opaque native invite directly. Android native intents
   normalize both this canonical form and legacy `streetcryptid://social` / `/pair` links
   into `/?pair=<token>`.

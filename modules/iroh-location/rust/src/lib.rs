@@ -2757,7 +2757,7 @@ impl LocationNode {
         Ok(sid.to_vec())
     }
 
-    /// Begin an invite-based pair from an opaque invite token (`scpair1:…`). Returns the session id.
+    /// Begin an invite-based pair from an opaque invite token (`scpair2:…`). Returns the session id.
     pub async fn initiate_pair_by_ticket(&self, token: String) -> Result<Vec<u8>, LocationError> {
         let inv =
             pairing::decode_invite(&token).map_err(|e| LocationError::Decode(e.to_string()))?;
@@ -3520,14 +3520,15 @@ fn ble_peer(p: &ble::BlePeerView) -> BlePeer {
     }
 }
 
-/// Encode a [`PairInvite`] into an opaque, dependency-free `scpair1:<hex>` token for QR / links.
+/// Encode a [`PairInvite`] into an opaque, dependency-free `scpair2:<base64url>` token for QR / links.
 #[uniffi::export]
 pub fn encode_pair_invite(invite: PairInvite) -> Result<String, LocationError> {
     let inv = invite_from_uniffi(&invite)?;
     pairing::encode_invite(&inv).map_err(|e| LocationError::Decode(e.to_string()))
 }
 
-/// Decode an opaque `scpair1:<hex>` token back into a [`PairInvite`].
+/// Decode an opaque `scpair2:<base64url>` token (or a legacy `scpair1:<hex>` one) back into a
+/// [`PairInvite`].
 #[uniffi::export]
 pub fn decode_pair_invite(token: String) -> Result<PairInvite, LocationError> {
     let inv = pairing::decode_invite(&token).map_err(|e| LocationError::Decode(e.to_string()))?;

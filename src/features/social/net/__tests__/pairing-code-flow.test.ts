@@ -166,7 +166,7 @@ class FakeNativeModule {
       endpointId: 'aa11',
       endpointTicket: 'et',
       expiresAtMs: 0,
-      token: 'scpair1:cafef00d',
+      token: 'scpair2:cafef00d',
     };
   }
   async initiatePairByToken(token: string) {
@@ -348,7 +348,7 @@ describe('LocationSharingService — encrypted short pairing-code path', () => {
     const sessionId = await svc.pairFromInput(code);
 
     expect(sessionId).toBe('sess-invite');
-    expect(mockHolder.mod.calls.initiatePairByToken).toEqual(['scpair1:cafef00d']);
+    expect(mockHolder.mod.calls.initiatePairByToken).toEqual(['scpair2:cafef00d']);
     // SAS is mandatory: redeeming a code must NOT auto-accept the local side.
     expect(mockHolder.mod.calls.respondPair).toHaveLength(0);
     // A one-time GET must have burned the entry.

@@ -34,7 +34,7 @@ import {
   type SpanContext,
 } from '@/features/dev/telemetry';
 import { encodeContactCard } from '../core/contact-card';
-import { decodePairLink, encodePairLink, isPairLink, PAIR_TOKEN_PREFIX } from '../core/pair-link';
+import { decodePairLink, encodePairLink, isPairLink, isPairToken } from '../core/pair-link';
 import {
   deriveLookupId,
   isPairingCode,
@@ -1262,7 +1262,7 @@ export class LocationSharingService implements FixPublisher {
 
   /**
    * Begin an invite-based pair from a short mailbox pairing code, an app pair link
-   * (`streetcryptid:///social?token=…`), or a raw `scpair1:` token. The handshake proceeds to the
+   * (`streetcryptid:///social?token=…`), or a raw `scpair2:` token. The handshake proceeds to the
    * SAS `verifying` gate; neither side is auto-accepted — both humans clear the visual check to
    * complete the pair. Returns the session id. Tags the eventual friend `code` (short code or raw
    * token) or `invite` (app link). A short code is recognized *before* pair-link parsing; its
@@ -1282,8 +1282,7 @@ export class LocationSharingService implements FixPublisher {
     }
     const token = decodePairLink(trimmed);
     // A full app pair link is an invite; a bare pasted/typed token is a manual code.
-    const method: PairingMethod =
-      isPairLink(trimmed) && !trimmed.startsWith(PAIR_TOKEN_PREFIX) ? 'invite' : 'code';
+    const method: PairingMethod = isPairLink(trimmed) && !isPairToken(trimmed) ? 'invite' : 'code';
     const sessionId = await this.mod.initiatePairByToken(token);
     this.initiatedRoutes.set(sessionId, method);
     this.setPairingActivity('pairing…');

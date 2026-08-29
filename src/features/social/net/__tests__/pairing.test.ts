@@ -152,7 +152,7 @@ class FakeNativeModule {
       endpointId: 'aa11',
       endpointTicket: 'et',
       expiresAtMs: 0,
-      token: 'scpair1:cafef00d',
+      token: 'scpair2:cafef00d',
     };
   }
   async initiatePairByToken(token: string) {
@@ -400,7 +400,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(link).toMatch(/^streetcryptid:\/\/\/social\?token=/);
 
     await svc.pairFromInput(link);
-    expect(mockHolder.mod.calls.initiatePairByToken).toEqual(['scpair1:cafef00d']);
+    expect(mockHolder.mod.calls.initiatePairByToken).toEqual(['scpair2:cafef00d']);
     // SAS is mandatory: initiating must NOT auto-accept the local side.
     expect(mockHolder.mod.calls.respondPair).toHaveLength(0);
   });
@@ -1277,7 +1277,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       resolveSession = resolve;
     });
 
-    const pairing = svc.pairFromInput('scpair1:slow');
+    const pairing = svc.pairFromInput('scpair2:slow');
     await Promise.resolve();
     await expect(svc.ensureBleReady()).rejects.toThrow(/pairing action/i);
     expect(mockHolder.mod.calls.shutdown).toBe(0);

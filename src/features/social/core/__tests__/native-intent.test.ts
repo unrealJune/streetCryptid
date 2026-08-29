@@ -1,6 +1,6 @@
 import { redirectSystemPath } from '@/app/+native-intent';
 
-const TOKEN = 'scpair1:deadbeef';
+const TOKEN = 'scpair2:deadbeef';
 
 describe('native pair intent rewriting', () => {
   it('routes Android-style host links to the map', () => {
