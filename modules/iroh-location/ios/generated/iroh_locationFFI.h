@@ -243,6 +243,20 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_DEVICE_SECRETS_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_DEVICE_SECRETS_METHOD0
+typedef void (*UniffiCallbackInterfaceDeviceSecretsMethod0)(uint64_t, RustBuffer* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_DEVICE_SECRETS_METHOD1
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_DEVICE_SECRETS_METHOD1
+typedef void (*UniffiCallbackInterfaceDeviceSecretsMethod1)(uint64_t, RustBuffer* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_FIX_LISTENER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_FIX_LISTENER_METHOD0
 typedef void (*UniffiCallbackInterfaceFixListenerMethod0)(uint64_t, RustBuffer, uint64_t, RustBuffer, int8_t, RustBuffer, void* _Nonnull, 
@@ -264,6 +278,16 @@ typedef void (*UniffiCallbackInterfaceFixListenerMethod2)(uint64_t, RustBuffer, 
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_DEVICE_SECRETS
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_DEVICE_SECRETS
+typedef struct UniffiVTableCallbackInterfaceDeviceSecrets {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceDeviceSecretsMethod0 _Nonnull identitySecret;
+    UniffiCallbackInterfaceDeviceSecretsMethod1 _Nonnull recvSecret;
+} UniffiVTableCallbackInterfaceDeviceSecrets;
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_FIX_LISTENER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_FIX_LISTENER
 typedef struct UniffiVTableCallbackInterfaceFixListener {
@@ -274,6 +298,31 @@ typedef struct UniffiVTableCallbackInterfaceFixListener {
     UniffiCallbackInterfaceFixListenerMethod2 _Nonnull onStatus;
 } UniffiVTableCallbackInterfaceFixListener;
 
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CLONE_DEVICESECRETS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CLONE_DEVICESECRETS
+uint64_t uniffi_iroh_location_fn_clone_devicesecrets(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FREE_DEVICESECRETS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FREE_DEVICESECRETS
+void uniffi_iroh_location_fn_free_devicesecrets(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_INIT_CALLBACK_VTABLE_DEVICESECRETS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_INIT_CALLBACK_VTABLE_DEVICESECRETS
+void uniffi_iroh_location_fn_init_callback_vtable_devicesecrets(const UniffiVTableCallbackInterfaceDeviceSecrets* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_DEVICESECRETS_IDENTITY_SECRET
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_DEVICESECRETS_IDENTITY_SECRET
+RustBuffer uniffi_iroh_location_fn_method_devicesecrets_identity_secret(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_DEVICESECRETS_RECV_SECRET
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_DEVICESECRETS_RECV_SECRET
+RustBuffer uniffi_iroh_location_fn_method_devicesecrets_recv_secret(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CLONE_FIXLISTENER
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CLONE_FIXLISTENER
@@ -315,6 +364,11 @@ uint64_t uniffi_iroh_location_fn_clone_locationnode(uint64_t handle, RustCallSta
 void uniffi_iroh_location_fn_free_locationnode(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CONSTRUCTOR_LOCATIONNODE_FROM_DEVICE_SECRETS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CONSTRUCTOR_LOCATIONNODE_FROM_DEVICE_SECRETS
+uint64_t uniffi_iroh_location_fn_constructor_locationnode_from_device_secrets(uint64_t secrets, RustBuffer data_root, RustBuffer state_root, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CONSTRUCTOR_LOCATIONNODE_NEW
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CONSTRUCTOR_LOCATIONNODE_NEW
 uint64_t uniffi_iroh_location_fn_constructor_locationnode_new(RustBuffer identity_secret, RustBuffer recv_secret, RustCallStatus *_Nonnull out_status
@@ -350,6 +404,11 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_ble_has_scan_hint(uint64_t 
 uint64_t uniffi_iroh_location_fn_method_locationnode_cancel_pair(uint64_t ptr, RustBuffer session_id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_CLEAR_OUTBOX
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_CLEAR_OUTBOX
+uint64_t uniffi_iroh_location_fn_method_locationnode_clear_outbox(uint64_t ptr
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_CLEAR_RESYNC
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_CLEAR_RESYNC
 uint64_t uniffi_iroh_location_fn_method_locationnode_clear_resync(uint64_t ptr
@@ -368,6 +427,11 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_confirm_pair_display(uint64
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_CREATE_INVITE
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_CREATE_INVITE
 uint64_t uniffi_iroh_location_fn_method_locationnode_create_invite(uint64_t ptr, uint64_t ttl_secs
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_CURRENT_SEQ
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_CURRENT_SEQ
+uint64_t uniffi_iroh_location_fn_method_locationnode_current_seq(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_DOC_TICKET
@@ -495,6 +559,16 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_nearby_ble_peers(uint64_t p
 uint64_t uniffi_iroh_location_fn_method_locationnode_network_changed(uint64_t ptr
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_NEXT_SEQ
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_NEXT_SEQ
+uint64_t uniffi_iroh_location_fn_method_locationnode_next_seq(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_OUTBOX_PENDING
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_OUTBOX_PENDING
+uint64_t uniffi_iroh_location_fn_method_locationnode_outbox_pending(uint64_t ptr
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_PAIR_RESULT
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_PAIR_RESULT
 uint64_t uniffi_iroh_location_fn_method_locationnode_pair_result(uint64_t ptr, RustBuffer session_id
@@ -605,9 +679,29 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_respond_pair(uint64_t ptr, 
 uint64_t uniffi_iroh_location_fn_method_locationnode_resync_count(uint64_t ptr, RustBuffer peer_endpoint_hex
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SEED_SEQ
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SEED_SEQ
+uint64_t uniffi_iroh_location_fn_method_locationnode_seed_seq(uint64_t ptr, uint64_t floor
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SET_PAIRING_READY
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SET_PAIRING_READY
 void uniffi_iroh_location_fn_method_locationnode_set_pairing_ready(uint64_t ptr, int8_t ready, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SET_SHARING_RECIPIENTS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SET_SHARING_RECIPIENTS
+uint64_t uniffi_iroh_location_fn_method_locationnode_set_sharing_recipients(uint64_t ptr, RustBuffer recipient_endpoints
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SET_TRANSPORT_CONFIG
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SET_TRANSPORT_CONFIG
+uint64_t uniffi_iroh_location_fn_method_locationnode_set_transport_config(uint64_t ptr, RustBuffer config
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SHARING_RECIPIENTS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SHARING_RECIPIENTS
+uint64_t uniffi_iroh_location_fn_method_locationnode_sharing_recipients(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SHUTDOWN
@@ -618,6 +712,11 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_shutdown(uint64_t ptr
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_START
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_START
 uint64_t uniffi_iroh_location_fn_method_locationnode_start(uint64_t ptr, RustBuffer relay_urls, RustBuffer relay_auth_token, int8_t relay_enabled, int8_t ip_enabled, int8_t ble_enabled
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_START_STORED
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_START_STORED
+uint64_t uniffi_iroh_location_fn_method_locationnode_start_stored(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_SUBMIT_PAIR_CHOICE
@@ -708,6 +807,11 @@ uint64_t uniffi_iroh_location_fn_clone_subscription(uint64_t handle, RustCallSta
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FREE_SUBSCRIPTION
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FREE_SUBSCRIPTION
 void uniffi_iroh_location_fn_free_subscription(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_INGEST_FIX
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_INGEST_FIX
+uint64_t uniffi_iroh_location_fn_method_subscription_ingest_fix(uint64_t ptr, RustBuffer subscription_id, RustBuffer fix, RustBuffer battery, uint64_t interval_ms, uint64_t now_ms
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_PUBLISH
@@ -1185,6 +1289,18 @@ uint16_t uniffi_iroh_location_checksum_func_flush_telemetry(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_DEVICESECRETS_IDENTITY_SECRET
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_DEVICESECRETS_IDENTITY_SECRET
+uint16_t uniffi_iroh_location_checksum_method_devicesecrets_identity_secret(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_DEVICESECRETS_RECV_SECRET
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_DEVICESECRETS_RECV_SECRET
+uint16_t uniffi_iroh_location_checksum_method_devicesecrets_recv_secret(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_FIXLISTENER_ON_FIX
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_FIXLISTENER_ON_FIX
 uint16_t uniffi_iroh_location_checksum_method_fixlistener_on_fix(void
@@ -1233,6 +1349,12 @@ uint16_t uniffi_iroh_location_checksum_method_locationnode_cancel_pair(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_CLEAR_OUTBOX
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_CLEAR_OUTBOX
+uint16_t uniffi_iroh_location_checksum_method_locationnode_clear_outbox(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_CLEAR_RESYNC
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_CLEAR_RESYNC
 uint16_t uniffi_iroh_location_checksum_method_locationnode_clear_resync(void
@@ -1254,6 +1376,12 @@ uint16_t uniffi_iroh_location_checksum_method_locationnode_confirm_pair_display(
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_CREATE_INVITE
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_CREATE_INVITE
 uint16_t uniffi_iroh_location_checksum_method_locationnode_create_invite(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_CURRENT_SEQ
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_CURRENT_SEQ
+uint16_t uniffi_iroh_location_checksum_method_locationnode_current_seq(void
     
 );
 #endif
@@ -1407,6 +1535,18 @@ uint16_t uniffi_iroh_location_checksum_method_locationnode_network_changed(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_NEXT_SEQ
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_NEXT_SEQ
+uint16_t uniffi_iroh_location_checksum_method_locationnode_next_seq(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_OUTBOX_PENDING
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_OUTBOX_PENDING
+uint16_t uniffi_iroh_location_checksum_method_locationnode_outbox_pending(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_PAIR_RESULT
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_PAIR_RESULT
 uint16_t uniffi_iroh_location_checksum_method_locationnode_pair_result(void
@@ -1539,9 +1679,33 @@ uint16_t uniffi_iroh_location_checksum_method_locationnode_resync_count(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SEED_SEQ
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SEED_SEQ
+uint16_t uniffi_iroh_location_checksum_method_locationnode_seed_seq(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SET_PAIRING_READY
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SET_PAIRING_READY
 uint16_t uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SET_SHARING_RECIPIENTS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SET_SHARING_RECIPIENTS
+uint16_t uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SET_TRANSPORT_CONFIG
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SET_TRANSPORT_CONFIG
+uint16_t uniffi_iroh_location_checksum_method_locationnode_set_transport_config(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SHARING_RECIPIENTS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_SHARING_RECIPIENTS
+uint16_t uniffi_iroh_location_checksum_method_locationnode_sharing_recipients(void
     
 );
 #endif
@@ -1554,6 +1718,12 @@ uint16_t uniffi_iroh_location_checksum_method_locationnode_shutdown(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_START
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_START
 uint16_t uniffi_iroh_location_checksum_method_locationnode_start(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_START_STORED
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_START_STORED
+uint16_t uniffi_iroh_location_checksum_method_locationnode_start_stored(void
     
 );
 #endif
@@ -1635,6 +1805,12 @@ uint16_t uniffi_iroh_location_checksum_method_meshcapsulestore_stats(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_INGEST_FIX
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_INGEST_FIX
+uint16_t uniffi_iroh_location_checksum_method_subscription_ingest_fix(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH
 uint16_t uniffi_iroh_location_checksum_method_subscription_publish(void
@@ -1662,6 +1838,12 @@ uint16_t uniffi_iroh_location_checksum_method_subscription_publish_null_traced(v
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH_TRACED
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH_TRACED
 uint16_t uniffi_iroh_location_checksum_method_subscription_publish_traced(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_CONSTRUCTOR_LOCATIONNODE_FROM_DEVICE_SECRETS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_CONSTRUCTOR_LOCATIONNODE_FROM_DEVICE_SECRETS
+uint16_t uniffi_iroh_location_checksum_constructor_locationnode_from_device_secrets(void
     
 );
 #endif

@@ -620,6 +620,12 @@ internal open class UniffiForeignFutureResultVoid(
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
     fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultVoid.UniffiByValue,)
 }
+internal interface UniffiCallbackInterfaceDeviceSecretsMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceDeviceSecretsMethod1 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceFixListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`via`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -628,6 +634,28 @@ internal interface UniffiCallbackInterfaceFixListenerMethod1 : com.sun.jna.Callb
 }
 internal interface UniffiCallbackInterfaceFixListenerMethod2 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`status`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "identitySecret", "recvSecret")
+internal open class UniffiVTableCallbackInterfaceDeviceSecrets(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `identitySecret`: UniffiCallbackInterfaceDeviceSecretsMethod0? = null,
+    @JvmField internal var `recvSecret`: UniffiCallbackInterfaceDeviceSecretsMethod1? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `identitySecret`: UniffiCallbackInterfaceDeviceSecretsMethod0? = null,
+        `recvSecret`: UniffiCallbackInterfaceDeviceSecretsMethod1? = null,
+    ): UniffiVTableCallbackInterfaceDeviceSecrets(`uniffiFree`,`uniffiClone`,`identitySecret`,`recvSecret`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceDeviceSecrets) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `identitySecret` = other.`identitySecret`
+        `recvSecret` = other.`recvSecret`
+    }
+
 }
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onFix", "onOpaque", "onStatus")
 internal open class UniffiVTableCallbackInterfaceFixListener(
@@ -711,6 +739,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_func_flush_telemetry(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_devicesecrets_identity_secret(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_devicesecrets_recv_secret(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_fixlistener_on_fix(
     ): Int
     external fun uniffi_iroh_location_checksum_method_fixlistener_on_opaque(
@@ -727,6 +759,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_cancel_pair(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_clear_outbox(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_clear_resync(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_complete_session(
@@ -734,6 +768,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_iroh_location_checksum_method_locationnode_confirm_pair_display(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_create_invite(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_current_seq(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_doc_ticket(
     ): Int
@@ -785,6 +821,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_network_changed(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_next_seq(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_outbox_pending(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_pair_result(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_pair_sas_challenge(
@@ -829,11 +869,21 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_resync_count(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_seed_seq(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_set_transport_config(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_sharing_recipients(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_shutdown(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_start(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_start_stored(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_submit_pair_choice(
     ): Int
@@ -861,6 +911,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_meshcapsulestore_stats(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_subscription_ingest_fix(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_subscription_publish(
     ): Int
     external fun uniffi_iroh_location_checksum_method_subscription_publish_inner(
@@ -870,6 +922,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_iroh_location_checksum_method_subscription_publish_null_traced(
     ): Int
     external fun uniffi_iroh_location_checksum_method_subscription_publish_traced(
+    ): Int
+    external fun uniffi_iroh_location_checksum_constructor_locationnode_from_device_secrets(
     ): Int
     external fun uniffi_iroh_location_checksum_constructor_locationnode_new(
     ): Int
@@ -893,10 +947,21 @@ internal object UniffiLib {
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "iroh_location"))
+        uniffiCallbackInterfaceDeviceSecrets.register(this)
         uniffiCallbackInterfaceFixListener.register(this)
         
     }
-    external fun uniffi_iroh_location_fn_clone_fixlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_iroh_location_fn_clone_devicesecrets(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_iroh_location_fn_free_devicesecrets(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_iroh_location_fn_init_callback_vtable_devicesecrets(`vtable`: UniffiVTableCallbackInterfaceDeviceSecrets,
+): Unit
+external fun uniffi_iroh_location_fn_method_devicesecrets_identity_secret(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_devicesecrets_recv_secret(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_clone_fixlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_iroh_location_fn_free_fixlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -912,6 +977,8 @@ external fun uniffi_iroh_location_fn_clone_locationnode(`handle`: Long,uniffi_ou
 ): Long
 external fun uniffi_iroh_location_fn_free_locationnode(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_iroh_location_fn_constructor_locationnode_from_device_secrets(`secrets`: Long,`dataRoot`: RustBuffer.ByValue,`stateRoot`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Long
 external fun uniffi_iroh_location_fn_constructor_locationnode_new(`identitySecret`: RustBuffer.ByValue,`recvSecret`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_iroh_location_fn_constructor_locationnode_new_at_dirs(`identitySecret`: RustBuffer.ByValue,`recvSecret`: RustBuffer.ByValue,`dataRoot`: RustBuffer.ByValue,`stateRoot`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -926,6 +993,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_ble_has_scan_hint(`ptr`
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_cancel_pair(`ptr`: Long,`sessionId`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_clear_outbox(`ptr`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_clear_resync(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_complete_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,`peerEphemeralHex`: RustBuffer.ByValue,
@@ -933,6 +1002,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_complete_session(`ptr`:
 external fun uniffi_iroh_location_fn_method_locationnode_confirm_pair_display(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`matched`: Byte,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_create_invite(`ptr`: Long,`ttlSecs`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_current_seq(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_doc_ticket(`ptr`: Long,
 ): Long
@@ -984,6 +1055,10 @@ external fun uniffi_iroh_location_fn_method_locationnode_nearby_ble_peers(`ptr`:
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_network_changed(`ptr`: Long,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_next_seq(`ptr`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_outbox_pending(`ptr`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_pair_result(`ptr`: Long,`sessionId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_pair_sas_challenge(`ptr`: Long,`sessionId`: RustBuffer.ByValue,
@@ -1028,11 +1103,21 @@ external fun uniffi_iroh_location_fn_method_locationnode_respond_pair(`ptr`: Lon
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_resync_count(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_seed_seq(`ptr`: Long,`floor`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_set_pairing_ready(`ptr`: Long,`ready`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_iroh_location_fn_method_locationnode_set_sharing_recipients(`ptr`: Long,`recipientEndpoints`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_set_transport_config(`ptr`: Long,`config`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_sharing_recipients(`ptr`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_shutdown(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_start(`ptr`: Long,`relayUrls`: RustBuffer.ByValue,`relayAuthToken`: RustBuffer.ByValue,`relayEnabled`: Byte,`ipEnabled`: Byte,`bleEnabled`: Byte,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_start_stored(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_submit_pair_choice(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`chosenIndex`: Int,
 ): Long
@@ -1070,6 +1155,8 @@ external fun uniffi_iroh_location_fn_clone_subscription(`handle`: Long,uniffi_ou
 ): Long
 external fun uniffi_iroh_location_fn_free_subscription(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_iroh_location_fn_method_subscription_ingest_fix(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`fix`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_subscription_publish(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`recipientEndpoints`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_subscription_publish_inner(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`ts`: Long,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
@@ -1284,6 +1371,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_devicesecrets_identity_secret() != 9294) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_devicesecrets_recv_secret() != 59366) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 28882) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1308,6 +1401,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 49013) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_clear_outbox() != 61861) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_clear_resync() != 52312) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1318,6 +1414,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_create_invite() != 6482) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_current_seq() != 23320) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_doc_ticket() != 34643) {
@@ -1395,6 +1494,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_network_changed() != 50592) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_next_seq() != 48703) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_outbox_pending() != 57932) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_pair_result() != 26021) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1461,13 +1566,28 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_resync_count() != 62719) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_seed_seq() != 19292) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients() != 39630) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_transport_config() != 29934) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_sharing_recipients() != 6345) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_shutdown() != 36520) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_start() != 8886) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_start_stored() != 48587) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_submit_pair_choice() != 8652) {
@@ -1509,6 +1629,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_subscription_ingest_fix() != 22084) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_subscription_publish() != 18306) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1524,10 +1647,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_subscription_publish_traced() != 2036) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_constructor_locationnode_from_device_secrets() != 9138) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_constructor_locationnode_new() != 52316) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_constructor_locationnode_new_at_dirs() != 15584) {
+    if (lib.uniffi_iroh_location_checksum_constructor_locationnode_new_at_dirs() != 4144) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_constructor_meshcapsulestore_new() != 52560) {
@@ -2076,6 +2202,408 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 
 
 /**
+ * Foreign (Swift/Kotlin) access to this device's identity, wherever the platform keeps it.
+ *
+ * The background drain path has to build a node with no JS context alive, and the identity it
+ * needs lives in the OS keystore that `expo-secure-store` writes: the iOS Keychain under
+ * `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, and Android Keystore-wrapped preferences.
+ * Rust cannot read either, and it should not want to — where a secret lives, and what unlock
+ * class guards it, is exactly the kind of decision that belongs to the platform.
+ *
+ * # Why a port rather than a file
+ *
+ * The obvious shortcut is to copy the identity secret into the Rust state dir, where the node
+ * could read it directly. That trades a real security property for convenience: FORWARD-SECRECY.md
+ * §1's threat model is a **seized device**, and the whole point of the keystore's accessibility
+ * class is that a locked phone's identity is not readable. A plain file in the app's data dir is,
+ * so the shortcut would quietly widen the exposure the ratchet exists to bound.
+ *
+ * So the secret stays where the OS protects it and crosses this seam on demand instead. The cost
+ * is one callback per node construction; the benefit is that `session_store`'s key — which is
+ * derived from this secret — inherits the platform's protection class rather than the filesystem's.
+ *
+ * # Contract
+ *
+ * - `None` means **not provisioned yet**, not an error: a fresh install has no identity until the
+ * app has run once. A background wake that gets `None` should do nothing and wait, rather than
+ * generate an identity the user's friends have never seen.
+ * - Implementations must be safe to call from a background thread while the device is locked,
+ * which is what the "after first unlock" class buys and why a `WhenUnlocked` item would not do.
+ */
+public interface DeviceSecrets {
+    
+    /**
+     * The long-lived identity seed. Also the input to the session store's key derivation.
+     */
+    fun `identitySecret`(): kotlin.ByteArray?
+    
+    /**
+     * The envelope receiving secret.
+     */
+    fun `recvSecret`(): kotlin.ByteArray?
+    
+    companion object
+}
+
+/**
+ * Foreign (Swift/Kotlin) access to this device's identity, wherever the platform keeps it.
+ *
+ * The background drain path has to build a node with no JS context alive, and the identity it
+ * needs lives in the OS keystore that `expo-secure-store` writes: the iOS Keychain under
+ * `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, and Android Keystore-wrapped preferences.
+ * Rust cannot read either, and it should not want to — where a secret lives, and what unlock
+ * class guards it, is exactly the kind of decision that belongs to the platform.
+ *
+ * # Why a port rather than a file
+ *
+ * The obvious shortcut is to copy the identity secret into the Rust state dir, where the node
+ * could read it directly. That trades a real security property for convenience: FORWARD-SECRECY.md
+ * §1's threat model is a **seized device**, and the whole point of the keystore's accessibility
+ * class is that a locked phone's identity is not readable. A plain file in the app's data dir is,
+ * so the shortcut would quietly widen the exposure the ratchet exists to bound.
+ *
+ * So the secret stays where the OS protects it and crosses this seam on demand instead. The cost
+ * is one callback per node construction; the benefit is that `session_store`'s key — which is
+ * derived from this secret — inherits the platform's protection class rather than the filesystem's.
+ *
+ * # Contract
+ *
+ * - `None` means **not provisioned yet**, not an error: a fresh install has no identity until the
+ * app has run once. A background wake that gets `None` should do nothing and wait, rather than
+ * generate an identity the user's friends have never seen.
+ * - Implementations must be safe to call from a background thread while the device is locked,
+ * which is what the "after first unlock" class buys and why a `WhenUnlocked` item would not do.
+ */
+open class DeviceSecretsImpl: Disposable, AutoCloseable, DeviceSecrets
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_iroh_location_fn_free_devicesecrets(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_iroh_location_fn_clone_devicesecrets(handle, status)
+        }
+    }
+
+    
+    /**
+     * The long-lived identity seed. Also the input to the session store's key derivation.
+     */override fun `identitySecret`(): kotlin.ByteArray? {
+            return FfiConverterOptionalByteArray.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_devicesecrets_identity_secret(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The envelope receiving secret.
+     */override fun `recvSecret`(): kotlin.ByteArray? {
+            return FfiConverterOptionalByteArray.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_devicesecrets_recv_secret(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceDeviceSecrets {
+    internal object `identitySecret`: UniffiCallbackInterfaceDeviceSecretsMethod0 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeDeviceSecrets.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`identitySecret`(
+                )
+            }
+            val writeReturn = { value: kotlin.ByteArray? -> uniffiOutReturn.setValue(FfiConverterOptionalByteArray.lower(value)) }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+    internal object `recvSecret`: UniffiCallbackInterfaceDeviceSecretsMethod1 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeDeviceSecrets.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`recvSecret`(
+                )
+            }
+            val writeReturn = { value: kotlin.ByteArray? -> uniffiOutReturn.setValue(FfiConverterOptionalByteArray.lower(value)) }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeDeviceSecrets.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeDeviceSecrets.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceDeviceSecrets.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `identitySecret`,
+        `recvSecret`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_iroh_location_fn_init_callback_vtable_devicesecrets(vtable)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeviceSecrets: FfiConverter<DeviceSecrets, Long> {
+    internal val handleMap = UniffiHandleMap<DeviceSecrets>()
+
+    override fun lower(value: DeviceSecrets): Long {
+        if (value is DeviceSecretsImpl) {
+             // Rust-implemented object.  Clone the handle and return it
+            return value.uniffiCloneHandle()
+         } else {
+            // Kotlin object, generate a new vtable handle and return that.
+            return handleMap.insert(value)
+         }
+    }
+
+    override fun lift(value: Long): DeviceSecrets {
+        if ((value and 1.toLong()) == 0.toLong()) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return DeviceSecretsImpl(UniffiWithHandle, value)
+        } else {
+            // Kotlin-generated handle, get the object from the handle map
+            return handleMap.remove(value)
+        }
+    }
+
+    override fun read(buf: ByteBuffer): DeviceSecrets {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: DeviceSecrets) = 8UL
+
+    override fun write(value: DeviceSecrets, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
  * Foreign (Swift/Kotlin/JS) callback for inbound events on a subscription.
  */
 public interface FixListener {
@@ -2521,6 +3049,11 @@ public interface LocationNodeInterface {
     suspend fun `cancelPair`(`sessionId`: kotlin.ByteArray)
     
     /**
+     * Drop every queued fix (sign-out, or sharing turned off for good).
+     */
+    suspend fun `clearOutbox`()
+    
+    /**
      * Drop our in-flight resync ephemeral once every peer has been restarted.
      */
     suspend fun `clearResync`()
@@ -2549,6 +3082,11 @@ public interface LocationNodeInterface {
      * Mint a one-shot, time-limited invite carrying only immutable bootstrap material.
      */
     suspend fun `createInvite`(`ttlSecs`: kotlin.ULong): PairInvite
+    
+    /**
+     * The last sequence number handed out, without advancing. For display and diagnostics.
+     */
+    suspend fun `currentSeq`(): kotlin.ULong
     
     /**
      * A shareable docs **read-ticket** granting replication of our trail namespace (the
@@ -2722,6 +3260,21 @@ public interface LocationNodeInterface {
      * rebind + relay re-check. No-op before `start()`; harmless to over-call.
      */
     suspend fun `networkChanged`()
+    
+    /**
+     * Advance and return this device's next publish sequence number.
+     *
+     * Durable before it returns: the caller puts the value straight onto the wire as half of an
+     * `author/seq` docs key, and two envelopes under one key is a payload silently lost to
+     * last-write-wins. See `seq_store.rs` for why the counter had to leave JS to be safe — in
+     * short, every headless callback gets a fresh JS context and so got its own copy of it.
+     */
+    suspend fun `nextSeq`(): kotlin.ULong
+    
+    /**
+     * How many captured fixes are waiting to be sealed.
+     */
+    suspend fun `outboxPending`(): kotlin.UInt
     
     /**
      * The completed-pair result for a session, enriched with the peer's verified latest profile
@@ -2908,10 +3461,43 @@ public interface LocationNodeInterface {
     suspend fun `resyncCount`(`peerEndpointHex`: kotlin.String): kotlin.UInt
     
     /**
+     * Raise the counter to at least `floor`, returning whether it moved.
+     *
+     * Monotone: a floor at or below the current value is a no-op. Two callers, one shape — the
+     * one-time migration of the old `expo-secure-store` value, and recovery from a counter file
+     * that will not parse (seed from the highest `seq` in the local replica). Neither can
+     * re-issue a value, because raising a counter only ever skips.
+     */
+    suspend fun `seedSeq`(`floor`: kotlin.ULong): kotlin.Boolean
+    
+    /**
      * Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. Invite-based
      * pairing is always allowed. This is an app-level acceptance gate, not a radio control.
      */
     fun `setPairingReady`(`ready`: kotlin.Boolean)
+    
+    /**
+     * Replace the set of friends this device seals location envelopes for.
+     *
+     * Persisted natively so an OS location callback can read it with no JS context alive. Push it
+     * on every pool change; see [`crate::recipients`] for why a stale set is safe in the only
+     * direction it can be stale, and why revocation still rests on the ratchet session rather
+     * than on this list.
+     */
+    suspend fun `setSharingRecipients`(`recipientEndpoints`: List<kotlin.String>)
+    
+    /**
+     * Remember the transport settings, so a background bootstrap can `start` without JS.
+     *
+     * Push it whenever the app changes a transport toggle. The relay URLs and token are build-time
+     * constants inlined into the JS bundle, so a device only learns them by being told.
+     */
+    suspend fun `setTransportConfig`(`config`: TransportConfig)
+    
+    /**
+     * Who the native drain path will seal for right now.
+     */
+    suspend fun `sharingRecipients`(): List<kotlin.String>
     
     /**
      * Shut down protocol handlers and close the endpoint before releasing this node.
@@ -2931,6 +3517,16 @@ public interface LocationNodeInterface {
      * Bind the iroh endpoint + spawn the gossip router. Idempotent.
      */
     suspend fun `start`(`relayUrls`: List<kotlin.String>, `relayAuthToken`: kotlin.String, `relayEnabled`: kotlin.Boolean, `ipEnabled`: kotlin.Boolean, `bleEnabled`: kotlin.Boolean)
+    
+    /**
+     * `start`, using the settings stored by [`set_transport_config`](Self::set_transport_config).
+     *
+     * The bootstrap counterpart to `start`, for a wake with no JS context to supply them. Fails
+     * rather than defaulting when nothing is stored: a node started with an empty relay list runs,
+     * reports healthy, and can only reach peers on the same LAN — which looks exactly like the
+     * connectivity failures this path exists to eliminate.
+     */
+    suspend fun `startStored`()
     
     /**
      * Picker action: submit the chosen figure index. A correct choice latches the local SAS and
@@ -3253,6 +3849,31 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Drop every queued fix (sign-out, or sharing turned off for good).
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `clearOutbox`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_clear_outbox(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Drop our in-flight resync ephemeral once every peer has been restarted.
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -3354,6 +3975,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypePairInvite.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * The last sequence number handed out, without advancing. For display and diagnostics.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `currentSeq`() : kotlin.ULong {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_current_seq(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterULong.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -4000,6 +4645,59 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Advance and return this device's next publish sequence number.
+     *
+     * Durable before it returns: the caller puts the value straight onto the wire as half of an
+     * `author/seq` docs key, and two envelopes under one key is a payload silently lost to
+     * last-write-wins. See `seq_store.rs` for why the counter had to leave JS to be safe — in
+     * short, every headless callback gets a fresh JS context and so got its own copy of it.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `nextSeq`() : kotlin.ULong {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_next_seq(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterULong.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * How many captured fixes are waiting to be sealed.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `outboxPending`() : kotlin.UInt {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_outbox_pending(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_u32(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_u32(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_u32(future) },
+        // lift function
+        { FfiConverterUInt.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * The completed-pair result for a session, enriched with the peer's verified latest profile
      * (once replicated). `None` until both sides have accepted.
      */
@@ -4578,6 +5276,35 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Raise the counter to at least `floor`, returning whether it moved.
+     *
+     * Monotone: a floor at or below the current value is a no-op. Two callers, one shape — the
+     * one-time migration of the old `expo-secure-store` value, and recovery from a counter file
+     * that will not parse (seed from the highest `seq` in the local replica). Neither can
+     * re-issue a value, because raising a counter only ever skips.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `seedSeq`(`floor`: kotlin.ULong) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_seed_seq(
+                uniffiHandle,
+                FfiConverterULong.lower(`floor`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. Invite-based
      * pairing is always allowed. This is an app-level acceptance gate, not a radio control.
      */override fun `setPairingReady`(`ready`: kotlin.Boolean)
@@ -4591,6 +5318,88 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     }
     
     
+
+    
+    /**
+     * Replace the set of friends this device seals location envelopes for.
+     *
+     * Persisted natively so an OS location callback can read it with no JS context alive. Push it
+     * on every pool change; see [`crate::recipients`] for why a stale set is safe in the only
+     * direction it can be stale, and why revocation still rests on the ratchet session rather
+     * than on this list.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setSharingRecipients`(`recipientEndpoints`: List<kotlin.String>) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_set_sharing_recipients(
+                uniffiHandle,
+                FfiConverterSequenceString.lower(`recipientEndpoints`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Remember the transport settings, so a background bootstrap can `start` without JS.
+     *
+     * Push it whenever the app changes a transport toggle. The relay URLs and token are build-time
+     * constants inlined into the JS bundle, so a device only learns them by being told.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setTransportConfig`(`config`: TransportConfig) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_set_transport_config(
+                uniffiHandle,
+                FfiConverterTypeTransportConfig.lower(`config`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Who the native drain path will seal for right now.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `sharingRecipients`() : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_sharing_recipients(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
 
     
     /**
@@ -4638,6 +5447,36 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_start(
                 uniffiHandle,
                 FfiConverterSequenceString.lower(`relayUrls`),FfiConverterString.lower(`relayAuthToken`),FfiConverterBoolean.lower(`relayEnabled`),FfiConverterBoolean.lower(`ipEnabled`),FfiConverterBoolean.lower(`bleEnabled`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * `start`, using the settings stored by [`set_transport_config`](Self::set_transport_config).
+     *
+     * The bootstrap counterpart to `start`, for a wake with no JS context to supply them. Fails
+     * rather than defaulting when nothing is stored: a node started with an empty relay list runs,
+     * reports healthy, and can only reach peers on the same LAN — which looks exactly like the
+     * connectivity failures this path exists to eliminate.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `startStored`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_start_stored(
+                uniffiHandle,
+                
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
@@ -4886,7 +5725,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
      *
      * Passing the same root for both is a bug on device in one direction and a break in the
      * other; the two have opposite requirements.
+     * Build a node from the platform keystore, for a background wake with no JS context alive.
+     *
+     * The counterpart to [`new_at_dirs`](Self::new_at_dirs), which takes the secrets as arguments
+     * because JS had already read them. Here nothing has: an OS location callback is the first
+     * code to run, so the node asks the platform for the identity itself through
+     * [`DeviceSecrets`].
+     *
+     * Fails with [`LocationError::NotStarted`] when the device has no identity yet. That is a
+     * fresh install whose app has never been opened, and the correct response is to do nothing —
+     * generating one here would mint an identity none of the user's friends have ever paired with,
+     * and silently orphan the one the app creates later.
      */
+    @Throws(LocationException::class) fun `fromDeviceSecrets`(`secrets`: DeviceSecrets, `dataRoot`: kotlin.String, `stateRoot`: kotlin.String): LocationNode {
+            return FfiConverterTypeLocationNode.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_constructor_locationnode_from_device_secrets(
+    
+        FfiConverterTypeDeviceSecrets.lower(`secrets`),FfiConverterString.lower(`dataRoot`),FfiConverterString.lower(`stateRoot`),_status)
+}
+    )
+    }
+    
+
+        
     @Throws(LocationException::class) fun `newAtDirs`(`identitySecret`: kotlin.ByteArray?, `recvSecret`: kotlin.ByteArray?, `dataRoot`: kotlin.String, `stateRoot`: kotlin.String): LocationNode {
             return FfiConverterTypeLocationNode.lift(
     uniffiRustCallWithError(LocationException) { _status ->
@@ -5410,6 +6272,21 @@ public object FfiConverterTypeMeshCapsuleStore: FfiConverter<MeshCapsuleStore, L
 public interface SubscriptionInterface {
     
     /**
+     * Take one captured location all the way to the wire, with no JS involved.
+     *
+     * This is the whole point of the native drain path. `expo-task-manager` spools location events
+     * when it cannot start a headless JS context, and on 2026-08-29 a Pixel spooled eleven and a
+     * half hours of them — 446 real fixes, captured by a perfectly healthy foreground service,
+     * with nothing on the JS side alive to publish them. Everything below runs in the OS callback
+     * that delivered the fix.
+     *
+     * Thin by design: the decisions live in [`publish::DrainEngine`], which depends on ports
+     * rather than on a node, so they can be tested against fakes that fail on demand. All this
+     * does is bind those ports to the real stores and hand the engine somewhere to send.
+     */
+    suspend fun `ingestFix`(`subscriptionId`: kotlin.String, `fix`: LocationFix, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong): IngestOutcome
+    
+    /**
      * Seal `fix` for `recipients` (each = a friend's 32-byte receiving public key) and
      * broadcast it on the topic. Recipients NOT in this list cannot decrypt it —
      * that's how revocation works.
@@ -5531,6 +6408,40 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
         return uniffiRustCall() { status ->
             UniffiLib.uniffi_iroh_location_fn_clone_subscription(handle, status)
         }
+    }
+
+    
+    /**
+     * Take one captured location all the way to the wire, with no JS involved.
+     *
+     * This is the whole point of the native drain path. `expo-task-manager` spools location events
+     * when it cannot start a headless JS context, and on 2026-08-29 a Pixel spooled eleven and a
+     * half hours of them — 446 real fixes, captured by a perfectly healthy foreground service,
+     * with nothing on the JS side alive to publish them. Everything below runs in the OS callback
+     * that delivered the fix.
+     *
+     * Thin by design: the decisions live in [`publish::DrainEngine`], which depends on ports
+     * rather than on a node, so they can be tested against fakes that fail on demand. All this
+     * does is bind those ports to the real stores and hand the engine somewhere to send.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `ingestFix`(`subscriptionId`: kotlin.String, `fix`: LocationFix, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong) : IngestOutcome {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_subscription_ingest_fix(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterTypeBatteryState.lower(`battery`),FfiConverterULong.lower(`intervalMs`),FfiConverterULong.lower(`nowMs`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeIngestOutcome.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
     }
 
     
@@ -5685,6 +6596,60 @@ public object FfiConverterTypeSubscription: FfiConverter<Subscription, Long> {
 
     override fun write(value: Subscription, buf: ByteBuffer) {
         buf.putLong(lower(value))
+    }
+}
+
+
+
+/**
+ * Battery inputs to the suspend decision. Supplied by the platform layer with each fix, because
+ * the native path has no JS context to ask.
+ */
+data class BatteryState (
+    /**
+     * 0.0–1.0. A platform that cannot report it should send 1.0 rather than 0.0: unknown must not
+     * read as critical, or a device with no battery API would never publish.
+     */
+    var `level`: kotlin.Double
+    , 
+    var `charging`: kotlin.Boolean
+    , 
+    /**
+     * iOS Low Power Mode / Android battery saver.
+     */
+    var `lowPower`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBatteryState: FfiConverterRustBuffer<BatteryState> {
+    override fun read(buf: ByteBuffer): BatteryState {
+        return BatteryState(
+            FfiConverterDouble.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: BatteryState) = (
+            FfiConverterDouble.allocationSize(value.`level`) +
+            FfiConverterBoolean.allocationSize(value.`charging`) +
+            FfiConverterBoolean.allocationSize(value.`lowPower`)
+    )
+
+    override fun write(value: BatteryState, buf: ByteBuffer) {
+            FfiConverterDouble.write(value.`level`, buf)
+            FfiConverterBoolean.write(value.`charging`, buf)
+            FfiConverterBoolean.write(value.`lowPower`, buf)
     }
 }
 
@@ -5969,6 +6934,54 @@ public object FfiConverterTypeControlMsg: FfiConverterRustBuffer<ControlMsg> {
 
 
 /**
+ * What one enqueue did, so the caller can record it without re-reading the queue.
+ */
+data class EnqueueOutcome (
+    /**
+     * Queue depth after the append.
+     */
+    var `pending`: kotlin.UInt
+    , 
+    /**
+     * How many of the oldest fixes the bound discarded to make room. Non-zero means this device
+     * has been unable to publish for hours; it is the signal, not an incidental detail.
+     */
+    var `overflowDropped`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeEnqueueOutcome: FfiConverterRustBuffer<EnqueueOutcome> {
+    override fun read(buf: ByteBuffer): EnqueueOutcome {
+        return EnqueueOutcome(
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: EnqueueOutcome) = (
+            FfiConverterUInt.allocationSize(value.`pending`) +
+            FfiConverterUInt.allocationSize(value.`overflowDropped`)
+    )
+
+    override fun write(value: EnqueueOutcome, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`pending`, buf)
+            FfiConverterUInt.write(value.`overflowDropped`, buf)
+    }
+}
+
+
+
+/**
  * A decrypted fix read back from the durable replica (mirrors the TS `NativeIncomingFix`).
  */
 data class IncomingFix (
@@ -6009,6 +7022,107 @@ public object FfiConverterTypeIncomingFix: FfiConverterRustBuffer<IncomingFix> {
             FfiConverterByteArray.write(value.`author`, buf)
             FfiConverterULong.write(value.`seq`, buf)
             FfiConverterTypeLocationFix.write(value.`fix`, buf)
+    }
+}
+
+
+
+/**
+ * What one [`DrainEngine::ingest`] call did.
+ *
+ * Every field is something a background callback could not otherwise observe, and each maps to a
+ * `sc.drop_reason` or span attribute the JS path already emits — so one dashboard answers for both
+ * paths rather than two that have to be reconciled.
+ */
+data class IngestOutcome (
+    /**
+     * The fix passed the confidence gate and became this device's position.
+     */
+    var `accepted`: kotlin.Boolean
+    , 
+    /**
+     * Why it did not, when it did not. A rejection is not a dropped slot: the heartbeat still
+     * republishes the last accepted position.
+     */
+    var `rejection`: FixRejection?
+    , 
+    /**
+     * Envelopes queued for this wake — one per interval slot that had come due.
+     */
+    var `enqueued`: kotlin.UInt
+    , 
+    /**
+     * Envelopes that actually reached the wire. Less than `enqueued` means the wake ran out of
+     * time or the network went away; the remainder is still queued.
+     */
+    var `published`: kotlin.UInt
+    , 
+    /**
+     * Depth of the queue afterwards.
+     */
+    var `pending`: kotlin.UInt
+    , 
+    /**
+     * Slots the backfill cap declined to fill ([`gate::MAX_BACKFILL_MS`]).
+     */
+    var `slotsSkipped`: kotlin.UInt
+    , 
+    /**
+     * Oldest fixes the queue bound discarded. Non-zero means hours of failed publishing.
+     */
+    var `overflowDropped`: kotlin.UInt
+    , 
+    /**
+     * Publishing is suspended on critical battery. Distinct from "nothing was due".
+     */
+    var `suspended`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeIngestOutcome: FfiConverterRustBuffer<IngestOutcome> {
+    override fun read(buf: ByteBuffer): IngestOutcome {
+        return IngestOutcome(
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeFixRejection.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: IngestOutcome) = (
+            FfiConverterBoolean.allocationSize(value.`accepted`) +
+            FfiConverterOptionalTypeFixRejection.allocationSize(value.`rejection`) +
+            FfiConverterUInt.allocationSize(value.`enqueued`) +
+            FfiConverterUInt.allocationSize(value.`published`) +
+            FfiConverterUInt.allocationSize(value.`pending`) +
+            FfiConverterUInt.allocationSize(value.`slotsSkipped`) +
+            FfiConverterUInt.allocationSize(value.`overflowDropped`) +
+            FfiConverterBoolean.allocationSize(value.`suspended`)
+    )
+
+    override fun write(value: IngestOutcome, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`accepted`, buf)
+            FfiConverterOptionalTypeFixRejection.write(value.`rejection`, buf)
+            FfiConverterUInt.write(value.`enqueued`, buf)
+            FfiConverterUInt.write(value.`published`, buf)
+            FfiConverterUInt.write(value.`pending`, buf)
+            FfiConverterUInt.write(value.`slotsSkipped`, buf)
+            FfiConverterUInt.write(value.`overflowDropped`, buf)
+            FfiConverterBoolean.write(value.`suspended`, buf)
     }
 }
 
@@ -7033,6 +8147,62 @@ public object FfiConverterTypeTransportAddressDiagnostic: FfiConverterRustBuffer
 
 
 /**
+ * Everything `LocationNode::start` needs, in one record.
+ */
+data class TransportConfig (
+    var `relayUrls`: List<kotlin.String>
+    , 
+    var `relayAuthToken`: kotlin.String
+    , 
+    var `relayEnabled`: kotlin.Boolean
+    , 
+    var `ipEnabled`: kotlin.Boolean
+    , 
+    var `bleEnabled`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportConfig> {
+    override fun read(buf: ByteBuffer): TransportConfig {
+        return TransportConfig(
+            FfiConverterSequenceString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TransportConfig) = (
+            FfiConverterSequenceString.allocationSize(value.`relayUrls`) +
+            FfiConverterString.allocationSize(value.`relayAuthToken`) +
+            FfiConverterBoolean.allocationSize(value.`relayEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`ipEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`bleEnabled`)
+    )
+
+    override fun write(value: TransportConfig, buf: ByteBuffer) {
+            FfiConverterSequenceString.write(value.`relayUrls`, buf)
+            FfiConverterString.write(value.`relayAuthToken`, buf)
+            FfiConverterBoolean.write(value.`relayEnabled`, buf)
+            FfiConverterBoolean.write(value.`ipEnabled`, buf)
+            FfiConverterBoolean.write(value.`bleEnabled`, buf)
+    }
+}
+
+
+
+/**
  * Live endpoint transport snapshot used by the in-app diagnostics.
  */
 data class TransportDiagnostics (
@@ -7070,6 +8240,44 @@ public object FfiConverterTypeTransportDiagnostics: FfiConverterRustBuffer<Trans
             FfiConverterSequenceTypePeerTransportDiagnostic.write(value.`peers`, buf)
     }
 }
+
+
+
+/**
+ * Why a fix was refused. Stamped on telemetry as `sc.drop_reason: fix-<reason>`.
+ */
+
+enum class FixRejection {
+    
+    INACCURATE,
+    STALE,
+    IMPLAUSIBLE_JUMP;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFixRejection: FfiConverterRustBuffer<FixRejection> {
+    override fun read(buf: ByteBuffer) = try {
+        FixRejection.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: FixRejection) = 4UL
+
+    override fun write(value: FixRejection, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -7623,6 +8831,38 @@ public object FfiConverterOptionalTypeSasChallenge: FfiConverterRustBuffer<SasCh
         } else {
             buf.put(1)
             FfiConverterTypeSasChallenge.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeFixRejection: FfiConverterRustBuffer<FixRejection?> {
+    override fun read(buf: ByteBuffer): FixRejection? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFixRejection.read(buf)
+    }
+
+    override fun allocationSize(value: FixRejection?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFixRejection.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FixRejection?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFixRejection.write(value, buf)
         }
     }
 }
