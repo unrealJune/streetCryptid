@@ -42,6 +42,7 @@ jest.mock('../../persistence', () => {
 });
 
 const defineTask = TaskManager.defineTask as jest.Mock;
+const isTaskDefined = TaskManager.isTaskDefined as jest.Mock;
 const startGeofencingAsync = Location.startGeofencingAsync as jest.Mock;
 const kvValues = (jest.requireMock('../../persistence') as { __values: Map<string, string> })
   .__values;
@@ -238,6 +239,93 @@ describe('revive-task', () => {
 
       await expect(armReviveFence(FIX, { now: () => 0 })).resolves.toBe(false);
       await expect(armReviveFence(FIX, { now: () => 1 })).resolves.toBe(true);
+    });
+  });
+
+  /**
+   * `infra/otel/README.md` has documented `revive.arm` since the fence was written — "whether the
+   * iOS tripwire is actually armed, rather than only believed to be" — and nothing emitted it. On
+   * iOS the fence is the only mechanism that can bring a terminated app back, so an arm that
+   * quietly did not happen looks, in every other signal the device sends, exactly like a phone
+   * whose owner has not moved. These pin the distinction.
+   */
+  describe('revive.arm', () => {
+    /** The attributes of the one `revive.arm` span this call produced. */
+    function armAttrs(telemetry: ReturnType<typeof fakeTelemetry>): Record<string, unknown> {
+      const startSpan = telemetry.instance.startSpan as unknown as jest.Mock;
+      const call = startSpan.mock.calls.find(([name]) => name === 'revive.arm');
+      expect(call).toBeDefined();
+      return (call?.[1] as { attributes: Record<string, unknown> }).attributes;
+    }
+
+    it('reports a real arm', async () => {
+      const telemetry = fakeTelemetry();
+      setTelemetryForTesting(telemetry.instance);
+
+      await expect(armReviveFence(FIX)).resolves.toBe(true);
+
+      const attrs = armAttrs(telemetry);
+      expect(attrs.outcome).toBe('armed');
+      expect(attrs.armed).toBe(true);
+      // No drop reason on the one outcome that leaves a working tripwire, so the drop queries show
+      // only the attempts that left none.
+      expect(attrs['sc.drop_reason']).toBeUndefined();
+    });
+
+    it('reports a task the OS cannot deliver to, which used to be silent', async () => {
+      // The failure this span exists for: `startGeofencingAsync` would succeed and deliver nothing,
+      // so the call site cannot tell this from a working fence.
+      isTaskDefined.mockReturnValueOnce(false);
+      const telemetry = fakeTelemetry();
+      setTelemetryForTesting(telemetry.instance);
+
+      await expect(armReviveFence(FIX)).resolves.toBe(false);
+
+      const attrs = armAttrs(telemetry);
+      expect(attrs.outcome).toBe('task-undefined');
+      expect(attrs.armed).toBe(false);
+      expect(attrs['sc.drop_reason']).toBe('revive-task-undefined');
+    });
+
+    it('reports a throttled re-arm, carrying why', async () => {
+      const telemetry = fakeTelemetry();
+      setTelemetryForTesting(telemetry.instance);
+      let clock = 10_000;
+      await armReviveFence(FIX, { now: () => clock });
+      (telemetry.instance.startSpan as unknown as jest.Mock).mockClear();
+
+      clock += 1_000;
+      await expect(armReviveFence(FIX, { now: () => clock })).resolves.toBe(false);
+
+      const attrs = armAttrs(telemetry);
+      expect(attrs.outcome).toBe('throttled');
+      expect(attrs.since_last_ms).toBe(1_000);
+      expect(attrs.moved_m).toBe(0);
+    });
+
+    it('reports a refused arm rather than swallowing it', async () => {
+      // `startGeofencingAsync` throwing is usually a missing `Always` authorization — the app
+      // believes it is covered and is not.
+      startGeofencingAsync.mockRejectedValueOnce(new Error('no Always authorization'));
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const telemetry = fakeTelemetry();
+      setTelemetryForTesting(telemetry.instance);
+
+      await expect(armReviveFence(FIX)).resolves.toBe(false);
+
+      const attrs = armAttrs(telemetry);
+      expect(attrs.outcome).toBe('failed');
+      expect(attrs['exception.message']).toBe('no Always authorization');
+      warn.mockRestore();
+    });
+
+    it('marks the forced arm, so a fenceless start is distinguishable', async () => {
+      const telemetry = fakeTelemetry();
+      setTelemetryForTesting(telemetry.instance);
+
+      await armReviveFence(FIX, { force: true });
+
+      expect(armAttrs(telemetry).forced).toBe(true);
     });
   });
 });

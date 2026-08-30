@@ -1,6 +1,7 @@
 import { Platform } from 'react-native';
 
 import {
+  type Attributes,
   getTelemetry,
   type SpanContext,
   withEventLogLaunchContext,
@@ -265,6 +266,64 @@ export interface ArmReviveFenceOptions {
 }
 
 /**
+ * Every way {@link armReviveFence} can end.
+ *
+ * `armed` is the only one that leaves a working tripwire behind. The rest are the reason this span
+ * exists: on iOS the fence is the sole mechanism that can bring a terminated app back, so an arm
+ * that quietly did not happen is indistinguishable, from every other signal the device emits, from
+ * a phone whose owner simply has not moved.
+ */
+export type ReviveArmOutcome =
+  /** The fence is registered and standing. */
+  | 'armed'
+  /** Refused by the re-arm floor; the previous fence still stands, which is a working tripwire. */
+  | 'throttled'
+  /**
+   * The OS has no handler registered for the fence task, so arming would succeed and deliver
+   * nothing. The one outcome that looks identical to success from the call site.
+   */
+  | 'task-undefined'
+  /** Web, or a build without the native modules. Not a fault. */
+  | 'unavailable'
+  /** `startGeofencingAsync` threw — usually a missing `Always` authorization. */
+  | 'failed';
+
+/**
+ * Record what an arm attempt actually did, and return whether the fence is now standing.
+ *
+ * One span per call rather than one per failure mode, because the question this answers is "is the
+ * tripwire armed?" and that is a property of the call, not of the branch it happened to take. It
+ * replaces the old `revive.arm.throttled` span, which covered exactly one of five outcomes and left
+ * the other four — including a silently unregistered task — emitting nothing at all.
+ *
+ * `infra/otel/README.md` has documented this span since the fence was written; it was never
+ * implemented, which is how an iPhone spent nineteen hours unable to revive without anything
+ * saying so.
+ */
+function recordArm(
+  outcome: ReviveArmOutcome,
+  options: ArmReviveFenceOptions,
+  extra: Attributes = {}
+): boolean {
+  const armed = outcome === 'armed';
+  getTelemetry()
+    .startSpan('revive.arm', {
+      attributes: {
+        outcome,
+        armed,
+        forced: options.force === true,
+        radius_m: REVIVE_FENCE_RADIUS_M,
+        platform: Platform.OS,
+        // Absent when armed, so the drop queries show only the attempts that left no tripwire.
+        ...(armed ? {} : { 'sc.drop_reason': `revive-${outcome}` }),
+        ...extra,
+      },
+    })
+    .end();
+  return armed;
+}
+
+/**
  * Arm (or re-center) the fence on `fix`. Idempotent: `startGeofencingAsync` replaces the task's
  * whole region set, so repeated calls move the one fence rather than stacking them.
  *
@@ -280,12 +339,14 @@ export async function armReviveFence(
   fix: LocationFix,
   options: ArmReviveFenceOptions = {}
 ): Promise<boolean> {
-  if (!isReviveFenceAvailable()) return false;
+  if (!isReviveFenceAvailable()) return recordArm('unavailable', options);
   const location = tryLocation();
   const taskManager = tryTaskManager();
-  if (!location || !taskManager) return false;
+  if (!location || !taskManager) return recordArm('unavailable', options);
   // Registering a geofence for a task the OS cannot deliver to is a silent no-op that looks armed.
-  if (!taskManager.isTaskDefined(REVIVE_FENCE_TASK)) return false;
+  // The single most valuable thing this span reports: "armed" and "believed armed" diverge here,
+  // and until now nothing said so.
+  if (!taskManager.isTaskDefined(REVIVE_FENCE_TASK)) return recordArm('task-undefined', options);
   const now = options.now ?? Date.now;
   const armedAt = now();
   // Persisted, not in-memory: every arm can wake a fresh process, so an in-process timestamp would
@@ -299,16 +360,10 @@ export async function armReviveFence(
       // tripwire behind the user — the exact failure the fence exists to prevent.
       const moved = metresBetween(last.lat, last.lon, fix.lat, fix.lon);
       if (moved < REVIVE_FENCE_RADIUS_M) {
-        getTelemetry()
-          .startSpan('revive.arm.throttled', {
-            attributes: {
-              since_last_ms: armedAt - last.at,
-              moved_m: Math.round(moved),
-              'sc.drop_reason': 'revive-rearm-throttled',
-            },
-          })
-          .end();
-        return false;
+        return recordArm('throttled', options, {
+          since_last_ms: armedAt - last.at,
+          moved_m: Math.round(moved),
+        });
       }
     }
   }
@@ -331,10 +386,12 @@ export async function armReviveFence(
     ]);
     // Only a real arm advances the floor, so a failed attempt can be retried immediately.
     await kv?.set(LAST_ARM_KEY, `${armedAt}:${fix.lat}:${fix.lon}`).catch(() => undefined);
-    return true;
+    return recordArm('armed', options);
   } catch (err) {
     console.warn('[revive-fence] arm failed', err);
-    return false;
+    return recordArm('failed', options, {
+      'exception.message': err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

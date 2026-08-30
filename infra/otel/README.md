@@ -119,16 +119,16 @@ between a push and the friend seeing it is normal rather than a fault.
 These exist because their absence was indistinguishable from a phone that was never woken. None of
 them describe a ping; all of them describe why there wasn't one.
 
-| Span                                                   | Says                                                                               |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------- |
-| `device.health`                                        | the periodic liveness record — OS permissions, task registration, `last_*_age_ms`  |
-| `storage.degraded`                                     | persistence fell back to memory; nothing this device saves survives a restart      |
-| `outbox.load` (`sc.drop_reason=outbox-*`)              | the durable queue was unreadable, so every fix waiting in it is gone               |
-| `cadence.rearm`                                        | the OS refused a cadence change, so sampling is pinned at an interval nobody chose |
-| `engine.failed`                                        | `doFlush` / `heartbeat` threw; the engine is in `error` and only the UI knew       |
-| `bg.selfheal` (`sharing-disabled` / `already-running`) | the self-heal ran and had nothing to do — distinct from never running              |
-| `bg.session` (`precheck-empty`)                        | a headless wake found an empty outbox — distinct from no wake at all               |
-| `revive.arm`                                           | whether the iOS tripwire is actually armed, rather than only believed to be        |
+| Span                                                   | Says                                                                                                                                                  |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `device.health`                                        | the periodic liveness record — OS permissions, task registration, `last_*_age_ms`                                                                     |
+| `storage.degraded`                                     | persistence fell back to memory; nothing this device saves survives a restart                                                                         |
+| `outbox.load` (`sc.drop_reason=outbox-*`)              | the durable queue was unreadable, so every fix waiting in it is gone                                                                                  |
+| `cadence.rearm`                                        | the OS refused a cadence change, so sampling is pinned at an interval nobody chose                                                                    |
+| `engine.failed`                                        | `doFlush` / `heartbeat` threw; the engine is in `error` and only the UI knew                                                                          |
+| `bg.selfheal` (`sharing-disabled` / `already-running`) | the self-heal ran and had nothing to do — distinct from never running                                                                                 |
+| `bg.session` (`precheck-empty`)                        | a headless wake found an empty outbox — distinct from no wake at all                                                                                  |
+| `revive.arm` (`outcome`)                               | whether the iOS tripwire is actually armed, rather than only believed to be — `armed` \| `throttled` \| `task-undefined` \| `unavailable` \| `failed` |
 
 ## Follow-one-ping cookbook (TraceQL, in Grafana → Explore → Tempo)
 
@@ -193,6 +193,16 @@ Receives that arrived but could not be decrypted / were gated by the app:
 ```traceql
 { name = "gossip.receive" && span.outcome != "delivered" }
 { name = "fix.received.app" && span.sc.drop_reason != "" }
+```
+
+Arms that left no tripwire. On iOS the fence is the only mechanism that can bring a _terminated_
+app back, so an arm that quietly did not happen is indistinguishable — from every other signal the
+device emits — from a phone whose owner has not moved. `task-undefined` is the one to watch: the
+geofence registers, the OS has no handler to deliver to, and the call site cannot tell:
+
+```traceql
+{ name = "revive.arm" && span.armed = false }
+{ name = "revive.arm" && span.outcome = "task-undefined" }
 ```
 
 Live mode (ARCHITECTURE §9c) — a request's whole journey, and why one was refused:
