@@ -8,7 +8,7 @@ import {
 } from '@/features/dev/telemetry';
 import type { LocationFix } from '../../core/types';
 import { createPersistentKV } from '../persistence';
-import type { PersistentKV } from './fix-outbox';
+import type { PersistentKV } from './persistent-kv';
 
 /**
  * iOS revive tripwire — a single self-recentering geofence whose only job is to get a *terminated*
@@ -189,7 +189,7 @@ function tryKv(): PersistentKV | null {
   } catch {
     armKv = null;
   }
-  return armKv;
+  return armKv ?? null;
 }
 
 /** True when this platform + build can actually host the revive fence. */

@@ -4,7 +4,6 @@ import {
   createBackgroundFixDispatcher,
   type ActiveBackgroundFixHandler,
 } from '../background-dispatch';
-import type { FixOutbox } from '../fix-outbox';
 
 const fix = (ts: number): LocationFix => ({
   lat: 47.62,
@@ -14,37 +13,31 @@ const fix = (ts: number): LocationFix => ({
   ts,
 });
 
-function fakeOutbox(): FixOutbox & { items: LocationFix[] } {
-  const items: LocationFix[] = [];
+/**
+ * Records what the headless path was handed.
+ *
+ * There is no fake outbox any more: the durable queue moved to Rust (`outbox.rs`) so an OS callback
+ * can fill and drain it with no JS context alive. The dispatcher's whole job is now the routing
+ * decision — mounted runtime, or a short-lived headless one — and that is what these assert.
+ */
+function recorder(): {
+  ingestHeadless: (fixes: readonly LocationFix[], parent?: SpanContext) => Promise<void>;
+  calls: { ts: number[]; parent?: SpanContext }[];
+} {
+  const calls: { ts: number[]; parent?: SpanContext }[] = [];
   return {
-    items,
-    async enqueue(item) {
-      items.push(item);
-    },
-    async drain(publish) {
-      let count = 0;
-      while (items.length > 0) {
-        await publish(items[0]);
-        items.shift();
-        count += 1;
-      }
-      return count;
-    },
-    async pending() {
-      return items.length;
-    },
-    async clear() {
-      items.length = 0;
+    calls,
+    ingestHeadless: async (fixes, parent) => {
+      calls.push({ ts: fixes.map((f) => f.ts), parent });
     },
   };
 }
 
 describe('background fix dispatcher', () => {
   it('delivers an OS batch directly to the mounted runtime', async () => {
-    const outbox = fakeOutbox();
-    const flushHeadless = jest.fn(async () => {});
+    const headless = recorder();
     const received: number[] = [];
-    const dispatcher = createBackgroundFixDispatcher({ outbox, flushHeadless });
+    const dispatcher = createBackgroundFixDispatcher({ ingestHeadless: headless.ingestHeadless });
     dispatcher.registerActiveHandler(async (item) => {
       received.push(item.ts);
     });
@@ -52,32 +45,23 @@ describe('background fix dispatcher', () => {
     await dispatcher.dispatch([fix(1), fix(2)]);
 
     expect(received).toEqual([1, 2]);
-    expect(outbox.items).toHaveLength(0);
-    expect(flushHeadless).not.toHaveBeenCalled();
+    expect(headless.calls).toHaveLength(0);
   });
 
-  it('persists a headless batch before asking the restored runtime to flush', async () => {
-    const outbox = fakeOutbox();
-    const seenAtFlush: number[][] = [];
-    const dispatcher = createBackgroundFixDispatcher({
-      outbox,
-      flushHeadless: async () => {
-        seenAtFlush.push(outbox.items.map((item) => item.ts));
-      },
-    });
+  it('hands a headless batch straight down, with no JS queue in between', async () => {
+    const headless = recorder();
+    const dispatcher = createBackgroundFixDispatcher({ ingestHeadless: headless.ingestHeadless });
 
     await dispatcher.dispatch([fix(3), fix(4)]);
 
-    expect(seenAtFlush).toEqual([[3, 4]]);
+    expect(headless.calls.map((c) => c.ts)).toEqual([[3, 4]]);
   });
 
   it('falls back without losing a fix when the live publisher rejects it', async () => {
-    const outbox = fakeOutbox();
+    const headless = recorder();
     const activeError = jest.fn();
-    const flushHeadless = jest.fn(async () => {});
     const dispatcher = createBackgroundFixDispatcher({
-      outbox,
-      flushHeadless,
+      ingestHeadless: headless.ingestHeadless,
       onActiveError: activeError,
     });
     const handler: ActiveBackgroundFixHandler = async (item) => {
@@ -87,17 +71,16 @@ describe('background fix dispatcher', () => {
 
     await dispatcher.dispatch([fix(5), fix(6), fix(7)]);
 
-    expect(outbox.items.map((item) => item.ts)).toEqual([6]);
     expect(activeError).toHaveBeenCalledTimes(1);
-    expect(flushHeadless).not.toHaveBeenCalled();
+    // A mounted runtime owns the process-wide native stores, so the rejected fix waits for ITS next
+    // heartbeat rather than racing a second runtime against the same author/seq space — the
+    // directory claim in `durable.rs` would refuse that second one anyway.
+    expect(headless.calls).toHaveLength(0);
   });
 
   it('stops routing to a handler after its cleanup runs', async () => {
-    const outbox = fakeOutbox();
-    const dispatcher = createBackgroundFixDispatcher({
-      outbox,
-      flushHeadless: async () => {},
-    });
+    const headless = recorder();
+    const dispatcher = createBackgroundFixDispatcher({ ingestHeadless: headless.ingestHeadless });
     const handler = jest.fn(async () => {});
     const unregister = dispatcher.registerActiveHandler(handler);
     unregister();
@@ -105,34 +88,24 @@ describe('background fix dispatcher', () => {
     await dispatcher.dispatch([fix(8)]);
 
     expect(handler).not.toHaveBeenCalled();
-    expect(outbox.items.map((item) => item.ts)).toEqual([8]);
+    expect(headless.calls.map((c) => c.ts)).toEqual([[8]]);
   });
 
   it('carries the wake context through active and headless dispatch', async () => {
     const parent: SpanContext = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
-    const activeOutbox = fakeOutbox();
     const activeHandler = jest.fn(async () => {});
-    const active = createBackgroundFixDispatcher({
-      outbox: activeOutbox,
-      flushHeadless: async () => {},
-    });
+    const active = createBackgroundFixDispatcher({ ingestHeadless: recorder().ingestHeadless });
     active.registerActiveHandler(activeHandler);
 
     await active.dispatch([fix(9)], parent);
 
     expect(activeHandler).toHaveBeenCalledWith(expect.objectContaining({ ts: 9 }), parent);
 
-    const headlessOutbox = fakeOutbox();
-    const enqueue = jest.spyOn(headlessOutbox, 'enqueue');
-    const flushHeadless = jest.fn(async () => {});
-    const headless = createBackgroundFixDispatcher({
-      outbox: headlessOutbox,
-      flushHeadless,
-    });
+    const headless = recorder();
+    const dispatcher = createBackgroundFixDispatcher({ ingestHeadless: headless.ingestHeadless });
 
-    await headless.dispatch([fix(10)], parent);
+    await dispatcher.dispatch([fix(10)], parent);
 
-    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ ts: 10 }), parent);
-    expect(flushHeadless).toHaveBeenCalledWith(parent);
+    expect(headless.calls).toEqual([{ ts: [10], parent }]);
   });
 });

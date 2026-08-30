@@ -1,7 +1,7 @@
 import { reportStorageDegraded } from './storage-health';
 import type { PoolState } from '../core/pool';
 import type { RatchetActivity } from '../core/types';
-import { InMemoryKV, type PersistentKV } from './background/fix-outbox';
+import { InMemoryKV, type PersistentKV } from './background/persistent-kv';
 import { DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
 import {
   InMemoryTrailStorage,

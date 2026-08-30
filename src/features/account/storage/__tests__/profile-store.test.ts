@@ -1,5 +1,5 @@
 import { defaultCryptidProfileDraft } from '../../core/profile';
-import { InMemoryKV } from '@/features/social/net/background/fix-outbox';
+import { InMemoryKV } from '@/features/social/net/background/persistent-kv';
 import { createCryptidProfileStore } from '../profile-store';
 
 describe('cryptid profile store', () => {

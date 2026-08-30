@@ -1,4 +1,3 @@
-import { DEFAULT_FIX_QUALITY_CONFIG } from '../fix-quality';
 import {
   AMBIENT_DELIVERY_INTERVAL_MS,
   AMBIENT_DISTANCE_INTERVAL_M,
@@ -92,7 +91,6 @@ describe('createSamplingPolicy', () => {
     const usable: AccuracyTier[] = ['balanced', 'high', 'highest'];
     expect(usable).toContain(DEFAULT_SAMPLING_CONFIG.normalAccuracy);
     expect(usable).toContain(DEFAULT_SAMPLING_CONFIG.lowBatteryAccuracy);
-    expect(DEFAULT_FIX_QUALITY_CONFIG.maxAccuracyM).toBeGreaterThanOrEqual(100);
   });
 
   it('suspends outright when critically low and not charging', () => {

@@ -8,6 +8,7 @@ import {
   type BlePeer,
   type BluetoothRadioState,
   type IrohLocationNativeModule,
+  type NativeIngestOutcome,
   type NativeLocationFix,
   type NativeRatchetEvent,
   type NodeKeys,
@@ -57,9 +58,10 @@ import type {
 } from '../core/types';
 import type { BackgroundLocationProvider } from './background/background-provider';
 import type { BackgroundStartConfig } from './background/background-task';
-import type { FixPublisher, LocationEngine } from './background/location-engine';
+import type { DrainOutcome, LocationEngine, NativeDrain } from './background/location-engine';
+import type { BatteryState } from './background/types';
 import { createTrailStore, type TrailPoint, type TrailStore } from './background/trail-store';
-import type { PersistentKV } from './background/fix-outbox';
+import type { PersistentKV } from './background/persistent-kv';
 import {
   clampMailboxTtlSeconds,
   createDefaultPairingMailbox,
@@ -373,7 +375,35 @@ function stableStringify(value: unknown): string {
  * - The background service (started via {@link startBackground}) samples GPS foreground and
  *   background and feeds fixes through a {@link LocationEngine} into {@link publishFix}.
  */
-export class LocationSharingService implements FixPublisher {
+/** The wire shape of a fix. One conversion, used by both the mounted and headless entry points. */
+function toNativeFix(fix: LocationFix): NativeLocationFix {
+  return {
+    lat: fix.lat,
+    lon: fix.lon,
+    accuracyM: fix.accuracyM,
+    headingDeg: fix.headingDeg,
+    ts: fix.ts,
+  };
+}
+
+/**
+ * A point-in-time power read for the native gate's suspend decision.
+ *
+ * Built per call rather than held: this runs on headless wakes where nothing else is alive, and a
+ * source cached on a service instance would be the wrong lifetime. Unknown reports as FULL — a
+ * critical level is a hard stop in `gate.rs`, so a device we cannot read must not look flat and
+ * stop publishing forever.
+ */
+async function readBatteryForNative(): Promise<BatteryState> {
+  try {
+    const { createBatterySource } = await import('./background/battery-source');
+    return await createBatterySource().read();
+  } catch {
+    return { level: 1, charging: false, lowPower: false };
+  }
+}
+
+export class LocationSharingService {
   private mod: IrohLocationNativeModule | null = null;
   private keys: NodeKeys | null = null;
   private ticketStr: string | null = null;
@@ -1352,6 +1382,58 @@ export class LocationSharingService implements FixPublisher {
   }
 
   /**
+   * The native publish pipeline, as the engine's port.
+   *
+   * Everything the engine used to do itself — the confidence gate, the wall-clock slot grid, the
+   * durable outbox and the drain — is behind these two calls now (`publish.rs`). The reason is not
+   * tidiness: the same code has to run in an OS callback with no JS context alive, which is what a
+   * Pixel spent eleven and a half hours unable to do while spooling 446 real fixes.
+   */
+  private nativeDrain(): NativeDrain {
+    const outcomeOf = (raw: NativeIngestOutcome): DrainOutcome => ({
+      accepted: raw.accepted,
+      rejection: raw.rejection,
+      enqueued: raw.enqueued,
+      published: raw.published,
+      pending: raw.pending,
+      suspended: raw.suspended,
+    });
+    return {
+      ingest: async (fix, battery, intervalMs) => {
+        const mod = this.mod;
+        if (!mod?.ingestFix) throw new Error('ingestFix: native module not bound');
+        if (!this.mySubId) throw new Error('ingestFix: no active subscription');
+        return outcomeOf(await mod.ingestFix(this.mySubId, toNativeFix(fix), battery, intervalMs));
+      },
+      heartbeat: async (battery, intervalMs) => {
+        const mod = this.mod;
+        if (!mod?.heartbeatFix) throw new Error('heartbeatFix: native module not bound');
+        if (!this.mySubId) throw new Error('heartbeatFix: no active subscription');
+        return outcomeOf(await mod.heartbeatFix(this.mySubId, battery, intervalMs));
+      },
+    };
+  }
+
+  /**
+   * Run one captured fix through the native pipeline from a headless context.
+   *
+   * The headless counterpart of the engine's `ingest`: no policy, no state, no listeners — a wake
+   * with no mounted runtime has nobody to tell. Returns how many envelopes reached the wire.
+   */
+  async ingestNativeFix(fix: LocationFix, _parent?: SpanContext): Promise<number> {
+    const battery = await readBatteryForNative();
+    const outcome = await this.nativeDrain().ingest(fix, battery, this.shareIntervalMs);
+    return outcome.published;
+  }
+
+  /** Fill the slots that elapsed while this phone was frozen, and drain. */
+  async heartbeatNativeFix(_parent?: SpanContext): Promise<number> {
+    const battery = await readBatteryForNative();
+    const outcome = await this.nativeDrain().heartbeat(battery, this.shareIntervalMs);
+    return outcome.published;
+  }
+
+  /**
    * Seal `fix` for the current recipients, broadcast it live (gossip) and mirror it to the durable
    * trail (docs). Returns the monotonic `seq` assigned. **Throws** when the node isn't ready so the
    * outbox drain retains the fix rather than dropping it — never returns a placeholder seq.
@@ -1968,7 +2050,7 @@ export class LocationSharingService implements FixPublisher {
         { createLocationEngine },
         { benchmarkProfileOverrides, createSamplingPolicy },
         { BackgroundLocationProvider: Provider },
-        { backgroundOutbox, registerActiveBackgroundFixHandler, registerActiveRefreshHandler },
+        { registerActiveBackgroundFixHandler, registerActiveRefreshHandler },
         { createBatterySource },
         { createCadenceController, cfgFromDecision },
       ] = await Promise.all([
@@ -1990,10 +2072,12 @@ export class LocationSharingService implements FixPublisher {
         ...benchmarkProfileOverrides(benchmarkProfile),
       });
       this.engine = createLocationEngine({
-        publisher: this,
-        outbox: backgroundOutbox,
-        trail: this.trail,
+        drain: this.nativeDrain(),
         policy,
+        // The native path writes our own fix to the iroh-docs replica, not to this app's trail
+        // store, so without this the user's own dot would not move until the next reconciliation.
+        // A local replica read, no network.
+        onPublished: () => void this.refreshTrailFromReplica(0).catch(() => undefined),
         // Real device power (charge level, charging state, Low-Power Mode) drives the policy's
         // battery-aware backoff — without this reader the engine assumes a perpetually full battery.
         battery: () => battery.read(),

@@ -1,12 +1,18 @@
 import { getTelemetry, type SpanContext } from '@/features/dev/telemetry';
 import type { LocationFix } from '../../core/types';
-import type { FixOutbox } from './fix-outbox';
 
 export type ActiveBackgroundFixHandler = (fix: LocationFix, parent?: SpanContext) => Promise<void>;
 
 interface BackgroundFixDispatcherOptions {
-  outbox: FixOutbox;
-  flushHeadless(parent?: SpanContext): Promise<void>;
+  /**
+   * Run fixes the mounted runtime did not take through a short-lived headless one.
+   *
+   * There is no JS queue in front of this any more: the durable outbox lives in Rust
+   * (`outbox.rs`), so a fix is handed straight down and the native side decides whether it is
+   * gated, queued or sent. The old two-step — persist here, drain there — existed because the
+   * queue was on this side of the boundary.
+   */
+  ingestHeadless(fixes: readonly LocationFix[], parent?: SpanContext): Promise<void>;
   onActiveError?(error: unknown): void;
 }
 
@@ -62,13 +68,10 @@ export function createBackgroundFixDispatcher(
         .end();
 
       if (queued.length === 0) return;
-      for (const fix of queued) {
-        await options.outbox.enqueue(fix, parent);
-      }
-      // A mounted runtime owns the monotonic sequence counter. If it rejected
-      // a fix, leave the durable item for its next flush rather than racing a
-      // second restored service against the same author/seq space.
-      if (!handler) await options.flushHeadless(parent);
+      // A mounted runtime owns the process-wide native stores. If it rejected a fix, leave it for
+      // its next heartbeat rather than racing a second restored service against the same author/seq
+      // space — the directory claim in `durable.rs` would refuse the second one anyway.
+      if (!handler) await options.ingestHeadless(queued, parent);
     },
 
     registerActiveHandler(handler): () => void {

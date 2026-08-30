@@ -2,7 +2,7 @@ import { Platform } from 'react-native';
 
 import { getTelemetry, type SpanContext } from '@/features/dev/telemetry';
 import { clearTeardownWatermark, loadTeardownWatermark } from '../persistence';
-import type { PersistentKV } from './fix-outbox';
+import type { PersistentKV } from './persistent-kv';
 
 /**
  * Reporting for a headless teardown that never came back.

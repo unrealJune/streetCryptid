@@ -1,5 +1,5 @@
 import type { Attributes } from '@/features/dev/telemetry';
-import type { PersistentKV } from './fix-outbox';
+import type { PersistentKV } from './persistent-kv';
 
 /**
  * "When did this phone last manage to do X?" — the durable timestamps that make the

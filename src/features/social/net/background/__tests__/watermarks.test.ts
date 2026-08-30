@@ -1,4 +1,4 @@
-import { InMemoryKV } from '../fix-outbox';
+import { InMemoryKV } from '../persistent-kv';
 import {
   loadWatermarks,
   stampWatermark,

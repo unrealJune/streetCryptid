@@ -1,7 +1,6 @@
 import { Platform } from 'react-native';
 
 import type { SpanContext } from '@/features/dev/telemetry';
-import { backgroundOutbox } from './background-outbox';
 import { defineBackgroundLocationTask, isBackgroundLocationAvailable } from './background-task';
 import { defineBackgroundRefreshTask, isBackgroundRefreshAvailable } from './refresh-task';
 import { defineReviveTask, isReviveFenceAvailable } from './revive-task';
@@ -18,16 +17,15 @@ import {
  * This module is imported by the app entry so `TaskManager.defineTask` runs in
  * global scope before React mounts, as required by Expo Location.
  *
- * The outbox is backed by expo-sqlite, so captures survive process death.
+ * Captures survive process death in the native outbox (`outbox.rs`), which is also what lets an OS
+ * callback drain them with no JS context alive.
  */
-export { backgroundOutbox } from './background-outbox';
 
 let registered = false;
 const dispatcher = createBackgroundFixDispatcher({
-  outbox: backgroundOutbox,
-  flushHeadless: async (parent) => {
-    const { flushBackgroundOutboxHeadless } = await import('./headless-runtime');
-    await flushBackgroundOutboxHeadless(parent);
+  ingestHeadless: async (fixes, parent) => {
+    const { ingestFixesHeadless } = await import('./headless-runtime');
+    await ingestFixesHeadless(fixes, parent);
   },
   onActiveError: (error) => {
     console.warn('[background-location] live publisher failed; fix queued for retry', error);

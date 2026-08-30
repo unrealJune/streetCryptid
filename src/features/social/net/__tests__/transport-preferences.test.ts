@@ -1,4 +1,4 @@
-import { InMemoryKV } from '../background/fix-outbox';
+import { InMemoryKV } from '../background/persistent-kv';
 import {
   DEFAULT_TRANSPORT_PREFERENCES,
   loadTransportPreferences,

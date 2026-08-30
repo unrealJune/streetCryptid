@@ -8,9 +8,9 @@ import {
   type Attributes,
   type SpanContext,
 } from '@/features/dev/telemetry';
+import { tryGetIrohLocation } from 'iroh-location';
 import { createPersistentKV, loadPool, loadRatchetDrops, loadSharingEnabled } from '../persistence';
 import { getStorageBackend, getStorageDegradationCount } from '../storage-health';
-import { backgroundOutbox } from './background-outbox';
 import { BACKGROUND_LOCATION_TASK, isBackgroundLocationRunning } from './background-task';
 import { BACKGROUND_REFRESH_TASK } from './refresh-task';
 import { loadReviveFenceArmedAt, REVIVE_FENCE_TASK } from './revive-task';
@@ -190,7 +190,10 @@ async function intentAttributes(): Promise<Attributes> {
     // Pool unreadable — the counts are omitted rather than guessed.
   }
   try {
-    attrs['outbox.pending'] = await backgroundOutbox.pending();
+    // From the native queue now (`outbox.rs`). Requires a started node, so on a wake that has not
+    // built one this is absent rather than zero — "we could not ask" and "nothing is waiting" are
+    // different answers and only one of them is good news.
+    attrs['outbox.pending'] = await tryGetIrohLocation()?.outboxPending?.();
   } catch {
     attrs['outbox.pending'] = undefined;
   }
