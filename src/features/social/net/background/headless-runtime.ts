@@ -14,8 +14,8 @@ import {
 import { recordDeviceHealth } from './device-health';
 import type { PersistentKV } from './persistent-kv';
 import type { LocationFix } from '../../core/types';
+import { tryGetIrohLocation } from 'iroh-location';
 import { reportStrandedTeardown } from './teardown-watermark';
-import { isBackgroundLocationRunning, startBackgroundLocation } from './background-task';
 import { createBatterySource } from './battery-source';
 import { cfgFromDecision } from './cadence-controller';
 import {
@@ -266,7 +266,10 @@ export async function ensureSharingArmedHeadless(
   // The OS may have brought the task back on its own (boot receiver, START_REDELIVER_INTENT), in
   // which case there is nothing to do — but "nothing to do" and "never ran" are different
   // diagnoses on a phone that has gone quiet, so both are recorded.
-  if (await isBackgroundLocationRunning()) return skip('already-running');
+  // The OS may have brought the runtime back on its own (boot receiver, START_REDELIVER_INTENT),
+  // in which case there is nothing to do — but "nothing to do" and "never ran" are different
+  // diagnoses on a phone that has gone quiet, so both are recorded.
+  if (tryGetIrohLocation()?.nativeBackgroundRunning?.()) return skip('already-running');
 
   const span = getTelemetry().startSpan('bg.selfheal', {
     parent,
@@ -282,13 +285,13 @@ export async function ensureSharingArmedHeadless(
     // mode compounds instead of ending.
     const decision = policy.decide({ battery: await createBatterySource().read() });
     span.setAttribute('decision.interval_ms', decision.timeIntervalMs);
-    await startBackgroundLocation(
-      cfgFromDecision(decision, {
-        title: 'streetCryptid',
-        body: "Keeping your friends' map current.",
-        color: '#C6791A',
-      })
-    );
+    // Restart the native runtime rather than an OS task. On Android this is the documented
+    // geofence exemption to the ban on starting a foreground service from the background, which is
+    // the only legal window a self-heal has (see `revive-task.ts`).
+    const mod = tryGetIrohLocation();
+    const target = cfgFromDecision(decision);
+    mod?.setBackgroundCadence?.(target.intervalMs, target.distanceIntervalM, target.accuracy);
+    mod?.startNativeBackground?.();
     span.setStatus('ok');
     return true;
   } catch (err) {

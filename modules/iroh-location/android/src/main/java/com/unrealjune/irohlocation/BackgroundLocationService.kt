@@ -51,13 +51,18 @@ class BackgroundLocationService : Service() {
   private var locationManager: LocationManager? = null
 
   /**
-   * The publish cadence, mirroring `DEFAULT_SHARE_INTERVAL_MS`.
+   * The publish cadence.
    *
    * It is the *slot* interval, not the sampling rate: the gate absorbs everything that arrives
    * inside a slot, so requesting updates more often than this costs battery and publishes nothing
    * extra. What it does buy is a fresher position at the moment a slot comes due.
+   *
+   * Held in the companion so the cadence controller can change it without a handle on the running
+   * service — Android gives callers a component name, not an instance. It used to be a constant,
+   * which meant a service that quietly ignored the interval the app was showing the user.
    */
-  private val slotIntervalMs: ULong = 5UL * 60UL * 1000UL
+  private val slotIntervalMs: ULong
+    get() = cadenceSlotIntervalMs
 
   private val listener =
     LocationListener { location ->
@@ -70,6 +75,7 @@ class BackgroundLocationService : Service() {
   override fun onCreate() {
     super.onCreate()
     startForeground(NOTIFICATION_ID, notification())
+    running = true
     startLocationUpdates()
   }
 
@@ -81,6 +87,7 @@ class BackgroundLocationService : Service() {
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_REDELIVER_INTENT
 
   override fun onDestroy() {
+    running = false
     locationManager?.removeUpdates(listener)
     locationManager = null
     // Release the directory claims so a mounted app can take them back immediately, rather than
@@ -105,7 +112,7 @@ class BackgroundLocationService : Service() {
         manager.requestLocationUpdates(
           provider,
           MIN_UPDATE_INTERVAL_MS,
-          MIN_UPDATE_DISTANCE_M,
+          cadenceDistanceM,
           listener,
           Looper.getMainLooper(),
         )
@@ -190,6 +197,31 @@ class BackgroundLocationService : Service() {
 
   companion object {
     private const val TAG = "IrohBgService"
+
+    /** Set by {@link setCadence}; read by the running service on its next fix. */
+    @Volatile private var cadenceSlotIntervalMs: ULong = 5UL * 60UL * 1000UL
+    @Volatile private var cadenceDistanceM: Float = 50f
+    @Volatile private var running = false
+
+    /** Whether the service is the one currently receiving locations. Reported by `device.health`. */
+    fun isRunning(): Boolean = running
+
+    /**
+     * Re-program from the sampling policy's decision.
+     *
+     * Stored rather than applied directly: `LocationManager` has no re-arm, so a distance change
+     * takes effect when the service next re-requests. The slot interval applies immediately,
+     * because it is enforced on our side rather than by the provider.
+     */
+    fun setCadence(context: Context, intervalMs: Long, distanceM: Float) {
+      cadenceSlotIntervalMs = intervalMs.coerceAtLeast(1L).toULong()
+      if (distanceM != cadenceDistanceM) {
+        cadenceDistanceM = distanceM
+        // Cheapest correct re-arm: the service re-requests on start, and startForegroundService on
+        // an already-running service just re-delivers the intent.
+        if (running) start(context)
+      }
+    }
     private const val CHANNEL_ID = "streetcryptid.location-sharing"
     private const val NOTIFICATION_ID = 0x5C10
 
@@ -201,7 +233,6 @@ class BackgroundLocationService : Service() {
      * minutes old. One minute and fifty metres is the same shape `AMBIENT_*` uses in JS.
      */
     private const val MIN_UPDATE_INTERVAL_MS = 60_000L
-    private const val MIN_UPDATE_DISTANCE_M = 50f
 
     fun start(context: Context) {
       val intent = Intent(context, BackgroundLocationService::class.java)

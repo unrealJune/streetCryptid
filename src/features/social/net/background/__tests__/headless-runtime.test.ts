@@ -55,15 +55,18 @@ jest.mock('@/features/account/storage/profile-store', () => ({
   })),
 }));
 
-// The self-heal touches only the OS location task — no iroh node — so it is mocked at that seam.
-const mockIsRunning = jest.fn(async () => false);
-const mockStartBackgroundLocation = jest.fn(async (_cfg: unknown) => {});
-// Spread the real module: `register-task` is pulled in transitively and needs the rest of it
-// (`isBackgroundLocationAvailable`, `defineBackgroundLocationTask`) at import time.
-jest.mock('../background-task', () => ({
-  ...jest.requireActual('../background-task'),
-  isBackgroundLocationRunning: () => mockIsRunning(),
-  startBackgroundLocation: (cfg: unknown) => mockStartBackgroundLocation(cfg),
+// The self-heal restarts the NATIVE runtime now — no iroh node built on this side — so it is
+// mocked at the module seam instead of the old OS-task one.
+const mockIsRunning = jest.fn(() => false);
+const mockStartNativeBackground = jest.fn(() => {});
+const mockSetBackgroundCadence = jest.fn((_i: number, _d: number, _a: string) => {});
+jest.mock('iroh-location', () => ({
+  ...jest.requireActual('iroh-location'),
+  tryGetIrohLocation: () => ({
+    nativeBackgroundRunning: () => mockIsRunning(),
+    startNativeBackground: () => mockStartNativeBackground(),
+    setBackgroundCadence: (i: number, d: number, a: string) => mockSetBackgroundCadence(i, d, a),
+  }),
 }));
 
 const mockLoadSharingEnabled = jest.fn(async () => true);
@@ -278,40 +281,39 @@ describe('headless-runtime', () => {
   describe('ensureSharingArmedHeadless', () => {
     beforeEach(() => {
       mockLoadSharingEnabled.mockImplementation(async () => true);
-      mockIsRunning.mockImplementation(async () => false);
-      mockStartBackgroundLocation.mockImplementation(async (_cfg: unknown) => {});
+      mockIsRunning.mockImplementation(() => false);
+      mockStartNativeBackground.mockImplementation(() => {});
     });
 
-    it('re-arms when sharing is enabled but the OS task is not running', async () => {
+    it('re-arms when sharing is enabled but the native runtime is not running', async () => {
       await expect(ensureSharingArmedHeadless('geofence')).resolves.toBe(true);
-      expect(mockStartBackgroundLocation).toHaveBeenCalledTimes(1);
-      // Ambient cadence, never live: resurrecting a 4s cadence unattended is how the original
+      expect(mockStartNativeBackground).toHaveBeenCalledTimes(1);
+      // The cadence is programmed before the runtime starts, so it never runs a tick at a rate
+      // nobody chose. Ambient only — resurrecting a fast cadence unattended is how the original
       // failure compounds instead of ending.
-      expect(mockStartBackgroundLocation.mock.calls[0][0]).toMatchObject({
-        timeIntervalMs: 300_000,
-        distanceIntervalM: 50,
-        deferredUpdatesIntervalMs: 60_000,
-        pausesUpdatesAutomatically: true,
-      });
+      expect(mockSetBackgroundCadence).toHaveBeenCalledWith(300_000, 50, 'balanced');
+      expect(mockSetBackgroundCadence.mock.invocationCallOrder[0]).toBeLessThan(
+        mockStartNativeBackground.mock.invocationCallOrder[0]
+      );
     });
 
     it('does nothing when the user has sharing switched off', async () => {
       mockLoadSharingEnabled.mockImplementation(async () => false);
 
       await expect(ensureSharingArmedHeadless('refresh')).resolves.toBe(false);
-      expect(mockStartBackgroundLocation).not.toHaveBeenCalled();
+      expect(mockStartNativeBackground).not.toHaveBeenCalled();
     });
 
     it('does nothing when the platform already restored the task itself', async () => {
       // Android's BOOT_COMPLETED receiver and START_REDELIVER_INTENT both land here.
-      mockIsRunning.mockImplementation(async () => true);
+      mockIsRunning.mockImplementation(() => true);
 
       await expect(ensureSharingArmedHeadless('refresh')).resolves.toBe(false);
-      expect(mockStartBackgroundLocation).not.toHaveBeenCalled();
+      expect(mockStartNativeBackground).not.toHaveBeenCalled();
     });
 
     it('swallows the Android background-FGS refusal instead of failing its caller', async () => {
-      mockStartBackgroundLocation.mockImplementation(async (_cfg: unknown) => {
+      mockStartNativeBackground.mockImplementation(() => {
         throw new Error('ForegroundServiceStartNotAllowedException: startForegroundService()');
       });
 
@@ -320,7 +322,7 @@ describe('headless-runtime', () => {
     });
 
     it('swallows an unexpected failure too', async () => {
-      mockStartBackgroundLocation.mockImplementation(async (_cfg: unknown) => {
+      mockStartNativeBackground.mockImplementation(() => {
         throw new Error('location provider unavailable');
       });
 

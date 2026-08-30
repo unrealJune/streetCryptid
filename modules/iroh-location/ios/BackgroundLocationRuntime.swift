@@ -30,10 +30,14 @@ import UIKit
 final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   static let shared = BackgroundLocationRuntime()
 
-  /// The publish cadence, mirroring `DEFAULT_SHARE_INTERVAL_MS`. It is the *slot* interval, not the
-  /// sampling rate: the gate absorbs everything inside a slot, so asking for updates more often
-  /// buys a fresher position at a slot boundary rather than more envelopes.
-  private let slotIntervalMs: UInt64 = 5 * 60 * 1000
+  /// The publish cadence. It is the *slot* interval, not the sampling rate: the gate absorbs
+  /// everything inside a slot, so asking for updates more often buys a fresher position at a slot
+  /// boundary rather than more envelopes.
+  ///
+  /// Seeded from `DEFAULT_SHARE_INTERVAL_MS` and replaced by {@link setCadence} whenever the user
+  /// picks a different interval. It used to be a constant, which meant a runtime that quietly
+  /// ignored the setting the app was showing them.
+  private var slotIntervalMs: UInt64 = 5 * 60 * 1000
 
   private let manager = CLLocationManager()
   private let queue = DispatchQueue(label: "com.unrealjune.irohlocation.background-runtime")
@@ -65,6 +69,37 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // `distanceFilter` above rather than by the OS pausing us, which is a control we can actually
     // reason about. See the delegate callbacks below, which make the pause visible either way.
     manager.pausesLocationUpdatesAutomatically = false
+  }
+
+  /// Whether this runtime is the one currently receiving locations.
+  ///
+  /// `device.health` reports it, because "sharing is on" and "something is actually being handed
+  /// positions" are different claims and the gap between them is the entire background failure.
+  var isRunning: Bool { running }
+
+  /// Re-program the OS from the sampling policy's decision.
+  ///
+  /// The cadence controller drives this now. Core Location ignores any time interval, so the
+  /// distance filter and the accuracy tier are the whole of what we can ask for; the publish
+  /// interval is enforced on our side by the slot grid.
+  func setCadence(intervalMs: UInt64, distanceM: Double, accuracy: String) {
+    slotIntervalMs = max(1, intervalMs)
+    manager.distanceFilter = distanceM > 0 ? distanceM : kCLDistanceFilterNone
+    manager.desiredAccuracy = Self.accuracy(for: accuracy)
+    // Re-requesting is what makes a change take effect; Core Location applies the new filter to
+    // the running request rather than needing a stop/start.
+    if running { manager.startUpdatingLocation() }
+  }
+
+  /// Map the policy's tier onto Core Location's constants. `balanced` is the ambient default and
+  /// is deliberately not `kCLLocationAccuracyKilometer`: the confidence gate rejects at 150 m, so a
+  /// coarser tier would spend battery producing fixes we then throw away.
+  private static func accuracy(for tier: String) -> CLLocationAccuracy {
+    switch tier {
+    case "high": return kCLLocationAccuracyBest
+    case "low": return kCLLocationAccuracyKilometer
+    default: return kCLLocationAccuracyHundredMeters
+    }
   }
 
   /// Begin background location updates. Idempotent.

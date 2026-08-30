@@ -517,6 +517,21 @@ export interface IrohLocationApi {
     battery: { level: number; charging: boolean; lowPower: boolean },
     intervalMs: number
   ): Promise<NativeIngestOutcome>;
+  /**
+   * Re-program the native background runtime from the sampling policy's decision.
+   *
+   * The cadence controller drives this. `intervalMs` is the publish slot the native gate enforces;
+   * `distanceM` and `accuracy` are what we ask the OS for. iOS ignores any time interval, so the
+   * distance filter is the only hardware-facing control there — see `sampling-policy.ts`. OPTIONAL.
+   */
+  setBackgroundCadence?(intervalMs: number, distanceM: number, accuracy: string): void;
+  /**
+   * Whether the native background runtime is currently receiving locations.
+   *
+   * Distinct from "sharing is enabled": the gap between what the user asked for and what the OS is
+   * actually handing us is the entire background failure this path exists to close. OPTIONAL.
+   */
+  nativeBackgroundRunning?(): boolean;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**

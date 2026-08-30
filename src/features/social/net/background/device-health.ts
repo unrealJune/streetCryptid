@@ -11,7 +11,6 @@ import {
 import { tryGetIrohLocation } from 'iroh-location';
 import { createPersistentKV, loadPool, loadRatchetDrops, loadSharingEnabled } from '../persistence';
 import { getStorageBackend, getStorageDegradationCount } from '../storage-health';
-import { BACKGROUND_LOCATION_TASK, isBackgroundLocationRunning } from './background-task';
 import { BACKGROUND_REFRESH_TASK } from './refresh-task';
 import { loadReviveFenceArmedAt, REVIVE_FENCE_TASK } from './revive-task';
 import { loadWatermarks, stampWatermark, watermarkAges } from './watermarks';
@@ -142,15 +141,13 @@ async function taskAttributes(): Promise<Attributes> {
       return undefined;
     }
   };
-  attrs['task.location_registered'] = await registered(BACKGROUND_LOCATION_TASK);
   attrs['task.refresh_registered'] = await registered(BACKGROUND_REFRESH_TASK);
   attrs['task.fence_registered'] = await registered(REVIVE_FENCE_TASK);
 
-  try {
-    attrs['task.location_running'] = await isBackgroundLocationRunning();
-  } catch {
-    attrs['task.location_running'] = undefined;
-  }
+  // From the native runtime now. `sharing.enabled` says what the user asked for; this says
+  // whether anything is actually being handed positions, and the gap between the two is the whole
+  // background failure this path exists to close.
+  attrs['task.location_running'] = tryGetIrohLocation()?.nativeBackgroundRunning?.();
 
   const backgroundTask = tryBackgroundTask();
   if (backgroundTask) {

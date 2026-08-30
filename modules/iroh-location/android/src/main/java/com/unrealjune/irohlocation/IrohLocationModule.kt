@@ -621,6 +621,22 @@ class IrohLocationModule : Module() {
       )
     }
 
+    /// Re-program the background runtime from the sampling policy's decision. The accuracy tier is
+    /// ignored on Android: `LocationManager` takes providers and a distance filter, not a tier, and
+    /// we already request both providers.
+    Function("setBackgroundCadence") { intervalMs: Double, distanceM: Double, _accuracy: String ->
+      BackgroundLocationService.setCadence(
+        checkNotNull(appContext.reactContext?.applicationContext) {
+          "IrohLocation needs an application context to re-program the background service"
+        },
+        intervalMs.toLong(),
+        distanceM.toFloat(),
+      )
+    }
+
+    /// Whether the background runtime is the one currently receiving locations.
+    Function("nativeBackgroundRunning") { BackgroundLocationService.isRunning() }
+
     Function("stopNativeBackground") {
       BackgroundLocationService.stop(
         checkNotNull(appContext.reactContext?.applicationContext) {

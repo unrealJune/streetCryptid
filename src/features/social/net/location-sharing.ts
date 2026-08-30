@@ -56,10 +56,10 @@ import type {
   RatchetActivity,
   SelfIdentity,
 } from '../core/types';
-import type { BackgroundLocationProvider } from './background/background-provider';
-import type { BackgroundStartConfig } from './background/background-task';
 import type { DrainOutcome, LocationEngine, NativeDrain } from './background/location-engine';
 import type { BatteryState } from './background/types';
+import { ensureBackgroundPermissions } from './background/location-permissions';
+import type { CadenceProvider, CadenceTarget } from './background/cadence-controller';
 import { createTrailStore, type TrailPoint, type TrailStore } from './background/trail-store';
 import type { PersistentKV } from './background/persistent-kv';
 import {
@@ -540,8 +540,6 @@ export class LocationSharingService {
 
   // Background service runtime (native-only; lazily imported so web/Expo Go never load it).
   private engine: LocationEngine | null = null;
-  private bgProvider: BackgroundLocationProvider | null = null;
-  private bgTaskHandlerStop: (() => void) | null = null;
   private engineStateStop: (() => void) | null = null;
   private bgRefreshHandlerStop: (() => void) | null = null;
   private bgLifecycleStop: (() => void) | null = null;
@@ -1374,8 +1372,7 @@ export class LocationSharingService {
   async isBackgroundAvailable(): Promise<boolean> {
     if (Platform.OS === 'web' || !this.mod) return false;
     try {
-      const { isBackgroundLocationAvailable } = await import('./background/background-task');
-      return isBackgroundLocationAvailable();
+      return typeof this.mod.startNativeBackground === 'function';
     } catch {
       return false;
     }
@@ -2036,7 +2033,7 @@ export class LocationSharingService {
    * battery-aware sampling policy, feeding fixes through a durable outbox into {@link publishFix}.
    * Native-only. See docs/social/ARCHITECTURE.md §9.
    */
-  async startBackground(config?: Partial<BackgroundStartConfig>): Promise<BackgroundAccess> {
+  async startBackground(config?: Partial<CadenceTarget>): Promise<BackgroundAccess> {
     if (Platform.OS === 'web') {
       throw new Error('Background location sharing is not supported on web.');
     }
@@ -2049,14 +2046,12 @@ export class LocationSharingService {
       const [
         { createLocationEngine },
         { benchmarkProfileOverrides, createSamplingPolicy },
-        { BackgroundLocationProvider: Provider },
-        { registerActiveBackgroundFixHandler, registerActiveRefreshHandler },
+        { registerActiveRefreshHandler },
         { createBatterySource },
         { createCadenceController, cfgFromDecision },
       ] = await Promise.all([
         import('./background/location-engine'),
         import('./background/sampling-policy'),
-        import('./background/background-provider'),
         import('./background/register-task'),
         import('./background/battery-source'),
         import('./background/cadence-controller'),
@@ -2098,10 +2093,6 @@ export class LocationSharingService {
         stampedFixAt = at;
         void stampWatermark(this.kv, 'fix', at).catch(() => undefined);
       });
-      this.bgTaskHandlerStop = registerActiveBackgroundFixHandler(async (fix, parent) => {
-        await this.ingestAndTrackLocal(fix, parent);
-      });
-
       // Route the periodic RECEIVE-side backfill (WorkManager / BGTaskScheduler) to THIS live
       // runtime rather than a headless node. On Android this runtime stays alive while backgrounded
       // (the location foreground service), so the periodic task must reuse this node — spinning up a
@@ -2119,40 +2110,39 @@ export class LocationSharingService {
         await this.syncTrail(0, parent);
       });
 
-      this.bgProvider = new Provider();
-      const notification = {
-        title: 'streetCryptid',
-        body: "Keeping your friends' map current.",
-        color: '#C6791A',
-      };
-      // Arm the OS from a *real* battery read, so a phone launching in Low-Power Mode starts at the
+      // Permission first: the native runtime cannot ask for it, and starting a foreground service
+      // that is then refused location leaves a notification the user cannot explain.
+      const permissions = await ensureBackgroundPermissions();
+      if (!permissions.foreground) throw new Error('location permission was refused');
+      this.backgroundAccess = permissions.background ? 'full' : 'foreground';
+
+      // Arm from a *real* battery read, so a phone launching in Low-Power Mode starts at the
       // conserving accuracy tier instead of arming high and being re-armed on the first power event.
       // (The cadence is identical either way — battery never moves it.)
       const initialDecision = policy.decide({ battery: await battery.read() });
-      const initialCfg = {
-        ...cfgFromDecision(initialDecision, notification),
-        ...config,
+      const initialCfg = { ...cfgFromDecision(initialDecision), ...config };
+      const nativeProvider: CadenceProvider = {
+        reprogram: async (cfg) => {
+          const mod = this.mod;
+          if (!mod?.setBackgroundCadence)
+            throw new Error('setBackgroundCadence: not in this build');
+          mod.setBackgroundCadence(cfg.intervalMs, cfg.distanceIntervalM, cfg.accuracy);
+        },
       };
-      const permissions = await this.bgProvider.startBackground(initialCfg);
-      this.backgroundAccess = permissions.background ? 'full' : 'foreground';
+      await nativeProvider.reprogram(initialCfg);
+      this.setNativeBackground(true);
 
-      // After the initial arm, the cadence controller re-programs the OS whenever the decision
-      // materially changes (motion class, battery, Low-Power Mode) and re-evaluates on power events —
-      // so sampling actually follows the policy instead of staying pinned at the first cadence.
+      // After the initial arm, the cadence controller re-programs the runtime whenever the decision
+      // materially changes (battery, Low-Power Mode) and re-evaluates on power events — so sampling
+      // follows the policy instead of staying pinned at the first cadence.
       this.bgCadenceStop = createCadenceController({
         engine: this.engine,
-        provider: this.bgProvider,
+        provider: nativeProvider,
         battery,
-        notification,
         overrides: config,
         seed: initialCfg,
         onError: (error) => console.warn('[background-location] cadence re-arm failed', error),
       }).start();
-
-      const firstFix = await this.bgProvider.getCurrent();
-      await this.ingestAndTrackLocal(firstFix);
-      // The TaskManager location task delivers in foreground too. A second watch processed every
-      // iOS fix twice and kept another CLLocationManager running for no additional information.
 
       // Fill due slots while the runtime remains alive. iOS may suspend this timer in the background.
       this.armHeartbeat(this.shareIntervalMs);
@@ -2222,7 +2212,11 @@ export class LocationSharingService {
         const { armReviveFence } = await import('./background/revive-task');
         // The one call that bypasses the re-arm floor: sharing is starting and there may be no
         // fence standing at all, so "keep whatever is already armed" is not a safe outcome here.
-        await armReviveFence(firstFix, { force: true });
+        // The last position we know of, not a fresh provider read: the native runtime captures
+        // on its own schedule and has not necessarily delivered one yet. A slightly stale centre
+        // still works — being outside it only makes the exit fire sooner.
+        const centre = this.latestLocalFix ?? this.engine?.getState().lastAcceptedFix;
+        if (centre) await armReviveFence(centre, { force: true });
       } catch (error) {
         console.warn('[revive-fence] arm failed', error);
       }
@@ -2330,8 +2324,6 @@ export class LocationSharingService {
     }
     const stopCadence = this.bgCadenceStop;
     this.bgCadenceStop = null;
-    this.bgTaskHandlerStop?.();
-    this.bgTaskHandlerStop = null;
     this.engineStateStop?.();
     this.engineStateStop = null;
     this.bgRefreshHandlerStop?.();
@@ -2343,11 +2335,8 @@ export class LocationSharingService {
     } catch {
       // ignore
     }
-    try {
-      await this.bgProvider?.stopBackground();
-    } catch {
-      // ignore
-    }
+    // Stops the foreground service / Core Location updates and releases the native stores.
+    this.setNativeBackground(false);
     try {
       await this.engine?.stop();
     } catch {
@@ -2359,7 +2348,6 @@ export class LocationSharingService {
     } catch {
       // ignore — cancellation is best-effort
     }
-    this.bgProvider = null;
     this.engine = null;
     this.backgroundSharing = false;
     this.backgroundAccess = 'unknown';
@@ -2447,8 +2435,6 @@ export class LocationSharingService {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
-    this.bgTaskHandlerStop?.();
-    this.bgTaskHandlerStop = null;
     this.engineStateStop?.();
     this.engineStateStop = null;
     this.bgRefreshHandlerStop?.();

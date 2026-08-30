@@ -499,6 +499,17 @@ public final class IrohLocationModule: Module {
       BackgroundLocationRuntime.shared.start()
     }
 
+    /// Re-program the background runtime from the sampling policy's decision.
+    Function("setBackgroundCadence") { (intervalMs: Double, distanceM: Double, accuracy: String) in
+      BackgroundLocationRuntime.shared.setCadence(
+        intervalMs: UInt64(max(1, intervalMs)), distanceM: distanceM, accuracy: accuracy)
+    }
+
+    /// Whether the background runtime is the one currently receiving locations.
+    Function("nativeBackgroundRunning") { () -> Bool in
+      BackgroundLocationRuntime.shared.isRunning
+    }
+
     Function("stopNativeBackground") {
       BackgroundLocationRuntime.shared.stop()
     }
