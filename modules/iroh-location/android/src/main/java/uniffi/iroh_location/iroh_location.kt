@@ -1107,7 +1107,7 @@ external fun uniffi_iroh_location_fn_method_locationnode_seed_seq(`ptr`: Long,`f
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_set_pairing_ready(`ptr`: Long,`ready`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_iroh_location_fn_method_locationnode_set_sharing_recipients(`ptr`: Long,`recipientEndpoints`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_locationnode_set_sharing_recipients(`ptr`: Long,`recipientEndpoints`: RustBuffer.ByValue,`watcherEndpoints`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_set_transport_config(`ptr`: Long,`config`: RustBuffer.ByValue,
 ): Long
@@ -1572,7 +1572,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients() != 39630) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients() != 14453) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_transport_config() != 29934) {
@@ -3479,12 +3479,17 @@ public interface LocationNodeInterface {
     /**
      * Replace the set of friends this device seals location envelopes for.
      *
-     * Persisted natively so an OS location callback can read it with no JS context alive. Push it
+     * Both lists, one call: a friend belongs to exactly one of them and they change together, so
+     * two separate setters would leave a window where someone is in both or in neither. "Neither"
+     * is the dangerous one — it silently stops their ratchet contribution and lapses the edge
+     * (FORWARD-SECRECY.md §4.1).
+     *
+     * Persisted natively so an OS location callback can read them with no JS context alive. Push
      * on every pool change; see [`crate::recipients`] for why a stale set is safe in the only
      * direction it can be stale, and why revocation still rests on the ratchet session rather
-     * than on this list.
+     * than on these lists.
      */
-    suspend fun `setSharingRecipients`(`recipientEndpoints`: List<kotlin.String>)
+    suspend fun `setSharingRecipients`(`recipientEndpoints`: List<kotlin.String>, `watcherEndpoints`: List<kotlin.String>)
     
     /**
      * Remember the transport settings, so a background bootstrap can `start` without JS.
@@ -5323,19 +5328,24 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     /**
      * Replace the set of friends this device seals location envelopes for.
      *
-     * Persisted natively so an OS location callback can read it with no JS context alive. Push it
+     * Both lists, one call: a friend belongs to exactly one of them and they change together, so
+     * two separate setters would leave a window where someone is in both or in neither. "Neither"
+     * is the dangerous one — it silently stops their ratchet contribution and lapses the edge
+     * (FORWARD-SECRECY.md §4.1).
+     *
+     * Persisted natively so an OS location callback can read them with no JS context alive. Push
      * on every pool change; see [`crate::recipients`] for why a stale set is safe in the only
      * direction it can be stale, and why revocation still rests on the ratchet session rather
-     * than on this list.
+     * than on these lists.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setSharingRecipients`(`recipientEndpoints`: List<kotlin.String>) {
+    override suspend fun `setSharingRecipients`(`recipientEndpoints`: List<kotlin.String>, `watcherEndpoints`: List<kotlin.String>) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_set_sharing_recipients(
                 uniffiHandle,
-                FfiConverterSequenceString.lower(`recipientEndpoints`),
+                FfiConverterSequenceString.lower(`recipientEndpoints`),FfiConverterSequenceString.lower(`watcherEndpoints`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },

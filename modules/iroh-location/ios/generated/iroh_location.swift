@@ -1682,12 +1682,17 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     /**
      * Replace the set of friends this device seals location envelopes for.
      *
-     * Persisted natively so an OS location callback can read it with no JS context alive. Push it
+     * Both lists, one call: a friend belongs to exactly one of them and they change together, so
+     * two separate setters would leave a window where someone is in both or in neither. "Neither"
+     * is the dangerous one — it silently stops their ratchet contribution and lapses the edge
+     * (FORWARD-SECRECY.md §4.1).
+     *
+     * Persisted natively so an OS location callback can read them with no JS context alive. Push
      * on every pool change; see [`crate::recipients`] for why a stale set is safe in the only
      * direction it can be stale, and why revocation still rests on the ratchet session rather
-     * than on this list.
+     * than on these lists.
      */
-    func setSharingRecipients(recipientEndpoints: [String]) async throws 
+    func setSharingRecipients(recipientEndpoints: [String], watcherEndpoints: [String]) async throws 
     
     /**
      * Remember the transport settings, so a background bootstrap can `start` without JS.
@@ -3280,18 +3285,23 @@ open func setPairingReady(ready: Bool)  {try! rustCall() {
     /**
      * Replace the set of friends this device seals location envelopes for.
      *
-     * Persisted natively so an OS location callback can read it with no JS context alive. Push it
+     * Both lists, one call: a friend belongs to exactly one of them and they change together, so
+     * two separate setters would leave a window where someone is in both or in neither. "Neither"
+     * is the dangerous one — it silently stops their ratchet contribution and lapses the edge
+     * (FORWARD-SECRECY.md §4.1).
+     *
+     * Persisted natively so an OS location callback can read them with no JS context alive. Push
      * on every pool change; see [`crate::recipients`] for why a stale set is safe in the only
      * direction it can be stale, and why revocation still rests on the ratchet session rather
-     * than on this list.
+     * than on these lists.
      */
-open func setSharingRecipients(recipientEndpoints: [String])async throws   {
+open func setSharingRecipients(recipientEndpoints: [String], watcherEndpoints: [String])async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_locationnode_set_sharing_recipients(
                     self.uniffiCloneHandle(),
-                    FfiConverterSequenceString.lower(recipientEndpoints)
+                    FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterSequenceString.lower(watcherEndpoints)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -7959,7 +7969,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients() != 39630) {
+    if (uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients() != 14453) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_set_transport_config() != 29934) {
