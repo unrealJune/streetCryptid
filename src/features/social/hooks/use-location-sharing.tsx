@@ -71,9 +71,7 @@ interface LocationSharingContextValue {
   refreshTransportDiagnostics(): Promise<void>;
   toggleShare(endpointId: string, on: boolean): Promise<void>;
   /** Ask a friend for real-time location, or withdraw the ask (ARCHITECTURE §9c). */
-  toggleWatch(endpointId: string, on: boolean): Promise<void>;
   /** End a friend's live window on us immediately. */
-  stopWatcher(endpointId: string): Promise<void>;
   removeFriend(endpointId: string): Promise<void>;
   retryLocation(): Promise<void>;
   /** Opt in/out of offline delivery via the trail stash. */
@@ -558,28 +556,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     },
     [run]
   );
-  /**
-   * Ask a friend to switch to the real-time cadence, or withdraw the ask (ARCHITECTURE §9c).
-   * Surfaces failures — "this build cannot send live requests yet" on an iOS binary predating the
-   * control bindings is a real answer the user needs, not something to swallow.
-   */
-  const toggleWatch = useCallback(
-    (endpointId: string, on: boolean) => {
-      setServiceError(null);
-      return run((service) =>
-        on ? service.requestLive(endpointId) : service.cancelLiveRequest(endpointId)
-      );
-    },
-    [run]
-  );
   /** End a friend's live window on us right now. */
-  const stopWatcher = useCallback(
-    (endpointId: string) => {
-      setServiceError(null);
-      return run((service) => service.stopWatcher(endpointId));
-    },
-    [run]
-  );
   const removeFriend = useCallback(async (endpointId: string) => {
     setServiceError(null);
     const service = serviceRef.current;
@@ -667,8 +644,6 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       refreshPairing,
       refreshTransportDiagnostics,
       toggleShare,
-      toggleWatch,
-      stopWatcher,
       removeFriend,
       retryLocation,
       setStashOptIn,
@@ -702,8 +677,6 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       refreshPairing,
       refreshTransportDiagnostics,
       toggleShare,
-      toggleWatch,
-      stopWatcher,
       removeFriend,
       retryLocation,
       setStashOptIn,

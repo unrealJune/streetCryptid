@@ -1,4 +1,3 @@
-import { getRandomBytesAsync } from 'expo-crypto';
 import { Platform } from 'react-native';
 
 import {
@@ -9,7 +8,6 @@ import {
   type BlePeer,
   type BluetoothRadioState,
   type IrohLocationNativeModule,
-  type NativeControlMsg,
   type NativeLocationFix,
   type NativeRatchetEvent,
   type NodeKeys,
@@ -70,14 +68,12 @@ import {
 import {
   createPersistentKV,
   createPersistentTrailStorage,
-  loadHandledNonces,
   loadIosLocationBenchmarkProfile,
   loadPool,
   loadRatchetActivity,
   loadShareIntervalMs,
   loadStashOptIn,
   loadTransportPreferences,
-  saveHandledNonces,
   savePool,
   saveRatchetActivity,
   saveRatchetDrops,
@@ -96,27 +92,11 @@ import {
   claimNativeRuntime,
   releaseNativeRuntime,
 } from './background/native-runtime-owner';
-import { DEFAULT_SAMPLING_CONFIG, DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
+import { DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
 import { recordDeviceHealth } from './background/device-health';
 import { reportStrandedTeardown } from './background/teardown-watermark';
 import { stampWatermark } from './background/watermarks';
 import { createDefaultStashClient, type StashClient } from './stash-client';
-import {
-  activeWatchers,
-  armWatcher,
-  buildLiveCancel,
-  buildLiveRequest,
-  clampLiveTtl,
-  disarmWatcher,
-  evaluateControlMsg,
-  liveUntil as liveUntilFrom,
-  markHandled,
-  mintNonce,
-  LIVE_TTL_DEFAULT_MS,
-  type HandledNonce,
-  type RandomBytesFn,
-  type WatcherSession,
-} from './live-requests';
 import { loadKeys, saveKeys } from './secure-keys';
 import { loadSeq, saveSeq } from './state-store';
 
@@ -238,7 +218,6 @@ export interface SharingSnapshot {
   /** Bilateral-pairing / nearby-discovery state. */
   pairing: PairingSnapshot;
   /** Live-mode request state (ARCHITECTURE §9c). */
-  live: LiveSnapshot;
   /** Per-friend forward-secrecy health — who is not receiving our fixes, and why (§4.5, §4.6). */
   sessions: SessionHealthSnapshot;
   /** Latest signed fix/null return envelopes successfully opened from each friend. */
@@ -272,20 +251,6 @@ export interface SessionHealthSnapshot {
   lastCheckedAt: number | null;
 }
 
-/**
- * Live-mode state for the UI (ARCHITECTURE §9c). There is no consent queue and no per-friend
- * permission: a friend we share with arms live mode directly. This exists so the UI can *show*
- * what is happening and offer a stop, not to gate it.
- */
-export interface LiveSnapshot {
-  /** Friends currently watching us live, with when each window ends. */
-  watchers: { author: string; expiresAt: number }[];
-  /** When the current live window ends (ms since epoch), or null when we are not live. */
-  liveUntil: number | null;
-  /** Friends we have an outstanding live request out to (we are watching them). */
-  watching: string[];
-}
-
 export interface LocationSharingInitOptions {
   /**
    * Headless mode restores only the identity, pool, and outbound topic needed
@@ -313,34 +278,6 @@ export const BLUETOOTH_UNSUPPORTED_MESSAGE =
   'This device has no Bluetooth LE radio, so Bump cannot run.';
 
 const PAIRING_POLL_INTERVAL_MS = 4000;
-
-/**
- * How often we check friends' control slots for live-mode requests (ARCHITECTURE §9c).
- *
- * Fixed at 5 min rather than following {@link SHARE_INTERVAL_OPTIONS_MS}: riding the share cadence
- * would make requests 15-min-slow for anyone on the long interval and needlessly chatty on the
- * short one. It also keeps this read traffic decoupled from the publish cadence, which is a
- * security property (§9) — and a constant-rate poll reveals nothing about movement.
- *
- * This is the floor on how long a live request takes to be noticed, so it is also the number that
- * makes live mode "ask to watch" rather than "watch now".
- */
-const LIVE_REQUEST_POLL_INTERVAL_MS = 5 * 60_000;
-
-/**
- * How often a WATCHER pulls the trail while it has a live session running.
- *
- * The subject's live cadence is worth nothing if we only reconcile when something else happens to
- * trigger a sync. Gossip delivers live fixes when the direct link is carrying, but that is exactly
- * what fails when a friend is far away behind a relay — and then the entire live window lands in one
- * batch on the next unrelated `syncTrail`.
- *
- * Deliberately faster than the subject's `liveMinPublishMs` so we never sit on a published fix, and
- * deliberately foreground-only: the user is looking at the screen, and a background watcher has no
- * one to show it to. Unlike the poll above this IS request-driven traffic, but it is bounded by the
- * live TTL and only runs when the user explicitly asked to watch someone.
- */
-const LIVE_WATCH_PULL_INTERVAL_MS = 8_000;
 
 const BUMP_POLL_INTERVAL_MS = 300;
 const BUMP_RESOLVE_TIMEOUT_MS = 12_000;
@@ -589,32 +526,8 @@ export class LocationSharingService implements FixPublisher {
    * security property, see §9 — untangled from this read traffic. A constant-rate poll leaks
    * nothing about movement.
    */
-  private liveRequestPollTimer: ReturnType<typeof setInterval> | null = null;
-  private liveRequestPollInFlight: Promise<void> | null = null;
-  /** Armed live sessions, by watching friend. */
-  private watcherSessions: WatcherSession[] = [];
-  /** Control nonces already acted on. Persisted; see `live-requests.ts`. */
-  private handledNonces: HandledNonce[] = [];
-  /** Nonce of the outstanding request WE sent per friend, so we can cancel it later. */
-  private readonly sentRequestNonces = new Map<string, string>();
-  /**
-   * Live sessions WE are watching, by friend endpoint id → absolute expiry. The watcher-side mirror
-   * of {@link watcherSessions}, which tracks who is watching us.
-   *
-   * Needed because live mode used to be entirely send-side: the subject sped up, but nothing on this
-   * end pulled any faster, so a watcher whose gossip link was not carrying (the normal case when the
-   * friend is far away and behind a relay) saw nothing at all until some unrelated `syncTrail` fired
-   * and delivered the whole window at once.
-   */
-  private readonly watchingSessions = new Map<string, number>();
-  private liveWatchPullTimer: ReturnType<typeof setInterval> | null = null;
-  private liveWatchPullInFlight: Promise<void> | null = null;
-  /** Cleans up outstanding live requests when we stop being able to watch (app backgrounded). */
-  private watcherLifecycleStop: (() => void) | null = null;
   /** True on the MOUNTED service only — the one that owns the process-wide native node. */
   private ownsNativeRuntime = false;
-  /** Injectable CSPRNG for control nonces; tests supply a deterministic one. */
-  private readonly randomBytes: RandomBytesFn;
   /**
    * Drives {@link LocationEngine.heartbeat} at the sampling interval while the runtime is alive.
    * iOS may suspend this timer while stationary; the periodic OS refresh is the best-effort backstop.
@@ -632,12 +545,9 @@ export class LocationSharingService implements FixPublisher {
    *   {@link createPairCode} / {@link pairFromInput}). Defaults to the HTTP client built from
    *   `EXPO_PUBLIC_PAIR_MAILBOX_URL`; tests can inject a fake.
    */
-  constructor(
-    deps: { mailbox?: PairingMailbox; stash?: StashClient; randomBytes?: RandomBytesFn } = {}
-  ) {
+  constructor(deps: { mailbox?: PairingMailbox; stash?: StashClient } = {}) {
     this.mailbox = deps.mailbox ?? createDefaultPairingMailbox();
     this.stash = deps.stash ?? createDefaultStashClient();
-    this.randomBytes = deps.randomBytes ?? ((n) => getRandomBytesAsync(n));
   }
 
   /** Whether offline delivery via the stash is both configured (deployed) and opted into. */
@@ -841,9 +751,6 @@ export class LocationSharingService implements FixPublisher {
     }
     await this.restorePool(interactive);
     this.stashOptIn = await loadStashOptIn(this.kv);
-    // Restored, not reset: a control nonce we already acted on must stay acted-on across a restart,
-    // or the sender's still-current slot would re-arm us on the next poll.
-    this.handledNonces = await loadHandledNonces(this.kv);
     // Hydrated here as well as in startBackground so settings shows the real value even before
     // background sharing has been switched on.
     this.shareIntervalMs = await loadShareIntervalMs(this.kv);
@@ -852,7 +759,6 @@ export class LocationSharingService implements FixPublisher {
       await this.syncStashGrants();
       this.startPairingPolling();
       await this.pollPairingOnce();
-      this.startWatcherLifecycle();
     }
     this.setStatus('ready');
   }
@@ -2167,10 +2073,6 @@ export class LocationSharingService implements FixPublisher {
       // Fill due slots while the runtime remains alive. iOS may suspend this timer in the background.
       this.armHeartbeat(this.shareIntervalMs);
 
-      // Live-mode requests are only actionable while we are actually sampling, so the poll's
-      // lifetime is background sharing's (§9c). Sharing off ⇒ nothing to make live ⇒ nothing to poll.
-      this.startLiveRequestPolling();
-
       this.bgLifecycleStop = createAppLifecycleController({
         onForeground: () => {
           void this.engine?.flush();
@@ -2342,10 +2244,6 @@ export class LocationSharingService implements FixPublisher {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
-    this.stopLiveRequestPolling();
-    // Sharing off ends any live session outright: there is nothing left to make live, and leaving
-    // stale watchers behind would have the UI claim someone is watching a phone that stopped.
-    this.watcherSessions = [];
     const stopCadence = this.bgCadenceStop;
     this.bgCadenceStop = null;
     this.bgTaskHandlerStop?.();
@@ -2384,308 +2282,15 @@ export class LocationSharingService implements FixPublisher {
     this.emit();
   }
 
-  /**
-   * Turn on real-time live tracking for a bounded window (default 2 min), after which it auto-reverts
-   * to the ambient cadence. The background service normally samples calmly to save battery; this is
-   * the on-demand escape hatch for the real-time case — a friend actively watching your location —
-   * so the app never pays real-time GPS cost around the clock. `on: false` (or a fresh call) cancels
-   * any active window. No-op until the background service is running; the cadence controller picks
-   * up the engine's new decision and re-programs the OS.
-   *
-   * Prefer {@link applyWatcherSessions} for the request-driven path — it derives the window from the
-   * active watchers so two overlapping watchers cannot cut each other short.
-   */
-  async setLiveTracking(on: boolean, ttlMs = 120_000): Promise<void> {
-    if (this.liveTrackingTimer) {
-      clearTimeout(this.liveTrackingTimer);
-      this.liveTrackingTimer = null;
-    }
-    await this.engine?.setLiveMode(on);
-    // The heartbeat carries live mode's keepalive, and the share interval is far too slow for it.
-    // Only touch the timer when one is actually running — live tracking is a no-op until the
-    // background service has started, and arming a heartbeat here would resurrect a stopped one.
-    if (this.heartbeatTimer) {
-      this.armHeartbeat(on ? DEFAULT_SAMPLING_CONFIG.liveMaxQuietMs : this.shareIntervalMs);
-    }
-    if (on && ttlMs > 0) {
-      const timer = setTimeout(() => {
-        this.liveTrackingTimer = null;
-        void this.engine?.setLiveMode(false);
-        if (this.heartbeatTimer) this.armHeartbeat(this.shareIntervalMs);
-        // Sessions have lapsed by construction; drop them so the UI stops claiming we are live.
-        this.watcherSessions = activeWatchers(this.watcherSessions, Date.now());
-        this.emit();
-      }, ttlMs);
-      (timer as unknown as { unref?: () => void }).unref?.();
-      this.liveTrackingTimer = timer;
-    }
-  }
-
   // ── Live-mode request channel (ARCHITECTURE §9c) ─────────────────────────────────────────
 
-  /**
-   * Ask `endpointId` to switch to the real-time cadence, by writing an encrypted control message
-   * into OUR namespace (which they replicate) and pushing it. They pick it up on their next poll,
-   * so expect minutes, not seconds — there is deliberately no push wake (§10).
-   *
-   * Wrapped only for that friend, so nobody else — including the stash — can tell a request was
-   * even sent, let alone to whom. Requires that they share with us: watching someone who does not
-   * share their location is meaningless, and we surface that as a failure rather than a silent wait.
-   */
-  async requestLive(endpointId: string, ttlMs = LIVE_TTL_DEFAULT_MS): Promise<void> {
-    const friend = this.state.friends[endpointId];
-    if (!friend) throw new Error('live: not a friend');
-    if (!this.mod) throw new Error('live: node not ready');
-    if (typeof this.mod.docsWriteControl !== 'function') {
-      // iOS bindings predating the control API — see `just bindgen-ios`.
-      throw new Error('live: this build cannot send live requests yet');
-    }
-    const span = getTelemetry().startSpan('live.request.sent', {
-      attributes: { 'sc.peer': endpointId.slice(0, 10), ttl_ms: clampLiveTtl(ttlMs) },
-    });
-    try {
-      const nonce = await mintNonce(this.randomBytes);
-      const msg = buildLiveRequest(Date.now(), ttlMs, nonce);
-      await this.mod.docsWriteControl(msg, [friend.recvPublic]);
-      // docsWriteControl only touches the LOCAL replica — same rule as docsWrite. Without this the
-      // request never leaves the phone and the friend polls forever. See §9 "push-to-stash".
-      //
-      // `pushTrail` now addresses the pool as well as the stash, so a request reaches the friend
-      // directly whenever they are reachable; the stash remains the path that does not need both
-      // phones online at the same moment.
-      await this.pushTrail(span.context);
-      this.sentRequestNonces.set(endpointId, nonce);
-      // Start pulling immediately. The subject won't speed up until its next poll (up to
-      // LIVE_REQUEST_POLL_INTERVAL_MS away), but its ambient fixes still need collecting in the
-      // meantime, and this way the window is covered end to end rather than from first-arrival.
-      this.watchingSessions.set(endpointId, Date.now() + clampLiveTtl(ttlMs));
-      this.startLiveWatchPull();
-      span.setStatus('ok');
-      this.emit();
-    } catch (err) {
-      span.recordError(err);
-      throw err;
-    } finally {
-      span.end();
-    }
-  }
-
-  /**
-   * Withdraw an outstanding live request. Supersedes it in our single control slot, so a friend who
-   * has not polled yet never sees the request at all. Best-effort: if they already armed, they stop
-   * on their next poll (or when the window lapses).
-   */
-  async cancelLiveRequest(endpointId: string): Promise<void> {
-    const friend = this.state.friends[endpointId];
-    if (!friend || !this.mod || typeof this.mod.docsWriteControl !== 'function') return;
-    const nonce = await mintNonce(this.randomBytes);
-    try {
-      await this.mod.docsWriteControl(buildLiveCancel(Date.now(), nonce), [friend.recvPublic]);
-      await this.pushTrail();
-    } catch {
-      /* best-effort — the window lapses on its own regardless */
-    }
-    this.sentRequestNonces.delete(endpointId);
-    this.watchingSessions.delete(endpointId);
-    this.stopLiveWatchPullIfIdle();
-    this.emit();
-  }
-
-  /**
-   * Withdraw every outstanding live request we sent. Called when we background: a watcher who is not
-   * looking at the screen has no use for a friend's real-time GPS, and leaving the request standing
-   * would keep their phone at the live cadence for the rest of the TTL for nobody's benefit.
-   *
-   * Best-effort and inherently racy against process death — if we are *killed* rather than
-   * backgrounded, nothing is sent and the subject's TTL is the only thing that stops it. That is why
-   * the TTL remains the real bound, and why a cancel that fails here is not worth surfacing.
-   */
-  private async cancelAllLiveRequests(): Promise<void> {
-    const outstanding = [...this.sentRequestNonces.keys()];
-    if (outstanding.length === 0) return;
-    await Promise.allSettled(outstanding.map((id) => this.cancelLiveRequest(id)));
-  }
-
-  /**
-   * Watch app state for the WATCHER half of live mode (§9c). Deliberately separate from the
-   * lifecycle controller `startBackground` installs: watching and sharing are independent — you can
-   * watch a friend without sharing your own location — so tying this to the background service
-   * would leave requests uncancelled for exactly the users who never turned sharing on.
-   */
-  private startWatcherLifecycle(): void {
-    if (this.watcherLifecycleStop) return;
-    this.watcherLifecycleStop = createAppLifecycleController({
-      onForeground: () => {
-        // Nothing to resume: a live window the user walked away from is over, by design. They ask
-        // again if they still want it.
-      },
-      onBackground: () => {
-        void this.cancelAllLiveRequests();
-        this.watchingSessions.clear();
-        this.stopLiveWatchPullIfIdle();
-      },
-    }).start();
-  }
-
-  /**
-   * Run the watcher-side pull while any live session is active. Idempotent — safe to call on every
-   * request.
-   */
-  private startLiveWatchPull(): void {
-    if (this.liveWatchPullTimer) return;
-    this.liveWatchPullTimer = setInterval(() => {
-      void this.runLiveWatchPull();
-    }, LIVE_WATCH_PULL_INTERVAL_MS);
-    (this.liveWatchPullTimer as unknown as { unref?: () => void }).unref?.();
-  }
-
   /** Stop the pull once no live session remains, so it can never outlive the windows it serves. */
-  private stopLiveWatchPullIfIdle(): void {
-    const now = Date.now();
-    for (const [id, expiresAt] of this.watchingSessions) {
-      if (expiresAt <= now) this.watchingSessions.delete(id);
-    }
-    if (this.watchingSessions.size > 0 || !this.liveWatchPullTimer) return;
-    clearInterval(this.liveWatchPullTimer);
-    this.liveWatchPullTimer = null;
-  }
 
   /** One pull tick. Serialized: a slow reconciliation must not overlap the next tick. */
-  private async runLiveWatchPull(): Promise<void> {
-    this.stopLiveWatchPullIfIdle();
-    if (this.watchingSessions.size === 0) return;
-    if (this.liveWatchPullInFlight) return this.liveWatchPullInFlight;
-    this.liveWatchPullInFlight = this.syncTrail(0)
-      .catch(() => {
-        /* a missed tick is recovered by the next one — never surface transient sync failures */
-      })
-      .finally(() => {
-        this.liveWatchPullInFlight = null;
-      });
-    return this.liveWatchPullInFlight;
-  }
 
   /** Stop `endpointId`'s live session immediately (the user's "stop" action). */
-  async stopWatcher(endpointId: string): Promise<void> {
-    this.watcherSessions = disarmWatcher(this.watcherSessions, endpointId, Date.now());
-    await this.applyWatcherSessions();
-  }
-
-  /**
-   * Reconcile live tracking with the currently-active watcher sessions: live until the LATEST
-   * expiry across them, ambient when there are none. Called after anything changes the set, so
-   * overlapping watchers extend rather than truncate each other.
-   */
-  private async applyWatcherSessions(): Promise<void> {
-    const now = Date.now();
-    this.watcherSessions = activeWatchers(this.watcherSessions, now);
-    const until = liveUntilFrom(this.watcherSessions, now);
-    if (until === null) {
-      await this.setLiveTracking(false);
-    } else {
-      await this.setLiveTracking(true, until - now);
-    }
-    this.emit();
-  }
-
-  /**
-   * Poll every friend's control slot for live-mode requests. Reconciles first — a request written
-   * by a friend is only visible to us once we have pulled their namespace.
-   *
-   * Serialized: a slow reconciliation must not overlap the next tick.
-   */
-  private async pollLiveRequestsOnce(): Promise<void> {
-    if (this.liveRequestPollInFlight) return this.liveRequestPollInFlight;
-    this.liveRequestPollInFlight = this.runLiveRequestPoll().finally(() => {
-      this.liveRequestPollInFlight = null;
-    });
-    return this.liveRequestPollInFlight;
-  }
-
-  private async runLiveRequestPoll(): Promise<void> {
-    const mod = this.mod;
-    if (!mod || typeof mod.readControl !== 'function') return;
-    const friends = pool.friendList(this.state);
-    if (friends.length === 0) return;
-
-    // Pull first: their control entry reaches us through the same reconciliation as their fixes.
-    try {
-      await this.syncTrail(0);
-    } catch {
-      /* an unreachable stash/peer just means we see requests on a later tick */
-    }
-
-    let changed = false;
-    for (const friend of friends) {
-      let messages: NativeControlMsg[];
-      try {
-        messages = await mod.readControl(friend.endpointId);
-      } catch {
-        continue;
-      }
-      for (const msg of messages) {
-        const now = Date.now();
-        const verdict = evaluateControlMsg(msg, {
-          now,
-          isSharing: pool.isSharingWith(this.state, friend.endpointId),
-          handled: this.handledNonces,
-        });
-        if (verdict.action === 'ignore') {
-          // Only remember decisions about messages we could have acted on. Recording a `stale` or
-          // `not-sharing` nonce would burn it, so a later legitimate re-send of the same message
-          // (after re-enabling sharing, say) would be silently dropped as a duplicate.
-          if (verdict.reason === 'duplicate') continue;
-          const dropped = getTelemetry().startSpan('live.request.ignored', {
-            attributes: {
-              'sc.peer': friend.endpointId.slice(0, 10),
-              'sc.drop_reason': verdict.reason,
-            },
-          });
-          dropped.end();
-          continue;
-        }
-
-        this.handledNonces = markHandled(this.handledNonces, msg.nonce, now);
-        await saveHandledNonces(this.kv, this.handledNonces);
-        changed = true;
-
-        const span = getTelemetry().startSpan(
-          verdict.action === 'arm' ? 'live.armed' : 'live.cancelled',
-          { attributes: { 'sc.peer': friend.endpointId.slice(0, 10) } }
-        );
-        if (verdict.action === 'arm') {
-          span.setAttribute('ttl_ms', verdict.ttlMs);
-          this.watcherSessions = armWatcher(
-            this.watcherSessions,
-            friend.endpointId,
-            now + verdict.ttlMs,
-            now
-          );
-        } else {
-          this.watcherSessions = disarmWatcher(this.watcherSessions, friend.endpointId, now);
-        }
-        span.end();
-      }
-    }
-    if (changed) await this.applyWatcherSessions();
-  }
 
   /** Start the live-request poll. Idempotent; runs only while background sharing is on. */
-  private startLiveRequestPolling(): void {
-    if (this.liveRequestPollTimer) return;
-    this.liveRequestPollTimer = setInterval(() => {
-      void this.pollLiveRequestsOnce();
-    }, LIVE_REQUEST_POLL_INTERVAL_MS);
-    (this.liveRequestPollTimer as unknown as { unref?: () => void }).unref?.();
-    // Check immediately too, so switching sharing on picks up a request already waiting.
-    void this.pollLiveRequestsOnce();
-  }
-
-  private stopLiveRequestPolling(): void {
-    if (!this.liveRequestPollTimer) return;
-    clearInterval(this.liveRequestPollTimer);
-    this.liveRequestPollTimer = null;
-  }
 
   /**
    * Wait for an in-flight headless session, but never long enough to be mistaken for a broken app.
@@ -2746,14 +2351,6 @@ export class LocationSharingService implements FixPublisher {
     // Stop callbacks synchronously before awaiting native teardown.
     this.stopPairingPolling();
     this.stopBumpPolling();
-    this.stopLiveRequestPolling();
-    this.watcherLifecycleStop?.();
-    this.watcherLifecycleStop = null;
-    this.watchingSessions.clear();
-    if (this.liveWatchPullTimer) {
-      clearInterval(this.liveWatchPullTimer);
-      this.liveWatchPullTimer = null;
-    }
     if (this.trailChangeTimer) {
       clearTimeout(this.trailChangeTimer);
       this.trailChangeTimer = null;
@@ -3272,7 +2869,6 @@ export class LocationSharingService implements FixPublisher {
       transports: this.transportState(),
       shareIntervalMs: this.shareIntervalMs,
       pairing: this.pairingSnapshot(),
-      live: this.liveSnapshot(),
       sessions: this.sessionHealthSnapshot(),
       ratchetActivity: { ...this.ratchetActivity },
     };
@@ -3296,16 +2892,6 @@ export class LocationSharingService implements FixPublisher {
       byFriend[endpointId] = reason === 'no_session' ? 'needs-repair' : 'lapsed';
     }
     return { byFriend, lastCheckedAt: this.sessionsCheckedAt };
-  }
-
-  private liveSnapshot(): LiveSnapshot {
-    const now = Date.now();
-    const active = activeWatchers(this.watcherSessions, now);
-    return {
-      watchers: active.map((s) => ({ author: s.author, expiresAt: s.expiresAt })),
-      liveUntil: liveUntilFrom(this.watcherSessions, now),
-      watching: [...this.sentRequestNonces.keys()],
-    };
   }
 
   private pairingSnapshot(): PairingSnapshot {
