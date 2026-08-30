@@ -911,6 +911,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_meshcapsulestore_stats(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_subscription_heartbeat_fix(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_subscription_ingest_fix(
     ): Int
     external fun uniffi_iroh_location_checksum_method_subscription_publish(
@@ -1155,6 +1157,8 @@ external fun uniffi_iroh_location_fn_clone_subscription(`handle`: Long,uniffi_ou
 ): Long
 external fun uniffi_iroh_location_fn_free_subscription(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_iroh_location_fn_method_subscription_heartbeat_fix(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_subscription_ingest_fix(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`fix`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_subscription_publish(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`recipientEndpoints`: RustBuffer.ByValue,
@@ -1627,6 +1631,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_subscription_heartbeat_fix() != 34732) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_subscription_ingest_fix() != 22084) {
@@ -6282,6 +6289,16 @@ public object FfiConverterTypeMeshCapsuleStore: FfiConverter<MeshCapsuleStore, L
 public interface SubscriptionInterface {
     
     /**
+     * Publish the slots that have come due without a new fix, reusing the last known position.
+     *
+     * Driven on a timer by whoever is running the pipeline — the mounted app today, since neither
+     * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
+     * delivers a location, and on a stationary phone that can be never; the cadence still has to
+     * be uniform, because it is the one property of a sealed envelope the stash can read.
+     */
+    suspend fun `heartbeatFix`(`subscriptionId`: kotlin.String, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong): IngestOutcome
+    
+    /**
      * Take one captured location all the way to the wire, with no JS involved.
      *
      * This is the whole point of the native drain path. `expo-task-manager` spools location events
@@ -6418,6 +6435,35 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
         return uniffiRustCall() { status ->
             UniffiLib.uniffi_iroh_location_fn_clone_subscription(handle, status)
         }
+    }
+
+    
+    /**
+     * Publish the slots that have come due without a new fix, reusing the last known position.
+     *
+     * Driven on a timer by whoever is running the pipeline — the mounted app today, since neither
+     * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
+     * delivers a location, and on a stationary phone that can be never; the cadence still has to
+     * be uniform, because it is the one property of a sealed envelope the stash can read.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `heartbeatFix`(`subscriptionId`: kotlin.String, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong) : IngestOutcome {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_subscription_heartbeat_fix(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterTypeBatteryState.lower(`battery`),FfiConverterULong.lower(`intervalMs`),FfiConverterULong.lower(`nowMs`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeIngestOutcome.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
     }
 
     

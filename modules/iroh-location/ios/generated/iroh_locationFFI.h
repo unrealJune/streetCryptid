@@ -809,6 +809,11 @@ uint64_t uniffi_iroh_location_fn_clone_subscription(uint64_t handle, RustCallSta
 void uniffi_iroh_location_fn_free_subscription(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_HEARTBEAT_FIX
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_HEARTBEAT_FIX
+uint64_t uniffi_iroh_location_fn_method_subscription_heartbeat_fix(uint64_t ptr, RustBuffer subscription_id, RustBuffer battery, uint64_t interval_ms, uint64_t now_ms
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_INGEST_FIX
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_INGEST_FIX
 uint64_t uniffi_iroh_location_fn_method_subscription_ingest_fix(uint64_t ptr, RustBuffer subscription_id, RustBuffer fix, RustBuffer battery, uint64_t interval_ms, uint64_t now_ms
@@ -1802,6 +1807,12 @@ uint16_t uniffi_iroh_location_checksum_method_meshcapsulestore_prune(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_STATS
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_MESHCAPSULESTORE_STATS
 uint16_t uniffi_iroh_location_checksum_method_meshcapsulestore_stats(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_HEARTBEAT_FIX
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_HEARTBEAT_FIX
+uint16_t uniffi_iroh_location_checksum_method_subscription_heartbeat_fix(void
     
 );
 #endif

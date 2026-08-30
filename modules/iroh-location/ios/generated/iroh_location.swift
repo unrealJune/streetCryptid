@@ -3895,6 +3895,16 @@ public func FfiConverterTypeMeshCapsuleStore_lower(_ value: MeshCapsuleStore) ->
 public protocol SubscriptionProtocol: AnyObject, Sendable {
     
     /**
+     * Publish the slots that have come due without a new fix, reusing the last known position.
+     *
+     * Driven on a timer by whoever is running the pipeline — the mounted app today, since neither
+     * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
+     * delivers a location, and on a stationary phone that can be never; the cadence still has to
+     * be uniform, because it is the one property of a sealed envelope the stash can read.
+     */
+    func heartbeatFix(subscriptionId: String, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64) async throws  -> IngestOutcome
+    
+    /**
      * Take one captured location all the way to the wire, with no JS involved.
      *
      * This is the whole point of the native drain path. `expo-task-manager` spools location events
@@ -3987,6 +3997,31 @@ open class Subscription: SubscriptionProtocol, @unchecked Sendable {
 
     
 
+    
+    /**
+     * Publish the slots that have come due without a new fix, reusing the last known position.
+     *
+     * Driven on a timer by whoever is running the pipeline — the mounted app today, since neither
+     * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
+     * delivers a location, and on a stationary phone that can be never; the cadence still has to
+     * be uniform, because it is the one property of a sealed envelope the stash can read.
+     */
+open func heartbeatFix(subscriptionId: String, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64)async throws  -> IngestOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_subscription_heartbeat_fix(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeIngestOutcome_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
     
     /**
      * Take one captured location all the way to the wire, with no JS involved.
@@ -8024,6 +8059,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_subscription_heartbeat_fix() != 34732) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_subscription_ingest_fix() != 22084) {
