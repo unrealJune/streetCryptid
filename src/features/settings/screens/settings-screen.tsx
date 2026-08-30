@@ -12,12 +12,14 @@ import { DEFAULT_SHARE_INTERVAL_MS } from '@/features/social/net/background/samp
 import { useTheme } from '@/hooks/use-theme';
 
 import { ProfileOnboardingPreview } from '@/features/account/components/profile-onboarding-preview';
+import { useExplorationBackup } from '@/features/map/hooks/use-exploration-backup';
 
 import { AppProvenanceDetails } from '../components/app-provenance';
 import { AuthorIdRow } from '../components/author-id-row';
 import { DebugLocationControls } from '../components/debug-location-controls';
 import { DEV_TELEMETRY_ENABLED } from '@/features/dev/telemetry';
 import { EventLogPanel } from '../components/event-log-panel';
+import { ExplorationBackupRow } from '../components/exploration-backup-row';
 import { IdentityRow } from '../components/identity-row';
 import { LocationAccessRow } from '../components/location-access-row';
 import { MapColorSchemeRow } from '../components/map-color-scheme-row';
@@ -45,6 +47,8 @@ export default function SettingsScreen() {
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
   const insets = useSafeAreaInsets();
   const router = useRouter();
+
+  const { busy: backupBusy, exportBackup, restoreBackup } = useExplorationBackup();
 
   const {
     snapshot,
@@ -198,6 +202,19 @@ export default function SettingsScreen() {
             EXPO_PUBLIC_TRAIL_STASH_URL/TICKET at a stash to enable it.
           </ThemedText>
         )}
+      </View>
+
+      <View style={styles.section}>
+        <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
+          LOCATION HISTORY
+        </ThemedText>
+        <ExplorationBackupRow
+          accent={chrome.green}
+          warningColor={chrome.amber}
+          busy={backupBusy}
+          onExport={exportBackup}
+          onRestore={restoreBackup}
+        />
       </View>
 
       <View style={styles.section}>

@@ -21,7 +21,7 @@ import {
   createDemoExplorationSource,
   createLiveExplorationSource,
 } from '../exploration/exploration-source';
-import { createExplorationStore } from '../exploration/exploration-store';
+import { sharedExplorationStore } from '../exploration/exploration-store';
 import { useMapTheme } from './use-map-theme';
 
 /** How long the camera must sit still before idle neighbor prefetch kicks in. */
@@ -117,12 +117,14 @@ export function useMapEngine(
       dataset.explorationMode === 'live'
         ? createLiveExplorationSource(
             grid,
-            createExplorationStore({ grid }),
+            sharedExplorationStore(grid),
             createPersistentTrailStorage()
           )
         : createDemoExplorationSource(grid, dataset.home),
     [grid, dataset]
   );
+
+  useEffect(() => () => exploration.dispose(), [exploration]);
 
   /** Bumps when cells are added — regions and readouts re-key on it. */
   const [explorationVersion, setExplorationVersion] = useState(0);

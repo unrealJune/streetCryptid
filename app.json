@@ -108,6 +108,7 @@
       "expo-image",
       "expo-status-bar",
       "expo-web-browser",
+      "expo-sharing",
       "./plugins/withSharedSigning",
       "./plugins/withBackupExclusion"
     ],

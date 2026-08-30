@@ -85,6 +85,11 @@ Data reaches the following parties only as described above:
 - Disabling notifications or unsubscribing removes your device's wake
   subscription from the stash.
 - Uninstalling the app removes all locally stored data from your device.
+- You can export the hexes you have explored to a file from Settings, and
+  restore that file on another device. The file contains only the identifiers of
+  hexes you have visited — no times, no route, and nothing about anyone else —
+  and it goes wherever you send it through your device's share sheet. Nothing
+  about it is sent to us.
 
 ## Children
 
