@@ -10,7 +10,6 @@ import uniffi.iroh_location.FixListener
 import uniffi.iroh_location.IngestOutcome
 import uniffi.iroh_location.LocationFix
 import uniffi.iroh_location.LocationNode
-import uniffi.iroh_location.RatchetEvent
 import uniffi.iroh_location.Subscription
 import uniffi.iroh_location.deriveTopic
 
@@ -52,8 +51,6 @@ internal object NativeBackgroundRuntime {
     override fun onOpaque(author: ByteArray, seq: ULong) = Unit
 
     override fun onStatus(status: String) = Unit
-
-    override fun onRatchetEvent(event: RatchetEvent) = Unit
   }
 
   /**

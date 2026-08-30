@@ -8,18 +8,19 @@ import UIKit
 /// that arrives can be sealed and sent without a headless JS context existing — but it is worth
 /// being clear about what it does *not* fix.
 ///
-/// ## What this fixes on iOS, and what it does not
+/// ## What this fixes on iOS
 ///
 /// On Android the diagnosed failure was a JS context that never started while the OS delivered
 /// location normally: 446 real fixes spooled over eleven and a half hours. Removing JS from that
 /// path fixes it outright.
 ///
-/// iOS failed differently. On 2026-08-29 an iPhone's `payload_ts` was frozen for nineteen hours —
-/// Core Location delivered *nothing at all*, and the app's own `bg.refresh` never ran once in
-/// thirty hours despite reading `registered` and `available`. This runtime asks the same scheduler
-/// for the same updates, so it inherits that starvation. What it buys is that every fix iOS *does*
-/// deliver now reaches the wire, instead of needing a JS context that may also be gone, and that
-/// the queue survives in native storage between them.
+/// iOS failed differently, and — unlike the first reading of it — the cause was ours. An iPhone's
+/// `payload_ts` sat frozen for nineteen hours while the app stayed alive, ran a full session at
+/// 01:57 and burned 39 sequence numbers on heartbeats. Core Location had simply stopped
+/// delivering: `pausesLocationUpdatesAutomatically`, which the JS path sets true, pauses updates
+/// when it decides the phone is stationary, and every route back is gated on MOVEMENT. See the
+/// flag in `init` for why that is off here, and the pause callbacks for what happens if it
+/// happens anyway.
 ///
 /// ## Relationship to the JS pipeline
 ///
@@ -220,5 +221,4 @@ private final class SilentFixListener: FixListener {
   func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String) {}
   func onOpaque(author: Data, seq: UInt64) {}
   func onStatus(status: String) {}
-  func onRatchetEvent(event: RatchetEvent) {}
 }

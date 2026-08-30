@@ -87,7 +87,9 @@ private func dataToHex(_ data: Data) -> String {
 ///   *is* backed up by default, and restoring an old copy would rewind send counters into key
 ///   reuse, so `excludeFromBackup` below is not optional decoration; it is the other half of
 ///   putting the state here at all.
-private func nodeStorageRoots() -> (data: URL, state: URL) {
+/// Internal rather than file-private: `BackgroundLocationRuntime` builds a node from the same
+/// two roots, and duplicating the rule is how the two halves of it drift apart.
+func nodeStorageRoots() -> (data: URL, state: URL) {
   let fm = FileManager.default
   let tmp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
   // Application Support is not guaranteed to exist; createDirectory below makes it.
