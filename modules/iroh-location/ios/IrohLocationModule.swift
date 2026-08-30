@@ -494,9 +494,11 @@ public final class IrohLocationModule: Module {
       return try await node.seedSeq(floor: UInt64(max(0, floor)))
     }
 
-    AsyncFunction("setSharingRecipients") { (recipientEndpointsHex: [String]) async throws in
+    AsyncFunction("setSharingRecipients") {
+      (recipientEndpointsHex: [String], watcherEndpointsHex: [String]) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      try await node.setSharingRecipients(recipientEndpoints: recipientEndpointsHex)
+      try await node.setSharingRecipients(
+        recipientEndpoints: recipientEndpointsHex, watcherEndpoints: watcherEndpointsHex)
     }
 
     AsyncFunction("outboxPending") { () async throws -> Double in

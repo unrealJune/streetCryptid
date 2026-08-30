@@ -618,8 +618,8 @@ class IrohLocationModule : Module() {
       { floor: Double -> requireNode().seedSeq(floor.coerceAtLeast(0.0).toULong()) }
 
     AsyncFunction("setSharingRecipients") Coroutine
-      { recipientEndpointsHex: List<String> ->
-        requireNode().setSharingRecipients(recipientEndpointsHex)
+      { recipientEndpointsHex: List<String>, watcherEndpointsHex: List<String> ->
+        requireNode().setSharingRecipients(recipientEndpointsHex, watcherEndpointsHex)
         Unit
       }
 

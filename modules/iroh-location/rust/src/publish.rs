@@ -74,9 +74,13 @@ pub trait FixQueue: Send + Sync {
     fn clear(&self) -> Result<(), StoreError>;
 }
 
-/// The friends this device currently seals location envelopes for.
+/// The friends this device currently seals location envelopes for, and the ones it owes a null
+/// envelope to.
 pub trait Recipients: Send + Sync {
     fn get(&self) -> Vec<String>;
+    /// Watch-only edges. They receive no position, but they do receive our ratchet contribution on
+    /// the same cadence — which is the only thing keeping the edge from lapsing at `T_lapse`.
+    fn watchers(&self) -> Vec<String>;
     fn set(&self, endpoints: &[String]) -> Result<(), StoreError>;
 }
 
@@ -100,6 +104,19 @@ pub trait PublishSink: Send + Sync {
         seq: u64,
         fix: LocationFix,
         recipients: Vec<String>,
+    ) -> impl std::future::Future<Output = Result<(), PublishError>> + Send;
+
+    /// The watcher lane: an envelope with no position, wrapped for friends we do NOT share with
+    /// (FORWARD-SECRECY.md §4.1).
+    ///
+    /// A distinct `seq` from the fix it accompanies — two envelopes, never the same
+    /// `(author, seq)` — so the two lanes land in separate last-write-wins slots and cannot
+    /// supersede each other.
+    fn publish_null(
+        &self,
+        seq: u64,
+        ts: u64,
+        watchers: Vec<String>,
     ) -> impl std::future::Future<Output = Result<(), PublishError>> + Send;
 }
 
@@ -230,12 +247,14 @@ impl<S: PublishSink> DrainEngine<'_, S> {
     /// published three of five envelopes did useful work, and the remainder is still queued.
     pub async fn drain(&self) -> Result<u32, PublishError> {
         let recipients = self.recipients.get();
+        let watchers = self.recipients.watchers();
         let mut published = 0u32;
 
         while let Some(fix) = self.queue.peek() {
             // A counter that cannot persist DOES stop us: handing out a seq we failed to record
             // is the one failure that corrupts rather than delays.
             let seq = self.seq.next()?;
+            let ts = fix.ts;
             if self
                 .sink
                 .publish(seq, fix, recipients.clone())
@@ -246,6 +265,18 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             }
             self.queue.commit()?;
             published += 1;
+
+            // The watcher lane, on the same cadence and best-effort by design. The fix has already
+            // gone out and been committed; a watch-only edge carries no position, so a failure here
+            // must not retain (and re-publish) a fix that already left. Its own seq, so the two
+            // lanes cannot supersede each other in one last-write-wins slot.
+            if !watchers.is_empty() {
+                let Ok(null_seq) = self.seq.next() else {
+                    // The counter is gone; the next iteration's fix lane will stop on it too.
+                    break;
+                };
+                let _ = self.sink.publish_null(null_seq, ts, watchers.clone()).await;
+            }
         }
         Ok(published)
     }

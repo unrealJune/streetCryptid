@@ -2886,10 +2886,14 @@ export class LocationSharingService implements FixPublisher {
     const mod = this.mod;
     if (typeof mod?.setSharingRecipients !== 'function') return;
     const recipients = pool.recipientEndpoints(this.state);
-    void mod.setSharingRecipients(recipients).catch((err: unknown) => {
+    // Watchers in the same call. A watch-only edge receives no position but still needs our ratchet
+    // contribution on the same cadence, or it lapses at T_lapse — the failure a20036e fixed once.
+    const watchers = pool.watcherEndpoints(this.state);
+    void mod.setSharingRecipients(recipients, watchers).catch((err: unknown) => {
       getTelemetry().log('warn', 'recipients: could not mirror the sharing set to native', {
         reason: err instanceof Error ? err.message : String(err),
         recipients: recipients.length,
+        watchers: watchers.length,
       });
     });
   }

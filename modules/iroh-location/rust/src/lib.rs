@@ -2473,17 +2473,23 @@ impl LocationNode {
 
     /// Replace the set of friends this device seals location envelopes for.
     ///
-    /// Persisted natively so an OS location callback can read it with no JS context alive. Push it
+    /// Both lists, one call: a friend belongs to exactly one of them and they change together, so
+    /// two separate setters would leave a window where someone is in both or in neither. "Neither"
+    /// is the dangerous one — it silently stops their ratchet contribution and lapses the edge
+    /// (FORWARD-SECRECY.md §4.1).
+    ///
+    /// Persisted natively so an OS location callback can read them with no JS context alive. Push
     /// on every pool change; see [`crate::recipients`] for why a stale set is safe in the only
     /// direction it can be stale, and why revocation still rests on the ratchet session rather
-    /// than on this list.
+    /// than on these lists.
     pub async fn set_sharing_recipients(
         &self,
         recipient_endpoints: Vec<String>,
+        watcher_endpoints: Vec<String>,
     ) -> Result<(), LocationError> {
         self.recipient_store()
             .await?
-            .set(&recipient_endpoints)
+            .set_all(&recipient_endpoints, &watcher_endpoints)
             .map_err(|e| LocationError::Network(e.to_string()))
     }
 
@@ -3986,6 +3992,24 @@ impl publish::PublishSink for SubscriptionSink<'_> {
         self.subscription
             .node
             .docs_write_ratcheted(self.subscription_id.clone(), seq, fix, recipients)
+            .await
+            .map_err(|e| publish::PublishError::Send(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn publish_null(
+        &self,
+        seq: u64,
+        ts: u64,
+        watchers: Vec<String>,
+    ) -> Result<(), publish::PublishError> {
+        self.subscription
+            .publish_null(seq, ts, watchers.clone())
+            .await
+            .map_err(|e| publish::PublishError::Send(e.to_string()))?;
+        self.subscription
+            .node
+            .docs_write_null_ratcheted(self.subscription_id.clone(), seq, ts, watchers)
             .await
             .map_err(|e| publish::PublishError::Send(e.to_string()))?;
         Ok(())

@@ -207,3 +207,37 @@ fn an_unreadable_recipient_list_fails_closed() {
 
     assert!(RecipientStore::open(&scratch.0).unwrap().get().is_empty());
 }
+
+#[test]
+fn sharing_and_watching_are_written_together() {
+    // A friend belongs to exactly one list, and they change together. Two separate writes leave a
+    // window where someone is in both or in neither — and "neither" silently stops their ratchet
+    // contribution and lapses the edge.
+    let scratch = Scratch::new("recipients-both");
+    let store = RecipientStore::open(&scratch.0).unwrap();
+
+    store
+        .set_all(&["AA11".into()], &["bb22".into(), "bb22".into()])
+        .unwrap();
+
+    assert_eq!(store.get(), vec!["aa11".to_string()]);
+    assert_eq!(store.watchers(), vec!["bb22".to_string()]);
+
+    let reopened = RecipientStore::open(&scratch.0).unwrap();
+    assert_eq!(reopened.get(), store.get());
+    assert_eq!(reopened.watchers(), store.watchers());
+}
+
+#[test]
+fn a_bad_watcher_leaves_both_lists_untouched() {
+    // Validated before either write, so a bad entry in the second list cannot leave the first
+    // replaced and the second stale.
+    let scratch = Scratch::new("recipients-both-reject");
+    let store = RecipientStore::open(&scratch.0).unwrap();
+    store.set_all(&["aa11".into()], &["bb22".into()]).unwrap();
+
+    assert!(store.set_all(&["cc33".into()], &["nope!".into()]).is_err());
+
+    assert_eq!(store.get(), vec!["aa11".to_string()]);
+    assert_eq!(store.watchers(), vec!["bb22".to_string()]);
+}

@@ -136,14 +136,21 @@ export declare class IrohLocationNativeModule
   /**
    * Replace the set of friends this device seals location envelopes for.
    *
-   * Persisted natively so an OS location callback can read it with no JS context alive. Push it on
+   * Both lists, one call: a friend belongs to exactly one of them and they change together, so two
+   * setters would leave a window where someone is in both or in neither. "Neither" silently stops
+   * their ratchet contribution and lapses the edge (FORWARD-SECRECY.md §4.1).
+   *
+   * Persisted natively so an OS location callback can read them with no JS context alive. Push on
    * every pool change. A momentarily stale list is safe in the only direction it can be stale: the
-   * ratchet session remains the authority on who can decrypt, and this list only narrows who we
+   * ratchet session remains the authority on who can decrypt, and these lists only narrow who we
    * attempt to seal for.
    *
    * OPTIONAL: absent on binaries built before the native drain path.
    */
-  setSharingRecipients?(recipientEndpointsHex: string[]): Promise<void>;
+  setSharingRecipients?(
+    recipientEndpointsHex: string[],
+    watcherEndpointsHex: string[]
+  ): Promise<void>;
   /** The last sequence number handed out, without advancing. OPTIONAL, as {@link nextSeq}. */
   currentSeq?(): Promise<number>;
   /**

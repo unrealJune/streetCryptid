@@ -103,11 +103,17 @@ impl FixQueue for FakeQueue {
     }
 }
 
-struct FakeRecipients(Vec<String>);
+struct FakeRecipients {
+    sharing: Vec<String>,
+    watching: Vec<String>,
+}
 
 impl Recipients for FakeRecipients {
     fn get(&self) -> Vec<String> {
-        self.0.clone()
+        self.sharing.clone()
+    }
+    fn watchers(&self) -> Vec<String> {
+        self.watching.clone()
     }
     fn set(&self, _endpoints: &[String]) -> Result<(), StoreError> {
         Ok(())
@@ -129,8 +135,12 @@ impl GateStateStore for FakeGate {
 #[derive(Default)]
 struct FakeSink {
     sent: Mutex<Vec<(u64, u64, Vec<String>)>>,
+    /// The watcher lane, kept apart so a test can assert one without the other.
+    nulls: Mutex<Vec<(u64, u64, Vec<String>)>>,
     /// Start failing once this many envelopes have gone out — a wake that loses the network.
     fail_after: Mutex<Option<usize>>,
+    /// Fail only the watcher lane. It is best-effort, so this must not cost the fix.
+    fail_nulls: Mutex<bool>,
 }
 
 impl PublishSink for FakeSink {
@@ -149,6 +159,19 @@ impl PublishSink for FakeSink {
         sent.push((seq, fix.ts, recipients));
         Ok(())
     }
+
+    async fn publish_null(
+        &self,
+        seq: u64,
+        ts: u64,
+        watchers: Vec<String>,
+    ) -> Result<(), PublishError> {
+        if *self.fail_nulls.lock().unwrap() {
+            return Err(PublishError::Send("watcher lane down".into()));
+        }
+        self.nulls.lock().unwrap().push((seq, ts, watchers));
+        Ok(())
+    }
 }
 
 struct Harness {
@@ -164,7 +187,10 @@ impl Harness {
         Self {
             seq: FakeSeq::default(),
             queue: FakeQueue::default(),
-            recipients: FakeRecipients(vec!["aa11".into(), "bb22".into()]),
+            recipients: FakeRecipients {
+                sharing: vec!["aa11".into(), "bb22".into()],
+                watching: vec![],
+            },
             gate: FakeGate::default(),
             sink: FakeSink::default(),
         }
@@ -443,7 +469,10 @@ async fn sharing_with_nobody_still_advances_the_grid() {
     // sealed for nobody rather than skipped, so the cadence stays uniform — a gap here would be
     // visible to the stash as "this device stopped".
     let h = Harness {
-        recipients: FakeRecipients(vec![]),
+        recipients: FakeRecipients {
+            sharing: vec![],
+            watching: vec![],
+        },
         ..Harness::new()
     };
     let now = INTERVAL * 10;
@@ -456,4 +485,102 @@ async fn sharing_with_nobody_still_advances_the_grid() {
 
     assert_eq!(out.published, 1);
     assert!(h.sink.sent.lock().unwrap()[0].2.is_empty());
+}
+
+/// A watch-only friend receives no position, but must still receive our ratchet contribution on the
+/// same cadence — that envelope is the only thing keeping the edge from lapsing at `T_lapse`
+/// (FORWARD-SECRECY.md §4.1). Dropping it is the mutual-lapse failure that took a day to find.
+fn watched_harness() -> Harness {
+    Harness {
+        recipients: FakeRecipients {
+            sharing: vec!["aa11".into()],
+            watching: vec!["cc33".into()],
+        },
+        ..Harness::new()
+    }
+}
+
+#[tokio::test]
+async fn a_watch_only_friend_gets_a_null_envelope_on_the_same_cadence() {
+    let h = watched_harness();
+    let now = INTERVAL * 10;
+
+    h.engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    let nulls = h.sink.nulls.lock().unwrap();
+    assert_eq!(nulls.len(), 1, "one per published fix");
+    assert_eq!(
+        nulls[0].2,
+        vec!["cc33".to_string()],
+        "sealed for the watcher"
+    );
+    assert_eq!(
+        nulls[0].1, now,
+        "carrying the tick's timestamp, not a position"
+    );
+}
+
+#[tokio::test]
+async fn the_two_lanes_never_share_a_seq() {
+    // Same `(author, seq)` would put them in one last-write-wins slot, where the second silently
+    // erases the first.
+    let h = watched_harness();
+    let base = INTERVAL * 10;
+    let engine = h.engine();
+    engine
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    let later = base + INTERVAL;
+    engine
+        .ingest(fix(later, 20.0), healthy_battery(), INTERVAL, later)
+        .await
+        .unwrap();
+
+    let fix_seqs: Vec<u64> = h.sink.sent.lock().unwrap().iter().map(|s| s.0).collect();
+    let null_seqs: Vec<u64> = h.sink.nulls.lock().unwrap().iter().map(|s| s.0).collect();
+
+    assert_eq!(fix_seqs, vec![1, 3]);
+    assert_eq!(null_seqs, vec![2, 4]);
+    for seq in &null_seqs {
+        assert!(!fix_seqs.contains(seq), "lanes must not collide on seq");
+    }
+}
+
+#[tokio::test]
+async fn a_failing_watcher_lane_does_not_cost_the_fix() {
+    // Best-effort by design: the fix has already gone out and been committed, and a watcher edge
+    // carries no position. Retaining the fix here would re-publish one that already left.
+    let h = watched_harness();
+    *h.sink.fail_nulls.lock().unwrap() = true;
+    let now = INTERVAL * 10;
+
+    let out = h
+        .engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert_eq!(out.published, 1);
+    assert_eq!(out.pending, 0, "the fix was committed, not retained");
+    assert_eq!(h.sink.sent.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn no_watchers_means_no_null_envelopes_and_no_burned_seq() {
+    // The common case. Burning a counter per tick for nobody would advance `seq` at twice the rate
+    // for every user with no watch-only edges.
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+
+    h.engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert!(h.sink.nulls.lock().unwrap().is_empty());
+    assert_eq!(h.seq.current(), 1, "only the fix consumed a seq");
 }
