@@ -49,7 +49,21 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // `sampling-policy.ts` about live mode having had no rate limit at all because of this.
     manager.distanceFilter = 50
     manager.activityType = .other
-    manager.pausesLocationUpdatesAutomatically = true
+    // FALSE, and this is the single most consequential line in the file.
+    //
+    // Apple recommends auto-pause for apps whose tracking *session ends* — navigation that arrives,
+    // a workout that finishes. Ambient friend-location never ends, and on 2026-08-29 the difference
+    // cost an iPhone nineteen hours. Core Location decided the phone was stationary, stopped
+    // delivering, and every route back is gated on MOVEMENT: significant-change monitoring and the
+    // region fence both fire only when the phone goes somewhere. A phone that pauses and then stays
+    // put has no way back at all, and looks from the outside exactly like a phone that is working —
+    // the app stayed alive throughout, ran a full session at 01:57 and burned 39 sequence numbers
+    // publishing heartbeats, all carrying a position Core Location had stopped updating.
+    //
+    // The battery cost is real and is the reason the JS path chose the other way; it is bounded by
+    // `distanceFilter` above rather than by the OS pausing us, which is a control we can actually
+    // reason about. See the delegate callbacks below, which make the pause visible either way.
+    manager.pausesLocationUpdatesAutomatically = false
   }
 
   /// Begin background location updates. Idempotent.
@@ -81,6 +95,25 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     let fix = Self.fix(from: location)
     let battery = Self.battery()
     Task { await self.publish(fix: fix, battery: battery) }
+  }
+
+  /// Core Location paused us anyway.
+  ///
+  /// It should not happen with `pausesLocationUpdatesAutomatically` off, but "should not" is what
+  /// the last nineteen hours of silence were built on. `expo-location` implements neither this
+  /// callback nor its counterpart, which is precisely why the pause was invisible: no span, no log,
+  /// no watermark, and a phone indistinguishable from one whose owner simply had not moved.
+  ///
+  /// Restarting immediately is the only recovery that is not gated on movement. If Core Location
+  /// pauses us again straight away we will have learned something worth knowing, and the log line
+  /// is what will say so.
+  func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
+    NSLog("[iroh-location] Core Location paused updates; restarting")
+    manager.startUpdatingLocation()
+  }
+
+  func locationManagerDidResumeLocationUpdates(_ manager: CLLocationManager) {
+    NSLog("[iroh-location] Core Location resumed updates")
   }
 
   func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
