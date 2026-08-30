@@ -117,7 +117,7 @@ export function useMapEngine(
       dataset.explorationMode === 'live'
         ? createLiveExplorationSource(
             grid,
-            sharedExplorationStore(grid),
+            sharedExplorationStore(),
             createPersistentTrailStorage()
           )
         : createDemoExplorationSource(grid, dataset.home),

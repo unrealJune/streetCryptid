@@ -1,7 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 
-import { createH3Grid, realH3 } from '../core/h3-grid';
-import { createNativeH3Enumerator } from '../core/native-h3-enumerator';
 import {
   exportExplorationBackup,
   restoreExplorationBackup,
@@ -21,10 +19,7 @@ export function useExplorationBackup(): {
   exportBackup(): Promise<ExplorationExportOutcome | null>;
   restoreBackup(): Promise<ExplorationRestoreOutcome | null>;
 } {
-  const store = useMemo(
-    () => sharedExplorationStore(createH3Grid(realH3(), createNativeH3Enumerator())),
-    []
-  );
+  const store = useMemo(() => sharedExplorationStore(), []);
   const [busy, setBusy] = useState(false);
   const inFlight = useRef(false);
 

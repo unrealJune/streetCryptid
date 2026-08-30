@@ -1,4 +1,4 @@
-import { explorationBackupFileName } from './exploration-backup';
+import { EXPLORATION_BACKUP_FILE_PREFIX, explorationBackupFileName } from './exploration-backup';
 
 /**
  * The device side of exploration backup: hand the encoded document to the
@@ -23,8 +23,12 @@ type FileHandle = {
   delete(): void;
 };
 
+type DirectoryHandle = {
+  list(): { name?: string; delete(): void }[];
+};
+
 type FileSystemModule = {
-  Paths: { cache: unknown };
+  Paths: { cache: DirectoryHandle };
   File: {
     new (...uris: unknown[]): FileHandle;
     pickFileAsync(options?: {
@@ -74,6 +78,11 @@ export async function shareExplorationBackup(
   if (!fs || !sharing) return false;
   if (!(await sharing.isAvailableAsync())) return false;
 
+  // The previous export is only cleaned up here, never right after sharing:
+  // on Android the receiving app reads the content URI after shareAsync()
+  // resolves, so deleting eagerly would hand it a file that no longer exists.
+  discardPreviousExports(fs);
+
   const file = new fs.File(fs.Paths.cache, explorationBackupFileName(now));
   file.create({ overwrite: true });
   file.write(text);
@@ -83,6 +92,17 @@ export async function shareExplorationBackup(
     dialogTitle: 'Back up explored hexes',
   });
   return true;
+}
+
+/** Drop earlier exports so a cache copy never outlives the share that needed it. */
+function discardPreviousExports(fs: FileSystemModule): void {
+  try {
+    for (const entry of fs.Paths.cache.list()) {
+      if (entry.name?.startsWith(EXPLORATION_BACKUP_FILE_PREFIX)) entry.delete();
+    }
+  } catch {
+    // Cleanup is best-effort; a stale export never breaks the next one.
+  }
 }
 
 /**

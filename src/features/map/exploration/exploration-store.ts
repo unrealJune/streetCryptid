@@ -2,7 +2,7 @@ import type { LocationFix } from '@/features/social/core/types';
 import { type TrailStorage } from '@/features/social/net/background/trail-store';
 
 import { H3_DISPLAY_RES } from '../core/cell-ladder';
-import type { CellIndex, H3Grid } from '../core/h3-grid';
+import { createH3Grid, realH3, type CellIndex, type H3Grid } from '../core/h3-grid';
 import { latLonToWorld } from '../core/mercator';
 
 /**
@@ -103,9 +103,13 @@ let shared: ExplorationStore | undefined;
  * The process-wide store. The map owns exploration, but settings writes to it
  * too (restore), and two independent stores would each cache their own `known`
  * set — a restore would then be invisible until the app relaunched.
+ *
+ * It builds its own grid rather than taking one: the store only ever asks for
+ * cell/parent/resolution arithmetic, which is pure h3, so there is nothing for a
+ * caller's grid to contribute and no way for callers to disagree about it.
  */
-export function sharedExplorationStore(grid: H3Grid): ExplorationStore {
-  if (!shared) shared = createExplorationStore({ grid });
+export function sharedExplorationStore(): ExplorationStore {
+  if (!shared) shared = createExplorationStore({ grid: createH3Grid(realH3()) });
   return shared;
 }
 
