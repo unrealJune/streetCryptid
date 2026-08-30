@@ -4028,6 +4028,41 @@ impl Drop for Subscription {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Subscription {
+    /// Publish the slots that have come due without a new fix, reusing the last known position.
+    ///
+    /// Driven on a timer by whoever is running the pipeline — the mounted app today, since neither
+    /// platform gives a background process a reliable one. `ingest_fix` only runs when the OS
+    /// delivers a location, and on a stationary phone that can be never; the cadence still has to
+    /// be uniform, because it is the one property of a sealed envelope the stash can read.
+    pub async fn heartbeat_fix(
+        &self,
+        subscription_id: String,
+        battery: gate::BatteryState,
+        interval_ms: u64,
+        now_ms: u64,
+    ) -> Result<publish::IngestOutcome, LocationError> {
+        let sink = SubscriptionSink {
+            subscription: self,
+            subscription_id,
+        };
+        let seq = self.node.seq_store().await?;
+        let queue = self.node.outbox().await?;
+        let recipients = self.node.recipient_store().await?;
+        let gate_store = self.node.gate_store().await?;
+        let engine = publish::DrainEngine {
+            seq: seq.as_ref(),
+            queue: queue.as_ref(),
+            recipients: recipients.as_ref(),
+            gate: gate_store.as_ref(),
+            sink: &sink,
+            quality: gate::FixQualityConfig::default(),
+        };
+        engine
+            .heartbeat(battery, interval_ms, now_ms)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
     /// Take one captured location all the way to the wire, with no JS involved.
     ///
     /// This is the whole point of the native drain path. `expo-task-manager` spools location events

@@ -61,6 +61,28 @@ private final class BluetoothRadioProbe: NSObject, CBCentralManagerDelegate {
 // Regenerate with `just bindgen-ios` on macOS (source bindings can also be produced from a
 // host library via `uniffi-bindgen ... --language swift`; only the XCFramework needs macOS).
 
+/// Unknown reports as FULL, never empty. A critical level is a hard stop in the gate, so a device
+/// whose battery we cannot read must not look flat and stop publishing forever.
+private func batteryState(from raw: [String: Any]) -> BatteryState {
+  BatteryState(
+    level: (raw["level"] as? Double) ?? 1.0,
+    charging: (raw["charging"] as? Bool) ?? false,
+    lowPower: (raw["lowPower"] as? Bool) ?? false)
+}
+
+private func ingestOutcomeToDict(_ outcome: IngestOutcome) -> [String: Any?] {
+  [
+    "accepted": outcome.accepted,
+    "rejection": outcome.rejection.map { String(describing: $0) },
+    "enqueued": Double(outcome.enqueued),
+    "published": Double(outcome.published),
+    "pending": Double(outcome.pending),
+    "slotsSkipped": Double(outcome.slotsSkipped),
+    "overflowDropped": Double(outcome.overflowDropped),
+    "suspended": outcome.suspended,
+  ]
+}
+
 private func hexToData(_ hex: String) -> Data {
   var data = Data(capacity: hex.count / 2)
   var index = hex.startIndex
@@ -445,25 +467,30 @@ public final class IrohLocationModule: Module {
       guard let sub = self.subscriptions[subscriptionId] else {
         throw Exception(name: "NoSubscription", description: "no such subscription")
       }
-      let outcome = try await sub.ingestFix(
-        subscriptionId: subscriptionId,
-        fix: locationFix(from: fix),
-        battery: BatteryState(
-          level: (battery["level"] as? Double) ?? 1.0,
-          charging: (battery["charging"] as? Bool) ?? false,
-          lowPower: (battery["lowPower"] as? Bool) ?? false),
-        intervalMs: UInt64(max(1, intervalMs)),
-        nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
-      return [
-        "accepted": outcome.accepted,
-        "rejection": outcome.rejection.map { String(describing: $0) },
-        "enqueued": Double(outcome.enqueued),
-        "published": Double(outcome.published),
-        "pending": Double(outcome.pending),
-        "slotsSkipped": Double(outcome.slotsSkipped),
-        "overflowDropped": Double(outcome.overflowDropped),
-        "suspended": outcome.suspended,
-      ]
+      return ingestOutcomeToDict(
+        try await sub.ingestFix(
+          subscriptionId: subscriptionId,
+          fix: locationFix(from: fix),
+          battery: batteryState(from: battery),
+          intervalMs: UInt64(max(1, intervalMs)),
+          nowMs: UInt64(Date().timeIntervalSince1970 * 1000)))
+    }
+
+    /// Publish the slots that have come due without a new fix, reusing the last known position.
+    /// Driven on a timer by the mounted app — neither platform gives a background process a
+    /// reliable one, and the cadence has to stay uniform whether or not the phone is moving.
+    AsyncFunction("heartbeatFix") {
+      (subscriptionId: String, battery: [String: Any], intervalMs: Double) async throws
+        -> [String: Any?] in
+      guard let sub = self.subscriptions[subscriptionId] else {
+        throw Exception(name: "NoSubscription", description: "no such subscription")
+      }
+      return ingestOutcomeToDict(
+        try await sub.heartbeatFix(
+          subscriptionId: subscriptionId,
+          battery: batteryState(from: battery),
+          intervalMs: UInt64(max(1, intervalMs)),
+          nowMs: UInt64(Date().timeIntervalSince1970 * 1000)))
     }
 
     /// Start/stop the native background runtime. The app calls these when the user turns sharing on

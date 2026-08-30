@@ -504,6 +504,19 @@ export interface IrohLocationApi {
    * running, not sharing itself. OPTIONAL.
    */
   ensureNotificationPermission?(): Promise<boolean>;
+  /**
+   * Publish the slots that have come due without a new fix, reusing the last known position.
+   *
+   * The counterpart to {@link ingestFix}, driven on a timer by the mounted app: neither platform
+   * gives a background process a reliable one, and the cadence has to stay uniform whether or not
+   * the phone is moving — it is the one property of a sealed envelope the stash can read. Resolves
+   * with `enqueued: 0` when the current slot is already covered, which is the common case. OPTIONAL.
+   */
+  heartbeatFix?(
+    subscriptionId: string,
+    battery: { level: number; charging: boolean; lowPower: boolean },
+    intervalMs: number
+  ): Promise<NativeIngestOutcome>;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**

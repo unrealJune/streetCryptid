@@ -584,3 +584,90 @@ async fn no_watchers_means_no_null_envelopes_and_no_burned_seq() {
     assert!(h.sink.nulls.lock().unwrap().is_empty());
     assert_eq!(h.seq.current(), 1, "only the fix consumed a seq");
 }
+
+#[tokio::test]
+async fn a_heartbeat_republishes_the_last_position_when_no_fix_arrives() {
+    // The cadence has to be uniform whether or not the phone is moving: it is the one property of
+    // a sealed envelope the stash can read, so a series that stops when its owner sits still is a
+    // series that leaks when its owner sits still.
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    let engine = h.engine();
+    engine
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+
+    let later = base + INTERVAL * 2;
+    let out = engine
+        .heartbeat(healthy_battery(), INTERVAL, later)
+        .await
+        .unwrap();
+
+    assert_eq!(out.enqueued, 2, "both elapsed slots");
+    assert_eq!(out.published, 2);
+    let sent = h.sink.sent.lock().unwrap();
+    // Carrying the ORIGINAL capture timestamp, so a heartbeat is honest about the position's age
+    // rather than pretending it is current.
+    assert_eq!(sent[1].1, base);
+    assert_eq!(sent[2].1, base);
+}
+
+#[tokio::test]
+async fn a_heartbeat_inside_a_covered_slot_publishes_nothing() {
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+    let engine = h.engine();
+    engine
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    let out = engine
+        .heartbeat(healthy_battery(), INTERVAL, now + 1_000)
+        .await
+        .unwrap();
+
+    assert_eq!(out.enqueued, 0);
+    assert_eq!(h.sink.sent.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_heartbeat_before_the_first_fix_does_nothing() {
+    // Nothing has passed the gate, so there is no position to repeat.
+    let h = Harness::new();
+
+    let out = h
+        .engine()
+        .heartbeat(healthy_battery(), INTERVAL, INTERVAL * 10)
+        .await
+        .unwrap();
+
+    assert_eq!(out.enqueued, 0);
+    assert!(!out.suspended);
+    assert!(h.sink.sent.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_heartbeat_respects_the_battery_suspend() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    let engine = h.engine();
+    engine
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+
+    let flat = BatteryState {
+        level: 0.02,
+        charging: false,
+        low_power: false,
+    };
+    let out = engine
+        .heartbeat(flat, INTERVAL, base + INTERVAL * 3)
+        .await
+        .unwrap();
+
+    assert!(out.suspended);
+    assert_eq!(out.enqueued, 0);
+}

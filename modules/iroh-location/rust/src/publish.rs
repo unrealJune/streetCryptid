@@ -236,6 +236,58 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         ))
     }
 
+    /// Publish the slots that have come due without a new fix, reusing the last known position.
+    ///
+    /// The counterpart to [`ingest`](Self::ingest), and not an optimisation: the cadence is the one
+    /// property of a sealed envelope the stash can read, so it has to be uniform whether or not the
+    /// phone is moving. `ingest` only runs when the OS delivers a location, which on a stationary
+    /// phone can be never — and a series that stops when its owner sits still is a series that
+    /// leaks when its owner sits still.
+    ///
+    /// No quality gate here, deliberately: there is no new fix to judge. The position being
+    /// republished already passed the gate when it arrived, and its ORIGINAL timestamp rides along
+    /// with it, so a heartbeat is honest about how old the position is rather than pretending it is
+    /// current.
+    ///
+    /// Returns `enqueued: 0` when the current slot is already covered, which is the common case.
+    pub async fn heartbeat(
+        &self,
+        battery: BatteryState,
+        interval_ms: u64,
+        now_ms: u64,
+    ) -> Result<IngestOutcome, PublishError> {
+        let mut state = self.gate.get();
+
+        if gate::critically_low(&battery) {
+            return Ok(self.outcome(None, 0, 0, 0, 0, true));
+        }
+        let Some(known) = state.last_known_fix.clone() else {
+            // Nothing has ever passed the gate, so there is no position to repeat. The first
+            // acceptable fix anchors the grid.
+            return Ok(self.outcome(None, 0, 0, 0, 0, false));
+        };
+
+        let plan = gate::due_slots(now_ms, interval_ms, state.last_published_slot);
+        let mut overflow_dropped = 0u32;
+        for _ in 0..plan.due {
+            overflow_dropped += self.queue.enqueue(known.clone())?.overflow_dropped;
+        }
+        if plan.due > 0 {
+            state.last_published_slot = Some(plan.current_slot);
+            self.gate.set(state);
+        }
+
+        let published = self.drain().await?;
+        Ok(self.outcome(
+            None,
+            plan.due,
+            published,
+            plan.skipped,
+            overflow_dropped,
+            false,
+        ))
+    }
+
     /// Publish queued fixes in capture order, stopping at the first failure.
     ///
     /// Order matters because `seq` is assigned here, at publish time: draining out of order would

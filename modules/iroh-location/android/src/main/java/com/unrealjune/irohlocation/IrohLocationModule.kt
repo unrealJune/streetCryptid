@@ -250,6 +250,17 @@ private fun bumpResolutionMap(r: BumpResolution): Map<String, Any?> =
     "detail" to r.detail,
   )
 
+/**
+ * Unknown reports as FULL, never empty. A critical level is a hard stop in the gate, so a device
+ * whose battery we cannot read must not look flat and stop publishing forever.
+ */
+private fun batteryStateOf(m: Map<String, Any>): BatteryState =
+  BatteryState(
+    (m["level"] as? Double) ?: 1.0,
+    (m["charging"] as? Boolean) ?: false,
+    (m["lowPower"] as? Boolean) ?: false,
+  )
+
 private fun ingestOutcomeToMap(o: IngestOutcome): Map<String, Any?> =
   mapOf(
     "accepted" to o.accepted,
@@ -576,15 +587,27 @@ class IrohLocationModule : Module() {
           sub.ingestFix(
             subscriptionId,
             locationFixOf(fix),
-            BatteryState(
-              (battery["level"] as? Double) ?: 1.0,
-              (battery["charging"] as? Boolean) ?: false,
-              (battery["lowPower"] as? Boolean) ?: false,
-            ),
+            batteryStateOf(battery),
             intervalMs.coerceAtLeast(1.0).toULong(),
             System.currentTimeMillis().toULong(),
           )
         ingestOutcomeToMap(outcome)
+      }
+
+    /// Publish the slots that have come due without a new fix, reusing the last known position.
+    /// Driven on a timer by the mounted app — neither platform gives a background process a
+    /// reliable one, and the cadence has to stay uniform whether or not the phone is moving.
+    AsyncFunction("heartbeatFix") Coroutine
+      { subscriptionId: String, battery: Map<String, Any>, intervalMs: Double ->
+        val sub = subs[subscriptionId] ?: throw IllegalStateException("no such subscription")
+        ingestOutcomeToMap(
+          sub.heartbeatFix(
+            subscriptionId,
+            batteryStateOf(battery),
+            intervalMs.coerceAtLeast(1.0).toULong(),
+            System.currentTimeMillis().toULong(),
+          )
+        )
       }
 
     /// Start/stop the native foreground service. The app calls these when the user turns sharing
