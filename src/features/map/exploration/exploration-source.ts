@@ -27,6 +27,8 @@ export interface ExplorationSource {
   noteSelfFix(fix: LocationFix): void;
   /** Re-scan the persisted trail (e.g. on foreground). No-op for demo. */
   backfill(): Promise<void>;
+  /** Release the source's store subscription. No-op for demo. */
+  dispose(): void;
 }
 
 class Notifier {
@@ -56,6 +58,7 @@ export function createDemoExplorationSource(grid: H3Grid, home: WorldPoint): Exp
     subscribe: (cb) => notifier.subscribe(cb),
     noteSelfFix: () => {},
     backfill: async () => {},
+    dispose: () => {},
   };
 }
 
@@ -92,6 +95,10 @@ export function createLiveExplorationSource(
     await backfill();
   })();
 
+  // Cells restored from a backup are written straight to the store (from
+  // settings, which has no source), so the map learns about them here.
+  const unsubscribeStore = store.subscribe((added) => fold(added));
+
   return {
     ready,
     index: () => index,
@@ -106,5 +113,6 @@ export function createLiveExplorationSource(
         .catch(() => {});
     },
     backfill,
+    dispose: unsubscribeStore,
   };
 }
