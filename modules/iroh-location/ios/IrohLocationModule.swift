@@ -403,6 +403,110 @@ public final class IrohLocationModule: Module {
       try await self.clearRuntime()
     }
 
+    // MARK: - Device identity (the background drain path's own copy)
+
+    /// Seed the Keychain item the background path reads. Idempotent; JS calls it once after
+    /// `createNode` and skips it thereafter via `deviceSecretsProvisioned`.
+    AsyncFunction("saveDeviceSecrets") { (identityHex: String, recvHex: String) async throws in
+      try KeychainDeviceSecrets.shared.save(
+        identity: hexToData(identityHex), recv: hexToData(recvHex))
+    }
+
+    Function("deviceSecretsProvisioned") { () -> Bool in
+      KeychainDeviceSecrets.shared.isProvisioned()
+    }
+
+    /// No counterpart on iOS: Core Location's background updates need no notification, and the
+    /// blue status bar indicator the OS shows instead is not something an app can request or
+    /// suppress. Present so callers do not have to branch on platform.
+    AsyncFunction("ensureNotificationPermission") { () async -> Bool in
+      true
+    }
+
+    /// Remember the transport settings, so the background runtime can `start` without JS.
+    AsyncFunction("setTransportConfig") {
+      (relayUrls: [String], relayAuthToken: String, relayEnabled: Bool, ipEnabled: Bool,
+        bleEnabled: Bool) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setTransportConfig(
+        config: TransportConfig(
+          relayUrls: relayUrls, relayAuthToken: relayAuthToken, relayEnabled: relayEnabled,
+          ipEnabled: ipEnabled, bleEnabled: bleEnabled))
+    }
+
+    /// Hand one captured fix to the native pipeline on the CURRENT subscription. The background
+    /// runtime does not come through here — it owns its own node — but the mounted app uses it to
+    /// exercise the same path the background one takes.
+    AsyncFunction("ingestFix") {
+      (subscriptionId: String, fix: [String: Double], battery: [String: Any], intervalMs: Double)
+        async throws -> [String: Any?] in
+      guard let sub = self.subscriptions[subscriptionId] else {
+        throw Exception(name: "NoSubscription", description: "no such subscription")
+      }
+      let outcome = try await sub.ingestFix(
+        subscriptionId: subscriptionId,
+        fix: locationFix(from: fix),
+        battery: BatteryState(
+          level: (battery["level"] as? Double) ?? 1.0,
+          charging: (battery["charging"] as? Bool) ?? false,
+          lowPower: (battery["lowPower"] as? Bool) ?? false),
+        intervalMs: UInt64(max(1, intervalMs)),
+        nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+      return [
+        "accepted": outcome.accepted,
+        "rejection": outcome.rejection.map { String(describing: $0) },
+        "enqueued": Double(outcome.enqueued),
+        "published": Double(outcome.published),
+        "pending": Double(outcome.pending),
+        "slotsSkipped": Double(outcome.slotsSkipped),
+        "overflowDropped": Double(outcome.overflowDropped),
+        "suspended": outcome.suspended,
+      ]
+    }
+
+    /// Start/stop the native background runtime. The app calls these when the user turns sharing on
+    /// and off; nothing else should.
+    Function("startNativeBackground") {
+      BackgroundLocationRuntime.shared.start()
+    }
+
+    Function("stopNativeBackground") {
+      BackgroundLocationRuntime.shared.stop()
+    }
+
+    // MARK: - Native publish state
+
+    /// Advance and return the publish counter. Durable before it resolves — see `seq_store.rs`.
+    AsyncFunction("nextSeq") { () async throws -> Double in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Double(try await node.nextSeq())
+    }
+
+    AsyncFunction("currentSeq") { () async throws -> Double in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Double(try await node.currentSeq())
+    }
+
+    AsyncFunction("seedSeq") { (floor: Double) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.seedSeq(floor: UInt64(max(0, floor)))
+    }
+
+    AsyncFunction("setSharingRecipients") { (recipientEndpointsHex: [String]) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setSharingRecipients(recipientEndpoints: recipientEndpointsHex)
+    }
+
+    AsyncFunction("outboxPending") { () async throws -> Double in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Double(try await node.outboxPending())
+    }
+
+    AsyncFunction("clearOutbox") { () async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.clearOutbox()
+    }
+
     AsyncFunction("ticket") { () async throws -> String in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return try await node.ticket()

@@ -3,6 +3,8 @@ import {
   type SpanContext,
   withEventLogLaunchContext,
 } from '@/features/dev/telemetry';
+import { createPersistentKV } from '../persistence';
+import { stampWatermark } from './watermarks';
 
 /**
  * Periodic background refresh — the counterpart to the event-driven location SEND task in
@@ -52,6 +54,21 @@ function tryBackgroundTask(): typeof import('expo-background-task') | null {
 /** TaskManager task name for the periodic backfill. Must be stable across app launches. */
 export const BACKGROUND_REFRESH_TASK = 'streetcryptid.background-refresh';
 
+/**
+ * Record that the OS ran us, before doing anything that could fail.
+ *
+ * The `bg.refresh` span below says the same thing, but only to a collector the phone can reach —
+ * and a phone whose refresh has stopped is usually also a phone we are not hearing from. The
+ * watermark is durable and local, so the NEXT `device.health` record carries `last_refresh_age_ms`
+ * whenever the phone next manages to speak, which is the one number that separates "throttled into
+ * silence" from "running fine and failing quietly". Stamped first for the same reason: a run that
+ * throws still ran, and conflating that with never being scheduled is exactly the ambiguity this
+ * exists to remove. Best-effort — a missed stamp costs one stale age and nothing else.
+ */
+async function stampRefresh(): Promise<void> {
+  await stampWatermark(createPersistentKV(), 'refresh').catch(() => undefined);
+}
+
 /** Requested cadence. 15 min is the platform minimum; the OS throttles further as it sees fit. */
 export const DEFAULT_REFRESH_INTERVAL_MINUTES = 15;
 
@@ -75,6 +92,7 @@ export function defineBackgroundRefreshTask(run: (parent?: SpanContext) => Promi
       const telemetry = getTelemetry();
       // One span per OS-scheduled refresh — the periodic counterpart of `bg.wake`.
       const span = telemetry.startSpan('bg.refresh');
+      await stampRefresh();
       try {
         await run(span.context);
         span.setStatus('ok');

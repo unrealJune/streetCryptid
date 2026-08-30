@@ -8,6 +8,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.wifi.WifiManager
 import android.os.Build
+import expo.modules.interfaces.permissions.PermissionsStatus
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -17,10 +18,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 // UniFFI-generated bindings for the `iroh-location` crate (in src/main/java/uniffi/…),
 // backed by libiroh_location.so under src/main/jniLibs. Regenerate with `just bindgen-android`
 // after changing the Rust UniFFI surface (see README §3).
+import uniffi.iroh_location.BatteryState
 import uniffi.iroh_location.BleCapabilities
 import uniffi.iroh_location.BlePeer
 import uniffi.iroh_location.BumpResolution
@@ -38,7 +41,9 @@ import uniffi.iroh_location.PairStateRecord
 import uniffi.iroh_location.ProfileView
 import uniffi.iroh_location.SasChallenge
 import uniffi.iroh_location.SasRoleKind
+import uniffi.iroh_location.IngestOutcome
 import uniffi.iroh_location.Subscription
+import uniffi.iroh_location.TransportConfig
 import uniffi.iroh_location.PeerTransportDiagnostic
 import uniffi.iroh_location.TransportAddressDiagnostic
 import uniffi.iroh_location.TransportDiagnostics
@@ -245,10 +250,67 @@ private fun bumpResolutionMap(r: BumpResolution): Map<String, Any?> =
     "detail" to r.detail,
   )
 
+private fun ingestOutcomeToMap(o: IngestOutcome): Map<String, Any?> =
+  mapOf(
+    "accepted" to o.accepted,
+    "rejection" to o.rejection?.name?.lowercase(),
+    "enqueued" to o.enqueued.toLong(),
+    "published" to o.published.toLong(),
+    "pending" to o.pending.toLong(),
+    "slotsSkipped" to o.slotsSkipped.toLong(),
+    "overflowDropped" to o.overflowDropped.toLong(),
+    "suspended" to o.suspended,
+  )
+
 class IrohLocationModule : Module() {
   private var node: LocationNode? = null
   private val subs = mutableMapOf<String, Subscription>()
   private var multicastLock: WifiManager.MulticastLock? = null
+  private var secretsStore: KeystoreDeviceSecrets? = null
+
+  /**
+   * Ask for `POST_NOTIFICATIONS`, which Android 13+ needs before a foreground service notification
+   * is visible.
+   *
+   * The service runs either way — Android does not refuse to start an FGS over this — so a denial
+   * costs transparency, not function. That is exactly why it is worth asking for: the ongoing
+   * notification is how a location-sharing app tells someone it is running, and silently having one
+   * they cannot see is the wrong side of that trade. Below API 33 the permission does not exist and
+   * this is trivially true.
+   */
+  private suspend fun ensurePostNotifications(): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
+    val manager = appContext.permissions ?: return false
+    return suspendCancellableCoroutine { continuation ->
+      manager.askForPermissions(
+        { result ->
+          val granted =
+            result[android.Manifest.permission.POST_NOTIFICATIONS]?.status ==
+              PermissionsStatus.GRANTED
+          continuation.resumeWith(Result.success(granted))
+        },
+        android.Manifest.permission.POST_NOTIFICATIONS,
+      )
+    }
+  }
+
+  /** The node, or the same error every other node-dependent export raises. */
+  private fun requireNode(): LocationNode =
+    node ?: throw IllegalStateException("call createNode first")
+
+  /**
+   * The device-identity store, built lazily and cached.
+   *
+   * Lazily because it touches the Keystore, and eagerly constructing it in the module initialiser
+   * would put that on every app start including the ones that never share location.
+   */
+  private fun deviceSecrets(): KeystoreDeviceSecrets =
+    secretsStore
+      ?: KeystoreDeviceSecrets(
+          appContext.reactContext?.applicationContext
+            ?: throw IllegalStateException("no application context for the device-secret store")
+        )
+        .also { secretsStore = it }
 
   /**
    * Honest radio/permission report for Bump, independent of whether a node exists.
@@ -471,6 +533,102 @@ class IrohLocationModule : Module() {
     AsyncFunction("shutdown") Coroutine
       { ->
         clearRuntime()
+        Unit
+      }
+
+    // Device identity — the background drain path's own copy. See DeviceSecretsStore.kt for why
+    // this is our entry rather than a read of expo-secure-store's private envelope format.
+
+    AsyncFunction("saveDeviceSecrets") Coroutine
+      { identityHex: String, recvHex: String ->
+        deviceSecrets().save(identityHex.hexToBytes(), recvHex.hexToBytes())
+        Unit
+      }
+
+    Function("deviceSecretsProvisioned") { deviceSecrets().isProvisioned() }
+
+    /// Ask for the notification permission the foreground service's ongoing notification needs.
+    /// Resolves to whether it is granted; the caller starts the service regardless, because a
+    /// denial costs visibility rather than function.
+    AsyncFunction("ensureNotificationPermission") Coroutine { -> ensurePostNotifications() }
+
+    /// Remember the transport settings, so the background service can `start` without JS.
+    AsyncFunction("setTransportConfig") Coroutine
+      { relayUrls: List<String>,
+        relayAuthToken: String,
+        relayEnabled: Boolean,
+        ipEnabled: Boolean,
+        bleEnabled: Boolean ->
+        requireNode()
+          .setTransportConfig(
+            TransportConfig(relayUrls, relayAuthToken, relayEnabled, ipEnabled, bleEnabled)
+          )
+        Unit
+      }
+
+    /// Hand one captured fix to the native pipeline on the CURRENT subscription. The background
+    /// service does not come through here — it owns its own node — but the mounted app uses it to
+    /// exercise the same path the background one takes.
+    AsyncFunction("ingestFix") Coroutine
+      { subscriptionId: String, fix: Map<String, Double>, battery: Map<String, Any>, intervalMs: Double ->
+        val sub = subs[subscriptionId] ?: throw IllegalStateException("no such subscription")
+        val outcome =
+          sub.ingestFix(
+            subscriptionId,
+            locationFixOf(fix),
+            BatteryState(
+              (battery["level"] as? Double) ?: 1.0,
+              (battery["charging"] as? Boolean) ?: false,
+              (battery["lowPower"] as? Boolean) ?: false,
+            ),
+            intervalMs.coerceAtLeast(1.0).toULong(),
+            System.currentTimeMillis().toULong(),
+          )
+        ingestOutcomeToMap(outcome)
+      }
+
+    /// Start/stop the native foreground service. The app calls these when the user turns sharing
+    /// on and off; nothing else should, because a service the user did not ask for is a persistent
+    /// notification they cannot explain.
+    Function("startNativeBackground") {
+      BackgroundLocationService.start(
+        checkNotNull(appContext.reactContext?.applicationContext) {
+          "IrohLocation needs an application context to start the background service"
+        }
+      )
+    }
+
+    Function("stopNativeBackground") {
+      BackgroundLocationService.stop(
+        checkNotNull(appContext.reactContext?.applicationContext) {
+          "IrohLocation needs an application context to stop the background service"
+        }
+      )
+    }
+
+    // Native publish state.
+
+    AsyncFunction("nextSeq") Coroutine
+      { -> requireNode().nextSeq().toDouble() }
+
+    AsyncFunction("currentSeq") Coroutine
+      { -> requireNode().currentSeq().toDouble() }
+
+    AsyncFunction("seedSeq") Coroutine
+      { floor: Double -> requireNode().seedSeq(floor.coerceAtLeast(0.0).toULong()) }
+
+    AsyncFunction("setSharingRecipients") Coroutine
+      { recipientEndpointsHex: List<String> ->
+        requireNode().setSharingRecipients(recipientEndpointsHex)
+        Unit
+      }
+
+    AsyncFunction("outboxPending") Coroutine
+      { -> requireNode().outboxPending().toDouble() }
+
+    AsyncFunction("clearOutbox") Coroutine
+      { ->
+        requireNode().clearOutbox()
         Unit
       }
 

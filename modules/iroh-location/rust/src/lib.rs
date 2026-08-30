@@ -18,18 +18,25 @@
 mod ble;
 mod crypto;
 mod docs;
+mod durable;
+pub mod gate;
 mod h3;
 /// Festival-mesh radio capsules: the outer wrapper that carries an envelope over open
 /// radio without a linkable identity (pure; see `mesh.rs` and `docs/mesh/DESIGN.md`).
 pub mod mesh;
 /// Native MVT tile/bundle decoder for the map pipeline (pure; see `mvt.rs`).
 pub mod mvt;
+pub mod outbox;
 pub mod pad;
 mod pairing;
 mod profile;
+pub mod publish;
 pub mod ratchet;
+pub mod recipients;
+pub mod seq_store;
 pub mod session_store;
 pub mod sessions;
+pub mod transport;
 
 /// The `mesh_epoch` every DOCS-path envelope carries.
 ///
@@ -211,6 +218,41 @@ pub struct RatchetEvent {
     pub ts: u64,
     pub kind: String,
     pub fix: Option<LocationFix>,
+}
+
+/// Foreign (Swift/Kotlin) access to this device's identity, wherever the platform keeps it.
+///
+/// The background drain path has to build a node with no JS context alive, and the identity it
+/// needs lives in the OS keystore that `expo-secure-store` writes: the iOS Keychain under
+/// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, and Android Keystore-wrapped preferences.
+/// Rust cannot read either, and it should not want to — where a secret lives, and what unlock
+/// class guards it, is exactly the kind of decision that belongs to the platform.
+///
+/// # Why a port rather than a file
+///
+/// The obvious shortcut is to copy the identity secret into the Rust state dir, where the node
+/// could read it directly. That trades a real security property for convenience: FORWARD-SECRECY.md
+/// §1's threat model is a **seized device**, and the whole point of the keystore's accessibility
+/// class is that a locked phone's identity is not readable. A plain file in the app's data dir is,
+/// so the shortcut would quietly widen the exposure the ratchet exists to bound.
+///
+/// So the secret stays where the OS protects it and crosses this seam on demand instead. The cost
+/// is one callback per node construction; the benefit is that `session_store`'s key — which is
+/// derived from this secret — inherits the platform's protection class rather than the filesystem's.
+///
+/// # Contract
+///
+/// - `None` means **not provisioned yet**, not an error: a fresh install has no identity until the
+///   app has run once. A background wake that gets `None` should do nothing and wait, rather than
+///   generate an identity the user's friends have never seen.
+/// - Implementations must be safe to call from a background thread while the device is locked,
+///   which is what the "after first unlock" class buys and why a `WhenUnlocked` item would not do.
+#[uniffi::export(with_foreign)]
+pub trait DeviceSecrets: Send + Sync + 'static {
+    /// The long-lived identity seed. Also the input to the session store's key derivation.
+    fn identity_secret(&self) -> Option<Vec<u8>>;
+    /// The envelope receiving secret.
+    fn recv_secret(&self) -> Option<Vec<u8>>;
 }
 
 /// Foreign (Swift/Kotlin/JS) callback for inbound events on a subscription.
@@ -937,6 +979,20 @@ pub struct LocationNode {
     /// [`SessionStore`](session_store::SessionStore) claims the session directory for the
     /// process and that claim must be released on shutdown.
     sessions: Mutex<Option<Arc<sessions::SessionManager>>>,
+    /// This device's monotonic publish counter (`seq_store.rs`). Created on `start` alongside the
+    /// session store and for the same reason: it claims a directory for the process, and that
+    /// claim has to be released on shutdown.
+    seq: Mutex<Option<Arc<seq_store::SeqStore>>>,
+    /// The three stores the native drain path needs to run with no JS context alive: what is
+    /// waiting to be sealed, who to seal it for, and where we are on the slot grid. Opened with
+    /// the node for the same reason as the counter — two of them claim directories.
+    outbox: Mutex<Option<Arc<outbox::Outbox>>>,
+    recipients: Mutex<Option<Arc<recipients::RecipientStore>>>,
+    gate: Mutex<Option<Arc<gate::GateStore>>>,
+    /// The settings a background bootstrap needs before it can call `start` — see
+    /// [`crate::transport`]. Opened eagerly with the node rather than lazily, because the one
+    /// caller that needs it is the one with no JS context to fall back on.
+    transport: Mutex<Option<Arc<transport::TransportStore>>>,
     /// Ephemerals minted by `begin_session` and awaiting the peer's half. Keyed by peer endpoint
     /// id. Held in memory only: an unfinished bootstrap that does not survive a restart is a
     /// bootstrap the user simply repeats, whereas one persisted to disk is a private key sitting
@@ -963,6 +1019,46 @@ struct PendingResync {
 impl LocationNode {
     async fn session_manager(&self) -> Result<Arc<sessions::SessionManager>, LocationError> {
         self.sessions
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
+
+    async fn outbox(&self) -> Result<Arc<outbox::Outbox>, LocationError> {
+        self.outbox
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
+
+    async fn recipient_store(&self) -> Result<Arc<recipients::RecipientStore>, LocationError> {
+        self.recipients
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
+
+    async fn transport_store(&self) -> Result<Arc<transport::TransportStore>, LocationError> {
+        self.transport
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
+
+    async fn gate_store(&self) -> Result<Arc<gate::GateStore>, LocationError> {
+        self.gate
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
+
+    async fn seq_store(&self) -> Result<Arc<seq_store::SeqStore>, LocationError> {
+        self.seq
             .lock()
             .await
             .clone()
@@ -1401,6 +1497,11 @@ fn new_location_node_at(
         pair: PairCore::new(identity_seed, author, recv_public),
         profile_events: ProfileEventQueue::default(),
         sessions: Mutex::new(None),
+        seq: Mutex::new(None),
+        outbox: Mutex::new(None),
+        recipients: Mutex::new(None),
+        gate: Mutex::new(None),
+        transport: Mutex::new(None),
         pending_bootstrap: Mutex::new(HashMap::new()),
         pending_resync: Mutex::new(None),
     }))
@@ -1435,6 +1536,35 @@ impl LocationNode {
     ///
     /// Passing the same root for both is a bug on device in one direction and a break in the
     /// other; the two have opposite requirements.
+    /// Build a node from the platform keystore, for a background wake with no JS context alive.
+    ///
+    /// The counterpart to [`new_at_dirs`](Self::new_at_dirs), which takes the secrets as arguments
+    /// because JS had already read them. Here nothing has: an OS location callback is the first
+    /// code to run, so the node asks the platform for the identity itself through
+    /// [`DeviceSecrets`].
+    ///
+    /// Fails with [`LocationError::NotStarted`] when the device has no identity yet. That is a
+    /// fresh install whose app has never been opened, and the correct response is to do nothing —
+    /// generating one here would mint an identity none of the user's friends have ever paired with,
+    /// and silently orphan the one the app creates later.
+    #[uniffi::constructor]
+    pub fn from_device_secrets(
+        secrets: Arc<dyn DeviceSecrets>,
+        data_root: String,
+        state_root: String,
+    ) -> Result<Arc<Self>, LocationError> {
+        let identity = secrets.identity_secret().ok_or(LocationError::NotStarted)?;
+        let recv = secrets.recv_secret().ok_or(LocationError::NotStarted)?;
+        new_location_node_at(
+            Some(identity),
+            Some(recv),
+            NodeDirs::Roots {
+                data: PathBuf::from(data_root),
+                state: PathBuf::from(state_root),
+            },
+        )
+    }
+
     #[uniffi::constructor]
     pub fn new_at_dirs(
         identity_secret: Option<Vec<u8>>,
@@ -1577,6 +1707,56 @@ impl LocationNode {
                 *slot = Some(Arc::new(sessions::SessionManager::new(store)));
             }
         }
+        // The publish counter, claimed in the same breath and under the same rule. It shares the
+        // state dir because it shares the lifetime: both are per-identity, neither is recoverable
+        // from the replica without a scan, and both must be released when the node shuts down.
+        {
+            let mut slot = self.seq.lock().await;
+            if slot.is_none() {
+                let store = seq_store::SeqStore::open(&self.state_dir)
+                    .map_err(|e| LocationError::Network(e.to_string()))?;
+                *slot = Some(Arc::new(store));
+            }
+        }
+        // The drain path's own state. All three live beside the counter because they share its
+        // lifetime and its reason for existing: an OS location callback has to be able to read
+        // them before any JS module has loaded.
+        {
+            let mut slot = self.outbox.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    outbox::Outbox::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.recipients.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    recipients::RecipientStore::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.gate.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    gate::GateStore::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.transport.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    transport::TransportStore::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
         let profile = Arc::new(
             ProfileDocs::init(docs, (*blobs).clone(), self.data_dir.clone())
                 .await
@@ -1663,6 +1843,15 @@ impl LocationNode {
         self.pair.detach_runtime().await;
         tracing::info!("shutdown: taking sessions lock");
         *self.sessions.lock().await = None;
+        // Same rule for the publish counter: hold the slot past shutdown and the directory claim
+        // outlives the node, so the next `start` is refused and the device stops publishing.
+        tracing::info!("shutdown: taking seq lock");
+        *self.seq.lock().await = None;
+        // Two of these hold directory claims; releasing them is what lets the next `start` succeed.
+        *self.outbox.lock().await = None;
+        *self.recipients.lock().await = None;
+        *self.gate.lock().await = None;
+        *self.transport.lock().await = None;
         tracing::info!("shutdown: complete");
         Ok(())
     }
@@ -2244,6 +2433,110 @@ impl LocationNode {
         }
         .instrument(span)
         .await
+    }
+
+    /// Remember the transport settings, so a background bootstrap can `start` without JS.
+    ///
+    /// Push it whenever the app changes a transport toggle. The relay URLs and token are build-time
+    /// constants inlined into the JS bundle, so a device only learns them by being told.
+    pub async fn set_transport_config(
+        &self,
+        config: transport::TransportConfig,
+    ) -> Result<(), LocationError> {
+        self.transport_store()
+            .await?
+            .set(config)
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// `start`, using the settings stored by [`set_transport_config`](Self::set_transport_config).
+    ///
+    /// The bootstrap counterpart to `start`, for a wake with no JS context to supply them. Fails
+    /// rather than defaulting when nothing is stored: a node started with an empty relay list runs,
+    /// reports healthy, and can only reach peers on the same LAN — which looks exactly like the
+    /// connectivity failures this path exists to eliminate.
+    pub async fn start_stored(&self) -> Result<(), LocationError> {
+        let config = self
+            .transport_store()
+            .await?
+            .get()
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        self.start(
+            config.relay_urls,
+            config.relay_auth_token,
+            config.relay_enabled,
+            config.ip_enabled,
+            config.ble_enabled,
+        )
+        .await
+    }
+
+    /// Replace the set of friends this device seals location envelopes for.
+    ///
+    /// Persisted natively so an OS location callback can read it with no JS context alive. Push it
+    /// on every pool change; see [`crate::recipients`] for why a stale set is safe in the only
+    /// direction it can be stale, and why revocation still rests on the ratchet session rather
+    /// than on this list.
+    pub async fn set_sharing_recipients(
+        &self,
+        recipient_endpoints: Vec<String>,
+    ) -> Result<(), LocationError> {
+        self.recipient_store()
+            .await?
+            .set(&recipient_endpoints)
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// Who the native drain path will seal for right now.
+    pub async fn sharing_recipients(&self) -> Result<Vec<String>, LocationError> {
+        Ok(self.recipient_store().await?.get())
+    }
+
+    /// How many captured fixes are waiting to be sealed.
+    pub async fn outbox_pending(&self) -> Result<u32, LocationError> {
+        Ok(self.outbox().await?.pending())
+    }
+
+    /// Drop every queued fix (sign-out, or sharing turned off for good).
+    pub async fn clear_outbox(&self) -> Result<(), LocationError> {
+        self.outbox()
+            .await?
+            .clear()
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// Advance and return this device's next publish sequence number.
+    ///
+    /// Durable before it returns: the caller puts the value straight onto the wire as half of an
+    /// `author/seq` docs key, and two envelopes under one key is a payload silently lost to
+    /// last-write-wins. See `seq_store.rs` for why the counter had to leave JS to be safe — in
+    /// short, every headless callback gets a fresh JS context and so got its own copy of it.
+    pub async fn next_seq(&self) -> Result<u64, LocationError> {
+        let store = self.seq_store().await?;
+        // The save is a couple of fsyncs, so it does not belong on the async executor's thread.
+        tokio::task::spawn_blocking(move || store.next())
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// The last sequence number handed out, without advancing. For display and diagnostics.
+    pub async fn current_seq(&self) -> Result<u64, LocationError> {
+        Ok(self.seq_store().await?.current())
+    }
+
+    /// Raise the counter to at least `floor`, returning whether it moved.
+    ///
+    /// Monotone: a floor at or below the current value is a no-op. Two callers, one shape — the
+    /// one-time migration of the old `expo-secure-store` value, and recovery from a counter file
+    /// that will not parse (seed from the highest `seq` in the local replica). Neither can
+    /// re-issue a value, because raising a counter only ever skips.
+    pub async fn seed_seq(&self, floor: u64) -> Result<bool, LocationError> {
+        let store = self.seq_store().await?;
+        tokio::task::spawn_blocking(move || store.seed(floor))
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?
+            .map_err(|e| LocationError::Network(e.to_string()))
     }
 
     /// Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
@@ -3664,6 +3957,41 @@ pub struct Subscription {
     receive_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
+/// Binds a live [`Subscription`] to [`publish::PublishSink`], so the engine can send without
+/// knowing what gossip or iroh-docs are.
+///
+/// Both lanes here, not one each: they carry the **same sealed bytes**, which is what makes
+/// per-recipient revocation carry over from the live path to the durable mirror. Splitting them
+/// across two sink calls would invite an implementation that sealed twice and let the two diverge.
+struct SubscriptionSink<'a> {
+    subscription: &'a Subscription,
+    /// Accepted for API parity with the TS contract and otherwise unused: a node owns a single
+    /// trail namespace, so `docs_write_ratcheted` ignores it (`_subscription_id`). Threaded through
+    /// rather than dropped so this sink keeps the same shape as the mounted path's call.
+    subscription_id: String,
+}
+
+impl publish::PublishSink for SubscriptionSink<'_> {
+    async fn publish(
+        &self,
+        seq: u64,
+        fix: LocationFix,
+        recipients: Vec<String>,
+    ) -> Result<(), publish::PublishError> {
+        // Live lane first, durable mirror second — the order `location-sharing.ts` uses.
+        self.subscription
+            .publish(seq, fix.clone(), recipients.clone())
+            .await
+            .map_err(|e| publish::PublishError::Send(e.to_string()))?;
+        self.subscription
+            .node
+            .docs_write_ratcheted(self.subscription_id.clone(), seq, fix, recipients)
+            .await
+            .map_err(|e| publish::PublishError::Send(e.to_string()))?;
+        Ok(())
+    }
+}
+
 impl Drop for Subscription {
     fn drop(&mut self) {
         if let Ok(mut task) = self.receive_task.lock() {
@@ -3676,6 +4004,47 @@ impl Drop for Subscription {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Subscription {
+    /// Take one captured location all the way to the wire, with no JS involved.
+    ///
+    /// This is the whole point of the native drain path. `expo-task-manager` spools location events
+    /// when it cannot start a headless JS context, and on 2026-08-29 a Pixel spooled eleven and a
+    /// half hours of them — 446 real fixes, captured by a perfectly healthy foreground service,
+    /// with nothing on the JS side alive to publish them. Everything below runs in the OS callback
+    /// that delivered the fix.
+    ///
+    /// Thin by design: the decisions live in [`publish::DrainEngine`], which depends on ports
+    /// rather than on a node, so they can be tested against fakes that fail on demand. All this
+    /// does is bind those ports to the real stores and hand the engine somewhere to send.
+    pub async fn ingest_fix(
+        &self,
+        subscription_id: String,
+        fix: LocationFix,
+        battery: gate::BatteryState,
+        interval_ms: u64,
+        now_ms: u64,
+    ) -> Result<publish::IngestOutcome, LocationError> {
+        let sink = SubscriptionSink {
+            subscription: self,
+            subscription_id,
+        };
+        let seq = self.node.seq_store().await?;
+        let queue = self.node.outbox().await?;
+        let recipients = self.node.recipient_store().await?;
+        let gate_store = self.node.gate_store().await?;
+        let engine = publish::DrainEngine {
+            seq: seq.as_ref(),
+            queue: queue.as_ref(),
+            recipients: recipients.as_ref(),
+            gate: gate_store.as_ref(),
+            sink: &sink,
+            quality: gate::FixQualityConfig::default(),
+        };
+        engine
+            .ingest(fix, battery, interval_ms, now_ms)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
     /// Seal `fix` for `recipients` (each = a friend's 32-byte receiving public key) and
     /// broadcast it on the topic. Recipients NOT in this list cannot decrypt it —
     /// that's how revocation works.

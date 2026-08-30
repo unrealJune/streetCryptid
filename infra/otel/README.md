@@ -156,6 +156,22 @@ Wakes that published nothing (the classic "phone woke but the ping never left"):
 { name = "outbox.drain" && span.published = 0 }
 ```
 
+Phones the OS has stopped running the periodic refresh on. `bg.refresh` counts the runs we heard
+about; `last_refresh_age_ms` is the durable stamp the phone carries locally, so it survives the
+window where the refresh has stopped AND the phone cannot reach the collector — which is the same
+window, more often than not. Six hours is ~24 missed runs at the requested 15-minute cadence:
+
+```traceql
+{ name = "bg.refresh" }
+{ name = "device.health" && span.last_refresh_age_ms > 21600000 }
+```
+
+Both platforms throttle this task to nothing without ever reporting it as unavailable. On
+2026-08-29 an iPhone read `refresh_registered: true` + `refresh_status: available` for thirty hours
+with zero `bg.refresh` spans, while a Pixel's interval decayed 15 → 24 → 214 → 687 minutes as App
+Standby demoted the WorkManager job. Neither is distinguishable from a healthy phone by any other
+attribute the record carries.
+
 Pushes that never completed a reconciliation with the stash — the fixes are written locally but
 stranded (`finished=false` means no `SyncFinished` before the deadline: unreachable stash, no
 network, or the wake ended too early):
@@ -258,15 +274,16 @@ produced the same permanent hole, because the old exporter discarded any batch i
 **2. Liveness is asserted, not inferred.** `device.health` is emitted every periodic refresh and on
 foreground resume. Its value is in the _mismatches_:
 
-| Read                                                   | Means                                                               |
-| ------------------------------------------------------ | ------------------------------------------------------------------- |
-| `sharing.enabled=true` + `task.location_running=false` | the OS is not delivering location — the core background failure     |
-| `perm.background` not `granted`                        | "Always" was refused or revoked; iOS can downgrade it silently      |
-| `perm.accuracy=reduced`                                | precise location off; every fix will fail the quality gate          |
-| `task.refresh_status=restricted`                       | Background App Refresh is off — the periodic task will never run    |
-| `storage.backend=memory`                               | outbox, friend pool and sharing intent are lost on every restart    |
-| `telemetry.queued` large and growing                   | the device is fine; it cannot reach **us**                          |
-| `last_wake_age_ms` much larger than the publish age    | it is being woken and choosing not to publish — read the drop spans |
+| Read                                                                 | Means                                                                     |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `sharing.enabled=true` + `task.location_running=false`               | the OS is not delivering location — the core background failure           |
+| `perm.background` not `granted`                                      | "Always" was refused or revoked; iOS can downgrade it silently            |
+| `perm.accuracy=reduced`                                              | precise location off; every fix will fail the quality gate                |
+| `task.refresh_status=restricted`                                     | Background App Refresh is off — the periodic task will never run          |
+| `task.refresh_registered=true`, `last_refresh_age_ms` huge or absent | the task is registered AND permitted, and the OS is simply not running it |
+| `storage.backend=memory`                                             | outbox, friend pool and sharing intent are lost on every restart          |
+| `telemetry.queued` large and growing                                 | the device is fine; it cannot reach **us**                                |
+| `last_wake_age_ms` much larger than the publish age                  | it is being woken and choosing not to publish — read the drop spans       |
 
 The top row of the device-health dashboard carries those checks as counts — devices with no
 `bg.wake` in 6h, no `device.health` in 2h, any terminal native-runtime state, and publishes with no

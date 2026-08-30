@@ -2,6 +2,7 @@ import { NativeModule, requireNativeModule } from 'expo-modules-core';
 
 import { requireIrohRelayRuntimeConfig } from './relay-config';
 import type {
+  NativeIngestOutcome,
   IrohLocationEvents,
   IrohLocationApi,
   BleCapabilities,
@@ -57,6 +58,102 @@ export declare class IrohLocationNativeModule
     recipientEndpointsHex: string[],
     traceparent?: string | null
   ): Promise<RatchetDropped[]>;
+  /**
+   * Advance and return this device's next publish sequence number.
+   *
+   * The counter is persisted natively **before** this resolves, because the value goes straight
+   * onto the wire as half of an `author/seq` docs key and two envelopes under one key is a payload
+   * lost to last-write-wins. It lives in native rather than JS because expo-task-manager hands
+   * every headless callback a fresh JS context: each got its own copy of the module, its own
+   * cached counter, and its own belief that it was the only writer. No JS-side guard can close
+   * that — the guard would be duplicated along with the thing it guards.
+   *
+   * OPTIONAL: absent on binaries built before this API, so callers must guard with
+   * `typeof mod.nextSeq === 'function'` and fall back to the old `state-store.ts` path.
+   */
+  nextSeq?(): Promise<number>;
+  /**
+   * Remember the transport settings natively, so a background wake can `start` without JS.
+   *
+   * The relay URLs and token are build-time `EXPO_PUBLIC_*` constants inlined into the JS bundle, so
+   * a device only learns them by being told. Push on every launch and whenever a toggle changes.
+   * OPTIONAL: absent on binaries built before the native drain path.
+   */
+  setTransportConfig?(config?: TransportConfig): Promise<void>;
+  /**
+   * Run one captured fix through the native gate → outbox → seal → send pipeline.
+   *
+   * The same call the background runtime makes, exposed so the mounted app can exercise the exact
+   * path a wake takes rather than a parallel implementation of it. OPTIONAL.
+   */
+  ingestFix?(
+    subscriptionId: string,
+    fix: NativeLocationFix,
+    battery: { level: number; charging: boolean; lowPower: boolean },
+    intervalMs: number
+  ): Promise<NativeIngestOutcome>;
+  /**
+   * Start the native background publish path — a foreground service on Android, Core Location on
+   * iOS. Only the sharing toggle should call these: a service the user did not ask for is a
+   * persistent notification they cannot explain. OPTIONAL.
+   */
+  /**
+   * Ask for the notification permission the Android foreground service's ongoing notification
+   * needs (API 33+). Resolves to whether it is granted; a no-op `true` on iOS and on older Android.
+   *
+   * Callers should start the service regardless of the answer — Android does not refuse to run a
+   * foreground service over this, so a denial costs the user's ability to SEE that sharing is
+   * running, not sharing itself. OPTIONAL.
+   */
+  ensureNotificationPermission?(): Promise<boolean>;
+  startNativeBackground?(): void;
+  stopNativeBackground?(): void;
+  /**
+   * Mirror this device's identity into the native store the background drain path reads.
+   *
+   * The background node is built with no JS context alive, so it cannot be handed the identity the
+   * way {@link createNode} is — it fetches it through the native `DeviceSecrets` port. This is what
+   * puts it there.
+   *
+   * Call on EVERY launch, not only when the store looks empty: an existing entry can hold a
+   * *different* identity (iOS Keychain items survive an app uninstall), and a background node built
+   * on a stale one would publish under an endpoint none of the user's friends have paired with.
+   * One keystore write per launch is what makes the two provably agree.
+   *
+   * OPTIONAL: absent on binaries built before the native drain path.
+   */
+  saveDeviceSecrets?(identityHex: string, recvHex: string): Promise<void>;
+  /**
+   * Whether the native identity store holds both halves. Diagnostic only — it says something is
+   * stored, never that it matches the identity this session is using, which is why
+   * {@link saveDeviceSecrets} is unconditional. OPTIONAL.
+   */
+  deviceSecretsProvisioned?(): boolean;
+  /** Fixes captured but not yet sealed, in the native queue. OPTIONAL. */
+  outboxPending?(): Promise<number>;
+  /** Drop every queued fix (sign-out, or sharing off for good). OPTIONAL. */
+  clearOutbox?(): Promise<void>;
+  /**
+   * Replace the set of friends this device seals location envelopes for.
+   *
+   * Persisted natively so an OS location callback can read it with no JS context alive. Push it on
+   * every pool change. A momentarily stale list is safe in the only direction it can be stale: the
+   * ratchet session remains the authority on who can decrypt, and this list only narrows who we
+   * attempt to seal for.
+   *
+   * OPTIONAL: absent on binaries built before the native drain path.
+   */
+  setSharingRecipients?(recipientEndpointsHex: string[]): Promise<void>;
+  /** The last sequence number handed out, without advancing. OPTIONAL, as {@link nextSeq}. */
+  currentSeq?(): Promise<number>;
+  /**
+   * Raise the native counter to at least `floor`; resolves to whether it moved.
+   *
+   * Monotone, so it is safe to call repeatedly: this is both the one-time migration of the old
+   * SecureStore value and the recovery path for an unreadable counter file. Raising can only skip
+   * values, never re-issue them. OPTIONAL, as {@link nextSeq}.
+   */
+  seedSeq?(floor: number): Promise<boolean>;
   /**
    * Broadcast a **null fix**: an envelope with an empty padded payload, wrapped for the friends we
    * do NOT share position with (FORWARD-SECRECY.md §4.1). Same signing, AAD, and ciphertext length
@@ -163,8 +260,23 @@ export declare class IrohLocationNativeModule
   bluetoothRadioState?(): Promise<BluetoothRadioState>;
 }
 
-type RawIrohLocationNativeModule = Omit<IrohLocationNativeModule, 'start'> & {
+/**
+ * The module as the native side actually declares it, before {@link withRelayConfig} fills in the
+ * relay URLs and token. Both transport entry points take them explicitly here and neither does
+ * above, which is the whole job of the wrapper.
+ */
+type RawIrohLocationNativeModule = Omit<
+  IrohLocationNativeModule,
+  'start' | 'setTransportConfig'
+> & {
   start(
+    relayUrls: string[],
+    relayAuthToken: string,
+    relayEnabled: boolean,
+    ipEnabled: boolean,
+    bleEnabled: boolean
+  ): Promise<void>;
+  setTransportConfig?(
     relayUrls: string[],
     relayAuthToken: string,
     relayEnabled: boolean,
@@ -186,6 +298,20 @@ function withRelayConfig(raw: RawIrohLocationNativeModule): IrohLocationNativeMo
         return async (config: TransportConfig = DEFAULT_TRANSPORT_CONFIG) => {
           const { relayUrls, authToken } = requireIrohRelayRuntimeConfig();
           await start(relayUrls, authToken, config.relay, config.ip, config.ble);
+        };
+      }
+
+      // Same treatment, same reason: the relay URLs and token are this bundle's build-time
+      // constants, so callers pass only the toggles and never have to know where the rest lives.
+      if (property === 'setTransportConfig') {
+        const native = target.setTransportConfig?.bind(target);
+        // Left undefined on a binary that predates the native drain path, so the callers'
+        // `typeof mod.setTransportConfig === 'function'` guard still reports the truth rather than
+        // finding this wrapper and failing inside it.
+        if (!native) return undefined;
+        return async (config: TransportConfig = DEFAULT_TRANSPORT_CONFIG) => {
+          const { relayUrls, authToken } = requireIrohRelayRuntimeConfig();
+          await native(relayUrls, authToken, config.relay, config.ip, config.ble);
         };
       }
 

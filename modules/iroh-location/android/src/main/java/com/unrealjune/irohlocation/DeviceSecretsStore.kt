@@ -1,0 +1,161 @@
+package com.unrealjune.irohlocation
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
+import android.util.Log
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+import uniffi.iroh_location.DeviceSecrets
+
+/**
+ * This device's iroh identity, sealed with an Android Keystore key we own.
+ *
+ * The background drain path builds a node with no JS context alive, so it cannot be handed the
+ * identity the way `createNode` is — it fetches it itself, through the Rust `DeviceSecrets` port.
+ * This is the Android half of that port.
+ *
+ * ## Why our own entry rather than reading expo-secure-store's
+ *
+ * `expo-secure-store` keeps an encrypted **JSON envelope** in SharedPreferences, with a `scheme`
+ * property selecting between `AESEncryptor` and `HybridAESEncryptor`, unwrapped against its own
+ * Keystore key. Reading that from here would mean reimplementing a private format we do not own:
+ * it would work today and break silently on an SDK bump, and "silently" is the worst possible
+ * failure for the one code path whose entire symptom is a phone that quietly stops publishing.
+ *
+ * Owning the entry costs one write at provisioning time and removes the coupling completely.
+ *
+ * ## Why mirroring is safe here, and would not be for `seq`
+ *
+ * The identity is written once and never changes, so two copies cannot diverge — the only failure
+ * available is one copy missing, which reads as "not provisioned" and is handled. The publish
+ * counter is the opposite (see `seq_store.rs`), which is why that one had to *move* rather than be
+ * mirrored. `expo-secure-store` therefore keeps its copy for the mounted path, untouched, and this
+ * is a second reader for the background path.
+ *
+ * ## Key properties
+ *
+ * AES-256-GCM, key non-exportable and generated in the Keystore. `setUserAuthenticationRequired`
+ * is left off and `setUnlockedDeviceRequired` is not set, which is the Android analogue of iOS's
+ * `AfterFirstUnlock`: a location callback arriving with the phone locked in a pocket is the entire
+ * scenario, and requiring an unlocked device would fail exactly then.
+ *
+ * StrongBox is deliberately not requested. It is unavailable on much of the fleet and its failure
+ * mode is a throw at key generation, which would turn a hardware detail into "this phone cannot
+ * share location at all".
+ */
+class KeystoreDeviceSecrets(context: Context) : DeviceSecrets {
+  private val prefs: SharedPreferences =
+    context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+  // region DeviceSecrets (read side, called from Rust)
+
+  /**
+   * `null` means **not provisioned**, not an error: a fresh install has no identity until the app
+   * has run once. The Rust side treats that as "do nothing and wait" rather than minting one.
+   */
+  override fun identitySecret(): ByteArray? = read(KEY_IDENTITY)
+
+  override fun recvSecret(): ByteArray? = read(KEY_RECV)
+
+  // endregion
+
+  /** Whether this device has already been seeded, so JS can skip the write on every launch. */
+  fun isProvisioned(): Boolean = identitySecret() != null && recvSecret() != null
+
+  /**
+   * Store both halves. Both are written or neither is: a node with an identity but no receiving
+   * secret cannot open anything sent to it, and would look like a working device that silently
+   * drops every fix.
+   *
+   * The two values are committed in one `apply` for the same reason — a process killed between two
+   * separate commits is exactly how a half-provisioned device would happen.
+   */
+  fun save(identity: ByteArray, recv: ByteArray) {
+    val key = loadOrCreateKey()
+    val sealedIdentity = seal(key, identity)
+    val sealedRecv = seal(key, recv)
+    prefs.edit().putString(KEY_IDENTITY, sealedIdentity).putString(KEY_RECV, sealedRecv).apply()
+  }
+
+  private fun read(name: String): ByteArray? {
+    val stored = prefs.getString(name, null) ?: return null
+    return try {
+      open(loadOrCreateKey(), stored)
+    } catch (e: Exception) {
+      // Unreadable is NOT the same as absent, and both return null here — but only one of them is
+      // ordinary, so this is the line that tells them apart afterwards. It happens when the
+      // Keystore key is gone (an app-data restore onto a different device, or a lock-screen change
+      // on some OEMs invalidating keys) and the correct recovery is to re-provision from the copy
+      // `expo-secure-store` still holds, which is what makes keeping that copy worth it.
+      Log.w(TAG, "device secret $name is present but unreadable; re-provisioning is required", e)
+      null
+    }
+  }
+
+  private fun seal(key: SecretKey, plaintext: ByteArray): String {
+    val cipher = Cipher.getInstance(TRANSFORMATION)
+    cipher.init(Cipher.ENCRYPT_MODE, key)
+    // The IV is generated by the Keystore, never by us — reusing one under GCM with the same key
+    // is a total loss of confidentiality, and this is the standard way not to.
+    val iv = cipher.iv
+    val ciphertext = cipher.doFinal(plaintext)
+    val blob = ByteArray(1 + iv.size + ciphertext.size)
+    blob[0] = iv.size.toByte()
+    iv.copyInto(blob, 1)
+    ciphertext.copyInto(blob, 1 + iv.size)
+    return Base64.encodeToString(blob, Base64.NO_WRAP)
+  }
+
+  private fun open(key: SecretKey, stored: String): ByteArray {
+    val blob = Base64.decode(stored, Base64.NO_WRAP)
+    require(blob.isNotEmpty()) { "empty device-secret blob" }
+    val ivLen = blob[0].toInt()
+    require(ivLen in 1 until blob.size) { "device-secret blob has a nonsense IV length" }
+    val iv = blob.copyOfRange(1, 1 + ivLen)
+    val ciphertext = blob.copyOfRange(1 + ivLen, blob.size)
+    val cipher = Cipher.getInstance(TRANSFORMATION)
+    cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
+    return cipher.doFinal(ciphertext)
+  }
+
+  private fun loadOrCreateKey(): SecretKey {
+    val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+    (keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let {
+      return it.secretKey
+    }
+    val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+    generator.init(
+      KeyGenParameterSpec.Builder(
+          KEY_ALIAS,
+          KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        )
+        .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+        .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+        .setKeySize(256)
+        // Usable while the device is locked — see the class docs. This is the Android analogue of
+        // iOS's AfterFirstUnlock, and the whole reason the background path can read anything.
+        .setUserAuthenticationRequired(false)
+        .build()
+    )
+    return generator.generateKey()
+  }
+
+  private companion object {
+    const val TAG = "IrohDeviceSecrets"
+    const val ANDROID_KEYSTORE = "AndroidKeyStore"
+    const val TRANSFORMATION = "AES/GCM/NoPadding"
+    const val GCM_TAG_BITS = 128
+
+    /** Ours, not expo's. Namespaced so it cannot collide with the app's other stored state. */
+    const val PREFS_NAME = "com.unrealjune.streetcryptid.device-identity"
+    const val KEY_ALIAS = "com.unrealjune.streetcryptid.device-identity"
+    const val KEY_IDENTITY = "identity"
+    const val KEY_RECV = "recv"
+  }
+}

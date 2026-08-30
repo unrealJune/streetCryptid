@@ -20,26 +20,15 @@
 //! §1 threat model — a seized device — that costs nothing, because an adversary holding the device
 //! has both. It would matter against an adversary who somehow extracted only the identity secret.
 //!
-//! # Why the writer guard lives here
+//! # Why the writer guard lives elsewhere
 //!
-//! `native-runtime-owner.ts` cannot close this race. expo-task-manager hands every headless
-//! callback a **fresh JS context**, so each gets its own copy of that module and its own `claimed`
-//! flag, while the native node is process-wide. Two contexts each believe they hold the claim.
-//!
-//! With sequential ratchet state that is not a node clobber, it is **key reuse** — which is why
-//! §4.2 requires the guard be structural rather than behavioural before any of this ships. So the
-//! claim lives in the one place both contexts genuinely share: a static in this crate. A second
-//! [`SessionStore::open`] on a directory that already has a live writer fails, rather than quietly
-//! becoming a second writer.
-//!
-//! Scope, so it is not mistaken for more than it is: this is process-wide, and both platforms run
-//! headless callbacks in the app process today. An Android task service configured into a separate
-//! process would need a file lock as well.
+//! The process-wide directory claim moved to [`crate::durable`] once the publish counter and the
+//! outbox needed the same guarantee. The reasoning is unchanged and is recorded there: a JS-side
+//! guard is duplicated along with every other JS module on each headless callback, so it cannot be
+//! the thing that makes a single writer true. With sequential ratchet state a second writer is
+//! **key reuse**, not a clobber, which is why §4.2 requires the guard be structural.
 
-use std::collections::HashSet;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload as AeadPayload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
@@ -47,6 +36,7 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use zeroize::Zeroize;
 
+use crate::durable::{claim_dir, write_atomic, WriterClaim};
 use crate::ratchet::{RatchetState, STATE_V};
 
 const STORE_KEY_CONTEXT: &str = "sc-dr/v1/store";
@@ -77,41 +67,6 @@ impl From<std::io::Error> for StoreError {
     }
 }
 
-/// Directories with a live writer in this process.
-fn claimed() -> &'static Mutex<HashSet<PathBuf>> {
-    static CLAIMED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    CLAIMED.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-/// Releases the process-wide claim when the store is dropped, so a legitimate re-open after a
-/// clean shutdown succeeds.
-struct WriterClaim(PathBuf);
-
-impl Drop for WriterClaim {
-    fn drop(&mut self) {
-        if let Ok(mut set) = claimed().lock() {
-            set.remove(&self.0);
-        }
-    }
-}
-
-/// fsync a directory, so a `rename` into it is durable and not just visible.
-///
-/// POSIX only. On Windows a directory handle is not something `File::open` will give us, and
-/// NTFS orders the metadata write itself; the mobile targets this actually protects are both
-/// POSIX, and desktop Windows is a development host rather than a device holding real sessions.
-fn sync_dir(dir: &Path) -> Result<(), StoreError> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(dir)?.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-    }
-    Ok(())
-}
-
 /// The single writer of this device's ratchet sessions.
 pub struct SessionStore {
     dir: PathBuf,
@@ -140,16 +95,9 @@ impl SessionStore {
     /// `data_dir` — that refusal is the guard, not an inconvenience to retry around.
     pub fn open(data_dir: &Path, identity_secret: &[u8]) -> Result<Self, StoreError> {
         let dir = data_dir.join(SESSIONS_DIR);
-        let canonical_claim = dir.clone();
-        {
-            let mut set = claimed().lock().map_err(|_| StoreError::AlreadyOpen)?;
-            if !set.insert(canonical_claim.clone()) {
-                return Err(StoreError::AlreadyOpen);
-            }
-        }
-        // From here on the claim is held, so any early return must release it — `WriterClaim` is
-        // constructed immediately for exactly that reason.
-        let claim = WriterClaim(canonical_claim);
+        // From here on the claim is held, so any early return must release it — which it does,
+        // because `claim` is a local and `WriterClaim` releases on drop.
+        let claim = claim_dir(dir.clone()).ok_or(StoreError::AlreadyOpen)?;
         std::fs::create_dir_all(&dir)?;
 
         let mut hasher = blake3::Hasher::new_derive_key(STORE_KEY_CONTEXT);
@@ -254,18 +202,7 @@ impl SessionStore {
         // Write-then-rename: a crash mid-write leaves the previous session intact rather than a
         // truncated one. A truncated session is unrecoverable — it cannot be parsed, and parsing
         // failure is (correctly) fatal — so a torn write would cost a resync every time.
-        let final_path = self.path_for(peer);
-        let tmp_path = final_path.with_extension("tmp");
-        {
-            let mut file = std::fs::File::create(&tmp_path)?;
-            file.write_all(&blob)?;
-            // The data, before anything points at it.
-            file.sync_all()?;
-        }
-        std::fs::rename(&tmp_path, &final_path)?;
-        // The rename itself. Without this the directory entry can still be lost after the data
-        // is safe, which lands us back on the previous blob — the rollback described above.
-        sync_dir(&self.dir)?;
+        write_atomic(&self.dir, &self.path_for(peer), &blob)?;
         Ok(())
     }
 

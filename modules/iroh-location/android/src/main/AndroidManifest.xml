@@ -16,4 +16,24 @@
 
     <uses-feature android:name="android.hardware.bluetooth_le"
         android:required="true" />
+
+    <!-- The native background publish path (BackgroundLocationService). Sharing has to survive the
+         app being closed, which is the whole point: the JS pipeline stopped publishing for eleven
+         hours on a Pixel because no headless JS context ever started. ACCESS_BACKGROUND_LOCATION is
+         what lets the service keep receiving fixes with the app closed; POST_NOTIFICATIONS is
+         required from Android 13 for the ongoing notification an FGS must show. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application>
+        <!-- `location` is one of the few FGS types Android 15 still lets a boot receiver start,
+             which is what keeps sharing alive across a reboot without a user tap. -->
+        <service
+            android:name="com.unrealjune.irohlocation.BackgroundLocationService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+    </application>
 </manifest>

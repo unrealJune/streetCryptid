@@ -10,8 +10,8 @@ import type { PersistentKV } from './fix-outbox';
  * a second ago produce identical records, and telling them apart means reconstructing a timeline
  * from spans that may never have been exported.
  *
- * All four live in ONE KV row, deliberately: they are stamped on the hot path (a live-mode publish
- * runs every few seconds) and four separate writes would be four SQLite statements per fix. The
+ * They all live in ONE KV row, deliberately: they are stamped on the hot path (a live-mode publish
+ * runs every few seconds) and separate writes would be a SQLite statement each, per fix. The
  * row is small and last-write-wins — losing a stamp costs a slightly stale age, never correctness,
  * so nothing here is worth a transaction.
  *
@@ -26,6 +26,17 @@ export const WATERMARKS_KEY = 'sc.social.watermarks';
 export type WatermarkKind =
   /** The OS delivered a location batch to our background task. */
   | 'wake'
+  /**
+   * The OS actually ran the periodic refresh task.
+   *
+   * Distinct from `task.refresh_registered`, which only says the handler is known to TaskManager.
+   * Both platforms will happily report a task as registered and permitted while never scheduling
+   * it: on 2026-08-29 one iPhone read `refresh_registered: true` + `refresh_status: available` for
+   * thirty hours without the task running once, and an Android phone's interval decayed
+   * 15 → 24 → 214 → 687 minutes under App Standby with every flag still green. Registration is
+   * what we asked for; this is what we got, and only the gap between them is diagnostic.
+   */
+  | 'refresh'
   /** A fix passed the confidence gate and was accepted by the engine. */
   | 'fix'
   /** `publishFix` completed — the envelope was sealed and broadcast. */
@@ -37,7 +48,7 @@ export type WatermarkKind =
 
 export type Watermarks = Partial<Record<WatermarkKind, number>>;
 
-const KINDS: WatermarkKind[] = ['wake', 'fix', 'publish', 'push', 'health'];
+const KINDS: WatermarkKind[] = ['wake', 'refresh', 'fix', 'publish', 'push', 'health'];
 
 function parse(raw: string | null): Watermarks {
   if (!raw) return {};

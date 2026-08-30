@@ -468,6 +468,14 @@ export class LocationSharingService implements FixPublisher {
   private readonly friendSubs = new Map<string, string>();
   private readonly removingFriends = new Set<string>();
   private seq = 0;
+  /**
+   * Whether the native counter has been seeded and is now authoritative.
+   *
+   * False on a binary that predates `nextSeq`, and false until `adoptNativeSeq` has handed the
+   * persisted floor down. Both cases keep the old SecureStore path, which is monotonic on its own
+   * — the one thing that must never happen is drawing from native before it knows the floor.
+   */
+  private nativeSeq = false;
 
   private readonly snapshotListeners = new Set<SnapshotListener>();
   private readonly fixListeners = new Set<FixListener>();
@@ -803,6 +811,9 @@ export class LocationSharingService implements FixPublisher {
       identitySecret: this.keys.identitySecret,
       recvSecret: this.keys.recvSecret,
     });
+    // And into the native store the background drain path reads, which `expo-secure-store` cannot
+    // serve because that path runs with no JS context alive.
+    await this.mirrorDeviceSecrets();
     this.configureDevTelemetry();
     // Restore the monotonic seq before anything can publish, so we never hand out a reused seq.
     this.seq = await loadSeq();
@@ -811,6 +822,12 @@ export class LocationSharingService implements FixPublisher {
     this.ratchetActivity = await loadRatchetActivity(this.kv);
     this.transportPreferences = await loadTransportPreferences(this.kv);
     await this.mod.start(this.transportPreferences);
+    // After `start`, which is where the native drain path's stores are opened.
+    await this.adoptNativeSeq();
+    await this.mirrorTransportConfig();
+    // Seed the native sharing set from the pool we just loaded. Without this a device whose pool
+    // has not changed since the last launch leaves native holding a list nobody refreshed.
+    this.pushSharingRecipients();
     if (interactive) {
       this.ticketStr = await this.mod.ticket();
       this.docTicketStr = await this.safeDocTicket();
@@ -2201,6 +2218,16 @@ export class LocationSharingService implements FixPublisher {
       // `ensureSharingArmedHeadless`. Writing it earlier would let a start that then threw leave
       // behind an intent the self-heal would keep trying to honour.
       await saveSharingEnabled(this.kv, true);
+      // Same moment, same intent: the native path is the one that still runs when the JS pipeline
+      // cannot be started at all. Ask for the notification permission first so the ongoing
+      // notification is visible from the start — but do not gate on the answer, because Android
+      // runs the service either way and a denial costs visibility rather than sharing.
+      try {
+        await this.mod?.ensureNotificationPermission?.();
+      } catch {
+        // Best-effort: a refused or unavailable prompt must not stop sharing from starting.
+      }
+      this.setNativeBackground(true);
       // Arm the revive fence around where we are now. On iOS it is the only mechanism that
       // relaunches a terminated app; on Android it cannot do that, but a geofence event is a
       // documented exemption to the ban on starting a foreground service from the background, which
@@ -2277,6 +2304,10 @@ export class LocationSharingService implements FixPublisher {
     } catch {
       // ignore — a KV failure must not block teardown
     }
+    // Before anything else that can throw: a foreground service the user has switched off must not
+    // outlive a failure further down teardown, or they are left with a notification and no way to
+    // explain it.
+    this.setNativeBackground(false);
     try {
       const { disarmReviveFence } = await import('./background/revive-task');
       await disarmReviveFence();
@@ -2836,9 +2867,152 @@ export class LocationSharingService implements FixPublisher {
   /** Persist the current pool (fire-and-forget; best-effort). */
   private persistPool(): void {
     void savePool(this.kv, this.state);
+    this.pushSharingRecipients();
+  }
+
+  /**
+   * Mirror the sharing set down to native, where the drain path can read it with no JS alive.
+   *
+   * Every pool change goes through {@link persistPool}, so hanging this here is what keeps the two
+   * copies in step rather than relying on each call site to remember. Fire-and-forget and
+   * best-effort for the same reason `savePool` is: this describes who to seal for *next* time, and
+   * failing to record it must never fail the pool change that prompted it.
+   *
+   * A momentarily stale native list is safe in the only direction it can be stale — see
+   * `recipients.rs`. The authority for "can this person read my location" stays the ratchet
+   * session, which this list can only ever narrow.
+   */
+  private pushSharingRecipients(): void {
+    const mod = this.mod;
+    if (typeof mod?.setSharingRecipients !== 'function') return;
+    const recipients = pool.recipientEndpoints(this.state);
+    void mod.setSharingRecipients(recipients).catch((err: unknown) => {
+      getTelemetry().log('warn', 'recipients: could not mirror the sharing set to native', {
+        reason: err instanceof Error ? err.message : String(err),
+        recipients: recipients.length,
+      });
+    });
+  }
+
+  /**
+   * Copy the transport settings into the native store the background bootstrap reads.
+   *
+   * The relay URLs and token are build-time `EXPO_PUBLIC_*` constants inlined into this bundle, so
+   * a device only learns them by being told. Pushed on every launch rather than once: the values
+   * change when the user is moved to a different relay by an app update, and a background node
+   * booting on last month's relay list would run, report healthy, and reach nobody.
+   *
+   * Best-effort — a failure costs background publishing, not the mounted path.
+   */
+  private async mirrorTransportConfig(): Promise<void> {
+    const mod = this.mod;
+    if (typeof mod?.setTransportConfig !== 'function') return;
+    try {
+      await mod.setTransportConfig(this.transportPreferences);
+    } catch (err) {
+      getTelemetry().log('warn', 'transport: native mirror failed, background publishing is off', {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Start or stop the native background publish path alongside the JS one.
+   *
+   * Both are armed, deliberately, and they cannot collide: the Rust stores take a process-wide
+   * directory claim, so whichever gets there first owns the counter and the queue and the other
+   * stands down (`durable.rs`). While the app is mounted that is the JS path, unchanged. The native
+   * one takes over exactly when the JS path stops being able to run at all — which on a Pixel on
+   * 2026-08-29 was eleven and a half hours during which `expo-task-manager` spooled 446 fixes it
+   * could never hand to a JS context.
+   *
+   * Synchronous and best-effort: a phone whose binary predates this keeps today's behaviour.
+   */
+  private setNativeBackground(enabled: boolean): void {
+    const mod = this.mod;
+    try {
+      if (enabled) mod?.startNativeBackground?.();
+      else mod?.stopNativeBackground?.();
+    } catch (err) {
+      getTelemetry().log('warn', `native background ${enabled ? 'start' : 'stop'} failed`, {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Copy this device's identity into the native store, every launch.
+   *
+   * Unconditional on purpose. Skipping when the store "looks provisioned" would be wrong in the one
+   * case that matters: an entry can survive an app uninstall on iOS, so it may hold an identity
+   * this install has never used, and a background node built on that would publish under an
+   * endpoint none of the user's friends have paired with — invisible from the app, and indented
+   * from every trail. One keystore write per launch is what makes the two provably agree.
+   *
+   * Best-effort: a device whose binary predates the native drain path, or whose keystore refuses
+   * the write, still works exactly as it does today — the mounted path reads `expo-secure-store`
+   * and is untouched. What it loses is background publishing, which is what the warning is for.
+   */
+  private async mirrorDeviceSecrets(): Promise<void> {
+    const mod = this.mod;
+    const keys = this.keys;
+    if (!keys || typeof mod?.saveDeviceSecrets !== 'function') return;
+    try {
+      await mod.saveDeviceSecrets(keys.identitySecret, keys.recvSecret);
+    } catch (err) {
+      getTelemetry().log(
+        'warn',
+        'device secrets: native mirror failed, background publishing is off',
+        {
+          reason: err instanceof Error ? err.message : String(err),
+        }
+      );
+    }
+  }
+
+  /**
+   * Hand the native counter our persisted value once, so the two schemes cannot overlap.
+   *
+   * Called after `start`, because the native store is claimed there. `seedSeq` is monotone, so
+   * calling it on every launch is harmless: after the first migration the floor is always at or
+   * below where native already is, and raising can only ever skip values. Best-effort — a phone
+   * whose binary predates the API keeps the JS path, which is exactly what the guard is for.
+   */
+  private async adoptNativeSeq(): Promise<void> {
+    const mod = this.mod;
+    if (!mod || typeof mod.seedSeq !== 'function' || typeof mod.nextSeq !== 'function') return;
+    try {
+      await mod.seedSeq(this.seq);
+      this.nativeSeq = true;
+    } catch (err) {
+      // Staying on the JS path is correct here rather than fatal: it is the scheme this device
+      // was already using, and it is monotonic on its own. What we must not do is start using
+      // native without the floor, which would re-issue every seq below it.
+      getTelemetry().log(
+        'warn',
+        'seq: could not adopt the native counter, staying on SecureStore',
+        {
+          reason: err instanceof Error ? err.message : String(err),
+        }
+      );
+    }
   }
 
   private async nextSeq(): Promise<number> {
+    const mod = this.mod;
+    if (this.nativeSeq && typeof mod?.nextSeq === 'function') {
+      // Native persists before it resolves, so the fail-stop guarantee the old path got from
+      // `saveSeq` throwing is preserved: a counter that cannot be written throws here and the
+      // publish aborts rather than risking reuse.
+      const seq = await mod.nextSeq();
+      this.seq = seq;
+      // Mirror, best-effort and deliberately AFTER the authoritative write. This is downgrade
+      // insurance: an OTA that rolls the JS bundle back onto this same binary would resume using
+      // `state-store.ts`, and a stale mirror there would re-issue. It cannot fail the publish —
+      // the value is already durable — so unlike the old path this one swallows.
+      void saveSeq(seq).catch(() => undefined);
+      return seq;
+    }
     this.seq += 1;
     // Persist BEFORE the caller puts this seq on the wire, so a kill mid-publish can't reuse it
     // (a lagging persisted seq would collide `author/seq` docs keys for a rejoining peer).
