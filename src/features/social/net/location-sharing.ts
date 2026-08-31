@@ -13,6 +13,7 @@ import {
   type NativeRatchetEvent,
   type NodeKeys,
   type OnFixEvent,
+  type OnNativeFixEvent,
   type OnOpaqueEvent,
   type PairEvent,
   type PairResult,
@@ -544,6 +545,12 @@ export class LocationSharingService {
   // Background service runtime (native-only; lazily imported so web/Expo Go never load it).
   private engine: LocationEngine | null = null;
   private engineStateStop: (() => void) | null = null;
+  /**
+   * The native runtime's handoff, live only while background sharing is on.
+   *
+   * See {@link handleNativeCapture} — this is how a mounted app publishes at all.
+   */
+  private nativeFixSub: Removable | null = null;
   private bgRefreshHandlerStop: (() => void) | null = null;
   private bgLifecycleStop: (() => void) | null = null;
   private bgCadenceStop: (() => Promise<void>) | null = null;
@@ -2182,6 +2189,20 @@ export class LocationSharingService {
           mod.setBackgroundCadence(cfg.intervalMs, cfg.distanceIntervalM, cfg.accuracy);
         },
       };
+      // Take the native runtime's handoff BEFORE starting it, or the first captures of a mounted
+      // session are sent to nobody — and on a fresh install those are the only captures there are.
+      //
+      // This is the mounted publish path, not a fallback. The writer claim in `durable.rs` is
+      // process-wide and the app has already claimed the stores by the time this runs, so the
+      // native runtime cannot build a node of its own while we are open; it captures and hands the
+      // fix here. Without this, a foregrounded app runs Core Location, receives fixes, and drops
+      // every one of them — which is what a fresh install did on 2026-08-30: paired, map open,
+      // nothing published, locate-me greyed out because nothing had ever reached the replica.
+      this.nativeFixSub =
+        this.mod.addListener?.('onNativeFix', (event: OnNativeFixEvent) => {
+          void this.handleNativeCapture(event);
+        }) ?? null;
+
       await nativeProvider.reprogram(initialCfg);
       this.setNativeBackground(true);
       // Starting the manager is what settles Core Location's authorization delegate, so this is the
@@ -2402,6 +2423,8 @@ export class LocationSharingService {
     this.bgRefreshHandlerStop = null;
     this.bgLifecycleStop?.();
     this.bgLifecycleStop = null;
+    this.nativeFixSub?.remove();
+    this.nativeFixSub = null;
     try {
       await stopCadence?.();
     } catch {
@@ -2945,6 +2968,51 @@ export class LocationSharingService {
    * before discarding it would throw the user's own marker across town for a frame. What reaches
    * here has already been through the gate, in Rust, on its way to the wire.
    */
+  /**
+   * Publish a capture the native runtime could not publish itself, and move our own dot to it.
+   *
+   * Routed through the engine rather than straight to {@link ingestNativeFix} for three reasons
+   * that all matter while the app is open: the engine's `onPublished` refreshes the trail, its
+   * state drives what the settings screen renders, and the cadence controller re-arms off it. Going
+   * around it would publish correctly and leave the whole UI frozen.
+   *
+   * The dot follows what the gate *accepted*, never the raw capture — the gate exists because a
+   * phone sometimes reports a position kilometres away, and rendering that before discarding it
+   * would throw the user's own marker across town for a frame.
+   */
+  private async handleNativeCapture(event: OnNativeFixEvent): Promise<void> {
+    const engine = this.engine;
+    // No engine means sharing is not running here; the capture is not ours to publish.
+    if (!engine) return;
+    try {
+      const { routeNativeCapture } = await import('./background/location-engine');
+      const accepted = await routeNativeCapture(
+        {
+          kind: event.kind,
+          fix: event.fix
+            ? {
+                lat: event.fix.lat,
+                lon: event.fix.lon,
+                accuracyM: event.fix.accuracyM,
+                headingDeg: event.fix.headingDeg,
+                ts: event.fix.ts,
+              }
+            : undefined,
+        },
+        engine
+      );
+      if (accepted) this.recordLocalFix(accepted);
+    } catch (err) {
+      // The fix stays in the native outbox, so the next capture retries it. Logged rather than
+      // swallowed: a handoff that keeps failing is a phone that has stopped publishing while
+      // looking entirely healthy, which is the exact failure this whole path exists to end.
+      getTelemetry().log('warn', 'native capture handoff failed', {
+        reason: err instanceof Error ? err.message : String(err),
+        'sc.drop_reason': 'handoff-failed',
+      });
+    }
+  }
+
   private recordLocalFix(fix: LocationFix): void {
     if (this.latestLocalFix && fix.ts < this.latestLocalFix.ts) return;
     this.latestLocalFix = fix;

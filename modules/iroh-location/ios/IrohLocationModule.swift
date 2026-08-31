@@ -389,7 +389,10 @@ public final class IrohLocationModule: Module {
 
   public func definition() -> ModuleDefinition {
     Name("IrohLocation")
-    Events("onFix", "onOpaque", "onStatus", "onSync")
+    // `onNativeFix` is the mounted-app handoff: the background runtime captures, but the writer
+    // claim is process-wide, so while the app is open it cannot own the node and hands the capture
+    // here instead. See `BackgroundLocationRuntime.eventSink`.
+    Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix")
 
     AsyncFunction("createNode") { (identityHex: String?, recvHex: String?) async throws -> [String: String] in
       try await self.clearRuntime()
@@ -496,6 +499,9 @@ public final class IrohLocationModule: Module {
     /// Start/stop the native background runtime. The app calls these when the user turns sharing on
     /// and off; nothing else should.
     Function("startNativeBackground") {
+      // Wire the handoff before starting, or the first captures of a mounted session have nowhere
+      // to go — and on a fresh install those are the only ones there are.
+      BackgroundLocationRuntime.shared.eventSink = self
       BackgroundLocationRuntime.shared.start()
     }
 

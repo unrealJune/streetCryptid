@@ -120,6 +120,20 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   private var lastWakeReason: WakeReason = .relaunch
   private var lastWakeAt: Date?
 
+  /// Where a captured fix goes when this runtime cannot own the node.
+  ///
+  /// The writer claim in `durable.rs` is **process-wide**, and on iOS the mounted app and this
+  /// runtime are the same process using the same `nodeStorageRoots()`. So whenever the app is open
+  /// it has already claimed the stores and `ensureStarted()` returns nil here — always, not
+  /// occasionally. That was survivable while a JS `watchPositionAsync` covered the mounted case;
+  /// once capture moved into Rust and that watcher was deleted, it meant a foregrounded app
+  /// captured fixes and dropped every one of them on the floor. A fresh install could pair, sit
+  /// there with the map open, and never publish anything at all.
+  ///
+  /// Handing the fix to JS is not a fallback path, it is the mounted path. The mounted runtime
+  /// owns the node, so it is the only thing that *can* publish; this side is the sensor.
+  weak var eventSink: IrohLocationModule?
+
   /// The coordinate the stop fence is centred on. Persisted, because a cold launch has to be able
   /// to re-arm the fence before anything else runs.
   private var stopAnchor: CLLocation?
@@ -593,9 +607,37 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
 
   // MARK: - Node lifecycle
 
+  /// Hand a capture to the mounted JS runtime, which owns the node this process's stores belong to.
+  ///
+  /// `kind` is `fix` when there is a position to run through the gate and `heartbeat` when this is
+  /// a tick from the parked coarse stream, which has no position worth gating — see the two call
+  /// sites. Dropping to the main queue because that is where the Expo event emitter expects to be
+  /// called from, and Core Location has already delivered us there anyway.
+  private func handOff(kind: String, fix: LocationFix?, battery: BatteryState) {
+    var payload: [String: Any] = [
+      "kind": kind,
+      "reason": lastWakeReason.rawValue,
+      "state": state.rawValue,
+      "battery": [
+        "level": battery.level, "charging": battery.charging, "lowPower": battery.lowPower,
+      ],
+    ]
+    if let fix {
+      payload["fix"] = [
+        "lat": fix.lat, "lon": fix.lon, "accuracyM": fix.accuracyM,
+        "headingDeg": fix.headingDeg, "ts": fix.ts,
+      ]
+    }
+    let sink = eventSink
+    DispatchQueue.main.async { sink?.sendEvent("onNativeFix", payload) }
+  }
+
   /// Run one captured fix through gate → outbox → seal → send.
   private func ingest(fix: LocationFix, battery: BatteryState) async {
-    guard let subscription = await ensureStarted() else { return }
+    guard let subscription = await ensureStarted() else {
+      handOff(kind: "fix", fix: fix, battery: battery)
+      return
+    }
     do {
       let outcome = try await subscription.ingestFix(
         subscriptionId: Self.subscriptionId,
@@ -616,7 +658,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// so it has to be uniform whether or not the phone is moving — a series that stops when its
   /// owner sits still is a series that leaks when its owner sits still.
   private func heartbeat(battery: BatteryState) async {
-    guard let subscription = await ensureStarted() else { return }
+    guard let subscription = await ensureStarted() else {
+      handOff(kind: "heartbeat", fix: nil, battery: battery)
+      return
+    }
     do {
       let outcome = try await subscription.heartbeatFix(
         subscriptionId: Self.subscriptionId,

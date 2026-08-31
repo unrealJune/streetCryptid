@@ -46,6 +46,30 @@ function reportEngineFailure(stage: string, message: string): void {
  * OS for. `cadence-controller.ts` observes {@link LocationEngine.onState} to re-arm.
  */
 
+/**
+ * What a capture handed up by the native runtime should do to the engine.
+ *
+ * Split out from the service so the decision can be tested without standing up a background
+ * session. It is small but it is not obvious: the two kinds go to different entry points, and the
+ * position that comes back is the one the gate ACCEPTED, never the one that arrived. The gate
+ * exists because a phone sometimes reports a position kilometres away, and rendering that before
+ * discarding it throws the user's own marker across town for a frame.
+ *
+ * Returns the fix the caller should show as our own position, or `null` when this capture did not
+ * establish one (a heartbeat, or a fix the gate refused with nothing accepted before it).
+ */
+export async function routeNativeCapture(
+  event: { kind: 'fix' | 'heartbeat'; fix?: LocationFix },
+  engine: Pick<LocationEngine, 'ingest' | 'heartbeat' | 'getState'>
+): Promise<LocationFix | null> {
+  if (event.kind === 'heartbeat' || !event.fix) {
+    await engine.heartbeat();
+    return null;
+  }
+  await engine.ingest(event.fix);
+  return engine.getState().lastAcceptedFix;
+}
+
 /** What the engine needs from the native pipeline. One call per entry point, nothing else. */
 export interface NativeDrain {
   /**

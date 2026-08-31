@@ -411,11 +411,33 @@ export interface BumpResolution {
 }
 
 /** Event map for the native module's EventEmitter. */
+
+/**
+ * A capture handed up by the native background runtime because it could not own the node itself.
+ *
+ * The writer claim in `durable.rs` is process-wide, so while the app is mounted it holds the stores
+ * and the native runtime — same process, same storage roots — is locked out of them. It captures
+ * anyway and sends this; the mounted runtime is the only thing that can publish it. `kind` is
+ * `fix` for a real position and `heartbeat` for a tick from the parked coarse stream, which carries
+ * no position worth gating.
+ */
+export interface OnNativeFixEvent {
+  kind: 'fix' | 'heartbeat';
+  /** Why the native runtime was executing: `movement` | `periodic` | `geofence_exit` | ... */
+  reason: string;
+  /** The runtime's motion state at capture: `moving` | `stopped`. */
+  state: string;
+  battery: { level: number; charging: boolean; lowPower: boolean };
+  /** Absent when `kind` is `heartbeat`. */
+  fix?: NativeLocationFix;
+}
+
 export type IrohLocationEvents = {
   onFix: (event: OnFixEvent) => void;
   onOpaque: (event: OnOpaqueEvent) => void;
   onStatus: (event: OnStatusEvent) => void;
   onSync: (event: OnSyncEvent) => void;
+  onNativeFix: (event: OnNativeFixEvent) => void;
 };
 
 /** The callable surface of the native module. */
