@@ -281,14 +281,42 @@ async fn a_rejected_fix_still_lets_the_heartbeat_republish() {
 }
 
 #[tokio::test]
-async fn a_rejected_first_fix_publishes_nothing_at_all() {
-    // Nothing to republish, so there is no slot to fill. The next acceptable fix anchors the grid.
+async fn a_coarse_first_fix_still_anchors_the_grid() {
+    // Regression, 2026-08-30: an iPhone at home held `Always`, had the runtime running, and
+    // published nothing for 88 minutes. Indoors every fix it saw was Wi-Fi-derived and past
+    // `max_accuracy_m`, and the old gate needed a PRIOR acceptance before it would relax — so the
+    // very first fix faced the strictest test the device would ever apply, nothing ever anchored,
+    // and `heartbeat` had no position to repeat for the rest of the evening.
+    //
+    // A device with no position has nothing for the strict tests to protect. Anchoring coarsely and
+    // saying so beats not anchoring at all: the accuracy rides along in the payload.
     let h = Harness::new();
     let now = INTERVAL * 10;
 
     let out = h
         .engine()
         .ingest(fix(now, 9_000.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert!(out.accepted, "the first fix anchors however coarse it is");
+    assert_eq!(out.enqueued, 1);
+    assert_eq!(out.published, 1);
+}
+
+#[tokio::test]
+async fn a_rejected_first_fix_publishes_nothing_at_all() {
+    // Nothing to republish, so there is no slot to fill. The next acceptable fix anchors the grid.
+    //
+    // Staleness is the one refusal a cold start still makes — the escape above relaxes accuracy and
+    // speed, never age, or a cold launch would anchor on whatever the OS had cached from yesterday
+    // and republish it as current.
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+
+    let out = h
+        .engine()
+        .ingest(fix(now - 11 * MINUTE, 10.0), healthy_battery(), INTERVAL, now)
         .await
         .unwrap();
 

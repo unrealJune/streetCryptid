@@ -118,10 +118,21 @@ pub fn assess_fix(
     }
 
     // Nothing has passed in a long time — stop being fussy rather than let the trail freeze.
-    if let Some(at) = last_accepted_at {
-        if now.saturating_sub(at) >= config.accept_anything_after_ms {
-            return None;
-        }
+    //
+    // `None` takes the escape too, and that is the whole point rather than a shortcut. A device
+    // that has never accepted anything is not "0 ms starved", it is infinitely starved: there is no
+    // position to fall back on, so the strict tests have nothing to protect. Requiring a prior
+    // acceptance to relax them made the first fix the strictest one a device would ever face, and
+    // an indoor phone whose Wi-Fi fixes all land past `max_accuracy_m` could never anchor the grid
+    // at all — `last_known_fix` stays `None`, `heartbeat` returns 0 forever, and the phone looks
+    // armed and healthy while publishing nothing. That is exactly how an iPhone spent 2026-08-30
+    // sitting at home with the runtime running and 88 minutes since its last publish.
+    //
+    // Staleness is still checked above, so this cannot anchor on a long-dead cached fix, and the
+    // accuracy rides along in the payload — a coarse anchor is honest, a missing one is not.
+    match last_accepted_at {
+        Some(at) if now.saturating_sub(at) < config.accept_anything_after_ms => {}
+        _ => return None,
     }
 
     // `accuracy_m <= 0` means the provider gave us no radius, not a perfect one. Skip the test we

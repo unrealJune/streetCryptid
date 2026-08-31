@@ -37,10 +37,17 @@ fn cfg() -> FixQualityConfig {
     FixQualityConfig::default()
 }
 
+/// A device that has already anchored recently, so the strict tests are the ones being exercised
+/// rather than the starvation escape. Anything passing `None` here is testing cold start instead —
+/// see `anchors_on_the_first_fix_however_coarse`.
+fn anchored(now: u64) -> Option<u64> {
+    Some(now.saturating_sub(MINUTE))
+}
+
 #[test]
 fn accepts_an_ordinary_urban_fix() {
     assert_eq!(
-        assess_fix(&at(1_000, 30.0), None, None, 1_500, &cfg()),
+        assess_fix(&at(1_000, 30.0), None, anchored(1_500), 1_500, &cfg()),
         None
     );
 }
@@ -48,8 +55,35 @@ fn accepts_an_ordinary_urban_fix() {
 #[test]
 fn refuses_a_tower_derived_fix() {
     assert_eq!(
-        assess_fix(&at(1_000, 2_000.0), None, None, 1_500, &cfg()),
+        assess_fix(&at(1_000, 2_000.0), None, anchored(1_500), 1_500, &cfg()),
         Some(FixRejection::Inaccurate)
+    );
+}
+
+#[test]
+fn anchors_on_the_first_fix_however_coarse() {
+    // Regression, 2026-08-30: an iPhone sat at home for 88 minutes with the background runtime
+    // running and published nothing. Indoors every Wi-Fi fix landed past `max_accuracy_m`, and
+    // because `accept_anything_after_ms` needed a PRIOR acceptance to relax anything, the first
+    // fix faced the strictest test the device would ever apply. Nothing anchored, so
+    // `last_known_fix` stayed `None` and `heartbeat` returned 0 forever.
+    //
+    // A device that has accepted nothing is infinitely starved, not zero-starved: there is no
+    // position for the strict tests to protect.
+    assert_eq!(
+        assess_fix(&at(1_000, 2_000.0), None, None, 1_500, &cfg()),
+        None
+    );
+}
+
+#[test]
+fn cold_start_still_refuses_a_stale_fix() {
+    // The escape relaxes accuracy and speed, never age — otherwise a cold launch would anchor the
+    // grid on whatever Core Location had cached from yesterday and republish it as current.
+    let now = 60 * MINUTE;
+    assert_eq!(
+        assess_fix(&at(now - 11 * MINUTE, 10.0), None, None, now, &cfg()),
+        Some(FixRejection::Stale)
     );
 }
 
@@ -58,7 +92,10 @@ fn treats_a_missing_accuracy_radius_as_untestable_not_perfect() {
     // `accuracy_m <= 0` means the provider gave us no radius. Skipping the test we cannot run is
     // not the same as passing it, but it must not reject either — that would drop every fix from
     // a provider that omits the field.
-    assert_eq!(assess_fix(&at(1_000, 0.0), None, None, 1_500, &cfg()), None);
+    assert_eq!(
+        assess_fix(&at(1_000, 0.0), None, anchored(1_500), 1_500, &cfg()),
+        None
+    );
 }
 
 #[test]
