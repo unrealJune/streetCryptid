@@ -254,6 +254,11 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   // confidence gate, so the wire behaviour is unchanged. It runs only while the app is actually
   // foregrounded — a second CLLocationManager is the cost of real-time, and the OS location task
   // already covers the background case.
+  //
+  // `permission-denied` is included deliberately: it is also what a WHILE-IN-USE grant reports
+  // (`startBackground` returning `foreground` access), and that is precisely the device where the
+  // published series is sparsest and a live foreground dot matters most. A genuine denial rejects
+  // the watch once per foreground entry — not per render, since the arm is lifecycle-driven.
   useEffect(() => {
     if (locationStatus !== 'running' && locationStatus !== 'permission-denied') return;
     let active = true;
