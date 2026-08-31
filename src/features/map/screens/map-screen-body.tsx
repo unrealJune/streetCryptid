@@ -69,6 +69,7 @@ export default function MapScreenBody() {
     friends,
     locationStatus,
     snapshot,
+    locateNow,
     pairFromInput,
     toggleShare,
     removeFriend,
@@ -208,13 +209,46 @@ export default function MapScreenBody() {
     [toggleSelection]
   );
   const selectSelf = useCallback(() => toggleSelection(SELF_AUTHOR), [toggleSelection]);
+  // Ask where the user is as soon as the map exists, so their own marker and the opening camera
+  // stop waiting on the sharing pipeline too — `initialCenter` and `selfLocation` below are gated
+  // on `hasLiveSelfFix`, which nothing but a publish used to set. `prompt: false` keeps this
+  // silent when permission has not been granted yet: the OS dialog must never precede the in-app
+  // disclosure screen, and the locate button is the user-initiated path that may ask.
+  useEffect(() => {
+    void locateNow({ prompt: false });
+  }, [locateNow]);
+
+  const [locating, setLocating] = useState(false);
+  /**
+   * Take the user to where they are. Always — this is a map control, not a sharing control.
+   *
+   * It used to be disabled until `hasLiveSelfFix`, which is only set by something reaching the
+   * PUBLISH path, so a freshly installed and correctly paired app sat with the button greyed out
+   * because it had never sealed a fix. "Where am I" and "have I told anyone where I am" are
+   * different questions, and only the second one needs the pipeline.
+   *
+   * Centres on what we already know first, so a press with a known position is instant, then asks
+   * the OS and re-centres if the answer moved. From cold there is nothing to show first and the
+   * read is the whole of it, which is what the spinner is for.
+   */
   const locateSelf = useCallback(() => {
-    if (!selfFix) return;
-    setLocateTarget((current) => ({
-      requestId: (current?.requestId ?? 0) + 1,
-      location: { lat: selfFix.lat, lon: selfFix.lon },
-    }));
-  }, [selfFix]);
+    if (selfFix) {
+      setLocateTarget((current) => ({
+        requestId: (current?.requestId ?? 0) + 1,
+        location: { lat: selfFix.lat, lon: selfFix.lon },
+      }));
+    }
+    setLocating(true);
+    void locateNow()
+      .then((fix) => {
+        if (!fix) return;
+        setLocateTarget((current) => ({
+          requestId: (current?.requestId ?? 0) + 1,
+          location: { lat: fix.lat, lon: fix.lon },
+        }));
+      })
+      .finally(() => setLocating(false));
+  }, [selfFix, locateNow]);
   // The island's segmented bar is the app's only navigation. Either tab also
   // dismisses whatever trace was drilled into, so the bar can never look dead —
   // and so tapping the tab you are already "on" is a way back out of a trace.
@@ -372,11 +406,7 @@ export default function MapScreenBody() {
       >
         <View pointerEvents="box-none" style={styles.controls}>
           <MapLayersControl layers={layers} onChange={setLayer} theme={theme} />
-          <LocateMeControl
-            disabled={!hasLiveSelfFix || !selfFix}
-            onPress={locateSelf}
-            theme={theme}
-          />
+          <LocateMeControl busy={locating} onPress={locateSelf} theme={theme} />
         </View>
         <MapIsland active={islandTab} onSelect={selectIslandTab} signal={selfSignal} theme={theme}>
           {rosterOpen ? (

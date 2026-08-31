@@ -16,30 +16,47 @@ describe('LocateMeControl', () => {
     act(() => renderer?.unmount());
   });
 
-  it('invokes the locate action when enabled', () => {
+  it('invokes the locate action', () => {
     const onPress = jest.fn();
     act(() => {
       renderer = create(
-        <LocateMeControl disabled={false} onPress={onPress} theme={CryptidThemes.daybreak} />
+        <LocateMeControl busy={false} onPress={onPress} theme={CryptidThemes.daybreak} />
       );
     });
 
     const button = renderer.root.findByProps({ accessibilityLabel: 'Locate me' });
-    expect(button.props.accessibilityState).toEqual({ disabled: false });
-
     act(() => button.props.onPress());
     expect(onPress).toHaveBeenCalledTimes(1);
   });
 
-  it('is disabled when no location is available', () => {
+  it('is pressable with no position yet, because the press is what goes and gets one', () => {
+    // Regression, 2026-08-30: this was disabled until `hasLiveSelfFix`, which is only set by
+    // something reaching the PUBLISH path — so a freshly installed, correctly paired app presented
+    // a dead button while perfectly able to answer "where am I" in a few hundred milliseconds.
+    // "Where am I" and "have I told anyone where I am" are different questions.
+    const onPress = jest.fn();
     act(() => {
       renderer = create(
-        <LocateMeControl disabled onPress={jest.fn()} theme={CryptidThemes.daybreak} />
+        <LocateMeControl busy={false} onPress={onPress} theme={CryptidThemes.daybreak} />
       );
     });
 
     const button = renderer.root.findByProps({ accessibilityLabel: 'Locate me' });
+    expect(button.props.disabled).toBe(false);
+    act(() => button.props.onPress());
+    expect(onPress).toHaveBeenCalled();
+  });
+
+  it('does not re-fire while a read is already in flight', () => {
+    const onPress = jest.fn();
+    act(() => {
+      renderer = create(<LocateMeControl busy onPress={onPress} theme={CryptidThemes.daybreak} />);
+    });
+
+    const button = renderer.root.findByProps({ accessibilityLabel: 'Locate me' });
     expect(button.props.disabled).toBe(true);
-    expect(button.props.accessibilityState).toEqual({ disabled: true });
+    // `busy`, not `disabled`: the control is working, not unavailable, and a screen reader should
+    // say so.
+    expect(button.props.accessibilityState).toEqual({ busy: true });
   });
 });
