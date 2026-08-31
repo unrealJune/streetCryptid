@@ -99,28 +99,73 @@ internal object NativeBackgroundRuntime {
     }
 
   /**
+   * What happened to one captured location, in the three ways it can differ for the caller.
+   *
+   * Three cases and not a nullable outcome, because two of them used to be the same `null` and the
+   * difference is the whole bug: "the app owns the node" needs the fix handed to the app, while
+   * "the relay blinked" needs it left in the native queue for the next wake. Collapsing them meant
+   * every capture taken while the app was alive went on the floor.
+   */
+  sealed interface Capture {
+    /** The fix went through the native pipeline here. */
+    data class Ingested(val outcome: IngestOutcome) : Capture
+
+    /**
+     * The mounted app holds the process-wide store claim, so this runtime cannot publish and the
+     * app is the only thing that can. Hand the fix up rather than dropping it.
+     */
+    data object AppOwnsNode : Capture
+
+    /** No identity yet, or the ingest threw. The fix stays queued; the next wake retries. */
+    data object Unavailable : Capture
+  }
+
+  /**
    * Take one captured location as far towards the wire as this moment allows.
    *
-   * Returns null when there is no runtime to ingest into, which the caller treats as "try to start
-   * one next time" rather than as a lost fix — the OS will deliver another.
+   * [Capture.AppOwnsNode] is the ordinary outcome whenever the app is open — see the class docs —
+   * and it is emphatically not "nothing to do": the caller must pass the fix to the app, because
+   * the JS pipeline that used to cover the mounted case no longer exists.
    */
   suspend fun ingest(
     context: Context,
     fix: LocationFix,
     battery: BatteryState,
     intervalMs: ULong,
-  ): IngestOutcome? {
-    if (!ensureStarted(context)) return null
-    val sub = lock.withLock { subscription } ?: return null
+  ): Capture {
+    if (!ensureStarted(context)) {
+      // `ensureStarted` returns false both for the store claim and for a device with no identity.
+      // Only the first has somewhere to hand the fix to: with no identity there is no app node
+      // either, so there is nothing that could publish it.
+      return if (hasIdentity(context)) Capture.AppOwnsNode else Capture.Unavailable
+    }
+    val sub = lock.withLock { subscription } ?: return Capture.Unavailable
     return try {
-      sub.ingestFix(SUBSCRIPTION_ID, fix, battery, intervalMs, System.currentTimeMillis().toULong())
+      Capture.Ingested(
+        sub.ingestFix(
+          SUBSCRIPTION_ID,
+          fix,
+          battery,
+          intervalMs,
+          System.currentTimeMillis().toULong(),
+        )
+      )
     } catch (e: Exception) {
       // The fix stays in the native outbox, so the next wake retries it. Failing loudly here would
       // take down a foreground service over a transient relay error.
       Log.w(TAG, "ingest failed; the fix stays queued", e)
-      null
+      Capture.Unavailable
     }
   }
+
+  /** Whether this device has an identity at all — the one case a handoff cannot help. */
+  private fun hasIdentity(context: Context): Boolean =
+    try {
+      KeystoreDeviceSecrets(context.applicationContext).identitySecret() != null
+    } catch (e: Exception) {
+      Log.w(TAG, "could not read the device identity", e)
+      false
+    }
 
   /** Release the node and, with it, every directory claim, so the app can take them back. */
   suspend fun stop() = lock.withLock { stopLocked() }

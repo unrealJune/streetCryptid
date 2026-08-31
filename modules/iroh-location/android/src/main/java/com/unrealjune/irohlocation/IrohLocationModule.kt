@@ -13,6 +13,7 @@ import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
+import java.lang.ref.WeakReference
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -494,7 +495,10 @@ class IrohLocationModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("IrohLocation")
-    Events("onFix", "onOpaque", "onStatus", "onSync")
+    // `onNativeFix` is the mounted-app handoff: the foreground service captures, but the store
+    // claim is process-wide, so while the app is alive the service cannot own the node and hands
+    // the capture here instead. See `IrohLocationModule.handOffCapture`.
+    Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix")
 
     OnCreate {
       val context = checkNotNull(
@@ -615,6 +619,9 @@ class IrohLocationModule : Module() {
     /// on and off; nothing else should, because a service the user did not ask for is a persistent
     /// notification they cannot explain.
     Function("startNativeBackground") {
+      // Take the handoff BEFORE starting the service, or the first captures of a mounted session
+      // are sent to nobody — and on a fresh install those are the only captures there are.
+      sink = WeakReference(this@IrohLocationModule)
       BackgroundLocationService.start(
         checkNotNull(appContext.reactContext?.applicationContext) {
           "IrohLocation needs an application context to start the background service"
@@ -639,6 +646,7 @@ class IrohLocationModule : Module() {
     Function("nativeBackgroundRunning") { BackgroundLocationService.isRunning() }
 
     Function("stopNativeBackground") {
+      sink = null
       BackgroundLocationService.stop(
         checkNotNull(appContext.reactContext?.applicationContext) {
           "IrohLocation needs an application context to stop the background service"
@@ -1135,5 +1143,62 @@ class IrohLocationModule : Module() {
 
     AsyncFunction("bleHasScanHint") Coroutine
       { endpointIdHex: String -> node?.bleHasScanHint(endpointIdHex.hexToBytes()) ?: false }
+  }
+
+  companion object {
+    /**
+     * Where the foreground service sends a capture it could not publish itself.
+     *
+     * The store claim in `durable.rs` is **process-wide**, and the service runs in the app process
+     * using the same storage roots. So whenever the app is alive it has already claimed the stores
+     * and `NativeBackgroundRuntime.ensureStarted` returns false there — always, not occasionally.
+     * That was survivable while a JS `watchPositionAsync` covered the mounted case; once capture
+     * moved into Rust and that watcher was deleted, it meant an app that was merely *running* —
+     * foreground or backgrounded with the service up — captured fixes and dropped every one. A
+     * Pixel spent 2026-08-31 in that state: service healthy, `location_running=true`, permissions
+     * granted, and `last_fix_age_ms` climbing past fifteen hours.
+     *
+     * Handing the fix to JS is not a fallback path, it is the mounted path. The mounted runtime
+     * owns the node, so it is the only thing that *can* publish; the service is the sensor. This is
+     * the Android counterpart of `BackgroundLocationRuntime.eventSink` on iOS, and it emits the
+     * same `onNativeFix` payload so one JS handler serves both platforms.
+     *
+     * Weak so a torn-down module cannot be held alive by a service that outlives it; null when
+     * sharing is off, which is the one time there is legitimately nobody to tell.
+     */
+    private var sink: WeakReference<IrohLocationModule>? = null
+
+    /**
+     * Hand one capture to the mounted app. Returns whether anything was listening.
+     *
+     * `false` means the fix is genuinely lost rather than queued, which is worth logging at the
+     * call site: it is the signature of the bug this exists to prevent.
+     */
+    fun handOffCapture(fix: LocationFix, battery: BatteryState, reason: String): Boolean {
+      val module = sink?.get() ?: return false
+      module.sendEvent(
+        "onNativeFix",
+        mapOf(
+          "kind" to "fix",
+          "reason" to reason,
+          "state" to "moving",
+          "battery" to
+            mapOf(
+              "level" to battery.level,
+              "charging" to battery.charging,
+              "lowPower" to battery.lowPower,
+            ),
+          "fix" to
+            mapOf(
+              "lat" to fix.lat,
+              "lon" to fix.lon,
+              "accuracyM" to fix.accuracyM,
+              "headingDeg" to fix.headingDeg,
+              "ts" to fix.ts.toLong(),
+            ),
+        ),
+      )
+      return true
+    }
   }
 }

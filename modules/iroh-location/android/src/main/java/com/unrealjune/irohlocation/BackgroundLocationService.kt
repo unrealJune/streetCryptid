@@ -127,22 +127,36 @@ class BackgroundLocationService : Service() {
   }
 
   private suspend fun publish(location: Location) {
-    val outcome =
-      NativeBackgroundRuntime.ingest(
-        applicationContext,
-        location.toFix(),
-        readBattery(),
-        slotIntervalMs,
-      ) ?: return
-    // One line per wake that did something, so a quiet phone and a broken one look different in
-    // logcat. The equivalent spans reach the collector from the Rust side.
-    if (outcome.enqueued > 0u || outcome.published > 0u) {
-      Log.i(
-        TAG,
-        "wake: enqueued=${outcome.enqueued} published=${outcome.published} " +
-          "pending=${outcome.pending} skipped=${outcome.slotsSkipped} " +
-          "dropped=${outcome.overflowDropped} suspended=${outcome.suspended}",
-      )
+    val fix = location.toFix()
+    val battery = readBattery()
+    when (val capture =
+      NativeBackgroundRuntime.ingest(applicationContext, fix, battery, slotIntervalMs)
+    ) {
+      is NativeBackgroundRuntime.Capture.Ingested -> {
+        val outcome = capture.outcome
+        // One line per wake that did something, so a quiet phone and a broken one look different
+        // in logcat. The equivalent spans reach the collector from the Rust side.
+        if (outcome.enqueued > 0u || outcome.published > 0u) {
+          Log.i(
+            TAG,
+            "wake: enqueued=${outcome.enqueued} published=${outcome.published} " +
+              "pending=${outcome.pending} skipped=${outcome.slotsSkipped} " +
+              "dropped=${outcome.overflowDropped} suspended=${outcome.suspended}",
+          )
+        }
+      }
+      // The ordinary outcome whenever the app is alive: the store claim is process-wide, so the
+      // mounted runtime owns the node and is the only thing that can publish this. Handing it over
+      // IS the mounted path — dropping here is what left a Pixel silent for fifteen hours with a
+      // perfectly healthy service running.
+      NativeBackgroundRuntime.Capture.AppOwnsNode ->
+        if (!IrohLocationModule.handOffCapture(fix, battery, reason = "movement")) {
+          // Sharing is off, or the module was torn down without stopping the service. Unlike the
+          // queued cases this fix is simply gone, so say so rather than letting it look routine.
+          Log.w(TAG, "capture dropped: the app owns the node but nothing is listening for handoff")
+        }
+      // No identity, or the ingest threw. The fix stays in the native outbox for the next wake.
+      NativeBackgroundRuntime.Capture.Unavailable -> Unit
     }
   }
 
