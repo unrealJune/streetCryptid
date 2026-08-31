@@ -14,6 +14,7 @@ import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile'
 import { runDevCommand as runDevCommandImpl } from '@/features/dev/commands/dev-commands';
 import { buildFriendPresence, type FriendPresence } from '@/features/social/core/presence';
 import type { IncomingFix, LocationFix } from '@/features/social/core/types';
+import { createAppLifecycleController } from '@/features/social/net/background/lifecycle';
 import { type TrailPoint } from '@/features/social/net/background/trail-store';
 import {
   BLUETOOTH_OFF_MESSAGE,
@@ -244,6 +245,61 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     });
     return () => subscription.remove();
   }, [locationStatus, startLocation]);
+
+  // Our OWN dot is a display concern, not a publishing one. The engine only surfaces fixes it
+  // ACCEPTED for publication, which lands on the share grid (minutes apart) — so a marker fed from
+  // that alone shows where we last PUSHED from, not where we are, and a cold start opens on a
+  // position that can be an interval old. Friends necessarily see the published series; we do not
+  // have to. This watch is display-only: it never ingests, never publishes, and never touches the
+  // confidence gate, so the wire behaviour is unchanged. It runs only while the app is actually
+  // foregrounded — a second CLLocationManager is the cost of real-time, and the OS location task
+  // already covers the background case.
+  useEffect(() => {
+    if (locationStatus !== 'running' && locationStatus !== 'permission-denied') return;
+    let active = true;
+    let stopWatch: (() => void) | null = null;
+    let starting = false;
+
+    const stop = (): void => {
+      stopWatch?.();
+      stopWatch = null;
+    };
+    const start = (): void => {
+      if (!active || starting || stopWatch) return;
+      starting = true;
+      const provider =
+        foregroundLocationProviderRef.current ??
+        (foregroundLocationProviderRef.current = new ExpoLocationProvider());
+      void provider
+        .watch((fix) => {
+          if (!active) return;
+          setLiveSelfFix((current) => (!current || fix.ts >= current.ts ? fix : current));
+        })
+        .then((off) => {
+          starting = false;
+          // Backgrounded (or unmounted) while the watch was being armed — drop it immediately
+          // rather than leaving an orphaned subscription running.
+          if (active && AppState.currentState === 'active') stopWatch = off;
+          else off();
+        })
+        .catch((watchError: unknown) => {
+          starting = false;
+          // Foreground permission missing is the ordinary case here; the banner already says so.
+          console.warn(`[location] live self watch unavailable: ${errorMessage(watchError)}`);
+        });
+    };
+
+    const lifecycle = createAppLifecycleController({
+      onForeground: start,
+      onBackground: stop,
+    }).start();
+
+    return () => {
+      active = false;
+      lifecycle();
+      stop();
+    };
+  }, [locationStatus]);
 
   // Fires once both the node is ready and the user has accepted the in-app disclosure — whichever
   // resolves last. Covers a returning user (disclosure already 'accepted' from a prior session, node
