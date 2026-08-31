@@ -222,6 +222,25 @@ export declare class IrohLocationNativeModule
     stashBaseUrl: string | null,
     stashPsk: string | null
   ): Promise<void>;
+  /**
+   * When the native drain last accepted a fix, published, and pushed (ms since epoch, or null).
+   *
+   * `device.health` turns these into `last_*_age_ms`. They are read from native rather than from
+   * the JS watermark row because the drain moved into Rust and the row is only written by callers
+   * that path bypasses: on 2026-08-31 a phone that had published 37 envelopes that afternoon
+   * reported a publish age of 672 minutes and read as eleven hours dead.
+   *
+   * Three separate answers on purpose — accepted-but-not-published is a gate or battery decision,
+   * published-but-not-pushed is a phone talking to its own replica, and one "last seen" number
+   * would hide both.
+   *
+   * OPTIONAL: absent on binaries built before the native push path.
+   */
+  publishWatermarks?(): Promise<{
+    lastAcceptedAt: number | null;
+    lastPublishedAt: number | null;
+    lastPushedAt: number | null;
+  }>;
   /** The last sequence number handed out, without advancing. OPTIONAL, as {@link nextSeq}. */
   currentSeq?(): Promise<number>;
   /**

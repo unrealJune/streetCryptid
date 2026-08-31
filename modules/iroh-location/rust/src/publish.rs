@@ -243,7 +243,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // half-way, and re-running these slots on the next wake would double-publish them.
         self.gate.set(state);
 
-        let published = self.drain().await?;
+        let published = self.drain(now_ms).await?;
         Ok(self.outcome(
             rejection,
             plan.due,
@@ -295,7 +295,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             self.gate.set(state);
         }
 
-        let published = self.drain().await?;
+        let published = self.drain(now_ms).await?;
         Ok(self.outcome(
             None,
             plan.due,
@@ -315,7 +315,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
     ///
     /// Returns how many reached the wire. A send failure is **not** an error here — a wake that
     /// published three of five envelopes did useful work, and the remainder is still queued.
-    pub async fn drain(&self) -> Result<u32, PublishError> {
+    pub async fn drain(&self, now_ms: u64) -> Result<u32, PublishError> {
         let recipients = self.recipients.get();
         let watchers = self.recipients.watchers();
         let mut published = 0u32;
@@ -358,9 +358,24 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // push means the next one carries them, whereas propagating would make a drain that did
         // reach the wire look like a drain that did not, and retain fixes that already went out.
         if published > 0 {
-            let _ = self.sink.flush().await;
+            // Stamp before the push, not after: these two answer different questions, and the gap
+            // between them is the diagnosis. A phone that publishes and cannot push is a phone
+            // whose fixes are sitting in its own replica — which read as perfect health for a whole
+            // day on 2026-08-31, because nothing recorded either moment natively.
+            self.stamp(|state| state.last_published_at = Some(now_ms));
+            if self.sink.flush().await.is_ok() {
+                self.stamp(|state| state.last_pushed_at = Some(now_ms));
+            }
         }
         Ok(published)
+    }
+
+    /// Read-modify-write one field of the gate state. The store is last-write-wins and every field
+    /// is a cache, so a lost stamp costs a stale age on one health record and nothing else.
+    fn stamp(&self, apply: impl FnOnce(&mut GateState)) {
+        let mut state = self.gate.get();
+        apply(&mut state);
+        self.gate.set(state);
     }
 
     fn outcome(

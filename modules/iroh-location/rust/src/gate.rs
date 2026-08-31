@@ -210,6 +210,23 @@ pub struct GateState {
     pub last_accepted_at: Option<u64>,
     /// Index of the last wall-clock slot we put an envelope on the wire for.
     pub last_published_slot: Option<u64>,
+    /// When a drain last put at least one envelope on the wire (ms since epoch).
+    ///
+    /// A *slot* index is not a time: it says which grid cell we covered, not when we managed it,
+    /// and it does not move at all on a wake that published nothing. `device.health` needs "how
+    /// long has this phone been failing to publish", which only a timestamp answers.
+    ///
+    /// It lives here rather than in the JS watermark row because the native drain is now the only
+    /// publish path, and the JS row is only written by callers that path bypasses — so
+    /// `last_publish_age_ms` read 672 minutes on 2026-08-31 for a phone that had published 37
+    /// envelopes that afternoon.
+    pub last_published_at: Option<u64>,
+    /// When a push last completed and the batch actually left the device (ms since epoch).
+    ///
+    /// Distinct from [`Self::last_published_at`] on purpose: publishing writes the local replica,
+    /// and the gap between these two is exactly the failure that made a phone look healthy while
+    /// delivering nothing.
+    pub last_pushed_at: Option<u64>,
 }
 
 /// Durable home for [`GateState`], next to the outbox it feeds.

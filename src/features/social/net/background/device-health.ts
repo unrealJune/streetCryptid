@@ -13,7 +13,36 @@ import { createPersistentKV, loadPool, loadRatchetDrops, loadSharingEnabled } fr
 import { getStorageBackend, getStorageDegradationCount } from '../storage-health';
 import { BACKGROUND_REFRESH_TASK } from './refresh-task';
 import { loadReviveFenceArmedAt, REVIVE_FENCE_TASK } from './revive-task';
-import { loadWatermarks, stampWatermark, watermarkAges } from './watermarks';
+import { loadWatermarks, stampWatermark, watermarkAges, type Watermarks } from './watermarks';
+
+/**
+ * The three watermarks the native drain owns, read from where they actually happen.
+ *
+ * `fix`, `publish` and `push` used to be stamped by `location-sharing.ts` on the JS publish path.
+ * That path was replaced by the Rust drain, and nothing took the stamping over — so the row kept
+ * whatever it last held and `device.health` reported it as fact. On 2026-08-31 an iPhone showed a
+ * publish age of 672 minutes through an afternoon in which it published 37 envelopes.
+ *
+ * Returns only the kinds native actually answered for, so a build whose binary predates the export
+ * falls through to the JS row rather than losing the attributes altogether. A `null` from native
+ * means "this has never happened", which `watermarkAges` renders as an absent attribute — a
+ * different diagnosis from "happened a long time ago", and deliberately not collapsed into one.
+ */
+async function nativeWatermarks(): Promise<Watermarks> {
+  try {
+    const read = tryGetIrohLocation()?.publishWatermarks;
+    if (!read) return {};
+    const native = await read();
+    const marks: Watermarks = {};
+    if (typeof native.lastAcceptedAt === 'number') marks.fix = native.lastAcceptedAt;
+    if (typeof native.lastPublishedAt === 'number') marks.publish = native.lastPublishedAt;
+    if (typeof native.lastPushedAt === 'number') marks.push = native.lastPushedAt;
+    return marks;
+  } catch {
+    // A node that has never started has no gate state to read. Omitted rather than guessed.
+    return {};
+  }
+}
 
 /**
  * `device.health` — a periodic assertion that this phone is alive, and a record of what the OS
@@ -284,6 +313,11 @@ export async function recordDeviceHealth(
       intentAttributes(),
       getSystemSnapshot(),
     ]);
+    // Native truth wins for the three the drain owns. The JS row is still written — by the refresh
+    // task, the wake path and this function — but nothing writes its `fix`/`publish`/`push` stamps
+    // any more, because the callers that did were replaced by the Rust drain. Reading the row
+    // alone reported a phone that had published 37 envelopes that afternoon as eleven hours dead.
+    const marksWithNative = { ...marks, ...(await nativeWatermarks()) };
 
     getTelemetry()
       .startSpan('device.health', {
@@ -295,7 +329,7 @@ export async function recordDeviceHealth(
           ...permissions,
           ...tasks,
           ...intent,
-          ...watermarkAges(marks, now),
+          ...watermarkAges(marksWithNative, now),
         },
       })
       .end();

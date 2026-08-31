@@ -680,6 +680,18 @@ class IrohLocationModule : Module() {
         Unit
       }
 
+    /// When the native drain last accepted, published and pushed. `device.health` reports these as
+    /// ages; the JS watermark row only ever saw the JS publish path, which the drain replaced.
+    AsyncFunction("publishWatermarks") Coroutine
+      { ->
+        val w = requireNode().publishWatermarks()
+        mapOf(
+          "lastAcceptedAt" to w.lastAcceptedAt?.toLong(),
+          "lastPublishedAt" to w.lastPublishedAt?.toLong(),
+          "lastPushedAt" to w.lastPushedAt?.toLong(),
+        )
+      }
+
     AsyncFunction("outboxPending") Coroutine
       { -> requireNode().outboxPending().toDouble() }
 

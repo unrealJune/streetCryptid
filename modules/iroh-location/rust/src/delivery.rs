@@ -83,6 +83,21 @@ impl DeliveryConfig {
     }
 }
 
+/// When the native drain last managed each step, in ms since epoch.
+///
+/// Three separate answers because the gaps between them are the whole diagnosis: accepted but not
+/// published is a gate or battery decision, published but not pushed is a phone talking to its own
+/// replica, and neither is visible from a single "last seen" number.
+#[derive(Debug, Clone, Default, PartialEq, Eq, uniffi::Record)]
+pub struct PublishWatermarks {
+    /// A fix passed the confidence gate and became this device's position.
+    pub last_accepted_at: Option<u64>,
+    /// A drain put at least one envelope on the wire.
+    pub last_published_at: Option<u64>,
+    /// A push completed, so those envelopes actually left the device.
+    pub last_pushed_at: Option<u64>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DeliveryError {
     #[error("delivery config io: {0}")]

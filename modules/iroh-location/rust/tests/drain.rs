@@ -803,3 +803,55 @@ async fn a_failed_push_does_not_retain_fixes_that_already_went_out() {
     );
     assert_eq!(*h.sink.flushes.lock().unwrap(), 1);
 }
+
+#[tokio::test]
+async fn a_drain_records_when_it_published_and_when_it_pushed() {
+    // `device.health` derives "how long has this phone been failing to publish" from these. They
+    // used to be stamped only by the JS publish path, which the native drain replaced — so on
+    // 2026-08-31 a phone that had published 37 envelopes that afternoon reported a publish age of
+    // 672 minutes, and read as eleven hours dead.
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+
+    h.engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    let state = h.gate.get();
+    assert_eq!(state.last_published_at, Some(now));
+    assert_eq!(state.last_pushed_at, Some(now));
+}
+
+#[tokio::test]
+async fn a_push_that_failed_leaves_the_publish_stamp_standing_alone() {
+    // The gap between the two is the diagnosis: published but never pushed is a phone talking to
+    // its own replica, and collapsing them into one "last seen" would hide exactly that.
+    let h = Harness::new();
+    *h.sink.fail_flush.lock().unwrap() = true;
+    let now = INTERVAL * 10;
+
+    h.engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    let state = h.gate.get();
+    assert_eq!(state.last_published_at, Some(now));
+    assert_eq!(state.last_pushed_at, None, "nothing left the device");
+}
+
+#[tokio::test]
+async fn a_wake_that_published_nothing_moves_neither_stamp() {
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+
+    h.engine()
+        .heartbeat(healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    let state = h.gate.get();
+    assert_eq!(state.last_published_at, None);
+    assert_eq!(state.last_pushed_at, None);
+}

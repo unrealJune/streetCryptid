@@ -2545,6 +2545,21 @@ impl LocationNode {
         Ok(self.delivery_store().await?.get())
     }
 
+    /// When this device last accepted a fix, published, and pushed — as the native drain saw it.
+    ///
+    /// `device.health` used to derive all three from a JS-side watermark row, which only the JS
+    /// publish path wrote. Once the native drain became the only publish path those stamps stopped
+    /// moving, and the record began reporting a phone that was working as one that had been silent
+    /// for eleven hours. These are the same moments observed from where they actually happen.
+    pub async fn publish_watermarks(&self) -> Result<delivery::PublishWatermarks, LocationError> {
+        let state = self.gate_store().await?.get();
+        Ok(delivery::PublishWatermarks {
+            last_accepted_at: state.last_accepted_at,
+            last_published_at: state.last_published_at,
+            last_pushed_at: state.last_pushed_at,
+        })
+    }
+
     /// How many captured fixes are waiting to be sealed.
     pub async fn outbox_pending(&self) -> Result<u32, LocationError> {
         Ok(self.outbox().await?.pending())

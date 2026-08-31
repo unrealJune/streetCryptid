@@ -326,6 +326,7 @@ foreground resume. Its value is in the _mismatches_:
 | `last_wake_age_ms` much larger than the publish age                  | it is being woken and choosing not to publish — read the drop spans          |
 | `location.state=stopped` + `location.fence_registered=false`         | parked with no way out — it will not wake until something else relaunches it |
 | `location.state=moving` + a large `last_publish_age_ms`              | Core Location is delivering and nothing is anchoring — check the gate        |
+| `last_publish_age_ms` small, `last_push_age_ms` large                | publishing into its own replica and reaching nobody — the delivery targets   |
 | `location.wake_reason=periodic` and never anything else              | iOS: parked, ticking on the coarse stream. Publishing, and healthy           |
 | `location.state=stopped` + `location.anchor_distance_m` in the km    | parked, and nowhere near the anchor: the stop fence is not firing            |
 | `location.wake_reason=coarse_departure`                              | the fence missed a departure and the parked clock caught it — count these    |
@@ -336,6 +337,13 @@ on iOS). It exists because `task.location_running=true` is true of a parked phon
 one alike — on 2026-08-30 an iPhone reported exactly that while 88 minutes past its last publish,
 and no other span could separate the two. Note `auth_status`, not `authorization`: the event log
 redacts any key matching `/authorization|password|psk|secret|ticket|token/i`.
+
+`last_fix_age_ms`, `last_publish_age_ms` and `last_push_age_ms` are read from the **native** gate
+state, not from the JS watermark row. The drain moved into Rust and the row's writers went with it,
+so for a while the row kept whatever it last held and this record reported that as fact — on
+2026-08-31 an iPhone showed a publish age of 672 minutes through an afternoon in which it published
+37 envelopes. A build whose binary predates the export falls back to the row. Publish and push stay
+two separate stamps on purpose: the gap between them is a phone talking only to itself.
 
 `anchor_distance_m` and the `coarse_departure` wake reason exist because `stopped` used to have a
 single way out. On 2026-08-31 an iPhone parked at 05:10 UTC and was still parked at 14:55 with its

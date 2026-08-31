@@ -37,11 +37,28 @@ export type WatermarkKind =
    * what we asked for; this is what we got, and only the gap between them is diagnostic.
    */
   | 'refresh'
-  /** A fix passed the confidence gate and was accepted by the engine. */
+  /**
+   * A fix passed the confidence gate and was accepted.
+   *
+   * Authoritatively stamped in Rust now (`GateState.last_accepted_at`), as are `publish` and
+   * `push`: the drain moved into the native core, and these three describe moments only it sees.
+   * `device.health` overlays the native answers on top of this row — see `nativeWatermarks`.
+   * The JS stamps are kept as a fallback for a binary predating the export, not as the truth.
+   */
   | 'fix'
-  /** `publishFix` completed — the envelope was sealed and broadcast. */
+  /**
+   * A drain put at least one envelope on the wire.
+   *
+   * Native: `GateState.last_published_at`. Note this is not the same as the fixes having left the
+   * device — see `push`, and keep them apart.
+   */
   | 'publish'
-  /** `pushTrail` completed — the envelope actually left the device. */
+  /**
+   * A push completed, so the envelopes actually left the device.
+   *
+   * Native: `GateState.last_pushed_at`. The gap between this and `publish` is a phone talking to
+   * its own replica and reaching nobody, which is why they are two stamps and not one.
+   */
   | 'push'
   /** A `device.health` record was emitted. */
   | 'health';

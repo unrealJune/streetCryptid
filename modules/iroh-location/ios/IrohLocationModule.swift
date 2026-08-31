@@ -577,6 +577,19 @@ public final class IrohLocationModule: Module {
           peerTickets: peerTickets, stashBaseUrl: stashBaseUrl, stashPsk: stashPsk))
     }
 
+    // When the native drain last accepted, published and pushed. `device.health` reports these as
+    // ages; the JS watermark row only ever saw the JS publish path, which the drain replaced.
+    // Same bindgen caveat as `pushTrail` below.
+    AsyncFunction("publishWatermarks") { () async throws -> [String: Any?] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      let w = try await node.publishWatermarks()
+      return [
+        "lastAcceptedAt": w.lastAcceptedAt.map { Double($0) },
+        "lastPublishedAt": w.lastPublishedAt.map { Double($0) },
+        "lastPushedAt": w.lastPushedAt.map { Double($0) },
+      ]
+    }
+
     AsyncFunction("outboxPending") { () async throws -> Double in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return Double(try await node.outboxPending())
