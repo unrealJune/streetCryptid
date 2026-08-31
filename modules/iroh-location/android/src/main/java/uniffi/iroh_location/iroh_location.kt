@@ -771,6 +771,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_current_seq(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_delivery_config(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_doc_ticket(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_docs_write(
@@ -847,6 +849,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_publish_resync(
     ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_publish_watermarks(
+    ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_push_trail(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_read_control(
@@ -870,6 +874,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_iroh_location_checksum_method_locationnode_resync_count(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_seed_seq(
+    ): Int
+    external fun uniffi_iroh_location_checksum_method_locationnode_set_delivery_config(
     ): Int
     external fun uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready(
     ): Int
@@ -1007,6 +1013,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_create_invite(`ptr`: Lo
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_current_seq(`ptr`: Long,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_delivery_config(`ptr`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_doc_ticket(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_docs_write(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,
@@ -1083,6 +1091,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_publish_profile(`ptr`: 
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_publish_resync(`ptr`: Long,`recipientRecvPubs`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_publish_watermarks(`ptr`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_push_trail(`ptr`: Long,`peerTickets`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_read_control(`ptr`: Long,`author`: RustBuffer.ByValue,
@@ -1106,6 +1116,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_respond_pair(`ptr`: Lon
 external fun uniffi_iroh_location_fn_method_locationnode_resync_count(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_seed_seq(`ptr`: Long,`floor`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_set_delivery_config(`ptr`: Long,`config`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_set_pairing_ready(`ptr`: Long,`ready`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1423,6 +1435,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_current_seq() != 23320) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_delivery_config() != 3587) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_doc_ticket() != 34643) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1537,6 +1552,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 54563) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_watermarks() != 59312) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail() != 39469) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1571,6 +1589,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_seed_seq() != 19292) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_delivery_config() != 36860) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
@@ -3096,6 +3117,11 @@ public interface LocationNodeInterface {
     suspend fun `currentSeq`(): kotlin.ULong
     
     /**
+     * Where the native drain path will push right now. For diagnostics and `device.health`.
+     */
+    suspend fun `deliveryConfig`(): DeliveryConfig
+    
+    /**
      * A shareable docs **read-ticket** granting replication of our trail namespace (the
      * swarm-join half of a grant). Goes in the contact card.
      */
@@ -3362,6 +3388,16 @@ public interface LocationNodeInterface {
     suspend fun `publishResync`(`recipientRecvPubs`: List<kotlin.String>): kotlin.String
     
     /**
+     * When this device last accepted a fix, published, and pushed — as the native drain saw it.
+     *
+     * `device.health` used to derive all three from a JS-side watermark row, which only the JS
+     * publish path wrote. Once the native drain became the only publish path those stamps stopped
+     * moving, and the record began reporting a phone that was working as one that had been silent
+     * for eleven hours. These are the same moments observed from where they actually happen.
+     */
+    suspend fun `publishWatermarks`(): PublishWatermarks
+    
+    /**
      * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
      * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
      * actually gets a published fix off the phone.**
@@ -3476,6 +3512,19 @@ public interface LocationNodeInterface {
      * re-issue a value, because raising a counter only ever skips.
      */
     suspend fun `seedSeq`(`floor`: kotlin.ULong): kotlin.Boolean
+    
+    /**
+     * Record where a drained envelope must be sent to leave this device — see [`crate::delivery`].
+     *
+     * Push it on every pool change and every stash opt-in change, next to
+     * [`Self::set_sharing_recipients`]: that call says who to seal for, this one says who to hand
+     * the sealed bytes to, and a device that knows the first but not the second publishes into its
+     * own local replica and reports success.
+     *
+     * An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
+     * so this never fails for being empty — the drain simply has no push to make.
+     */
+    suspend fun `setDeliveryConfig`(`config`: DeliveryConfig)
     
     /**
      * Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. Invite-based
@@ -4011,6 +4060,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_u64(future) },
         // lift function
         { FfiConverterULong.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Where the native drain path will push right now. For diagnostics and `device.health`.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `deliveryConfig`() : DeliveryConfig {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_delivery_config(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeDeliveryConfig.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -4988,6 +5061,35 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * When this device last accepted a fix, published, and pushed — as the native drain saw it.
+     *
+     * `device.health` used to derive all three from a JS-side watermark row, which only the JS
+     * publish path wrote. Once the native drain became the only publish path those stamps stopped
+     * moving, and the record began reporting a phone that was working as one that had been silent
+     * for eleven hours. These are the same moments observed from where they actually happen.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishWatermarks`() : PublishWatermarks {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_publish_watermarks(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypePublishWatermarks.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
      * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
      * actually gets a published fix off the phone.**
@@ -5310,6 +5412,39 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
         // lift function
         { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Record where a drained envelope must be sent to leave this device — see [`crate::delivery`].
+     *
+     * Push it on every pool change and every stash opt-in change, next to
+     * [`Self::set_sharing_recipients`]: that call says who to seal for, this one says who to hand
+     * the sealed bytes to, and a device that knows the first but not the second publishes into its
+     * own local replica and reports success.
+     *
+     * An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
+     * so this never fails for being empty — the drain simply has no push to make.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setDeliveryConfig`(`config`: DeliveryConfig) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_set_delivery_config(
+                uniffiHandle,
+                FfiConverterTypeDeliveryConfig.lower(`config`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -6990,6 +7125,65 @@ public object FfiConverterTypeControlMsg: FfiConverterRustBuffer<ControlMsg> {
 
 
 /**
+ * Everything the drain needs to get a published envelope off the device.
+ */
+data class DeliveryConfig (
+    /**
+     * Every endpoint worth dialing after a drain: the trail stash first when it is opted into,
+     * then every pool member. Mirrors `durablePeerTickets()` in `location-sharing.ts` — the two
+     * must agree, because whichever path publishes has to reach the same set.
+     */
+    var `peerTickets`: List<kotlin.String>
+    , 
+    /**
+     * Base URL of the trail stash's content API, when the user has opted into durable delivery.
+     * `None` means push to peers only and upload no blobs.
+     */
+    var `stashBaseUrl`: kotlin.String?
+    , 
+    /**
+     * Pre-shared key for that API, when the deployment requires one. Meaningless without
+     * `stash_base_url` and always written with it.
+     */
+    var `stashPsk`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeliveryConfig: FfiConverterRustBuffer<DeliveryConfig> {
+    override fun read(buf: ByteBuffer): DeliveryConfig {
+        return DeliveryConfig(
+            FfiConverterSequenceString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DeliveryConfig) = (
+            FfiConverterSequenceString.allocationSize(value.`peerTickets`) +
+            FfiConverterOptionalString.allocationSize(value.`stashBaseUrl`) +
+            FfiConverterOptionalString.allocationSize(value.`stashPsk`)
+    )
+
+    override fun write(value: DeliveryConfig, buf: ByteBuffer) {
+            FfiConverterSequenceString.write(value.`peerTickets`, buf)
+            FfiConverterOptionalString.write(value.`stashBaseUrl`, buf)
+            FfiConverterOptionalString.write(value.`stashPsk`, buf)
+    }
+}
+
+
+
+/**
  * What one enqueue did, so the caller can record it without re-reading the queue.
  */
 data class EnqueueOutcome (
@@ -7956,6 +8150,65 @@ public object FfiConverterTypeProfileView: FfiConverterRustBuffer<ProfileView> {
 
 
 /**
+ * When the native drain last managed each step, in ms since epoch.
+ *
+ * Three separate answers because the gaps between them are the whole diagnosis: accepted but not
+ * published is a gate or battery decision, published but not pushed is a phone talking to its own
+ * replica, and neither is visible from a single "last seen" number.
+ */
+data class PublishWatermarks (
+    /**
+     * A fix passed the confidence gate and became this device's position.
+     */
+    var `lastAcceptedAt`: kotlin.ULong?
+    , 
+    /**
+     * A drain put at least one envelope on the wire.
+     */
+    var `lastPublishedAt`: kotlin.ULong?
+    , 
+    /**
+     * A push completed, so those envelopes actually left the device.
+     */
+    var `lastPushedAt`: kotlin.ULong?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePublishWatermarks: FfiConverterRustBuffer<PublishWatermarks> {
+    override fun read(buf: ByteBuffer): PublishWatermarks {
+        return PublishWatermarks(
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PublishWatermarks) = (
+            FfiConverterOptionalULong.allocationSize(value.`lastAcceptedAt`) +
+            FfiConverterOptionalULong.allocationSize(value.`lastPublishedAt`) +
+            FfiConverterOptionalULong.allocationSize(value.`lastPushedAt`)
+    )
+
+    override fun write(value: PublishWatermarks, buf: ByteBuffer) {
+            FfiConverterOptionalULong.write(value.`lastAcceptedAt`, buf)
+            FfiConverterOptionalULong.write(value.`lastPublishedAt`, buf)
+            FfiConverterOptionalULong.write(value.`lastPushedAt`, buf)
+    }
+}
+
+
+
+/**
  * A decrypted ratcheted envelope read from the durable replica.
  *
  * `kind` is `fix` or `null`; `fix` is present only for the fix lane. Keeping null envelopes in
@@ -8631,6 +8884,38 @@ public object FfiConverterOptionalShort: FfiConverterRustBuffer<kotlin.Short?> {
         } else {
             buf.put(1)
             FfiConverterShort.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
+    override fun read(buf: ByteBuffer): kotlin.ULong? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterULong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ULong?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterULong.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ULong?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterULong.write(value, buf)
         }
     }
 }

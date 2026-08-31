@@ -1292,6 +1292,11 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func currentSeq() async throws  -> UInt64
     
     /**
+     * Where the native drain path will push right now. For diagnostics and `device.health`.
+     */
+    func deliveryConfig() async throws  -> DeliveryConfig
+    
+    /**
      * A shareable docs **read-ticket** granting replication of our trail namespace (the
      * swarm-join half of a grant). Goes in the contact card.
      */
@@ -1558,6 +1563,16 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func publishResync(recipientRecvPubs: [String]) async throws  -> String
     
     /**
+     * When this device last accepted a fix, published, and pushed — as the native drain saw it.
+     *
+     * `device.health` used to derive all three from a JS-side watermark row, which only the JS
+     * publish path wrote. Once the native drain became the only publish path those stamps stopped
+     * moving, and the record began reporting a phone that was working as one that had been silent
+     * for eleven hours. These are the same moments observed from where they actually happen.
+     */
+    func publishWatermarks() async throws  -> PublishWatermarks
+    
+    /**
      * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
      * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
      * actually gets a published fix off the phone.**
@@ -1672,6 +1687,19 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * re-issue a value, because raising a counter only ever skips.
      */
     func seedSeq(floor: UInt64) async throws  -> Bool
+    
+    /**
+     * Record where a drained envelope must be sent to leave this device — see [`crate::delivery`].
+     *
+     * Push it on every pool change and every stash opt-in change, next to
+     * [`Self::set_sharing_recipients`]: that call says who to seal for, this one says who to hand
+     * the sealed bytes to, and a device that knows the first but not the second publishes into its
+     * own local replica and reports success.
+     *
+     * An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
+     * so this never fails for being empty — the drain simply has no push to make.
+     */
+    func setDeliveryConfig(config: DeliveryConfig) async throws 
     
     /**
      * Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. Invite-based
@@ -2173,6 +2201,26 @@ open func currentSeq()async throws  -> UInt64  {
             completeFunc: ffi_iroh_location_rust_future_complete_u64,
             freeFunc: ffi_iroh_location_rust_future_free_u64,
             liftFunc: FfiConverterUInt64.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Where the native drain path will push right now. For diagnostics and `device.health`.
+     */
+open func deliveryConfig()async throws  -> DeliveryConfig  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_delivery_config(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeDeliveryConfig_lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -2992,6 +3040,31 @@ open func publishResync(recipientRecvPubs: [String])async throws  -> String  {
 }
     
     /**
+     * When this device last accepted a fix, published, and pushed — as the native drain saw it.
+     *
+     * `device.health` used to derive all three from a JS-side watermark row, which only the JS
+     * publish path wrote. Once the native drain became the only publish path those stamps stopped
+     * moving, and the record began reporting a phone that was working as one that had been silent
+     * for eleven hours. These are the same moments observed from where they actually happen.
+     */
+open func publishWatermarks()async throws  -> PublishWatermarks  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_publish_watermarks(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePublishWatermarks_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
      * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
      * actually gets a published fix off the phone.**
@@ -3266,6 +3339,34 @@ open func seedSeq(floor: UInt64)async throws  -> Bool  {
             completeFunc: ffi_iroh_location_rust_future_complete_i8,
             freeFunc: ffi_iroh_location_rust_future_free_i8,
             liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Record where a drained envelope must be sent to leave this device — see [`crate::delivery`].
+     *
+     * Push it on every pool change and every stash opt-in change, next to
+     * [`Self::set_sharing_recipients`]: that call says who to seal for, this one says who to hand
+     * the sealed bytes to, and a device that knows the first but not the second publishes into its
+     * own local replica and reports success.
+     *
+     * An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
+     * so this never fails for being empty — the drain simply has no push to make.
+     */
+open func setDeliveryConfig(config: DeliveryConfig)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_set_delivery_config(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeDeliveryConfig_lower(config)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -4635,6 +4736,93 @@ public func FfiConverterTypeControlMsg_lower(_ value: ControlMsg) -> RustBuffer 
 
 
 /**
+ * Everything the drain needs to get a published envelope off the device.
+ */
+public struct DeliveryConfig: Equatable, Hashable {
+    /**
+     * Every endpoint worth dialing after a drain: the trail stash first when it is opted into,
+     * then every pool member. Mirrors `durablePeerTickets()` in `location-sharing.ts` — the two
+     * must agree, because whichever path publishes has to reach the same set.
+     */
+    public var peerTickets: [String]
+    /**
+     * Base URL of the trail stash's content API, when the user has opted into durable delivery.
+     * `None` means push to peers only and upload no blobs.
+     */
+    public var stashBaseUrl: String?
+    /**
+     * Pre-shared key for that API, when the deployment requires one. Meaningless without
+     * `stash_base_url` and always written with it.
+     */
+    public var stashPsk: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Every endpoint worth dialing after a drain: the trail stash first when it is opted into,
+         * then every pool member. Mirrors `durablePeerTickets()` in `location-sharing.ts` — the two
+         * must agree, because whichever path publishes has to reach the same set.
+         */peerTickets: [String], 
+        /**
+         * Base URL of the trail stash's content API, when the user has opted into durable delivery.
+         * `None` means push to peers only and upload no blobs.
+         */stashBaseUrl: String?, 
+        /**
+         * Pre-shared key for that API, when the deployment requires one. Meaningless without
+         * `stash_base_url` and always written with it.
+         */stashPsk: String?) {
+        self.peerTickets = peerTickets
+        self.stashBaseUrl = stashBaseUrl
+        self.stashPsk = stashPsk
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DeliveryConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeliveryConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeliveryConfig {
+        return
+            try DeliveryConfig(
+                peerTickets: FfiConverterSequenceString.read(from: &buf), 
+                stashBaseUrl: FfiConverterOptionString.read(from: &buf), 
+                stashPsk: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeliveryConfig, into buf: inout [UInt8]) {
+        FfiConverterSequenceString.write(value.peerTickets, into: &buf)
+        FfiConverterOptionString.write(value.stashBaseUrl, into: &buf)
+        FfiConverterOptionString.write(value.stashPsk, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeliveryConfig_lift(_ buf: RustBuffer) throws -> DeliveryConfig {
+    return try FfiConverterTypeDeliveryConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeliveryConfig_lower(_ value: DeliveryConfig) -> RustBuffer {
+    return FfiConverterTypeDeliveryConfig.lower(value)
+}
+
+
+/**
  * What one enqueue did, so the caller can record it without re-reading the queue.
  */
 public struct EnqueueOutcome: Equatable, Hashable {
@@ -5890,6 +6078,89 @@ public func FfiConverterTypeProfileView_lower(_ value: ProfileView) -> RustBuffe
 
 
 /**
+ * When the native drain last managed each step, in ms since epoch.
+ *
+ * Three separate answers because the gaps between them are the whole diagnosis: accepted but not
+ * published is a gate or battery decision, published but not pushed is a phone talking to its own
+ * replica, and neither is visible from a single "last seen" number.
+ */
+public struct PublishWatermarks: Equatable, Hashable {
+    /**
+     * A fix passed the confidence gate and became this device's position.
+     */
+    public var lastAcceptedAt: UInt64?
+    /**
+     * A drain put at least one envelope on the wire.
+     */
+    public var lastPublishedAt: UInt64?
+    /**
+     * A push completed, so those envelopes actually left the device.
+     */
+    public var lastPushedAt: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * A fix passed the confidence gate and became this device's position.
+         */lastAcceptedAt: UInt64?, 
+        /**
+         * A drain put at least one envelope on the wire.
+         */lastPublishedAt: UInt64?, 
+        /**
+         * A push completed, so those envelopes actually left the device.
+         */lastPushedAt: UInt64?) {
+        self.lastAcceptedAt = lastAcceptedAt
+        self.lastPublishedAt = lastPublishedAt
+        self.lastPushedAt = lastPushedAt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PublishWatermarks: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePublishWatermarks: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PublishWatermarks {
+        return
+            try PublishWatermarks(
+                lastAcceptedAt: FfiConverterOptionUInt64.read(from: &buf), 
+                lastPublishedAt: FfiConverterOptionUInt64.read(from: &buf), 
+                lastPushedAt: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PublishWatermarks, into buf: inout [UInt8]) {
+        FfiConverterOptionUInt64.write(value.lastAcceptedAt, into: &buf)
+        FfiConverterOptionUInt64.write(value.lastPublishedAt, into: &buf)
+        FfiConverterOptionUInt64.write(value.lastPushedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePublishWatermarks_lift(_ buf: RustBuffer) throws -> PublishWatermarks {
+    return try FfiConverterTypePublishWatermarks.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePublishWatermarks_lower(_ value: PublishWatermarks) -> RustBuffer {
+    return FfiConverterTypePublishWatermarks.lower(value)
+}
+
+
+/**
  * A decrypted ratcheted envelope read from the durable replica.
  *
  * `kind` is `fix` or `null`; `fix` is present only for the fix lane. Keeping null envelopes in
@@ -6855,6 +7126,30 @@ fileprivate struct FfiConverterOptionInt16: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterInt16.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -7851,6 +8146,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_current_seq() != 23320) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_delivery_config() != 3587) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_doc_ticket() != 34643) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -7965,6 +8263,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 54563) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_publish_watermarks() != 59312) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_push_trail() != 39469) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -7999,6 +8300,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_seed_seq() != 19292) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_set_delivery_config() != 36860) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
