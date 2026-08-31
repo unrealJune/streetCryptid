@@ -650,6 +650,10 @@ export class LocationSharingService {
       await this.syncStashGrants();
       await this.ensureMySubscription();
     }
+    // The opt-in is half of what the native drain pushes to, so it has to travel with the choice.
+    // Opting out matters as much as opting in: it is what stops the background path uploading to a
+    // stash the user has just turned off.
+    this.pushDeliveryConfig();
     this.emit();
   }
 
@@ -789,6 +793,11 @@ export class LocationSharingService {
     }
     await this.restorePool(interactive);
     this.stashOptIn = await loadStashOptIn(this.kv);
+    // Seed the native push targets from the pool and opt-in we have just loaded — after both, not
+    // next to `pushSharingRecipients` above, or the stash would be mirrored as off on every launch.
+    // Without this a device whose pool has not changed since the last launch leaves native holding
+    // a list nobody refreshed, and a background wake publishes to nowhere.
+    this.pushDeliveryConfig();
     // Hydrated here as well as in startBackground so settings shows the real value even before
     // background sharing has been switched on.
     this.shareIntervalMs = await loadShareIntervalMs(this.kv);
@@ -2630,6 +2639,9 @@ export class LocationSharingService {
   private persistPool(): void {
     void savePool(this.kv, this.state);
     this.pushSharingRecipients();
+    // The peer tickets come out of the same pool, so the two mirrors move together or the native
+    // drain seals for a friend it cannot then send to.
+    this.pushDeliveryConfig();
   }
 
   /**
@@ -2644,6 +2656,43 @@ export class LocationSharingService {
    * `recipients.rs`. The authority for "can this person read my location" stays the ratchet
    * session, which this list can only ever narrow.
    */
+  /**
+   * Mirror the delivery set down to native — the companion to {@link pushSharingRecipients}.
+   *
+   * That call tells the native drain who to seal for; this one tells it who to hand the sealed
+   * bytes to. A device with the first and not the second seals correctly, writes its local replica,
+   * reports success, and delivers nothing: `docsWrite` is local-only and iroh-docs broadcasts a
+   * local insert solely for namespaces the live engine has marked as syncing, which a publish-only
+   * context never does. That is exactly what two phones did all day on 2026-08-31 — full outboxes,
+   * healthy publishes, and a stash that received nothing from either.
+   *
+   * Same list as {@link durablePeerTickets} on purpose: whichever path publishes has to reach the
+   * same peers, and two lists that could drift is how the JS and native paths would start
+   * delivering to different sets.
+   *
+   * Fire-and-forget and best-effort, as {@link pushSharingRecipients}: failing to record where to
+   * send must not fail the pool change that prompted it, and the entries stay in the local replica
+   * for the next push either way.
+   */
+  private pushDeliveryConfig(): void {
+    const mod = this.mod;
+    if (typeof mod?.setDeliveryConfig !== 'function') return;
+    const peerTickets = this.durablePeerTickets();
+    // Gated on the OPT-IN, not on the stash being built into this bundle — the same distinction
+    // `pushTrail` draws. Passing a base URL for a user who switched the stash off would PUT sealed
+    // envelopes into a namespace `syncStashGrants` never registered.
+    const stash = this.stashEnabled() ? this.stashConfig : null;
+    void mod
+      .setDeliveryConfig(peerTickets, stash?.baseUrl ?? null, stash?.psk ?? null)
+      .catch((err: unknown) => {
+        getTelemetry().log('warn', 'delivery: could not mirror the push targets to native', {
+          reason: err instanceof Error ? err.message : String(err),
+          peers: peerTickets.length,
+          stash: Boolean(stash),
+        });
+      });
+  }
+
   private pushSharingRecipients(): void {
     const mod = this.mod;
     if (typeof mod?.setSharingRecipients !== 'function') return;

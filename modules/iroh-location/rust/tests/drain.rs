@@ -141,6 +141,12 @@ struct FakeSink {
     fail_after: Mutex<Option<usize>>,
     /// Fail only the watcher lane. It is best-effort, so this must not cost the fix.
     fail_nulls: Mutex<bool>,
+    /// How many times the drain asked for the batch to be pushed off the device. This is the
+    /// counter that would have caught the 2026-08-31 outage, where every envelope was "published"
+    /// into a local replica nothing ever reconciled with.
+    flushes: Mutex<u32>,
+    /// The stash was unreachable. Must not cost the fixes: they are committed and go out next time.
+    fail_flush: Mutex<bool>,
 }
 
 impl PublishSink for FakeSink {
@@ -170,6 +176,14 @@ impl PublishSink for FakeSink {
             return Err(PublishError::Send("watcher lane down".into()));
         }
         self.nulls.lock().unwrap().push((seq, ts, watchers));
+        Ok(())
+    }
+
+    async fn flush(&self) -> Result<(), PublishError> {
+        *self.flushes.lock().unwrap() += 1;
+        if *self.fail_flush.lock().unwrap() {
+            return Err(PublishError::Send("stash unreachable".into()));
+        }
         Ok(())
     }
 }
@@ -698,4 +712,94 @@ async fn a_heartbeat_respects_the_battery_suspend() {
 
     assert!(out.suspended);
     assert_eq!(out.enqueued, 0);
+}
+
+// --- Getting the batch off the device -------------------------------------------------------
+//
+// `publish` writes the local replica and broadcasts to a swarm that is empty on a background wake.
+// Until something reconciles with a peer, a "published" envelope has not left the phone. These are
+// the tests that were missing on 2026-08-31, when two phones spent a day publishing into their own
+// replicas while the trail stash received nothing from either.
+
+#[tokio::test]
+async fn a_drain_that_published_pushes_the_batch_off_the_device() {
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+
+    let out = h
+        .engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert_eq!(out.published, 1);
+    assert_eq!(
+        *h.sink.flushes.lock().unwrap(),
+        1,
+        "a published envelope that is never pushed has not left the phone"
+    );
+}
+
+#[tokio::test]
+async fn one_push_per_drain_not_one_per_envelope() {
+    // Reconciliation moves everything the namespace holds, so a dial per fix would pay N dials to
+    // send a superset of the same thing.
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    // Three slots come due at once — the shape of a wake after the phone was frozen.
+    let out = h
+        .engine()
+        .ingest(
+            fix(base + INTERVAL * 3, 20.0),
+            healthy_battery(),
+            INTERVAL,
+            base + INTERVAL * 3,
+        )
+        .await
+        .unwrap();
+
+    assert!(out.published >= 1);
+    assert_eq!(
+        *h.sink.flushes.lock().unwrap(),
+        1,
+        "one push per drain, however many envelopes it sent"
+    );
+}
+
+#[tokio::test]
+async fn a_drain_that_published_nothing_does_not_push() {
+    // Most wakes on a stationary phone. A push here is a dial per pool member for no new data.
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+
+    let out = h
+        .engine()
+        .heartbeat(healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert_eq!(out.published, 0, "nothing has ever passed the gate");
+    assert_eq!(*h.sink.flushes.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_failed_push_does_not_retain_fixes_that_already_went_out() {
+    // The fixes are on the wire and committed; the stash being unreachable must not make the drain
+    // look like it failed, or the next wake republishes envelopes that already left.
+    let h = Harness::new();
+    *h.sink.fail_flush.lock().unwrap() = true;
+    let now = INTERVAL * 10;
+
+    let out = h
+        .engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert_eq!(out.published, 1, "the envelope reached the wire");
+    assert_eq!(
+        out.pending, 0,
+        "and was committed, not retained for a retry"
+    );
+    assert_eq!(*h.sink.flushes.lock().unwrap(), 1);
 }

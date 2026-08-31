@@ -196,6 +196,32 @@ export declare class IrohLocationNativeModule
     recipientEndpointsHex: string[],
     watcherEndpointsHex: string[]
   ): Promise<void>;
+  /**
+   * Record where a drained envelope must be SENT for it to leave this device.
+   *
+   * The companion to {@link setSharingRecipients}: that call says who to seal for, this one says
+   * who to hand the sealed bytes to. A device that knows the first but not the second publishes
+   * into its own local replica and reports success — `docsWrite` is local-only, and iroh-docs
+   * broadcasts a local insert solely for namespaces the live engine has marked as syncing, which a
+   * publish-only context never does. Two phones spent 2026-08-31 in exactly that state.
+   *
+   * Persisted natively because the caller that most needs it is an OS location callback with no JS
+   * context alive to supply it. Push on every pool change and every stash opt-in change, alongside
+   * {@link setSharingRecipients}.
+   *
+   * `peerTickets` must mirror `durablePeerTickets()` — stash first when opted into, then every pool
+   * member — because whichever path publishes has to reach the same set. An empty list is a valid
+   * configuration (stash off, no friends yet), not an unset one: the drain simply has no push to
+   * make. `stashBaseUrl` is omitted when the user has opted out, which is deliberately distinct
+   * from the stash merely not being built into this bundle.
+   *
+   * OPTIONAL: absent on binaries built before the native push path.
+   */
+  setDeliveryConfig?(
+    peerTickets: string[],
+    stashBaseUrl: string | null,
+    stashPsk: string | null
+  ): Promise<void>;
   /** The last sequence number handed out, without advancing. OPTIONAL, as {@link nextSeq}. */
   currentSeq?(): Promise<number>;
   /**

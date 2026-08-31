@@ -17,6 +17,7 @@
 
 mod ble;
 mod crypto;
+pub mod delivery;
 mod docs;
 mod durable;
 pub mod gate;
@@ -993,6 +994,10 @@ pub struct LocationNode {
     /// [`crate::transport`]. Opened eagerly with the node rather than lazily, because the one
     /// caller that needs it is the one with no JS context to fall back on.
     transport: Mutex<Option<Arc<transport::TransportStore>>>,
+    /// Where a drained envelope has to be sent to actually leave the phone — see
+    /// [`crate::delivery`]. Opened with the others because the drain reads it on every wake, and a
+    /// wake with no JS context has nowhere else to get it.
+    delivery: Mutex<Option<Arc<delivery::DeliveryStore>>>,
     /// Ephemerals minted by `begin_session` and awaiting the peer's half. Keyed by peer endpoint
     /// id. Held in memory only: an unfinished bootstrap that does not survive a restart is a
     /// bootstrap the user simply repeats, whereas one persisted to disk is a private key sitting
@@ -1043,6 +1048,14 @@ impl LocationNode {
 
     async fn transport_store(&self) -> Result<Arc<transport::TransportStore>, LocationError> {
         self.transport
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
+
+    async fn delivery_store(&self) -> Result<Arc<delivery::DeliveryStore>, LocationError> {
+        self.delivery
             .lock()
             .await
             .clone()
@@ -1502,6 +1515,7 @@ fn new_location_node_at(
         recipients: Mutex::new(None),
         gate: Mutex::new(None),
         transport: Mutex::new(None),
+        delivery: Mutex::new(None),
         pending_bootstrap: Mutex::new(HashMap::new()),
         pending_resync: Mutex::new(None),
     }))
@@ -1753,6 +1767,15 @@ impl LocationNode {
             if slot.is_none() {
                 *slot = Some(Arc::new(
                     transport::TransportStore::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.delivery.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    delivery::DeliveryStore::open(&self.state_dir)
                         .map_err(|e| LocationError::Network(e.to_string()))?,
                 ));
             }
@@ -2496,6 +2519,30 @@ impl LocationNode {
     /// Who the native drain path will seal for right now.
     pub async fn sharing_recipients(&self) -> Result<Vec<String>, LocationError> {
         Ok(self.recipient_store().await?.get())
+    }
+
+    /// Record where a drained envelope must be sent to leave this device — see [`crate::delivery`].
+    ///
+    /// Push it on every pool change and every stash opt-in change, next to
+    /// [`Self::set_sharing_recipients`]: that call says who to seal for, this one says who to hand
+    /// the sealed bytes to, and a device that knows the first but not the second publishes into its
+    /// own local replica and reports success.
+    ///
+    /// An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
+    /// so this never fails for being empty — the drain simply has no push to make.
+    pub async fn set_delivery_config(
+        &self,
+        config: delivery::DeliveryConfig,
+    ) -> Result<(), LocationError> {
+        self.delivery_store()
+            .await?
+            .set(config)
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// Where the native drain path will push right now. For diagnostics and `device.health`.
+    pub async fn delivery_config(&self) -> Result<delivery::DeliveryConfig, LocationError> {
+        Ok(self.delivery_store().await?.get())
     }
 
     /// How many captured fixes are waiting to be sealed.
@@ -4012,6 +4059,39 @@ impl publish::PublishSink for SubscriptionSink<'_> {
             .docs_write_null_ratcheted(self.subscription_id.clone(), seq, ts, watchers)
             .await
             .map_err(|e| publish::PublishError::Send(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Reconcile the trail namespace with the stash and the pool, so the envelopes just written
+    /// actually leave the phone. See [`LocationNode::push_trail`].
+    ///
+    /// Reads the peer set from [`crate::delivery`] rather than taking it as an argument, because
+    /// the caller that most needs this — an OS location callback with no JS context alive — has
+    /// nowhere to get it from. `set_delivery_config` is what keeps it current.
+    async fn flush(&self) -> Result<(), publish::PublishError> {
+        let node = &self.subscription.node;
+        let config = node
+            .delivery_config()
+            .await
+            .map_err(|e| publish::PublishError::Send(e.to_string()))?;
+        // Nothing to push to is a real state — stash opted out, no friends yet — and not worth a
+        // span or a native round trip. `push_trail` with an empty list still waits out the push
+        // deadline, which on a background wake is seconds of budget spent on no work.
+        if config.is_empty() {
+            return Ok(());
+        }
+        node.push_trail(config.peer_tickets.clone(), None)
+            .await
+            .map_err(|e| publish::PublishError::Send(e.to_string()))?;
+        // Content upload is stash-only and gated on the opt-in, not on the stash merely being
+        // built into this bundle — the same distinction `location-sharing.ts` draws. Uploading for
+        // a user who switched the stash off would PUT sealed envelopes into a namespace nothing
+        // registered, failing on every tick and burying real push failures.
+        if let Some((base_url, psk)) = config.stash() {
+            node.upload_trail_content(base_url.to_string(), psk)
+                .await
+                .map_err(|e| publish::PublishError::Send(e.to_string()))?;
+        }
         Ok(())
     }
 }

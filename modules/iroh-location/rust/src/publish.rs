@@ -118,6 +118,24 @@ pub trait PublishSink: Send + Sync {
         ts: u64,
         watchers: Vec<String>,
     ) -> impl std::future::Future<Output = Result<(), PublishError>> + Send;
+
+    /// Get everything just published **off the device**, once per drain that sent anything.
+    ///
+    /// Not an optimisation and not a lifecycle hook: [`Self::publish`] writes the local replica and
+    /// broadcasts to a live swarm that, on a background wake, is empty. iroh-docs broadcasts a
+    /// local insert only for namespaces the live engine has marked as syncing, which a publish-only
+    /// context never does — so until something reconciles with a peer, an "published" envelope has
+    /// not left the phone.
+    ///
+    /// It is part of this trait rather than a call the platform layer makes afterwards because
+    /// leaving it to the caller is exactly how it went missing: the JS orchestration used to do it,
+    /// the native drain replaced that orchestration, and nothing took the step over. Two phones ran
+    /// a full day on 2026-08-31 publishing into their own replicas while the stash received nothing
+    /// from either. Making it a port means the engine's own tests assert it happens.
+    ///
+    /// Best-effort by contract: a failure degrades offline delivery for those fixes, it does not
+    /// mean the drain failed. The entries are committed and stay in the replica for the next push.
+    fn flush(&self) -> impl std::future::Future<Output = Result<(), PublishError>> + Send;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -329,6 +347,18 @@ impl<S: PublishSink> DrainEngine<'_, S> {
                 };
                 let _ = self.sink.publish_null(null_seq, ts, watchers.clone()).await;
             }
+        }
+
+        // One push per drain, not one per envelope: reconciliation moves everything the namespace
+        // holds, so pushing per fix would pay a dial per fix to send a superset of the same thing.
+        // Guarded on `published` because a drain that sent nothing has nothing new to mirror — and
+        // on a stationary phone that is most of them.
+        //
+        // The error is deliberately swallowed. The fixes are committed and in the replica; a failed
+        // push means the next one carries them, whereas propagating would make a drain that did
+        // reach the wire look like a drain that did not, and retain fixes that already went out.
+        if published > 0 {
+            let _ = self.sink.flush().await;
         }
         Ok(published)
     }

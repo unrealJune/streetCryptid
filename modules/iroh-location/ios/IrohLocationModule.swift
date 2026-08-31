@@ -563,6 +563,20 @@ public final class IrohLocationModule: Module {
         recipientEndpoints: recipientEndpointsHex, watcherEndpoints: watcherEndpointsHex)
     }
 
+    // Record where a drained envelope must be SENT to leave the device. The companion to
+    // `setSharingRecipients`: that one says who to seal for, this one says who to hand the sealed
+    // bytes to. Without it the drain publishes into a local replica nothing reconciles with.
+    //
+    // Same bindgen caveat as `pushTrail` below: needs `just bindgen-ios` on macOS before
+    // `node.setDeliveryConfig` exists in the generated Swift.
+    AsyncFunction("setDeliveryConfig") {
+      (peerTickets: [String], stashBaseUrl: String?, stashPsk: String?) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setDeliveryConfig(
+        config: DeliveryConfig(
+          peerTickets: peerTickets, stashBaseUrl: stashBaseUrl, stashPsk: stashPsk))
+    }
+
     AsyncFunction("outboxPending") { () async throws -> Double in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return Double(try await node.outboxPending())

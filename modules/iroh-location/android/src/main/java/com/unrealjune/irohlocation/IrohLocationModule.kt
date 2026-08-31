@@ -28,6 +28,7 @@ import uniffi.iroh_location.BleCapabilities
 import uniffi.iroh_location.BlePeer
 import uniffi.iroh_location.BumpResolution
 import uniffi.iroh_location.ControlMsg
+import uniffi.iroh_location.DeliveryConfig
 import uniffi.iroh_location.FixListener
 import uniffi.iroh_location.RatchetEvent
 import uniffi.iroh_location.LocationFix
@@ -659,6 +660,15 @@ class IrohLocationModule : Module() {
     AsyncFunction("setSharingRecipients") Coroutine
       { recipientEndpointsHex: List<String>, watcherEndpointsHex: List<String> ->
         requireNode().setSharingRecipients(recipientEndpointsHex, watcherEndpointsHex)
+        Unit
+      }
+
+    /// Record where a drained envelope must be SENT to leave the device. The companion to
+    /// `setSharingRecipients`: that one says who to seal for, this one says who to hand the sealed
+    /// bytes to. Without it the drain publishes into a local replica nothing reconciles with.
+    AsyncFunction("setDeliveryConfig") Coroutine
+      { peerTickets: List<String>, stashBaseUrl: String?, stashPsk: String? ->
+        requireNode().setDeliveryConfig(DeliveryConfig(peerTickets, stashBaseUrl, stashPsk))
         Unit
       }
 

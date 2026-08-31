@@ -28,6 +28,11 @@ class FakeNativeModule {
     pollResync: [] as { peer: string; recvPub: string }[],
     forgetSession: [] as string[],
     clearResync: 0,
+    setDeliveryConfig: [] as {
+      peerTickets: string[];
+      stashBaseUrl: string | null;
+      stashPsk: string | null;
+    }[],
   };
   private handlers: Record<string, (e: unknown) => void> = {};
   readonly unsubscribeFailures = new Set<string>();
@@ -112,6 +117,13 @@ class FakeNativeModule {
       peerTickets,
       ...(traceparent ? { traceparent } : {}),
     });
+  }
+  async setDeliveryConfig(
+    peerTickets: string[],
+    stashBaseUrl: string | null,
+    stashPsk: string | null
+  ) {
+    this.calls.setDeliveryConfig.push({ peerTickets, stashBaseUrl, stashPsk });
   }
   trailFixes: {
     author: string;
@@ -647,6 +659,88 @@ describe('LocationSharingService — durable trail wiring', () => {
 
       expect(latest()?.shareIntervalMs).toBe(300_000);
     });
+  });
+});
+
+describe('LocationSharingService — native delivery targets', () => {
+  // Publishing is not delivery. `docsWrite` writes the LOCAL replica and iroh-docs broadcasts a
+  // local insert only for namespaces the live engine has marked as syncing, which a publish-only
+  // context never does — so a native drain that does not know who to push to seals correctly,
+  // reports success, and delivers nothing. Two phones ran a full day in that state on 2026-08-31.
+  // These assert the app tells native where to send, at every point the answer can change.
+  beforeEach(() => {
+    mockHolder.mod = new FakeNativeModule();
+    mockHolder.stashConfig = null;
+    setTelemetryForTesting(undefined);
+    resetEventLogForTesting();
+  });
+
+  it('seeds the native push targets on init, before anything has changed', async () => {
+    // A device whose pool has not changed since the last launch would otherwise leave native
+    // holding a list nobody refreshed, and a background wake would publish to nowhere.
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+
+    expect(mockHolder.mod.calls.setDeliveryConfig.length).toBeGreaterThan(0);
+  });
+
+  it('mirrors a friend ticket to native when the pool changes', async () => {
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+
+    expect(mockHolder.mod.calls.setDeliveryConfig.at(-1)?.peerTickets).toContain('ticket-b');
+  });
+
+  it('sends the stash URL only once it is opted into, and the ticket leads', async () => {
+    // Gated on the opt-in rather than on the stash being built into this bundle: uploading for a
+    // user who switched it off would PUT sealed envelopes into a namespace nothing registered.
+    mockHolder.stashConfig = {
+      baseUrl: 'https://stash.example.com',
+      ticket: 'ticket-stash',
+      psk: null,
+    };
+    const stash = { configured: true, registerNamespace: async () => {} };
+    const svc = makeService({ stash });
+    await svc.init('@me', 'mothman');
+
+    expect(mockHolder.mod.calls.setDeliveryConfig.at(-1)?.stashBaseUrl).toBeNull();
+
+    await svc.setStashOptIn(true);
+
+    const latest = mockHolder.mod.calls.setDeliveryConfig.at(-1);
+    expect(latest?.stashBaseUrl).toBe('https://stash.example.com');
+    // Same order as `durablePeerTickets`: the stash is always-on and usually answers immediately.
+    expect(latest?.peerTickets[0]).toBe('ticket-stash');
+  });
+
+  it('stops naming the stash when the user opts back out', async () => {
+    mockHolder.stashConfig = {
+      baseUrl: 'https://stash.example.com',
+      ticket: 'ticket-stash',
+      psk: null,
+    };
+    const stash = { configured: true, registerNamespace: async () => {} };
+    const svc = makeService({ stash });
+    await svc.init('@me', 'mothman');
+    await svc.setStashOptIn(true);
+    await svc.setStashOptIn(false);
+
+    const latest = mockHolder.mod.calls.setDeliveryConfig.at(-1);
+    expect(latest?.stashBaseUrl).toBeNull();
+    expect(latest?.peerTickets).not.toContain('ticket-stash');
+  });
+
+  it('tolerates a binary built before the native push path existed', async () => {
+    // A phone can run an older binary than the JS bundle; the guard must report the truth rather
+    // than throwing inside a pool change.
+    const mod = new FakeNativeModule();
+    (mod as { setDeliveryConfig?: unknown }).setDeliveryConfig = undefined;
+    mockHolder.mod = mod;
+    const svc = makeService();
+
+    await expect(svc.init('@me', 'mothman')).resolves.not.toThrow();
+    await expect(svc.addFriend(friend)).resolves.not.toThrow();
   });
 });
 
