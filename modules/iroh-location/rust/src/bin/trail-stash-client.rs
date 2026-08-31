@@ -626,7 +626,11 @@ async fn run_watch(
                 state
                     .peers
                     .iter()
-                    .map(|saved| format!("{}:{}", short_hex(&saved.endpoint_id), saved.last_seq))
+                    .map(|saved| format!(
+                        "{}:{}",
+                        short_hex(&saved.endpoint_id),
+                        saved.last_seq
+                    ))
                     .collect::<Vec<_>>()
                     .join(" ")
             );

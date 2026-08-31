@@ -75,10 +75,7 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
         .await
         .expect("stash imports author trail");
     stash
-        .sync_latest(
-            vec![author.ticket().await.expect("author endpoint ticket")],
-            None,
-        )
+        .sync_latest(vec![author.ticket().await.expect("author endpoint ticket")], None)
         .await
         .expect("stash explicitly reconciles with author");
     assert!(
@@ -97,10 +94,7 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
         .await
         .expect("phone imports friend trail");
     phone
-        .sync_latest(
-            vec![stash.ticket().await.expect("stash endpoint ticket")],
-            None,
-        )
+        .sync_latest(vec![stash.ticket().await.expect("stash endpoint ticket")], None)
         .await
         .expect("phone explicitly reconciles with stash");
 
