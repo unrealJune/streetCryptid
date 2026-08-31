@@ -268,6 +268,36 @@ From any span, "Logs for this span" (trace→logs) jumps to that instance's logs
    where `sc.drop_reason=unknown-or-removing-author` is the last gate that can silently eat a fix.
    A gap of up to a backfill interval between steps 5 and 6 is now normal.
 
+## Which build is this phone running?
+
+Ask this **first**, every time. It has been the answer more often than any other single question,
+and `service.version` cannot answer it: a test branch carries whatever version `package.json` last
+released, so a branch build and the release it replaced report the same string. On 2026-08-30 two
+iPhones both said `1.6.1` and were running entirely different code.
+
+`app.commit` is the answer, and it is on every span and every log line already — `app.config.ts`
+computes `extra.buildProvenance` (`EAS_BUILD_GIT_COMMIT_HASH`, falling back to `git rev-parse HEAD`)
+and `identity.ts`'s `getBuildResource()` puts it on the OTLP resource. Alongside it:
+`app.build_profile`, `app.build_id`, `app.native_version`, `app.native_build`.
+
+Traces — it must be `select`ed, or it will not appear in the search response:
+
+```traceql
+{resource.service.name="streetcryptid-app"}
+  | select(resource.service.instance.id, resource.app.commit, resource.app.build_profile)
+```
+
+Logs — `app_commit` is **structured metadata**, not an index label, so it filters with `|` and does
+NOT show up in Loki's `/labels` listing (only `service_name` and `service_instance_id` do). That
+absence is why it is easy to conclude it was never plumbed:
+
+```logql
+{service_instance_id="84f86b144a"} | app_commit="b3a0b0bccb45"
+```
+
+The same stream carries `device_model`, `device_id`, `os_version`, `app_build_profile` and
+`app_native_build`, all as structured metadata.
+
 ## Reading silence
 
 A phone that has stopped working produces _less_ signal, not more, so the usual "search for the
@@ -284,16 +314,26 @@ produced the same permanent hole, because the old exporter discarded any batch i
 **2. Liveness is asserted, not inferred.** `device.health` is emitted every periodic refresh and on
 foreground resume. Its value is in the _mismatches_:
 
-| Read                                                                 | Means                                                                     |
-| -------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `sharing.enabled=true` + `task.location_running=false`               | the OS is not delivering location — the core background failure           |
-| `perm.background` not `granted`                                      | "Always" was refused or revoked; iOS can downgrade it silently            |
-| `perm.accuracy=reduced`                                              | precise location off; every fix will fail the quality gate                |
-| `task.refresh_status=restricted`                                     | Background App Refresh is off — the periodic task will never run          |
-| `task.refresh_registered=true`, `last_refresh_age_ms` huge or absent | the task is registered AND permitted, and the OS is simply not running it |
-| `storage.backend=memory`                                             | outbox, friend pool and sharing intent are lost on every restart          |
-| `telemetry.queued` large and growing                                 | the device is fine; it cannot reach **us**                                |
-| `last_wake_age_ms` much larger than the publish age                  | it is being woken and choosing not to publish — read the drop spans       |
+| Read                                                                 | Means                                                                        |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `sharing.enabled=true` + `task.location_running=false`               | the OS is not delivering location — the core background failure              |
+| `perm.background` not `granted`                                      | "Always" was refused or revoked; iOS can downgrade it silently               |
+| `perm.accuracy=reduced`                                              | precise location off; every fix will fail the quality gate                   |
+| `task.refresh_status=restricted`                                     | Background App Refresh is off — the periodic task will never run             |
+| `task.refresh_registered=true`, `last_refresh_age_ms` huge or absent | the task is registered AND permitted, and the OS is simply not running it    |
+| `storage.backend=memory`                                             | outbox, friend pool and sharing intent are lost on every restart             |
+| `telemetry.queued` large and growing                                 | the device is fine; it cannot reach **us**                                   |
+| `last_wake_age_ms` much larger than the publish age                  | it is being woken and choosing not to publish — read the drop spans          |
+| `location.state=stopped` + `location.fence_registered=false`         | parked with no way out — it will not wake until something else relaunches it |
+| `location.state=moving` + a large `last_publish_age_ms`              | Core Location is delivering and nothing is anchoring — check the gate        |
+| `location.wake_reason=periodic` and never anything else              | iOS: parked, ticking on the coarse stream. Publishing, and healthy           |
+| `location.auth_status` not `always` while `perm.background=granted`  | the two disagree; Core Location's own read is the one that governs           |
+
+`location.*` comes from the native runtime's `nativeBackgroundState()` (`BackgroundLocationRuntime`
+on iOS). It exists because `task.location_running=true` is true of a parked phone and of a broken
+one alike — on 2026-08-30 an iPhone reported exactly that while 88 minutes past its last publish,
+and no other span could separate the two. Note `auth_status`, not `authorization`: the event log
+redacts any key matching `/authorization|password|psk|secret|ticket|token/i`.
 
 The top row of the device-health dashboard carries those checks as counts — devices with no
 `bg.wake` in 6h, no `device.health` in 2h, any terminal native-runtime state, and publishes with no
