@@ -532,6 +532,23 @@ export interface IrohLocationApi {
    * actually handing us is the entire background failure this path exists to close. OPTIONAL.
    */
   nativeBackgroundRunning?(): boolean;
+  /**
+   * What the native runtime is doing and why — `{ running, state, wake_reason, auth_status,
+   * precise, anchor_armed, fence_registered, slc_available, last_wake_age_ms?, anchor_age_ms? }`.
+   *
+   * `device.health` flattens this under `location.*`. On iOS a parked phone emits nothing by
+   * construction, so "which state is it in and when did it last run" is the only way to tell it
+   * apart from a phone that has stopped waking at all. OPTIONAL.
+   */
+  nativeBackgroundState?(): Record<string, unknown>;
+  /**
+   * Whether Core Location grants background updates right now, read live from the delegate.
+   *
+   * Distinct from `expo-location`'s request round-trip, which on a fresh install returns before the
+   * authorization delegate has settled — latching that answer left a phone holding `authorizedAlways`
+   * reporting `access=foreground` for an evening. OPTIONAL.
+   */
+  nativeBackgroundAuthorized?(): boolean;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**

@@ -5,22 +5,35 @@ import UIKit
 /// An iroh node driven straight from Core Location, with no JS in the loop.
 ///
 /// The iOS counterpart of `BackgroundLocationService.kt`. It removes the same dependency — a fix
-/// that arrives can be sealed and sent without a headless JS context existing — but it is worth
-/// being clear about what it does *not* fix.
+/// that arrives can be sealed and sent without a headless JS context existing — but iOS needs a
+/// good deal more than that, because the OS gives us no timers and no daemons.
 ///
-/// ## What this fixes on iOS
+/// ## The rule this file is built around
 ///
-/// On Android the diagnosed failure was a JS context that never started while the OS delivered
-/// location normally: 446 real fixes spooled over eleven and a half hours. Removing JS from that
-/// path fixes it outright.
+/// **Every piece of periodic work has to be parasitic on a Core Location callback.** There is no
+/// other clock. A `Timer` does not survive suspension, a JS `setInterval` does not survive
+/// suspension, and `BGTaskScheduler` fires a handful of times a day. So the only things that can
+/// wake this app are: a location delivery, a geofence crossing, a significant-location-change
+/// relaunch, or a push. Anything designed around a cadence works on a desk and fails in a pocket.
 ///
-/// iOS failed differently, and — unlike the first reading of it — the cause was ours. An iPhone's
-/// `payload_ts` sat frozen for nineteen hours while the app stayed alive, ran a full session at
-/// 01:57 and burned 39 sequence numbers on heartbeats. Core Location had simply stopped
-/// delivering: `pausesLocationUpdatesAutomatically`, which the JS path sets true, pauses updates
-/// when it decides the phone is stationary, and every route back is gated on MOVEMENT. See the
-/// flag in `init` for why that is off here, and the pause callbacks for what happens if it
-/// happens anyway.
+/// ## What went wrong before this rewrite
+///
+/// Two incidents, one file:
+///
+/// - 2026-08-29, an iPhone's `payload_ts` froze for nineteen hours while the app stayed alive and
+///   burned 39 sequence numbers on heartbeats. `pausesLocationUpdatesAutomatically` had paused
+///   updates and every route back was gated on MOVEMENT. That is why the flag is `false` below.
+/// - 2026-08-30, an iPhone sat at home for 88 minutes with `task.location_running = true`,
+///   `Always` authorization, one recipient — and published nothing at all. Two causes, both fixed
+///   here. A 50 m `distanceFilter` means a phone in a living room never generates a delivery, so
+///   the process is suspended and nothing runs; and nothing ever seeded the gate, so the native
+///   `heartbeat` had no position to repeat and returned 0 every time it was asked (see the
+///   `last_known_fix` guard in `publish.rs`, and the cold-start escape in `gate.rs`).
+///
+/// The fix for the second is the `stopped` state below: when the phone settles we stop the precise
+/// stream, drop to a **coarse** Wi-Fi/cell-derived stream that costs no GPS, and let each of those
+/// cheap deliveries drive a heartbeat. That keeps the process alive and the cadence uniform while
+/// someone sits on their sofa, which is the single most common thing a user does.
 ///
 /// ## Relationship to the JS pipeline
 ///
@@ -30,14 +43,72 @@ import UIKit
 final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   static let shared = BackgroundLocationRuntime()
 
+  // MARK: - Vocabulary
+
+  /// Where the phone is in the moving/stopped cycle.
+  ///
+  /// There is deliberately no `dark` case. Darkness is the absence of contact and only the server
+  /// can observe it; a client that believed it was dark would be a client that was still running.
+  enum MotionState: String {
+    case moving
+    case stopped
+  }
+
+  /// Why this runtime is executing right now.
+  ///
+  /// Stamped on every log line and reported to `device.health`. With five interleaving wakeup paths
+  /// running on hardware we do not own, "why did this phone go quiet at 23:00" is either a field on
+  /// a record or it is tea leaves.
+  /// Only reasons we can actually tell apart appear here. There is deliberately no `slc` case:
+  /// a significant-location-change delivery arrives through `didUpdateLocations` looking exactly
+  /// like any other, so claiming to distinguish it would be a field that lies. What separates an SLC
+  /// relaunch from a running app is `relaunch`, which is what a cold start reports.
+  enum WakeReason: String {
+    /// A delivery on the precise stream, i.e. the phone is going somewhere.
+    case movement
+    /// A tick on the coarse stream while parked. Not movement — a clock.
+    case periodic
+    case geofenceExit = "geofence_exit"
+    case relaunch
+    case stateChange = "state_change"
+    case seed
+  }
+
+  // MARK: - Tuning
+
+  /// Radius of the stop-anchor exit fence. A tuning knob, not a constant of nature: too small and
+  /// GPS jitter causes false exits and battery churn, too large and we look laggy when someone
+  /// leaves the house. 100 m is the starting guess; `bg.stop_anchor` telemetry carries the
+  /// re-entry-within-two-minutes rate that should tune it.
+  private static let stopAnchorRadiusM: CLLocationDistance = 100
+
+  /// How far fixes may wander from the candidate anchor and still count as "not going anywhere".
+  private static let stopJitterRadiusM: CLLocationDistance = 50
+
+  /// How long the phone must stay inside `stopJitterRadiusM` before we believe it has stopped.
+  /// Belt and braces on purpose — `CLLocation.speed` alone is not trustworthy in the field.
+  private static let stopDwellSeconds: TimeInterval = 180
+
+  /// The accuracy we ask for while stopped. Wi-Fi/cell derived: it does not spin up GPS, so it is
+  /// nearly free, and it is the only thing that keeps the process alive and ticking on a phone
+  /// that is not moving. The gate refuses these as *positions* (they land far past
+  /// `max_accuracy_m`), which is correct — they are used as a clock, not as a location.
+  private static let stoppedAccuracy: CLLocationAccuracy = kCLLocationAccuracyThreeKilometers
+
+  private static let stopAnchorRegionId = "sc.stop-anchor"
+
+  // MARK: - State
+
   /// The publish cadence. It is the *slot* interval, not the sampling rate: the gate absorbs
   /// everything inside a slot, so asking for updates more often buys a fresher position at a slot
   /// boundary rather than more envelopes.
-  ///
-  /// Seeded from `DEFAULT_SHARE_INTERVAL_MS` and replaced by {@link setCadence} whenever the user
-  /// picks a different interval. It used to be a constant, which meant a runtime that quietly
-  /// ignored the setting the app was showing them.
   private var slotIntervalMs: UInt64 = 5 * 60 * 1000
+
+  /// What the sampling policy last asked for while moving. Held separately from what is programmed
+  /// on the manager, because `stopped` deliberately overrides both and has to be able to put them
+  /// back on exit.
+  private var movingAccuracy: CLLocationAccuracy = kCLLocationAccuracyHundredMeters
+  private var movingDistanceFilter: CLLocationDistance = 50
 
   private let manager = CLLocationManager()
   private let queue = DispatchQueue(label: "com.unrealjune.irohlocation.background-runtime")
@@ -45,30 +116,40 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   private var subscription: Subscription?
   private var running = false
 
+  private var state: MotionState = .moving
+  private var lastWakeReason: WakeReason = .relaunch
+  private var lastWakeAt: Date?
+
+  /// The coordinate the stop fence is centred on. Persisted, because a cold launch has to be able
+  /// to re-arm the fence before anything else runs.
+  private var stopAnchor: CLLocation?
+
+  /// When the phone first entered the jitter radius of the current stop candidate. `nil` while
+  /// moving or once the stop is confirmed.
+  private var stopCandidate: (centre: CLLocation, since: Date)?
+
   private override init() {
     super.init()
     manager.delegate = self
-    manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-    // 50 m, matching `AMBIENT_DISTANCE_INTERVAL_M`. On iOS `timeInterval` is ignored entirely, so
-    // the distance filter is the only hardware-facing control we have — see the note in
-    // `sampling-policy.ts` about live mode having had no rate limit at all because of this.
-    manager.distanceFilter = 50
+    manager.desiredAccuracy = movingAccuracy
+    manager.distanceFilter = movingDistanceFilter
     manager.activityType = .other
-    // FALSE, and this is the single most consequential line in the file.
+    // FALSE, and this is still the single most consequential line in the file.
     //
     // Apple recommends auto-pause for apps whose tracking *session ends* — navigation that arrives,
     // a workout that finishes. Ambient friend-location never ends, and on 2026-08-29 the difference
-    // cost an iPhone nineteen hours. Core Location decided the phone was stationary, stopped
-    // delivering, and every route back is gated on MOVEMENT: significant-change monitoring and the
-    // region fence both fire only when the phone goes somewhere. A phone that pauses and then stays
-    // put has no way back at all, and looks from the outside exactly like a phone that is working —
-    // the app stayed alive throughout, ran a full session at 01:57 and burned 39 sequence numbers
-    // publishing heartbeats, all carrying a position Core Location had stopped updating.
+    // cost an iPhone nineteen hours: Core Location decided the phone was stationary, stopped
+    // delivering, and every route back was gated on movement. A phone that pauses and then stays
+    // put has no way back at all.
     //
-    // The battery cost is real and is the reason the JS path chose the other way; it is bounded by
-    // `distanceFilter` above rather than by the OS pausing us, which is a control we can actually
-    // reason about. See the delegate callbacks below, which make the pause visible either way.
+    // We replace the system's pause with the `stopped` state below, which is the same idea done
+    // where we can see it: we choose when to stop the precise stream, we leave a fence that fires
+    // on exit, and we keep a cheap tick running so the silence is legible.
     manager.pausesLocationUpdatesAutomatically = false
+    // With `Always` there is no blue pill, and asking for one would advertise a background session
+    // the user has already consented to in the permission sheet.
+    manager.showsBackgroundLocationIndicator = false
+    restorePersistedState()
   }
 
   /// Whether this runtime is the one currently receiving locations.
@@ -77,72 +158,415 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// positions" are different claims and the gap between them is the entire background failure.
   var isRunning: Bool { running }
 
-  /// Re-program the OS from the sampling policy's decision.
+  /// What `device.health` needs to tell a stationary phone apart from a broken one.
   ///
-  /// The cadence controller drives this now. Core Location ignores any time interval, so the
-  /// distance filter and the accuracy tier are the whole of what we can ask for; the publish
-  /// interval is enforced on our side by the slot grid.
-  func setCadence(intervalMs: UInt64, distanceM: Double, accuracy: String) {
-    slotIntervalMs = max(1, intervalMs)
-    manager.distanceFilter = distanceM > 0 ? distanceM : kCLDistanceFilterNone
-    manager.desiredAccuracy = Self.accuracy(for: accuracy)
-    // Re-requesting is what makes a change take effect; Core Location applies the new filter to
-    // the running request rather than needing a stop/start.
-    if running { manager.startUpdatingLocation() }
+  /// Every field here answers a question that was previously unanswerable from the outside: which
+  /// state the machine is in, why it last ran, whether the fence that is supposed to resurrect it
+  /// actually exists, and whether the authorization it was started under still holds.
+  var healthSnapshot: [String: Any] {
+    var snapshot: [String: Any] = [
+      "running": running,
+      "state": state.rawValue,
+      "wake_reason": lastWakeReason.rawValue,
+      // `auth_status`, not `authorization`: the telemetry event log redacts any key matching
+      // /authorization|password|psk|secret|ticket|token/i — a rule meant for HTTP headers that would
+      // otherwise ship this as `[REDACTED]` and hide the one field that says whether the user
+      // downgraded us. The design doc's heartbeat payload spells it this way too.
+      "auth_status": Self.authorizationName(manager.authorizationStatus),
+      "precise": manager.accuracyAuthorization == .fullAccuracy,
+      "anchor_armed": stopAnchor != nil,
+      "fence_registered": manager.monitoredRegions.contains {
+        $0.identifier == Self.stopAnchorRegionId
+      },
+      "slc_available": CLLocationManager.significantLocationChangeMonitoringAvailable(),
+    ]
+    if let lastWakeAt {
+      snapshot["last_wake_age_ms"] = Int(Date().timeIntervalSince(lastWakeAt) * 1000)
+    }
+    if let stopAnchor {
+      snapshot["anchor_age_ms"] = Int(Date().timeIntervalSince(stopAnchor.timestamp) * 1000)
+    }
+    return snapshot
   }
 
-  /// Map the policy's tier onto Core Location's constants. `balanced` is the ambient default and
-  /// is deliberately not `kCLLocationAccuracyKilometer`: the confidence gate rejects at 150 m, so a
-  /// coarser tier would spend battery producing fixes we then throw away.
-  private static func accuracy(for tier: String) -> CLLocationAccuracy {
-    switch tier {
-    case "high": return kCLLocationAccuracyBest
-    case "low": return kCLLocationAccuracyKilometer
-    default: return kCLLocationAccuracyHundredMeters
-    }
+  /// Whether background location is actually usable, as Core Location sees it right now.
+  ///
+  /// Read on demand rather than sampled once at start. `startBackground` used to latch its answer
+  /// from a single `requestAlwaysAuthorization` round-trip, and on a fresh install that call
+  /// returns before the delegate has settled — so a phone holding `authorizedAlways` spent an
+  /// evening showing "allow background location" and reporting `access=foreground`.
+  var hasBackgroundAuthorization: Bool {
+    manager.authorizationStatus == .authorizedAlways
   }
+
+  // MARK: - Lifecycle
 
   /// Begin background location updates. Idempotent.
+  ///
+  /// Order matters and is the same order `didFinishLaunchingWithOptions` should use: **arm the
+  /// resurrection ladder before anything that can throw or hang.** If the node fails to build, or
+  /// the store claim is refused, or we are killed two lines from now, the phone must still be able
+  /// to come back.
   func start() {
     guard !running else { return }
-    // Without this the app stops receiving updates the moment it is backgrounded, which is the
-    // entire window this exists to cover. It requires the `location` UIBackgroundMode.
-    manager.allowsBackgroundLocationUpdates = true
-    // Ask iOS to relaunch us into the background after a termination. Distinct from the updates
-    // themselves: this is what gets a killed app a second chance at all.
+
+    // Rung 1. Armed always, never stopped, and first. This is the only mechanism that relaunches a
+    // *terminated* app, and standard location updates emphatically are not one.
     manager.startMonitoringSignificantLocationChanges()
-    manager.startUpdatingLocation()
+    // Rung 2. If we were stopped when we died, the fence we died holding is what brings us back.
+    rearmStopAnchorFence()
+
+    manager.allowsBackgroundLocationUpdates = true
     running = true
+
+    // A background launch is amnesia: `restorePersistedState` has put the state machine back, so
+    // honour it rather than assuming we start moving. A phone that was parked overnight should
+    // come back parked, not spin GPS up to rediscover that.
+    switch state {
+    case .stopped where stopAnchor != nil:
+      applyStoppedCadence()
+    default:
+      state = .moving
+      applyMovingCadence()
+    }
+    // Seed the gate from the cached position, BEFORE starting the stream.
+    //
+    // Nothing else in the system will. Until something has passed the gate there is no
+    // `last_known_fix`, so `heartbeat` returns 0 every time it is asked, and there is no position to
+    // centre the stop fence on either — a phone can be armed, authorised and running while
+    // publishing nothing at all, which is precisely what one did for 88 minutes on 2026-08-30.
+    //
+    // `manager.location` and not `requestLocation()`: it is free, it needs no delegate round-trip,
+    // and one-shot requests are not a supported combination with `startUpdatingLocation()`. If there
+    // is no cached position — a genuinely fresh install — the stream's first delivery seeds it
+    // instead, which is why this is best-effort rather than a precondition.
+    if let cached = manager.location {
+      note(.seed)
+      let fix = Self.fix(from: cached)
+      let battery = Self.battery()
+      Task { await self.ingest(fix: fix, battery: battery) }
+    }
+
+    manager.startUpdatingLocation()
   }
 
   func stop() {
     guard running else { return }
     manager.stopUpdatingLocation()
     manager.stopMonitoringSignificantLocationChanges()
+    clearStopAnchorFence()
     manager.allowsBackgroundLocationUpdates = false
     running = false
+    state = .moving
+    stopAnchor = nil
+    stopCandidate = nil
+    persistState()
     queue.async { self.teardown() }
+  }
+
+  /// Re-program the OS from the sampling policy's decision.
+  ///
+  /// Core Location ignores any time interval, so the distance filter and the accuracy tier are the
+  /// whole of what we can ask for; the publish interval is enforced on our side by the slot grid.
+  ///
+  /// Recorded as the *moving* cadence and only applied immediately if we are moving — a policy
+  /// re-arm must not quietly cancel a stop and start burning GPS on a parked phone.
+  func setCadence(intervalMs: UInt64, distanceM: Double, accuracy: String) {
+    slotIntervalMs = max(1, intervalMs)
+    movingDistanceFilter = distanceM > 0 ? distanceM : kCLDistanceFilterNone
+    movingAccuracy = Self.accuracy(for: accuracy)
+    if running && state == .moving {
+      applyMovingCadence()
+      // Re-requesting is what makes a change take effect; Core Location applies the new filter to
+      // the running request rather than needing a stop/start.
+      manager.startUpdatingLocation()
+    }
+  }
+
+  /// Map the policy's tier onto Core Location's constants. `balanced` is the ambient default and
+  /// is deliberately not `kCLLocationAccuracyKilometer`: the confidence gate rejects at 150 m, so a
+  /// coarser tier would spend battery producing fixes we then throw away.
+  ///
+  /// `kCLLocationAccuracyBest` is never one of these. It is for turn-by-turn navigation; showing a
+  /// friend which building you are in does not need sub-10 m precision and the power difference is
+  /// large.
+  private static func accuracy(for tier: String) -> CLLocationAccuracy {
+    switch tier {
+    case "high": return kCLLocationAccuracyNearestTenMeters
+    case "low": return kCLLocationAccuracyKilometer
+    default: return kCLLocationAccuracyHundredMeters
+    }
+  }
+
+  // MARK: - State machine
+
+  /// Program the manager for a phone that is going somewhere.
+  ///
+  /// The tier is derived from `CLLocation.speed` rather than `CMMotionActivityManager`: motion
+  /// activity would be a better signal, but it is a second permission prompt and a second thing to
+  /// be denied, and speed rides along on fixes we already have. If the activity permission is ever
+  /// added, this is the one function that needs to change.
+  private func applyMovingCadence(speedMps: CLLocationSpeed = -1) {
+    // A negative speed is Core Location's "unknown", and it is also the default here, so a caller
+    // with no fix in hand lands on whatever the sampling policy last asked for.
+    var accuracy = movingAccuracy
+    var filter = movingDistanceFilter
+    var activity: CLActivityType = .other
+    switch speedMps {
+    case 8...:
+      accuracy = kCLLocationAccuracyNearestTenMeters
+      filter = 50
+      activity = .automotiveNavigation
+    case 3..<8:
+      accuracy = kCLLocationAccuracyNearestTenMeters
+      filter = 30
+      activity = .fitness
+    case 0.5..<3:
+      accuracy = kCLLocationAccuracyHundredMeters
+      filter = 20
+      activity = .fitness
+    default:
+      break
+    }
+    manager.desiredAccuracy = accuracy
+    manager.distanceFilter = filter
+    manager.activityType = activity
+  }
+
+  /// Program the manager for a phone that is parked.
+  ///
+  /// GPS off, and a coarse stream left running as the clock. `kCLDistanceFilterNone` is essential
+  /// here and is the correction to the bug this rewrite exists for: with a 50 m filter a phone in a
+  /// living room produces no deliveries at all, and an app that produces no deliveries is an app
+  /// iOS suspends. At three-kilometre accuracy the deliveries cost effectively nothing and each one
+  /// is a chance to fill a slot.
+  private func applyStoppedCadence() {
+    manager.desiredAccuracy = Self.stoppedAccuracy
+    manager.distanceFilter = kCLDistanceFilterNone
+    manager.activityType = .other
+  }
+
+  /// Settle into `stopped`, but only behind a tripwire that actually exists.
+  ///
+  /// Exit from `stopped` is entirely event-driven — the fence is the only way out, because the
+  /// coarse stream it runs on reports a three-kilometre radius and cannot tell a hundred-metre
+  /// departure from standing still. So a stop taken without a fence is not a low-power state, it is
+  /// a phone that has gone dark until the next relaunch. Staying in `moving` costs battery; that is
+  /// the correct way to fail.
+  private func enterStopped(anchor: CLLocation) {
+    guard armStopAnchorFence(at: anchor) else {
+      NSLog("[iroh-location] stop declined: no fence could be armed, staying in moving")
+      stopCandidate = nil
+      return
+    }
+    state = .stopped
+    stopAnchor = anchor
+    stopCandidate = nil
+    applyStoppedCadence()
+    manager.startUpdatingLocation()
+    persistState()
+    note(.stateChange)
+    NSLog(
+      "[iroh-location] stopped: anchor=(\(anchor.coordinate.latitude), "
+        + "\(anchor.coordinate.longitude)) fence=\(Self.stopAnchorRadiusM)m")
+  }
+
+  private func enterMoving(reason: WakeReason) {
+    state = .moving
+    stopAnchor = nil
+    stopCandidate = nil
+    clearStopAnchorFence()
+    applyMovingCadence()
+    manager.startUpdatingLocation()
+    persistState()
+    note(reason)
+    NSLog("[iroh-location] moving: reason=\(reason.rawValue)")
+  }
+
+  /// Decide whether a fix while `moving` means we have settled.
+  ///
+  /// Two signals, and neither is trusted alone: the phone must be slow *and* have stayed inside
+  /// `stopJitterRadiusM` for `stopDwellSeconds`. The `.stationary` flag Core Location sets on
+  /// updates is not reliable enough in the field to be one of them.
+  private func considerStopping(at location: CLLocation) {
+    let movingFast = location.speed >= 0 && location.speed > 1.0
+    guard !movingFast else {
+      stopCandidate = nil
+      return
+    }
+    guard let candidate = stopCandidate else {
+      stopCandidate = (centre: location, since: Date())
+      return
+    }
+    if location.distance(from: candidate.centre) > Self.stopJitterRadiusM {
+      stopCandidate = (centre: location, since: Date())
+      return
+    }
+    if Date().timeIntervalSince(candidate.since) >= Self.stopDwellSeconds {
+      enterStopped(anchor: location)
+    }
+  }
+
+  // MARK: - The resurrection ladder
+
+  /// Returns whether a fence is now armed. `false` means region monitoring is unavailable or the
+  /// app is not authorised for it, and the caller must not treat the phone as parked.
+  ///
+  /// Note that this is optimistic: `startMonitoring` is asynchronous and can still fail later, which
+  /// arrives at `monitoringDidFailFor`. `location.fence_registered` on `device.health` reports what
+  /// the OS actually holds, which is the number to trust.
+  @discardableResult
+  private func armStopAnchorFence(at location: CLLocation) -> Bool {
+    guard CLLocationManager.isMonitoringAvailable(for: CLCircularRegion.self) else { return false }
+    guard manager.authorizationStatus == .authorizedAlways else { return false }
+    clearStopAnchorFence()
+    let region = CLCircularRegion(
+      center: location.coordinate,
+      radius: Self.stopAnchorRadiusM,
+      identifier: Self.stopAnchorRegionId)
+    // Exit only. Entry would fire the moment we arm it and tell us nothing we do not know.
+    region.notifyOnExit = true
+    region.notifyOnEntry = false
+    manager.startMonitoring(for: region)
+    return true
+  }
+
+  /// Re-arm from disk, without needing a fix.
+  ///
+  /// The point of persisting the anchor: a cold launch has to restore the fence *before* it tries
+  /// to build a node, because building the node is the part that can fail.
+  private func rearmStopAnchorFence() {
+    guard let stopAnchor else { return }
+    if !armStopAnchorFence(at: stopAnchor) {
+      // We were parked when we died and cannot re-arm the way out. Come back moving rather than
+      // come back dark; `start` reads this.
+      NSLog("[iroh-location] could not re-arm the stop fence; resuming as moving")
+      state = .moving
+      self.stopAnchor = nil
+      persistState()
+    }
+  }
+
+  private func clearStopAnchorFence() {
+    for region in manager.monitoredRegions where region.identifier == Self.stopAnchorRegionId {
+      manager.stopMonitoring(for: region)
+    }
+  }
+
+  // MARK: - Persistence
+
+  /// Small, synchronous, and written on every transition. We will be killed mid-flight and we want
+  /// to come back knowing where we were.
+  private func persistState() {
+    let defaults = UserDefaults.standard
+    defaults.set(state.rawValue, forKey: "sc.bg.state")
+    if let stopAnchor {
+      defaults.set(stopAnchor.coordinate.latitude, forKey: "sc.bg.anchor.lat")
+      defaults.set(stopAnchor.coordinate.longitude, forKey: "sc.bg.anchor.lon")
+      defaults.set(stopAnchor.timestamp.timeIntervalSince1970, forKey: "sc.bg.anchor.ts")
+    } else {
+      defaults.removeObject(forKey: "sc.bg.anchor.lat")
+      defaults.removeObject(forKey: "sc.bg.anchor.lon")
+      defaults.removeObject(forKey: "sc.bg.anchor.ts")
+    }
+  }
+
+  private func restorePersistedState() {
+    let defaults = UserDefaults.standard
+    if let raw = defaults.string(forKey: "sc.bg.state"), let restored = MotionState(rawValue: raw) {
+      state = restored
+    }
+    guard defaults.object(forKey: "sc.bg.anchor.lat") != nil else { return }
+    let lat = defaults.double(forKey: "sc.bg.anchor.lat")
+    let lon = defaults.double(forKey: "sc.bg.anchor.lon")
+    let ts = defaults.double(forKey: "sc.bg.anchor.ts")
+    stopAnchor = CLLocation(
+      coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+      altitude: 0,
+      horizontalAccuracy: Self.stopAnchorRadiusM,
+      verticalAccuracy: -1,
+      timestamp: Date(timeIntervalSince1970: ts))
+  }
+
+  private func note(_ reason: WakeReason) {
+    lastWakeReason = reason
+    lastWakeAt = Date()
   }
 
   // MARK: - CLLocationManagerDelegate
 
   func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
     guard let location = locations.last else { return }
-    let fix = Self.fix(from: location)
     let battery = Self.battery()
-    Task { await self.publish(fix: fix, battery: battery) }
+
+    switch state {
+    case .moving:
+      note(.movement)
+      // Re-tier from the speed this fix reports. Cheap, and it is what keeps a walk from being
+      // sampled like a motorway.
+      applyMovingCadence(speedMps: location.speed)
+      let fix = Self.fix(from: location)
+      Task { await self.ingest(fix: fix, battery: battery) }
+      considerStopping(at: location)
+
+    case .stopped:
+      // Deliberately NOT ingested. This is a three-kilometre Wi-Fi fix; the gate would refuse it as
+      // a position and be right to. Its whole value is that it arrived — it is the clock that lets
+      // a parked phone keep filling slots with the anchor it already accepted, at the anchor's own
+      // timestamp, so a stationary stretch is honest about being stationary rather than absent.
+      note(.periodic)
+      Task { await self.heartbeat(battery: battery) }
+    }
+  }
+
+  func locationManager(
+    _ manager: CLLocationManager, didExitRegion region: CLRegion
+  ) {
+    guard region.identifier == Self.stopAnchorRegionId else { return }
+    // The whole point of the stopped state: exit is event-driven, so we are responsive to movement
+    // and cost nothing while parked, which normally trade off against each other.
+    //
+    // `enterMoving` restarts the precise stream, whose first delivery is the fresh position — no
+    // one-shot request, which is not a supported combination with an active stream. The heartbeat
+    // covers the gap until that lands, so a crossing is never a silent slot.
+    enterMoving(reason: .geofenceExit)
+    let battery = Self.battery()
+    Task { await self.heartbeat(battery: battery) }
+  }
+
+  /// Authorization changed under us — including the delayed re-prompt, where iOS shows the user a
+  /// map of everywhere the app has tracked them and a great many say no.
+  ///
+  /// A downgrade is a product event, not an error: it is reported, and the runtime stands down
+  /// rather than pretending to share. An upgrade re-arms, which is what makes the fresh-install
+  /// race self-correcting instead of latched until the next relaunch.
+  func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    let status = manager.authorizationStatus
+    NSLog("[iroh-location] authorization -> \(Self.authorizationName(status))")
+    switch status {
+    case .authorizedAlways:
+      guard running else { return }
+      manager.allowsBackgroundLocationUpdates = true
+      manager.startMonitoringSignificantLocationChanges()
+      rearmStopAnchorFence()
+      note(.stateChange)
+    case .authorizedWhenInUse:
+      // Foreground updates still work; background ones will not survive suspension. Keep running
+      // so the app is useful, and let `device.health` carry the truth.
+      note(.stateChange)
+    default:
+      guard running else { return }
+      NSLog("[iroh-location] authorization lost; standing down")
+      stop()
+    }
   }
 
   /// Core Location paused us anyway.
   ///
   /// It should not happen with `pausesLocationUpdatesAutomatically` off, but "should not" is what
-  /// the last nineteen hours of silence were built on. `expo-location` implements neither this
-  /// callback nor its counterpart, which is precisely why the pause was invisible: no span, no log,
-  /// no watermark, and a phone indistinguishable from one whose owner simply had not moved.
-  ///
-  /// Restarting immediately is the only recovery that is not gated on movement. If Core Location
-  /// pauses us again straight away we will have learned something worth knowing, and the log line
-  /// is what will say so.
+  /// the nineteen hours of silence were built on. `expo-location` implements neither this callback
+  /// nor its counterpart, which is precisely why the pause was invisible: no span, no log, no
+  /// watermark, and a phone indistinguishable from one whose owner simply had not moved.
   func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
     NSLog("[iroh-location] Core Location paused updates; restarting")
     manager.startUpdatingLocation()
@@ -154,13 +578,23 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
 
   func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
     // Not fatal and not rare — a denied authorisation or a momentary lack of any fix both land
-    // here. The app surfaces authorisation state itself; this line is for the rest.
+    // here. `requestLocation` in particular fails outright when it cannot get a fix in time, and
+    // the running stream is unaffected, so this must not tear anything down.
     NSLog("[iroh-location] background location error: \(error.localizedDescription)")
+  }
+
+  func locationManager(
+    _ manager: CLLocationManager, monitoringDidFailFor region: CLRegion?, withError error: Error
+  ) {
+    // A fence we could not arm is a resurrection rung we do not have. SLC still covers us, but this
+    // is worth saying out loud rather than inferring later from an absence.
+    NSLog("[iroh-location] stop-anchor fence failed to arm: \(error.localizedDescription)")
   }
 
   // MARK: - Node lifecycle
 
-  private func publish(fix: LocationFix, battery: BatteryState) async {
+  /// Run one captured fix through gate → outbox → seal → send.
+  private func ingest(fix: LocationFix, battery: BatteryState) async {
     guard let subscription = await ensureStarted() else { return }
     do {
       let outcome = try await subscription.ingestFix(
@@ -169,17 +603,40 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         battery: battery,
         intervalMs: slotIntervalMs,
         nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
-      // One line per wake that did something, so a quiet phone and a broken one look different in
-      // the device log. The equivalent spans reach the collector from the Rust side.
-      if outcome.enqueued > 0 || outcome.published > 0 {
-        NSLog(
-          "[iroh-location] wake: enqueued=\(outcome.enqueued) published=\(outcome.published) "
-            + "pending=\(outcome.pending) suspended=\(outcome.suspended)")
-      }
+      report("ingest", outcome)
     } catch {
       // The fix stays in the native outbox, so the next delivery retries it.
       NSLog("[iroh-location] ingest failed, fix stays queued: \(error.localizedDescription)")
     }
+  }
+
+  /// Fill the slots that have come due with no new fix, reusing the last accepted position.
+  ///
+  /// Not an optimisation. The cadence is the one property of a sealed envelope the stash can read,
+  /// so it has to be uniform whether or not the phone is moving — a series that stops when its
+  /// owner sits still is a series that leaks when its owner sits still.
+  private func heartbeat(battery: BatteryState) async {
+    guard let subscription = await ensureStarted() else { return }
+    do {
+      let outcome = try await subscription.heartbeatFix(
+        subscriptionId: Self.subscriptionId,
+        battery: battery,
+        intervalMs: slotIntervalMs,
+        nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+      report("heartbeat", outcome)
+    } catch {
+      NSLog("[iroh-location] heartbeat failed: \(error.localizedDescription)")
+    }
+  }
+
+  /// One line per wake that did something, so a quiet phone and a broken one look different in the
+  /// device log. The equivalent spans reach the collector from the Rust side.
+  private func report(_ lane: String, _ outcome: IngestOutcome) {
+    guard outcome.enqueued > 0 || outcome.published > 0 else { return }
+    NSLog(
+      "[iroh-location] \(lane): reason=\(lastWakeReason.rawValue) state=\(state.rawValue) "
+        + "enqueued=\(outcome.enqueued) published=\(outcome.published) "
+        + "pending=\(outcome.pending) suspended=\(outcome.suspended)")
   }
 
   /// Build and start a node from Keychain-held state, unless one is already running.
@@ -244,6 +701,17 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       level: level >= 0 ? Double(level) : 1.0,
       charging: state == .charging || state == .full,
       lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
+  }
+
+  private static func authorizationName(_ status: CLAuthorizationStatus) -> String {
+    switch status {
+    case .authorizedAlways: return "always"
+    case .authorizedWhenInUse: return "when_in_use"
+    case .denied: return "denied"
+    case .restricted: return "restricted"
+    case .notDetermined: return "not_determined"
+    @unknown default: return "unknown"
+    }
   }
 
   /// Accepted for API parity and ignored: a node owns a single trail namespace, so the Rust side

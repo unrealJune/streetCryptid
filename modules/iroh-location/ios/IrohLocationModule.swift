@@ -510,6 +510,24 @@ public final class IrohLocationModule: Module {
       BackgroundLocationRuntime.shared.isRunning
     }
 
+    /// What the runtime is doing and why, for `device.health`.
+    ///
+    /// Reports the moving/stopped state, the reason it last ran, whether the stop-anchor fence is
+    /// actually registered, and the live authorization — the four things that previously had to be
+    /// inferred from an absence of spans, which is to say could not be inferred at all.
+    Function("nativeBackgroundState") { () -> [String: Any] in
+      BackgroundLocationRuntime.shared.healthSnapshot
+    }
+
+    /// Whether Core Location grants background updates **right now**.
+    ///
+    /// Distinct from `expo-location`'s request round-trip, which on a fresh install returns before
+    /// the delegate has settled and made a phone holding `authorizedAlways` report `foreground` for
+    /// an evening. Read this instead of latching that.
+    Function("nativeBackgroundAuthorized") { () -> Bool in
+      BackgroundLocationRuntime.shared.hasBackgroundAuthorization
+    }
+
     Function("stopNativeBackground") {
       BackgroundLocationRuntime.shared.stop()
     }

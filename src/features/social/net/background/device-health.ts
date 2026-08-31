@@ -147,7 +147,31 @@ async function taskAttributes(): Promise<Attributes> {
   // From the native runtime now. `sharing.enabled` says what the user asked for; this says
   // whether anything is actually being handed positions, and the gap between the two is the whole
   // background failure this path exists to close.
-  attrs['task.location_running'] = tryGetIrohLocation()?.nativeBackgroundRunning?.();
+  const iroh = tryGetIrohLocation();
+  attrs['task.location_running'] = iroh?.nativeBackgroundRunning?.();
+
+  // The runtime's own account of itself, flattened under `location.*`.
+  //
+  // "Running" is necessary and nowhere near sufficient. A parked iPhone emits nothing by
+  // construction, so on 2026-08-30 `task.location_running = true` was perfectly true of a phone
+  // that had published nothing for 88 minutes — and no other span could tell that apart from a
+  // phone that was simply not moving. `location.state` says which of the two it is,
+  // `location.wake_reason` says what last ran it, and `location.fence_registered` says whether the
+  // thing that is supposed to resurrect it actually exists.
+  try {
+    const native = iroh?.nativeBackgroundState?.();
+    if (native) {
+      for (const [key, value] of Object.entries(native)) {
+        // Only scalars: an attribute that stringifies to `[object Object]` is worse than absent.
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+          attrs[`location.${key}`] = value;
+        }
+      }
+    }
+  } catch {
+    // A build whose binary predates the export, or a runtime that has never started. Omitted
+    // rather than guessed — see the note on `outbox.pending` about the two different answers.
+  }
 
   const backgroundTask = tryBackgroundTask();
   if (backgroundTask) {
