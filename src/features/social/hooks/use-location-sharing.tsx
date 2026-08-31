@@ -8,7 +8,7 @@ import {
   useState,
   type PropsWithChildren,
 } from 'react';
-import { AppState, Platform } from 'react-native';
+import { Platform } from 'react-native';
 
 import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
 import { runDevCommand as runDevCommandImpl } from '@/features/dev/commands/dev-commands';
@@ -231,17 +231,6 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       setLocationError(errorMessage(startError));
     }
   }, []);
-
-  useEffect(() => {
-    if (locationStatus !== 'permission-denied') return;
-    const subscription = AppState.addEventListener('change', (state) => {
-      if (state !== 'active') return;
-      const service = serviceRef.current;
-      if (!service) return;
-      void service.stopBackground().then(() => startLocation(service));
-    });
-    return () => subscription.remove();
-  }, [locationStatus, startLocation]);
 
   // Fires once both the node is ready and the user has accepted the in-app disclosure — whichever
   // resolves last. Covers a returning user (disclosure already 'accepted' from a prior session, node
@@ -589,7 +578,21 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       }),
     [snapshot?.friends, friendFixes, hasLiveSelfFix, selfFix]
   );
-  const error = locationError ?? serviceError;
+  // `permission-denied` is a claim about the OS, and it is the one bit of location state that goes
+  // stale in our hand. It is set once, from whatever `startBackground` read at start-up; the service
+  // re-derives the real answer on every foreground and reports it on the snapshot. Derived rather
+  // than written back, so there is one source of truth and no cascading render.
+  //
+  // This replaces an effect that tore the whole runtime down and restarted it on every foreground
+  // while the status was denied — which on 2026-08-30 was a phone that had held `authorizedAlways`
+  // the entire time and had merely read the permission one beat too early on a fresh install. A
+  // genuine denial leaves `backgroundAccess` at `foreground`, and the banner correctly stands.
+  const accessRecovered =
+    locationStatus === 'permission-denied' && snapshot?.backgroundAccess === 'full';
+  const effectiveLocationStatus: LocationRuntimeStatus = accessRecovered
+    ? 'running'
+    : locationStatus;
+  const error = (accessRecovered ? null : locationError) ?? serviceError;
 
   const transportReport = useMemo<TransportReport>(
     () =>
@@ -628,7 +631,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       selfFix,
       hasLiveSelfFix,
       friends,
-      locationStatus,
+      locationStatus: effectiveLocationStatus,
       error,
       disclosureStatus,
       acknowledgeLocationDisclosure,
@@ -661,7 +664,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       selfFix,
       hasLiveSelfFix,
       friends,
-      locationStatus,
+      effectiveLocationStatus,
       disclosureStatus,
       acknowledgeLocationDisclosure,
       error,

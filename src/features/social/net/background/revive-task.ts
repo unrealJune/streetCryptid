@@ -117,6 +117,39 @@ export const REVIVE_FENCE_MIN_REARM_MS = 60_000;
 export const REVIVE_FENCE_MAX_FIX_AGE_MS = 5 * 60_000;
 
 /**
+ * A cached OS position to centre the fence on when nothing else in the app has one yet.
+ *
+ * The fresh-install case, and the reason it needs its own function: on a new install
+ * `latestLocalFix` is empty until something publishes and the engine's `lastAcceptedFix` is empty
+ * permanently, because the native runtime feeds the Rust gate directly and no longer hands the JS
+ * engine anything. So the arm at the end of `startBackground` had no centre, skipped silently, and
+ * left a phone with no resurrection path at all — `task.fence_registered` sat `false` through the
+ * whole of 2026-08-30.
+ *
+ * `getLastKnownPositionAsync` needs no GPS and returns immediately or not at all, so this cannot
+ * delay a start. `maxAge` is the same bound the re-centre uses: a fence centred on yesterday is
+ * worse than no new fence, because being permanently outside it re-fires an exit on every arm.
+ */
+export async function lastKnownFixForFence(): Promise<LocationFix | null> {
+  if (!isReviveFenceAvailable()) return null;
+  try {
+    const Location = await import('expo-location');
+    const pos = await Location.getLastKnownPositionAsync({ maxAge: REVIVE_FENCE_MAX_FIX_AGE_MS });
+    if (!pos) return null;
+    return {
+      lat: pos.coords.latitude,
+      lon: pos.coords.longitude,
+      accuracyM: pos.coords.accuracy ?? 0,
+      headingDeg: pos.coords.heading ?? 0,
+      ts: pos.timestamp,
+    };
+  } catch {
+    // No permission yet, or no cached position. Both are ordinary on a first launch.
+    return null;
+  }
+}
+
+/**
  * KV key holding the last successful arm as `ms:lat:lon`; survives the cold launches the fence
  * causes, which an in-process variable would not.
  */

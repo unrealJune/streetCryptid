@@ -356,6 +356,60 @@ describe('LocationSharingService — durable trail wiring', () => {
     expect(mockHolder.mod.calls.syncLatest).toEqual([{ peerTickets: [] }]);
   });
 
+  it('moves our own dot from the replica, not only from a manual push', async () => {
+    // Regression, 2026-08-30: "I cannot hit the location button (greyed out) after restarting the
+    // app. It seems to only work when a push has happened."
+    //
+    // The locate-me control is gated on `!hasLiveSelfFix || !selfFix`, and `hasLiveSelfFix` comes
+    // from `onLocalFix`. When capture moved into Rust, `ingestAndTrackLocal` — the only thing that
+    // fed our own dot from the pipeline — was left uncalled and nothing replaced it, so the sole
+    // live writer of `latestLocalFix` was the debug Push button. The user's description was an
+    // exact statement of the bug.
+    //
+    // The native runtime publishes with no JS alive, so the replica is where our own position has
+    // to come from now.
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+
+    const seen: { lat: number; lon: number; ts: number }[] = [];
+    svc.onLocalFix((fix) => seen.push(fix));
+    expect(seen).toHaveLength(0);
+
+    mockHolder.mod.trailFixes.push({
+      author: 'aa11',
+      seq: 9,
+      fix: { lat: 47.6062, lon: -122.3321, accuracyM: 12, headingDeg: 0, ts: 5_000 },
+    });
+    await svc.syncTrail(0);
+
+    expect(seen.at(-1)).toMatchObject({ lat: 47.6062, lon: -122.3321, ts: 5_000 });
+  });
+
+  it('never walks our own dot backwards from a replayed replica entry', async () => {
+    // `readLatest` is re-read in full on every sync, so the same entry arrives repeatedly and an
+    // older one can arrive after a newer publish. The dot must not jump back to it.
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+
+    const seen: { ts: number }[] = [];
+    svc.onLocalFix((fix) => seen.push(fix));
+
+    mockHolder.mod.trailFixes.push({
+      author: 'aa11',
+      seq: 9,
+      fix: { lat: 47.6062, lon: -122.3321, accuracyM: 12, headingDeg: 0, ts: 5_000 },
+    });
+    await svc.syncTrail(0);
+
+    await svc.forceLocationPush(
+      { lat: 47.61, lon: -122.33, accuracyM: 8, headingDeg: 0, ts: 9_000 },
+      'manual'
+    );
+    await svc.syncTrail(0);
+
+    expect(seen.at(-1)?.ts).toBe(9_000);
+  });
+
   it('syncTrail explicitly targets the configured stash when opted in', async () => {
     mockHolder.stashConfig = {
       baseUrl: 'https://stash.example.com',

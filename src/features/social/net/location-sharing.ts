@@ -58,7 +58,10 @@ import type {
 } from '../core/types';
 import type { DrainOutcome, LocationEngine, NativeDrain } from './background/location-engine';
 import type { BatteryState } from './background/types';
-import { ensureBackgroundPermissions } from './background/location-permissions';
+import {
+  ensureBackgroundPermissions,
+  readBackgroundAccessGranted,
+} from './background/location-permissions';
 import type { CadenceProvider, CadenceTarget } from './background/cadence-controller';
 import { createTrailStore, type TrailPoint, type TrailStore } from './background/trail-store';
 import type { PersistentKV } from './background/persistent-kv';
@@ -1995,6 +1998,19 @@ export class LocationSharingService {
 
       if (selfId && nf.author === selfId) {
         await this.trail.appendOwn(fix, nf.seq);
+        // ...and this is where our own dot comes from now.
+        //
+        // It used to come from `ingestAndTrackLocal`, which fed the JS engine and mirrored back
+        // whatever it accepted. That path was deleted when capture moved into Rust, and nothing
+        // replaced it: `latestLocalFix` was left with exactly one live writer, the debug push
+        // button. So the locate-me control (`map-screen-body.tsx`, `!hasLiveSelfFix || !selfFix`)
+        // was greyed out from launch until someone pressed Push — reported 2026-08-30 as "it only
+        // works when a push has happened", which was a precise description of the bug.
+        //
+        // The replica is the source of truth for our own position now, so reading it back is not a
+        // workaround: it is the same fix, after the same gate, that actually went on the wire.
+        // `recordLocalFix` ignores anything older than what it holds, so replays cost nothing.
+        this.recordLocalFix(fix);
       } else if (known.has(nf.author)) {
         await this.trail.recordFriendLatest({
           author: nf.author,
@@ -2026,6 +2042,43 @@ export class LocationSharingService {
   /** Every friend's current fix — at most one per friend, and never any older one. */
   friendLatest(): Promise<TrailPoint[]> {
     return this.trail.friendLatest();
+  }
+
+  /**
+   * Re-derive {@link BackgroundAccess} from the OS, and publish the answer if it moved.
+   *
+   * `startBackground` used to latch its answer from the single `requestBackgroundPermissionsAsync`
+   * round-trip it made at start-up. On iOS that call resolves before the authorization delegate has
+   * settled, so a fresh install read "denied" at 17:44:13 on 2026-08-30 and `authorizedAlways` two
+   * seconds later — and because nothing re-read it, the phone showed "allow background location"
+   * and reported `access=foreground` for the rest of the evening while holding full permission.
+   *
+   * Prefers the native runtime's live read (Core Location's own `authorizationStatus`, which is the
+   * value the background updates actually depend on) and falls back to `expo-location` on a build
+   * whose binary predates that export. Never prompts, so it is safe to call on every foreground.
+   */
+  async refreshBackgroundAccess(): Promise<BackgroundAccess> {
+    // `tryGetIrohLocation()` rather than `this.mod`, which is only bound once `init` has run. This
+    // is a pure OS read with no node behind it, and the UI can reasonably ask before the node is
+    // up — the same reasoning `device-health.ts` uses for `nativeBackgroundRunning`.
+    const mod = tryGetIrohLocation();
+    const native = mod?.nativeBackgroundAuthorized;
+    let granted: boolean;
+    if (typeof native === 'function') {
+      try {
+        granted = native.call(mod);
+      } catch {
+        granted = await readBackgroundAccessGranted();
+      }
+    } else {
+      granted = await readBackgroundAccessGranted();
+    }
+    const next: BackgroundAccess = granted ? 'full' : 'foreground';
+    if (next !== this.backgroundAccess) {
+      this.backgroundAccess = next;
+      this.emit();
+    }
+    return next;
   }
 
   /**
@@ -2131,6 +2184,10 @@ export class LocationSharingService {
       };
       await nativeProvider.reprogram(initialCfg);
       this.setNativeBackground(true);
+      // Starting the manager is what settles Core Location's authorization delegate, so this is the
+      // first moment the answer above can be trusted. Cheap, never prompts, and on the fresh-install
+      // race it is the difference between "sharing" and a banner that never goes away.
+      await this.refreshBackgroundAccess();
 
       // After the initial arm, the cadence controller re-programs the runtime whenever the decision
       // materially changes (battery, Low-Power Mode) and re-evaluates on power events — so sampling
@@ -2151,6 +2208,11 @@ export class LocationSharingService {
         onForeground: () => {
           void this.engine?.flush();
           void this.syncTrail(0);
+          // Re-derive rather than trust what start-up decided. Authorization moves in both
+          // directions without us: iOS settles a fresh grant a beat after the request resolves, and
+          // it also re-prompts days later with a map of everywhere we have tracked the user, where
+          // a great many downgrade. Both are product events and both surface here.
+          void this.refreshBackgroundAccess();
           // A foreground record is the fastest way to learn what state a phone came back in —
           // notably whether the OS still has its location task running, which is exactly what a
           // process kill takes away. Self-throttled to one per
@@ -2209,14 +2271,24 @@ export class LocationSharingService {
       // documented exemption to the ban on starting a foreground service from the background, which
       // is the only way the self-heal can legally re-arm. See `revive-task.ts`.
       try {
-        const { armReviveFence } = await import('./background/revive-task');
+        const { armReviveFence, lastKnownFixForFence } = await import('./background/revive-task');
         // The one call that bypasses the re-arm floor: sharing is starting and there may be no
         // fence standing at all, so "keep whatever is already armed" is not a safe outcome here.
-        // The last position we know of, not a fresh provider read: the native runtime captures
-        // on its own schedule and has not necessarily delivered one yet. A slightly stale centre
-        // still works — being outside it only makes the exit fire sooner.
-        const centre = this.latestLocalFix ?? this.engine?.getState().lastAcceptedFix;
+        // A slightly stale centre still works — being outside it only makes the exit fire sooner.
+        //
+        // The fallback read is not belt-and-braces, it is the fresh-install case, and skipping it
+        // cost an iPhone its only resurrection path on 2026-08-30: `latestLocalFix` is empty until
+        // something publishes, `lastAcceptedFix` is empty because the native runtime no longer
+        // feeds the JS engine at all, so on a new install `centre` was always undefined and the
+        // fence was silently never armed — `task.fence_registered` sat `false` for the whole
+        // evening. A cached OS position needs no GPS and is more than good enough to centre a
+        // 200 m tripwire.
+        const centre =
+          this.latestLocalFix ??
+          this.engine?.getState().lastAcceptedFix ??
+          (await lastKnownFixForFence());
         if (centre) await armReviveFence(centre, { force: true });
+        else console.warn('[revive-fence] no position to centre on; fence not armed');
       } catch (error) {
         console.warn('[revive-fence] arm failed', error);
       }
@@ -2865,20 +2937,14 @@ export class LocationSharingService {
   }
 
   /**
-   * Feed a raw provider fix to the engine, then move the local own-position dot to whatever the
-   * engine actually *accepted*.
+   * Move the app's own-position dot, ignoring anything older than what we already hold.
    *
-   * The dot deliberately follows the engine rather than the raw fix: the confidence gate exists
-   * because Android sometimes reports a position kilometres away, and rendering that before
-   * discarding it would throw the user's own marker across town for a frame. On rejection this
-   * re-affirms the last good position instead.
+   * Fed from the replica read in {@link refreshTrailFromReplica} and from
+   * {@link forceLocationPush}. It is deliberately NOT fed from raw provider fixes: the confidence
+   * gate exists because a phone sometimes reports a position kilometres away, and rendering that
+   * before discarding it would throw the user's own marker across town for a frame. What reaches
+   * here has already been through the gate, in Rust, on its way to the wire.
    */
-  private async ingestAndTrackLocal(fix: LocationFix, parent?: SpanContext): Promise<void> {
-    await this.engine?.ingest(fix, parent);
-    const accepted = this.engine?.getState().lastAcceptedFix ?? null;
-    if (accepted && accepted !== this.latestLocalFix) this.recordLocalFix(accepted);
-  }
-
   private recordLocalFix(fix: LocationFix): void {
     if (this.latestLocalFix && fix.ts < this.latestLocalFix.ts) return;
     this.latestLocalFix = fix;
