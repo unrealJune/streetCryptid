@@ -69,6 +69,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     /// A tick on the coarse stream while parked. Not movement — a clock.
     case periodic
     case geofenceExit = "geofence_exit"
+    /// The parked clock reported us confidently away from the anchor, and the fence had not said
+    /// so. See `considerDeparture(from:)` — this reason appearing at all means the fence is
+    /// unreliable on that device, which is worth being able to count.
+    case coarseDeparture = "coarse_departure"
     case relaunch
     case stateChange = "state_change"
     case seed
@@ -138,6 +142,11 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// to re-arm the fence before anything else runs.
   private var stopAnchor: CLLocation?
 
+  /// The most recent position from either stream, however coarse. Not a published fix and never
+  /// used as one — it exists so `healthSnapshot` can report how far a parked phone has drifted from
+  /// its anchor, which is the difference between "still at home" and "the fence is not firing".
+  private var lastSeenLocation: CLLocation?
+
   /// When the phone first entered the jitter radius of the current stop candidate. `nil` while
   /// moving or once the stop is confirmed.
   private var stopCandidate: (centre: CLLocation, since: Date)?
@@ -199,6 +208,15 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     }
     if let stopAnchor {
       snapshot["anchor_age_ms"] = Int(Date().timeIntervalSince(stopAnchor.timestamp) * 1000)
+      // How far the last position we saw was from the fence we are parked behind.
+      //
+      // The field that would have ended the 2026-08-31 investigation in one query. Every other
+      // attribute on a phone parked through a commute reads healthy — armed, authorised, running,
+      // fence registered — and "still parked" is indistinguishable from "still at home" without
+      // this. A `stopped` record whose distance is kilometres is a fence that is not firing.
+      if let lastSeen = lastSeenLocation {
+        snapshot["anchor_distance_m"] = Int(lastSeen.distance(from: stopAnchor))
+      }
     }
     return snapshot
   }
@@ -512,6 +530,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
     guard let location = locations.last else { return }
     let battery = Self.battery()
+    lastSeenLocation = location
 
     switch state {
     case .moving:
@@ -528,9 +547,49 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // a position and be right to. Its whole value is that it arrived — it is the clock that lets
       // a parked phone keep filling slots with the anchor it already accepted, at the anchor's own
       // timestamp, so a stationary stretch is honest about being stationary rather than absent.
+      //
+      // Its *coordinate* is still worth one comparison, though, which is the correction below: a
+      // fix too coarse to publish can still be good enough to prove we are nowhere near the anchor.
+      if considerDeparture(from: location) { return }
       note(.periodic)
       Task { await self.heartbeat(battery: battery) }
     }
+  }
+
+  /// Leave `stopped` when the parked clock itself shows we have gone, and the fence has not said so.
+  ///
+  /// The stopped state was built with exactly one way out — `didExitRegion` on a 100 m fence — on
+  /// the reasoning that the coarse stream "cannot tell a hundred-metre departure from standing
+  /// still". True, and it does not have to: a commute is kilometres, and the same delivery that
+  /// serves as the clock also carries a coordinate.
+  ///
+  /// That single exit failed in the field. On 2026-08-31 an iPhone parked at 05:10 UTC and was
+  /// still `stopped` at 14:55 with the anchor untouched — `anchor_age_ms` climbing 47 → 584 minutes
+  /// across a drive to work — while `fence_registered` read `true` the whole time. The JS revive
+  /// fence, a second and independent region, was equally silent through the same window. Whatever
+  /// the cause, one mechanism with no backstop is what turned it into a day of silence.
+  ///
+  /// The threshold is the fix's OWN accuracy plus the fence radius, so this cannot false-positive:
+  /// a three-kilometre cell fix has to be three kilometres out before it counts, while a 65 m Wi-Fi
+  /// fix unparks at ~165 m. A parked phone's noise is bounded by the accuracy it reports, so a
+  /// stationary stretch stays stationary and stays cheap — which is the whole value of `stopped`.
+  ///
+  /// Returns whether we left; the caller skips the heartbeat when we did, because `enterMoving`
+  /// runs one itself.
+  private func considerDeparture(from location: CLLocation) -> Bool {
+    guard let anchor = stopAnchor else { return false }
+    // A negative accuracy means the coordinate is invalid, not that it is perfect.
+    guard location.horizontalAccuracy >= 0 else { return false }
+    let threshold = location.horizontalAccuracy + Self.stopAnchorRadiusM
+    let travelled = location.distance(from: anchor)
+    guard travelled > threshold else { return false }
+    NSLog(
+      "[iroh-location] coarse departure: \(Int(travelled))m from anchor "
+        + "(threshold \(Int(threshold))m); the fence did not fire")
+    enterMoving(reason: .coarseDeparture)
+    let battery = Self.battery()
+    Task { await self.heartbeat(battery: battery) }
+    return true
   }
 
   func locationManager(

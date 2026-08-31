@@ -327,6 +327,8 @@ foreground resume. Its value is in the _mismatches_:
 | `location.state=stopped` + `location.fence_registered=false`         | parked with no way out — it will not wake until something else relaunches it |
 | `location.state=moving` + a large `last_publish_age_ms`              | Core Location is delivering and nothing is anchoring — check the gate        |
 | `location.wake_reason=periodic` and never anything else              | iOS: parked, ticking on the coarse stream. Publishing, and healthy           |
+| `location.state=stopped` + `location.anchor_distance_m` in the km    | parked, and nowhere near the anchor: the stop fence is not firing            |
+| `location.wake_reason=coarse_departure`                              | the fence missed a departure and the parked clock caught it — count these    |
 | `location.auth_status` not `always` while `perm.background=granted`  | the two disagree; Core Location's own read is the one that governs           |
 
 `location.*` comes from the native runtime's `nativeBackgroundState()` (`BackgroundLocationRuntime`
@@ -334,6 +336,14 @@ on iOS). It exists because `task.location_running=true` is true of a parked phon
 one alike — on 2026-08-30 an iPhone reported exactly that while 88 minutes past its last publish,
 and no other span could separate the two. Note `auth_status`, not `authorization`: the event log
 redacts any key matching `/authorization|password|psk|secret|ticket|token/i`.
+
+`anchor_distance_m` and the `coarse_departure` wake reason exist because `stopped` used to have a
+single way out. On 2026-08-31 an iPhone parked at 05:10 UTC and was still parked at 14:55 with its
+anchor untouched, across a drive to work — `fence_registered` read `true` the whole time, and the JS
+revive fence was silent through the same window. Every other attribute read healthy, and "still
+parked" is indistinguishable from "still at home" without a distance. The parked coarse stream now
+also serves as a backstop exit (`considerDeparture`), so `coarse_departure` appearing at all means
+the fence is unreliable on that device rather than that anything is broken now.
 
 The top row of the device-health dashboard carries those checks as counts — devices with no
 `bg.wake` in 6h, no `device.health` in 2h, any terminal native-runtime state, and publishes with no
