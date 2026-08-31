@@ -132,3 +132,68 @@ describe('backfillFromTrail', () => {
     expect(await db.getKv('backfill.cursor')).toBeNull();
   });
 });
+
+describe('exportCells / importCells', () => {
+  it('exports explored cells sorted and without any timing data', async () => {
+    const { db, store } = makeStore();
+    await store.recordFix(fixAt(47.64, -122.35, 5000));
+    await store.recordFix(fixAt(47.62, -122.32, 1000));
+
+    const exported = await store.exportCells();
+    expect(exported).toHaveLength(2);
+    expect([...exported]).toEqual([...exported].sort());
+    expect(new Set(exported)).toEqual(new Set(db.cells.keys()));
+  });
+
+  it('adds unknown cells with no timestamp and preserves known ones', async () => {
+    const { db, store } = makeStore();
+    await store.recordFix(fixAt(47.62, -122.32, 1000));
+    const [known] = await store.exportCells();
+    const fresh = grid.cellAt(latLonToWorld({ lat: 47.64, lon: -122.35 }), H3_DISPLAY_RES);
+
+    const result = await store.importCells([known, fresh]);
+
+    expect(result.added).toEqual([fresh]);
+    expect(result.skipped).toBe(1);
+    expect(db.cells.get(known)).toEqual({ firstTs: 1000, lastTs: 1000 });
+    expect(db.cells.get(fresh)).toEqual({ firstTs: 0, lastTs: 0 });
+  });
+
+  it('folds finer cells to their display-resolution parent and rejects coarser ones', async () => {
+    const { store } = makeStore();
+    const display = grid.cellAt(latLonToWorld({ lat: 47.62, lon: -122.32 }), H3_DISPLAY_RES);
+    const finer = grid.cellAt(latLonToWorld({ lat: 47.62, lon: -122.32 }), H3_DISPLAY_RES + 2);
+    const coarser = grid.parentOf(display, H3_DISPLAY_RES - 2);
+
+    const result = await store.importCells([finer, coarser, 'not-a-cell']);
+
+    expect(result.added).toEqual([display]);
+    expect(result.rejected).toBe(2);
+  });
+
+  it('notifies subscribers so an open map picks a restore up', async () => {
+    const { store } = makeStore();
+    const seen: string[][] = [];
+    const unsubscribe = store.subscribe((added) => seen.push([...added]));
+    const cell = grid.cellAt(latLonToWorld({ lat: 47.62, lon: -122.32 }), H3_DISPLAY_RES);
+
+    await store.importCells([cell]);
+    expect(seen).toEqual([[cell]]);
+
+    unsubscribe();
+    await store.importCells([
+      grid.cellAt(latLonToWorld({ lat: 47.64, lon: -122.35 }), H3_DISPLAY_RES),
+    ]);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('does not notify when nothing is new', async () => {
+    const { store } = makeStore();
+    const cell = grid.cellAt(latLonToWorld({ lat: 47.62, lon: -122.32 }), H3_DISPLAY_RES);
+    await store.importCells([cell]);
+    const seen: string[][] = [];
+    store.subscribe((added) => seen.push([...added]));
+    await store.importCells([cell]);
+    expect(seen).toHaveLength(0);
+  });
+});

@@ -107,3 +107,25 @@ describe('live exploration source', () => {
     expect(notified).toBe(0);
   });
 });
+
+describe('restore folding', () => {
+  it('folds cells restored through the store into the open map', async () => {
+    const db = new InMemoryExplorationDb();
+    const store = createExplorationStore({ grid, openDb: async () => db });
+    const source = createLiveExplorationSource(grid, store, new InMemoryTrailStorage());
+    await source.ready;
+    const before = source.version();
+    const cell = grid.cellAt(latLonToWorld({ lat: 47.66, lon: -122.38 }), H3_DISPLAY_RES);
+
+    await store.importCells([cell]);
+
+    expect(source.index().cells.has(cell)).toBe(true);
+    expect(source.version()).toBeGreaterThan(before);
+
+    source.dispose();
+    await store.importCells([
+      grid.cellAt(latLonToWorld({ lat: 47.68, lon: -122.4 }), H3_DISPLAY_RES),
+    ]);
+    expect(source.index().cells.size).toBe(1);
+  });
+});

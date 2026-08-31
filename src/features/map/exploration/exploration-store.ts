@@ -2,7 +2,7 @@ import type { LocationFix } from '@/features/social/core/types';
 import { type TrailStorage } from '@/features/social/net/background/trail-store';
 
 import { H3_DISPLAY_RES } from '../core/cell-ladder';
-import type { CellIndex, H3Grid } from '../core/h3-grid';
+import { createH3Grid, realH3, type CellIndex, type H3Grid } from '../core/h3-grid';
 import { latLonToWorld } from '../core/mercator';
 
 /**
@@ -29,6 +29,14 @@ export const EXPLORATION_ACCURACY_MAX_M = 100;
 
 const BACKFILL_CURSOR_KEY = 'backfill.cursor';
 
+/**
+ * Timestamp written for cells folded in from a backup. A backup carries no
+ * timing data at all (see exploration-backup.ts), so there is nothing honest to
+ * put here — 0 records "explored, when unknown" rather than inventing a moment.
+ * A later real fix in the cell touches `last_ts` as usual.
+ */
+export const IMPORTED_CELL_TS = 0;
+
 /** Minimal storage port: SQLite in the app, a Map fake in tests. */
 export interface ExplorationDb {
   allCells(): Promise<CellIndex[]>;
@@ -52,6 +60,31 @@ export interface ExplorationStore {
    * Idempotent; resolves the number of newly explored cells.
    */
   backfillFromTrail(storage: TrailStorage): Promise<CellIndex[]>;
+  /**
+   * Every explored cell, sorted — the payload of a backup. Timestamps stay in
+   * the DB; nothing but the cell index leaves the store.
+   */
+  exportCells(): Promise<CellIndex[]>;
+  /**
+   * Fold cells from a backup in. Idempotent (already-known cells are counted as
+   * skipped, never re-dated), and cells the grid does not recognise at the
+   * display resolution are rejected rather than stored.
+   */
+  importCells(cells: Iterable<CellIndex>): Promise<ExplorationImportResult>;
+  /**
+   * Observe cells added by something other than the caller — restore, in
+   * practice. Lets the map fold a restored history in without a reload.
+   */
+  subscribe(listener: (added: readonly CellIndex[]) => void): () => void;
+}
+
+export interface ExplorationImportResult {
+  /** Cells that were not already explored. */
+  readonly added: readonly CellIndex[];
+  /** Cells already explored, left untouched. */
+  readonly skipped: number;
+  /** Entries the grid rejected at the display resolution. */
+  readonly rejected: number;
 }
 
 export interface ExplorationStoreOptions {
@@ -64,8 +97,25 @@ export function createExplorationStore(opts: ExplorationStoreOptions): Explorati
   return new DbExplorationStore(opts.grid, opts.openDb ?? openSqliteExplorationDb);
 }
 
+let shared: ExplorationStore | undefined;
+
+/**
+ * The process-wide store. The map owns exploration, but settings writes to it
+ * too (restore), and two independent stores would each cache their own `known`
+ * set — a restore would then be invisible until the app relaunched.
+ *
+ * It builds its own grid rather than taking one: the store only ever asks for
+ * cell/parent/resolution arithmetic, which is pure h3, so there is nothing for a
+ * caller's grid to contribute and no way for callers to disagree about it.
+ */
+export function sharedExplorationStore(): ExplorationStore {
+  if (!shared) shared = createExplorationStore({ grid: createH3Grid(realH3()) });
+  return shared;
+}
+
 class DbExplorationStore implements ExplorationStore {
   private readonly fallback = new InMemoryExplorationDb();
+  private readonly listeners = new Set<(added: readonly CellIndex[]) => void>();
   private dbPromise: Promise<ExplorationDb | null> | undefined;
   private knownPromise: Promise<Set<CellIndex>> | undefined;
 
@@ -134,6 +184,63 @@ class DbExplorationStore implements ExplorationStore {
       await db.setKv(BACKFILL_CURSOR_KEY, String(maxTs + 1));
     }
     return added;
+  }
+
+  async exportCells(): Promise<CellIndex[]> {
+    return [...(await this.known())].sort();
+  }
+
+  async importCells(cells: Iterable<CellIndex>): Promise<ExplorationImportResult> {
+    const known = await this.known();
+    const db = await this.db();
+    const added: CellIndex[] = [];
+    let skipped = 0;
+    let rejected = 0;
+
+    for (const cell of cells) {
+      let resolution: number;
+      try {
+        resolution = this.grid.resolutionOf(cell);
+      } catch {
+        rejected++;
+        continue;
+      }
+      // Only cells the display grid can actually draw; finer ones fold to their
+      // res-9 parent exactly as load() normalizes legacy rows.
+      let normalized: CellIndex;
+      if (resolution === H3_DISPLAY_RES) normalized = cell;
+      else if (resolution > H3_DISPLAY_RES) {
+        try {
+          normalized = this.grid.parentOf(cell, H3_DISPLAY_RES);
+        } catch {
+          rejected++;
+          continue;
+        }
+      } else {
+        rejected++;
+        continue;
+      }
+
+      if (known.has(normalized)) {
+        skipped++;
+        continue;
+      }
+      known.add(normalized);
+      added.push(normalized);
+      await db.insertCell(normalized, IMPORTED_CELL_TS).catch(() => {});
+    }
+
+    if (added.length) this.notify(added);
+    return { added, skipped, rejected };
+  }
+
+  subscribe(listener: (added: readonly CellIndex[]) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private notify(added: readonly CellIndex[]): void {
+    for (const listener of this.listeners) listener(added);
   }
 }
 
