@@ -84,11 +84,7 @@ pub const PAIR_WIRE_V: u8 = 3;
 
 /// Invite schema version carried in every [`InviteData`].
 ///
-/// v2 shortened the token (see [`encode_invite`]): the endpoint address rides as the endpoint
-/// ticket's own *binary* form rather than its base32 string, the redundant `endpoint_id` is gone
-/// (it is inside the address), and the payload is base64url rather than hex. A decoded invite is
-/// ALWAYS normalized to this version, including one recovered from a legacy v1 token, so
-/// re-encoding a decoded invite always produces the current form.
+/// v1 (postcard over a base32 ticket *string*, hex-encoded) never shipped and is not decoded.
 pub const INVITE_V: u8 = 2;
 
 /// Hard ceiling on a single framed pairing message body, enforced on read and write. Pairing
@@ -141,9 +137,8 @@ const SAS_ACCEPTED_GRACE_MS: u64 = 10_000;
 /// spread that never overrides uniqueness/correctness.
 const SAS_MIN_SEPARATION: u16 = 8;
 
-/// Opaque token prefix for an encoded invite. `scpair1:` is the legacy hex form, still decoded.
+/// Opaque token prefix for an encoded invite.
 const INVITE_PREFIX: &str = "scpair2:";
-const LEGACY_INVITE_PREFIX: &str = "scpair1:";
 
 const SESSION_ID_LEN: usize = 16;
 const INVITE_SECRET_LEN: usize = 16;
@@ -166,37 +161,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-// ── Hex (dependency-free, round-trips with hex_decode) ────────────────────────────────────
-
-/// Only the legacy v1 invite decoder still needs hex, so the encoder survives for the test that
-/// mints a v1 token to feed it.
-#[cfg(test)]
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
-fn hex_decode(s: &str) -> Result<Vec<u8>> {
-    if s.len() % 2 != 0 {
-        bail!("odd-length hex");
-    }
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let bytes = s.as_bytes();
-    for pair in bytes.chunks_exact(2) {
-        let hi = (pair[0] as char)
-            .to_digit(16)
-            .ok_or_else(|| anyhow!("bad hex digit"))?;
-        let lo = (pair[1] as char)
-            .to_digit(16)
-            .ok_or_else(|| anyhow!("bad hex digit"))?;
-        out.push(((hi << 4) | lo) as u8);
-    }
-    Ok(out)
 }
 
 // ── Base64url (dependency-free, round-trips with b64url_decode) ───────────────────────────
@@ -468,7 +432,7 @@ pub struct InviteData {
     pub expires_at_ms: u64,
 }
 
-/// v2 invite payload. Two things keep it short: the endpoint address rides as the endpoint
+/// Invite payload. Two things keep it short: the endpoint address rides as the endpoint
 /// ticket's own **binary** form (`Ticket::encode_bytes`) rather than its ~150-character base32
 /// string, and the endpoint id is not repeated — it is already inside that address. Fixed-size
 /// arrays avoid postcard's length prefixes for the two fields whose length is a constant.
@@ -482,26 +446,12 @@ struct InviteWire {
     expires_at_ms: u64,
 }
 
-/// v1 invite payload, decode-only. Kept so a link minted by an older build still resolves to a
-/// real invite (usually an expired one, with the error that says so) instead of "bad prefix".
-#[derive(Deserialize)]
-struct InviteWireV1 {
-    v: u8,
-    invite_id: Vec<u8>,
-    secret: Vec<u8>,
-    endpoint_id: Vec<u8>,
-    endpoint_ticket: String,
-    expires_at_ms: u64,
-}
-
 /// Encode an invite to an opaque, dependency-free `scpair2:<base64url>` token.
 ///
-/// The endpoint ticket is re-encoded from its string form into the bytes it already wraps, and the
-/// separately-carried `endpoint_id` is dropped, because both were redundant: a ticket string is
-/// base32 (8 characters per 5 bytes) of a structure that *contains* the endpoint id, and that whole
-/// string was then hex-encoded a second time. Encoding therefore requires a parseable ticket whose
-/// endpoint id matches `inv.endpoint_id`; a mismatch is refused rather than silently resolved,
-/// since the decoded invite would otherwise name a different peer than the one encoded.
+/// Encoding requires a parseable ticket whose endpoint id matches `inv.endpoint_id`, because the
+/// token stores only the ticket — the endpoint id is read back out of it. A mismatch is refused
+/// rather than silently resolved, since the decoded invite would otherwise name a different peer
+/// than the one encoded.
 pub fn encode_invite(inv: &InviteData) -> Result<String> {
     if inv.version != INVITE_V {
         bail!("unsupported invite version {}", inv.version);
@@ -524,21 +474,13 @@ pub fn encode_invite(inv: &InviteData) -> Result<String> {
     Ok(format!("{INVITE_PREFIX}{}", b64url_encode(&bytes)))
 }
 
-/// Decode + structurally validate an invite token, accepting both the current
-/// `scpair2:<base64url>` form and the legacy `scpair1:<hex>` one. The result is always normalized
-/// to [`INVITE_V`], so a decoded invite can be re-encoded into a current token.
+/// Decode + structurally validate an `scpair2:<base64url>` invite token.
 pub fn decode_invite(s: &str) -> Result<InviteData> {
-    if let Some(payload) = s.strip_prefix(INVITE_PREFIX) {
-        return decode_invite_v2(&b64url_decode(payload)?);
-    }
-    if let Some(payload) = s.strip_prefix(LEGACY_INVITE_PREFIX) {
-        return decode_invite_v1(&hex_decode(payload)?);
-    }
-    bail!("bad invite prefix")
-}
-
-fn decode_invite_v2(bytes: &[u8]) -> Result<InviteData> {
-    let w: InviteWire = postcard::from_bytes(bytes).map_err(|e| anyhow!("decode invite: {e}"))?;
+    let payload = s
+        .strip_prefix(INVITE_PREFIX)
+        .ok_or_else(|| anyhow!("bad invite prefix"))?;
+    let bytes = b64url_decode(payload)?;
+    let w: InviteWire = postcard::from_bytes(&bytes).map_err(|e| anyhow!("decode invite: {e}"))?;
     if w.v != INVITE_V {
         bail!("unsupported invite version {}", w.v);
     }
@@ -550,33 +492,6 @@ fn decode_invite_v2(bytes: &[u8]) -> Result<InviteData> {
         secret: w.secret,
         endpoint_id: *ticket.endpoint_addr().id.as_bytes(),
         endpoint_ticket: ticket.to_string(),
-        expires_at_ms: w.expires_at_ms,
-    })
-}
-
-fn decode_invite_v1(bytes: &[u8]) -> Result<InviteData> {
-    let w: InviteWireV1 = postcard::from_bytes(bytes).map_err(|e| anyhow!("decode invite: {e}"))?;
-    if w.v != 1 {
-        bail!("unsupported invite version {}", w.v);
-    }
-    let invite_id: [u8; SESSION_ID_LEN] = w
-        .invite_id
-        .try_into()
-        .map_err(|_| anyhow!("bad invite id length"))?;
-    let secret: [u8; INVITE_SECRET_LEN] = w
-        .secret
-        .try_into()
-        .map_err(|_| anyhow!("bad invite secret length"))?;
-    let endpoint_id: [u8; ENDPOINT_LEN] = w
-        .endpoint_id
-        .try_into()
-        .map_err(|_| anyhow!("bad endpoint id length"))?;
-    Ok(InviteData {
-        version: INVITE_V,
-        invite_id,
-        secret,
-        endpoint_id,
-        endpoint_ticket: w.endpoint_ticket,
         expires_at_ms: w.expires_at_ms,
     })
 }
@@ -2570,33 +2485,6 @@ mod tests {
         }
     }
 
-    /// Mirror of the retired v1 payload, so the legacy decode path is tested against bytes an
-    /// older build would actually have produced rather than against itself.
-    #[derive(Serialize)]
-    struct LegacyInviteWire {
-        v: u8,
-        invite_id: Vec<u8>,
-        secret: Vec<u8>,
-        endpoint_id: Vec<u8>,
-        endpoint_ticket: String,
-        expires_at_ms: u64,
-    }
-
-    fn legacy_v1_token(inv: &InviteData) -> String {
-        let w = LegacyInviteWire {
-            v: 1,
-            invite_id: inv.invite_id.to_vec(),
-            secret: inv.secret.to_vec(),
-            endpoint_id: inv.endpoint_id.to_vec(),
-            endpoint_ticket: inv.endpoint_ticket.clone(),
-            expires_at_ms: inv.expires_at_ms,
-        };
-        format!(
-            "{LEGACY_INVITE_PREFIX}{}",
-            hex_encode(&postcard::to_allocvec(&w).unwrap())
-        )
-    }
-
     fn recv_pub() -> Vec<u8> {
         let mut b = vec![0u8; RECV_PUB_LEN];
         OsRng.fill_bytes(&mut b);
@@ -2764,18 +2652,16 @@ mod tests {
     }
 
     /// The token is the thing a human pastes into a chat, so its length is a property worth
-    /// pinning: base64url over a singly-encoded endpoint address must stay well under the ~460
-    /// characters the v1 hex-over-base32-string form produced for the same invite.
+    /// pinning rather than merely hoping for. A relay-plus-direct-address invite encodes to ~168
+    /// characters; the ceiling is loose enough to absorb a longer relay URL but tight enough to
+    /// catch a regression that re-introduces a second encoding layer (which cost ~260 characters).
     #[test]
-    fn invite_token_is_shorter_than_the_legacy_form() {
-        let inv = sample_invite();
-        let token = encode_invite(&inv).unwrap();
-        let legacy = legacy_v1_token(&inv);
+    fn invite_token_stays_short() {
+        let token = encode_invite(&sample_invite()).unwrap();
         assert!(
-            token.len() * 2 < legacy.len(),
-            "v2 token {} chars, v1 {} chars",
-            token.len(),
-            legacy.len()
+            token.len() < 220,
+            "invite token grew to {} chars",
+            token.len()
         );
     }
 
@@ -2789,17 +2675,11 @@ mod tests {
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
     }
 
-    /// A link minted by a pre-v2 build still resolves, normalized to the current schema.
-    #[test]
-    fn legacy_v1_token_still_decodes() {
-        let inv = sample_invite();
-        let back = decode_invite(&legacy_v1_token(&inv)).unwrap();
-        assert_eq!(inv, back);
-    }
-
     #[test]
     fn invite_bad_prefix_rejected() {
         assert!(decode_invite("nope:deadbeef").is_err());
+        // The never-shipped v1 prefix is not a special case — it is simply not our prefix.
+        assert!(decode_invite("scpair1:deadbeef").is_err());
     }
 
     #[test]

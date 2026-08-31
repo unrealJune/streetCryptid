@@ -290,7 +290,7 @@ export async function sealPairToken(
   overrides: SealCryptoOverrides = {}
 ): Promise<string> {
   if (!isPairToken(token)) {
-    throw new PairingCodeError('pairing capsule: expected an scpair2:/scpair1: token');
+    throw new PairingCodeError('pairing capsule: expected an scpair2: token');
   }
   const tokenBytes = utf8Bytes(token);
   if (tokenBytes.byteLength > MAX_TOKEN_BYTES) {
@@ -339,9 +339,7 @@ export async function openPairCapsule(
   }
   const token = utf8Decode(plaintext);
   if (!isPairToken(token)) {
-    throw new PairingCodeError(
-      'pairing capsule: decrypted payload is not a valid scpair2:/scpair1: token'
-    );
+    throw new PairingCodeError('pairing capsule: decrypted payload is not a valid scpair2: token');
   }
   return token;
 }

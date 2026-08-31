@@ -696,7 +696,7 @@ export interface IrohLocationApi {
   pairResult(sessionIdHex: string): Promise<PairResult | null>;
   /** Encode a {@link PairInvite} into an opaque `scpair2:<base64url>` token for QR / links. */
   encodePairInvite(invite: PairInvite): Promise<string>;
-  /** Decode an opaque `scpair2:` token (or a legacy `scpair1:` one) back into a {@link PairInvite}. */
+  /** Decode an opaque `scpair2:<base64url>` token back into a {@link PairInvite}. */
   decodePairInvite(token: string): Promise<PairInvite>;
 
   /** Local addresses plus live path usage for the requested peer EndpointIds. */

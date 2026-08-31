@@ -3527,8 +3527,7 @@ pub fn encode_pair_invite(invite: PairInvite) -> Result<String, LocationError> {
     pairing::encode_invite(&inv).map_err(|e| LocationError::Decode(e.to_string()))
 }
 
-/// Decode an opaque `scpair2:<base64url>` token (or a legacy `scpair1:<hex>` one) back into a
-/// [`PairInvite`].
+/// Decode an opaque `scpair2:<base64url>` token back into a [`PairInvite`].
 #[uniffi::export]
 pub fn decode_pair_invite(token: String) -> Result<PairInvite, LocationError> {
     let inv = pairing::decode_invite(&token).map_err(|e| LocationError::Decode(e.to_string()))?;

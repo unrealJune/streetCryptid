@@ -13,12 +13,6 @@ export const PAIR_SCHEME = 'streetcryptid';
 export const PAIR_PATH = 'social';
 /** Prefix of the opaque native invite token (`scpair2:<base64url>`). */
 export const PAIR_TOKEN_PREFIX = 'scpair2:';
-/**
- * Every token prefix we still accept, newest first. `scpair1:` is the retired hex form, which the
- * native decoder also still reads — a link someone was sent before the shortening keeps working
- * (and, once past its TTL, fails with "invite expired" rather than "not a pair link").
- */
-export const PAIR_TOKEN_PREFIXES = [PAIR_TOKEN_PREFIX, 'scpair1:'] as const;
 
 const PAIR_LINK_PREFIX = `${PAIR_SCHEME}:///${PAIR_PATH}`;
 const LEGACY_SOCIAL_LINK_PREFIX = `${PAIR_SCHEME}://${PAIR_PATH}`;
@@ -31,12 +25,12 @@ const ACCEPTED_LINK_PREFIXES = [
   LEGACY_TRIPLE_PAIR_LINK_PREFIX,
 ] as const;
 
-/** True when `s` is a raw opaque native invite token (`scpair2:<…>`, or the legacy `scpair1:`). */
+/** True when `s` is a raw opaque native invite token (`scpair2:<…>`). */
 export function isPairToken(s: string): boolean {
-  return PAIR_TOKEN_PREFIXES.some((prefix) => s.startsWith(prefix) && s.length > prefix.length);
+  return s.startsWith(PAIR_TOKEN_PREFIX) && s.length > PAIR_TOKEN_PREFIX.length;
 }
 
-/** True when `s` is a streetCryptid pair link or a raw `scpair2:`/`scpair1:` token. */
+/** True when `s` is a streetCryptid pair link or a raw `scpair2:` token. */
 export function isPairLink(s: string): boolean {
   const trimmed = s.trim();
   return (
@@ -69,7 +63,7 @@ function parseQuery(input: string): Map<string, string> {
 }
 
 /**
- * Decode a pair link (or a raw `scpair2:`/`scpair1:` token) back into the opaque native token.
+ * Decode a pair link (or a raw `scpair2:` token) back into the opaque native token.
  * Rejects legacy `streetcryptid://contact?…` cards and anything that isn't a pair link, so the two schemes can't be
  * confused.
  */
