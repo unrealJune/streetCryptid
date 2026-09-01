@@ -9,8 +9,8 @@ use std::sync::Mutex;
 
 use iroh_location::gate::{BatteryState, FixQualityConfig, GateState};
 use iroh_location::publish::{
-    DrainEngine, EnqueueOutcome, FixQueue, GateStateStore, PublishError, PublishSink, Recipients,
-    SeqCounter, StoreError,
+    DrainEngine, EnqueueOutcome, FixQueue, FlushOutcome, GateStateStore, PublishError, PublishSink,
+    Recipients, SeqCounter, StoreError,
 };
 use iroh_location::LocationFix;
 
@@ -147,6 +147,8 @@ struct FakeSink {
     flushes: Mutex<u32>,
     /// The stash was unreachable. Must not cost the fixes: they are committed and go out next time.
     fail_flush: Mutex<bool>,
+    /// Nowhere to send — stash opted out and an empty pool. A successful call that pushed nothing.
+    no_targets: Mutex<bool>,
 }
 
 impl PublishSink for FakeSink {
@@ -179,12 +181,15 @@ impl PublishSink for FakeSink {
         Ok(())
     }
 
-    async fn flush(&self) -> Result<(), PublishError> {
+    async fn flush(&self) -> Result<FlushOutcome, PublishError> {
         *self.flushes.lock().unwrap() += 1;
         if *self.fail_flush.lock().unwrap() {
             return Err(PublishError::Send("stash unreachable".into()));
         }
-        Ok(())
+        if *self.no_targets.lock().unwrap() {
+            return Ok(FlushOutcome::NoTargets);
+        }
+        Ok(FlushOutcome::Pushed)
     }
 }
 
@@ -330,7 +335,12 @@ async fn a_rejected_first_fix_publishes_nothing_at_all() {
 
     let out = h
         .engine()
-        .ingest(fix(now - 11 * MINUTE, 10.0), healthy_battery(), INTERVAL, now)
+        .ingest(
+            fix(now - 11 * MINUTE, 10.0),
+            healthy_battery(),
+            INTERVAL,
+            now,
+        )
         .await
         .unwrap();
 
@@ -854,4 +864,36 @@ async fn a_wake_that_published_nothing_moves_neither_stamp() {
     let state = h.gate.get();
     assert_eq!(state.last_published_at, None);
     assert_eq!(state.last_pushed_at, None);
+}
+
+#[tokio::test]
+async fn a_flush_with_nowhere_to_send_is_not_recorded_as_a_push() {
+    // The bug this exists to stop: "nothing to push to" and "pushed" were the same `Ok`, so a
+    // phone with the stash opted out and an empty pool stamped `last_pushed_at` on every drain and
+    // reported a fresh push forever. That is the same lying watermark the native stamps replaced.
+    let h = Harness::new();
+    *h.sink.no_targets.lock().unwrap() = true;
+    let now = INTERVAL * 10;
+
+    let out = h
+        .engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        out.published, 1,
+        "it still reached the live lane and the replica"
+    );
+    let state = h.gate.get();
+    assert_eq!(state.last_published_at, Some(now));
+    assert_eq!(
+        state.last_pushed_at, None,
+        "nothing left the device, so nothing may claim to have"
+    );
+    assert_eq!(
+        *h.sink.flushes.lock().unwrap(),
+        1,
+        "the flush was still attempted"
+    );
 }

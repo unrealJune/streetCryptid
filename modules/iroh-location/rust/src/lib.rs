@@ -4083,7 +4083,7 @@ impl publish::PublishSink for SubscriptionSink<'_> {
     /// Reads the peer set from [`crate::delivery`] rather than taking it as an argument, because
     /// the caller that most needs this — an OS location callback with no JS context alive — has
     /// nowhere to get it from. `set_delivery_config` is what keeps it current.
-    async fn flush(&self) -> Result<(), publish::PublishError> {
+    async fn flush(&self) -> Result<publish::FlushOutcome, publish::PublishError> {
         let node = &self.subscription.node;
         let config = node
             .delivery_config()
@@ -4091,23 +4091,37 @@ impl publish::PublishSink for SubscriptionSink<'_> {
             .map_err(|e| publish::PublishError::Send(e.to_string()))?;
         // Nothing to push to is a real state — stash opted out, no friends yet — and not worth a
         // span or a native round trip. `push_trail` with an empty list still waits out the push
-        // deadline, which on a background wake is seconds of budget spent on no work.
+        // deadline, which on a background wake is seconds of budget spent on no work. Reported as
+        // `NoTargets` rather than as success: nothing left the device, and saying otherwise is how
+        // the watermark started lying.
         if config.is_empty() {
-            return Ok(());
+            return Ok(publish::FlushOutcome::NoTargets);
         }
+        // This is the push. Its success or failure is the whole of whether the entries left.
         node.push_trail(config.peer_tickets.clone(), None)
             .await
             .map_err(|e| publish::PublishError::Send(e.to_string()))?;
-        // Content upload is stash-only and gated on the opt-in, not on the stash merely being
-        // built into this bundle — the same distinction `location-sharing.ts` draws. Uploading for
-        // a user who switched the stash off would PUT sealed envelopes into a namespace nothing
-        // registered, failing on every tick and burying real push failures.
+        // The blob upload is a SEPARATE fact and must not be able to discard the push above.
+        //
+        // It used to be chained with `?`, so an unreachable content API turned a completed
+        // reconciliation into a failed flush and the drain skipped the watermark — a phone pushing
+        // fine every few minutes reported `last_push_age_ms` in the tens of minutes, which is the
+        // instrument you reach for when you suspect exactly this. Reconciliation moved the entries
+        // regardless; a missing blob is a degradation the stash already reports itself, as
+        // `content_missing` on `/healthz` and on the `trail.content.upload` span.
+        //
+        // Stash-only and gated on the OPT-IN, not on the stash merely being built into this
+        // bundle — the same distinction `location-sharing.ts` draws. Uploading for a user who
+        // switched the stash off would PUT sealed envelopes into a namespace nothing registered.
         if let Some((base_url, psk)) = config.stash() {
-            node.upload_trail_content(base_url.to_string(), psk)
-                .await
-                .map_err(|e| publish::PublishError::Send(e.to_string()))?;
+            if let Err(err) = node.upload_trail_content(base_url.to_string(), psk).await {
+                tracing::warn!(
+                    error = %err,
+                    "trail content upload failed; entries reconciled but their blobs may be missing"
+                );
+            }
         }
-        Ok(())
+        Ok(publish::FlushOutcome::Pushed)
     }
 }
 

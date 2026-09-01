@@ -135,7 +135,30 @@ pub trait PublishSink: Send + Sync {
     ///
     /// Best-effort by contract: a failure degrades offline delivery for those fixes, it does not
     /// mean the drain failed. The entries are committed and stay in the replica for the next push.
-    fn flush(&self) -> impl std::future::Future<Output = Result<(), PublishError>> + Send;
+    ///
+    /// **An implementation must report the reconciliation and nothing else.** Whatever else it does
+    /// alongside — uploading blobs, refreshing a cache — must not be able to turn a completed push
+    /// into an `Err`. Chaining a content upload onto the push with `?` is what made a phone that
+    /// was reconciling every few minutes report `last_push_age_ms` in the tens of minutes, which is
+    /// precisely the instrument you reach for when you suspect it is not pushing.
+    fn flush(&self)
+        -> impl std::future::Future<Output = Result<FlushOutcome, PublishError>> + Send;
+}
+
+/// Whether a flush actually moved anything off the device.
+///
+/// Two outcomes rather than a bare `Ok`, because they were the same value and it made the push
+/// watermark lie: a phone with nowhere to send returned `Ok`, the drain stamped `last_pushed_at`,
+/// and `device.health` reported a fresh push forever on a device that had never pushed at all.
+/// That is the same class of fault the native watermarks were introduced to end, reintroduced one
+/// commit later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushOutcome {
+    /// Reconciled with at least one peer. The entries have left the device.
+    Pushed,
+    /// Nowhere to send: the stash is not opted into and the pool is empty. A real configuration,
+    /// not a failure — and emphatically not a push.
+    NoTargets,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -363,7 +386,10 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             // whose fixes are sitting in its own replica — which read as perfect health for a whole
             // day on 2026-08-31, because nothing recorded either moment natively.
             self.stamp(|state| state.last_published_at = Some(now_ms));
-            if self.sink.flush().await.is_ok() {
+            // Only a flush that actually reached a peer counts. `NoTargets` is a successful call
+            // that pushed nothing, and stamping it would report a fresh push on a phone that has
+            // never had anywhere to send.
+            if matches!(self.sink.flush().await, Ok(FlushOutcome::Pushed)) {
                 self.stamp(|state| state.last_pushed_at = Some(now_ms));
             }
         }
