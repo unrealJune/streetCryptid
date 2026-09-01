@@ -84,6 +84,7 @@ import {
   saveRatchetActivity,
   saveRatchetDrops,
   type RatchetDropCounts,
+  loadSharingEnabled,
   saveShareIntervalMs,
   saveSharingEnabled,
   saveStashOptIn,
@@ -2434,6 +2435,25 @@ export class LocationSharingService {
     this.bgLifecycleStop = null;
     this.nativeFixSub?.remove();
     this.nativeFixSub = null;
+    // Detach the engine BEFORE any of the slow work below, and stop the detached copy rather than
+    // re-reading the field.
+    //
+    // Everything after this point awaits, and a `startBackground` can land in any of those gaps —
+    // this is a lifecycle teardown, so a remount racing a shutdown is the normal case, not an edge
+    // one. Re-reading `this.engine` at await time meant the stop could land on the *successor*
+    // engine, and `this.engine = null` at the end could null it: a phone was left with Core
+    // Location armed, the `onNativeFix` listener live, and `this.engine` pointing at an engine that
+    // had been stopped out from under it. Every capture was then refused with
+    // `engine-not-running` — 102 of them in two hours on 2026-09-01, on a phone that otherwise
+    // reported perfect health.
+    //
+    // Detaching first makes the window fail safe instead: a capture arriving mid-teardown sees no
+    // engine and is dropped, which is what a shutdown means, and a `startBackground` that arrives
+    // installs a fresh engine this function can no longer touch.
+    const engine = this.engine;
+    this.engine = null;
+    this.backgroundSharing = false;
+    this.backgroundAccess = 'unknown';
     try {
       await stopCadence?.();
     } catch {
@@ -2442,7 +2462,7 @@ export class LocationSharingService {
     // Stops the foreground service / Core Location updates and releases the native stores.
     this.setNativeBackground(false);
     try {
-      await this.engine?.stop();
+      await engine?.stop();
     } catch {
       // ignore
     }
@@ -2452,9 +2472,6 @@ export class LocationSharingService {
     } catch {
       // ignore — cancellation is best-effort
     }
-    this.engine = null;
-    this.backgroundSharing = false;
-    this.backgroundAccess = 'unknown';
     this.emit();
   }
 
@@ -3033,6 +3050,25 @@ export class LocationSharingService {
     const engine = this.engine;
     // No engine means sharing is not running here; the capture is not ours to publish.
     if (!engine) return;
+    // An engine that is wired up but not running is a bug, not a decision, and it swallows every
+    // capture silently — so repair it rather than spend another day's fixes proving it.
+    //
+    // The OS is only delivering because we asked it to, so a capture arriving at all says the
+    // native side believes sharing is on. The durable intent is what decides whether it is right:
+    // `stopBackground` clears `sharingEnabled` when the user switches off, while
+    // `teardownBackground` deliberately leaves it set for the self-heal to find (see its docs). So
+    // "idle engine + intent still set" can only be a lifecycle fault, and starting is the correct
+    // response; a user who actually turned sharing off cleared the intent and is never resumed.
+    if (engine.getState().status !== 'running') {
+      const intended = await loadSharingEnabled(this.kv).catch(() => false);
+      if (!intended) return;
+      getTelemetry().log('warn', 'engine was not running while sharing is on; restarting it', {
+        'sc.drop_reason': 'engine-restarted',
+        status: engine.getState().status,
+      });
+      await engine.start().catch(() => undefined);
+      if (engine.getState().status !== 'running') return;
+    }
     try {
       const { routeNativeCapture } = await import('./background/location-engine');
       const accepted = await routeNativeCapture(

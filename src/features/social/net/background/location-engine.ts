@@ -224,10 +224,16 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
       if (state.status !== 'running') {
         // Stamped rather than silent: "the engine was not running" and "the fix was refused" are
         // different faults and used to be indistinguishable from outside.
+        //
+        // `status` rides along because the two ways to be not-running are different bugs and read
+        // identically without it. `error` means a drain threw and there is an `engine.failed` span
+        // saying why; `idle` means nothing ever started this engine, or something stopped it and
+        // left it wired up — which is a lifecycle race, has no accompanying span, and is what cost
+        // a phone 102 consecutive captures on 2026-09-01 while every other attribute read healthy.
         getTelemetry()
           .startSpan('engine.ingest', {
             parent,
-            attributes: { 'sc.drop_reason': 'engine-not-running' },
+            attributes: { 'sc.drop_reason': 'engine-not-running', status: state.status },
           })
           .end();
         return decision;
