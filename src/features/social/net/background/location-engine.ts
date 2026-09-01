@@ -178,6 +178,10 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
 
   function applyOutcome(outcome: DrainOutcome, fix: LocationFix | null): void {
     setState({
+      // A run that got through clears a previous failure, status included. Without this the engine
+      // reported `error` for the rest of the process after one transient throw, while publishing
+      // perfectly well — and the settings screen showed it.
+      status: 'running',
       pending: outcome.pending,
       error: null,
       ...(fix && outcome.accepted ? { lastAcceptedFix: fix, lastRejection: null } : {}),
@@ -221,7 +225,15 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
       const decision = policy.decide({ battery: batt });
       setState({ decision, lastFixAt: now() });
 
-      if (state.status !== 'running') {
+      // `idle` refuses; `error` does not.
+      //
+      // An error records that the LAST attempt threw, and latching on it meant one transient
+      // failure — a relay blink, a subscription being rebound — disabled publishing for the whole
+      // life of the process, because nothing ever set the status back. The native side is built to
+      // retry (the fix stays in its outbox), so the correct response to a previous failure is to
+      // try again and report the next outcome, not to stop. A genuinely broken pipeline keeps
+      // failing loudly with one `engine.failed` per capture, which is the signal we want anyway.
+      if (state.status === 'idle') {
         // Stamped rather than silent: "the engine was not running" and "the fix was refused" are
         // different faults and used to be indistinguishable from outside.
         //
@@ -282,8 +294,20 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
     getState,
   };
 
-  async function runHeartbeat(stage: string, _parent?: SpanContext): Promise<number> {
-    if (state.status !== 'running') return 0;
+  async function runHeartbeat(stage: string, parent?: SpanContext): Promise<number> {
+    if (state.status === 'idle') {
+      // Said out loud, for the same reason `ingest` says it: the heartbeat is the ONLY thing
+      // publishing on a phone that is not moving, so an engine that silently refuses it produces a
+      // device that emits nothing and looks exactly like one whose owner is sitting still. This
+      // path returned a bare 0 and left no trace at all.
+      getTelemetry()
+        .startSpan('engine.heartbeat', {
+          parent,
+          attributes: { stage, 'sc.drop_reason': 'engine-not-running', status: state.status },
+        })
+        .end();
+      return 0;
+    }
     const batt = await battery();
     const outcome = await exclusive(async () => {
       try {

@@ -107,18 +107,54 @@ describe('LocationEngine — the running flag in front of the native pipeline', 
     expect(refusals().at(-1)).toMatchObject({ status: 'idle' });
   });
 
-  it('distinguishes a failed engine from one that was never started', async () => {
-    // `error` is the other way to be not-running, and it is a different bug: something threw, and
-    // `engine.failed` says what. Reporting both as one state is what made the idle case invisible.
+  it('reports a throw as a failure rather than swallowing it', async () => {
+    const drain = drainStub();
+    const engine = engineWith(drain);
+    await engine.start();
+    drain.fail = true;
+
+    await engine.ingest(fix);
+
+    const failure = getEventLog().find((e) => e.action === 'engine.failed');
+    expect(failure).toBeDefined();
+    expect(engine.getState().status).toBe('error');
+  });
+
+  it('keeps trying after a failure instead of latching', async () => {
+    // Latching on `error` meant one transient throw — a relay blink, a subscription being rebound
+    // — disabled publishing for the whole life of the process, because nothing set the status
+    // back. On 2026-09-01 an iPhone produced twelve `engine.failed` spans in two minutes and then
+    // refused every capture of an entire drive. The native side retries by design; so does this.
     const drain = drainStub();
     const engine = engineWith(drain);
     await engine.start();
     drain.fail = true;
     await engine.ingest(fix);
+    expect(engine.getState().status).toBe('error');
 
+    drain.fail = false;
+    const before = drain.calls;
     await engine.ingest(fix);
 
-    expect(refusals().at(-1)).toMatchObject({ status: 'error' });
-    expect(getEventLog().some((e) => e.action === 'engine.failed')).toBe(true);
+    expect(drain.calls).toBe(before + 1);
+    expect(engine.getState().status).toBe('running');
+    expect(engine.getState().error).toBeNull();
+  });
+
+  it('says out loud when a heartbeat is refused, rather than returning a bare zero', async () => {
+    // The heartbeat is the ONLY thing publishing on a phone that is not moving, so an engine that
+    // silently refuses it produces a device that emits nothing and reads exactly like one whose
+    // owner is sitting still.
+    const engine = engineWith(drainStub());
+
+    await expect(engine.heartbeat()).resolves.toBe(0);
+
+    const refused = getEventLog().find((e) => e.action === 'engine.heartbeat');
+    expect((refused?.details as { attributes: Record<string, unknown> })?.attributes).toMatchObject(
+      {
+        'sc.drop_reason': 'engine-not-running',
+        status: 'idle',
+      }
+    );
   });
 });

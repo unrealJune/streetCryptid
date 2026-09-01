@@ -1419,12 +1419,29 @@ export class LocationSharingService {
       ingest: async (fix, battery, intervalMs) => {
         const mod = this.mod;
         if (!mod?.ingestFix) throw new Error('ingestFix: native module not bound');
+        // Re-establish the subscription rather than fail on its absence — the step `publishFix`
+        // took and this path lost when it replaced it.
+        //
+        // `mySubId` is nulled by anything that rebinds the node (`rebind`, a pool change that
+        // resubscribes, a shutdown) and is only restored by whoever calls this. Without the call,
+        // a moment without a subscription becomes permanent: every capture throws, the engine
+        // latches into `error`, and it stays there for the life of the process even once a
+        // subscription exists again. That is what an iPhone did on 2026-09-01 — twelve
+        // `engine.failed` spans in two minutes, all `ingestFix: no active subscription`, through an
+        // entire drive.
+        //
+        // Cheap to repeat: it compares a signature of the bootstrap set and returns immediately
+        // when nothing has changed, which is every call but the first.
+        await this.ensureMySubscription();
         if (!this.mySubId) throw new Error('ingestFix: no active subscription');
         return outcomeOf(await mod.ingestFix(this.mySubId, toNativeFix(fix), battery, intervalMs));
       },
       heartbeat: async (battery, intervalMs) => {
         const mod = this.mod;
         if (!mod?.heartbeatFix) throw new Error('heartbeatFix: native module not bound');
+        // Same reason as `ingest` above: the heartbeat is the only thing publishing on a phone that
+        // is not moving, so it is the last place that should give up on a missing subscription.
+        await this.ensureMySubscription();
         if (!this.mySubId) throw new Error('heartbeatFix: no active subscription');
         return outcomeOf(await mod.heartbeatFix(this.mySubId, battery, intervalMs));
       },
