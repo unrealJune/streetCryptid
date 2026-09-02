@@ -93,6 +93,15 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// Belt and braces on purpose — `CLLocation.speed` alone is not trustworthy in the field.
   private static let stopDwellSeconds: TimeInterval = 180
 
+  /// The accuracy we ask for while a stop candidate is dwelling.
+  ///
+  /// Deliberately not the speed tier's choice. The dwell runs an *unfiltered* stream (see
+  /// `holdCandidateCadence`) and the 0.5-3 m/s tier asks for `kCLLocationAccuracyNearestTenMeters`,
+  /// which is GPS — unfiltered GPS on a phone that is nearly stationary is a battery hole. This is
+  /// the file's ambient default instead: Wi-Fi/cell derived, comfortably inside the confidence
+  /// gate's 150 m rejection, and precise enough to centre a 100 m fence on.
+  private static let candidateAccuracy: CLLocationAccuracy = kCLLocationAccuracyHundredMeters
+
   /// The accuracy we ask for while stopped. Wi-Fi/cell derived: it does not spin up GPS, so it is
   /// nearly free, and it is the only thing that keeps the process alive and ticking on a phone
   /// that is not moving. The gate refuses these as *positions* (they land far past
@@ -151,6 +160,14 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// moving or once the stop is confirmed.
   private var stopCandidate: (centre: CLLocation, since: Date)?
 
+  /// The centre of a fence armed *speculatively*, around a stop candidate, while still `moving`.
+  ///
+  /// Distinct from `stopAnchor`, which asserts "we are parked here". This one says only "we might
+  /// be about to be", and it exists because the confirmation that would promote it cannot be
+  /// relied on to arrive — see `considerStopping`. Not persisted: a guess is not worth restoring
+  /// across a launch, and a stop that was real got promoted to `stopAnchor` before we died.
+  private var candidateFence: CLLocation?
+
   private override init() {
     super.init()
     manager.delegate = self
@@ -202,7 +219,17 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         $0.identifier == Self.stopAnchorRegionId
       },
       "slc_available": CLLocationManager.significantLocationChangeMonitoringAvailable(),
+      // A candidate pending while `moving` is the window this phone is most fragile in, and it had
+      // no reporting at all until 2026-09-02, when an iPhone spent two hours inside it. `moving` +
+      // pending + a fence that is only `candidate_fence_armed` is a stop that has not converted;
+      // if `candidate_age_ms` keeps climbing past `stopDwellSeconds`, the dwell is being starved of
+      // deliveries and `holdCandidateCadence` is not doing its job.
+      "candidate_pending": stopCandidate != nil,
+      "candidate_fence_armed": candidateFence != nil,
     ]
+    if let stopCandidate {
+      snapshot["candidate_age_ms"] = Int(Date().timeIntervalSince(stopCandidate.since) * 1000)
+    }
     if let lastWakeAt {
       snapshot["last_wake_age_ms"] = Int(Date().timeIntervalSince(lastWakeAt) * 1000)
     }
@@ -292,6 +319,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     state = .moving
     stopAnchor = nil
     stopCandidate = nil
+    candidateFence = nil
     persistState()
     queue.async { self.teardown() }
   }
@@ -307,7 +335,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     slotIntervalMs = max(1, intervalMs)
     movingDistanceFilter = distanceM > 0 ? distanceM : kCLDistanceFilterNone
     movingAccuracy = Self.accuracy(for: accuracy)
-    if running && state == .moving {
+    // The `state == .moving` half is that rule; `stopCandidate == nil` is the same rule one step
+    // earlier. A candidate is dwelling on an unfiltered stream, and putting the policy's distance
+    // filter back over the top of it is exactly how the confirming delivery goes missing.
+    if running && state == .moving && stopCandidate == nil {
       applyMovingCadence()
       // Re-requesting is what makes a change take effect; Core Location applies the new filter to
       // the running request rather than needing a stop/start.
@@ -388,12 +419,15 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   private func enterStopped(anchor: CLLocation) {
     guard armStopAnchorFence(at: anchor) else {
       NSLog("[iroh-location] stop declined: no fence could be armed, staying in moving")
-      stopCandidate = nil
+      abandonStopCandidate()
       return
     }
     state = .stopped
     stopAnchor = anchor
     stopCandidate = nil
+    // The speculative fence has just been re-armed at `anchor` by the guard above and is now the
+    // real one; what it was centred on no longer matters.
+    candidateFence = nil
     applyStoppedCadence()
     manager.startUpdatingLocation()
     persistState()
@@ -407,6 +441,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     state = .moving
     stopAnchor = nil
     stopCandidate = nil
+    candidateFence = nil
     clearStopAnchorFence()
     applyMovingCadence()
     manager.startUpdatingLocation()
@@ -420,23 +455,99 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// Two signals, and neither is trusted alone: the phone must be slow *and* have stayed inside
   /// `stopJitterRadiusM` for `stopDwellSeconds`. The `.stationary` flag Core Location sets on
   /// updates is not reliable enough in the field to be one of them.
+  ///
+  /// ## Why a candidate pays up front
+  ///
+  /// Confirming a stop takes a *second* delivery, `stopDwellSeconds` after the first. Nothing
+  /// guarantees one arrives, and the thing that prevents it is the stop itself: with the 20-50 m
+  /// `distanceFilter` `moving` runs on, a phone that has genuinely stopped produces no deliveries
+  /// at all. On 2026-09-02 an iPhone held a clean five-minute cadence into a cafe, sat down at
+  /// 13:08 and was never heard from again — still `moving`, `fence_registered=false`, two hours of
+  /// nothing on every device the pipeline touches. `enterStopped` had never run, so neither the
+  /// fence nor the coarse clock that `stopped` exists to install were ever installed. The state
+  /// that fixes going dark could only be reached by not being still.
+  ///
+  /// So opening a candidate now does both of the things confirmation used to do, immediately and
+  /// without waiting to be right about it:
+  ///
+  /// - **arms the fence** (`candidateFence`), so a way back exists even if this process is
+  ///   suspended one second from now and nothing else ever runs;
+  /// - **unfilters the stream** (`holdCandidateCadence`), so the delivery the dwell is waiting on
+  ///   is one the OS still has a reason to make.
+  ///
+  /// Both are cheap, and both are handed straight back by `abandonStopCandidate` the moment the
+  /// phone turns out to have been moving after all. Guessing early and paying for the guess is the
+  /// correct way to fail here; the other way is a day of silence.
   private func considerStopping(at location: CLLocation) {
     let movingFast = location.speed >= 0 && location.speed > 1.0
     guard !movingFast else {
-      stopCandidate = nil
+      abandonStopCandidate()
       return
     }
-    guard let candidate = stopCandidate else {
-      stopCandidate = (centre: location, since: Date())
+    guard let candidate = stopCandidate,
+      location.distance(from: candidate.centre) <= Self.stopJitterRadiusM
+    else {
+      // No candidate, or this fix has wandered out of the one we had. Either way the dwell starts
+      // again from here.
+      openStopCandidate(at: location)
       return
     }
-    if location.distance(from: candidate.centre) > Self.stopJitterRadiusM {
-      stopCandidate = (centre: location, since: Date())
+    guard Date().timeIntervalSince(candidate.since) >= Self.stopDwellSeconds else {
+      holdCandidateCadence()
       return
     }
-    if Date().timeIntervalSince(candidate.since) >= Self.stopDwellSeconds {
-      enterStopped(anchor: location)
+    enterStopped(anchor: location)
+  }
+
+  /// Open — or re-centre — the stop candidate, and arm the tripwire before we have earned it.
+  ///
+  /// Arming here rather than in `enterStopped` is the safety net. A speculative exit fence around a
+  /// phone that merely *looks* settled costs one monitored region and nothing else, and it is the
+  /// only rung on the ladder that answers a short departure: SLC wants roughly half a kilometre,
+  /// and walking out of a cafe does not qualify. If the stop is confirmed the fence is already
+  /// where it needs to be; if it is not, `abandonStopCandidate` takes it away again.
+  private func openStopCandidate(at location: CLLocation) {
+    stopCandidate = (centre: location, since: Date())
+    // A failed arm is not a new failure — `enterStopped` would refuse for the same two reasons, and
+    // says so. It does mean the dwell below is now the only thing keeping this process alive.
+    candidateFence = armStopAnchorFence(at: location) ? location : nil
+    holdCandidateCadence()
+  }
+
+  /// Keep deliveries arriving while a candidate dwells.
+  ///
+  /// `kCLDistanceFilterNone` is the whole of it: it is the difference between a clock and a
+  /// tripwire that never trips, and it is the same correction `applyStoppedCadence` makes for the
+  /// same reason one state later. The accuracy comes down to `candidateAccuracy` at the same time
+  /// so that an unfiltered stream cannot mean an unfiltered *GPS* stream — this only ever engages
+  /// below 1 m/s, where ten-metre precision buys nothing that hundred-metre precision does not.
+  ///
+  /// Re-asserted on every delivery, because `didUpdateLocations` calls `applyMovingCadence` first
+  /// and that overwrites both.
+  private func holdCandidateCadence() {
+    guard manager.distanceFilter != kCLDistanceFilterNone
+      || manager.desiredAccuracy != Self.candidateAccuracy
+    else { return }
+    manager.desiredAccuracy = Self.candidateAccuracy
+    manager.distanceFilter = kCLDistanceFilterNone
+    // Re-requesting is what makes a change take effect; Core Location applies the new filter to the
+    // running request rather than needing a stop/start.
+    manager.startUpdatingLocation()
+  }
+
+  /// The phone is going somewhere after all: give back everything the candidate borrowed.
+  ///
+  /// The cadence needs no restoring here. `didUpdateLocations` calls `applyMovingCadence` with this
+  /// fix's own speed before it calls `considerStopping`, so the manager is already holding the
+  /// policy's accuracy and filter by the time we get here; only the re-request is ours to make.
+  private func abandonStopCandidate() {
+    guard stopCandidate != nil || candidateFence != nil else { return }
+    stopCandidate = nil
+    if candidateFence != nil {
+      clearStopAnchorFence()
+      candidateFence = nil
     }
+    manager.startUpdatingLocation()
   }
 
   // MARK: - The resurrection ladder

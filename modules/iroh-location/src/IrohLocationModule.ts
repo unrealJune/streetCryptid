@@ -136,7 +136,8 @@ export declare class IrohLocationNativeModule
   nativeBackgroundRunning?(): boolean;
   /**
    * What the native runtime is doing and why — `{ running, state, wake_reason, auth_status,
-   * precise, anchor_armed, fence_registered, slc_available, last_wake_age_ms?, anchor_age_ms? }`.
+   * precise, anchor_armed, fence_registered, slc_available, candidate_pending,
+   * candidate_fence_armed, last_wake_age_ms?, candidate_age_ms?, anchor_age_ms? }`.
    *
    * `device.health` flattens this under `location.*`. On iOS a parked phone emits nothing by
    * construction, so "which state is it in and when did it last run" is the only way to tell it
