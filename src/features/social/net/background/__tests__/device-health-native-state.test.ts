@@ -24,9 +24,11 @@ const mockNativeHolder: {
         lastPushedAt: number | null;
       }>)
     | undefined;
+  sharingRecipients: (() => Promise<string[]>) | undefined;
 } = {
   state: undefined,
   watermarks: undefined,
+  sharingRecipients: undefined,
 };
 
 jest.mock('iroh-location', () => ({
@@ -35,6 +37,7 @@ jest.mock('iroh-location', () => ({
     nativeBackgroundRunning: () => true,
     nativeBackgroundState: mockNativeHolder.state,
     publishWatermarks: mockNativeHolder.watermarks,
+    sharingRecipients: mockNativeHolder.sharingRecipients,
   }),
 }));
 
@@ -52,6 +55,7 @@ describe('device.health — native runtime state', () => {
     setTelemetryForTesting(createTelemetry({ now: () => 1_000 }));
     mockNativeHolder.state = undefined;
     mockNativeHolder.watermarks = undefined;
+    mockNativeHolder.sharingRecipients = undefined;
   });
 
   afterEach(() => setTelemetryForTesting(undefined));
@@ -125,6 +129,7 @@ describe('device.health — publish watermarks come from native', () => {
     setTelemetryForTesting(createTelemetry({ now: () => 1_000 }));
     mockNativeHolder.state = undefined;
     mockNativeHolder.watermarks = undefined;
+    mockNativeHolder.sharingRecipients = undefined;
   });
 
   afterEach(() => setTelemetryForTesting(undefined));
@@ -173,5 +178,63 @@ describe('device.health — publish watermarks come from native', () => {
     };
 
     await expect(recordDeviceHealth('refresh')).resolves.not.toThrow();
+  });
+});
+
+/**
+ * The count that actually seals.
+ *
+ * `sharing.recipients` is the JS pool in AsyncStorage; the native drain path reads none of it and
+ * keeps its own durable list. On 2026-09-03 the two disagreed for a full day — pool of one, native
+ * list empty, 91 envelopes sealed for nobody — and every health record reported the healthy number,
+ * because it only ever asked one of them. Reporting both is what turns that into one query.
+ */
+describe('device.health — the native sharing set', () => {
+  beforeEach(() => {
+    resetEventLogForTesting();
+    setTelemetryForTesting(createTelemetry({ now: () => 1_000 }));
+    mockNativeHolder.sharingRecipients = undefined;
+  });
+
+  afterEach(() => setTelemetryForTesting(undefined));
+
+  it('reports how many recipients native holds', async () => {
+    mockNativeHolder.sharingRecipients = async () => ['bb22', 'cc33'];
+
+    await recordDeviceHealth('refresh');
+
+    expect(attributes()['sharing.native_recipients']).toBe(2);
+  });
+
+  /**
+   * Zero is the interesting value, so it has to be a real one. An empty native list beside a
+   * non-empty pool is the exact 2026-09-03 signature, and a reporter that dropped the key when the
+   * answer was zero would hide precisely the case it exists for.
+   */
+  it('reports zero as zero, because an empty native list is the failure it looks for', async () => {
+    mockNativeHolder.sharingRecipients = async () => [];
+
+    await recordDeviceHealth('refresh');
+
+    expect(attributes()['sharing.native_recipients']).toBe(0);
+  });
+
+  it('omits it on a binary that predates the getter, rather than reporting zero', async () => {
+    mockNativeHolder.sharingRecipients = undefined;
+
+    await recordDeviceHealth('refresh');
+
+    expect(attributes()['sharing.native_recipients']).toBeUndefined();
+  });
+
+  /** No node to ask is not the same answer as nobody to seal for. See `outbox.pending`. */
+  it('omits it when there is no node, rather than turning the refusal into a zero', async () => {
+    mockNativeHolder.sharingRecipients = async () => {
+      throw new Error('call createNode first');
+    };
+
+    await recordDeviceHealth('refresh');
+
+    expect(attributes()['sharing.native_recipients']).toBeUndefined();
   });
 });

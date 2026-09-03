@@ -634,6 +634,19 @@ export interface IrohLocationApi {
     watcherEndpointsHex: string[]
   ): Promise<void>;
   /**
+   * Who the native drain path will seal for RIGHT NOW, read back from its durable store.
+   *
+   * The counterpart to {@link setSharingRecipients}, and the only way to see the two sides
+   * disagree. Every JS-side reading of "who am I sharing with" comes from the pool in
+   * `AsyncStorage`; the native publish path reads none of that, and on 2026-09-03 the two had
+   * diverged for a full day — pool of one, native list empty, 91 envelopes sealed for nobody, and
+   * `device.health` reporting the healthy number the whole time. `sharing.native_recipients` is
+   * this one.
+   *
+   * OPTIONAL: absent on binaries built before the native drain path.
+   */
+  sharingRecipients?(): Promise<string[]>;
+  /**
    * Record where a drained envelope must be SENT for it to leave this device.
    *
    * The companion to {@link setSharingRecipients}: that call says who to seal for, this one says

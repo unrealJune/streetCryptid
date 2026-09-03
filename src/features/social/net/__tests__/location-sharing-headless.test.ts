@@ -23,6 +23,7 @@ class FakeNativeModule {
     uploadTrailContent: [] as { baseUrl: string }[],
     publish: [] as unknown[][],
     docsWrite: [] as unknown[][],
+    setSharingRecipients: [] as { recipients: string[]; watchers: string[] }[],
   };
 
   async createNode() {
@@ -52,6 +53,9 @@ class FakeNativeModule {
   }
   async docsWrite(...args: unknown[]) {
     this.calls.docsWrite.push(args);
+  }
+  async setSharingRecipients(recipients: string[], watchers: string[]) {
+    this.calls.setSharingRecipients.push({ recipients, watchers });
   }
   async syncTrail(since: number, peerTicket: string | null) {
     this.calls.syncTrail.push({ since, peerTicket });
@@ -188,6 +192,75 @@ describe('LocationSharingService — headless init', () => {
       friends: { [friendA.endpointId]: friendA, [friendB.endpointId]: friendB },
       sharingWith: [friendA.endpointId, friendB.endpointId],
     };
+  });
+
+  /**
+   * The mirror must carry the RESTORED pool, and the ordering is the entire behaviour.
+   *
+   * `pushSharingRecipients` used to run twelve lines before `restorePool`, where `this.state` was
+   * still `emptyPool()`. `set_all` is durable, so every init overwrote the on-disk recipient list
+   * with nothing. Interactive sessions hid it — the next pool change re-pushed the real set — but a
+   * headless wake changes no pool, so it published sealed for nobody: 91 of 94 envelopes on
+   * 2026-09-03 went out `recipients=0` while `device.health` read `sharing.recipients=1` from the
+   * JS pool throughout. Asserting on the last call would not have caught it; the empty write is
+   * the bug, wherever in init it lands.
+   */
+  it('mirrors the restored pool to native, and never the empty one it starts with', async () => {
+    const svc = makeService();
+
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+
+    expect(mockHolder.mod.calls.setSharingRecipients).toEqual([
+      { recipients: [friendA.endpointId, friendB.endpointId], watchers: [] },
+    ]);
+  });
+
+  it('never hands native an empty recipient list while the pool has members', async () => {
+    const svc = makeService();
+
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+
+    expect(
+      mockHolder.mod.calls.setSharingRecipients.filter((c) => c.recipients.length === 0)
+    ).toEqual([]);
+  });
+
+  /**
+   * The guard is "we have not looked at the pool yet", not "the list is empty" — those are the same
+   * value and only one of them is wrong to send. A device that really shares with nobody must still
+   * say so, or a removed friend keeps being sealed for.
+   */
+  it('still mirrors an empty set when the pool genuinely is empty', async () => {
+    mockHolder.pool = { friends: {}, sharingWith: [] };
+    const svc = makeService();
+
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+
+    expect(mockHolder.mod.calls.setSharingRecipients).toEqual([{ recipients: [], watchers: [] }]);
+  });
+
+  it('mirrors an empty set when nothing is persisted at all, rather than skipping', async () => {
+    mockHolder.pool = null;
+    const svc = makeService();
+
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+
+    expect(mockHolder.mod.calls.setSharingRecipients).toEqual([{ recipients: [], watchers: [] }]);
+  });
+
+  /** A friend we do not share position with is a watcher edge, and still needs the null lane. */
+  it('splits the pool into recipients and watchers in the one call', async () => {
+    mockHolder.pool = {
+      friends: { [friendA.endpointId]: friendA, [friendB.endpointId]: friendB },
+      sharingWith: [friendA.endpointId],
+    };
+    const svc = makeService();
+
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+
+    expect(mockHolder.mod.calls.setSharingRecipients).toEqual([
+      { recipients: [friendA.endpointId], watchers: [friendB.endpointId] },
+    ]);
   });
 
   it('re-opens every friend trail namespace so a background backfill has something to reconcile', async () => {

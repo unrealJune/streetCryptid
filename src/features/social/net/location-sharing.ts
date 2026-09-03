@@ -420,6 +420,16 @@ export class LocationSharingService {
   private cryptidName = '';
   private color = '';
   private state = pool.emptyPool();
+  /**
+   * Whether {@link restorePool} has run, so {@link pushSharingRecipients} knows the pool it is
+   * about to mirror is the real one.
+   *
+   * `emptyPool()` and "everyone was removed" are the same value, and the native setter is durable,
+   * so mirroring the wrong one of those silently replaces a good recipient list with nothing. This
+   * flag is the difference between them, and it is what makes the ordering in `init` enforced
+   * rather than remembered.
+   */
+  private poolRestored = false;
   private status = 'idle';
   /**
    * Friends the last publish could not reach, and the human-actionable reason (§4.5).
@@ -778,9 +788,6 @@ export class LocationSharingService {
     // After `start`, which is where the native drain path's stores are opened.
     await this.adoptNativeSeq();
     await this.mirrorTransportConfig();
-    // Seed the native sharing set from the pool we just loaded. Without this a device whose pool
-    // has not changed since the last launch leaves native holding a list nobody refreshed.
-    this.pushSharingRecipients();
     if (interactive) {
       this.ticketStr = await this.mod.ticket();
       this.docTicketStr = await this.safeDocTicket();
@@ -793,11 +800,20 @@ export class LocationSharingService {
       );
     }
     await this.restorePool(interactive);
+    // Seed the native sharing set from the pool we have just loaded — AFTER `restorePool`, and the
+    // ordering is the whole of it.
+    //
+    // This used to run twelve lines earlier, where `this.state` was still the empty pool, so every
+    // init mirrored an EMPTY list; `set_all` is durable, so it overwrote a good list on disk. An
+    // interactive session got away with it because the next pool change re-pushed the real set. A
+    // headless wake changes no pool, so it published sealed for nobody until someone opened the
+    // app — 91 of 94 envelopes on 2026-09-03 went out `recipients=0` while `device.health` read
+    // `sharing.recipients=1` from the JS pool the whole time. The two had diverged and only the
+    // native one was ever consulted.
+    this.pushSharingRecipients();
     this.stashOptIn = await loadStashOptIn(this.kv);
-    // Seed the native push targets from the pool and opt-in we have just loaded — after both, not
-    // next to `pushSharingRecipients` above, or the stash would be mirrored as off on every launch.
-    // Without this a device whose pool has not changed since the last launch leaves native holding
-    // a list nobody refreshed, and a background wake publishes to nowhere.
+    // Seed the native push targets from the pool and opt-in we have just loaded — after both, for
+    // the same reason, or the stash would be mirrored as off on every launch.
     this.pushDeliveryConfig();
     // Hydrated here as well as in startBackground so settings shows the real value even before
     // background sharing has been switched on.
@@ -2614,6 +2630,11 @@ export class LocationSharingService {
   /** Restore the persisted pool and re-establish subscriptions so sharing resumes after a reload. */
   private async restorePool(subscribeToFriends = true): Promise<void> {
     const persisted = await loadPool(this.kv);
+    // Set either way, and before the early return: a device with nothing persisted HAS a known
+    // pool, it is just empty, and mirroring that empty set is correct. What must never reach native
+    // is the pool we have not looked at yet — which is indistinguishable from it by value alone,
+    // and is why the ordering bug above was invisible to every check that only saw the list.
+    this.poolRestored = true;
     if (!persisted) return;
     this.state = persisted;
     if (subscribeToFriends) {
@@ -2728,8 +2749,25 @@ export class LocationSharingService {
   }
 
   private pushSharingRecipients(): void {
+    // Never mirror a pool we have not loaded. The list would be empty, the write is durable, and
+    // the result is a phone that publishes sealed for nobody while every JS-side reading of "who
+    // am I sharing with" still says one — see the note in `init`.
+    if (!this.poolRestored) {
+      getTelemetry().log('warn', 'recipients: refused to mirror a pool that was never restored', {
+        'sc.drop_reason': 'pool-not-restored',
+      });
+      return;
+    }
     const mod = this.mod;
-    if (typeof mod?.setSharingRecipients !== 'function') return;
+    if (typeof mod?.setSharingRecipients !== 'function') {
+      // Was a bare `return`. A binary predating the native drain path is the ordinary case, but so
+      // is a null `mod`, and the two are the difference between "this phone cannot" and "this
+      // session forgot" — neither of which left any trace at all before this.
+      getTelemetry().log('warn', 'recipients: native sharing set not mirrored', {
+        'sc.drop_reason': mod ? 'setter-unavailable' : 'no-native-module',
+      });
+      return;
+    }
     const recipients = pool.recipientEndpoints(this.state);
     // Watchers in the same call. A watch-only edge receives no position but still needs our ratchet
     // contribution on the same cadence, or it lapses at T_lapse — the failure a20036e fixed once.

@@ -240,6 +240,20 @@ async function intentAttributes(): Promise<Attributes> {
     // Pool unreadable — the counts are omitted rather than guessed.
   }
   try {
+    // The SAME question asked of native, and the reason both are here.
+    //
+    // `sharing.recipients` above is the JS pool; the native drain path never reads it, and on
+    // 2026-09-03 the two disagreed for a day — pool of one, native list empty, every envelope
+    // sealed for nobody — while this record reported the healthy number and nothing else could
+    // contradict it. A mismatch between these two lines is now a thing one query can find.
+    //
+    // Absent rather than zero when there is no node to ask, for the reason `outbox.pending` gives.
+    attrs['sharing.native_recipients'] = (await tryGetIrohLocation()?.sharingRecipients?.())
+      ?.length;
+  } catch {
+    attrs['sharing.native_recipients'] = undefined;
+  }
+  try {
     // From the native queue now (`outbox.rs`). Requires a started node, so on a wake that has not
     // built one this is absent rather than zero — "we could not ask" and "nothing is waiting" are
     // different answers and only one of them is good news.

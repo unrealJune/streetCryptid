@@ -671,6 +671,11 @@ class IrohLocationModule : Module() {
         Unit
       }
 
+    /// Read the durable sharing set back. `device.health` reports its size next to the pool's, so a
+    /// phone whose JS pool and native list have diverged says so instead of reading healthy.
+    AsyncFunction("sharingRecipients") Coroutine
+      { -> requireNode().sharingRecipients() }
+
     /// Record where a drained envelope must be SENT to leave the device. The companion to
     /// `setSharingRecipients`: that one says who to seal for, this one says who to hand the sealed
     /// bytes to. Without it the drain publishes into a local replica nothing reconciles with.
