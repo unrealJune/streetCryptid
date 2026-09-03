@@ -591,6 +591,23 @@ export interface IrohLocationApi {
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**
+   * Give the native runtime back its autonomy because THIS JS runtime is going away.
+   *
+   * Not {@link stopNativeBackground}: that one is the user switching sharing off and disarms
+   * everything, and on iOS "everything" includes SLC, the stop-anchor fence and the persisted
+   * anchor — the only three mechanisms that can bring a terminated app back. A process teardown
+   * that removes them leaves a phone which cannot wake until its owner opens the app, which is the
+   * opposite of what a teardown is allowed to mean. The JS side already draws this distinction for
+   * the sharing intent and the revive fence; this is the native half of it.
+   *
+   * Both platforms drop the capture handoff and keep the mechanism: iOS releases its node handle so
+   * it rebuilds against the stores this session is about to close, Android keeps its foreground
+   * service running.
+   *
+   * OPTIONAL: absent on binaries built before the native drain path.
+   */
+  releaseNativeBackground?(): void;
+  /**
    * Mirror this device's identity into the native store the background drain path reads.
    *
    * The background node is built with no JS context alive, so it cannot be handed the identity the

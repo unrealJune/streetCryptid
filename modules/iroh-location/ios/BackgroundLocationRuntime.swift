@@ -304,9 +304,44 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       let fix = Self.fix(from: cached)
       let battery = Self.battery()
       Task { await self.ingest(fix: fix, battery: battery) }
+      // And let the seed open a stop candidate, exactly as a delivery would.
+      //
+      // Without this, a runtime that comes up while the phone is ALREADY still can never leave
+      // `moving`: `considerStopping` runs only from `didUpdateLocations`, and a stationary phone at
+      // a 20-50 m `distanceFilter` produces no deliveries to run it from. So no candidate, no
+      // fence, no unfiltered stream — the deadlock the candidate rewrite exists to break, entered
+      // through the one door that rewrite does not cover. Every restart onto a stationary phone
+      // takes that door: a relaunch after termination, a `stop()`/`start()` cycle that cleared the
+      // anchor, a fresh install indoors.
+      //
+      // The cached fix can be old, and arming on it anyway is the right trade. A stop fence in the
+      // wrong place fires on the next delivery and costs one wake; no fence at all costs a day. If
+      // the cached fix still reports real speed, `considerStopping` refuses it and we stay moving.
+      if state == .moving {
+        considerStopping(at: cached)
+      }
     }
 
     manager.startUpdatingLocation()
+  }
+
+  /// Give up the node this runtime holds, and change nothing else.
+  ///
+  /// The counterpart to `stop()`, and the distinction is the same one `teardownBackground` draws on
+  /// the JS side and then did not honour here: "the user switched sharing off" tears the ladder
+  /// down, "this process is going away" must leave every rung of it standing. `stop()` unmonitors
+  /// SLC, clears the stop fence and un-persists the anchor — on iOS those are the only three things
+  /// that can bring a terminated app back, and a teardown that removes them leaves a phone that
+  /// cannot wake until its owner opens the app.
+  ///
+  /// Deliberately does NOT touch `running`, the location stream, the fence, or the anchor. All it
+  /// does is drop the node handle, because the JS session that is going away is about to close the
+  /// stores it was built on; `ensureStarted` rebuilds against the freed stores on the next delivery,
+  /// which is what lets the native path take over publishing exactly when JS stops being able to.
+  func release() {
+    guard running else { return }
+    NSLog("[iroh-location] releasing the node; ladder stays armed")
+    queue.async { self.teardown() }
   }
 
   func stop() {

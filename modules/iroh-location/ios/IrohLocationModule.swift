@@ -538,6 +538,17 @@ public final class IrohLocationModule: Module {
       BackgroundLocationRuntime.shared.stop()
     }
 
+    /// This JS runtime is going away, but sharing is NOT off. Keep every rung of the ladder armed.
+    ///
+    /// The difference from `stopNativeBackground` is the difference between the user switching
+    /// sharing off and a process teardown, and only the first should disarm SLC, the stop fence and
+    /// the persisted anchor. Dropping the sink is the point: with no JS to hand captures to, the
+    /// runtime rebuilds its own node and publishes them itself.
+    Function("releaseNativeBackground") {
+      BackgroundLocationRuntime.shared.eventSink = nil
+      BackgroundLocationRuntime.shared.release()
+    }
+
     // MARK: - Native publish state
 
     /// Advance and return the publish counter. Durable before it resolves — see `seq_store.rs`.

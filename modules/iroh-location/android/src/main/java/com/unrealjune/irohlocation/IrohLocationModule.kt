@@ -654,6 +654,16 @@ class IrohLocationModule : Module() {
       )
     }
 
+    /// This JS runtime is going away, but sharing is NOT off. Drop the handoff, keep the service.
+    ///
+    /// The counterpart to `stopNativeBackground`, and the service is exactly what must survive: it
+    /// is the thing that keeps capturing once there is no JS context to capture into, and stopping
+    /// it on a process teardown would take the foreground notification down with it and leave the
+    /// phone with nothing running at all until the app is opened again.
+    Function("releaseNativeBackground") {
+      sink = null
+    }
+
     // Native publish state.
 
     AsyncFunction("nextSeq") Coroutine

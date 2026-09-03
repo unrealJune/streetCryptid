@@ -2492,8 +2492,17 @@ export class LocationSharingService {
     } catch {
       // ignore
     }
-    // Stops the foreground service / Core Location updates and releases the native stores.
-    this.setNativeBackground(false);
+    // Release, NOT stop. This function is "the process is going away"; `stopBackground` is "the
+    // user switched sharing off", and it calls the full stop itself before it gets here. Routing
+    // both through `setNativeBackground(false)` meant a teardown disarmed SLC, the stop fence and
+    // the persisted anchor — everything iOS has for waking a terminated app — while this same
+    // function went to lengths to preserve the JS intent and the revive fence beside them.
+    //
+    // It has not been firing: `performShutdown` nulls `this.mod` before it reaches here, so the
+    // call has been a silent no-op on the only path that reaches it with sharing still on. That is
+    // an accident of ordering, not a design, and it is one moved line away from being a day of
+    // silence again.
+    this.releaseNativeBackground();
     try {
       await engine?.stop();
     } catch {
@@ -2822,6 +2831,30 @@ export class LocationSharingService {
       else mod?.stopNativeBackground?.();
     } catch (err) {
       getTelemetry().log('warn', `native background ${enabled ? 'start' : 'stop'} failed`, {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Hand the native runtime back for a teardown, WITHOUT telling it sharing is off.
+   *
+   * The native half of the distinction {@link teardownBackground} already draws. `stopNativeBackground`
+   * disarms iOS's whole resurrection ladder — SLC, the stop-anchor fence, the persisted anchor — and
+   * those are the only things that can relaunch a terminated app; a process teardown that removes
+   * them leaves a phone that cannot wake until someone opens it.
+   *
+   * Falls back to the full stop on a binary that predates `releaseNativeBackground`, because on
+   * Android leaving a foreground service running with no JS and no way to reach it is worse than
+   * disarming, and on iOS the old behaviour is what that binary has always done.
+   */
+  private releaseNativeBackground(): void {
+    const mod = this.mod;
+    try {
+      if (typeof mod?.releaseNativeBackground === 'function') mod.releaseNativeBackground();
+      else mod?.stopNativeBackground?.();
+    } catch (err) {
+      getTelemetry().log('warn', 'native background release failed', {
         reason: err instanceof Error ? err.message : String(err),
       });
     }
