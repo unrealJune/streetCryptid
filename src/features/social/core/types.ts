@@ -29,6 +29,14 @@ export interface LocationFix {
    * the map while they sit perfectly still.
    */
   motion?: MotionState;
+  /**
+   * ms since epoch when the author entered {@link motion} — "parked since 22:09".
+   *
+   * Deliberately not derived from {@link ts}. That is when the position was *measured*, and a phone
+   * that dies and relaunches while parked re-seeds the gate from the OS cache, so `ts` goes fresh
+   * at the same coordinates. This survives the relaunch; `ts` does not.
+   */
+  motionSinceMs?: number;
 }
 
 /**

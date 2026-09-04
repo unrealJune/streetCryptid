@@ -174,6 +174,7 @@ class BackgroundLocationService : Service() {
       // as "this author cannot say" and fall back to inference; reading it as `Moving` would decay
       // every Android friend's position fast while they sit perfectly still at home.
       motion = null,
+      motionSinceMs = null,
     )
 
   /**

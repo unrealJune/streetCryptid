@@ -64,6 +64,7 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
         heading_deg: 90.0,
         ts: 1234,
         motion: None,
+        motion_since_ms: None,
     };
     author
         .docs_write("test".into(), 1, fix, vec![phone.recv_public()])
@@ -152,6 +153,7 @@ async fn a_pool_member_serves_an_absent_authors_fix() {
         heading_deg: 12.0,
         ts: 9_876,
         motion: None,
+        motion_since_ms: None,
     };
     // Sealed for BOTH friends: the late device must be able to decrypt what the relay hands on,
     // which is the whole point of the wrap set (§4.1).
@@ -268,6 +270,7 @@ async fn a_published_fix_reaches_the_pool_without_a_reconciliation_window() {
         heading_deg: 271.0,
         ts: 24_680,
         motion: None,
+        motion_since_ms: None,
     };
     author
         .docs_write(
@@ -671,6 +674,7 @@ async fn a_completed_bump_leaves_both_sides_with_a_ratchet_session() {
         heading_deg: 90.0,
         ts: 4321,
         motion: None,
+        motion_since_ms: None,
     };
     let dropped = sender
         .docs_write_ratcheted("test".into(), 1, fix, vec![receiver_hex.clone()])

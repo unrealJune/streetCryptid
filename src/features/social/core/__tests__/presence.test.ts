@@ -4,6 +4,8 @@ import {
   distanceBetweenFixes,
   formatDistance,
   formatPresenceAge,
+  formatPresenceState,
+  compactPresenceState,
   MOVING_PRESENCE_WINDOW_MS,
   PARKED_PRESENCE_WINDOW_MS,
   RECENT_PRESENCE_WINDOW_MS,
@@ -153,5 +155,68 @@ describe('aliveness versus not-moving-ness', () => {
 
     expect(presence.ageMs).toBe(2 * HOUR);
     expect(presence.contactAgeMs).toBe(60_000);
+  });
+});
+
+describe('presence copy', () => {
+  const now = new Date('2026-09-04T21:00:00').getTime();
+  const parkedAt = new Date('2026-09-04T18:42:00').getTime();
+
+  function presence(over: Partial<ReturnType<typeof buildFriendPresence>[number]>) {
+    return {
+      friend: friend('aabb', '@moth'),
+      fix: fix(47.62, -122.32, parkedAt),
+      distanceM: 100,
+      ageMs: now - parkedAt,
+      contactAgeMs: 60_000,
+      freshness: 'stale' as const,
+      state: 'live' as const,
+      ...over,
+    };
+  }
+
+  it('tells a parked friend by when she settled, not by how long ago', () => {
+    // "Updated 2 hr ago" is true and useless — it grows all evening while nothing is wrong. A
+    // clock time stays true and stops reading as decay.
+    const line = formatPresenceState(
+      presence({ state: 'parked', motion: 'parked', motionSinceMs: parkedAt }),
+      now
+    );
+    expect(line).toBe('Not moving · since 18:42');
+  });
+
+  it('names the day once the time alone would mislead', () => {
+    const yesterday = new Date('2026-09-03T23:10:00').getTime();
+    const line = formatPresenceState(
+      presence({ state: 'parked', motion: 'parked', motionSinceMs: yesterday }),
+      now
+    );
+    expect(line).toMatch(/^Not moving · since \w{3} 23:10$/);
+  });
+
+  it('falls back to the state alone when the author could not say when', () => {
+    expect(formatPresenceState(presence({ state: 'parked', motion: 'parked' }), now)).toBe(
+      'Not moving'
+    );
+  });
+
+  it('leads with the doubt when contact is lost', () => {
+    expect(
+      formatPresenceState(presence({ state: 'dark', contactAgeMs: 6 * 60 * 60 * 1000 }), now)
+    ).toBe('No contact for 6 hr');
+  });
+
+  it('keeps the age copy for a friend who is actually moving', () => {
+    expect(
+      formatPresenceState(presence({ state: 'live', motion: 'moving', ageMs: 30_000 }), now)
+    ).toBe('Updated now');
+  });
+
+  it('drops the clock time in the roster row, where it would clip', () => {
+    // A truncated "NOT MOVING · SIN…" is worse than no time at all; the full line lives on the
+    // profile sheet.
+    const parked = presence({ state: 'parked', motion: 'parked', motionSinceMs: parkedAt });
+    expect(compactPresenceState(parked)).toBe('Not moving');
+    expect(formatPresenceState(parked, now)).toBe('Not moving · since 18:42');
   });
 });

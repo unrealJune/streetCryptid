@@ -21,6 +21,7 @@ fn at(ts: u64, accuracy_m: f64) -> LocationFix {
         heading_deg: 0.0,
         ts,
         motion: None,
+        motion_since_ms: None,
     }
 }
 
@@ -32,6 +33,7 @@ fn moved(ts: u64, accuracy_m: f64, degrees_north: f64) -> LocationFix {
         heading_deg: 0.0,
         ts,
         motion: None,
+        motion_since_ms: None,
     }
 }
 

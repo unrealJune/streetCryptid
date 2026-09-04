@@ -74,6 +74,11 @@ export interface FriendPresence {
   contactAgeMs: number | null;
   /** What she said she was doing. `undefined` = could not say; never read it as moving. */
   motion?: MotionState;
+  /**
+   * ms since epoch when she entered {@link motion} — the answer to "since when", which
+   * {@link ageMs} cannot give because a relaunch re-measures the same spot at a fresh timestamp.
+   */
+  motionSinceMs?: number;
   state: PresenceState;
   freshness: PresenceFreshness;
   /**
@@ -198,6 +203,7 @@ export function buildFriendPresence(input: FriendPresenceInput): FriendPresence[
         ageMs,
         contactAgeMs,
         motion,
+        motionSinceMs: fix ? fix.motionSinceMs : undefined,
         state: stateFor(fix, contactAgeMs, motion),
         freshness: freshnessFor(ageMs),
         via: fix ? point?.via : undefined,
@@ -236,4 +242,69 @@ export function formatPresenceAge(ageMs: number | null): string {
   if (hours < 24) return `Updated ${hours} hr ago`;
   const days = Math.floor(hours / 24);
   return `Updated ${days} day${days === 1 ? '' : 's'} ago`;
+}
+
+/**
+ * One line for a friend's row, answering the question the dot cannot: is this position still true?
+ *
+ * Three shapes, because three things are worth saying and they are not degrees of one thing:
+ *
+ * - **parked** — "Not moving · since 18:42". The position is exactly right and she is sitting still,
+ *   so this leads with the reassurance and gives the time she settled rather than an age that grows
+ *   all evening for no reason.
+ * - **dark** — "No contact for 6 hr". Leads with the doubt, because here the dot may genuinely be
+ *   wrong and that is the only honest thing to say.
+ * - **live** — the existing age copy, which is right when she is actually moving.
+ *
+ * `since` is rendered as a clock time, not an elapsed duration: "since 18:42" stays true and stops
+ * needing re-rendering, while "parked 4 hr ago" is a number that ticks for no reason and reads as
+ * decay. Falls back to elapsed when the author could not say when.
+ */
+export function formatPresenceState(presence: FriendPresence, now = Date.now()): string {
+  if (!presence.fix) return 'Waiting for location';
+  if (presence.state === 'dark') {
+    return `No contact for ${coarseDuration(presence.contactAgeMs ?? 0)}`;
+  }
+  if (presence.state === 'parked') {
+    if (presence.motionSinceMs === undefined) return 'Not moving';
+    return `Not moving · since ${clockTime(presence.motionSinceMs, now)}`;
+  }
+  return formatPresenceAge(presence.ageMs);
+}
+
+/** `18:42`, or `Tue 18:42` once it is no longer today — a bare time would silently mislead. */
+function clockTime(atMs: number, now: number): string {
+  const at = new Date(atMs);
+  const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+  const sameDay = new Date(now).toDateString() === at.toDateString();
+  if (sameDay) return hhmm;
+  const day = at.toLocaleDateString(undefined, { weekday: 'short' });
+  return `${day} ${hhmm}`;
+}
+
+/** Durations for the dark state: coarse on purpose, because precision here implies confidence. */
+function coarseDuration(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${Math.max(1, minutes)} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'}`;
+}
+
+/**
+ * The roster-row variant: the same three states, said in as few characters as possible.
+ *
+ * A row is a glance surface rendered at `numberOfLines={1}` beside a handle and a distance, so the
+ * clock time in {@link formatPresenceState} is the first thing to clip on a narrow screen — and a
+ * truncated "NOT MOVING · SIN…" is worse than not showing the time at all. The full line belongs on
+ * the profile sheet, where there is room for it. Mirrors {@link compactDistance}'s reasoning.
+ */
+export function compactPresenceState(presence: FriendPresence): string {
+  if (!presence.fix) return 'Waiting for location';
+  if (presence.state === 'dark') {
+    return `No contact ${coarseDuration(presence.contactAgeMs ?? 0)}`;
+  }
+  if (presence.state === 'parked') return 'Not moving';
+  return formatPresenceAge(presence.ageMs);
 }

@@ -25,6 +25,7 @@ fn fix(ts: u64, accuracy_m: f64) -> LocationFix {
         heading_deg: 0.0,
         ts,
         motion: None,
+        motion_since_ms: None,
     }
 }
 
@@ -139,6 +140,8 @@ struct FakeSink {
     /// What `motion` each published fix actually carried. Separate from `sent` because it is the
     /// only field a receiver cannot derive for itself, so it is worth asserting on its own.
     motions: Mutex<Vec<Option<MotionState>>>,
+    /// The moment each published fix said its state began.
+    since: Mutex<Vec<Option<u64>>>,
     /// The watcher lane, kept apart so a test can assert one without the other.
     nulls: Mutex<Vec<(u64, u64, Vec<String>)>>,
     /// Start failing once this many envelopes have gone out — a wake that loses the network.
@@ -169,6 +172,7 @@ impl PublishSink for FakeSink {
             }
         }
         self.motions.lock().unwrap().push(fix.motion);
+        self.since.lock().unwrap().push(fix.motion_since_ms);
         sent.push((seq, fix.ts, recipients));
         Ok(())
     }
@@ -918,8 +922,10 @@ async fn a_flush_with_nowhere_to_send_is_not_recorded_as_a_push() {
 async fn a_heartbeat_carries_the_state_the_anchor_was_not_captured_under() {
     let h = Harness::new();
     let anchor = 1_000 * MINUTE;
+    // She stopped three minutes before the delivery that confirmed it — `stopDwellSeconds`.
+    let parked_at = anchor + INTERVAL - 180_000;
 
-    set_motion(&h.gate, Some(MotionState::Moving));
+    set_motion(&h.gate, Some(MotionState::Moving), Some(anchor));
     h.engine()
         .ingest(fix(anchor, 20.0), healthy_battery(), INTERVAL, anchor)
         .await
@@ -931,7 +937,7 @@ async fn a_heartbeat_carries_the_state_the_anchor_was_not_captured_under() {
     );
 
     // She stops. The anchor does not change; what it means does.
-    set_motion(&h.gate, Some(MotionState::Parked));
+    set_motion(&h.gate, Some(MotionState::Parked), Some(parked_at));
     let later = anchor + INTERVAL;
     h.engine()
         .heartbeat(healthy_battery(), INTERVAL, later)
@@ -943,6 +949,11 @@ async fn a_heartbeat_carries_the_state_the_anchor_was_not_captured_under() {
         motions,
         vec![Some(MotionState::Moving), Some(MotionState::Parked)],
         "the republish says parked"
+    );
+    assert_eq!(
+        h.sink.since.lock().unwrap().clone(),
+        vec![Some(anchor), Some(parked_at)],
+        "and says when she parked — which is NOT the anchor's timestamp, and not now"
     );
     let sent = h.sink.sent.lock().unwrap();
     assert_eq!(
@@ -981,9 +992,9 @@ async fn recording_a_transition_publishes_nothing() {
         .unwrap();
     let before = h.sink.sent.lock().unwrap().len();
 
-    set_motion(&h.gate, Some(MotionState::Parked));
-    set_motion(&h.gate, Some(MotionState::Moving));
-    set_motion(&h.gate, Some(MotionState::Parked));
+    set_motion(&h.gate, Some(MotionState::Parked), Some(now));
+    set_motion(&h.gate, Some(MotionState::Moving), Some(now + 1));
+    set_motion(&h.gate, Some(MotionState::Parked), Some(now + 2));
 
     assert_eq!(
         h.sink.sent.lock().unwrap().len(),

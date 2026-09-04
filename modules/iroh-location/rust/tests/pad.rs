@@ -10,11 +10,13 @@
 use iroh_location::pad::{self, PadError, MAX_PAYLOAD, PADDED_LEN};
 use iroh_location::{LocationFix, MotionState};
 
+/// The expensive shape on purpose: parked, and carrying the moment it began. That is what a phone
+/// sitting at home publishes all night, so it is what the size class has to fit.
 fn encoded(ts: u64) -> Vec<u8> {
-    encoded_with(ts, Some(MotionState::Parked))
+    encoded_with(ts, Some(MotionState::Parked), Some(ts))
 }
 
-fn encoded_with(ts: u64, motion: Option<MotionState>) -> Vec<u8> {
+fn encoded_with(ts: u64, motion: Option<MotionState>, motion_since_ms: Option<u64>) -> Vec<u8> {
     let fix = LocationFix {
         lat: -122.419416,
         lon: 37.774929,
@@ -22,6 +24,7 @@ fn encoded_with(ts: u64, motion: Option<MotionState>) -> Vec<u8> {
         heading_deg: 359.9,
         ts,
         motion,
+        motion_since_ms,
     };
     postcard::to_allocvec(&fix).unwrap()
 }
@@ -32,36 +35,54 @@ fn the_size_class_actually_fits_a_real_fix() {
     // assumed — and asserted here so the class cannot silently become too small if a field is
     // added to LocationFix.
     let now = encoded(1_786_000_000_000);
-    assert_eq!(now.len(), 40, "a present-day fix");
+    assert_eq!(
+        now.len(),
+        47,
+        "a present-day fix, parked, carrying since-when"
+    );
     assert_eq!(
         encoded(4_102_444_800_000).len(),
-        40,
-        "still 40 in the year 2100"
+        47,
+        "still 47 in the year 2100"
     );
 
-    // `motion` is the first optional field on the wire, and `None` is a real value an Android
-    // author publishes for the life of the install — so the cheap case is measured too. It must
-    // not be mistaken for the size class shrinking back: padding hides the difference, and this
-    // asserts the pair rather than either alone.
+    // The cheap end, and a real one: an Android author has no motion state machine and publishes
+    // both optionals as `None` for the life of the install. Asserted alongside the expensive shape
+    // rather than instead of it — padding hides the difference, and the class has to fit the top.
     assert_eq!(
-        encoded_with(1_786_000_000_000, None).len(),
-        39,
+        encoded_with(1_786_000_000_000, None, None).len(),
+        40,
         "an author with no motion state machine"
     );
 
-    // The absolute bound: a varint ts cannot exceed this however far the clock runs.
+    // The absolute bound: both varints at their maximum, which no clock will produce. This is the
+    // number that must fit the class.
     let worst = encoded(u64::MAX);
-    assert_eq!(worst.len(), 44);
+    assert_eq!(worst.len(), 55);
     assert!(
         worst.len() <= MAX_PAYLOAD,
         "the worst-case fix ({}) must fit the class ({MAX_PAYLOAD})",
         worst.len()
     );
-    // Headroom is deliberate: changing the class is a wire break.
+
+    // HEADROOM IS NOW TIGHT, and this assertion is the warning rather than a formality.
+    //
+    // It began at >= 16 bytes when a fix was 42. `motion` took it to 44, and `motion_since_ms` to
+    // 55 — a timestamp is expensive, and this one is absolute rather than an offset because every
+    // other time in the crate is. What is left is 7 bytes at the paranoid bound and 15 at
+    // present-day timestamps, which is one small field, not "a couple".
+    //
+    // The next field added here needs a decision first, because the cheap options are gone:
+    // widening PADDED_LEN is a wire break (it changes ciphertext length, and §4.1 rests on every
+    // frame being identical), so the choices are a narrower encoding for this field, or a second
+    // size class, or accepting the break at a version boundary.
     assert!(
-        MAX_PAYLOAD - worst.len() >= 16,
-        "too little headroom for future fields"
+        MAX_PAYLOAD - worst.len() >= 7,
+        "the size class is full: {} bytes left of {MAX_PAYLOAD}",
+        MAX_PAYLOAD - worst.len()
     );
+    // Realistic timestamps leave more, and that is the number worth watching day to day.
+    assert!(MAX_PAYLOAD - now.len() >= 15);
 }
 
 #[test]
@@ -83,7 +104,7 @@ fn every_payload_size_pads_to_the_same_length() {
 
 #[test]
 fn padding_round_trips() {
-    for len in [0usize, 1, 39, 40, 44, MAX_PAYLOAD] {
+    for len in [0usize, 1, 40, 47, 55, MAX_PAYLOAD] {
         let payload = vec![0x5a; len];
         let frame = pad::pad(&payload).unwrap();
         assert_eq!(pad::unpad(&frame).unwrap(), &payload[..], "len {len}");
@@ -147,7 +168,7 @@ fn the_frame_does_not_leak_the_payload_length_in_its_shape() {
     let a = pad::pad(&[]).unwrap();
     let b = pad::pad(&encoded(1_786_000_000_000)).unwrap();
     // Both are zero from (2 + their own length) onward; the tail they share is all zero.
-    let tail = 2 + 44;
+    let tail = 2 + 55;
     assert!(a[tail..].iter().all(|&x| x == 0));
     assert!(b[tail..].iter().all(|&x| x == 0));
     assert_eq!(a[tail..], b[tail..]);

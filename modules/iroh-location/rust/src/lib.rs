@@ -193,6 +193,15 @@ pub struct LocationFix {
     pub heading_deg: f64,
     pub ts: u64,
     pub motion: Option<MotionState>,
+    /// When the author ENTERED [`Self::motion`], ms since epoch. `None` alongside a `Some(motion)`
+    /// means the state is known but the moment it began is not.
+    ///
+    /// Not derivable from [`Self::ts`], which is a different question. `ts` is when the position
+    /// was *measured*, and a cold start re-seeds the gate from the OS cache — so a phone that dies
+    /// and revives while parked (several times a night, on the device this was built for) publishes
+    /// a fresh `ts` at the same coordinates. That is honest about the measurement and says nothing
+    /// about how long she has been there. This field is the one that survives the relaunch.
+    pub motion_since_ms: Option<u64>,
 }
 
 /// Control message kind. Not a uniffi enum: the wire carries a plain `u8` so an unknown future
@@ -4181,9 +4190,13 @@ impl Subscription {
     /// it, so an Android device publishes `motion: None` — "this author cannot tell you" — for the
     /// life of the install. See [`MotionState`] for why this is a device state rather than a
     /// property of the fix, and [`publish::DrainEngine::set_motion`] for why it does not publish.
-    pub async fn set_motion_state(&self, motion: Option<MotionState>) -> Result<(), LocationError> {
+    pub async fn set_motion_state(
+        &self,
+        motion: Option<MotionState>,
+        since_ms: Option<u64>,
+    ) -> Result<(), LocationError> {
         let gate_store = self.node.gate_store().await?;
-        publish::set_motion(gate_store.as_ref(), motion);
+        publish::set_motion(gate_store.as_ref(), motion, since_ms);
         Ok(())
     }
 
@@ -4352,6 +4365,15 @@ impl Subscription {
                 .as_ref()
                 .map(|f| now_ms().saturating_sub(f.ts))
                 .unwrap_or(0),
+            // How long the author has been in `sc.motion`. A run of `parked` spans whose
+            // `sc.motion_for_ms` climbs steadily is a healthy stationary phone; the value RESETTING
+            // is the transition itself, which is otherwise invisible — `device.health` carries the
+            // state but fired twice in 26 hours on the device this was built for.
+            sc.motion_for_ms = fix
+                .as_ref()
+                .and_then(|f| f.motion_since_ms)
+                .map(|since| now_ms().saturating_sub(since))
+                .unwrap_or(0),
             sc.envelope = 3,
             sc.entry_hash = tracing::field::Empty,
             recipients = recipient_endpoints.len(),
@@ -4421,6 +4443,7 @@ mod null_fix_tests {
             heading_deg: 91.0,
             ts: 1_786_000_000_000,
             motion: Some(crate::MotionState::Parked),
+            motion_since_ms: None,
         }
     }
 

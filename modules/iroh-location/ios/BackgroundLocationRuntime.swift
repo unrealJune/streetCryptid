@@ -292,7 +292,14 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // no-op — but the `default` branch above can *demote* a restored `stopped` back to `moving`
     // when the anchor did not survive, and a gate left saying `parked` would then have every
     // envelope claim she is sitting still while the phone spins GPS looking for her.
-    publishMotion(state == .stopped ? .parked : .moving)
+    //
+    // The date only lands if the state actually CHANGED — `set_motion` is idempotent — so a phone
+    // relaunching into the same state it died in keeps the original moment. That is the difference
+    // between "parked since 22:09" and a phone that reports itself freshly parked every time iOS
+    // revives it, which on this device is several times a night.
+    publishMotion(
+      state == .stopped ? .parked : .moving,
+      since: stopAnchor?.timestamp ?? Date())
     // Seed the gate from the cached position, BEFORE starting the stream.
     //
     // Nothing else in the system will. Until something has passed the gate there is no
@@ -466,7 +473,12 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // Before `persistState`, and before the coarse stream starts producing the heartbeats that
     // carry it: the first envelope after this point is the one that tells her friends she has
     // settled rather than gone quiet, and this phone may not survive many more.
-    publishMotion(.parked)
+    //
+    // Dated from the CANDIDATE, not from now. `enterStopped` runs on the delivery that *confirmed*
+    // the dwell, which is `stopDwellSeconds` after she actually stopped — dating it here would
+    // report every arrival three minutes late for as long as she stays. `stopCandidate` is still
+    // set at this point and is cleared two lines below.
+    publishMotion(.parked, since: stopCandidate?.since ?? anchor.timestamp)
     stopAnchor = anchor
     stopCandidate = nil
     // The speculative fence has just been re-armed at `anchor` by the guard above and is now the
@@ -483,7 +495,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
 
   private func enterMoving(reason: WakeReason) {
     state = .moving
-    publishMotion(.moving)
+    // No candidate to date this from: leaving is observed as it happens, unlike settling.
+    publishMotion(.moving, since: Date())
     stopAnchor = nil
     stopCandidate = nil
     candidateFence = nil
@@ -877,11 +890,12 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// Fire-and-forget on purpose: it writes one field and publishes nothing, so there is nothing to
   /// wait for, and a state change must never be able to block a delivery callback. A failure costs
   /// one envelope's worth of staleness in the flag, not a fix.
-  private func publishMotion(_ motion: MotionState) {
+  private func publishMotion(_ motion: MotionState, since: Date) {
+    let sinceMs = UInt64(max(0, since.timeIntervalSince1970 * 1000))
     Task {
       guard let subscription = await ensureStarted() else { return }
       do {
-        try await subscription.setMotionState(motion: motion)
+        try await subscription.setMotionState(motion: motion, sinceMs: sinceMs)
       } catch {
         NSLog("[iroh-location] motion state not recorded: \(error.localizedDescription)")
       }

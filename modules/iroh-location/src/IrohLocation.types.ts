@@ -47,6 +47,8 @@ export interface NativeLocationFix {
    * read as in-motion, or every such friend decays off the map while sitting perfectly still.
    */
   motion?: NativeMotionState;
+  /** ms since epoch when the author entered {@link motion}. */
+  motionSinceMs?: number;
 }
 
 /** Key material returned by `createNode`; persist the secrets in the OS secure store. */

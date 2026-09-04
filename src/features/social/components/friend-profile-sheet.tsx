@@ -8,7 +8,7 @@ import { CryptidThemes, Spacing } from '@/constants/theme';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import { useTheme } from '@/hooks/use-theme';
 import { fixTransportBadge, fixTransportDescription } from '../core/fix-transport';
-import { formatDistance, formatPresenceAge, type FriendPresence } from '../core/presence';
+import { formatDistance, formatPresenceState, type FriendPresence } from '../core/presence';
 import type { RatchetActivity } from '../core/types';
 
 interface FriendProfileSheetProps {
@@ -138,7 +138,10 @@ export function FriendProfileSheet({
 
         <View style={[styles.details, { borderColor: theme.backgroundSelected }]}>
           <DetailRow label="LOCATION" value={locationLine} />
-          <DetailRow label="LAST SIGNAL" value={formatPresenceAge(presence.ageMs)} />
+          {/* "LAST SIGNAL" asked one question and answered a different one: it read `fix.ts`,
+              which for a parked friend is when she was last MEASURED, not when we last heard from
+              her. The two diverge by hours in the normal case. */}
+          <DetailRow label="STATUS" value={formatPresenceState(presence)} />
           {presence.fix ? (
             <DetailRow
               accessibilityLabel={fixTransportDescription(presence.via)}

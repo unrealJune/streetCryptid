@@ -141,6 +141,7 @@ fn fix_at(ts: u64) -> LocationFix {
         heading_deg: 90.0,
         ts,
         motion: None,
+        motion_since_ms: None,
     }
 }
 

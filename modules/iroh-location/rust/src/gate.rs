@@ -239,6 +239,9 @@ pub struct GateState {
     /// `None` means this device cannot say — Android has no such state machine — and a receiver
     /// must fall back to inference rather than reading it as `Moving`.
     pub motion: Option<crate::MotionState>,
+    /// When [`Self::motion`] was entered, ms since epoch. Set together with it and stamped onto the
+    /// same envelopes, so "parked" and "parked since 22:09" survive a relaunch as one fact.
+    pub motion_since_ms: Option<u64>,
 }
 
 /// Durable home for [`GateState`], next to the outbox it feeds.

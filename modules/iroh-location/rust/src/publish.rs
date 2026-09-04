@@ -221,13 +221,20 @@ pub struct DrainEngine<'a, S: PublishSink> {
 /// which the parked coarse stream produces within one interval.
 ///
 /// Idempotent, because both `enterMoving` and `enterStopped` can run on a path that has already set
-/// the state, and a write here costs a durable file rewrite.
-pub fn set_motion(gate: &dyn GateStateStore, motion: Option<MotionState>) {
+/// the state, and a write here costs a durable file rewrite. Idempotence is also what keeps
+/// `since_ms` meaningful: re-asserting a state the device is already in — which `start()` does on
+/// every relaunch — must NOT restamp the moment it began, or a phone that dies hourly would report
+/// itself freshly parked all night.
+pub fn set_motion(gate: &dyn GateStateStore, motion: Option<MotionState>, since_ms: Option<u64>) {
     let state = gate.get();
     if state.motion == motion {
         return;
     }
-    gate.set(GateState { motion, ..state });
+    gate.set(GateState {
+        motion,
+        motion_since_ms: since_ms,
+        ..state
+    });
 }
 
 impl<S: PublishSink> DrainEngine<'_, S> {
@@ -278,6 +285,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // Stamped here, at enqueue, rather than carried in from capture: the state is the device's
         // and can change after a fix is measured. See `crate::MotionState`.
         known.motion = state.motion;
+        known.motion_since_ms = state.motion_since_ms;
 
         let plan = gate::due_slots(now_ms, interval_ms, state.last_published_slot);
         let mut overflow_dropped = 0u32;
@@ -335,6 +343,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // The reason the state lives on `GateState` and not on the fix: this republish is the one
         // that carries `Parked`, and the position it repeats was captured while `Moving`.
         known.motion = state.motion;
+        known.motion_since_ms = state.motion_since_ms;
 
         let plan = gate::due_slots(now_ms, interval_ms, state.last_published_slot);
         let mut overflow_dropped = 0u32;

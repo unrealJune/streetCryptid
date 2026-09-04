@@ -389,6 +389,7 @@ function toNativeFix(fix: LocationFix): NativeLocationFix {
     headingDeg: fix.headingDeg,
     ts: fix.ts,
     ...(fix.motion ? { motion: fix.motion } : {}),
+    ...(fix.motionSinceMs ? { motionSinceMs: fix.motionSinceMs } : {}),
   };
 }
 
@@ -1517,6 +1518,7 @@ export class LocationSharingService {
         headingDeg: fix.headingDeg,
         ts: fix.ts,
         ...(fix.motion ? { motion: fix.motion } : {}),
+        ...(fix.motionSinceMs ? { motionSinceMs: fix.motionSinceMs } : {}),
       };
       // Endpoint ids, not receiving keys: the fix lanes are envelope v3, wrapped under each
       // friend's ratchet session (FORWARD-SECRECY.md §4.7).
@@ -2040,6 +2042,7 @@ export class LocationSharingService {
         headingDeg: nf.fix.headingDeg,
         ts: nf.fix.ts,
         ...(nf.fix.motion ? { motion: nf.fix.motion } : {}),
+        ...(nf.fix.motionSinceMs ? { motionSinceMs: nf.fix.motionSinceMs } : {}),
       };
       // `sinceTs` is the caller's inclusive lower bound; the watermark is what we have already
       // ingested. Compared on `(ts, seq)` so a republish at the same timestamp is not mistaken for
@@ -3062,6 +3065,7 @@ export class LocationSharingService {
         headingDeg: event.fix.headingDeg,
         ts: event.fix.ts,
         ...(event.fix.motion ? { motion: event.fix.motion } : {}),
+        ...(event.fix.motionSinceMs ? { motionSinceMs: event.fix.motionSinceMs } : {}),
       },
       receivedAt: Date.now(),
       ...(event.backfill ? { backfill: true } : {}),
@@ -3174,6 +3178,7 @@ export class LocationSharingService {
                 headingDeg: event.fix.headingDeg,
                 ts: event.fix.ts,
                 ...(event.fix.motion ? { motion: event.fix.motion } : {}),
+                ...(event.fix.motionSinceMs ? { motionSinceMs: event.fix.motionSinceMs } : {}),
               }
             : undefined,
         },

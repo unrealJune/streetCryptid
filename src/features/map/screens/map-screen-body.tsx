@@ -29,7 +29,7 @@ import {
 import { sampleTrailForMap } from '@/features/map/core/trail-sampling';
 import { BumpPairingStrip } from '@/features/social/components/bump-pairing-strip';
 import { FriendProfileSheet } from '@/features/social/components/friend-profile-sheet';
-import { formatPresenceAge } from '@/features/social/core/presence';
+import { compactPresenceState } from '@/features/social/core/presence';
 import type { LocationFix } from '@/features/social/core/types';
 import { useArmedBump } from '@/features/social/hooks/use-armed-bump';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
@@ -141,7 +141,11 @@ export default function MapScreenBody() {
             color: resolveSignalColor(presence.friend.color, theme.chrome.green),
             location: { lat: presence.fix.lat, lon: presence.fix.lon },
             latestTs: presence.fix.ts,
-            stale: presence.freshness === 'stale',
+            // Keyed to CONTACT, not to how old the position is. A friend parked at home has a
+            // position that is exactly right and an age that grows all evening; dimming her was
+            // the false alarm that made the signal worth ignoring. Only `dark` — where we have
+            // genuinely lost her and the dot may be wrong — earns the fade.
+            stale: presence.state === 'dark',
           },
         ];
       }),
@@ -158,8 +162,8 @@ export default function MapScreenBody() {
         cryptidName: presence.friend.cryptidName,
         color: resolveSignalColor(presence.friend.color, theme.chrome.green),
         distanceM: presence.distanceM,
-        status: formatPresenceAge(presence.ageMs).toUpperCase(),
-        online: presence.freshness === 'live' || presence.freshness === 'recent',
+        status: compactPresenceState(presence).toUpperCase(),
+        online: presence.state === 'live' || presence.state === 'parked',
         locatable: presence.fix !== null,
       })),
     [friends, theme.chrome.green]

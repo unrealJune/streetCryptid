@@ -36,6 +36,7 @@ fn fix(ts: u64) -> LocationFix {
         heading_deg: 0.0,
         ts,
         motion: None,
+        motion_since_ms: None,
     }
 }
 
