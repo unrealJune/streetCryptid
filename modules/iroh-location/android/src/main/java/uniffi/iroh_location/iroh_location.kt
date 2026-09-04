@@ -1185,7 +1185,7 @@ external fun uniffi_iroh_location_fn_method_subscription_publish_null_traced(`pt
 ): Long
 external fun uniffi_iroh_location_fn_method_subscription_publish_traced(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_subscription_set_motion_state(`ptr`: Long,`motion`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_subscription_set_motion_state(`ptr`: Long,`motion`: RustBuffer.ByValue,`sinceMs`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_func_decode_mvt_bundle(`bundle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1679,7 +1679,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_subscription_publish_traced() != 2036) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_subscription_set_motion_state() != 19436) {
+    if (lib.uniffi_iroh_location_checksum_method_subscription_set_motion_state() != 4636) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_constructor_locationnode_from_device_secrets() != 9138) {
@@ -6485,7 +6485,7 @@ public interface SubscriptionInterface {
      * life of the install. See [`MotionState`] for why this is a device state rather than a
      * property of the fix, and [`publish::DrainEngine::set_motion`] for why it does not publish.
      */
-    suspend fun `setMotionState`(`motion`: MotionState?)
+    suspend fun `setMotionState`(`motion`: MotionState?, `sinceMs`: kotlin.ULong?)
     
     companion object
 }
@@ -6780,12 +6780,12 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setMotionState`(`motion`: MotionState?) {
+    override suspend fun `setMotionState`(`motion`: MotionState?, `sinceMs`: kotlin.ULong?) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_subscription_set_motion_state(
                 uniffiHandle,
-                FfiConverterOptionalTypeMotionState.lower(`motion`),
+                FfiConverterOptionalTypeMotionState.lower(`motion`),FfiConverterOptionalULong.lower(`sinceMs`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
@@ -7445,6 +7445,18 @@ data class LocationFix (
     var `ts`: kotlin.ULong
     , 
     var `motion`: MotionState?
+    , 
+    /**
+     * When the author ENTERED [`Self::motion`], ms since epoch. `None` alongside a `Some(motion)`
+     * means the state is known but the moment it began is not.
+     *
+     * Not derivable from [`Self::ts`], which is a different question. `ts` is when the position
+     * was *measured*, and a cold start re-seeds the gate from the OS cache — so a phone that dies
+     * and revives while parked (several times a night, on the device this was built for) publishes
+     * a fresh `ts` at the same coordinates. That is honest about the measurement and says nothing
+     * about how long she has been there. This field is the one that survives the relaunch.
+     */
+    var `motionSinceMs`: kotlin.ULong?
     
 ){
     
@@ -7467,6 +7479,7 @@ public object FfiConverterTypeLocationFix: FfiConverterRustBuffer<LocationFix> {
             FfiConverterDouble.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterOptionalTypeMotionState.read(buf),
+            FfiConverterOptionalULong.read(buf),
         )
     }
 
@@ -7476,7 +7489,8 @@ public object FfiConverterTypeLocationFix: FfiConverterRustBuffer<LocationFix> {
             FfiConverterDouble.allocationSize(value.`accuracyM`) +
             FfiConverterDouble.allocationSize(value.`headingDeg`) +
             FfiConverterULong.allocationSize(value.`ts`) +
-            FfiConverterOptionalTypeMotionState.allocationSize(value.`motion`)
+            FfiConverterOptionalTypeMotionState.allocationSize(value.`motion`) +
+            FfiConverterOptionalULong.allocationSize(value.`motionSinceMs`)
     )
 
     override fun write(value: LocationFix, buf: ByteBuffer) {
@@ -7486,6 +7500,7 @@ public object FfiConverterTypeLocationFix: FfiConverterRustBuffer<LocationFix> {
             FfiConverterDouble.write(value.`headingDeg`, buf)
             FfiConverterULong.write(value.`ts`, buf)
             FfiConverterOptionalTypeMotionState.write(value.`motion`, buf)
+            FfiConverterOptionalULong.write(value.`motionSinceMs`, buf)
     }
 }
 

@@ -4050,7 +4050,7 @@ public protocol SubscriptionProtocol: AnyObject, Sendable {
      * life of the install. See [`MotionState`] for why this is a device state rather than a
      * property of the fix, and [`publish::DrainEngine::set_motion`] for why it does not publish.
      */
-    func setMotionState(motion: MotionState?) async throws 
+    func setMotionState(motion: MotionState?, sinceMs: UInt64?) async throws 
     
 }
 /**
@@ -4269,13 +4269,13 @@ open func publishTraced(seq: UInt64, fix: LocationFix, recipientEndpoints: [Stri
      * life of the install. See [`MotionState`] for why this is a device state rather than a
      * property of the fix, and [`publish::DrainEngine::set_motion`] for why it does not publish.
      */
-open func setMotionState(motion: MotionState?)async throws   {
+open func setMotionState(motion: MotionState?, sinceMs: UInt64?)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_subscription_set_motion_state(
                     self.uniffiCloneHandle(),
-                    FfiConverterOptionTypeMotionState.lower(motion)
+                    FfiConverterOptionTypeMotionState.lower(motion),FfiConverterOptionUInt64.lower(sinceMs)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -5141,16 +5141,38 @@ public struct LocationFix: Equatable, Hashable {
     public var headingDeg: Double
     public var ts: UInt64
     public var motion: MotionState?
+    /**
+     * When the author ENTERED [`Self::motion`], ms since epoch. `None` alongside a `Some(motion)`
+     * means the state is known but the moment it began is not.
+     *
+     * Not derivable from [`Self::ts`], which is a different question. `ts` is when the position
+     * was *measured*, and a cold start re-seeds the gate from the OS cache — so a phone that dies
+     * and revives while parked (several times a night, on the device this was built for) publishes
+     * a fresh `ts` at the same coordinates. That is honest about the measurement and says nothing
+     * about how long she has been there. This field is the one that survives the relaunch.
+     */
+    public var motionSinceMs: UInt64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(lat: Double, lon: Double, accuracyM: Double, headingDeg: Double, ts: UInt64, motion: MotionState?) {
+    public init(lat: Double, lon: Double, accuracyM: Double, headingDeg: Double, ts: UInt64, motion: MotionState?, 
+        /**
+         * When the author ENTERED [`Self::motion`], ms since epoch. `None` alongside a `Some(motion)`
+         * means the state is known but the moment it began is not.
+         *
+         * Not derivable from [`Self::ts`], which is a different question. `ts` is when the position
+         * was *measured*, and a cold start re-seeds the gate from the OS cache — so a phone that dies
+         * and revives while parked (several times a night, on the device this was built for) publishes
+         * a fresh `ts` at the same coordinates. That is honest about the measurement and says nothing
+         * about how long she has been there. This field is the one that survives the relaunch.
+         */motionSinceMs: UInt64?) {
         self.lat = lat
         self.lon = lon
         self.accuracyM = accuracyM
         self.headingDeg = headingDeg
         self.ts = ts
         self.motion = motion
+        self.motionSinceMs = motionSinceMs
     }
 
     
@@ -5174,7 +5196,8 @@ public struct FfiConverterTypeLocationFix: FfiConverterRustBuffer {
                 accuracyM: FfiConverterDouble.read(from: &buf), 
                 headingDeg: FfiConverterDouble.read(from: &buf), 
                 ts: FfiConverterUInt64.read(from: &buf), 
-                motion: FfiConverterOptionTypeMotionState.read(from: &buf)
+                motion: FfiConverterOptionTypeMotionState.read(from: &buf), 
+                motionSinceMs: FfiConverterOptionUInt64.read(from: &buf)
         )
     }
 
@@ -5185,6 +5208,7 @@ public struct FfiConverterTypeLocationFix: FfiConverterRustBuffer {
         FfiConverterDouble.write(value.headingDeg, into: &buf)
         FfiConverterUInt64.write(value.ts, into: &buf)
         FfiConverterOptionTypeMotionState.write(value.motion, into: &buf)
+        FfiConverterOptionUInt64.write(value.motionSinceMs, into: &buf)
     }
 }
 
@@ -8536,7 +8560,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_subscription_publish_traced() != 2036) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_subscription_set_motion_state() != 19436) {
+    if (uniffi_iroh_location_checksum_method_subscription_set_motion_state() != 4636) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_constructor_locationnode_from_device_secrets() != 9138) {
