@@ -1,17 +1,15 @@
 import type { BatterySource } from '../battery-source';
-import type { BackgroundStartConfig } from '../background-task';
 import {
   cadenceDiffers,
   cfgFromDecision,
   createCadenceController,
   type CadenceEngine,
-  type CadenceNotification,
+  type CadenceTarget,
 } from '../cadence-controller';
 import type { EngineState } from '../location-engine';
 import { createSamplingPolicy } from '../sampling-policy';
 import type { BatteryState } from '../types';
 
-const NOTIF: CadenceNotification = { title: 'streetCryptid', body: 'body', color: '#C6791A' };
 // Tiers set explicitly so a battery change is observable here. The shipped defaults deliberately
 // use the same tier for both (nothing coarser than the confidence gate accepts), which would make
 // these tests assert nothing about the controller's re-arm logic.
@@ -36,9 +34,9 @@ function stateFor(battery: BatteryState, intervalMs?: number): EngineState {
   };
 }
 
-function cfgFor(battery: BatteryState, intervalMs?: number): BackgroundStartConfig {
+function cfgFor(battery: BatteryState, intervalMs?: number): CadenceTarget {
   if (intervalMs !== undefined) policy.setIntervalMs(intervalMs);
-  return cfgFromDecision(policy.decide({ battery }), NOTIF);
+  return cfgFromDecision(policy.decide({ battery }));
 }
 
 function fakeEngine() {
@@ -62,11 +60,11 @@ function fakeEngine() {
 }
 
 function fakeProvider() {
-  const calls: BackgroundStartConfig[] = [];
+  const calls: CadenceTarget[] = [];
   let resolvers: (() => void)[] = [];
   return {
     calls,
-    async reprogram(cfg: BackgroundStartConfig): Promise<void> {
+    async reprogram(cfg: CadenceTarget): Promise<void> {
       calls.push(cfg);
       await new Promise<void>((resolve) => resolvers.push(resolve));
     },
@@ -106,19 +104,12 @@ beforeEach(() => {
 });
 
 describe('cadence pure helpers', () => {
-  it('cfgFromDecision carries accuracy, cadence, ambient auto-pause and notification', () => {
+  it('carries the three things a policy decision can change, and nothing else', () => {
+    // The notification text, the foreground-service type, the activity hint and the auto-pause flag
+    // all moved to the native runtime, which owns them. Auto-pause especially: it is `false` there
+    // and was `true` here, and that difference cost an iPhone nineteen hours.
     const cfg = cfgFor(fullBattery);
-    expect(cfg.accuracy).toBe('balanced');
-    expect(cfg.timeIntervalMs).toBe(300_000);
-    expect(cfg.pausesUpdatesAutomatically).toBe(true);
-    expect(cfg.notificationTitle).toBe('streetCryptid');
-    expect(cfg.notificationColor).toBe('#C6791A');
-  });
-
-  it('pins the iOS activity hint, which used to be derived from movement', () => {
-    expect(cfgFor(fullBattery).activityType).toBe('other');
-    expect(cfgFor(lowBattery).activityType).toBe('other');
-    expect(cfgFor(fullBattery, 60_000).activityType).toBe('other');
+    expect(cfg).toEqual({ accuracy: 'balanced', intervalMs: 300_000, distanceIntervalM: 50 });
   });
 
   it('keeps the ambient OS movement filter stable across battery states', () => {
@@ -130,9 +121,9 @@ describe('cadence pure helpers', () => {
     expect(cadenceDiffers(cfgFor(fullBattery), cfgFor(fullBattery))).toBe(false);
     expect(cadenceDiffers(cfgFor(fullBattery), cfgFor(lowBattery))).toBe(true);
     expect(cadenceDiffers(cfgFor(fullBattery, 300_000), cfgFor(fullBattery, 60_000))).toBe(true);
-    expect(
-      cadenceDiffers(cfgFor(fullBattery), { ...cfgFor(fullBattery), notificationBody: 'other' })
-    ).toBe(false);
+    // There is nothing left in the target that is NOT cadence-relevant — the notification text
+    // that this used to prove was ignored belongs to the native runtime now.
+    expect(cadenceDiffers(cfgFor(fullBattery), cfgFor(fullBattery))).toBe(false);
   });
 });
 
@@ -144,7 +135,6 @@ describe('cadence controller', () => {
       engine,
       provider,
       battery: fakeBattery(),
-      notification: NOTIF,
     }).start();
 
     engine.emit(stateFor(fullBattery));
@@ -156,7 +146,7 @@ describe('cadence controller', () => {
 
     expect(provider.calls.map((c) => c.accuracy)).toEqual(['balanced', 'low']);
     // ...and the battery change moved accuracy WITHOUT moving the cadence.
-    expect(provider.calls.map((c) => c.timeIntervalMs)).toEqual([300_000, 300_000]);
+    expect(provider.calls.map((c) => c.intervalMs)).toEqual([300_000, 300_000]);
     await stop();
   });
 
@@ -167,7 +157,6 @@ describe('cadence controller', () => {
       engine,
       provider,
       battery: fakeBattery(),
-      notification: NOTIF,
     }).start();
 
     engine.emit(stateFor(fullBattery, 300_000));
@@ -177,7 +166,7 @@ describe('cadence controller', () => {
     provider.releaseAll();
     await tick();
 
-    expect(provider.calls.map((c) => c.timeIntervalMs)).toEqual([300_000, 60_000]);
+    expect(provider.calls.map((c) => c.intervalMs)).toEqual([300_000, 60_000]);
     await stop();
   });
 
@@ -188,7 +177,6 @@ describe('cadence controller', () => {
       engine,
       provider,
       battery: fakeBattery(),
-      notification: NOTIF,
     }).start();
 
     engine.emit(stateFor(fullBattery));
@@ -209,7 +197,6 @@ describe('cadence controller', () => {
       engine,
       provider,
       battery: fakeBattery(),
-      notification: NOTIF,
       seed: cfgFor(fullBattery),
     }).start();
 
@@ -227,8 +214,7 @@ describe('cadence controller', () => {
       engine,
       provider,
       battery: fakeBattery(),
-      notification: NOTIF,
-      overrides: { timeIntervalMs: 60_000 },
+      overrides: { intervalMs: 60_000 },
     }).start();
 
     engine.emit(stateFor(fullBattery));
@@ -238,7 +224,7 @@ describe('cadence controller', () => {
     provider.releaseAll();
     await tick();
 
-    expect(provider.calls.map((c) => c.timeIntervalMs)).toEqual([60_000, 60_000]);
+    expect(provider.calls.map((c) => c.intervalMs)).toEqual([60_000, 60_000]);
     expect(provider.calls.map((c) => c.accuracy)).toEqual(['balanced', 'low']);
     await stop();
   });
@@ -250,7 +236,6 @@ describe('cadence controller', () => {
       engine,
       provider,
       battery: fakeBattery(),
-      notification: NOTIF,
     }).start();
 
     engine.emit(stateFor(fullBattery, 300_000)); // starts reprogram, now in flight
@@ -261,7 +246,7 @@ describe('cadence controller', () => {
     provider.release();
     await tick();
 
-    expect(provider.calls.map((c) => c.timeIntervalMs)).toEqual([300_000, 60_000]);
+    expect(provider.calls.map((c) => c.intervalMs)).toEqual([300_000, 60_000]);
     await stop();
   });
 
@@ -272,7 +257,6 @@ describe('cadence controller', () => {
       engine,
       provider,
       battery: fakeBattery(),
-      notification: NOTIF,
     }).start();
 
     engine.emit(stateFor(fullBattery, 300_000)); // in flight
@@ -281,7 +265,7 @@ describe('cadence controller', () => {
     provider.release(); // let the in-flight arm finish
     await stopped;
 
-    expect(provider.calls.map((c) => c.timeIntervalMs)).toEqual([300_000]);
+    expect(provider.calls.map((c) => c.intervalMs)).toEqual([300_000]);
   });
 
   it('re-evaluates the engine on a power event', async () => {
@@ -291,7 +275,6 @@ describe('cadence controller', () => {
       engine,
       provider: fakeProvider(),
       battery,
-      notification: NOTIF,
     }).start();
 
     battery.fire();
@@ -309,7 +292,6 @@ describe('cadence controller', () => {
       engine,
       provider,
       battery,
-      notification: NOTIF,
     }).start();
     await stop();
 

@@ -8,23 +8,28 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.wifi.WifiManager
 import android.os.Build
+import expo.modules.interfaces.permissions.PermissionsStatus
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
+import java.lang.ref.WeakReference
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 // UniFFI-generated bindings for the `iroh-location` crate (in src/main/java/uniffi/…),
 // backed by libiroh_location.so under src/main/jniLibs. Regenerate with `just bindgen-android`
 // after changing the Rust UniFFI surface (see README §3).
+import uniffi.iroh_location.BatteryState
 import uniffi.iroh_location.BleCapabilities
 import uniffi.iroh_location.BlePeer
 import uniffi.iroh_location.BumpResolution
 import uniffi.iroh_location.ControlMsg
+import uniffi.iroh_location.DeliveryConfig
 import uniffi.iroh_location.FixListener
 import uniffi.iroh_location.RatchetEvent
 import uniffi.iroh_location.LocationFix
@@ -38,7 +43,9 @@ import uniffi.iroh_location.PairStateRecord
 import uniffi.iroh_location.ProfileView
 import uniffi.iroh_location.SasChallenge
 import uniffi.iroh_location.SasRoleKind
+import uniffi.iroh_location.IngestOutcome
 import uniffi.iroh_location.Subscription
+import uniffi.iroh_location.TransportConfig
 import uniffi.iroh_location.PeerTransportDiagnostic
 import uniffi.iroh_location.TransportAddressDiagnostic
 import uniffi.iroh_location.TransportDiagnostics
@@ -245,10 +252,78 @@ private fun bumpResolutionMap(r: BumpResolution): Map<String, Any?> =
     "detail" to r.detail,
   )
 
+/**
+ * Unknown reports as FULL, never empty. A critical level is a hard stop in the gate, so a device
+ * whose battery we cannot read must not look flat and stop publishing forever.
+ */
+private fun batteryStateOf(m: Map<String, Any>): BatteryState =
+  BatteryState(
+    (m["level"] as? Double) ?: 1.0,
+    (m["charging"] as? Boolean) ?: false,
+    (m["lowPower"] as? Boolean) ?: false,
+  )
+
+private fun ingestOutcomeToMap(o: IngestOutcome): Map<String, Any?> =
+  mapOf(
+    "accepted" to o.accepted,
+    "rejection" to o.rejection?.name?.lowercase(),
+    "enqueued" to o.enqueued.toLong(),
+    "published" to o.published.toLong(),
+    "pending" to o.pending.toLong(),
+    "slotsSkipped" to o.slotsSkipped.toLong(),
+    "overflowDropped" to o.overflowDropped.toLong(),
+    "suspended" to o.suspended,
+  )
+
 class IrohLocationModule : Module() {
   private var node: LocationNode? = null
   private val subs = mutableMapOf<String, Subscription>()
   private var multicastLock: WifiManager.MulticastLock? = null
+  private var secretsStore: KeystoreDeviceSecrets? = null
+
+  /**
+   * Ask for `POST_NOTIFICATIONS`, which Android 13+ needs before a foreground service notification
+   * is visible.
+   *
+   * The service runs either way — Android does not refuse to start an FGS over this — so a denial
+   * costs transparency, not function. That is exactly why it is worth asking for: the ongoing
+   * notification is how a location-sharing app tells someone it is running, and silently having one
+   * they cannot see is the wrong side of that trade. Below API 33 the permission does not exist and
+   * this is trivially true.
+   */
+  private suspend fun ensurePostNotifications(): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
+    val manager = appContext.permissions ?: return false
+    return suspendCancellableCoroutine { continuation ->
+      manager.askForPermissions(
+        { result ->
+          val granted =
+            result[android.Manifest.permission.POST_NOTIFICATIONS]?.status ==
+              PermissionsStatus.GRANTED
+          continuation.resumeWith(Result.success(granted))
+        },
+        android.Manifest.permission.POST_NOTIFICATIONS,
+      )
+    }
+  }
+
+  /** The node, or the same error every other node-dependent export raises. */
+  private fun requireNode(): LocationNode =
+    node ?: throw IllegalStateException("call createNode first")
+
+  /**
+   * The device-identity store, built lazily and cached.
+   *
+   * Lazily because it touches the Keystore, and eagerly constructing it in the module initialiser
+   * would put that on every app start including the ones that never share location.
+   */
+  private fun deviceSecrets(): KeystoreDeviceSecrets =
+    secretsStore
+      ?: KeystoreDeviceSecrets(
+          appContext.reactContext?.applicationContext
+            ?: throw IllegalStateException("no application context for the device-secret store")
+        )
+        .also { secretsStore = it }
 
   /**
    * Honest radio/permission report for Bump, independent of whether a node exists.
@@ -420,7 +495,10 @@ class IrohLocationModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("IrohLocation")
-    Events("onFix", "onOpaque", "onStatus", "onSync")
+    // `onNativeFix` is the mounted-app handoff: the foreground service captures, but the store
+    // claim is process-wide, so while the app is alive the service cannot own the node and hands
+    // the capture here instead. See `IrohLocationModule.handOffCapture`.
+    Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix")
 
     OnCreate {
       val context = checkNotNull(
@@ -471,6 +549,170 @@ class IrohLocationModule : Module() {
     AsyncFunction("shutdown") Coroutine
       { ->
         clearRuntime()
+        Unit
+      }
+
+    // Device identity — the background drain path's own copy. See DeviceSecretsStore.kt for why
+    // this is our entry rather than a read of expo-secure-store's private envelope format.
+
+    AsyncFunction("saveDeviceSecrets") Coroutine
+      { identityHex: String, recvHex: String ->
+        deviceSecrets().save(identityHex.hexToBytes(), recvHex.hexToBytes())
+        Unit
+      }
+
+    Function("deviceSecretsProvisioned") { deviceSecrets().isProvisioned() }
+
+    /// Ask for the notification permission the foreground service's ongoing notification needs.
+    /// Resolves to whether it is granted; the caller starts the service regardless, because a
+    /// denial costs visibility rather than function.
+    AsyncFunction("ensureNotificationPermission") Coroutine { -> ensurePostNotifications() }
+
+    /// Remember the transport settings, so the background service can `start` without JS.
+    AsyncFunction("setTransportConfig") Coroutine
+      { relayUrls: List<String>,
+        relayAuthToken: String,
+        relayEnabled: Boolean,
+        ipEnabled: Boolean,
+        bleEnabled: Boolean ->
+        requireNode()
+          .setTransportConfig(
+            TransportConfig(relayUrls, relayAuthToken, relayEnabled, ipEnabled, bleEnabled)
+          )
+        Unit
+      }
+
+    /// Hand one captured fix to the native pipeline on the CURRENT subscription. The background
+    /// service does not come through here — it owns its own node — but the mounted app uses it to
+    /// exercise the same path the background one takes.
+    AsyncFunction("ingestFix") Coroutine
+      { subscriptionId: String, fix: Map<String, Double>, battery: Map<String, Any>, intervalMs: Double ->
+        val sub = subs[subscriptionId] ?: throw IllegalStateException("no such subscription")
+        val outcome =
+          sub.ingestFix(
+            subscriptionId,
+            locationFixOf(fix),
+            batteryStateOf(battery),
+            intervalMs.coerceAtLeast(1.0).toULong(),
+            System.currentTimeMillis().toULong(),
+          )
+        ingestOutcomeToMap(outcome)
+      }
+
+    /// Publish the slots that have come due without a new fix, reusing the last known position.
+    /// Driven on a timer by the mounted app — neither platform gives a background process a
+    /// reliable one, and the cadence has to stay uniform whether or not the phone is moving.
+    AsyncFunction("heartbeatFix") Coroutine
+      { subscriptionId: String, battery: Map<String, Any>, intervalMs: Double ->
+        val sub = subs[subscriptionId] ?: throw IllegalStateException("no such subscription")
+        ingestOutcomeToMap(
+          sub.heartbeatFix(
+            subscriptionId,
+            batteryStateOf(battery),
+            intervalMs.coerceAtLeast(1.0).toULong(),
+            System.currentTimeMillis().toULong(),
+          )
+        )
+      }
+
+    /// Start/stop the native foreground service. The app calls these when the user turns sharing
+    /// on and off; nothing else should, because a service the user did not ask for is a persistent
+    /// notification they cannot explain.
+    Function("startNativeBackground") {
+      // Take the handoff BEFORE starting the service, or the first captures of a mounted session
+      // are sent to nobody — and on a fresh install those are the only captures there are.
+      sink = WeakReference(this@IrohLocationModule)
+      BackgroundLocationService.start(
+        checkNotNull(appContext.reactContext?.applicationContext) {
+          "IrohLocation needs an application context to start the background service"
+        }
+      )
+    }
+
+    /// Re-program the background runtime from the sampling policy's decision. The accuracy tier is
+    /// ignored on Android: `LocationManager` takes providers and a distance filter, not a tier, and
+    /// we already request both providers.
+    Function("setBackgroundCadence") { intervalMs: Double, distanceM: Double, _accuracy: String ->
+      BackgroundLocationService.setCadence(
+        checkNotNull(appContext.reactContext?.applicationContext) {
+          "IrohLocation needs an application context to re-program the background service"
+        },
+        intervalMs.toLong(),
+        distanceM.toFloat(),
+      )
+    }
+
+    /// Whether the background runtime is the one currently receiving locations.
+    Function("nativeBackgroundRunning") { BackgroundLocationService.isRunning() }
+
+    Function("stopNativeBackground") {
+      sink = null
+      BackgroundLocationService.stop(
+        checkNotNull(appContext.reactContext?.applicationContext) {
+          "IrohLocation needs an application context to stop the background service"
+        }
+      )
+    }
+
+    /// This JS runtime is going away, but sharing is NOT off. Drop the handoff, keep the service.
+    ///
+    /// The counterpart to `stopNativeBackground`, and the service is exactly what must survive: it
+    /// is the thing that keeps capturing once there is no JS context to capture into, and stopping
+    /// it on a process teardown would take the foreground notification down with it and leave the
+    /// phone with nothing running at all until the app is opened again.
+    Function("releaseNativeBackground") {
+      sink = null
+    }
+
+    // Native publish state.
+
+    AsyncFunction("nextSeq") Coroutine
+      { -> requireNode().nextSeq().toDouble() }
+
+    AsyncFunction("currentSeq") Coroutine
+      { -> requireNode().currentSeq().toDouble() }
+
+    AsyncFunction("seedSeq") Coroutine
+      { floor: Double -> requireNode().seedSeq(floor.coerceAtLeast(0.0).toULong()) }
+
+    AsyncFunction("setSharingRecipients") Coroutine
+      { recipientEndpointsHex: List<String>, watcherEndpointsHex: List<String> ->
+        requireNode().setSharingRecipients(recipientEndpointsHex, watcherEndpointsHex)
+        Unit
+      }
+
+    /// Read the durable sharing set back. `device.health` reports its size next to the pool's, so a
+    /// phone whose JS pool and native list have diverged says so instead of reading healthy.
+    AsyncFunction("sharingRecipients") Coroutine
+      { -> requireNode().sharingRecipients() }
+
+    /// Record where a drained envelope must be SENT to leave the device. The companion to
+    /// `setSharingRecipients`: that one says who to seal for, this one says who to hand the sealed
+    /// bytes to. Without it the drain publishes into a local replica nothing reconciles with.
+    AsyncFunction("setDeliveryConfig") Coroutine
+      { peerTickets: List<String>, stashBaseUrl: String?, stashPsk: String? ->
+        requireNode().setDeliveryConfig(DeliveryConfig(peerTickets, stashBaseUrl, stashPsk))
+        Unit
+      }
+
+    /// When the native drain last accepted, published and pushed. `device.health` reports these as
+    /// ages; the JS watermark row only ever saw the JS publish path, which the drain replaced.
+    AsyncFunction("publishWatermarks") Coroutine
+      { ->
+        val w = requireNode().publishWatermarks()
+        mapOf(
+          "lastAcceptedAt" to w.lastAcceptedAt?.toLong(),
+          "lastPublishedAt" to w.lastPublishedAt?.toLong(),
+          "lastPushedAt" to w.lastPushedAt?.toLong(),
+        )
+      }
+
+    AsyncFunction("outboxPending") Coroutine
+      { -> requireNode().outboxPending().toDouble() }
+
+    AsyncFunction("clearOutbox") Coroutine
+      { ->
+        requireNode().clearOutbox()
         Unit
       }
 
@@ -928,5 +1170,62 @@ class IrohLocationModule : Module() {
 
     AsyncFunction("bleHasScanHint") Coroutine
       { endpointIdHex: String -> node?.bleHasScanHint(endpointIdHex.hexToBytes()) ?: false }
+  }
+
+  companion object {
+    /**
+     * Where the foreground service sends a capture it could not publish itself.
+     *
+     * The store claim in `durable.rs` is **process-wide**, and the service runs in the app process
+     * using the same storage roots. So whenever the app is alive it has already claimed the stores
+     * and `NativeBackgroundRuntime.ensureStarted` returns false there — always, not occasionally.
+     * That was survivable while a JS `watchPositionAsync` covered the mounted case; once capture
+     * moved into Rust and that watcher was deleted, it meant an app that was merely *running* —
+     * foreground or backgrounded with the service up — captured fixes and dropped every one. A
+     * Pixel spent 2026-08-31 in that state: service healthy, `location_running=true`, permissions
+     * granted, and `last_fix_age_ms` climbing past fifteen hours.
+     *
+     * Handing the fix to JS is not a fallback path, it is the mounted path. The mounted runtime
+     * owns the node, so it is the only thing that *can* publish; the service is the sensor. This is
+     * the Android counterpart of `BackgroundLocationRuntime.eventSink` on iOS, and it emits the
+     * same `onNativeFix` payload so one JS handler serves both platforms.
+     *
+     * Weak so a torn-down module cannot be held alive by a service that outlives it; null when
+     * sharing is off, which is the one time there is legitimately nobody to tell.
+     */
+    private var sink: WeakReference<IrohLocationModule>? = null
+
+    /**
+     * Hand one capture to the mounted app. Returns whether anything was listening.
+     *
+     * `false` means the fix is genuinely lost rather than queued, which is worth logging at the
+     * call site: it is the signature of the bug this exists to prevent.
+     */
+    fun handOffCapture(fix: LocationFix, battery: BatteryState, reason: String): Boolean {
+      val module = sink?.get() ?: return false
+      module.sendEvent(
+        "onNativeFix",
+        mapOf(
+          "kind" to "fix",
+          "reason" to reason,
+          "state" to "moving",
+          "battery" to
+            mapOf(
+              "level" to battery.level,
+              "charging" to battery.charging,
+              "lowPower" to battery.lowPower,
+            ),
+          "fix" to
+            mapOf(
+              "lat" to fix.lat,
+              "lon" to fix.lon,
+              "accuracyM" to fix.accuracyM,
+              "headingDeg" to fix.headingDeg,
+              "ts" to fix.ts.toLong(),
+            ),
+        ),
+      )
+      return true
+    }
   }
 }

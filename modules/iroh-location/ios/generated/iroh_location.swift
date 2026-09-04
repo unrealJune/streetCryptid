@@ -594,6 +594,303 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
+ * Foreign (Swift/Kotlin) access to this device's identity, wherever the platform keeps it.
+ *
+ * The background drain path has to build a node with no JS context alive, and the identity it
+ * needs lives in the OS keystore that `expo-secure-store` writes: the iOS Keychain under
+ * `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, and Android Keystore-wrapped preferences.
+ * Rust cannot read either, and it should not want to — where a secret lives, and what unlock
+ * class guards it, is exactly the kind of decision that belongs to the platform.
+ *
+ * # Why a port rather than a file
+ *
+ * The obvious shortcut is to copy the identity secret into the Rust state dir, where the node
+ * could read it directly. That trades a real security property for convenience: FORWARD-SECRECY.md
+ * §1's threat model is a **seized device**, and the whole point of the keystore's accessibility
+ * class is that a locked phone's identity is not readable. A plain file in the app's data dir is,
+ * so the shortcut would quietly widen the exposure the ratchet exists to bound.
+ *
+ * So the secret stays where the OS protects it and crosses this seam on demand instead. The cost
+ * is one callback per node construction; the benefit is that `session_store`'s key — which is
+ * derived from this secret — inherits the platform's protection class rather than the filesystem's.
+ *
+ * # Contract
+ *
+ * - `None` means **not provisioned yet**, not an error: a fresh install has no identity until the
+ * app has run once. A background wake that gets `None` should do nothing and wait, rather than
+ * generate an identity the user's friends have never seen.
+ * - Implementations must be safe to call from a background thread while the device is locked,
+ * which is what the "after first unlock" class buys and why a `WhenUnlocked` item would not do.
+ */
+public protocol DeviceSecrets: AnyObject, Sendable {
+    
+    /**
+     * The long-lived identity seed. Also the input to the session store's key derivation.
+     */
+    func identitySecret()  -> Data?
+    
+    /**
+     * The envelope receiving secret.
+     */
+    func recvSecret()  -> Data?
+    
+}
+/**
+ * Foreign (Swift/Kotlin) access to this device's identity, wherever the platform keeps it.
+ *
+ * The background drain path has to build a node with no JS context alive, and the identity it
+ * needs lives in the OS keystore that `expo-secure-store` writes: the iOS Keychain under
+ * `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, and Android Keystore-wrapped preferences.
+ * Rust cannot read either, and it should not want to — where a secret lives, and what unlock
+ * class guards it, is exactly the kind of decision that belongs to the platform.
+ *
+ * # Why a port rather than a file
+ *
+ * The obvious shortcut is to copy the identity secret into the Rust state dir, where the node
+ * could read it directly. That trades a real security property for convenience: FORWARD-SECRECY.md
+ * §1's threat model is a **seized device**, and the whole point of the keystore's accessibility
+ * class is that a locked phone's identity is not readable. A plain file in the app's data dir is,
+ * so the shortcut would quietly widen the exposure the ratchet exists to bound.
+ *
+ * So the secret stays where the OS protects it and crosses this seam on demand instead. The cost
+ * is one callback per node construction; the benefit is that `session_store`'s key — which is
+ * derived from this secret — inherits the platform's protection class rather than the filesystem's.
+ *
+ * # Contract
+ *
+ * - `None` means **not provisioned yet**, not an error: a fresh install has no identity until the
+ * app has run once. A background wake that gets `None` should do nothing and wait, rather than
+ * generate an identity the user's friends have never seen.
+ * - Implementations must be safe to call from a background thread while the device is locked,
+ * which is what the "after first unlock" class buys and why a `WhenUnlocked` item would not do.
+ */
+open class DeviceSecretsImpl: DeviceSecrets, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_iroh_location_fn_clone_devicesecrets(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_iroh_location_fn_free_devicesecrets(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * The long-lived identity seed. Also the input to the session store's key derivation.
+     */
+open func identitySecret() -> Data?  {
+    return try!  FfiConverterOptionData.lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_devicesecrets_identity_secret(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * The envelope receiving secret.
+     */
+open func recvSecret() -> Data?  {
+    return try!  FfiConverterOptionData.lift(try! rustCall() {
+    uniffi_iroh_location_fn_method_devicesecrets_recv_secret(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceDeviceSecrets {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceDeviceSecrets = UniffiVTableCallbackInterfaceDeviceSecrets(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeDeviceSecrets.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface DeviceSecrets: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeDeviceSecrets.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface DeviceSecrets: handle missing in uniffiClone")
+            }
+        },
+        identitySecret: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data? in
+                guard let uniffiObj = try? FfiConverterTypeDeviceSecrets.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.identitySecret(
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        recvSecret: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data? in
+                guard let uniffiObj = try? FfiConverterTypeDeviceSecrets.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.recvSecret(
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceDeviceSecrets> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceDeviceSecrets>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitDeviceSecrets() {
+    uniffi_iroh_location_fn_init_callback_vtable_devicesecrets(UniffiCallbackInterfaceDeviceSecrets.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceSecrets: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<DeviceSecrets>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = DeviceSecrets
+
+    public static func lift(_ handle: UInt64) throws -> DeviceSecrets {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return DeviceSecretsImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: DeviceSecrets) -> UInt64 {
+         if let rustImpl = value as? DeviceSecretsImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceSecrets {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: DeviceSecrets, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceSecrets_lift(_ handle: UInt64) throws -> DeviceSecrets {
+    return try FfiConverterTypeDeviceSecrets.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceSecrets_lower(_ value: DeviceSecrets) -> UInt64 {
+    return FfiConverterTypeDeviceSecrets.lower(value)
+}
+
+
+
+
+
+
+/**
  * Foreign (Swift/Kotlin/JS) callback for inbound events on a subscription.
  */
 public protocol FixListener: AnyObject, Sendable {
@@ -955,6 +1252,11 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func cancelPair(sessionId: Data) async throws 
     
     /**
+     * Drop every queued fix (sign-out, or sharing turned off for good).
+     */
+    func clearOutbox() async throws 
+    
+    /**
      * Drop our in-flight resync ephemeral once every peer has been restarted.
      */
     func clearResync() async 
@@ -983,6 +1285,16 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * Mint a one-shot, time-limited invite carrying only immutable bootstrap material.
      */
     func createInvite(ttlSecs: UInt64) async throws  -> PairInvite
+    
+    /**
+     * The last sequence number handed out, without advancing. For display and diagnostics.
+     */
+    func currentSeq() async throws  -> UInt64
+    
+    /**
+     * Where the native drain path will push right now. For diagnostics and `device.health`.
+     */
+    func deliveryConfig() async throws  -> DeliveryConfig
     
     /**
      * A shareable docs **read-ticket** granting replication of our trail namespace (the
@@ -1158,6 +1470,21 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func networkChanged() async 
     
     /**
+     * Advance and return this device's next publish sequence number.
+     *
+     * Durable before it returns: the caller puts the value straight onto the wire as half of an
+     * `author/seq` docs key, and two envelopes under one key is a payload silently lost to
+     * last-write-wins. See `seq_store.rs` for why the counter had to leave JS to be safe — in
+     * short, every headless callback gets a fresh JS context and so got its own copy of it.
+     */
+    func nextSeq() async throws  -> UInt64
+    
+    /**
+     * How many captured fixes are waiting to be sealed.
+     */
+    func outboxPending() async throws  -> UInt32
+    
+    /**
      * The completed-pair result for a session, enriched with the peer's verified latest profile
      * (once replicated). `None` until both sides have accepted.
      */
@@ -1234,6 +1561,16 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * than minting a new one, so a peer that already saw our half does not have to see a second.
      */
     func publishResync(recipientRecvPubs: [String]) async throws  -> String
+    
+    /**
+     * When this device last accepted a fix, published, and pushed — as the native drain saw it.
+     *
+     * `device.health` used to derive all three from a JS-side watermark row, which only the JS
+     * publish path wrote. Once the native drain became the only publish path those stamps stopped
+     * moving, and the record began reporting a phone that was working as one that had been silent
+     * for eleven hours. These are the same moments observed from where they actually happen.
+     */
+    func publishWatermarks() async throws  -> PublishWatermarks
     
     /**
      * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
@@ -1342,10 +1679,61 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func resyncCount(peerEndpointHex: String) async throws  -> UInt32
     
     /**
+     * Raise the counter to at least `floor`, returning whether it moved.
+     *
+     * Monotone: a floor at or below the current value is a no-op. Two callers, one shape — the
+     * one-time migration of the old `expo-secure-store` value, and recovery from a counter file
+     * that will not parse (seed from the highest `seq` in the local replica). Neither can
+     * re-issue a value, because raising a counter only ever skips.
+     */
+    func seedSeq(floor: UInt64) async throws  -> Bool
+    
+    /**
+     * Record where a drained envelope must be sent to leave this device — see [`crate::delivery`].
+     *
+     * Push it on every pool change and every stash opt-in change, next to
+     * [`Self::set_sharing_recipients`]: that call says who to seal for, this one says who to hand
+     * the sealed bytes to, and a device that knows the first but not the second publishes into its
+     * own local replica and reports success.
+     *
+     * An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
+     * so this never fails for being empty — the drain simply has no push to make.
+     */
+    func setDeliveryConfig(config: DeliveryConfig) async throws 
+    
+    /**
      * Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. Invite-based
      * pairing is always allowed. This is an app-level acceptance gate, not a radio control.
      */
     func setPairingReady(ready: Bool) 
+    
+    /**
+     * Replace the set of friends this device seals location envelopes for.
+     *
+     * Both lists, one call: a friend belongs to exactly one of them and they change together, so
+     * two separate setters would leave a window where someone is in both or in neither. "Neither"
+     * is the dangerous one — it silently stops their ratchet contribution and lapses the edge
+     * (FORWARD-SECRECY.md §4.1).
+     *
+     * Persisted natively so an OS location callback can read them with no JS context alive. Push
+     * on every pool change; see [`crate::recipients`] for why a stale set is safe in the only
+     * direction it can be stale, and why revocation still rests on the ratchet session rather
+     * than on these lists.
+     */
+    func setSharingRecipients(recipientEndpoints: [String], watcherEndpoints: [String]) async throws 
+    
+    /**
+     * Remember the transport settings, so a background bootstrap can `start` without JS.
+     *
+     * Push it whenever the app changes a transport toggle. The relay URLs and token are build-time
+     * constants inlined into the JS bundle, so a device only learns them by being told.
+     */
+    func setTransportConfig(config: TransportConfig) async throws 
+    
+    /**
+     * Who the native drain path will seal for right now.
+     */
+    func sharingRecipients() async throws  -> [String]
     
     /**
      * Shut down protocol handlers and close the endpoint before releasing this node.
@@ -1365,6 +1753,16 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * Bind the iroh endpoint + spawn the gossip router. Idempotent.
      */
     func start(relayUrls: [String], relayAuthToken: String, relayEnabled: Bool, ipEnabled: Bool, bleEnabled: Bool) async throws 
+    
+    /**
+     * `start`, using the settings stored by [`set_transport_config`](Self::set_transport_config).
+     *
+     * The bootstrap counterpart to `start`, for a wake with no JS context to supply them. Fails
+     * rather than defaulting when nothing is stored: a node started with an empty relay list runs,
+     * reports healthy, and can only reach peers on the same LAN — which looks exactly like the
+     * connectivity failures this path exists to eliminate.
+     */
+    func startStored() async throws 
     
     /**
      * Picker action: submit the chosen figure index. A correct choice latches the local SAS and
@@ -1528,7 +1926,28 @@ public convenience init(identitySecret: Data?, recvSecret: Data?)throws  {
      *
      * Passing the same root for both is a bug on device in one direction and a break in the
      * other; the two have opposite requirements.
+     * Build a node from the platform keystore, for a background wake with no JS context alive.
+     *
+     * The counterpart to [`new_at_dirs`](Self::new_at_dirs), which takes the secrets as arguments
+     * because JS had already read them. Here nothing has: an OS location callback is the first
+     * code to run, so the node asks the platform for the identity itself through
+     * [`DeviceSecrets`].
+     *
+     * Fails with [`LocationError::NotStarted`] when the device has no identity yet. That is a
+     * fresh install whose app has never been opened, and the correct response is to do nothing —
+     * generating one here would mint an identity none of the user's friends have ever paired with,
+     * and silently orphan the one the app creates later.
      */
+public static func fromDeviceSecrets(secrets: DeviceSecrets, dataRoot: String, stateRoot: String)throws  -> LocationNode  {
+    return try  FfiConverterTypeLocationNode_lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_constructor_locationnode_from_device_secrets(
+        FfiConverterTypeDeviceSecrets_lower(secrets),
+        FfiConverterString.lower(dataRoot),
+        FfiConverterString.lower(stateRoot),$0
+    )
+})
+}
+    
 public static func newAtDirs(identitySecret: Data?, recvSecret: Data?, dataRoot: String, stateRoot: String)throws  -> LocationNode  {
     return try  FfiConverterTypeLocationNode_lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
     uniffi_iroh_location_fn_constructor_locationnode_new_at_dirs(
@@ -1656,6 +2075,26 @@ open func cancelPair(sessionId: Data)async throws   {
 }
     
     /**
+     * Drop every queued fix (sign-out, or sharing turned off for good).
+     */
+open func clearOutbox()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_clear_outbox(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Drop our in-flight resync ephemeral once every peer has been restarted.
      */
 open func clearResync()async   {
@@ -1742,6 +2181,46 @@ open func createInvite(ttlSecs: UInt64)async throws  -> PairInvite  {
             completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
             freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePairInvite_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * The last sequence number handed out, without advancing. For display and diagnostics.
+     */
+open func currentSeq()async throws  -> UInt64  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_current_seq(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_u64,
+            completeFunc: ffi_iroh_location_rust_future_complete_u64,
+            freeFunc: ffi_iroh_location_rust_future_free_u64,
+            liftFunc: FfiConverterUInt64.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Where the native drain path will push right now. For diagnostics and `device.health`.
+     */
+open func deliveryConfig()async throws  -> DeliveryConfig  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_delivery_config(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeDeliveryConfig_lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -2280,6 +2759,51 @@ open func networkChanged()async   {
 }
     
     /**
+     * Advance and return this device's next publish sequence number.
+     *
+     * Durable before it returns: the caller puts the value straight onto the wire as half of an
+     * `author/seq` docs key, and two envelopes under one key is a payload silently lost to
+     * last-write-wins. See `seq_store.rs` for why the counter had to leave JS to be safe — in
+     * short, every headless callback gets a fresh JS context and so got its own copy of it.
+     */
+open func nextSeq()async throws  -> UInt64  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_next_seq(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_u64,
+            completeFunc: ffi_iroh_location_rust_future_complete_u64,
+            freeFunc: ffi_iroh_location_rust_future_free_u64,
+            liftFunc: FfiConverterUInt64.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * How many captured fixes are waiting to be sealed.
+     */
+open func outboxPending()async throws  -> UInt32  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_outbox_pending(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_u32,
+            completeFunc: ffi_iroh_location_rust_future_complete_u32,
+            freeFunc: ffi_iroh_location_rust_future_free_u32,
+            liftFunc: FfiConverterUInt32.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * The completed-pair result for a session, enriched with the peer's verified latest profile
      * (once replicated). `None` until both sides have accepted.
      */
@@ -2511,6 +3035,31 @@ open func publishResync(recipientRecvPubs: [String])async throws  -> String  {
             completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
             freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
             liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * When this device last accepted a fix, published, and pushed — as the native drain saw it.
+     *
+     * `device.health` used to derive all three from a JS-side watermark row, which only the JS
+     * publish path wrote. Once the native drain became the only publish path those stamps stopped
+     * moving, and the record began reporting a phone that was working as one that had been silent
+     * for eleven hours. These are the same moments observed from where they actually happen.
+     */
+open func publishWatermarks()async throws  -> PublishWatermarks  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_publish_watermarks(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePublishWatermarks_lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -2770,6 +3319,59 @@ open func resyncCount(peerEndpointHex: String)async throws  -> UInt32  {
 }
     
     /**
+     * Raise the counter to at least `floor`, returning whether it moved.
+     *
+     * Monotone: a floor at or below the current value is a no-op. Two callers, one shape — the
+     * one-time migration of the old `expo-secure-store` value, and recovery from a counter file
+     * that will not parse (seed from the highest `seq` in the local replica). Neither can
+     * re-issue a value, because raising a counter only ever skips.
+     */
+open func seedSeq(floor: UInt64)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_seed_seq(
+                    self.uniffiCloneHandle(),
+                    FfiConverterUInt64.lower(floor)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_i8,
+            completeFunc: ffi_iroh_location_rust_future_complete_i8,
+            freeFunc: ffi_iroh_location_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Record where a drained envelope must be sent to leave this device — see [`crate::delivery`].
+     *
+     * Push it on every pool change and every stash opt-in change, next to
+     * [`Self::set_sharing_recipients`]: that call says who to seal for, this one says who to hand
+     * the sealed bytes to, and a device that knows the first but not the second publishes into its
+     * own local replica and reports success.
+     *
+     * An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
+     * so this never fails for being empty — the drain simply has no push to make.
+     */
+open func setDeliveryConfig(config: DeliveryConfig)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_set_delivery_config(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeDeliveryConfig_lower(config)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. Invite-based
      * pairing is always allowed. This is an app-level acceptance gate, not a radio control.
      */
@@ -2779,6 +3381,79 @@ open func setPairingReady(ready: Bool)  {try! rustCall() {
         FfiConverterBool.lower(ready),$0
     )
 }
+}
+    
+    /**
+     * Replace the set of friends this device seals location envelopes for.
+     *
+     * Both lists, one call: a friend belongs to exactly one of them and they change together, so
+     * two separate setters would leave a window where someone is in both or in neither. "Neither"
+     * is the dangerous one — it silently stops their ratchet contribution and lapses the edge
+     * (FORWARD-SECRECY.md §4.1).
+     *
+     * Persisted natively so an OS location callback can read them with no JS context alive. Push
+     * on every pool change; see [`crate::recipients`] for why a stale set is safe in the only
+     * direction it can be stale, and why revocation still rests on the ratchet session rather
+     * than on these lists.
+     */
+open func setSharingRecipients(recipientEndpoints: [String], watcherEndpoints: [String])async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_set_sharing_recipients(
+                    self.uniffiCloneHandle(),
+                    FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterSequenceString.lower(watcherEndpoints)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Remember the transport settings, so a background bootstrap can `start` without JS.
+     *
+     * Push it whenever the app changes a transport toggle. The relay URLs and token are build-time
+     * constants inlined into the JS bundle, so a device only learns them by being told.
+     */
+open func setTransportConfig(config: TransportConfig)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_set_transport_config(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeTransportConfig_lower(config)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Who the native drain path will seal for right now.
+     */
+open func sharingRecipients()async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_sharing_recipients(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
 }
     
     /**
@@ -2820,6 +3495,31 @@ open func start(relayUrls: [String], relayAuthToken: String, relayEnabled: Bool,
                 uniffi_iroh_location_fn_method_locationnode_start(
                     self.uniffiCloneHandle(),
                     FfiConverterSequenceString.lower(relayUrls),FfiConverterString.lower(relayAuthToken),FfiConverterBool.lower(relayEnabled),FfiConverterBool.lower(ipEnabled),FfiConverterBool.lower(bleEnabled)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * `start`, using the settings stored by [`set_transport_config`](Self::set_transport_config).
+     *
+     * The bootstrap counterpart to `start`, for a wake with no JS context to supply them. Fails
+     * rather than defaulting when nothing is stored: a node started with an empty relay list runs,
+     * reports healthy, and can only reach peers on the same LAN — which looks exactly like the
+     * connectivity failures this path exists to eliminate.
+     */
+open func startStored()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_start_stored(
+                    self.uniffiCloneHandle()
+                    
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -3296,6 +3996,31 @@ public func FfiConverterTypeMeshCapsuleStore_lower(_ value: MeshCapsuleStore) ->
 public protocol SubscriptionProtocol: AnyObject, Sendable {
     
     /**
+     * Publish the slots that have come due without a new fix, reusing the last known position.
+     *
+     * Driven on a timer by whoever is running the pipeline — the mounted app today, since neither
+     * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
+     * delivers a location, and on a stationary phone that can be never; the cadence still has to
+     * be uniform, because it is the one property of a sealed envelope the stash can read.
+     */
+    func heartbeatFix(subscriptionId: String, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64) async throws  -> IngestOutcome
+    
+    /**
+     * Take one captured location all the way to the wire, with no JS involved.
+     *
+     * This is the whole point of the native drain path. `expo-task-manager` spools location events
+     * when it cannot start a headless JS context, and on 2026-08-29 a Pixel spooled eleven and a
+     * half hours of them — 446 real fixes, captured by a perfectly healthy foreground service,
+     * with nothing on the JS side alive to publish them. Everything below runs in the OS callback
+     * that delivered the fix.
+     *
+     * Thin by design: the decisions live in [`publish::DrainEngine`], which depends on ports
+     * rather than on a node, so they can be tested against fakes that fail on demand. All this
+     * does is bind those ports to the real stores and hand the engine somewhere to send.
+     */
+    func ingestFix(subscriptionId: String, fix: LocationFix, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64) async throws  -> IngestOutcome
+    
+    /**
      * Seal `fix` for `recipients` (each = a friend's 32-byte receiving public key) and
      * broadcast it on the topic. Recipients NOT in this list cannot decrypt it —
      * that's how revocation works.
@@ -3373,6 +4098,61 @@ open class Subscription: SubscriptionProtocol, @unchecked Sendable {
 
     
 
+    
+    /**
+     * Publish the slots that have come due without a new fix, reusing the last known position.
+     *
+     * Driven on a timer by whoever is running the pipeline — the mounted app today, since neither
+     * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
+     * delivers a location, and on a stationary phone that can be never; the cadence still has to
+     * be uniform, because it is the one property of a sealed envelope the stash can read.
+     */
+open func heartbeatFix(subscriptionId: String, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64)async throws  -> IngestOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_subscription_heartbeat_fix(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeIngestOutcome_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Take one captured location all the way to the wire, with no JS involved.
+     *
+     * This is the whole point of the native drain path. `expo-task-manager` spools location events
+     * when it cannot start a headless JS context, and on 2026-08-29 a Pixel spooled eleven and a
+     * half hours of them — 446 real fixes, captured by a perfectly healthy foreground service,
+     * with nothing on the JS side alive to publish them. Everything below runs in the OS callback
+     * that delivered the fix.
+     *
+     * Thin by design: the decisions live in [`publish::DrainEngine`], which depends on ports
+     * rather than on a node, so they can be tested against fakes that fail on demand. All this
+     * does is bind those ports to the real stores and hand the engine somewhere to send.
+     */
+open func ingestFix(subscriptionId: String, fix: LocationFix, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64)async throws  -> IngestOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_subscription_ingest_fix(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterTypeLocationFix_lower(fix),FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeIngestOutcome_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
     
     /**
      * Seal `fix` for `recipients` (each = a friend's 32-byte receiving public key) and
@@ -3517,6 +4297,82 @@ public func FfiConverterTypeSubscription_lower(_ value: Subscription) -> UInt64 
 }
 
 
+
+
+/**
+ * Battery inputs to the suspend decision. Supplied by the platform layer with each fix, because
+ * the native path has no JS context to ask.
+ */
+public struct BatteryState: Equatable, Hashable {
+    /**
+     * 0.0–1.0. A platform that cannot report it should send 1.0 rather than 0.0: unknown must not
+     * read as critical, or a device with no battery API would never publish.
+     */
+    public var level: Double
+    public var charging: Bool
+    /**
+     * iOS Low Power Mode / Android battery saver.
+     */
+    public var lowPower: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 0.0–1.0. A platform that cannot report it should send 1.0 rather than 0.0: unknown must not
+         * read as critical, or a device with no battery API would never publish.
+         */level: Double, charging: Bool, 
+        /**
+         * iOS Low Power Mode / Android battery saver.
+         */lowPower: Bool) {
+        self.level = level
+        self.charging = charging
+        self.lowPower = lowPower
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension BatteryState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBatteryState: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BatteryState {
+        return
+            try BatteryState(
+                level: FfiConverterDouble.read(from: &buf), 
+                charging: FfiConverterBool.read(from: &buf), 
+                lowPower: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: BatteryState, into buf: inout [UInt8]) {
+        FfiConverterDouble.write(value.level, into: &buf)
+        FfiConverterBool.write(value.charging, into: &buf)
+        FfiConverterBool.write(value.lowPower, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBatteryState_lift(_ buf: RustBuffer) throws -> BatteryState {
+    return try FfiConverterTypeBatteryState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBatteryState_lower(_ value: BatteryState) -> RustBuffer {
+    return FfiConverterTypeBatteryState.lower(value)
+}
 
 
 /**
@@ -3880,6 +4736,164 @@ public func FfiConverterTypeControlMsg_lower(_ value: ControlMsg) -> RustBuffer 
 
 
 /**
+ * Everything the drain needs to get a published envelope off the device.
+ */
+public struct DeliveryConfig: Equatable, Hashable {
+    /**
+     * Every endpoint worth dialing after a drain: the trail stash first when it is opted into,
+     * then every pool member. Mirrors `durablePeerTickets()` in `location-sharing.ts` — the two
+     * must agree, because whichever path publishes has to reach the same set.
+     */
+    public var peerTickets: [String]
+    /**
+     * Base URL of the trail stash's content API, when the user has opted into durable delivery.
+     * `None` means push to peers only and upload no blobs.
+     */
+    public var stashBaseUrl: String?
+    /**
+     * Pre-shared key for that API, when the deployment requires one. Meaningless without
+     * `stash_base_url` and always written with it.
+     */
+    public var stashPsk: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Every endpoint worth dialing after a drain: the trail stash first when it is opted into,
+         * then every pool member. Mirrors `durablePeerTickets()` in `location-sharing.ts` — the two
+         * must agree, because whichever path publishes has to reach the same set.
+         */peerTickets: [String], 
+        /**
+         * Base URL of the trail stash's content API, when the user has opted into durable delivery.
+         * `None` means push to peers only and upload no blobs.
+         */stashBaseUrl: String?, 
+        /**
+         * Pre-shared key for that API, when the deployment requires one. Meaningless without
+         * `stash_base_url` and always written with it.
+         */stashPsk: String?) {
+        self.peerTickets = peerTickets
+        self.stashBaseUrl = stashBaseUrl
+        self.stashPsk = stashPsk
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DeliveryConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeliveryConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeliveryConfig {
+        return
+            try DeliveryConfig(
+                peerTickets: FfiConverterSequenceString.read(from: &buf), 
+                stashBaseUrl: FfiConverterOptionString.read(from: &buf), 
+                stashPsk: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeliveryConfig, into buf: inout [UInt8]) {
+        FfiConverterSequenceString.write(value.peerTickets, into: &buf)
+        FfiConverterOptionString.write(value.stashBaseUrl, into: &buf)
+        FfiConverterOptionString.write(value.stashPsk, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeliveryConfig_lift(_ buf: RustBuffer) throws -> DeliveryConfig {
+    return try FfiConverterTypeDeliveryConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeliveryConfig_lower(_ value: DeliveryConfig) -> RustBuffer {
+    return FfiConverterTypeDeliveryConfig.lower(value)
+}
+
+
+/**
+ * What one enqueue did, so the caller can record it without re-reading the queue.
+ */
+public struct EnqueueOutcome: Equatable, Hashable {
+    /**
+     * Queue depth after the append.
+     */
+    public var pending: UInt32
+    /**
+     * How many of the oldest fixes the bound discarded to make room. Non-zero means this device
+     * has been unable to publish for hours; it is the signal, not an incidental detail.
+     */
+    public var overflowDropped: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Queue depth after the append.
+         */pending: UInt32, 
+        /**
+         * How many of the oldest fixes the bound discarded to make room. Non-zero means this device
+         * has been unable to publish for hours; it is the signal, not an incidental detail.
+         */overflowDropped: UInt32) {
+        self.pending = pending
+        self.overflowDropped = overflowDropped
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EnqueueOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEnqueueOutcome: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EnqueueOutcome {
+        return
+            try EnqueueOutcome(
+                pending: FfiConverterUInt32.read(from: &buf), 
+                overflowDropped: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EnqueueOutcome, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.pending, into: &buf)
+        FfiConverterUInt32.write(value.overflowDropped, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEnqueueOutcome_lift(_ buf: RustBuffer) throws -> EnqueueOutcome {
+    return try FfiConverterTypeEnqueueOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEnqueueOutcome_lower(_ value: EnqueueOutcome) -> RustBuffer {
+    return FfiConverterTypeEnqueueOutcome.lower(value)
+}
+
+
+/**
  * A decrypted fix read back from the durable replica (mirrors the TS `NativeIncomingFix`).
  */
 public struct IncomingFix: Equatable, Hashable {
@@ -3937,6 +4951,143 @@ public func FfiConverterTypeIncomingFix_lift(_ buf: RustBuffer) throws -> Incomi
 #endif
 public func FfiConverterTypeIncomingFix_lower(_ value: IncomingFix) -> RustBuffer {
     return FfiConverterTypeIncomingFix.lower(value)
+}
+
+
+/**
+ * What one [`DrainEngine::ingest`] call did.
+ *
+ * Every field is something a background callback could not otherwise observe, and each maps to a
+ * `sc.drop_reason` or span attribute the JS path already emits — so one dashboard answers for both
+ * paths rather than two that have to be reconciled.
+ */
+public struct IngestOutcome: Equatable, Hashable {
+    /**
+     * The fix passed the confidence gate and became this device's position.
+     */
+    public var accepted: Bool
+    /**
+     * Why it did not, when it did not. A rejection is not a dropped slot: the heartbeat still
+     * republishes the last accepted position.
+     */
+    public var rejection: FixRejection?
+    /**
+     * Envelopes queued for this wake — one per interval slot that had come due.
+     */
+    public var enqueued: UInt32
+    /**
+     * Envelopes that actually reached the wire. Less than `enqueued` means the wake ran out of
+     * time or the network went away; the remainder is still queued.
+     */
+    public var published: UInt32
+    /**
+     * Depth of the queue afterwards.
+     */
+    public var pending: UInt32
+    /**
+     * Slots the backfill cap declined to fill ([`gate::MAX_BACKFILL_MS`]).
+     */
+    public var slotsSkipped: UInt32
+    /**
+     * Oldest fixes the queue bound discarded. Non-zero means hours of failed publishing.
+     */
+    public var overflowDropped: UInt32
+    /**
+     * Publishing is suspended on critical battery. Distinct from "nothing was due".
+     */
+    public var suspended: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The fix passed the confidence gate and became this device's position.
+         */accepted: Bool, 
+        /**
+         * Why it did not, when it did not. A rejection is not a dropped slot: the heartbeat still
+         * republishes the last accepted position.
+         */rejection: FixRejection?, 
+        /**
+         * Envelopes queued for this wake — one per interval slot that had come due.
+         */enqueued: UInt32, 
+        /**
+         * Envelopes that actually reached the wire. Less than `enqueued` means the wake ran out of
+         * time or the network went away; the remainder is still queued.
+         */published: UInt32, 
+        /**
+         * Depth of the queue afterwards.
+         */pending: UInt32, 
+        /**
+         * Slots the backfill cap declined to fill ([`gate::MAX_BACKFILL_MS`]).
+         */slotsSkipped: UInt32, 
+        /**
+         * Oldest fixes the queue bound discarded. Non-zero means hours of failed publishing.
+         */overflowDropped: UInt32, 
+        /**
+         * Publishing is suspended on critical battery. Distinct from "nothing was due".
+         */suspended: Bool) {
+        self.accepted = accepted
+        self.rejection = rejection
+        self.enqueued = enqueued
+        self.published = published
+        self.pending = pending
+        self.slotsSkipped = slotsSkipped
+        self.overflowDropped = overflowDropped
+        self.suspended = suspended
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension IngestOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeIngestOutcome: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> IngestOutcome {
+        return
+            try IngestOutcome(
+                accepted: FfiConverterBool.read(from: &buf), 
+                rejection: FfiConverterOptionTypeFixRejection.read(from: &buf), 
+                enqueued: FfiConverterUInt32.read(from: &buf), 
+                published: FfiConverterUInt32.read(from: &buf), 
+                pending: FfiConverterUInt32.read(from: &buf), 
+                slotsSkipped: FfiConverterUInt32.read(from: &buf), 
+                overflowDropped: FfiConverterUInt32.read(from: &buf), 
+                suspended: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: IngestOutcome, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.accepted, into: &buf)
+        FfiConverterOptionTypeFixRejection.write(value.rejection, into: &buf)
+        FfiConverterUInt32.write(value.enqueued, into: &buf)
+        FfiConverterUInt32.write(value.published, into: &buf)
+        FfiConverterUInt32.write(value.pending, into: &buf)
+        FfiConverterUInt32.write(value.slotsSkipped, into: &buf)
+        FfiConverterUInt32.write(value.overflowDropped, into: &buf)
+        FfiConverterBool.write(value.suspended, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeIngestOutcome_lift(_ buf: RustBuffer) throws -> IngestOutcome {
+    return try FfiConverterTypeIngestOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeIngestOutcome_lower(_ value: IngestOutcome) -> RustBuffer {
+    return FfiConverterTypeIngestOutcome.lower(value)
 }
 
 
@@ -4927,6 +6078,89 @@ public func FfiConverterTypeProfileView_lower(_ value: ProfileView) -> RustBuffe
 
 
 /**
+ * When the native drain last managed each step, in ms since epoch.
+ *
+ * Three separate answers because the gaps between them are the whole diagnosis: accepted but not
+ * published is a gate or battery decision, published but not pushed is a phone talking to its own
+ * replica, and neither is visible from a single "last seen" number.
+ */
+public struct PublishWatermarks: Equatable, Hashable {
+    /**
+     * A fix passed the confidence gate and became this device's position.
+     */
+    public var lastAcceptedAt: UInt64?
+    /**
+     * A drain put at least one envelope on the wire.
+     */
+    public var lastPublishedAt: UInt64?
+    /**
+     * A push completed, so those envelopes actually left the device.
+     */
+    public var lastPushedAt: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * A fix passed the confidence gate and became this device's position.
+         */lastAcceptedAt: UInt64?, 
+        /**
+         * A drain put at least one envelope on the wire.
+         */lastPublishedAt: UInt64?, 
+        /**
+         * A push completed, so those envelopes actually left the device.
+         */lastPushedAt: UInt64?) {
+        self.lastAcceptedAt = lastAcceptedAt
+        self.lastPublishedAt = lastPublishedAt
+        self.lastPushedAt = lastPushedAt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PublishWatermarks: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePublishWatermarks: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PublishWatermarks {
+        return
+            try PublishWatermarks(
+                lastAcceptedAt: FfiConverterOptionUInt64.read(from: &buf), 
+                lastPublishedAt: FfiConverterOptionUInt64.read(from: &buf), 
+                lastPushedAt: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PublishWatermarks, into buf: inout [UInt8]) {
+        FfiConverterOptionUInt64.write(value.lastAcceptedAt, into: &buf)
+        FfiConverterOptionUInt64.write(value.lastPublishedAt, into: &buf)
+        FfiConverterOptionUInt64.write(value.lastPushedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePublishWatermarks_lift(_ buf: RustBuffer) throws -> PublishWatermarks {
+    return try FfiConverterTypePublishWatermarks.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePublishWatermarks_lower(_ value: PublishWatermarks) -> RustBuffer {
+    return FfiConverterTypePublishWatermarks.lower(value)
+}
+
+
+/**
  * A decrypted ratcheted envelope read from the durable replica.
  *
  * `kind` is `fix` or `null`; `fix` is present only for the fix lane. Keeping null envelopes in
@@ -5264,6 +6498,75 @@ public func FfiConverterTypeTransportAddressDiagnostic_lower(_ value: TransportA
 
 
 /**
+ * Everything `LocationNode::start` needs, in one record.
+ */
+public struct TransportConfig: Equatable, Hashable {
+    public var relayUrls: [String]
+    public var relayAuthToken: String
+    public var relayEnabled: Bool
+    public var ipEnabled: Bool
+    public var bleEnabled: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(relayUrls: [String], relayAuthToken: String, relayEnabled: Bool, ipEnabled: Bool, bleEnabled: Bool) {
+        self.relayUrls = relayUrls
+        self.relayAuthToken = relayAuthToken
+        self.relayEnabled = relayEnabled
+        self.ipEnabled = ipEnabled
+        self.bleEnabled = bleEnabled
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TransportConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTransportConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TransportConfig {
+        return
+            try TransportConfig(
+                relayUrls: FfiConverterSequenceString.read(from: &buf), 
+                relayAuthToken: FfiConverterString.read(from: &buf), 
+                relayEnabled: FfiConverterBool.read(from: &buf), 
+                ipEnabled: FfiConverterBool.read(from: &buf), 
+                bleEnabled: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TransportConfig, into buf: inout [UInt8]) {
+        FfiConverterSequenceString.write(value.relayUrls, into: &buf)
+        FfiConverterString.write(value.relayAuthToken, into: &buf)
+        FfiConverterBool.write(value.relayEnabled, into: &buf)
+        FfiConverterBool.write(value.ipEnabled, into: &buf)
+        FfiConverterBool.write(value.bleEnabled, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransportConfig_lift(_ buf: RustBuffer) throws -> TransportConfig {
+    return try FfiConverterTypeTransportConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransportConfig_lower(_ value: TransportConfig) -> RustBuffer {
+    return FfiConverterTypeTransportConfig.lower(value)
+}
+
+
+/**
  * Live endpoint transport snapshot used by the in-app diagnostics.
  */
 public struct TransportDiagnostics: Equatable, Hashable {
@@ -5318,6 +6621,83 @@ public func FfiConverterTypeTransportDiagnostics_lift(_ buf: RustBuffer) throws 
 public func FfiConverterTypeTransportDiagnostics_lower(_ value: TransportDiagnostics) -> RustBuffer {
     return FfiConverterTypeTransportDiagnostics.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Why a fix was refused. Stamped on telemetry as `sc.drop_reason: fix-<reason>`.
+ */
+
+public enum FixRejection: Equatable, Hashable {
+    
+    case inaccurate
+    case stale
+    case implausibleJump
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FixRejection: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFixRejection: FfiConverterRustBuffer {
+    typealias SwiftType = FixRejection
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FixRejection {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .inaccurate
+        
+        case 2: return .stale
+        
+        case 3: return .implausibleJump
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FixRejection, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .inaccurate:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .stale:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .implausibleJump:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFixRejection_lift(_ buf: RustBuffer) throws -> FixRejection {
+    return try FfiConverterTypeFixRejection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFixRejection_lower(_ value: FixRejection) -> RustBuffer {
+    return FfiConverterTypeFixRejection.lower(value)
+}
+
 
 
 public enum LocationError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
@@ -5754,6 +7134,30 @@ fileprivate struct FfiConverterOptionInt16: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
     typealias SwiftType = Bool?
 
@@ -5938,6 +7342,30 @@ fileprivate struct FfiConverterOptionTypeSasChallenge: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeSasChallenge.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFixRejection: FfiConverterRustBuffer {
+    typealias SwiftType = FixRejection?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFixRejection.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFixRejection.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -6670,6 +8098,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_devicesecrets_identity_secret() != 9294) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_devicesecrets_recv_secret() != 59366) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 28882) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6694,6 +8128,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 49013) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_clear_outbox() != 61861) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_clear_resync() != 52312) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6704,6 +8141,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_create_invite() != 6482) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_current_seq() != 23320) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_delivery_config() != 3587) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_doc_ticket() != 34643) {
@@ -6781,6 +8224,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_network_changed() != 50592) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_next_seq() != 48703) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_outbox_pending() != 57932) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_pair_result() != 26021) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6812,6 +8261,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 54563) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_publish_watermarks() != 59312) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_push_trail() != 39469) {
@@ -6847,13 +8299,31 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_resync_count() != 62719) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_seed_seq() != 19292) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_set_delivery_config() != 36860) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients() != 14453) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_set_transport_config() != 29934) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_sharing_recipients() != 6345) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_shutdown() != 36520) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_start() != 8886) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_start_stored() != 48587) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_submit_pair_choice() != 8652) {
@@ -6895,6 +8365,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_subscription_heartbeat_fix() != 34732) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_subscription_ingest_fix() != 22084) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_subscription_publish() != 18306) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6910,16 +8386,20 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_subscription_publish_traced() != 2036) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_constructor_locationnode_from_device_secrets() != 9138) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_constructor_locationnode_new() != 52316) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_constructor_locationnode_new_at_dirs() != 15584) {
+    if (uniffi_iroh_location_checksum_constructor_locationnode_new_at_dirs() != 4144) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_constructor_meshcapsulestore_new() != 52560) {
         return InitializationResult.apiChecksumMismatch
     }
 
+    uniffiCallbackInitDeviceSecrets()
     uniffiCallbackInitFixListener()
     return InitializationResult.ok
 }()

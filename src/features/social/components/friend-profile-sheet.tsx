@@ -15,28 +15,11 @@ interface FriendProfileSheetProps {
   presence: FriendPresence | null;
   visible: boolean;
   sharing: boolean;
-  /** Whether we have an outstanding live request out to this friend (ARCHITECTURE §9c). */
-  watching: boolean;
-  /** When this friend's live window on US ends (ms since epoch), or null if they are not watching. */
-  watchedUntil: number | null;
   ratchetActivity?: RatchetActivity;
   onClose(): void;
   onToggleShare(on: boolean): Promise<void>;
-  /** Ask this friend to switch to the real-time cadence, or withdraw the ask. */
-  onToggleWatch(on: boolean): Promise<void>;
-  /** End this friend's live window on us immediately. */
-  onStopWatcher(): Promise<void>;
   onViewMap(): void;
   onRemove(): Promise<void>;
-}
-
-/**
- * " for another 12 min" — or "" once the window has effectively lapsed, so the sheet never claims a
- * negative or zero remaining time while the next poll catches up.
- */
-function formatLiveRemaining(untilMs: number, now: number = Date.now()): string {
-  const minutes = Math.round((untilMs - now) / 60_000);
-  return minutes >= 1 ? ` for another ${minutes} min` : '';
 }
 
 function pairingLabel(method: FriendPresence['friend']['pairingMethod']): string {
@@ -57,13 +40,9 @@ export function FriendProfileSheet({
   presence,
   visible,
   sharing,
-  watching,
-  watchedUntil,
   ratchetActivity,
   onClose,
   onToggleShare,
-  onToggleWatch,
-  onStopWatcher,
   onViewMap,
   onRemove,
 }: FriendProfileSheetProps) {
@@ -200,46 +179,6 @@ export function FriendProfileSheet({
             {sharing ? 'Pause sharing my location' : 'Share my location'}
           </ThemedText>
         </Pressable>
-
-        {/* Live mode (ARCHITECTURE §9c). Asking is one tap and needs no permission from them beyond
-            the sharing they already granted — but it is NOT instant: they pick it up on their next
-            poll, so the copy promises "shortly", never "now". */}
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => void onToggleWatch(!watching)}
-          style={({ pressed }) => [
-            styles.secondaryAction,
-            { borderColor: theme.backgroundSelected, opacity: pressed ? 0.58 : 1 },
-          ]}
-        >
-          <ThemedText type="smallBold">
-            {watching ? 'Stop asking for live location' : 'Ask to see live location'}
-          </ThemedText>
-        </Pressable>
-        {watching ? (
-          <ThemedText type="small" themeColor="textSecondary" style={styles.liveHint}>
-            {presence.friend.handle} will start sharing in real time shortly, for a short window.
-          </ThemedText>
-        ) : null}
-
-        {watchedUntil !== null ? (
-          <View accessibilityLiveRegion="polite" style={styles.liveWatcher}>
-            <ThemedText type="small" themeColor="textSecondary">
-              {presence.friend.handle} is seeing your location in real time
-              {formatLiveRemaining(watchedUntil)}.
-            </ThemedText>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => void onStopWatcher()}
-              style={({ pressed }) => [
-                styles.secondaryAction,
-                { borderColor: theme.backgroundSelected, opacity: pressed ? 0.58 : 1 },
-              ]}
-            >
-              <ThemedText type="smallBold">Stop live location</ThemedText>
-            </Pressable>
-          </View>
-        ) : null}
 
         <View style={[styles.removeSection, { borderTopColor: theme.backgroundSelected }]}>
           {confirmingRemove ? (

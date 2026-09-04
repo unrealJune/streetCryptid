@@ -1,4 +1,4 @@
-import { InMemoryKV } from '../background/fix-outbox';
+import { InMemoryKV } from '../background/persistent-kv';
 import { DEFAULT_SHARE_INTERVAL_MS } from '../background/sampling-policy';
 import {
   loadShareIntervalMs,

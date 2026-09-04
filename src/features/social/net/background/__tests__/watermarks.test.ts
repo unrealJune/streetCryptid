@@ -1,4 +1,4 @@
-import { InMemoryKV } from '../fix-outbox';
+import { InMemoryKV } from '../persistent-kv';
 import {
   loadWatermarks,
   stampWatermark,
@@ -20,6 +20,17 @@ describe('background watermarks', () => {
     await stampWatermark(kv, 'publish', 2_000);
     await stampWatermark(kv, 'push', 3_000);
     expect(await loadWatermarks(kv)).toEqual({ wake: 1_000, publish: 2_000, push: 3_000 });
+  });
+
+  it('tracks the periodic refresh separately from the location wake', async () => {
+    // The two OS entry points fail independently and for different reasons — a phone whose
+    // location task is spooling can still be running refreshes, and an iPhone can run location
+    // updates for thirty hours without the refresh task firing once. One stamp for both would
+    // report each as healthy whenever the other worked.
+    const kv = new InMemoryKV();
+    await stampWatermark(kv, 'wake', 1_000);
+    await stampWatermark(kv, 'refresh', 4_000);
+    expect(await loadWatermarks(kv)).toEqual({ wake: 1_000, refresh: 4_000 });
   });
 
   it('reads a never-stamped store as "nothing has ever happened"', async () => {
@@ -61,6 +72,10 @@ describe('background watermarks', () => {
       last_wake_age_ms: 1_000,
       last_publish_age_ms: 5_000,
     });
+  });
+
+  it('exports the refresh stamp as its own age attribute', () => {
+    expect(watermarkAges({ refresh: 4_000 }, 10_000)).toEqual({ last_refresh_age_ms: 6_000 });
   });
 
   it('omits a kind that has never happened rather than sending a sentinel', () => {

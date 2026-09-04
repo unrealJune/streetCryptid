@@ -1,4 +1,3 @@
-import { getRandomBytesAsync } from 'expo-crypto';
 import { Platform } from 'react-native';
 
 import {
@@ -9,11 +8,12 @@ import {
   type BlePeer,
   type BluetoothRadioState,
   type IrohLocationNativeModule,
-  type NativeControlMsg,
+  type NativeIngestOutcome,
   type NativeLocationFix,
   type NativeRatchetEvent,
   type NodeKeys,
   type OnFixEvent,
+  type OnNativeFixEvent,
   type OnOpaqueEvent,
   type PairEvent,
   type PairResult,
@@ -57,11 +57,15 @@ import type {
   RatchetActivity,
   SelfIdentity,
 } from '../core/types';
-import type { BackgroundLocationProvider } from './background/background-provider';
-import type { BackgroundStartConfig } from './background/background-task';
-import type { FixPublisher, LocationEngine } from './background/location-engine';
+import type { DrainOutcome, LocationEngine, NativeDrain } from './background/location-engine';
+import type { BatteryState } from './background/types';
+import {
+  ensureBackgroundPermissions,
+  readBackgroundAccessGranted,
+} from './background/location-permissions';
+import type { CadenceProvider, CadenceTarget } from './background/cadence-controller';
 import { createTrailStore, type TrailPoint, type TrailStore } from './background/trail-store';
-import type { PersistentKV } from './background/fix-outbox';
+import type { PersistentKV } from './background/persistent-kv';
 import {
   clampMailboxTtlSeconds,
   createDefaultPairingMailbox,
@@ -70,18 +74,17 @@ import {
 import {
   createPersistentKV,
   createPersistentTrailStorage,
-  loadHandledNonces,
   loadIosLocationBenchmarkProfile,
   loadPool,
   loadRatchetActivity,
   loadShareIntervalMs,
   loadStashOptIn,
   loadTransportPreferences,
-  saveHandledNonces,
   savePool,
   saveRatchetActivity,
   saveRatchetDrops,
   type RatchetDropCounts,
+  loadSharingEnabled,
   saveShareIntervalMs,
   saveSharingEnabled,
   saveStashOptIn,
@@ -96,27 +99,11 @@ import {
   claimNativeRuntime,
   releaseNativeRuntime,
 } from './background/native-runtime-owner';
-import { DEFAULT_SAMPLING_CONFIG, DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
+import { DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
 import { recordDeviceHealth } from './background/device-health';
 import { reportStrandedTeardown } from './background/teardown-watermark';
 import { stampWatermark } from './background/watermarks';
 import { createDefaultStashClient, type StashClient } from './stash-client';
-import {
-  activeWatchers,
-  armWatcher,
-  buildLiveCancel,
-  buildLiveRequest,
-  clampLiveTtl,
-  disarmWatcher,
-  evaluateControlMsg,
-  liveUntil as liveUntilFrom,
-  markHandled,
-  mintNonce,
-  LIVE_TTL_DEFAULT_MS,
-  type HandledNonce,
-  type RandomBytesFn,
-  type WatcherSession,
-} from './live-requests';
 import { loadKeys, saveKeys } from './secure-keys';
 import { loadSeq, saveSeq } from './state-store';
 
@@ -238,7 +225,6 @@ export interface SharingSnapshot {
   /** Bilateral-pairing / nearby-discovery state. */
   pairing: PairingSnapshot;
   /** Live-mode request state (ARCHITECTURE §9c). */
-  live: LiveSnapshot;
   /** Per-friend forward-secrecy health — who is not receiving our fixes, and why (§4.5, §4.6). */
   sessions: SessionHealthSnapshot;
   /** Latest signed fix/null return envelopes successfully opened from each friend. */
@@ -272,20 +258,6 @@ export interface SessionHealthSnapshot {
   lastCheckedAt: number | null;
 }
 
-/**
- * Live-mode state for the UI (ARCHITECTURE §9c). There is no consent queue and no per-friend
- * permission: a friend we share with arms live mode directly. This exists so the UI can *show*
- * what is happening and offer a stop, not to gate it.
- */
-export interface LiveSnapshot {
-  /** Friends currently watching us live, with when each window ends. */
-  watchers: { author: string; expiresAt: number }[];
-  /** When the current live window ends (ms since epoch), or null when we are not live. */
-  liveUntil: number | null;
-  /** Friends we have an outstanding live request out to (we are watching them). */
-  watching: string[];
-}
-
 export interface LocationSharingInitOptions {
   /**
    * Headless mode restores only the identity, pool, and outbound topic needed
@@ -313,34 +285,6 @@ export const BLUETOOTH_UNSUPPORTED_MESSAGE =
   'This device has no Bluetooth LE radio, so Bump cannot run.';
 
 const PAIRING_POLL_INTERVAL_MS = 4000;
-
-/**
- * How often we check friends' control slots for live-mode requests (ARCHITECTURE §9c).
- *
- * Fixed at 5 min rather than following {@link SHARE_INTERVAL_OPTIONS_MS}: riding the share cadence
- * would make requests 15-min-slow for anyone on the long interval and needlessly chatty on the
- * short one. It also keeps this read traffic decoupled from the publish cadence, which is a
- * security property (§9) — and a constant-rate poll reveals nothing about movement.
- *
- * This is the floor on how long a live request takes to be noticed, so it is also the number that
- * makes live mode "ask to watch" rather than "watch now".
- */
-const LIVE_REQUEST_POLL_INTERVAL_MS = 5 * 60_000;
-
-/**
- * How often a WATCHER pulls the trail while it has a live session running.
- *
- * The subject's live cadence is worth nothing if we only reconcile when something else happens to
- * trigger a sync. Gossip delivers live fixes when the direct link is carrying, but that is exactly
- * what fails when a friend is far away behind a relay — and then the entire live window lands in one
- * batch on the next unrelated `syncTrail`.
- *
- * Deliberately faster than the subject's `liveMinPublishMs` so we never sit on a published fix, and
- * deliberately foreground-only: the user is looking at the screen, and a background watcher has no
- * one to show it to. Unlike the poll above this IS request-driven traffic, but it is bounded by the
- * live TTL and only runs when the user explicitly asked to watch someone.
- */
-const LIVE_WATCH_PULL_INTERVAL_MS = 8_000;
 
 const BUMP_POLL_INTERVAL_MS = 300;
 const BUMP_RESOLVE_TIMEOUT_MS = 12_000;
@@ -436,7 +380,35 @@ function stableStringify(value: unknown): string {
  * - The background service (started via {@link startBackground}) samples GPS foreground and
  *   background and feeds fixes through a {@link LocationEngine} into {@link publishFix}.
  */
-export class LocationSharingService implements FixPublisher {
+/** The wire shape of a fix. One conversion, used by both the mounted and headless entry points. */
+function toNativeFix(fix: LocationFix): NativeLocationFix {
+  return {
+    lat: fix.lat,
+    lon: fix.lon,
+    accuracyM: fix.accuracyM,
+    headingDeg: fix.headingDeg,
+    ts: fix.ts,
+  };
+}
+
+/**
+ * A point-in-time power read for the native gate's suspend decision.
+ *
+ * Built per call rather than held: this runs on headless wakes where nothing else is alive, and a
+ * source cached on a service instance would be the wrong lifetime. Unknown reports as FULL — a
+ * critical level is a hard stop in `gate.rs`, so a device we cannot read must not look flat and
+ * stop publishing forever.
+ */
+async function readBatteryForNative(): Promise<BatteryState> {
+  try {
+    const { createBatterySource } = await import('./background/battery-source');
+    return await createBatterySource().read();
+  } catch {
+    return { level: 1, charging: false, lowPower: false };
+  }
+}
+
+export class LocationSharingService {
   private mod: IrohLocationNativeModule | null = null;
   private keys: NodeKeys | null = null;
   private ticketStr: string | null = null;
@@ -448,6 +420,16 @@ export class LocationSharingService implements FixPublisher {
   private cryptidName = '';
   private color = '';
   private state = pool.emptyPool();
+  /**
+   * Whether {@link restorePool} has run, so {@link pushSharingRecipients} knows the pool it is
+   * about to mirror is the real one.
+   *
+   * `emptyPool()` and "everyone was removed" are the same value, and the native setter is durable,
+   * so mirroring the wrong one of those silently replaces a good recipient list with nothing. This
+   * flag is the difference between them, and it is what makes the ordering in `init` enforced
+   * rather than remembered.
+   */
+  private poolRestored = false;
   private status = 'idle';
   /**
    * Friends the last publish could not reach, and the human-actionable reason (§4.5).
@@ -468,6 +450,14 @@ export class LocationSharingService implements FixPublisher {
   private readonly friendSubs = new Map<string, string>();
   private readonly removingFriends = new Set<string>();
   private seq = 0;
+  /**
+   * Whether the native counter has been seeded and is now authoritative.
+   *
+   * False on a binary that predates `nextSeq`, and false until `adoptNativeSeq` has handed the
+   * persisted floor down. Both cases keep the old SecureStore path, which is monotonic on its own
+   * — the one thing that must never happen is drawing from native before it knows the floor.
+   */
+  private nativeSeq = false;
 
   private readonly snapshotListeners = new Set<SnapshotListener>();
   private readonly fixListeners = new Set<FixListener>();
@@ -565,9 +555,13 @@ export class LocationSharingService implements FixPublisher {
 
   // Background service runtime (native-only; lazily imported so web/Expo Go never load it).
   private engine: LocationEngine | null = null;
-  private bgProvider: BackgroundLocationProvider | null = null;
-  private bgTaskHandlerStop: (() => void) | null = null;
   private engineStateStop: (() => void) | null = null;
+  /**
+   * The native runtime's handoff, live only while background sharing is on.
+   *
+   * See {@link handleNativeCapture} — this is how a mounted app publishes at all.
+   */
+  private nativeFixSub: Removable | null = null;
   private bgRefreshHandlerStop: (() => void) | null = null;
   private bgLifecycleStop: (() => void) | null = null;
   private bgCadenceStop: (() => Promise<void>) | null = null;
@@ -581,32 +575,8 @@ export class LocationSharingService implements FixPublisher {
    * security property, see §9 — untangled from this read traffic. A constant-rate poll leaks
    * nothing about movement.
    */
-  private liveRequestPollTimer: ReturnType<typeof setInterval> | null = null;
-  private liveRequestPollInFlight: Promise<void> | null = null;
-  /** Armed live sessions, by watching friend. */
-  private watcherSessions: WatcherSession[] = [];
-  /** Control nonces already acted on. Persisted; see `live-requests.ts`. */
-  private handledNonces: HandledNonce[] = [];
-  /** Nonce of the outstanding request WE sent per friend, so we can cancel it later. */
-  private readonly sentRequestNonces = new Map<string, string>();
-  /**
-   * Live sessions WE are watching, by friend endpoint id → absolute expiry. The watcher-side mirror
-   * of {@link watcherSessions}, which tracks who is watching us.
-   *
-   * Needed because live mode used to be entirely send-side: the subject sped up, but nothing on this
-   * end pulled any faster, so a watcher whose gossip link was not carrying (the normal case when the
-   * friend is far away and behind a relay) saw nothing at all until some unrelated `syncTrail` fired
-   * and delivered the whole window at once.
-   */
-  private readonly watchingSessions = new Map<string, number>();
-  private liveWatchPullTimer: ReturnType<typeof setInterval> | null = null;
-  private liveWatchPullInFlight: Promise<void> | null = null;
-  /** Cleans up outstanding live requests when we stop being able to watch (app backgrounded). */
-  private watcherLifecycleStop: (() => void) | null = null;
   /** True on the MOUNTED service only — the one that owns the process-wide native node. */
   private ownsNativeRuntime = false;
-  /** Injectable CSPRNG for control nonces; tests supply a deterministic one. */
-  private readonly randomBytes: RandomBytesFn;
   /**
    * Drives {@link LocationEngine.heartbeat} at the sampling interval while the runtime is alive.
    * iOS may suspend this timer while stationary; the periodic OS refresh is the best-effort backstop.
@@ -624,12 +594,9 @@ export class LocationSharingService implements FixPublisher {
    *   {@link createPairCode} / {@link pairFromInput}). Defaults to the HTTP client built from
    *   `EXPO_PUBLIC_PAIR_MAILBOX_URL`; tests can inject a fake.
    */
-  constructor(
-    deps: { mailbox?: PairingMailbox; stash?: StashClient; randomBytes?: RandomBytesFn } = {}
-  ) {
+  constructor(deps: { mailbox?: PairingMailbox; stash?: StashClient } = {}) {
     this.mailbox = deps.mailbox ?? createDefaultPairingMailbox();
     this.stash = deps.stash ?? createDefaultStashClient();
-    this.randomBytes = deps.randomBytes ?? ((n) => getRandomBytesAsync(n));
   }
 
   /** Whether offline delivery via the stash is both configured (deployed) and opted into. */
@@ -694,6 +661,10 @@ export class LocationSharingService implements FixPublisher {
       await this.syncStashGrants();
       await this.ensureMySubscription();
     }
+    // The opt-in is half of what the native drain pushes to, so it has to travel with the choice.
+    // Opting out matters as much as opting in: it is what stops the background path uploading to a
+    // stash the user has just turned off.
+    this.pushDeliveryConfig();
     this.emit();
   }
 
@@ -803,6 +774,9 @@ export class LocationSharingService implements FixPublisher {
       identitySecret: this.keys.identitySecret,
       recvSecret: this.keys.recvSecret,
     });
+    // And into the native store the background drain path reads, which `expo-secure-store` cannot
+    // serve because that path runs with no JS context alive.
+    await this.mirrorDeviceSecrets();
     this.configureDevTelemetry();
     // Restore the monotonic seq before anything can publish, so we never hand out a reused seq.
     this.seq = await loadSeq();
@@ -811,6 +785,9 @@ export class LocationSharingService implements FixPublisher {
     this.ratchetActivity = await loadRatchetActivity(this.kv);
     this.transportPreferences = await loadTransportPreferences(this.kv);
     await this.mod.start(this.transportPreferences);
+    // After `start`, which is where the native drain path's stores are opened.
+    await this.adoptNativeSeq();
+    await this.mirrorTransportConfig();
     if (interactive) {
       this.ticketStr = await this.mod.ticket();
       this.docTicketStr = await this.safeDocTicket();
@@ -823,10 +800,21 @@ export class LocationSharingService implements FixPublisher {
       );
     }
     await this.restorePool(interactive);
+    // Seed the native sharing set from the pool we have just loaded — AFTER `restorePool`, and the
+    // ordering is the whole of it.
+    //
+    // This used to run twelve lines earlier, where `this.state` was still the empty pool, so every
+    // init mirrored an EMPTY list; `set_all` is durable, so it overwrote a good list on disk. An
+    // interactive session got away with it because the next pool change re-pushed the real set. A
+    // headless wake changes no pool, so it published sealed for nobody until someone opened the
+    // app — 91 of 94 envelopes on 2026-09-03 went out `recipients=0` while `device.health` read
+    // `sharing.recipients=1` from the JS pool the whole time. The two had diverged and only the
+    // native one was ever consulted.
+    this.pushSharingRecipients();
     this.stashOptIn = await loadStashOptIn(this.kv);
-    // Restored, not reset: a control nonce we already acted on must stay acted-on across a restart,
-    // or the sender's still-current slot would re-arm us on the next poll.
-    this.handledNonces = await loadHandledNonces(this.kv);
+    // Seed the native push targets from the pool and opt-in we have just loaded — after both, for
+    // the same reason, or the stash would be mirrored as off on every launch.
+    this.pushDeliveryConfig();
     // Hydrated here as well as in startBackground so settings shows the real value even before
     // background sharing has been switched on.
     this.shareIntervalMs = await loadShareIntervalMs(this.kv);
@@ -835,7 +823,6 @@ export class LocationSharingService implements FixPublisher {
       await this.syncStashGrants();
       this.startPairingPolling();
       await this.pollPairingOnce();
-      this.startWatcherLifecycle();
     }
     this.setStatus('ready');
   }
@@ -1421,11 +1408,79 @@ export class LocationSharingService implements FixPublisher {
   async isBackgroundAvailable(): Promise<boolean> {
     if (Platform.OS === 'web' || !this.mod) return false;
     try {
-      const { isBackgroundLocationAvailable } = await import('./background/background-task');
-      return isBackgroundLocationAvailable();
+      return typeof this.mod.startNativeBackground === 'function';
     } catch {
       return false;
     }
+  }
+
+  /**
+   * The native publish pipeline, as the engine's port.
+   *
+   * Everything the engine used to do itself — the confidence gate, the wall-clock slot grid, the
+   * durable outbox and the drain — is behind these two calls now (`publish.rs`). The reason is not
+   * tidiness: the same code has to run in an OS callback with no JS context alive, which is what a
+   * Pixel spent eleven and a half hours unable to do while spooling 446 real fixes.
+   */
+  private nativeDrain(): NativeDrain {
+    const outcomeOf = (raw: NativeIngestOutcome): DrainOutcome => ({
+      accepted: raw.accepted,
+      rejection: raw.rejection,
+      enqueued: raw.enqueued,
+      published: raw.published,
+      pending: raw.pending,
+      suspended: raw.suspended,
+    });
+    return {
+      ingest: async (fix, battery, intervalMs) => {
+        const mod = this.mod;
+        if (!mod?.ingestFix) throw new Error('ingestFix: native module not bound');
+        // Re-establish the subscription rather than fail on its absence — the step `publishFix`
+        // took and this path lost when it replaced it.
+        //
+        // `mySubId` is nulled by anything that rebinds the node (`rebind`, a pool change that
+        // resubscribes, a shutdown) and is only restored by whoever calls this. Without the call,
+        // a moment without a subscription becomes permanent: every capture throws, the engine
+        // latches into `error`, and it stays there for the life of the process even once a
+        // subscription exists again. That is what an iPhone did on 2026-09-01 — twelve
+        // `engine.failed` spans in two minutes, all `ingestFix: no active subscription`, through an
+        // entire drive.
+        //
+        // Cheap to repeat: it compares a signature of the bootstrap set and returns immediately
+        // when nothing has changed, which is every call but the first.
+        await this.ensureMySubscription();
+        if (!this.mySubId) throw new Error('ingestFix: no active subscription');
+        return outcomeOf(await mod.ingestFix(this.mySubId, toNativeFix(fix), battery, intervalMs));
+      },
+      heartbeat: async (battery, intervalMs) => {
+        const mod = this.mod;
+        if (!mod?.heartbeatFix) throw new Error('heartbeatFix: native module not bound');
+        // Same reason as `ingest` above: the heartbeat is the only thing publishing on a phone that
+        // is not moving, so it is the last place that should give up on a missing subscription.
+        await this.ensureMySubscription();
+        if (!this.mySubId) throw new Error('heartbeatFix: no active subscription');
+        return outcomeOf(await mod.heartbeatFix(this.mySubId, battery, intervalMs));
+      },
+    };
+  }
+
+  /**
+   * Run one captured fix through the native pipeline from a headless context.
+   *
+   * The headless counterpart of the engine's `ingest`: no policy, no state, no listeners — a wake
+   * with no mounted runtime has nobody to tell. Returns how many envelopes reached the wire.
+   */
+  async ingestNativeFix(fix: LocationFix, _parent?: SpanContext): Promise<number> {
+    const battery = await readBatteryForNative();
+    const outcome = await this.nativeDrain().ingest(fix, battery, this.shareIntervalMs);
+    return outcome.published;
+  }
+
+  /** Fill the slots that elapsed while this phone was frozen, and drain. */
+  async heartbeatNativeFix(_parent?: SpanContext): Promise<number> {
+    const battery = await readBatteryForNative();
+    const outcome = await this.nativeDrain().heartbeat(battery, this.shareIntervalMs);
+    return outcome.published;
   }
 
   /**
@@ -1993,6 +2048,19 @@ export class LocationSharingService implements FixPublisher {
 
       if (selfId && nf.author === selfId) {
         await this.trail.appendOwn(fix, nf.seq);
+        // ...and this is where our own dot comes from now.
+        //
+        // It used to come from `ingestAndTrackLocal`, which fed the JS engine and mirrored back
+        // whatever it accepted. That path was deleted when capture moved into Rust, and nothing
+        // replaced it: `latestLocalFix` was left with exactly one live writer, the debug push
+        // button. So the locate-me control (`map-screen-body.tsx`, `!hasLiveSelfFix || !selfFix`)
+        // was greyed out from launch until someone pressed Push — reported 2026-08-30 as "it only
+        // works when a push has happened", which was a precise description of the bug.
+        //
+        // The replica is the source of truth for our own position now, so reading it back is not a
+        // workaround: it is the same fix, after the same gate, that actually went on the wire.
+        // `recordLocalFix` ignores anything older than what it holds, so replays cost nothing.
+        this.recordLocalFix(fix);
       } else if (known.has(nf.author)) {
         await this.trail.recordFriendLatest({
           author: nf.author,
@@ -2027,11 +2095,48 @@ export class LocationSharingService implements FixPublisher {
   }
 
   /**
+   * Re-derive {@link BackgroundAccess} from the OS, and publish the answer if it moved.
+   *
+   * `startBackground` used to latch its answer from the single `requestBackgroundPermissionsAsync`
+   * round-trip it made at start-up. On iOS that call resolves before the authorization delegate has
+   * settled, so a fresh install read "denied" at 17:44:13 on 2026-08-30 and `authorizedAlways` two
+   * seconds later — and because nothing re-read it, the phone showed "allow background location"
+   * and reported `access=foreground` for the rest of the evening while holding full permission.
+   *
+   * Prefers the native runtime's live read (Core Location's own `authorizationStatus`, which is the
+   * value the background updates actually depend on) and falls back to `expo-location` on a build
+   * whose binary predates that export. Never prompts, so it is safe to call on every foreground.
+   */
+  async refreshBackgroundAccess(): Promise<BackgroundAccess> {
+    // `tryGetIrohLocation()` rather than `this.mod`, which is only bound once `init` has run. This
+    // is a pure OS read with no node behind it, and the UI can reasonably ask before the node is
+    // up — the same reasoning `device-health.ts` uses for `nativeBackgroundRunning`.
+    const mod = tryGetIrohLocation();
+    const native = mod?.nativeBackgroundAuthorized;
+    let granted: boolean;
+    if (typeof native === 'function') {
+      try {
+        granted = native.call(mod);
+      } catch {
+        granted = await readBackgroundAccessGranted();
+      }
+    } else {
+      granted = await readBackgroundAccessGranted();
+    }
+    const next: BackgroundAccess = granted ? 'full' : 'foreground';
+    if (next !== this.backgroundAccess) {
+      this.backgroundAccess = next;
+      this.emit();
+    }
+    return next;
+  }
+
+  /**
    * Start the background location service: real GPS (foreground + OS background), gated by the
    * battery-aware sampling policy, feeding fixes through a durable outbox into {@link publishFix}.
    * Native-only. See docs/social/ARCHITECTURE.md §9.
    */
-  async startBackground(config?: Partial<BackgroundStartConfig>): Promise<BackgroundAccess> {
+  async startBackground(config?: Partial<CadenceTarget>): Promise<BackgroundAccess> {
     if (Platform.OS === 'web') {
       throw new Error('Background location sharing is not supported on web.');
     }
@@ -2044,14 +2149,12 @@ export class LocationSharingService implements FixPublisher {
       const [
         { createLocationEngine },
         { benchmarkProfileOverrides, createSamplingPolicy },
-        { BackgroundLocationProvider: Provider },
-        { backgroundOutbox, registerActiveBackgroundFixHandler, registerActiveRefreshHandler },
+        { registerActiveRefreshHandler },
         { createBatterySource },
         { createCadenceController, cfgFromDecision },
       ] = await Promise.all([
         import('./background/location-engine'),
         import('./background/sampling-policy'),
-        import('./background/background-provider'),
         import('./background/register-task'),
         import('./background/battery-source'),
         import('./background/cadence-controller'),
@@ -2067,10 +2170,12 @@ export class LocationSharingService implements FixPublisher {
         ...benchmarkProfileOverrides(benchmarkProfile),
       });
       this.engine = createLocationEngine({
-        publisher: this,
-        outbox: backgroundOutbox,
-        trail: this.trail,
+        drain: this.nativeDrain(),
         policy,
+        // The native path writes our own fix to the iroh-docs replica, not to this app's trail
+        // store, so without this the user's own dot would not move until the next reconciliation.
+        // A local replica read, no network.
+        onPublished: () => void this.refreshTrailFromReplica(0).catch(() => undefined),
         // Real device power (charge level, charging state, Low-Power Mode) drives the policy's
         // battery-aware backoff — without this reader the engine assumes a perpetually full battery.
         battery: () => battery.read(),
@@ -2091,10 +2196,6 @@ export class LocationSharingService implements FixPublisher {
         stampedFixAt = at;
         void stampWatermark(this.kv, 'fix', at).catch(() => undefined);
       });
-      this.bgTaskHandlerStop = registerActiveBackgroundFixHandler(async (fix, parent) => {
-        await this.ingestAndTrackLocal(fix, parent);
-      });
-
       // Route the periodic RECEIVE-side backfill (WorkManager / BGTaskScheduler) to THIS live
       // runtime rather than a headless node. On Android this runtime stays alive while backgrounded
       // (the location foreground service), so the periodic task must reuse this node — spinning up a
@@ -2112,52 +2213,70 @@ export class LocationSharingService implements FixPublisher {
         await this.syncTrail(0, parent);
       });
 
-      this.bgProvider = new Provider();
-      const notification = {
-        title: 'streetCryptid',
-        body: "Keeping your friends' map current.",
-        color: '#C6791A',
-      };
-      // Arm the OS from a *real* battery read, so a phone launching in Low-Power Mode starts at the
+      // Permission first: the native runtime cannot ask for it, and starting a foreground service
+      // that is then refused location leaves a notification the user cannot explain.
+      const permissions = await ensureBackgroundPermissions();
+      if (!permissions.foreground) throw new Error('location permission was refused');
+      this.backgroundAccess = permissions.background ? 'full' : 'foreground';
+
+      // Arm from a *real* battery read, so a phone launching in Low-Power Mode starts at the
       // conserving accuracy tier instead of arming high and being re-armed on the first power event.
       // (The cadence is identical either way — battery never moves it.)
       const initialDecision = policy.decide({ battery: await battery.read() });
-      const initialCfg = {
-        ...cfgFromDecision(initialDecision, notification),
-        ...config,
+      const initialCfg = { ...cfgFromDecision(initialDecision), ...config };
+      const nativeProvider: CadenceProvider = {
+        reprogram: async (cfg) => {
+          const mod = this.mod;
+          if (!mod?.setBackgroundCadence)
+            throw new Error('setBackgroundCadence: not in this build');
+          mod.setBackgroundCadence(cfg.intervalMs, cfg.distanceIntervalM, cfg.accuracy);
+        },
       };
-      const permissions = await this.bgProvider.startBackground(initialCfg);
-      this.backgroundAccess = permissions.background ? 'full' : 'foreground';
+      // Take the native runtime's handoff BEFORE starting it, or the first captures of a mounted
+      // session are sent to nobody — and on a fresh install those are the only captures there are.
+      //
+      // This is the mounted publish path, not a fallback. The writer claim in `durable.rs` is
+      // process-wide and the app has already claimed the stores by the time this runs, so the
+      // native runtime cannot build a node of its own while we are open; it captures and hands the
+      // fix here. Without this, a foregrounded app runs Core Location, receives fixes, and drops
+      // every one of them — which is what a fresh install did on 2026-08-30: paired, map open,
+      // nothing published, locate-me greyed out because nothing had ever reached the replica.
+      this.nativeFixSub =
+        this.mod.addListener?.('onNativeFix', (event: OnNativeFixEvent) => {
+          void this.handleNativeCapture(event);
+        }) ?? null;
 
-      // After the initial arm, the cadence controller re-programs the OS whenever the decision
-      // materially changes (motion class, battery, Low-Power Mode) and re-evaluates on power events —
-      // so sampling actually follows the policy instead of staying pinned at the first cadence.
+      await nativeProvider.reprogram(initialCfg);
+      this.setNativeBackground(true);
+      // Starting the manager is what settles Core Location's authorization delegate, so this is the
+      // first moment the answer above can be trusted. Cheap, never prompts, and on the fresh-install
+      // race it is the difference between "sharing" and a banner that never goes away.
+      await this.refreshBackgroundAccess();
+
+      // After the initial arm, the cadence controller re-programs the runtime whenever the decision
+      // materially changes (battery, Low-Power Mode) and re-evaluates on power events — so sampling
+      // follows the policy instead of staying pinned at the first cadence.
       this.bgCadenceStop = createCadenceController({
         engine: this.engine,
-        provider: this.bgProvider,
+        provider: nativeProvider,
         battery,
-        notification,
         overrides: config,
         seed: initialCfg,
         onError: (error) => console.warn('[background-location] cadence re-arm failed', error),
       }).start();
 
-      const firstFix = await this.bgProvider.getCurrent();
-      await this.ingestAndTrackLocal(firstFix);
-      // The TaskManager location task delivers in foreground too. A second watch processed every
-      // iOS fix twice and kept another CLLocationManager running for no additional information.
-
       // Fill due slots while the runtime remains alive. iOS may suspend this timer in the background.
       this.armHeartbeat(this.shareIntervalMs);
-
-      // Live-mode requests are only actionable while we are actually sampling, so the poll's
-      // lifetime is background sharing's (§9c). Sharing off ⇒ nothing to make live ⇒ nothing to poll.
-      this.startLiveRequestPolling();
 
       this.bgLifecycleStop = createAppLifecycleController({
         onForeground: () => {
           void this.engine?.flush();
           void this.syncTrail(0);
+          // Re-derive rather than trust what start-up decided. Authorization moves in both
+          // directions without us: iOS settles a fresh grant a beat after the request resolves, and
+          // it also re-prompts days later with a map of everywhere we have tracked the user, where
+          // a great many downgrade. Both are product events and both surface here.
+          void this.refreshBackgroundAccess();
           // A foreground record is the fastest way to learn what state a phone came back in —
           // notably whether the OS still has its location task running, which is exactly what a
           // process kill takes away. Self-throttled to one per
@@ -2201,15 +2320,39 @@ export class LocationSharingService implements FixPublisher {
       // `ensureSharingArmedHeadless`. Writing it earlier would let a start that then threw leave
       // behind an intent the self-heal would keep trying to honour.
       await saveSharingEnabled(this.kv, true);
+      // Same moment, same intent: the native path is the one that still runs when the JS pipeline
+      // cannot be started at all. Ask for the notification permission first so the ongoing
+      // notification is visible from the start — but do not gate on the answer, because Android
+      // runs the service either way and a denial costs visibility rather than sharing.
+      try {
+        await this.mod?.ensureNotificationPermission?.();
+      } catch {
+        // Best-effort: a refused or unavailable prompt must not stop sharing from starting.
+      }
+      this.setNativeBackground(true);
       // Arm the revive fence around where we are now. On iOS it is the only mechanism that
       // relaunches a terminated app; on Android it cannot do that, but a geofence event is a
       // documented exemption to the ban on starting a foreground service from the background, which
       // is the only way the self-heal can legally re-arm. See `revive-task.ts`.
       try {
-        const { armReviveFence } = await import('./background/revive-task');
+        const { armReviveFence, lastKnownFixForFence } = await import('./background/revive-task');
         // The one call that bypasses the re-arm floor: sharing is starting and there may be no
         // fence standing at all, so "keep whatever is already armed" is not a safe outcome here.
-        await armReviveFence(firstFix, { force: true });
+        // A slightly stale centre still works — being outside it only makes the exit fire sooner.
+        //
+        // The fallback read is not belt-and-braces, it is the fresh-install case, and skipping it
+        // cost an iPhone its only resurrection path on 2026-08-30: `latestLocalFix` is empty until
+        // something publishes, `lastAcceptedFix` is empty because the native runtime no longer
+        // feeds the JS engine at all, so on a new install `centre` was always undefined and the
+        // fence was silently never armed — `task.fence_registered` sat `false` for the whole
+        // evening. A cached OS position needs no GPS and is more than good enough to centre a
+        // 200 m tripwire.
+        const centre =
+          this.latestLocalFix ??
+          this.engine?.getState().lastAcceptedFix ??
+          (await lastKnownFixForFence());
+        if (centre) await armReviveFence(centre, { force: true });
+        else console.warn('[revive-fence] no position to centre on; fence not armed');
       } catch (error) {
         console.warn('[revive-fence] arm failed', error);
       }
@@ -2277,6 +2420,10 @@ export class LocationSharingService implements FixPublisher {
     } catch {
       // ignore — a KV failure must not block teardown
     }
+    // Before anything else that can throw: a foreground service the user has switched off must not
+    // outlive a failure further down teardown, or they are left with a notification and no way to
+    // explain it.
+    this.setNativeBackground(false);
     try {
       const { disarmReviveFence } = await import('./background/revive-task');
       await disarmReviveFence();
@@ -2311,32 +2458,53 @@ export class LocationSharingService implements FixPublisher {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
-    this.stopLiveRequestPolling();
-    // Sharing off ends any live session outright: there is nothing left to make live, and leaving
-    // stale watchers behind would have the UI claim someone is watching a phone that stopped.
-    this.watcherSessions = [];
     const stopCadence = this.bgCadenceStop;
     this.bgCadenceStop = null;
-    this.bgTaskHandlerStop?.();
-    this.bgTaskHandlerStop = null;
     this.engineStateStop?.();
     this.engineStateStop = null;
     this.bgRefreshHandlerStop?.();
     this.bgRefreshHandlerStop = null;
     this.bgLifecycleStop?.();
     this.bgLifecycleStop = null;
+    this.nativeFixSub?.remove();
+    this.nativeFixSub = null;
+    // Detach the engine BEFORE any of the slow work below, and stop the detached copy rather than
+    // re-reading the field.
+    //
+    // Everything after this point awaits, and a `startBackground` can land in any of those gaps —
+    // this is a lifecycle teardown, so a remount racing a shutdown is the normal case, not an edge
+    // one. Re-reading `this.engine` at await time meant the stop could land on the *successor*
+    // engine, and `this.engine = null` at the end could null it: a phone was left with Core
+    // Location armed, the `onNativeFix` listener live, and `this.engine` pointing at an engine that
+    // had been stopped out from under it. Every capture was then refused with
+    // `engine-not-running` — 102 of them in two hours on 2026-09-01, on a phone that otherwise
+    // reported perfect health.
+    //
+    // Detaching first makes the window fail safe instead: a capture arriving mid-teardown sees no
+    // engine and is dropped, which is what a shutdown means, and a `startBackground` that arrives
+    // installs a fresh engine this function can no longer touch.
+    const engine = this.engine;
+    this.engine = null;
+    this.backgroundSharing = false;
+    this.backgroundAccess = 'unknown';
     try {
       await stopCadence?.();
     } catch {
       // ignore
     }
+    // Release, NOT stop. This function is "the process is going away"; `stopBackground` is "the
+    // user switched sharing off", and it calls the full stop itself before it gets here. Routing
+    // both through `setNativeBackground(false)` meant a teardown disarmed SLC, the stop fence and
+    // the persisted anchor — everything iOS has for waking a terminated app — while this same
+    // function went to lengths to preserve the JS intent and the revive fence beside them.
+    //
+    // It has not been firing: `performShutdown` nulls `this.mod` before it reaches here, so the
+    // call has been a silent no-op on the only path that reaches it with sharing still on. That is
+    // an accident of ordering, not a design, and it is one moved line away from being a day of
+    // silence again.
+    this.releaseNativeBackground();
     try {
-      await this.bgProvider?.stopBackground();
-    } catch {
-      // ignore
-    }
-    try {
-      await this.engine?.stop();
+      await engine?.stop();
     } catch {
       // ignore
     }
@@ -2346,315 +2514,18 @@ export class LocationSharingService implements FixPublisher {
     } catch {
       // ignore — cancellation is best-effort
     }
-    this.bgProvider = null;
-    this.engine = null;
-    this.backgroundSharing = false;
-    this.backgroundAccess = 'unknown';
     this.emit();
-  }
-
-  /**
-   * Turn on real-time live tracking for a bounded window (default 2 min), after which it auto-reverts
-   * to the ambient cadence. The background service normally samples calmly to save battery; this is
-   * the on-demand escape hatch for the real-time case — a friend actively watching your location —
-   * so the app never pays real-time GPS cost around the clock. `on: false` (or a fresh call) cancels
-   * any active window. No-op until the background service is running; the cadence controller picks
-   * up the engine's new decision and re-programs the OS.
-   *
-   * Prefer {@link applyWatcherSessions} for the request-driven path — it derives the window from the
-   * active watchers so two overlapping watchers cannot cut each other short.
-   */
-  async setLiveTracking(on: boolean, ttlMs = 120_000): Promise<void> {
-    if (this.liveTrackingTimer) {
-      clearTimeout(this.liveTrackingTimer);
-      this.liveTrackingTimer = null;
-    }
-    await this.engine?.setLiveMode(on);
-    // The heartbeat carries live mode's keepalive, and the share interval is far too slow for it.
-    // Only touch the timer when one is actually running — live tracking is a no-op until the
-    // background service has started, and arming a heartbeat here would resurrect a stopped one.
-    if (this.heartbeatTimer) {
-      this.armHeartbeat(on ? DEFAULT_SAMPLING_CONFIG.liveMaxQuietMs : this.shareIntervalMs);
-    }
-    if (on && ttlMs > 0) {
-      const timer = setTimeout(() => {
-        this.liveTrackingTimer = null;
-        void this.engine?.setLiveMode(false);
-        if (this.heartbeatTimer) this.armHeartbeat(this.shareIntervalMs);
-        // Sessions have lapsed by construction; drop them so the UI stops claiming we are live.
-        this.watcherSessions = activeWatchers(this.watcherSessions, Date.now());
-        this.emit();
-      }, ttlMs);
-      (timer as unknown as { unref?: () => void }).unref?.();
-      this.liveTrackingTimer = timer;
-    }
   }
 
   // ── Live-mode request channel (ARCHITECTURE §9c) ─────────────────────────────────────────
 
-  /**
-   * Ask `endpointId` to switch to the real-time cadence, by writing an encrypted control message
-   * into OUR namespace (which they replicate) and pushing it. They pick it up on their next poll,
-   * so expect minutes, not seconds — there is deliberately no push wake (§10).
-   *
-   * Wrapped only for that friend, so nobody else — including the stash — can tell a request was
-   * even sent, let alone to whom. Requires that they share with us: watching someone who does not
-   * share their location is meaningless, and we surface that as a failure rather than a silent wait.
-   */
-  async requestLive(endpointId: string, ttlMs = LIVE_TTL_DEFAULT_MS): Promise<void> {
-    const friend = this.state.friends[endpointId];
-    if (!friend) throw new Error('live: not a friend');
-    if (!this.mod) throw new Error('live: node not ready');
-    if (typeof this.mod.docsWriteControl !== 'function') {
-      // iOS bindings predating the control API — see `just bindgen-ios`.
-      throw new Error('live: this build cannot send live requests yet');
-    }
-    const span = getTelemetry().startSpan('live.request.sent', {
-      attributes: { 'sc.peer': endpointId.slice(0, 10), ttl_ms: clampLiveTtl(ttlMs) },
-    });
-    try {
-      const nonce = await mintNonce(this.randomBytes);
-      const msg = buildLiveRequest(Date.now(), ttlMs, nonce);
-      await this.mod.docsWriteControl(msg, [friend.recvPublic]);
-      // docsWriteControl only touches the LOCAL replica — same rule as docsWrite. Without this the
-      // request never leaves the phone and the friend polls forever. See §9 "push-to-stash".
-      //
-      // `pushTrail` now addresses the pool as well as the stash, so a request reaches the friend
-      // directly whenever they are reachable; the stash remains the path that does not need both
-      // phones online at the same moment.
-      await this.pushTrail(span.context);
-      this.sentRequestNonces.set(endpointId, nonce);
-      // Start pulling immediately. The subject won't speed up until its next poll (up to
-      // LIVE_REQUEST_POLL_INTERVAL_MS away), but its ambient fixes still need collecting in the
-      // meantime, and this way the window is covered end to end rather than from first-arrival.
-      this.watchingSessions.set(endpointId, Date.now() + clampLiveTtl(ttlMs));
-      this.startLiveWatchPull();
-      span.setStatus('ok');
-      this.emit();
-    } catch (err) {
-      span.recordError(err);
-      throw err;
-    } finally {
-      span.end();
-    }
-  }
-
-  /**
-   * Withdraw an outstanding live request. Supersedes it in our single control slot, so a friend who
-   * has not polled yet never sees the request at all. Best-effort: if they already armed, they stop
-   * on their next poll (or when the window lapses).
-   */
-  async cancelLiveRequest(endpointId: string): Promise<void> {
-    const friend = this.state.friends[endpointId];
-    if (!friend || !this.mod || typeof this.mod.docsWriteControl !== 'function') return;
-    const nonce = await mintNonce(this.randomBytes);
-    try {
-      await this.mod.docsWriteControl(buildLiveCancel(Date.now(), nonce), [friend.recvPublic]);
-      await this.pushTrail();
-    } catch {
-      /* best-effort — the window lapses on its own regardless */
-    }
-    this.sentRequestNonces.delete(endpointId);
-    this.watchingSessions.delete(endpointId);
-    this.stopLiveWatchPullIfIdle();
-    this.emit();
-  }
-
-  /**
-   * Withdraw every outstanding live request we sent. Called when we background: a watcher who is not
-   * looking at the screen has no use for a friend's real-time GPS, and leaving the request standing
-   * would keep their phone at the live cadence for the rest of the TTL for nobody's benefit.
-   *
-   * Best-effort and inherently racy against process death — if we are *killed* rather than
-   * backgrounded, nothing is sent and the subject's TTL is the only thing that stops it. That is why
-   * the TTL remains the real bound, and why a cancel that fails here is not worth surfacing.
-   */
-  private async cancelAllLiveRequests(): Promise<void> {
-    const outstanding = [...this.sentRequestNonces.keys()];
-    if (outstanding.length === 0) return;
-    await Promise.allSettled(outstanding.map((id) => this.cancelLiveRequest(id)));
-  }
-
-  /**
-   * Watch app state for the WATCHER half of live mode (§9c). Deliberately separate from the
-   * lifecycle controller `startBackground` installs: watching and sharing are independent — you can
-   * watch a friend without sharing your own location — so tying this to the background service
-   * would leave requests uncancelled for exactly the users who never turned sharing on.
-   */
-  private startWatcherLifecycle(): void {
-    if (this.watcherLifecycleStop) return;
-    this.watcherLifecycleStop = createAppLifecycleController({
-      onForeground: () => {
-        // Nothing to resume: a live window the user walked away from is over, by design. They ask
-        // again if they still want it.
-      },
-      onBackground: () => {
-        void this.cancelAllLiveRequests();
-        this.watchingSessions.clear();
-        this.stopLiveWatchPullIfIdle();
-      },
-    }).start();
-  }
-
-  /**
-   * Run the watcher-side pull while any live session is active. Idempotent — safe to call on every
-   * request.
-   */
-  private startLiveWatchPull(): void {
-    if (this.liveWatchPullTimer) return;
-    this.liveWatchPullTimer = setInterval(() => {
-      void this.runLiveWatchPull();
-    }, LIVE_WATCH_PULL_INTERVAL_MS);
-    (this.liveWatchPullTimer as unknown as { unref?: () => void }).unref?.();
-  }
-
   /** Stop the pull once no live session remains, so it can never outlive the windows it serves. */
-  private stopLiveWatchPullIfIdle(): void {
-    const now = Date.now();
-    for (const [id, expiresAt] of this.watchingSessions) {
-      if (expiresAt <= now) this.watchingSessions.delete(id);
-    }
-    if (this.watchingSessions.size > 0 || !this.liveWatchPullTimer) return;
-    clearInterval(this.liveWatchPullTimer);
-    this.liveWatchPullTimer = null;
-  }
 
   /** One pull tick. Serialized: a slow reconciliation must not overlap the next tick. */
-  private async runLiveWatchPull(): Promise<void> {
-    this.stopLiveWatchPullIfIdle();
-    if (this.watchingSessions.size === 0) return;
-    if (this.liveWatchPullInFlight) return this.liveWatchPullInFlight;
-    this.liveWatchPullInFlight = this.syncTrail(0)
-      .catch(() => {
-        /* a missed tick is recovered by the next one — never surface transient sync failures */
-      })
-      .finally(() => {
-        this.liveWatchPullInFlight = null;
-      });
-    return this.liveWatchPullInFlight;
-  }
 
   /** Stop `endpointId`'s live session immediately (the user's "stop" action). */
-  async stopWatcher(endpointId: string): Promise<void> {
-    this.watcherSessions = disarmWatcher(this.watcherSessions, endpointId, Date.now());
-    await this.applyWatcherSessions();
-  }
-
-  /**
-   * Reconcile live tracking with the currently-active watcher sessions: live until the LATEST
-   * expiry across them, ambient when there are none. Called after anything changes the set, so
-   * overlapping watchers extend rather than truncate each other.
-   */
-  private async applyWatcherSessions(): Promise<void> {
-    const now = Date.now();
-    this.watcherSessions = activeWatchers(this.watcherSessions, now);
-    const until = liveUntilFrom(this.watcherSessions, now);
-    if (until === null) {
-      await this.setLiveTracking(false);
-    } else {
-      await this.setLiveTracking(true, until - now);
-    }
-    this.emit();
-  }
-
-  /**
-   * Poll every friend's control slot for live-mode requests. Reconciles first — a request written
-   * by a friend is only visible to us once we have pulled their namespace.
-   *
-   * Serialized: a slow reconciliation must not overlap the next tick.
-   */
-  private async pollLiveRequestsOnce(): Promise<void> {
-    if (this.liveRequestPollInFlight) return this.liveRequestPollInFlight;
-    this.liveRequestPollInFlight = this.runLiveRequestPoll().finally(() => {
-      this.liveRequestPollInFlight = null;
-    });
-    return this.liveRequestPollInFlight;
-  }
-
-  private async runLiveRequestPoll(): Promise<void> {
-    const mod = this.mod;
-    if (!mod || typeof mod.readControl !== 'function') return;
-    const friends = pool.friendList(this.state);
-    if (friends.length === 0) return;
-
-    // Pull first: their control entry reaches us through the same reconciliation as their fixes.
-    try {
-      await this.syncTrail(0);
-    } catch {
-      /* an unreachable stash/peer just means we see requests on a later tick */
-    }
-
-    let changed = false;
-    for (const friend of friends) {
-      let messages: NativeControlMsg[];
-      try {
-        messages = await mod.readControl(friend.endpointId);
-      } catch {
-        continue;
-      }
-      for (const msg of messages) {
-        const now = Date.now();
-        const verdict = evaluateControlMsg(msg, {
-          now,
-          isSharing: pool.isSharingWith(this.state, friend.endpointId),
-          handled: this.handledNonces,
-        });
-        if (verdict.action === 'ignore') {
-          // Only remember decisions about messages we could have acted on. Recording a `stale` or
-          // `not-sharing` nonce would burn it, so a later legitimate re-send of the same message
-          // (after re-enabling sharing, say) would be silently dropped as a duplicate.
-          if (verdict.reason === 'duplicate') continue;
-          const dropped = getTelemetry().startSpan('live.request.ignored', {
-            attributes: {
-              'sc.peer': friend.endpointId.slice(0, 10),
-              'sc.drop_reason': verdict.reason,
-            },
-          });
-          dropped.end();
-          continue;
-        }
-
-        this.handledNonces = markHandled(this.handledNonces, msg.nonce, now);
-        await saveHandledNonces(this.kv, this.handledNonces);
-        changed = true;
-
-        const span = getTelemetry().startSpan(
-          verdict.action === 'arm' ? 'live.armed' : 'live.cancelled',
-          { attributes: { 'sc.peer': friend.endpointId.slice(0, 10) } }
-        );
-        if (verdict.action === 'arm') {
-          span.setAttribute('ttl_ms', verdict.ttlMs);
-          this.watcherSessions = armWatcher(
-            this.watcherSessions,
-            friend.endpointId,
-            now + verdict.ttlMs,
-            now
-          );
-        } else {
-          this.watcherSessions = disarmWatcher(this.watcherSessions, friend.endpointId, now);
-        }
-        span.end();
-      }
-    }
-    if (changed) await this.applyWatcherSessions();
-  }
 
   /** Start the live-request poll. Idempotent; runs only while background sharing is on. */
-  private startLiveRequestPolling(): void {
-    if (this.liveRequestPollTimer) return;
-    this.liveRequestPollTimer = setInterval(() => {
-      void this.pollLiveRequestsOnce();
-    }, LIVE_REQUEST_POLL_INTERVAL_MS);
-    (this.liveRequestPollTimer as unknown as { unref?: () => void }).unref?.();
-    // Check immediately too, so switching sharing on picks up a request already waiting.
-    void this.pollLiveRequestsOnce();
-  }
-
-  private stopLiveRequestPolling(): void {
-    if (!this.liveRequestPollTimer) return;
-    clearInterval(this.liveRequestPollTimer);
-    this.liveRequestPollTimer = null;
-  }
 
   /**
    * Wait for an in-flight headless session, but never long enough to be mistaken for a broken app.
@@ -2715,14 +2586,6 @@ export class LocationSharingService implements FixPublisher {
     // Stop callbacks synchronously before awaiting native teardown.
     this.stopPairingPolling();
     this.stopBumpPolling();
-    this.stopLiveRequestPolling();
-    this.watcherLifecycleStop?.();
-    this.watcherLifecycleStop = null;
-    this.watchingSessions.clear();
-    if (this.liveWatchPullTimer) {
-      clearInterval(this.liveWatchPullTimer);
-      this.liveWatchPullTimer = null;
-    }
     if (this.trailChangeTimer) {
       clearTimeout(this.trailChangeTimer);
       this.trailChangeTimer = null;
@@ -2735,8 +2598,6 @@ export class LocationSharingService implements FixPublisher {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
-    this.bgTaskHandlerStop?.();
-    this.bgTaskHandlerStop = null;
     this.engineStateStop?.();
     this.engineStateStop = null;
     this.bgRefreshHandlerStop?.();
@@ -2778,6 +2639,11 @@ export class LocationSharingService implements FixPublisher {
   /** Restore the persisted pool and re-establish subscriptions so sharing resumes after a reload. */
   private async restorePool(subscribeToFriends = true): Promise<void> {
     const persisted = await loadPool(this.kv);
+    // Set either way, and before the early return: a device with nothing persisted HAS a known
+    // pool, it is just empty, and mirroring that empty set is correct. What must never reach native
+    // is the pool we have not looked at yet — which is indistinguishable from it by value alone,
+    // and is why the ordering bug above was invisible to every check that only saw the list.
+    this.poolRestored = true;
     if (!persisted) return;
     this.state = persisted;
     if (subscribeToFriends) {
@@ -2836,9 +2702,237 @@ export class LocationSharingService implements FixPublisher {
   /** Persist the current pool (fire-and-forget; best-effort). */
   private persistPool(): void {
     void savePool(this.kv, this.state);
+    this.pushSharingRecipients();
+    // The peer tickets come out of the same pool, so the two mirrors move together or the native
+    // drain seals for a friend it cannot then send to.
+    this.pushDeliveryConfig();
+  }
+
+  /**
+   * Mirror the sharing set down to native, where the drain path can read it with no JS alive.
+   *
+   * Every pool change goes through {@link persistPool}, so hanging this here is what keeps the two
+   * copies in step rather than relying on each call site to remember. Fire-and-forget and
+   * best-effort for the same reason `savePool` is: this describes who to seal for *next* time, and
+   * failing to record it must never fail the pool change that prompted it.
+   *
+   * A momentarily stale native list is safe in the only direction it can be stale — see
+   * `recipients.rs`. The authority for "can this person read my location" stays the ratchet
+   * session, which this list can only ever narrow.
+   */
+  /**
+   * Mirror the delivery set down to native — the companion to {@link pushSharingRecipients}.
+   *
+   * That call tells the native drain who to seal for; this one tells it who to hand the sealed
+   * bytes to. A device with the first and not the second seals correctly, writes its local replica,
+   * reports success, and delivers nothing: `docsWrite` is local-only and iroh-docs broadcasts a
+   * local insert solely for namespaces the live engine has marked as syncing, which a publish-only
+   * context never does. That is exactly what two phones did all day on 2026-08-31 — full outboxes,
+   * healthy publishes, and a stash that received nothing from either.
+   *
+   * Same list as {@link durablePeerTickets} on purpose: whichever path publishes has to reach the
+   * same peers, and two lists that could drift is how the JS and native paths would start
+   * delivering to different sets.
+   *
+   * Fire-and-forget and best-effort, as {@link pushSharingRecipients}: failing to record where to
+   * send must not fail the pool change that prompted it, and the entries stay in the local replica
+   * for the next push either way.
+   */
+  private pushDeliveryConfig(): void {
+    const mod = this.mod;
+    if (typeof mod?.setDeliveryConfig !== 'function') return;
+    const peerTickets = this.durablePeerTickets();
+    // Gated on the OPT-IN, not on the stash being built into this bundle — the same distinction
+    // `pushTrail` draws. Passing a base URL for a user who switched the stash off would PUT sealed
+    // envelopes into a namespace `syncStashGrants` never registered.
+    const stash = this.stashEnabled() ? this.stashConfig : null;
+    void mod
+      .setDeliveryConfig(peerTickets, stash?.baseUrl ?? null, stash?.psk ?? null)
+      .catch((err: unknown) => {
+        getTelemetry().log('warn', 'delivery: could not mirror the push targets to native', {
+          reason: err instanceof Error ? err.message : String(err),
+          peers: peerTickets.length,
+          stash: Boolean(stash),
+        });
+      });
+  }
+
+  private pushSharingRecipients(): void {
+    // Never mirror a pool we have not loaded. The list would be empty, the write is durable, and
+    // the result is a phone that publishes sealed for nobody while every JS-side reading of "who
+    // am I sharing with" still says one — see the note in `init`.
+    if (!this.poolRestored) {
+      getTelemetry().log('warn', 'recipients: refused to mirror a pool that was never restored', {
+        'sc.drop_reason': 'pool-not-restored',
+      });
+      return;
+    }
+    const mod = this.mod;
+    if (typeof mod?.setSharingRecipients !== 'function') {
+      // Was a bare `return`. A binary predating the native drain path is the ordinary case, but so
+      // is a null `mod`, and the two are the difference between "this phone cannot" and "this
+      // session forgot" — neither of which left any trace at all before this.
+      getTelemetry().log('warn', 'recipients: native sharing set not mirrored', {
+        'sc.drop_reason': mod ? 'setter-unavailable' : 'no-native-module',
+      });
+      return;
+    }
+    const recipients = pool.recipientEndpoints(this.state);
+    // Watchers in the same call. A watch-only edge receives no position but still needs our ratchet
+    // contribution on the same cadence, or it lapses at T_lapse — the failure a20036e fixed once.
+    const watchers = pool.watcherEndpoints(this.state);
+    void mod.setSharingRecipients(recipients, watchers).catch((err: unknown) => {
+      getTelemetry().log('warn', 'recipients: could not mirror the sharing set to native', {
+        reason: err instanceof Error ? err.message : String(err),
+        recipients: recipients.length,
+        watchers: watchers.length,
+      });
+    });
+  }
+
+  /**
+   * Copy the transport settings into the native store the background bootstrap reads.
+   *
+   * The relay URLs and token are build-time `EXPO_PUBLIC_*` constants inlined into this bundle, so
+   * a device only learns them by being told. Pushed on every launch rather than once: the values
+   * change when the user is moved to a different relay by an app update, and a background node
+   * booting on last month's relay list would run, report healthy, and reach nobody.
+   *
+   * Best-effort — a failure costs background publishing, not the mounted path.
+   */
+  private async mirrorTransportConfig(): Promise<void> {
+    const mod = this.mod;
+    if (typeof mod?.setTransportConfig !== 'function') return;
+    try {
+      await mod.setTransportConfig(this.transportPreferences);
+    } catch (err) {
+      getTelemetry().log('warn', 'transport: native mirror failed, background publishing is off', {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Start or stop the native background publish path alongside the JS one.
+   *
+   * Both are armed, deliberately, and they cannot collide: the Rust stores take a process-wide
+   * directory claim, so whichever gets there first owns the counter and the queue and the other
+   * stands down (`durable.rs`). While the app is mounted that is the JS path, unchanged. The native
+   * one takes over exactly when the JS path stops being able to run at all — which on a Pixel on
+   * 2026-08-29 was eleven and a half hours during which `expo-task-manager` spooled 446 fixes it
+   * could never hand to a JS context.
+   *
+   * Synchronous and best-effort: a phone whose binary predates this keeps today's behaviour.
+   */
+  private setNativeBackground(enabled: boolean): void {
+    const mod = this.mod;
+    try {
+      if (enabled) mod?.startNativeBackground?.();
+      else mod?.stopNativeBackground?.();
+    } catch (err) {
+      getTelemetry().log('warn', `native background ${enabled ? 'start' : 'stop'} failed`, {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Hand the native runtime back for a teardown, WITHOUT telling it sharing is off.
+   *
+   * The native half of the distinction {@link teardownBackground} already draws. `stopNativeBackground`
+   * disarms iOS's whole resurrection ladder — SLC, the stop-anchor fence, the persisted anchor — and
+   * those are the only things that can relaunch a terminated app; a process teardown that removes
+   * them leaves a phone that cannot wake until someone opens it.
+   *
+   * Falls back to the full stop on a binary that predates `releaseNativeBackground`, because on
+   * Android leaving a foreground service running with no JS and no way to reach it is worse than
+   * disarming, and on iOS the old behaviour is what that binary has always done.
+   */
+  private releaseNativeBackground(): void {
+    const mod = this.mod;
+    try {
+      if (typeof mod?.releaseNativeBackground === 'function') mod.releaseNativeBackground();
+      else mod?.stopNativeBackground?.();
+    } catch (err) {
+      getTelemetry().log('warn', 'native background release failed', {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Copy this device's identity into the native store, every launch.
+   *
+   * Unconditional on purpose. Skipping when the store "looks provisioned" would be wrong in the one
+   * case that matters: an entry can survive an app uninstall on iOS, so it may hold an identity
+   * this install has never used, and a background node built on that would publish under an
+   * endpoint none of the user's friends have paired with — invisible from the app, and indented
+   * from every trail. One keystore write per launch is what makes the two provably agree.
+   *
+   * Best-effort: a device whose binary predates the native drain path, or whose keystore refuses
+   * the write, still works exactly as it does today — the mounted path reads `expo-secure-store`
+   * and is untouched. What it loses is background publishing, which is what the warning is for.
+   */
+  private async mirrorDeviceSecrets(): Promise<void> {
+    const mod = this.mod;
+    const keys = this.keys;
+    if (!keys || typeof mod?.saveDeviceSecrets !== 'function') return;
+    try {
+      await mod.saveDeviceSecrets(keys.identitySecret, keys.recvSecret);
+    } catch (err) {
+      getTelemetry().log(
+        'warn',
+        'device secrets: native mirror failed, background publishing is off',
+        {
+          reason: err instanceof Error ? err.message : String(err),
+        }
+      );
+    }
+  }
+
+  /**
+   * Hand the native counter our persisted value once, so the two schemes cannot overlap.
+   *
+   * Called after `start`, because the native store is claimed there. `seedSeq` is monotone, so
+   * calling it on every launch is harmless: after the first migration the floor is always at or
+   * below where native already is, and raising can only ever skip values. Best-effort — a phone
+   * whose binary predates the API keeps the JS path, which is exactly what the guard is for.
+   */
+  private async adoptNativeSeq(): Promise<void> {
+    const mod = this.mod;
+    if (!mod || typeof mod.seedSeq !== 'function' || typeof mod.nextSeq !== 'function') return;
+    try {
+      await mod.seedSeq(this.seq);
+      this.nativeSeq = true;
+    } catch (err) {
+      // Staying on the JS path is correct here rather than fatal: it is the scheme this device
+      // was already using, and it is monotonic on its own. What we must not do is start using
+      // native without the floor, which would re-issue every seq below it.
+      getTelemetry().log(
+        'warn',
+        'seq: could not adopt the native counter, staying on SecureStore',
+        {
+          reason: err instanceof Error ? err.message : String(err),
+        }
+      );
+    }
   }
 
   private async nextSeq(): Promise<number> {
+    const mod = this.mod;
+    if (this.nativeSeq && typeof mod?.nextSeq === 'function') {
+      // Native persists before it resolves, so the fail-stop guarantee the old path got from
+      // `saveSeq` throwing is preserved: a counter that cannot be written throws here and the
+      // publish aborts rather than risking reuse.
+      const seq = await mod.nextSeq();
+      this.seq = seq;
+      // Mirror, best-effort and deliberately AFTER the authoritative write. This is downgrade
+      // insurance: an OTA that rolls the JS bundle back onto this same binary would resume using
+      // `state-store.ts`, and a stale mirror there would re-issue. It cannot fail the publish —
+      // the value is already durable — so unlike the old path this one swallows.
+      void saveSeq(seq).catch(() => undefined);
+      return seq;
+    }
     this.seq += 1;
     // Persist BEFORE the caller puts this seq on the wire, so a kill mid-publish can't reuse it
     // (a lagging persisted seq would collide `author/seq` docs keys for a rejoining peer).
@@ -3020,18 +3114,76 @@ export class LocationSharingService implements FixPublisher {
   }
 
   /**
-   * Feed a raw provider fix to the engine, then move the local own-position dot to whatever the
-   * engine actually *accepted*.
+   * Move the app's own-position dot, ignoring anything older than what we already hold.
    *
-   * The dot deliberately follows the engine rather than the raw fix: the confidence gate exists
-   * because Android sometimes reports a position kilometres away, and rendering that before
-   * discarding it would throw the user's own marker across town for a frame. On rejection this
-   * re-affirms the last good position instead.
+   * Fed from the replica read in {@link refreshTrailFromReplica} and from
+   * {@link forceLocationPush}. It is deliberately NOT fed from raw provider fixes: the confidence
+   * gate exists because a phone sometimes reports a position kilometres away, and rendering that
+   * before discarding it would throw the user's own marker across town for a frame. What reaches
+   * here has already been through the gate, in Rust, on its way to the wire.
    */
-  private async ingestAndTrackLocal(fix: LocationFix, parent?: SpanContext): Promise<void> {
-    await this.engine?.ingest(fix, parent);
-    const accepted = this.engine?.getState().lastAcceptedFix ?? null;
-    if (accepted && accepted !== this.latestLocalFix) this.recordLocalFix(accepted);
+  /**
+   * Publish a capture the native runtime could not publish itself, and move our own dot to it.
+   *
+   * Routed through the engine rather than straight to {@link ingestNativeFix} for three reasons
+   * that all matter while the app is open: the engine's `onPublished` refreshes the trail, its
+   * state drives what the settings screen renders, and the cadence controller re-arms off it. Going
+   * around it would publish correctly and leave the whole UI frozen.
+   *
+   * The dot follows what the gate *accepted*, never the raw capture — the gate exists because a
+   * phone sometimes reports a position kilometres away, and rendering that before discarding it
+   * would throw the user's own marker across town for a frame.
+   */
+  private async handleNativeCapture(event: OnNativeFixEvent): Promise<void> {
+    const engine = this.engine;
+    // No engine means sharing is not running here; the capture is not ours to publish.
+    if (!engine) return;
+    // An engine that is wired up but not running is a bug, not a decision, and it swallows every
+    // capture silently — so repair it rather than spend another day's fixes proving it.
+    //
+    // The OS is only delivering because we asked it to, so a capture arriving at all says the
+    // native side believes sharing is on. The durable intent is what decides whether it is right:
+    // `stopBackground` clears `sharingEnabled` when the user switches off, while
+    // `teardownBackground` deliberately leaves it set for the self-heal to find (see its docs). So
+    // "idle engine + intent still set" can only be a lifecycle fault, and starting is the correct
+    // response; a user who actually turned sharing off cleared the intent and is never resumed.
+    if (engine.getState().status !== 'running') {
+      const intended = await loadSharingEnabled(this.kv).catch(() => false);
+      if (!intended) return;
+      getTelemetry().log('warn', 'engine was not running while sharing is on; restarting it', {
+        'sc.drop_reason': 'engine-restarted',
+        status: engine.getState().status,
+      });
+      await engine.start().catch(() => undefined);
+      if (engine.getState().status !== 'running') return;
+    }
+    try {
+      const { routeNativeCapture } = await import('./background/location-engine');
+      const accepted = await routeNativeCapture(
+        {
+          kind: event.kind,
+          fix: event.fix
+            ? {
+                lat: event.fix.lat,
+                lon: event.fix.lon,
+                accuracyM: event.fix.accuracyM,
+                headingDeg: event.fix.headingDeg,
+                ts: event.fix.ts,
+              }
+            : undefined,
+        },
+        engine
+      );
+      if (accepted) this.recordLocalFix(accepted);
+    } catch (err) {
+      // The fix stays in the native outbox, so the next capture retries it. Logged rather than
+      // swallowed: a handoff that keeps failing is a phone that has stopped publishing while
+      // looking entirely healthy, which is the exact failure this whole path exists to end.
+      getTelemetry().log('warn', 'native capture handoff failed', {
+        reason: err instanceof Error ? err.message : String(err),
+        'sc.drop_reason': 'handoff-failed',
+      });
+    }
   }
 
   private recordLocalFix(fix: LocationFix): void {
@@ -3094,7 +3246,6 @@ export class LocationSharingService implements FixPublisher {
       transports: this.transportState(),
       shareIntervalMs: this.shareIntervalMs,
       pairing: this.pairingSnapshot(),
-      live: this.liveSnapshot(),
       sessions: this.sessionHealthSnapshot(),
       ratchetActivity: { ...this.ratchetActivity },
     };
@@ -3118,16 +3269,6 @@ export class LocationSharingService implements FixPublisher {
       byFriend[endpointId] = reason === 'no_session' ? 'needs-repair' : 'lapsed';
     }
     return { byFriend, lastCheckedAt: this.sessionsCheckedAt };
-  }
-
-  private liveSnapshot(): LiveSnapshot {
-    const now = Date.now();
-    const active = activeWatchers(this.watcherSessions, now);
-    return {
-      watchers: active.map((s) => ({ author: s.author, expiresAt: s.expiresAt })),
-      liveUntil: liveUntilFrom(this.watcherSessions, now),
-      watching: [...this.sentRequestNonces.keys()],
-    };
   }
 
   private pairingSnapshot(): PairingSnapshot {

@@ -61,6 +61,28 @@ private final class BluetoothRadioProbe: NSObject, CBCentralManagerDelegate {
 // Regenerate with `just bindgen-ios` on macOS (source bindings can also be produced from a
 // host library via `uniffi-bindgen ... --language swift`; only the XCFramework needs macOS).
 
+/// Unknown reports as FULL, never empty. A critical level is a hard stop in the gate, so a device
+/// whose battery we cannot read must not look flat and stop publishing forever.
+private func batteryState(from raw: [String: Any]) -> BatteryState {
+  BatteryState(
+    level: (raw["level"] as? Double) ?? 1.0,
+    charging: (raw["charging"] as? Bool) ?? false,
+    lowPower: (raw["lowPower"] as? Bool) ?? false)
+}
+
+private func ingestOutcomeToDict(_ outcome: IngestOutcome) -> [String: Any?] {
+  [
+    "accepted": outcome.accepted,
+    "rejection": outcome.rejection.map { String(describing: $0) },
+    "enqueued": Double(outcome.enqueued),
+    "published": Double(outcome.published),
+    "pending": Double(outcome.pending),
+    "slotsSkipped": Double(outcome.slotsSkipped),
+    "overflowDropped": Double(outcome.overflowDropped),
+    "suspended": outcome.suspended,
+  ]
+}
+
 private func hexToData(_ hex: String) -> Data {
   var data = Data(capacity: hex.count / 2)
   var index = hex.startIndex
@@ -87,7 +109,9 @@ private func dataToHex(_ data: Data) -> String {
 ///   *is* backed up by default, and restoring an old copy would rewind send counters into key
 ///   reuse, so `excludeFromBackup` below is not optional decoration; it is the other half of
 ///   putting the state here at all.
-private func nodeStorageRoots() -> (data: URL, state: URL) {
+/// Internal rather than file-private: `BackgroundLocationRuntime` builds a node from the same
+/// two roots, and duplicating the rule is how the two halves of it drift apart.
+func nodeStorageRoots() -> (data: URL, state: URL) {
   let fm = FileManager.default
   let tmp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
   // Application Support is not guaranteed to exist; createDirectory below makes it.
@@ -365,7 +389,10 @@ public final class IrohLocationModule: Module {
 
   public func definition() -> ModuleDefinition {
     Name("IrohLocation")
-    Events("onFix", "onOpaque", "onStatus", "onSync")
+    // `onNativeFix` is the mounted-app handoff: the background runtime captures, but the writer
+    // claim is process-wide, so while the app is open it cannot own the node and hands the capture
+    // here instead. See `BackgroundLocationRuntime.eventSink`.
+    Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix")
 
     AsyncFunction("createNode") { (identityHex: String?, recvHex: String?) async throws -> [String: String] in
       try await self.clearRuntime()
@@ -401,6 +428,194 @@ public final class IrohLocationModule: Module {
 
     AsyncFunction("shutdown") { () async throws in
       try await self.clearRuntime()
+    }
+
+    // MARK: - Device identity (the background drain path's own copy)
+
+    /// Seed the Keychain item the background path reads. Idempotent; JS calls it once after
+    /// `createNode` and skips it thereafter via `deviceSecretsProvisioned`.
+    AsyncFunction("saveDeviceSecrets") { (identityHex: String, recvHex: String) async throws in
+      try KeychainDeviceSecrets.shared.save(
+        identity: hexToData(identityHex), recv: hexToData(recvHex))
+    }
+
+    Function("deviceSecretsProvisioned") { () -> Bool in
+      KeychainDeviceSecrets.shared.isProvisioned()
+    }
+
+    /// No counterpart on iOS: Core Location's background updates need no notification, and the
+    /// blue status bar indicator the OS shows instead is not something an app can request or
+    /// suppress. Present so callers do not have to branch on platform.
+    AsyncFunction("ensureNotificationPermission") { () async -> Bool in
+      true
+    }
+
+    /// Remember the transport settings, so the background runtime can `start` without JS.
+    AsyncFunction("setTransportConfig") {
+      (relayUrls: [String], relayAuthToken: String, relayEnabled: Bool, ipEnabled: Bool,
+        bleEnabled: Bool) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setTransportConfig(
+        config: TransportConfig(
+          relayUrls: relayUrls, relayAuthToken: relayAuthToken, relayEnabled: relayEnabled,
+          ipEnabled: ipEnabled, bleEnabled: bleEnabled))
+    }
+
+    /// Hand one captured fix to the native pipeline on the CURRENT subscription. The background
+    /// runtime does not come through here — it owns its own node — but the mounted app uses it to
+    /// exercise the same path the background one takes.
+    AsyncFunction("ingestFix") {
+      (subscriptionId: String, fix: [String: Double], battery: [String: Any], intervalMs: Double)
+        async throws -> [String: Any?] in
+      guard let sub = self.subscriptions[subscriptionId] else {
+        throw Exception(name: "NoSubscription", description: "no such subscription")
+      }
+      return ingestOutcomeToDict(
+        try await sub.ingestFix(
+          subscriptionId: subscriptionId,
+          fix: locationFix(from: fix),
+          battery: batteryState(from: battery),
+          intervalMs: UInt64(max(1, intervalMs)),
+          nowMs: UInt64(Date().timeIntervalSince1970 * 1000)))
+    }
+
+    /// Publish the slots that have come due without a new fix, reusing the last known position.
+    /// Driven on a timer by the mounted app — neither platform gives a background process a
+    /// reliable one, and the cadence has to stay uniform whether or not the phone is moving.
+    AsyncFunction("heartbeatFix") {
+      (subscriptionId: String, battery: [String: Any], intervalMs: Double) async throws
+        -> [String: Any?] in
+      guard let sub = self.subscriptions[subscriptionId] else {
+        throw Exception(name: "NoSubscription", description: "no such subscription")
+      }
+      return ingestOutcomeToDict(
+        try await sub.heartbeatFix(
+          subscriptionId: subscriptionId,
+          battery: batteryState(from: battery),
+          intervalMs: UInt64(max(1, intervalMs)),
+          nowMs: UInt64(Date().timeIntervalSince1970 * 1000)))
+    }
+
+    /// Start/stop the native background runtime. The app calls these when the user turns sharing on
+    /// and off; nothing else should.
+    Function("startNativeBackground") {
+      // Wire the handoff before starting, or the first captures of a mounted session have nowhere
+      // to go — and on a fresh install those are the only ones there are.
+      BackgroundLocationRuntime.shared.eventSink = self
+      BackgroundLocationRuntime.shared.start()
+    }
+
+    /// Re-program the background runtime from the sampling policy's decision.
+    Function("setBackgroundCadence") { (intervalMs: Double, distanceM: Double, accuracy: String) in
+      BackgroundLocationRuntime.shared.setCadence(
+        intervalMs: UInt64(max(1, intervalMs)), distanceM: distanceM, accuracy: accuracy)
+    }
+
+    /// Whether the background runtime is the one currently receiving locations.
+    Function("nativeBackgroundRunning") { () -> Bool in
+      BackgroundLocationRuntime.shared.isRunning
+    }
+
+    /// What the runtime is doing and why, for `device.health`.
+    ///
+    /// Reports the moving/stopped state, the reason it last ran, whether the stop-anchor fence is
+    /// actually registered, and the live authorization — the four things that previously had to be
+    /// inferred from an absence of spans, which is to say could not be inferred at all.
+    Function("nativeBackgroundState") { () -> [String: Any] in
+      BackgroundLocationRuntime.shared.healthSnapshot
+    }
+
+    /// Whether Core Location grants background updates **right now**.
+    ///
+    /// Distinct from `expo-location`'s request round-trip, which on a fresh install returns before
+    /// the delegate has settled and made a phone holding `authorizedAlways` report `foreground` for
+    /// an evening. Read this instead of latching that.
+    Function("nativeBackgroundAuthorized") { () -> Bool in
+      BackgroundLocationRuntime.shared.hasBackgroundAuthorization
+    }
+
+    Function("stopNativeBackground") {
+      BackgroundLocationRuntime.shared.stop()
+    }
+
+    /// This JS runtime is going away, but sharing is NOT off. Keep every rung of the ladder armed.
+    ///
+    /// The difference from `stopNativeBackground` is the difference between the user switching
+    /// sharing off and a process teardown, and only the first should disarm SLC, the stop fence and
+    /// the persisted anchor. Dropping the sink is the point: with no JS to hand captures to, the
+    /// runtime rebuilds its own node and publishes them itself.
+    Function("releaseNativeBackground") {
+      BackgroundLocationRuntime.shared.eventSink = nil
+      BackgroundLocationRuntime.shared.release()
+    }
+
+    // MARK: - Native publish state
+
+    /// Advance and return the publish counter. Durable before it resolves — see `seq_store.rs`.
+    AsyncFunction("nextSeq") { () async throws -> Double in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Double(try await node.nextSeq())
+    }
+
+    AsyncFunction("currentSeq") { () async throws -> Double in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Double(try await node.currentSeq())
+    }
+
+    AsyncFunction("seedSeq") { (floor: Double) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.seedSeq(floor: UInt64(max(0, floor)))
+    }
+
+    AsyncFunction("setSharingRecipients") {
+      (recipientEndpointsHex: [String], watcherEndpointsHex: [String]) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setSharingRecipients(
+        recipientEndpoints: recipientEndpointsHex, watcherEndpoints: watcherEndpointsHex)
+    }
+
+    // Read the durable sharing set back. `device.health` reports its size next to the pool's, so a
+    // phone whose JS pool and native list have diverged says so instead of reading healthy.
+    AsyncFunction("sharingRecipients") { () async throws -> [String] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.sharingRecipients()
+    }
+
+    // Record where a drained envelope must be SENT to leave the device. The companion to
+    // `setSharingRecipients`: that one says who to seal for, this one says who to hand the sealed
+    // bytes to. Without it the drain publishes into a local replica nothing reconciles with.
+    //
+    // Same bindgen caveat as `pushTrail` below: needs `just bindgen-ios` on macOS before
+    // `node.setDeliveryConfig` exists in the generated Swift.
+    AsyncFunction("setDeliveryConfig") {
+      (peerTickets: [String], stashBaseUrl: String?, stashPsk: String?) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setDeliveryConfig(
+        config: DeliveryConfig(
+          peerTickets: peerTickets, stashBaseUrl: stashBaseUrl, stashPsk: stashPsk))
+    }
+
+    // When the native drain last accepted, published and pushed. `device.health` reports these as
+    // ages; the JS watermark row only ever saw the JS publish path, which the drain replaced.
+    // Same bindgen caveat as `pushTrail` below.
+    AsyncFunction("publishWatermarks") { () async throws -> [String: Any?] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      let w = try await node.publishWatermarks()
+      return [
+        "lastAcceptedAt": w.lastAcceptedAt.map { Double($0) },
+        "lastPublishedAt": w.lastPublishedAt.map { Double($0) },
+        "lastPushedAt": w.lastPushedAt.map { Double($0) },
+      ]
+    }
+
+    AsyncFunction("outboxPending") { () async throws -> Double in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Double(try await node.outboxPending())
+    }
+
+    AsyncFunction("clearOutbox") { () async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.clearOutbox()
     }
 
     AsyncFunction("ticket") { () async throws -> String in

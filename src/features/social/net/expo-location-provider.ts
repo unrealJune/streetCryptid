@@ -20,6 +20,18 @@ export class ExpoLocationProvider implements LocationProvider {
     return status === Location.PermissionStatus.GRANTED;
   }
 
+  /**
+   * Whether foreground location is already granted, WITHOUT prompting.
+   *
+   * The distinction matters for more than politeness: Google Play requires the in-app disclosure
+   * screen to precede the OS permission dialog, so anything that runs on its own — as opposed to in
+   * response to the user tapping something — must be able to check without asking.
+   */
+  async hasPermission(): Promise<boolean> {
+    const { status } = await Location.getForegroundPermissionsAsync();
+    return status === Location.PermissionStatus.GRANTED;
+  }
+
   async getCurrent(): Promise<LocationFix> {
     const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
     return toFix(pos);

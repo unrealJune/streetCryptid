@@ -119,16 +119,16 @@ between a push and the friend seeing it is normal rather than a fault.
 These exist because their absence was indistinguishable from a phone that was never woken. None of
 them describe a ping; all of them describe why there wasn't one.
 
-| Span                                                   | Says                                                                               |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------- |
-| `device.health`                                        | the periodic liveness record — OS permissions, task registration, `last_*_age_ms`  |
-| `storage.degraded`                                     | persistence fell back to memory; nothing this device saves survives a restart      |
-| `outbox.load` (`sc.drop_reason=outbox-*`)              | the durable queue was unreadable, so every fix waiting in it is gone               |
-| `cadence.rearm`                                        | the OS refused a cadence change, so sampling is pinned at an interval nobody chose |
-| `engine.failed`                                        | `doFlush` / `heartbeat` threw; the engine is in `error` and only the UI knew       |
-| `bg.selfheal` (`sharing-disabled` / `already-running`) | the self-heal ran and had nothing to do — distinct from never running              |
-| `bg.session` (`precheck-empty`)                        | a headless wake found an empty outbox — distinct from no wake at all               |
-| `revive.arm`                                           | whether the iOS tripwire is actually armed, rather than only believed to be        |
+| Span                                                   | Says                                                                                                                                                  |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `device.health`                                        | the periodic liveness record — OS permissions, task registration, `last_*_age_ms`                                                                     |
+| `storage.degraded`                                     | persistence fell back to memory; nothing this device saves survives a restart                                                                         |
+| `outbox.load` (`sc.drop_reason=outbox-*`)              | the durable queue was unreadable, so every fix waiting in it is gone                                                                                  |
+| `cadence.rearm`                                        | the OS refused a cadence change, so sampling is pinned at an interval nobody chose                                                                    |
+| `engine.failed`                                        | `doFlush` / `heartbeat` threw; the engine is in `error` and only the UI knew                                                                          |
+| `bg.selfheal` (`sharing-disabled` / `already-running`) | the self-heal ran and had nothing to do — distinct from never running                                                                                 |
+| `bg.session` (`precheck-empty`)                        | a headless wake found an empty outbox — distinct from no wake at all                                                                                  |
+| `revive.arm` (`outcome`)                               | whether the iOS tripwire is actually armed, rather than only believed to be — `armed` \| `throttled` \| `task-undefined` \| `unavailable` \| `failed` |
 
 ## Follow-one-ping cookbook (TraceQL, in Grafana → Explore → Tempo)
 
@@ -156,6 +156,22 @@ Wakes that published nothing (the classic "phone woke but the ping never left"):
 { name = "outbox.drain" && span.published = 0 }
 ```
 
+Phones the OS has stopped running the periodic refresh on. `bg.refresh` counts the runs we heard
+about; `last_refresh_age_ms` is the durable stamp the phone carries locally, so it survives the
+window where the refresh has stopped AND the phone cannot reach the collector — which is the same
+window, more often than not. Six hours is ~24 missed runs at the requested 15-minute cadence:
+
+```traceql
+{ name = "bg.refresh" }
+{ name = "device.health" && span.last_refresh_age_ms > 21600000 }
+```
+
+Both platforms throttle this task to nothing without ever reporting it as unavailable. On
+2026-08-29 an iPhone read `refresh_registered: true` + `refresh_status: available` for thirty hours
+with zero `bg.refresh` spans, while a Pixel's interval decayed 15 → 24 → 214 → 687 minutes as App
+Standby demoted the WorkManager job. Neither is distinguishable from a healthy phone by any other
+attribute the record carries.
+
 Pushes that never completed a reconciliation with the stash — the fixes are written locally but
 stranded (`finished=false` means no `SyncFinished` before the deadline: unreachable stash, no
 network, or the wake ended too early):
@@ -177,6 +193,16 @@ Receives that arrived but could not be decrypted / were gated by the app:
 ```traceql
 { name = "gossip.receive" && span.outcome != "delivered" }
 { name = "fix.received.app" && span.sc.drop_reason != "" }
+```
+
+Arms that left no tripwire. On iOS the fence is the only mechanism that can bring a _terminated_
+app back, so an arm that quietly did not happen is indistinguishable — from every other signal the
+device emits — from a phone whose owner has not moved. `task-undefined` is the one to watch: the
+geofence registers, the OS has no handler to deliver to, and the call site cannot tell:
+
+```traceql
+{ name = "revive.arm" && span.armed = false }
+{ name = "revive.arm" && span.outcome = "task-undefined" }
 ```
 
 Live mode (ARCHITECTURE §9c) — a request's whole journey, and why one was refused:
@@ -242,6 +268,36 @@ From any span, "Logs for this span" (trace→logs) jumps to that instance's logs
    where `sc.drop_reason=unknown-or-removing-author` is the last gate that can silently eat a fix.
    A gap of up to a backfill interval between steps 5 and 6 is now normal.
 
+## Which build is this phone running?
+
+Ask this **first**, every time. It has been the answer more often than any other single question,
+and `service.version` cannot answer it: a test branch carries whatever version `package.json` last
+released, so a branch build and the release it replaced report the same string. On 2026-08-30 two
+iPhones both said `1.6.1` and were running entirely different code.
+
+`app.commit` is the answer, and it is on every span and every log line already — `app.config.ts`
+computes `extra.buildProvenance` (`EAS_BUILD_GIT_COMMIT_HASH`, falling back to `git rev-parse HEAD`)
+and `identity.ts`'s `getBuildResource()` puts it on the OTLP resource. Alongside it:
+`app.build_profile`, `app.build_id`, `app.native_version`, `app.native_build`.
+
+Traces — it must be `select`ed, or it will not appear in the search response:
+
+```traceql
+{resource.service.name="streetcryptid-app"}
+  | select(resource.service.instance.id, resource.app.commit, resource.app.build_profile)
+```
+
+Logs — `app_commit` is **structured metadata**, not an index label, so it filters with `|` and does
+NOT show up in Loki's `/labels` listing (only `service_name` and `service_instance_id` do). That
+absence is why it is easy to conclude it was never plumbed:
+
+```logql
+{service_instance_id="84f86b144a"} | app_commit="b3a0b0bccb45"
+```
+
+The same stream carries `device_model`, `device_id`, `os_version`, `app_build_profile` and
+`app_native_build`, all as structured metadata.
+
 ## Reading silence
 
 A phone that has stopped working produces _less_ signal, not more, so the usual "search for the
@@ -258,15 +314,47 @@ produced the same permanent hole, because the old exporter discarded any batch i
 **2. Liveness is asserted, not inferred.** `device.health` is emitted every periodic refresh and on
 foreground resume. Its value is in the _mismatches_:
 
-| Read                                                   | Means                                                               |
-| ------------------------------------------------------ | ------------------------------------------------------------------- |
-| `sharing.enabled=true` + `task.location_running=false` | the OS is not delivering location — the core background failure     |
-| `perm.background` not `granted`                        | "Always" was refused or revoked; iOS can downgrade it silently      |
-| `perm.accuracy=reduced`                                | precise location off; every fix will fail the quality gate          |
-| `task.refresh_status=restricted`                       | Background App Refresh is off — the periodic task will never run    |
-| `storage.backend=memory`                               | outbox, friend pool and sharing intent are lost on every restart    |
-| `telemetry.queued` large and growing                   | the device is fine; it cannot reach **us**                          |
-| `last_wake_age_ms` much larger than the publish age    | it is being woken and choosing not to publish — read the drop spans |
+| Read                                                                                                | Means                                                                                                                                                                                                  |
+| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sharing.enabled=true` + `task.location_running=false`                                              | the OS is not delivering location — the core background failure                                                                                                                                        |
+| `perm.background` not `granted`                                                                     | "Always" was refused or revoked; iOS can downgrade it silently                                                                                                                                         |
+| `perm.accuracy=reduced`                                                                             | precise location off; every fix will fail the quality gate                                                                                                                                             |
+| `task.refresh_status=restricted`                                                                    | Background App Refresh is off — the periodic task will never run                                                                                                                                       |
+| `task.refresh_registered=true`, `last_refresh_age_ms` huge or absent                                | the task is registered AND permitted, and the OS is simply not running it                                                                                                                              |
+| `storage.backend=memory`                                                                            | outbox, friend pool and sharing intent are lost on every restart                                                                                                                                       |
+| `sharing.recipients` >= 1 while `sharing.native_recipients` is 0                                    | the JS pool and the native seal list have diverged. Every publish from the native drain path is sealed for nobody, and every other reading on this record looks healthy. Cost a full day on 2026-09-03 |
+| `telemetry.queued` large and growing                                                                | the device is fine; it cannot reach **us**                                                                                                                                                             |
+| `last_wake_age_ms` much larger than the publish age                                                 | it is being woken and choosing not to publish — read the drop spans                                                                                                                                    |
+| `location.state=stopped` + `location.fence_registered=false`                                        | parked with no way out — it will not wake until something else relaunches it                                                                                                                           |
+| `location.state=moving` + `location.candidate_pending=true`, `candidate_age_ms` climbing past 180 s | a stop that is not converting: the dwell is being starved of deliveries, so `stopped` — and the fence and coarse clock it installs — is never reached. Cost an iPhone two hours on 2026-09-02          |
+| `location.candidate_fence_armed=true` while `anchor_armed=false`                                    | the tripwire under a phone that only _looks_ settled. Speculative and correct; it is what answers a departure too short for SLC                                                                        |
+| `location.state=moving` + a large `last_publish_age_ms`                                             | Core Location is delivering and nothing is anchoring — check the gate                                                                                                                                  |
+| `last_publish_age_ms` small, `last_push_age_ms` large                                               | publishing into its own replica and reaching nobody — the delivery targets                                                                                                                             |
+| `location.wake_reason=periodic` and never anything else                                             | iOS: parked, ticking on the coarse stream. Publishing, and healthy                                                                                                                                     |
+| `location.state=stopped` + `location.anchor_distance_m` in the km                                   | parked, and nowhere near the anchor: the stop fence is not firing                                                                                                                                      |
+| `location.wake_reason=coarse_departure`                                                             | the fence missed a departure and the parked clock caught it — count these                                                                                                                              |
+| `location.auth_status` not `always` while `perm.background=granted`                                 | the two disagree; Core Location's own read is the one that governs                                                                                                                                     |
+
+`location.*` comes from the native runtime's `nativeBackgroundState()` (`BackgroundLocationRuntime`
+on iOS). It exists because `task.location_running=true` is true of a parked phone and of a broken
+one alike — on 2026-08-30 an iPhone reported exactly that while 88 minutes past its last publish,
+and no other span could separate the two. Note `auth_status`, not `authorization`: the event log
+redacts any key matching `/authorization|password|psk|secret|ticket|token/i`.
+
+`last_fix_age_ms`, `last_publish_age_ms` and `last_push_age_ms` are read from the **native** gate
+state, not from the JS watermark row. The drain moved into Rust and the row's writers went with it,
+so for a while the row kept whatever it last held and this record reported that as fact — on
+2026-08-31 an iPhone showed a publish age of 672 minutes through an afternoon in which it published
+37 envelopes. A build whose binary predates the export falls back to the row. Publish and push stay
+two separate stamps on purpose: the gap between them is a phone talking only to itself.
+
+`anchor_distance_m` and the `coarse_departure` wake reason exist because `stopped` used to have a
+single way out. On 2026-08-31 an iPhone parked at 05:10 UTC and was still parked at 14:55 with its
+anchor untouched, across a drive to work — `fence_registered` read `true` the whole time, and the JS
+revive fence was silent through the same window. Every other attribute read healthy, and "still
+parked" is indistinguishable from "still at home" without a distance. The parked coarse stream now
+also serves as a backstop exit (`considerDeparture`), so `coarse_departure` appearing at all means
+the fence is unreliable on that device rather than that anything is broken now.
 
 The top row of the device-health dashboard carries those checks as counts — devices with no
 `bg.wake` in 6h, no `device.health` in 2h, any terminal native-runtime state, and publishes with no

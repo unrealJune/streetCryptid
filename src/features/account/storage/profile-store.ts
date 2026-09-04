@@ -4,7 +4,7 @@ import {
   type CryptidProfile,
   type CryptidProfileDraft,
 } from '../core/profile';
-import type { PersistentKV } from '@/features/social/net/background/fix-outbox';
+import type { PersistentKV } from '@/features/social/net/background/persistent-kv';
 import { createPersistentKV } from '@/features/social/net/persistence';
 
 const PROFILE_KEY = 'sc.account.profile.v1';

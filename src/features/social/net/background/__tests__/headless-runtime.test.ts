@@ -8,7 +8,7 @@ import {
 
 import {
   ensureSharingArmedHeadless,
-  flushBackgroundOutboxHeadless,
+  ingestFixesHeadless,
   runBackgroundRefreshHeadless,
 } from '../headless-runtime';
 import { registerActiveRefreshHandler } from '../register-task';
@@ -21,11 +21,18 @@ const mockInit = jest.fn(async () => {});
 const mockSyncTrail = jest.fn(async () => {});
 const mockShutdownAsync = jest.fn(async () => {});
 const mockFlushDevTelemetry = jest.fn(async () => {});
-const mockPublishFix = jest.fn(async () => 1);
+const calls: string[] = [];
+const mockIngestNativeFix = jest.fn(async () => {
+  calls.push('drain');
+  return 1;
+});
+const mockHeartbeatNativeFix = jest.fn(async () => {
+  calls.push('drain');
+  return 1;
+});
 const mockPushTrail = jest.fn(async () => {});
 const mockServiceCtor = jest.fn();
 /** Call order across the service, so we can assert drain-before-sync/push. */
-const calls: string[] = [];
 
 jest.mock('../../location-sharing', () => ({
   LocationSharingService: jest.fn().mockImplementation(() => {
@@ -33,7 +40,8 @@ jest.mock('../../location-sharing', () => ({
     return {
       init: mockInit,
       syncTrail: mockSyncTrail,
-      publishFix: mockPublishFix,
+      ingestNativeFix: mockIngestNativeFix,
+      heartbeatNativeFix: mockHeartbeatNativeFix,
       pushTrail: mockPushTrail,
       flushDevTelemetry: mockFlushDevTelemetry,
       shutdownAsync: mockShutdownAsync,
@@ -47,22 +55,18 @@ jest.mock('@/features/account/storage/profile-store', () => ({
   })),
 }));
 
-jest.mock('../background-outbox', () => ({
-  backgroundOutbox: {
-    pending: jest.fn(async () => 0),
-    drain: jest.fn(async () => 0),
-  },
-}));
-
-// The self-heal touches only the OS location task — no iroh node — so it is mocked at that seam.
-const mockIsRunning = jest.fn(async () => false);
-const mockStartBackgroundLocation = jest.fn(async (_cfg: unknown) => {});
-// Spread the real module: `register-task` is pulled in transitively and needs the rest of it
-// (`isBackgroundLocationAvailable`, `defineBackgroundLocationTask`) at import time.
-jest.mock('../background-task', () => ({
-  ...jest.requireActual('../background-task'),
-  isBackgroundLocationRunning: () => mockIsRunning(),
-  startBackgroundLocation: (cfg: unknown) => mockStartBackgroundLocation(cfg),
+// The self-heal restarts the NATIVE runtime now — no iroh node built on this side — so it is
+// mocked at the module seam instead of the old OS-task one.
+const mockIsRunning = jest.fn(() => false);
+const mockStartNativeBackground = jest.fn(() => {});
+const mockSetBackgroundCadence = jest.fn((_i: number, _d: number, _a: string) => {});
+jest.mock('iroh-location', () => ({
+  ...jest.requireActual('iroh-location'),
+  tryGetIrohLocation: () => ({
+    nativeBackgroundRunning: () => mockIsRunning(),
+    startNativeBackground: () => mockStartNativeBackground(),
+    setBackgroundCadence: (i: number, d: number, a: string) => mockSetBackgroundCadence(i, d, a),
+  }),
 }));
 
 const mockLoadSharingEnabled = jest.fn(async () => true);
@@ -93,23 +97,23 @@ function setAppState(state: string): void {
   (AppState as unknown as { currentState: string }).currentState = state;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports -- mocked module, needs the handle
-const { backgroundOutbox } = require('../background-outbox') as {
-  backgroundOutbox: { pending: jest.Mock; drain: jest.Mock };
-};
-
-/** Arm the mocked outbox with `count` queued fixes that drain successfully. */
-function queueFixes(count: number): void {
-  let remaining = count;
-  backgroundOutbox.pending.mockImplementation(async () => remaining);
-  backgroundOutbox.drain.mockImplementation(async (publish: (fix: unknown) => Promise<void>) => {
-    calls.push('drain');
-    const n = remaining;
-    for (let i = 0; i < n; i += 1)
-      await publish({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: i });
-    remaining = 0;
-    return n;
-  });
+/**
+ * A batch of `count` captured fixes, as the OS would hand them over.
+ *
+ * There is no queue to arm any more: the durable outbox is native (`outbox.rs`), and being handed
+ * fixes is what makes a headless session worth starting. The old helper stubbed a JS queue's depth
+ * to make the precheck pass; the argument replaces it.
+ */
+function fixes(
+  count: number
+): { lat: number; lon: number; accuracyM: number; headingDeg: number; ts: number }[] {
+  return Array.from({ length: count }, (_, i) => ({
+    lat: 1,
+    lon: 2,
+    accuracyM: 5,
+    headingDeg: 0,
+    ts: i,
+  }));
 }
 
 describe('headless-runtime', () => {
@@ -125,8 +129,6 @@ describe('headless-runtime', () => {
     mockPushTrail.mockImplementation(async () => {
       calls.push('pushTrail');
     });
-    backgroundOutbox.pending.mockImplementation(async () => 0);
-    backgroundOutbox.drain.mockImplementation(async () => 0);
     mockShutdownAsync.mockImplementation(async () => {});
     mockSaveWatermark.mockClear();
     mockClearWatermark.mockClear();
@@ -182,7 +184,6 @@ describe('headless-runtime', () => {
     // Syncing before the drain stranded everything this wake published until the next OS wake.
     it('drains the outbox BEFORE syncing so freshly published fixes are pushed in the same wake', async () => {
       setAppState('background');
-      queueFixes(2);
 
       await runBackgroundRefreshHeadless();
 
@@ -190,11 +191,11 @@ describe('headless-runtime', () => {
     });
   });
 
-  describe('flushBackgroundOutboxHeadless', () => {
+  describe('ingestFixesHeadless', () => {
     it('is a no-op while the app is active (the mounted runtime drains its own outbox)', async () => {
       setAppState('active');
 
-      const published = await flushBackgroundOutboxHeadless();
+      const published = await ingestFixesHeadless(fixes(1));
 
       expect(published).toBe(0);
       expect(mockServiceCtor).not.toHaveBeenCalled();
@@ -211,10 +212,9 @@ describe('headless-runtime', () => {
     // but does nothing, through relaunches, until reinstall.
     it('is a no-op while the app is merely inactive (cold launch / permission alert)', async () => {
       // Queued work, so the precheck passes and the guard is the ONLY thing that can refuse.
-      backgroundOutbox.pending.mockImplementation(async () => 3);
       setAppState('inactive');
 
-      const published = await flushBackgroundOutboxHeadless();
+      const published = await ingestFixesHeadless(fixes(1));
 
       expect(published).toBe(0);
       expect(mockServiceCtor).not.toHaveBeenCalled();
@@ -223,11 +223,10 @@ describe('headless-runtime', () => {
     it('is a no-op while a mounted runtime holds the native-runtime claim', async () => {
       // Backgrounded, so the AppState guard alone would wave this through — but the mounted runtime
       // is alive and owns the node (iOS keeps it alive when the user backgrounds the app).
-      backgroundOutbox.pending.mockImplementation(async () => 3);
       setAppState('background');
       claimNativeRuntime();
       try {
-        const published = await flushBackgroundOutboxHeadless();
+        const published = await ingestFixesHeadless(fixes(1));
 
         expect(published).toBe(0);
         expect(mockServiceCtor).not.toHaveBeenCalled();
@@ -239,25 +238,26 @@ describe('headless-runtime', () => {
     // Guards the other half: with the app genuinely backgrounded and no claim standing, the session
     // MUST still run, or the whole background pipeline silently stops delivering.
     it('still runs a session when the app is backgrounded and nothing holds the claim', async () => {
-      backgroundOutbox.pending.mockImplementation(async () => 3);
       setAppState('background');
 
-      await flushBackgroundOutboxHeadless();
+      await ingestFixesHeadless(fixes(1));
 
       expect(mockServiceCtor).toHaveBeenCalledTimes(1);
     });
 
     it('pushes the durable trail to the stash after draining, before the node shuts down', async () => {
       setAppState('background');
-      queueFixes(3);
       const parent = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
 
-      const published = await flushBackgroundOutboxHeadless(parent);
+      const published = await ingestFixesHeadless(fixes(3), parent);
 
       expect(published).toBe(3);
-      expect(mockPublishFix).toHaveBeenCalledTimes(3);
+      expect(mockIngestNativeFix).toHaveBeenCalledTimes(3);
       expect(mockPushTrail).toHaveBeenCalledWith(parent);
-      expect(calls).toEqual(['drain', 'pushTrail']);
+      // One ingest per fix now, not one batched drain: the native outbox is the queue, so the
+      // batch is handed down a fix at a time. The property under test is unchanged — every one of
+      // them lands before the push, or the envelopes never leave the phone.
+      expect(calls).toEqual(['drain', 'drain', 'drain', 'pushTrail']);
       // The node must still be alive for the push — shutdown is the session's `finally`.
       expect(mockPushTrail.mock.invocationCallOrder[0]).toBeLessThan(
         mockShutdownAsync.mock.invocationCallOrder[0]
@@ -266,9 +266,11 @@ describe('headless-runtime', () => {
 
     it('skips the push when nothing was published', async () => {
       setAppState('background');
-      queueFixes(0);
+      // The gate absorbed it — an accepted fix inside an already-covered slot. Real, and the
+      // commonest outcome by far, since fixes arrive far faster than the publish interval.
+      mockIngestNativeFix.mockImplementationOnce(async () => 0);
 
-      await flushBackgroundOutboxHeadless();
+      await ingestFixesHeadless(fixes(1));
 
       expect(mockPushTrail).not.toHaveBeenCalled();
     });
@@ -279,40 +281,39 @@ describe('headless-runtime', () => {
   describe('ensureSharingArmedHeadless', () => {
     beforeEach(() => {
       mockLoadSharingEnabled.mockImplementation(async () => true);
-      mockIsRunning.mockImplementation(async () => false);
-      mockStartBackgroundLocation.mockImplementation(async (_cfg: unknown) => {});
+      mockIsRunning.mockImplementation(() => false);
+      mockStartNativeBackground.mockImplementation(() => {});
     });
 
-    it('re-arms when sharing is enabled but the OS task is not running', async () => {
+    it('re-arms when sharing is enabled but the native runtime is not running', async () => {
       await expect(ensureSharingArmedHeadless('geofence')).resolves.toBe(true);
-      expect(mockStartBackgroundLocation).toHaveBeenCalledTimes(1);
-      // Ambient cadence, never live: resurrecting a 4s cadence unattended is how the original
+      expect(mockStartNativeBackground).toHaveBeenCalledTimes(1);
+      // The cadence is programmed before the runtime starts, so it never runs a tick at a rate
+      // nobody chose. Ambient only — resurrecting a fast cadence unattended is how the original
       // failure compounds instead of ending.
-      expect(mockStartBackgroundLocation.mock.calls[0][0]).toMatchObject({
-        timeIntervalMs: 300_000,
-        distanceIntervalM: 50,
-        deferredUpdatesIntervalMs: 60_000,
-        pausesUpdatesAutomatically: true,
-      });
+      expect(mockSetBackgroundCadence).toHaveBeenCalledWith(300_000, 50, 'balanced');
+      expect(mockSetBackgroundCadence.mock.invocationCallOrder[0]).toBeLessThan(
+        mockStartNativeBackground.mock.invocationCallOrder[0]
+      );
     });
 
     it('does nothing when the user has sharing switched off', async () => {
       mockLoadSharingEnabled.mockImplementation(async () => false);
 
       await expect(ensureSharingArmedHeadless('refresh')).resolves.toBe(false);
-      expect(mockStartBackgroundLocation).not.toHaveBeenCalled();
+      expect(mockStartNativeBackground).not.toHaveBeenCalled();
     });
 
     it('does nothing when the platform already restored the task itself', async () => {
       // Android's BOOT_COMPLETED receiver and START_REDELIVER_INTENT both land here.
-      mockIsRunning.mockImplementation(async () => true);
+      mockIsRunning.mockImplementation(() => true);
 
       await expect(ensureSharingArmedHeadless('refresh')).resolves.toBe(false);
-      expect(mockStartBackgroundLocation).not.toHaveBeenCalled();
+      expect(mockStartNativeBackground).not.toHaveBeenCalled();
     });
 
     it('swallows the Android background-FGS refusal instead of failing its caller', async () => {
-      mockStartBackgroundLocation.mockImplementation(async (_cfg: unknown) => {
+      mockStartNativeBackground.mockImplementation(() => {
         throw new Error('ForegroundServiceStartNotAllowedException: startForegroundService()');
       });
 
@@ -321,7 +322,7 @@ describe('headless-runtime', () => {
     });
 
     it('swallows an unexpected failure too', async () => {
-      mockStartBackgroundLocation.mockImplementation(async (_cfg: unknown) => {
+      mockStartNativeBackground.mockImplementation(() => {
         throw new Error('location provider unavailable');
       });
 
@@ -335,9 +336,8 @@ describe('headless-runtime', () => {
   describe('bounded teardown', () => {
     it('clears the watermark once native shutdown returns', async () => {
       setAppState('background');
-      queueFixes(1);
 
-      await flushBackgroundOutboxHeadless();
+      await ingestFixesHeadless(fixes(1));
 
       expect(mockSaveWatermark).toHaveBeenCalledWith(expect.anything(), 'drain');
       expect(mockShutdownAsync).toHaveBeenCalled();
@@ -348,11 +348,10 @@ describe('headless-runtime', () => {
       jest.useFakeTimers();
       try {
         setAppState('background');
-        queueFixes(1);
         // Models the 2026-08-18 iPhone: teardown entered, never came back.
         mockShutdownAsync.mockImplementation(() => new Promise<void>(() => {}));
 
-        const session = flushBackgroundOutboxHeadless();
+        const session = ingestFixesHeadless(fixes(1));
         // Let every await before the teardown race settle, then trip the deadline.
         await Promise.resolve();
         await jest.advanceTimersByTimeAsync(11_000);
@@ -368,12 +367,11 @@ describe('headless-runtime', () => {
 
     it('clears the watermark when shutdown fails, because a failed teardown still finished', async () => {
       setAppState('background');
-      queueFixes(1);
       mockShutdownAsync.mockImplementation(async () => {
         throw new Error('router closed twice');
       });
 
-      await expect(flushBackgroundOutboxHeadless()).resolves.toBe(1);
+      await expect(ingestFixesHeadless(fixes(1))).resolves.toBe(1);
       expect(mockClearWatermark).toHaveBeenCalled();
     });
 

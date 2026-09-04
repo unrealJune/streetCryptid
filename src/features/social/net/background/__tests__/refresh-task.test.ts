@@ -2,6 +2,7 @@ import * as BackgroundTask from 'expo-background-task';
 import * as TaskManager from 'expo-task-manager';
 
 import { setTelemetryForTesting, type Telemetry } from '@/features/dev/telemetry';
+import { stampWatermark } from '../watermarks';
 
 import {
   BACKGROUND_REFRESH_TASK,
@@ -23,10 +24,15 @@ jest.mock('expo-background-task', () => ({
   BackgroundTaskResult: { Success: 1, Failed: 2 },
 }));
 
+// `createPersistentKV()` hands back a fresh in-memory store per call outside a real app, so the
+// stamp cannot be observed by reading it back. The call itself is the contract under test.
+jest.mock('../watermarks', () => ({ stampWatermark: jest.fn(async () => {}) }));
+
 const defineTask = TaskManager.defineTask as jest.Mock;
 const isTaskRegisteredAsync = TaskManager.isTaskRegisteredAsync as jest.Mock;
 const registerTaskAsync = BackgroundTask.registerTaskAsync as jest.Mock;
 const unregisterTaskAsync = BackgroundTask.unregisterTaskAsync as jest.Mock;
+const stamp = stampWatermark as jest.Mock;
 
 function fakeTelemetry() {
   const flush = jest.fn(async () => {});
@@ -92,6 +98,37 @@ describe('refresh-task', () => {
     expect(run).toHaveBeenCalledTimes(1);
     expect(flush).toHaveBeenCalledTimes(1);
     expect(result).toBe(1); // BackgroundTaskResult.Success
+  });
+
+  it('stamps the refresh watermark when the OS runs the task', async () => {
+    const { instance } = fakeTelemetry();
+    setTelemetryForTesting(instance);
+
+    defineBackgroundRefreshTask(jest.fn(async () => {}));
+    const executor = defineTask.mock.calls[0][1] as () => Promise<number>;
+    await executor();
+
+    expect(stamp).toHaveBeenCalledWith(expect.anything(), 'refresh');
+  });
+
+  it('stamps the refresh watermark even when the runner throws', async () => {
+    // A run that failed still ran. Only stamping on success would leave a phone whose refresh
+    // errors every time looking identical to one the OS has stopped scheduling — which is the
+    // distinction the stamp exists to make.
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const { instance } = fakeTelemetry();
+    setTelemetryForTesting(instance);
+
+    defineBackgroundRefreshTask(
+      jest.fn(async () => {
+        throw new Error('boom');
+      })
+    );
+    const executor = defineTask.mock.calls[0][1] as () => Promise<number>;
+    await executor();
+
+    expect(stamp).toHaveBeenCalledWith(expect.anything(), 'refresh');
+    warn.mockRestore();
   });
 
   it('returns Failed and still flushes telemetry when the runner throws', async () => {

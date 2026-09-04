@@ -8,13 +8,41 @@ import {
   type Attributes,
   type SpanContext,
 } from '@/features/dev/telemetry';
+import { tryGetIrohLocation } from 'iroh-location';
 import { createPersistentKV, loadPool, loadRatchetDrops, loadSharingEnabled } from '../persistence';
 import { getStorageBackend, getStorageDegradationCount } from '../storage-health';
-import { backgroundOutbox } from './background-outbox';
-import { BACKGROUND_LOCATION_TASK, isBackgroundLocationRunning } from './background-task';
 import { BACKGROUND_REFRESH_TASK } from './refresh-task';
 import { loadReviveFenceArmedAt, REVIVE_FENCE_TASK } from './revive-task';
-import { loadWatermarks, stampWatermark, watermarkAges } from './watermarks';
+import { loadWatermarks, stampWatermark, watermarkAges, type Watermarks } from './watermarks';
+
+/**
+ * The three watermarks the native drain owns, read from where they actually happen.
+ *
+ * `fix`, `publish` and `push` used to be stamped by `location-sharing.ts` on the JS publish path.
+ * That path was replaced by the Rust drain, and nothing took the stamping over — so the row kept
+ * whatever it last held and `device.health` reported it as fact. On 2026-08-31 an iPhone showed a
+ * publish age of 672 minutes through an afternoon in which it published 37 envelopes.
+ *
+ * Returns only the kinds native actually answered for, so a build whose binary predates the export
+ * falls through to the JS row rather than losing the attributes altogether. A `null` from native
+ * means "this has never happened", which `watermarkAges` renders as an absent attribute — a
+ * different diagnosis from "happened a long time ago", and deliberately not collapsed into one.
+ */
+async function nativeWatermarks(): Promise<Watermarks> {
+  try {
+    const read = tryGetIrohLocation()?.publishWatermarks;
+    if (!read) return {};
+    const native = await read();
+    const marks: Watermarks = {};
+    if (typeof native.lastAcceptedAt === 'number') marks.fix = native.lastAcceptedAt;
+    if (typeof native.lastPublishedAt === 'number') marks.publish = native.lastPublishedAt;
+    if (typeof native.lastPushedAt === 'number') marks.push = native.lastPushedAt;
+    return marks;
+  } catch {
+    // A node that has never started has no gate state to read. Omitted rather than guessed.
+    return {};
+  }
+}
 
 /**
  * `device.health` — a periodic assertion that this phone is alive, and a record of what the OS
@@ -142,14 +170,36 @@ async function taskAttributes(): Promise<Attributes> {
       return undefined;
     }
   };
-  attrs['task.location_registered'] = await registered(BACKGROUND_LOCATION_TASK);
   attrs['task.refresh_registered'] = await registered(BACKGROUND_REFRESH_TASK);
   attrs['task.fence_registered'] = await registered(REVIVE_FENCE_TASK);
 
+  // From the native runtime now. `sharing.enabled` says what the user asked for; this says
+  // whether anything is actually being handed positions, and the gap between the two is the whole
+  // background failure this path exists to close.
+  const iroh = tryGetIrohLocation();
+  attrs['task.location_running'] = iroh?.nativeBackgroundRunning?.();
+
+  // The runtime's own account of itself, flattened under `location.*`.
+  //
+  // "Running" is necessary and nowhere near sufficient. A parked iPhone emits nothing by
+  // construction, so on 2026-08-30 `task.location_running = true` was perfectly true of a phone
+  // that had published nothing for 88 minutes — and no other span could tell that apart from a
+  // phone that was simply not moving. `location.state` says which of the two it is,
+  // `location.wake_reason` says what last ran it, and `location.fence_registered` says whether the
+  // thing that is supposed to resurrect it actually exists.
   try {
-    attrs['task.location_running'] = await isBackgroundLocationRunning();
+    const native = iroh?.nativeBackgroundState?.();
+    if (native) {
+      for (const [key, value] of Object.entries(native)) {
+        // Only scalars: an attribute that stringifies to `[object Object]` is worse than absent.
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+          attrs[`location.${key}`] = value;
+        }
+      }
+    }
   } catch {
-    attrs['task.location_running'] = undefined;
+    // A build whose binary predates the export, or a runtime that has never started. Omitted
+    // rather than guessed — see the note on `outbox.pending` about the two different answers.
   }
 
   const backgroundTask = tryBackgroundTask();
@@ -190,7 +240,24 @@ async function intentAttributes(): Promise<Attributes> {
     // Pool unreadable — the counts are omitted rather than guessed.
   }
   try {
-    attrs['outbox.pending'] = await backgroundOutbox.pending();
+    // The SAME question asked of native, and the reason both are here.
+    //
+    // `sharing.recipients` above is the JS pool; the native drain path never reads it, and on
+    // 2026-09-03 the two disagreed for a day — pool of one, native list empty, every envelope
+    // sealed for nobody — while this record reported the healthy number and nothing else could
+    // contradict it. A mismatch between these two lines is now a thing one query can find.
+    //
+    // Absent rather than zero when there is no node to ask, for the reason `outbox.pending` gives.
+    attrs['sharing.native_recipients'] = (await tryGetIrohLocation()?.sharingRecipients?.())
+      ?.length;
+  } catch {
+    attrs['sharing.native_recipients'] = undefined;
+  }
+  try {
+    // From the native queue now (`outbox.rs`). Requires a started node, so on a wake that has not
+    // built one this is absent rather than zero — "we could not ask" and "nothing is waiting" are
+    // different answers and only one of them is good news.
+    attrs['outbox.pending'] = await tryGetIrohLocation()?.outboxPending?.();
   } catch {
     attrs['outbox.pending'] = undefined;
   }
@@ -260,6 +327,11 @@ export async function recordDeviceHealth(
       intentAttributes(),
       getSystemSnapshot(),
     ]);
+    // Native truth wins for the three the drain owns. The JS row is still written — by the refresh
+    // task, the wake path and this function — but nothing writes its `fix`/`publish`/`push` stamps
+    // any more, because the callers that did were replaced by the Rust drain. Reading the row
+    // alone reported a phone that had published 37 envelopes that afternoon as eleven hours dead.
+    const marksWithNative = { ...marks, ...(await nativeWatermarks()) };
 
     getTelemetry()
       .startSpan('device.health', {
@@ -271,7 +343,7 @@ export async function recordDeviceHealth(
           ...permissions,
           ...tasks,
           ...intent,
-          ...watermarkAges(marks, now),
+          ...watermarkAges(marksWithNative, now),
         },
       })
       .end();
