@@ -18,7 +18,7 @@
 //! worth substituting.
 
 use crate::gate::{self, BatteryState, FixQualityConfig, GateState};
-use crate::LocationFix;
+use crate::{LocationFix, MotionState};
 
 /// What can go wrong reaching persisted publish state.
 ///
@@ -208,6 +208,28 @@ pub struct DrainEngine<'a, S: PublishSink> {
     pub quality: FixQualityConfig,
 }
 
+/// Record the motion state the platform's state machine has moved to.
+///
+/// A free function rather than a [`DrainEngine`] method because it touches exactly one port: it
+/// needs no counter, no outbox, no recipients and nowhere to send, and making callers assemble
+/// those to write one field would be a lie about what it does.
+///
+/// Deliberately does NOT publish. A transition is exactly the kind of event that must not put an
+/// envelope on the wire out of cadence: the interval is the one property of a sealed envelope the
+/// stash can read, so an extra publish the moment someone parks would announce "she just arrived
+/// somewhere" to an observer who cannot read the payload. The flag rides the next due slot instead,
+/// which the parked coarse stream produces within one interval.
+///
+/// Idempotent, because both `enterMoving` and `enterStopped` can run on a path that has already set
+/// the state, and a write here costs a durable file rewrite.
+pub fn set_motion(gate: &dyn GateStateStore, motion: Option<MotionState>) {
+    let state = gate.get();
+    if state.motion == motion {
+        return;
+    }
+    gate.set(GateState { motion, ..state });
+}
+
 impl<S: PublishSink> DrainEngine<'_, S> {
     /// Take one captured location as far towards the wire as this wake allows.
     ///
@@ -247,12 +269,15 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             return Ok(self.outcome(rejection, 0, 0, 0, 0, true));
         }
 
-        let Some(known) = state.last_known_fix.clone() else {
+        let Some(mut known) = state.last_known_fix.clone() else {
             // Refused before we ever had a position. Nothing to republish, so no slot to fill; the
             // next acceptable fix anchors the grid.
             self.gate.set(state);
             return Ok(self.outcome(rejection, 0, 0, 0, 0, false));
         };
+        // Stamped here, at enqueue, rather than carried in from capture: the state is the device's
+        // and can change after a fix is measured. See `crate::MotionState`.
+        known.motion = state.motion;
 
         let plan = gate::due_slots(now_ms, interval_ms, state.last_published_slot);
         let mut overflow_dropped = 0u32;
@@ -302,11 +327,14 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         if gate::critically_low(&battery) {
             return Ok(self.outcome(None, 0, 0, 0, 0, true));
         }
-        let Some(known) = state.last_known_fix.clone() else {
+        let Some(mut known) = state.last_known_fix.clone() else {
             // Nothing has ever passed the gate, so there is no position to repeat. The first
             // acceptable fix anchors the grid.
             return Ok(self.outcome(None, 0, 0, 0, 0, false));
         };
+        // The reason the state lives on `GateState` and not on the fix: this republish is the one
+        // that carries `Parked`, and the position it repeats was captured while `Moving`.
+        known.motion = state.motion;
 
         let plan = gate::due_slots(now_ms, interval_ms, state.last_published_slot);
         let mut overflow_dropped = 0u32;

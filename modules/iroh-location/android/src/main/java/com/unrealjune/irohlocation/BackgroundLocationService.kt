@@ -169,6 +169,11 @@ class BackgroundLocationService : Service() {
       accuracyM = if (hasAccuracy()) accuracy.toDouble() else 0.0,
       headingDeg = if (hasBearing()) bearing.toDouble() else 0.0,
       ts = time.toULong(),
+      // Android has no moving/stopped state machine — it streams, and `setMotionState` is never
+      // called here — so `null` is the honest answer and not a placeholder. A receiver must read it
+      // as "this author cannot say" and fall back to inference; reading it as `Moving` would decay
+      // every Android friend's position fast while they sit perfectly still at home.
+      motion = null,
     )
 
   /**

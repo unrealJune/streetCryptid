@@ -1,12 +1,53 @@
-import type { FixTransport, Friend, LocationFix } from './types';
+import type { FixTransport, Friend, LocationFix, MotionState } from './types';
 
 export const LIVE_PRESENCE_WINDOW_MS = 15 * 60 * 1000;
 export const RECENT_PRESENCE_WINDOW_MS = 6 * 60 * 60 * 1000;
 
+/**
+ * How long a friend who told us she was **parked** stays at full confidence.
+ *
+ * Much longer than {@link RECENT_PRESENCE_WINDOW_MS}, and deliberately so: a stale dot at an anchor
+ * is usually still a *correct* dot, because people stay put for hours. Fading her out after fifteen
+ * minutes would be wrong nearly every time it fired, and a signal that cries wolf gets ignored —
+ * which is worse than not having one.
+ *
+ * What it buys is that `dark` becomes rare enough to *mean* something: a parked phone is supposed to
+ * keep heartbeating, so one that has said nothing for a day is a broken app, and that is worth
+ * telling someone about.
+ */
+export const PARKED_PRESENCE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long a friend we lost **in motion** stays at full confidence.
+ *
+ * Short, because a person in motion invalidates her own position: riding towards a forty-minute-old
+ * dot of someone who was cycling is the failure this app exists to prevent, and showing it at full
+ * confidence is actively lying.
+ */
+export const MOVING_PRESENCE_WINDOW_MS = 10 * 60 * 1000;
+
 export type PresenceFreshness = 'live' | 'recent' | 'stale' | 'unknown';
+
+/**
+ * What the friend's dot actually means right now — the two axes the UI kept conflating.
+ *
+ * - `live` — she is moving and we are hearing from her.
+ * - `parked` — she told us she has settled. The position is *not* uncertain; it is exactly right
+ *   and she simply is not moving. Renders at full strength.
+ * - `dark` — we have lost contact for longer than her last known state justifies. Here the position
+ *   may well be wrong, and saying so is the honest thing.
+ * - `unknown` — no fix at all yet.
+ */
+export type PresenceState = 'live' | 'parked' | 'dark' | 'unknown';
 
 export interface LatestLocationPoint {
   author: string;
+  /**
+   * The author's monotonic publish counter. Advances on **every** envelope including heartbeats,
+   * so it moves while {@link LocationFix.ts} stands still — which is what makes "her phone spoke"
+   * separable from "she moved".
+   */
+  seq: number;
   fix: LocationFix;
   receivedAt: number;
   /** How the fix reached this device. Absent on rows stored before provenance was recorded. */
@@ -17,7 +58,23 @@ export interface FriendPresence {
   friend: Friend;
   fix: LocationFix | null;
   distanceM: number | null;
+  /**
+   * How old the *position* is — `now - fix.ts`. Says how long ago she was measured, which for a
+   * parked friend keeps growing while nothing at all is wrong.
+   */
   ageMs: number | null;
+  /**
+   * How long since her phone last **spoke** — `now - receivedAt`. Advances on every envelope,
+   * heartbeats included, so it stands still only when we have genuinely lost her.
+   *
+   * Strictly this measures *our contact* rather than her aliveness: if this device is the one
+   * offline, every friend's contact age grows at once. That is why {@link PresenceState} is not
+   * called "alive", and why all friends going dark together should be read as a local fault.
+   */
+  contactAgeMs: number | null;
+  /** What she said she was doing. `undefined` = could not say; never read it as moving. */
+  motion?: MotionState;
+  state: PresenceState;
   freshness: PresenceFreshness;
   /**
    * How {@link fix} reached this device. Since only the newest fix per friend is retained, this is
@@ -56,6 +113,37 @@ function freshnessFor(ageMs: number | null): PresenceFreshness {
   return 'stale';
 }
 
+/**
+ * How long silence from this friend stays forgivable, given what she last told us she was doing.
+ *
+ * The decay rate is hers to set, not a global constant: what makes a position stop being true is
+ * her moving, so the state she was in when we lost contact is exactly the right input.
+ *
+ * An author who could not say gets the middle window and is **never** promoted to `parked`. It is
+ * tempting to infer it — a large `receivedAt - fix.ts` frozen at last contact really is the
+ * signature of a phone republishing an anchor — but the same gap is produced by a fix that simply
+ * took a long time to arrive through the stash, which is the common case for exactly the peers that
+ * cannot send the flag. Guessing wrong here holds a possibly-stale dot at full confidence for a
+ * day, so the fallback declines to guess.
+ */
+function contactWindowFor(motion: MotionState | undefined): number {
+  if (motion === 'parked') return PARKED_PRESENCE_WINDOW_MS;
+  if (motion === 'moving') return MOVING_PRESENCE_WINDOW_MS;
+  return RECENT_PRESENCE_WINDOW_MS;
+}
+
+function stateFor(
+  fix: LocationFix | null,
+  contactAgeMs: number | null,
+  motion: MotionState | undefined
+): PresenceState {
+  if (!fix || contactAgeMs === null) return 'unknown';
+  if (contactAgeMs > contactWindowFor(motion)) return 'dark';
+  // In contact. `parked` is a full-strength state, not a degraded one: the position is not
+  // uncertain, she simply is not moving.
+  return motion === 'parked' ? 'parked' : 'live';
+}
+
 /** Great-circle distance between two location fixes in metres. */
 export function distanceBetweenFixes(a: LocationFix, b: LocationFix): number {
   const radiusM = 6_371_000;
@@ -85,7 +173,16 @@ export function buildFriendPresence(input: FriendPresenceInput): FriendPresence[
     if (!isValidFix(point.fix)) continue;
     const key = endpointKey(point.author);
     const current = newestByAuthor.get(key);
-    if (!current || point.fix.ts > current.fix.ts) newestByAuthor.set(key, point);
+    // Ordered `(fix.ts, seq)`, matching `isNewer` in trail-store: a heartbeat republishes the same
+    // position under a NEW seq, so comparing timestamps alone would discard it — and with it the
+    // `receivedAt` that is the only evidence her phone is still speaking.
+    if (
+      !current ||
+      point.fix.ts > current.fix.ts ||
+      (point.fix.ts === current.fix.ts && point.seq > current.seq)
+    ) {
+      newestByAuthor.set(key, point);
+    }
   }
 
   return input.friends
@@ -93,10 +190,15 @@ export function buildFriendPresence(input: FriendPresenceInput): FriendPresence[
       const point = newestByAuthor.get(endpointKey(friend.endpointId));
       const fix = point?.fix ?? null;
       const ageMs = fix ? Math.max(0, now - fix.ts) : null;
+      const contactAgeMs = fix && point ? Math.max(0, now - point.receivedAt) : null;
+      const motion = fix ? fix.motion : undefined;
       return {
         friend,
         fix,
         ageMs,
+        contactAgeMs,
+        motion,
+        state: stateFor(fix, contactAgeMs, motion),
         freshness: freshnessFor(ageMs),
         via: fix ? point?.via : undefined,
         distanceM:

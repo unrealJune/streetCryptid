@@ -35,6 +35,7 @@ fn fix(ts: u64) -> LocationFix {
         accuracy_m: 8.0,
         heading_deg: 0.0,
         ts,
+        motion: None,
     }
 }
 

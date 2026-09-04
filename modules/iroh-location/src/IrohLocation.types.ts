@@ -25,6 +25,15 @@ export interface NativeIngestOutcome {
   suspended: boolean;
 }
 
+/**
+ * What the author's motion state machine believed when it sealed this position.
+ *
+ * Only the author can answer the receiver's real question — *which way do I read this silence* —
+ * because a parked phone republishes its anchor at the anchor's own timestamp, making an old `ts`
+ * equally the signature of a friend at home and of a fix that took twenty minutes to arrive.
+ */
+export type NativeMotionState = 'moving' | 'parked';
+
 export interface NativeLocationFix {
   lat: number;
   lon: number;
@@ -32,6 +41,12 @@ export interface NativeLocationFix {
   headingDeg: number;
   /** ms since epoch */
   ts: number;
+  /**
+   * Absent means **the author cannot say**, not "moving" — Android has no motion state machine, and
+   * a peer older than this field never sent one. Both must fall back to inference rather than being
+   * read as in-motion, or every such friend decays off the map while sitting perfectly still.
+   */
+  motion?: NativeMotionState;
 }
 
 /** Key material returned by `createNode`; persist the secrets in the OS secure store. */

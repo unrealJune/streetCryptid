@@ -70,6 +70,9 @@ private fun locationFixOf(fix: Map<String, Double>): LocationFix =
     fix["accuracyM"] ?: 0.0,
     fix["headingDeg"] ?: 0.0,
     (fix["ts"] ?: 0.0).toLong().toULong(),
+    // The JS bridge carries no motion state: this crosses from `Map<String, Double>`, and the state
+    // is the native runtime's to know. See `Location.toFix` in BackgroundLocationService.
+    null,
   )
 
 /** Build a control message from the JS object (see `NativeControlMsg`). `nonce` crosses as hex. */

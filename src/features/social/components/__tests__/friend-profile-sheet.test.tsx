@@ -25,6 +25,8 @@ function presenceWith(via?: FixTransport): FriendPresence {
     fix: { lat: 40.1, lon: -80.2, accuracyM: 10, headingDeg: 0, ts: 1_700_000_000_000 },
     distanceM: 120,
     ageMs: 60_000,
+    contactAgeMs: 60_000,
+    state: 'live',
     freshness: 'live',
     ...(via ? { via } : {}),
   };

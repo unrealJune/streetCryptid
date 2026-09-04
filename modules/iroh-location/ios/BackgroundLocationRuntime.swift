@@ -288,6 +288,11 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       state = .moving
       applyMovingCadence()
     }
+    // Re-assert it either way. The gate persists the motion state too, so the common case is a
+    // no-op — but the `default` branch above can *demote* a restored `stopped` back to `moving`
+    // when the anchor did not survive, and a gate left saying `parked` would then have every
+    // envelope claim she is sitting still while the phone spins GPS looking for her.
+    publishMotion(state == .stopped ? .parked : .moving)
     // Seed the gate from the cached position, BEFORE starting the stream.
     //
     // Nothing else in the system will. Until something has passed the gate there is no
@@ -458,6 +463,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       return
     }
     state = .stopped
+    // Before `persistState`, and before the coarse stream starts producing the heartbeats that
+    // carry it: the first envelope after this point is the one that tells her friends she has
+    // settled rather than gone quiet, and this phone may not survive many more.
+    publishMotion(.parked)
     stopAnchor = anchor
     stopCandidate = nil
     // The speculative fence has just been re-armed at `anchor` by the guard above and is now the
@@ -474,6 +483,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
 
   private func enterMoving(reason: WakeReason) {
     state = .moving
+    publishMotion(.moving)
     stopAnchor = nil
     stopCandidate = nil
     candidateFence = nil
@@ -857,6 +867,27 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     }
   }
 
+  /// Tell the publish path which state this phone is in, so every envelope it seals says so.
+  ///
+  /// The receiver cannot work this out for itself. A parked phone republishes its anchor at the
+  /// anchor's own timestamp, so an old `ts` on a fresh envelope is equally the signature of a
+  /// friend sitting at home and of a fix that took twenty minutes to reach them through the stash.
+  /// This is the phone answering which — the one question only it can answer.
+  ///
+  /// Fire-and-forget on purpose: it writes one field and publishes nothing, so there is nothing to
+  /// wait for, and a state change must never be able to block a delivery callback. A failure costs
+  /// one envelope's worth of staleness in the flag, not a fix.
+  private func publishMotion(_ motion: MotionState) {
+    Task {
+      guard let subscription = await ensureStarted() else { return }
+      do {
+        try await subscription.setMotionState(motion: motion)
+      } catch {
+        NSLog("[iroh-location] motion state not recorded: \(error.localizedDescription)")
+      }
+    }
+  }
+
   /// Fill the slots that have come due with no new fix, reusing the last accepted position.
   ///
   /// Not an optimisation. The cadence is the one property of a sealed envelope the stash can read,
@@ -938,7 +969,11 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // Zero is how the gate spells "untestable", so it skips the check rather than passing it.
       accuracyM: location.horizontalAccuracy >= 0 ? location.horizontalAccuracy : 0,
       headingDeg: location.course >= 0 ? location.course : 0,
-      ts: UInt64(location.timestamp.timeIntervalSince1970 * 1000))
+      ts: UInt64(location.timestamp.timeIntervalSince1970 * 1000),
+      // Not stamped here. A fix becomes "the parked position" a dwell AFTER it was measured, and
+      // every heartbeat republishes a fix captured under a state that has since changed — so the
+      // publish path reads the state at enqueue instead. `publishMotion` is what sets it.
+      motion: nil)
   }
 
   /// Unknown battery reports as full rather than empty: a critical level is a hard stop in the

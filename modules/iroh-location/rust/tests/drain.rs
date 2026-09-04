@@ -9,10 +9,10 @@ use std::sync::Mutex;
 
 use iroh_location::gate::{BatteryState, FixQualityConfig, GateState};
 use iroh_location::publish::{
-    DrainEngine, EnqueueOutcome, FixQueue, FlushOutcome, GateStateStore, PublishError, PublishSink,
-    Recipients, SeqCounter, StoreError,
+    set_motion, DrainEngine, EnqueueOutcome, FixQueue, FlushOutcome, GateStateStore, PublishError,
+    PublishSink, Recipients, SeqCounter, StoreError,
 };
-use iroh_location::LocationFix;
+use iroh_location::{LocationFix, MotionState};
 
 const MINUTE: u64 = 60_000;
 const INTERVAL: u64 = 5 * MINUTE;
@@ -24,6 +24,7 @@ fn fix(ts: u64, accuracy_m: f64) -> LocationFix {
         accuracy_m,
         heading_deg: 0.0,
         ts,
+        motion: None,
     }
 }
 
@@ -135,6 +136,9 @@ impl GateStateStore for FakeGate {
 #[derive(Default)]
 struct FakeSink {
     sent: Mutex<Vec<(u64, u64, Vec<String>)>>,
+    /// What `motion` each published fix actually carried. Separate from `sent` because it is the
+    /// only field a receiver cannot derive for itself, so it is worth asserting on its own.
+    motions: Mutex<Vec<Option<MotionState>>>,
     /// The watcher lane, kept apart so a test can assert one without the other.
     nulls: Mutex<Vec<(u64, u64, Vec<String>)>>,
     /// Start failing once this many envelopes have gone out — a wake that loses the network.
@@ -164,6 +168,7 @@ impl PublishSink for FakeSink {
                 return Err(PublishError::Send("network gone".into()));
             }
         }
+        self.motions.lock().unwrap().push(fix.motion);
         sent.push((seq, fix.ts, recipients));
         Ok(())
     }
@@ -896,4 +901,94 @@ async fn a_flush_with_nowhere_to_send_is_not_recorded_as_a_push() {
         1,
         "the flush was still attempted"
     );
+}
+
+// ── motion state ──────────────────────────────────────────────────────────────────────────────
+//
+// The receiver's question is "which way do I read this silence", and only the author can answer
+// it. These cover the answer being carried honestly.
+
+/// The case the whole field exists for.
+///
+/// A phone parks on an anchor it captured while *moving* — `considerStopping` needs a second
+/// delivery to confirm, so the fix is always older than the decision. Every heartbeat afterwards
+/// republishes that same fix at its own timestamp. If the flag lived on the captured fix it would
+/// still say `Moving` all night; stamping at enqueue is what makes the republish tell the truth.
+#[tokio::test]
+async fn a_heartbeat_carries_the_state_the_anchor_was_not_captured_under() {
+    let h = Harness::new();
+    let anchor = 1_000 * MINUTE;
+
+    set_motion(&h.gate, Some(MotionState::Moving));
+    h.engine()
+        .ingest(fix(anchor, 20.0), healthy_battery(), INTERVAL, anchor)
+        .await
+        .unwrap();
+    assert_eq!(
+        *h.sink.motions.lock().unwrap(),
+        vec![Some(MotionState::Moving)],
+        "captured and published while moving"
+    );
+
+    // She stops. The anchor does not change; what it means does.
+    set_motion(&h.gate, Some(MotionState::Parked));
+    let later = anchor + INTERVAL;
+    h.engine()
+        .heartbeat(healthy_battery(), INTERVAL, later)
+        .await
+        .unwrap();
+
+    let motions = h.sink.motions.lock().unwrap().clone();
+    assert_eq!(
+        motions,
+        vec![Some(MotionState::Moving), Some(MotionState::Parked)],
+        "the republish says parked"
+    );
+    let sent = h.sink.sent.lock().unwrap();
+    assert_eq!(
+        sent[1].1, anchor,
+        "and still carries the anchor's own timestamp, not the republish time"
+    );
+}
+
+/// Android has no motion state machine, so it never calls `set_motion` and publishes `None` for
+/// the life of the install. `None` must survive to the wire as a real value — a receiver has to be
+/// able to tell "this author cannot say" from "this author says moving", or it will read every
+/// Android friend as permanently in motion and decay their position fast.
+#[tokio::test]
+async fn an_author_with_no_state_machine_publishes_none() {
+    let h = Harness::new();
+    let now = 2_000 * MINUTE;
+
+    h.engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert_eq!(*h.sink.motions.lock().unwrap(), vec![None]);
+}
+
+/// A transition must not put an envelope on the wire. The interval is the one property of a sealed
+/// envelope the stash can read, so publishing the moment someone parks would announce "she just
+/// arrived somewhere" to an observer who cannot read the payload.
+#[tokio::test]
+async fn recording_a_transition_publishes_nothing() {
+    let h = Harness::new();
+    let now = 3_000 * MINUTE;
+    h.engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+    let before = h.sink.sent.lock().unwrap().len();
+
+    set_motion(&h.gate, Some(MotionState::Parked));
+    set_motion(&h.gate, Some(MotionState::Moving));
+    set_motion(&h.gate, Some(MotionState::Parked));
+
+    assert_eq!(
+        h.sink.sent.lock().unwrap().len(),
+        before,
+        "state changes are recorded, never announced"
+    );
+    assert_eq!(h.gate.get().motion, Some(MotionState::Parked));
 }

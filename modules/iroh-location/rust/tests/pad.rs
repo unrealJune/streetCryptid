@@ -8,15 +8,20 @@
 //! payload distribution rather than assuming it.
 
 use iroh_location::pad::{self, PadError, MAX_PAYLOAD, PADDED_LEN};
-use iroh_location::LocationFix;
+use iroh_location::{LocationFix, MotionState};
 
 fn encoded(ts: u64) -> Vec<u8> {
+    encoded_with(ts, Some(MotionState::Parked))
+}
+
+fn encoded_with(ts: u64, motion: Option<MotionState>) -> Vec<u8> {
     let fix = LocationFix {
         lat: -122.419416,
         lon: 37.774929,
         accuracy_m: 65.5,
         heading_deg: 359.9,
         ts,
+        motion,
     };
     postcard::to_allocvec(&fix).unwrap()
 }
@@ -27,16 +32,26 @@ fn the_size_class_actually_fits_a_real_fix() {
     // assumed — and asserted here so the class cannot silently become too small if a field is
     // added to LocationFix.
     let now = encoded(1_786_000_000_000);
-    assert_eq!(now.len(), 38, "a present-day fix");
+    assert_eq!(now.len(), 40, "a present-day fix");
     assert_eq!(
         encoded(4_102_444_800_000).len(),
-        38,
-        "still 38 in the year 2100"
+        40,
+        "still 40 in the year 2100"
+    );
+
+    // `motion` is the first optional field on the wire, and `None` is a real value an Android
+    // author publishes for the life of the install — so the cheap case is measured too. It must
+    // not be mistaken for the size class shrinking back: padding hides the difference, and this
+    // asserts the pair rather than either alone.
+    assert_eq!(
+        encoded_with(1_786_000_000_000, None).len(),
+        39,
+        "an author with no motion state machine"
     );
 
     // The absolute bound: a varint ts cannot exceed this however far the clock runs.
     let worst = encoded(u64::MAX);
-    assert_eq!(worst.len(), 42);
+    assert_eq!(worst.len(), 44);
     assert!(
         worst.len() <= MAX_PAYLOAD,
         "the worst-case fix ({}) must fit the class ({MAX_PAYLOAD})",
@@ -68,7 +83,7 @@ fn every_payload_size_pads_to_the_same_length() {
 
 #[test]
 fn padding_round_trips() {
-    for len in [0usize, 1, 38, 42, MAX_PAYLOAD] {
+    for len in [0usize, 1, 39, 40, 44, MAX_PAYLOAD] {
         let payload = vec![0x5a; len];
         let frame = pad::pad(&payload).unwrap();
         assert_eq!(pad::unpad(&frame).unwrap(), &payload[..], "len {len}");
@@ -132,7 +147,7 @@ fn the_frame_does_not_leak_the_payload_length_in_its_shape() {
     let a = pad::pad(&[]).unwrap();
     let b = pad::pad(&encoded(1_786_000_000_000)).unwrap();
     // Both are zero from (2 + their own length) onward; the tail they share is all zero.
-    let tail = 2 + 42;
+    let tail = 2 + 44;
     assert!(a[tail..].iter().all(|&x| x == 0));
     assert!(b[tail..].iter().all(|&x| x == 0));
     assert_eq!(a[tail..], b[tail..]);

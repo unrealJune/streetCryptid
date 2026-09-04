@@ -160,7 +160,31 @@ impl From<mesh::MeshError> for LocationError {
     }
 }
 
+/// What the author's motion state machine believed when it put this position on the wire.
+///
+/// The receiver's question is never "is she moving right now" — it is **"which way do I read this
+/// silence"**, and only the author can answer that. A parked phone republishes its anchor at the
+/// anchor's own timestamp (see [`publish::DrainEngine::heartbeat`]), so an old `ts` alone is
+/// ambiguous: it is equally the signature of a friend sitting at home and of a fix that took
+/// twenty minutes to reach us through the stash. This field is the author saying which.
+///
+/// Deliberately NOT captured per-fix by the platform layer. A fix becomes "the parked position" a
+/// dwell *after* it was measured — `considerStopping` needs a second delivery to confirm — so the
+/// anchor is captured while `moving` and only later reinterpreted. The state therefore lives in
+/// [`gate::GateState`] and is stamped at enqueue time, which also gets it onto heartbeats, whose
+/// whole job is to republish a fix captured under a state that has since changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum, serde::Serialize, serde::Deserialize)]
+pub enum MotionState {
+    Moving,
+    Parked,
+}
+
 /// A decrypted location fix handed to the app.
+///
+/// `motion` is appended LAST and is `Option` for two independent reasons, both load-bearing:
+/// postcard is positional, so a trailing field leaves the first five decoding byte-identically on
+/// a peer that has never heard of it; and Android has no motion state machine at all, so `None`
+/// is a real value on the wire meaning "this author cannot tell you", not merely a default.
 #[derive(Debug, Clone, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct LocationFix {
     pub lat: f64,
@@ -168,6 +192,7 @@ pub struct LocationFix {
     pub accuracy_m: f64,
     pub heading_deg: f64,
     pub ts: u64,
+    pub motion: Option<MotionState>,
 }
 
 /// Control message kind. Not a uniffi enum: the wire carries a plain `u8` so an unknown future
@@ -3923,13 +3948,26 @@ fn encode_fix_payload(fix: Option<&LocationFix>) -> Result<Vec<u8>, LocationErro
 
 /// Unpad and decode a sealed fix payload. `Ok(None)` is a null fix (§4.1) — a watcher's cadence
 /// keep-alive, which carries no position and is not an error.
+/// Trailing bytes are IGNORED — stated in the call rather than left to be inferred.
+///
+/// `pad.rs` reserves ~20 bytes of headroom "for a couple of future fields", and postcard makes that
+/// headroom usable: it is positional, and `from_bytes` does not require the input to be fully
+/// consumed, so a peer that predates a field decodes the ones it knows and never sees the rest.
+/// That is what lets `motion` be appended without a lockstep upgrade of every phone — the builds
+/// already out there are fine.
+///
+/// `take_from_bytes` is therefore not a behaviour change but a declaration of intent: it names the
+/// remainder `_unknown_future_fields` at the one call site where that is the contract, so the
+/// leniency cannot be "tidied away" by someone who reads `from_bytes` as strict. The crate already
+/// uses it this way in [`crypto::envelope_version`]. A short or malformed payload still fails;
+/// only *excess* is forgiven, and `a_truncated_payload_is_still_an_error` holds that line.
 fn decode_fix_payload(payload: &[u8]) -> Result<Option<LocationFix>, LocationError> {
     let inner = pad::unpad(payload).map_err(|e| LocationError::Decode(e.to_string()))?;
     if inner.is_empty() {
         return Ok(None);
     }
-    postcard::from_bytes::<LocationFix>(inner)
-        .map(Some)
+    postcard::take_from_bytes::<LocationFix>(inner)
+        .map(|(fix, _unknown_future_fields)| Some(fix))
         .map_err(|_| LocationError::Decode("decode fix".into()))
 }
 
@@ -4137,6 +4175,18 @@ impl Drop for Subscription {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Subscription {
+    /// Tell the publish path which motion state this device's platform layer has moved to.
+    ///
+    /// Called by the iOS state machine on every `enterMoving` / `enterStopped`; Android never calls
+    /// it, so an Android device publishes `motion: None` — "this author cannot tell you" — for the
+    /// life of the install. See [`MotionState`] for why this is a device state rather than a
+    /// property of the fix, and [`publish::DrainEngine::set_motion`] for why it does not publish.
+    pub async fn set_motion_state(&self, motion: Option<MotionState>) -> Result<(), LocationError> {
+        let gate_store = self.node.gate_store().await?;
+        publish::set_motion(gate_store.as_ref(), motion);
+        Ok(())
+    }
+
     /// Publish the slots that have come due without a new fix, reusing the last known position.
     ///
     /// Driven on a timer by whoever is running the pipeline — the mounted app today, since neither
@@ -4281,6 +4331,27 @@ impl Subscription {
             sc.author = %telemetry::short_hex(&self.node.author),
             sc.seq = seq,
             sc.lane = if fix.is_none() { "null" } else { "fix" },
+            // What this envelope claims about the author's motion, and how old the position it
+            // carries already was when it was sealed. Together they are "was she parked, and for
+            // how long" — the question that took a code read to answer on 2026-09-04 because the
+            // publish span recorded `sc.seq` and nothing about the fix. `parked` with a climbing
+            // `sc.fix_age_ms` is a healthy stationary phone; the gap BETWEEN two such spans is how
+            // long the process was dead.
+            sc.motion = fix
+                .as_ref()
+                .map(|f| match f.motion {
+                    Some(MotionState::Moving) => "moving",
+                    Some(MotionState::Parked) => "parked",
+                    None => "unknown",
+                })
+                .unwrap_or("none"),
+            // Against the wall clock, NOT against `ts`: the envelope carries the fix's own
+            // timestamp (`drain` seals with `let ts = fix.ts`), so the two are equal by
+            // construction and their difference would be a constant zero.
+            sc.fix_age_ms = fix
+                .as_ref()
+                .map(|f| now_ms().saturating_sub(f.ts))
+                .unwrap_or(0),
             sc.envelope = 3,
             sc.entry_hash = tracing::field::Empty,
             recipients = recipient_endpoints.len(),
@@ -4340,6 +4411,7 @@ mod null_fix_tests {
     use super::{decode_fix_payload, encode_fix_payload, LocationFix};
     use crate::crypto;
     use crate::docs::{encode_ctl_key, encode_key, encode_nul_key};
+    use crate::pad;
 
     fn fix() -> LocationFix {
         LocationFix {
@@ -4348,7 +4420,67 @@ mod null_fix_tests {
             accuracy_m: 12.5,
             heading_deg: 91.0,
             ts: 1_786_000_000_000,
+            motion: Some(crate::MotionState::Parked),
         }
+    }
+
+    /// The guarantee that lets a field ever be added to `LocationFix` again.
+    ///
+    /// Simulates a peer from the future: take a real payload and append bytes postcard will not
+    /// account for. Before `decode_fix_payload` used `take_from_bytes` this returned `Err`, and
+    /// because the caller maps every error to "drop the fix", shipping a sixth field would have
+    /// stopped older peers from seeing their friend's location **at all** — not a missing flag, a
+    /// silent end to sharing between builds.
+    ///
+    /// The five fields this build knows must still decode exactly.
+    #[test]
+    fn a_payload_from_a_future_build_still_decodes_its_known_fields() {
+        let mut encoded = postcard::to_allocvec(&fix()).unwrap();
+        // Whatever the next field turns out to be.
+        encoded.extend_from_slice(&[0x01, 0x7f, 0x2a]);
+        let framed = pad::pad(&encoded).unwrap();
+
+        let decoded = decode_fix_payload(&framed)
+            .expect("a trailing unknown field must not fail the decode")
+            .expect("and it is not a null fix");
+
+        assert_eq!(decoded.lat, fix().lat);
+        assert_eq!(decoded.ts, fix().ts);
+        assert_eq!(decoded.accuracy_m, fix().accuracy_m);
+        assert_eq!(decoded.motion, fix().motion);
+    }
+
+    /// The property that makes appending a field safe **for peers already in the field**, pinned
+    /// because the entire rollout risk turns on it.
+    ///
+    /// postcard 1.x `from_bytes` does not require the input to be fully consumed — it decodes the
+    /// fields the type declares and ignores the rest. So a build that predates `motion` reads the
+    /// five fields it knows and never sees the sixth. That is what makes this a compatible change
+    /// rather than one needing a lockstep upgrade of every phone.
+    ///
+    /// Asserted on the OLD entry point deliberately: `decode_fix_payload` uses `take_from_bytes`
+    /// now, but the peers this protects are running the strict-looking one, so that is the call
+    /// whose behaviour has to be guaranteed. If a postcard upgrade ever makes it strict, this test
+    /// fails and the next appended field becomes a wire break.
+    #[test]
+    fn a_build_that_predates_a_field_ignores_it_rather_than_failing() {
+        let mut encoded = postcard::to_allocvec(&fix()).unwrap();
+        encoded.extend_from_slice(&[0x01, 0x7f, 0x2a]);
+
+        let old_peer = postcard::from_bytes::<LocationFix>(&encoded)
+            .expect("an older build must tolerate a field it has never heard of");
+        assert_eq!(old_peer.lat, fix().lat);
+        assert_eq!(old_peer.ts, fix().ts);
+        assert!(postcard::take_from_bytes::<LocationFix>(&encoded).is_ok());
+    }
+
+    /// The other half: leniency must not swallow a genuinely broken payload. Only *excess* is
+    /// forgiven — a truncated fix is still an error, or a corrupt frame would decode as a position.
+    #[test]
+    fn a_truncated_payload_is_still_an_error() {
+        let encoded = postcard::to_allocvec(&fix()).unwrap();
+        let framed = pad::pad(&encoded[..encoded.len() - 4]).unwrap();
+        assert!(decode_fix_payload(&framed).is_err());
     }
 
     /// The property symmetric lanes rest on (§4.1): sealed, a watcher's null envelope must be

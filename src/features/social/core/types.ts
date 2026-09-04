@@ -4,6 +4,17 @@
 export type Hex = string;
 
 /** A decrypted location fix. */
+/**
+ * What the author's own motion state machine said when it published this position.
+ *
+ * The receiver's question is never "is she moving right now" — it is **which way do I read this
+ * silence**, and only the author can answer it. A parked phone republishes its anchor at the
+ * anchor's own timestamp, so an old {@link LocationFix.ts} on a freshly-arrived envelope is equally
+ * the signature of a friend sitting at home and of a fix that took twenty minutes to reach us
+ * through the stash.
+ */
+export type MotionState = 'moving' | 'parked';
+
 export interface LocationFix {
   lat: number;
   lon: number;
@@ -11,6 +22,13 @@ export interface LocationFix {
   headingDeg: number;
   /** ms since epoch */
   ts: number;
+  /**
+   * Absent means **the author cannot say** — not "moving". Android has no motion state machine, and
+   * a peer on a build older than this field never sent one; both are honest `undefined`s, and both
+   * must fall back to inference. Reading absence as in-motion would decay every Android friend off
+   * the map while they sit perfectly still.
+   */
+  motion?: MotionState;
 }
 
 /**

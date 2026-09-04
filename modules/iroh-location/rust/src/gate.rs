@@ -227,6 +227,18 @@ pub struct GateState {
     /// and the gap between these two is exactly the failure that made a phone look healthy while
     /// delivering nothing.
     pub last_pushed_at: Option<u64>,
+    /// What the platform's motion state machine last reported, stamped onto every envelope this
+    /// device publishes (see [`crate::MotionState`]).
+    ///
+    /// Here rather than on the captured fix because the two have different lifetimes: a fix is
+    /// measured once, while the state it was measured under can change afterwards and *retroactively
+    /// reinterpret it*. The anchor a phone parks on is captured while `moving` and only becomes the
+    /// parked position a dwell later, and every heartbeat after that republishes that same fix under
+    /// a state it was never captured in.
+    ///
+    /// `None` means this device cannot say — Android has no such state machine — and a receiver
+    /// must fall back to inference rather than reading it as `Moving`.
+    pub motion: Option<crate::MotionState>,
 }
 
 /// Durable home for [`GateState`], next to the outbox it feeds.
