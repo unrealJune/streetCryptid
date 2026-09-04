@@ -3,7 +3,7 @@
     "name": "streetCryptid",
     "slug": "streetCryptid",
     "owner": "streetcryptid",
-    "version": "1.6.2",
+    "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "streetcryptid",
