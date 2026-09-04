@@ -4042,6 +4042,16 @@ public protocol SubscriptionProtocol: AnyObject, Sendable {
     
     func publishTraced(seq: UInt64, fix: LocationFix, recipientEndpoints: [String], traceparent: String) async throws  -> [String]
     
+    /**
+     * Tell the publish path which motion state this device's platform layer has moved to.
+     *
+     * Called by the iOS state machine on every `enterMoving` / `enterStopped`; Android never calls
+     * it, so an Android device publishes `motion: None` — "this author cannot tell you" — for the
+     * life of the install. See [`MotionState`] for why this is a device state rather than a
+     * property of the fix, and [`publish::DrainEngine::set_motion`] for why it does not publish.
+     */
+    func setMotionState(motion: MotionState?) async throws 
+    
 }
 /**
  * A live topic subscription; publish fixes through it.
@@ -4247,6 +4257,31 @@ open func publishTraced(seq: UInt64, fix: LocationFix, recipientEndpoints: [Stri
             completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
             freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Tell the publish path which motion state this device's platform layer has moved to.
+     *
+     * Called by the iOS state machine on every `enterMoving` / `enterStopped`; Android never calls
+     * it, so an Android device publishes `motion: None` — "this author cannot tell you" — for the
+     * life of the install. See [`MotionState`] for why this is a device state rather than a
+     * property of the fix, and [`publish::DrainEngine::set_motion`] for why it does not publish.
+     */
+open func setMotionState(motion: MotionState?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_subscription_set_motion_state(
+                    self.uniffiCloneHandle(),
+                    FfiConverterOptionTypeMotionState.lower(motion)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -5093,6 +5128,11 @@ public func FfiConverterTypeIngestOutcome_lower(_ value: IngestOutcome) -> RustB
 
 /**
  * A decrypted location fix handed to the app.
+ *
+ * `motion` is appended LAST and is `Option` for two independent reasons, both load-bearing:
+ * postcard is positional, so a trailing field leaves the first five decoding byte-identically on
+ * a peer that has never heard of it; and Android has no motion state machine at all, so `None`
+ * is a real value on the wire meaning "this author cannot tell you", not merely a default.
  */
 public struct LocationFix: Equatable, Hashable {
     public var lat: Double
@@ -5100,15 +5140,17 @@ public struct LocationFix: Equatable, Hashable {
     public var accuracyM: Double
     public var headingDeg: Double
     public var ts: UInt64
+    public var motion: MotionState?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(lat: Double, lon: Double, accuracyM: Double, headingDeg: Double, ts: UInt64) {
+    public init(lat: Double, lon: Double, accuracyM: Double, headingDeg: Double, ts: UInt64, motion: MotionState?) {
         self.lat = lat
         self.lon = lon
         self.accuracyM = accuracyM
         self.headingDeg = headingDeg
         self.ts = ts
+        self.motion = motion
     }
 
     
@@ -5131,7 +5173,8 @@ public struct FfiConverterTypeLocationFix: FfiConverterRustBuffer {
                 lon: FfiConverterDouble.read(from: &buf), 
                 accuracyM: FfiConverterDouble.read(from: &buf), 
                 headingDeg: FfiConverterDouble.read(from: &buf), 
-                ts: FfiConverterUInt64.read(from: &buf)
+                ts: FfiConverterUInt64.read(from: &buf), 
+                motion: FfiConverterOptionTypeMotionState.read(from: &buf)
         )
     }
 
@@ -5141,6 +5184,7 @@ public struct FfiConverterTypeLocationFix: FfiConverterRustBuffer {
         FfiConverterDouble.write(value.accuracyM, into: &buf)
         FfiConverterDouble.write(value.headingDeg, into: &buf)
         FfiConverterUInt64.write(value.ts, into: &buf)
+        FfiConverterOptionTypeMotionState.write(value.motion, into: &buf)
     }
 }
 
@@ -6802,6 +6846,88 @@ public func FfiConverterTypeLocationError_lower(_ value: LocationError) -> RustB
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * What the author's motion state machine believed when it put this position on the wire.
+ *
+ * The receiver's question is never "is she moving right now" — it is **"which way do I read this
+ * silence"**, and only the author can answer that. A parked phone republishes its anchor at the
+ * anchor's own timestamp (see [`publish::DrainEngine::heartbeat`]), so an old `ts` alone is
+ * ambiguous: it is equally the signature of a friend sitting at home and of a fix that took
+ * twenty minutes to reach us through the stash. This field is the author saying which.
+ *
+ * Deliberately NOT captured per-fix by the platform layer. A fix becomes "the parked position" a
+ * dwell *after* it was measured — `considerStopping` needs a second delivery to confirm — so the
+ * anchor is captured while `moving` and only later reinterpreted. The state therefore lives in
+ * [`gate::GateState`] and is stamped at enqueue time, which also gets it onto heartbeats, whose
+ * whole job is to republish a fix captured under a state that has since changed.
+ */
+
+public enum MotionState: Equatable, Hashable {
+    
+    case moving
+    case parked
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MotionState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMotionState: FfiConverterRustBuffer {
+    typealias SwiftType = MotionState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MotionState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .moving
+        
+        case 2: return .parked
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MotionState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .moving:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .parked:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMotionState_lift(_ buf: RustBuffer) throws -> MotionState {
+    return try FfiConverterTypeMotionState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMotionState_lower(_ value: MotionState) -> RustBuffer {
+    return FfiConverterTypeMotionState.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * The kind of a polled pairing event.
  */
 
@@ -7366,6 +7492,30 @@ fileprivate struct FfiConverterOptionTypeFixRejection: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFixRejection.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeMotionState: FfiConverterRustBuffer {
+    typealias SwiftType = MotionState?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMotionState.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMotionState.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -8384,6 +8534,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_subscription_publish_traced() != 2036) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_subscription_set_motion_state() != 19436) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_constructor_locationnode_from_device_secrets() != 9138) {
