@@ -451,6 +451,8 @@ export default function MapScreenBody() {
       <FriendProfileSheet
         presence={profilePresence}
         visible={profilePresence !== null}
+        peers={snapshot?.friends}
+        stashEndpointId={snapshot?.stash.endpointId ?? null}
         sharing={
           profilePresence
             ? (snapshot?.sharingWith ?? []).includes(profilePresence.friend.endpointId)

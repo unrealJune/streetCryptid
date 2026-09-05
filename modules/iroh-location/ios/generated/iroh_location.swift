@@ -904,8 +904,12 @@ public protocol FixListener: AnyObject, Sendable {
      *
      * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
      * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
+     *
+     * `via_peer` is WHO performed that last hop: the hex EndpointId of the neighbour that handed
+     * us the datagram. It is reported verbatim, including when it equals `author` (a fix straight
+     * from its own author) — deciding what to call that device is the app's job, not this seam's.
      */
-    func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String) 
+    func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String, viaPeer: String?) 
     
     /**
      * A fix we received but could NOT decrypt (not addressed to us / revoked). Useful
@@ -984,15 +988,20 @@ open class FixListenerImpl: FixListener, @unchecked Sendable {
      *
      * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
      * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
+     *
+     * `via_peer` is WHO performed that last hop: the hex EndpointId of the neighbour that handed
+     * us the datagram. It is reported verbatim, including when it equals `author` (a fix straight
+     * from its own author) — deciding what to call that device is the app's job, not this seam's.
      */
-open func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String)  {try! rustCall() {
+open func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String, viaPeer: String?)  {try! rustCall() {
     uniffi_iroh_location_fn_method_fixlistener_on_fix(
             self.uniffiCloneHandle(),
         FfiConverterData.lower(author),
         FfiConverterUInt64.lower(seq),
         FfiConverterTypeLocationFix_lower(fix),
         FfiConverterBool.lower(backfill),
-        FfiConverterString.lower(via),$0
+        FfiConverterString.lower(via),
+        FfiConverterOptionString.lower(viaPeer),$0
     )
 }
 }
@@ -1056,6 +1065,7 @@ fileprivate struct UniffiCallbackInterfaceFixListener {
             fix: RustBuffer,
             backfill: Int8,
             via: RustBuffer,
+            viaPeer: RustBuffer,
             uniffiOutReturn: UnsafeMutableRawPointer,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -1069,7 +1079,8 @@ fileprivate struct UniffiCallbackInterfaceFixListener {
                      seq: try FfiConverterUInt64.lift(seq),
                      fix: try FfiConverterTypeLocationFix_lift(fix),
                      backfill: try FfiConverterBool.lift(backfill),
-                     via: try FfiConverterString.lift(via)
+                     via: try FfiConverterString.lift(via),
+                     viaPeer: try FfiConverterOptionString.lift(viaPeer)
                 )
             }
 
@@ -6224,15 +6235,27 @@ public struct RatchetEvent: Equatable, Hashable {
     public var ts: UInt64
     public var kind: String
     public var fix: LocationFix?
+    /**
+     * Hex EndpointId of the peer that served this author's entry during the last reconciliation,
+     * when one was observed. `None` means the entry was already in the replica — read back, not
+     * just delivered — so there is no serving peer to name.
+     */
+    public var viaPeer: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(author: Data, seq: UInt64, ts: UInt64, kind: String, fix: LocationFix?) {
+    public init(author: Data, seq: UInt64, ts: UInt64, kind: String, fix: LocationFix?, 
+        /**
+         * Hex EndpointId of the peer that served this author's entry during the last reconciliation,
+         * when one was observed. `None` means the entry was already in the replica — read back, not
+         * just delivered — so there is no serving peer to name.
+         */viaPeer: String?) {
         self.author = author
         self.seq = seq
         self.ts = ts
         self.kind = kind
         self.fix = fix
+        self.viaPeer = viaPeer
     }
 
     
@@ -6255,7 +6278,8 @@ public struct FfiConverterTypeRatchetEvent: FfiConverterRustBuffer {
                 seq: FfiConverterUInt64.read(from: &buf), 
                 ts: FfiConverterUInt64.read(from: &buf), 
                 kind: FfiConverterString.read(from: &buf), 
-                fix: FfiConverterOptionTypeLocationFix.read(from: &buf)
+                fix: FfiConverterOptionTypeLocationFix.read(from: &buf), 
+                viaPeer: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -6265,6 +6289,7 @@ public struct FfiConverterTypeRatchetEvent: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.ts, into: &buf)
         FfiConverterString.write(value.kind, into: &buf)
         FfiConverterOptionTypeLocationFix.write(value.fix, into: &buf)
+        FfiConverterOptionString.write(value.viaPeer, into: &buf)
     }
 }
 
@@ -7973,6 +7998,20 @@ public func encodePairInvite(invite: PairInvite)throws  -> String  {
 })
 }
 /**
+ * The EndpointId (hex) inside an endpoint ticket, without dialling anything.
+ *
+ * Pure decode, deliberately node-free: the app uses it to recognise the configured stash as the
+ * device that handed over a fix, and that question comes up before (and independently of) any
+ * node being started. Same parse as the bootstrap loop in [`LocationNode::subscribe`].
+ */
+public func endpointIdFromTicket(ticket: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
+    uniffi_iroh_location_fn_func_endpoint_id_from_ticket(
+        FfiConverterString.lower(ticket),$0
+    )
+})
+}
+/**
  * Generate a fresh device "receiving key" (X25519) keypair -> (secret, public).
  */
 public func generateRecvKeypair() -> [Data]  {
@@ -8161,6 +8200,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_func_encode_pair_invite() != 8507) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_func_endpoint_id_from_ticket() != 28437) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_func_generate_recv_keypair() != 62550) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8203,7 +8245,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_devicesecrets_recv_secret() != 59366) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 28882) {
+    if (uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 31892) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_fixlistener_on_opaque() != 14800) {

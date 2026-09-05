@@ -224,8 +224,13 @@ export interface SharingSnapshot {
   backgroundAccess: BackgroundAccess;
   /** Fixes recovered by the last durable sync, or null if none yet. */
   lastSyncRecovered: number | null;
-  /** Offline-delivery stash: whether a stash is deployed and whether the user opted in. */
-  stash: { available: boolean; optedIn: boolean };
+  /**
+   * Offline-delivery stash: whether a stash is deployed, whether the user opted in, and — once
+   * resolved from its dial ticket — its EndpointId, so a fix it served can be attributed to it
+   * rather than to "a device you haven't paired with". Optional: absent on binaries without
+   * `endpointIdFromTicket`, and on every snapshot literal written before it existed.
+   */
+  stash: { available: boolean; optedIn: boolean; endpointId?: string | null };
   /** Which route sealed envelopes take, what was asked for, and what this build can offer. */
   delivery: DeliveryStateSnapshot;
   /** Live iroh endpoint addresses and known peer path usage for the diagnostics screen. */
@@ -532,6 +537,15 @@ export class LocationSharingService {
   private readonly stashConfig = getStashConfig();
   /** The stash's dial ticket for reconciliation bootstrap, or null when not configured. */
   private readonly stashTicket: string | null = this.stashConfig?.ticket ?? null;
+  /**
+   * The stash's EndpointId, decoded from {@link stashTicket} once the node exists.
+   *
+   * Only needed to recognise the stash as the DELIVERER of someone's fix — it dials by ticket, so
+   * nothing else here needs the id. Null while unresolved, and on binaries without
+   * `endpointIdFromTicket`; the profile sheet then describes it as an unpaired device, which is
+   * uninformative but never wrong.
+   */
+  private stashEndpointId: string | null = null;
   /** Per-user opt-in (persisted). Defaults false — the stash is never used unless turned on. */
   private deliveryMode: DeliveryMode = DEFAULT_DELIVERY_MODE;
   /** Persisted native endpoint transports. All paths are enabled by default. */
@@ -642,14 +656,36 @@ export class LocationSharingService {
     return this.effectiveDelivery() === 'stash' && this.stashTicket !== null;
   }
 
+  /**
+   * Decode {@link stashTicket} into the stash's EndpointId, once per node.
+   *
+   * Guarded and best-effort by design: the id is only ever used to put a name on a delivery, so a
+   * binary without the export, or a ticket that will not parse, costs a nicer sentence and nothing
+   * else. Never throws into `init`.
+   */
+  private async resolveStashEndpointId(): Promise<void> {
+    if (this.stashEndpointId || !this.stashTicket) return;
+    const decode = this.mod?.endpointIdFromTicket;
+    if (typeof decode !== 'function') return;
+    try {
+      this.stashEndpointId = await decode.call(this.mod, this.stashTicket);
+    } catch {
+      // A stash we cannot name is still a stash we can use.
+    }
+  }
+
   /** The stash dial ticket to fold into subscribe() bootstrap sets, or [] when disabled. */
   private stashBootstrap(): string[] {
     return this.stashEnabled() && this.stashTicket ? [this.stashTicket] : [];
   }
 
   /** Current opt-in state for the UI: whether a stash exists and whether it's turned on. */
-  stashState(): { available: boolean; optedIn: boolean } {
-    return { available: this.stash.configured, optedIn: this.deliveryMode === 'stash' };
+  stashState(): { available: boolean; optedIn: boolean; endpointId: string | null } {
+    return {
+      available: this.stash.configured,
+      optedIn: this.deliveryMode === 'stash',
+      endpointId: this.stashEndpointId,
+    };
   }
 
   /** The delivery picker's whole world: what was chosen, what will happen, and what exists. */
@@ -841,6 +877,7 @@ export class LocationSharingService {
     await this.mod.start(this.transportPreferences);
     // After `start`, which is where the native drain path's stores are opened.
     await this.adoptNativeSeq();
+    await this.resolveStashEndpointId();
     await this.mirrorTransportConfig();
     if (interactive) {
       this.ticketStr = await this.mod.ticket();
@@ -2129,6 +2166,11 @@ export class LocationSharingService {
           fix,
           receivedAt: Date.now(),
           backfill: true,
+          // A peer is named only for a slot that was actually DELIVERED into the replica by this
+          // sync; an entry that was already there produces no attribution and stays the coarse
+          // `sync` label. So a peer is exactly what promotes this to `docs` — "reconciled from a
+          // peer's replica" — rather than "read out of the durable trail, source unknown".
+          ...(nf.viaPeer ? { via: 'docs' as const, viaPeer: nf.viaPeer } : {}),
         });
         recoveredFriendFixes += 1;
       } else {
@@ -3103,6 +3145,7 @@ export class LocationSharingService {
         payload_accuracy_m: event.fix.accuracyM,
         payload_heading_deg: event.fix.headingDeg,
         transport_path: event.via ?? (event.backfill ? 'durable-trail' : 'live-gossip'),
+        ...(event.viaPeer ? { transport_peer: event.viaPeer.slice(0, 10) } : {}),
         ...(known ? {} : { 'sc.drop_reason': 'unknown-or-removing-author' }),
       },
     });
@@ -3130,6 +3173,7 @@ export class LocationSharingService {
       receivedAt: Date.now(),
       ...(event.backfill ? { backfill: true } : {}),
       ...(event.via ? { via: event.via } : {}),
+      ...(event.viaPeer ? { viaPeer: event.viaPeer } : {}),
     };
     void this.trail
       .recordFriendLatest(fix)

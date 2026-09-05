@@ -151,6 +151,15 @@ export interface IncomingFix {
    * to the coarse live/sync split implied by {@link backfill}.
    */
   via?: FixTransport;
+  /**
+   * WHO performed that last hop — the endpoint that handed this device the envelope. Not a claim
+   * about the author's own link, and frequently not {@link IncomingFix.author}: gossip is
+   * epidemic, so any device in the author's swarm can carry their fix here, and reconciliation is
+   * served by whichever peer holds the entry. May be an endpoint this device has never paired
+   * with. Absent ⇒ nobody delivered it on this path (read back from the replica), or the native
+   * binary predates attribution.
+   */
+  viaPeer?: Hex;
 }
 
 export type RatchetAckKind = 'fix' | 'null';

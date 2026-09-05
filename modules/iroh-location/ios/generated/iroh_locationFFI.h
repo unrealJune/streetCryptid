@@ -259,7 +259,7 @@ typedef void (*UniffiCallbackInterfaceDeviceSecretsMethod1)(uint64_t, RustBuffer
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_FIX_LISTENER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_FIX_LISTENER_METHOD0
-typedef void (*UniffiCallbackInterfaceFixListenerMethod0)(uint64_t, RustBuffer, uint64_t, RustBuffer, int8_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceFixListenerMethod0)(uint64_t, RustBuffer, uint64_t, RustBuffer, int8_t, RustBuffer, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -341,7 +341,7 @@ void uniffi_iroh_location_fn_init_callback_vtable_fixlistener(const UniffiVTable
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_FIXLISTENER_ON_FIX
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_FIXLISTENER_ON_FIX
-void uniffi_iroh_location_fn_method_fixlistener_on_fix(uint64_t ptr, RustBuffer author, uint64_t seq, RustBuffer fix, int8_t backfill, RustBuffer via, RustCallStatus *_Nonnull out_status
+void uniffi_iroh_location_fn_method_fixlistener_on_fix(uint64_t ptr, RustBuffer author, uint64_t seq, RustBuffer fix, int8_t backfill, RustBuffer via, RustBuffer via_peer, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_FIXLISTENER_ON_OPAQUE
@@ -884,6 +884,11 @@ RustBuffer uniffi_iroh_location_fn_func_derive_topic(RustBuffer author_endpoint_
 RustBuffer uniffi_iroh_location_fn_func_encode_pair_invite(RustBuffer invite, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_ENDPOINT_ID_FROM_TICKET
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_ENDPOINT_ID_FROM_TICKET
+RustBuffer uniffi_iroh_location_fn_func_endpoint_id_from_ticket(RustBuffer ticket, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_GENERATE_RECV_KEYPAIR
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_GENERATE_RECV_KEYPAIR
 RustBuffer uniffi_iroh_location_fn_func_generate_recv_keypair(RustCallStatus *_Nonnull out_status
@@ -1234,6 +1239,12 @@ uint16_t uniffi_iroh_location_checksum_func_derive_topic(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_ENCODE_PAIR_INVITE
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_ENCODE_PAIR_INVITE
 uint16_t uniffi_iroh_location_checksum_func_encode_pair_invite(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_ENDPOINT_ID_FROM_TICKET
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_ENDPOINT_ID_FROM_TICKET
+uint16_t uniffi_iroh_location_checksum_func_endpoint_id_from_ticket(void
     
 );
 #endif

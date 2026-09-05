@@ -7,15 +7,28 @@ import { resolveSignalColor, signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Spacing } from '@/constants/theme';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import { useTheme } from '@/hooks/use-theme';
-import { fixTransportBadge, fixTransportDescription } from '../core/fix-transport';
+import {
+  describeDelivery,
+  fixTransportBadge,
+  fixTransportDescription,
+  type DeliveryProvenance,
+} from '../core/fix-transport';
 import { describePresence, formatAge, formatDistance, type FriendPresence } from '../core/presence';
-import type { RatchetActivity } from '../core/types';
+import type { Friend, RatchetActivity } from '../core/types';
 
 interface FriendProfileSheetProps {
   presence: FriendPresence | null;
   visible: boolean;
   sharing: boolean;
   ratchetActivity?: RatchetActivity;
+  /**
+   * The pool, so a fix forwarded by a mutual can be named. Anyone absent from it stays unnamed —
+   * the author's swarm is not this device's address book, and a stranger's endpoint id is shown
+   * as an id rather than dressed up as an identity.
+   */
+  peers?: readonly Friend[];
+  /** The trail stash's endpoint id, when known, so a stashed hop reads as the stash. */
+  stashEndpointId?: string | null;
   onClose(): void;
   onToggleShare(on: boolean): Promise<void>;
   onViewMap(): void;
@@ -41,6 +54,8 @@ export function FriendProfileSheet({
   visible,
   sharing,
   ratchetActivity,
+  peers,
+  stashEndpointId,
   onClose,
   onToggleShare,
   onViewMap,
@@ -49,6 +64,7 @@ export function FriendProfileSheet({
   const theme = useTheme();
   const scheme = useColorScheme();
   const insets = useSafeAreaInsets();
+  const [pathExpanded, setPathExpanded] = useState(false);
   const [confirmingEndpoint, setConfirmingEndpoint] = useState<string | null>(null);
   const [removingEndpoint, setRemovingEndpoint] = useState<string | null>(null);
   const [removeFailure, setRemoveFailure] = useState<{
@@ -66,8 +82,22 @@ export function FriendProfileSheet({
   const removeError = removeFailure?.endpointId === endpointId ? removeFailure.message : null;
   const distance = formatDistance(presence.distanceM);
   const locationLine = distance ?? (presence.fix ? 'Location received' : 'Waiting for location');
+  // Lower-cased keys: endpoint ids reach us from native hex, storage and tickets, and a case
+  // difference between two spellings of the same device would read as two devices.
+  const friendHandles = new Map(
+    (peers ?? []).map((peer) => [peer.endpointId.trim().toLowerCase(), peer.handle])
+  );
+  const delivery = describeDelivery({
+    via: presence.via,
+    viaPeer: presence.viaPeer,
+    author: endpointId,
+    authorHandle: presence.friend.handle,
+    friendHandles,
+    stashEndpointId,
+  });
 
   function closeSheet(): void {
+    setPathExpanded(false);
     setConfirmingEndpoint(null);
     setRemovingEndpoint(null);
     setRemoveFailure(null);
@@ -153,10 +183,12 @@ export function FriendProfileSheet({
             <DetailRow label="LAST CONTACT" value={`${formatAge(presence.contactAgeMs)} ago`} />
           ) : null}
           {presence.fix ? (
-            <DetailRow
-              accessibilityLabel={fixTransportDescription(presence.via)}
-              label="SIGNAL PATH"
-              value={fixTransportBadge(presence.via)}
+            <SignalPathRow
+              delivery={delivery}
+              expanded={pathExpanded}
+              onToggle={() => setPathExpanded((open) => !open)}
+              theme={theme}
+              via={presence.via}
             />
           ) : null}
           <DetailRow label="CONNECTION" value={pairingLabel(presence.friend.pairingMethod)} />
@@ -272,6 +304,71 @@ function formatAckAge(ack: RatchetActivity['fix'] | undefined): string {
   return `${days} day${days === 1 ? '' : 's'} ago · ${path}`;
 }
 
+/**
+ * SIGNAL PATH, which answers two different questions and so is one row that opens.
+ *
+ * The badge says HOW the last hop happened; pressing says WHO performed it. The second question
+ * only became askable when the delivering endpoint started being recorded, and it stays folded
+ * away by default because the honest answer is often "a device you haven't paired with" — true,
+ * and not what a glance at a friend's profile is for.
+ */
+function SignalPathRow({
+  delivery,
+  expanded,
+  onToggle,
+  theme,
+  via,
+}: {
+  delivery: DeliveryProvenance;
+  expanded: boolean;
+  onToggle(): void;
+  theme: ReturnType<typeof useTheme>;
+  via: FriendPresence['via'];
+}) {
+  return (
+    <View>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded }}
+        accessibilityLabel={`SIGNAL PATH: ${fixTransportDescription(via)}`}
+        accessibilityHint={
+          expanded
+            ? 'Hides which device delivered this fix'
+            : 'Shows which device delivered this fix'
+        }
+        onPress={onToggle}
+        style={({ pressed }) => [styles.detailRow, { opacity: pressed ? 0.58 : 1 }]}
+      >
+        <ThemedText type="code" themeColor="textSecondary">
+          SIGNAL PATH
+        </ThemedText>
+        <View style={styles.pathValue}>
+          <ThemedText type="smallBold">{fixTransportBadge(via)}</ThemedText>
+          <ThemedText type="code" themeColor="textSecondary">
+            {expanded ? '⌄' : '›'}
+          </ThemedText>
+        </View>
+      </Pressable>
+      {expanded ? (
+        <View
+          accessibilityLiveRegion="polite"
+          style={[styles.pathDetail, { borderLeftColor: theme.backgroundSelected }]}
+        >
+          <ThemedText type="smallBold">{delivery.headline}</ThemedText>
+          {delivery.peerId ? (
+            <ThemedText type="code" themeColor="textSecondary">
+              {delivery.peerId}
+            </ThemedText>
+          ) : null}
+          <ThemedText type="small" themeColor="textSecondary">
+            {delivery.detail}
+          </ThemedText>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 function DetailRow({
   accessibilityLabel,
   label,
@@ -339,6 +436,17 @@ const styles = StyleSheet.create({
   detailValue: {
     flex: 1,
     textAlign: 'right',
+  },
+  pathValue: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.two,
+  },
+  pathDetail: {
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    gap: Spacing.one,
+    marginBottom: Spacing.three,
+    paddingLeft: Spacing.three,
   },
   primaryAction: {
     alignItems: 'center',

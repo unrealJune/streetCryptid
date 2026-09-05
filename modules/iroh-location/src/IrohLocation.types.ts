@@ -105,6 +105,13 @@ export interface OnFixEvent {
   backfill?: boolean;
   /** How the fix reached this device. Absent on binaries built before per-fix transport labels. */
   via?: FixVia;
+  /**
+   * WHO performed that last hop: the hex EndpointId of the neighbour whose datagram this was.
+   * Gossip is epidemic, so this is frequently NOT {@link OnFixEvent.author} — it is whichever
+   * device in the author's swarm happened to carry the envelope here, which may be the stash or a
+   * peer this device has never paired with. Absent on binaries built before deliverer attribution.
+   */
+  viaPeer?: string;
 }
 
 export interface OnOpaqueEvent {
@@ -161,6 +168,12 @@ export interface NativeRatchetEvent {
   /** Absent on installed native binaries from before null-lane activity was surfaced. */
   kind?: 'fix' | 'null';
   fix?: NativeLocationFix;
+  /**
+   * Hex EndpointId of the peer that served this author's entry in the reconciliation that just
+   * ran. Absent when the entry was already in the replica (read back rather than delivered), and
+   * on binaries built before per-entry attribution.
+   */
+  viaPeer?: string;
 }
 
 // ── Control messages (docs/social/ARCHITECTURE.md §9c) ──────────────────────────────────────
@@ -997,6 +1010,15 @@ export interface IrohLocationApi {
   encodePairInvite(invite: PairInvite): Promise<string>;
   /** Decode an opaque `scpair1:<hex>` token back into a {@link PairInvite}. */
   decodePairInvite(token: string): Promise<PairInvite>;
+
+  /**
+   * The EndpointId (hex) inside an endpoint ticket — a pure decode, no node required.
+   *
+   * Optional: absent in Expo Go, on web, and on installed binaries built before it existed. Guard
+   * with `typeof … === 'function'`; a caller that cannot resolve a ticket simply cannot name that
+   * device, which every consumer already has to handle.
+   */
+  endpointIdFromTicket?(ticket: string): Promise<string>;
 
   /** Local addresses plus live path usage for the requested peer EndpointIds. */
   transportDiagnostics(peerEndpointIdsHex: string[]): Promise<TransportDiagnostics>;

@@ -974,7 +974,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
 
 /// Inbound fixes still land in the durable replica; nothing here needs to surface them.
 private final class SilentFixListener: FixListener {
-  func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String) {}
+  func onFix(
+    author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String, viaPeer: String?
+  ) {}
   func onOpaque(author: Data, seq: UInt64) {}
   func onStatus(status: String) {}
 }

@@ -228,6 +228,32 @@ pub fn decode_nul_key(key: &[u8]) -> Option<Vec<u8>> {
     hex_decode(author_hex)
 }
 
+/// Note one delivered entry against the author it belongs to. Pure, so the newest-wins rule is
+/// testable without a live reconciliation.
+///
+/// Non-fix keys (control, resync, pre-LWW) are ignored: those lanes are not what "delivered a
+/// friend's location" means, and attributing a fix to the peer that happened to hand over a live
+/// mode request would be a plausible-looking lie.
+fn record_serving_peer(
+    peers: &mut HashMap<[u8; 32], ServingPeer>,
+    key: &[u8],
+    peer: [u8; 32],
+    entry_ts: u64,
+) {
+    let Some(author) = decode_key(key).or_else(|| decode_nul_key(key)) else {
+        return;
+    };
+    let Ok(author): Result<[u8; 32], _> = author.as_slice().try_into() else {
+        return;
+    };
+    let entry = peers
+        .entry(author)
+        .or_insert(ServingPeer { peer, entry_ts });
+    if entry_ts >= entry.entry_ts {
+        *entry = ServingPeer { peer, entry_ts };
+    }
+}
+
 /// Literal leading segment marking a **resync record** (FORWARD-SECRECY.md §4.6).
 ///
 /// Its own lane rather than the control lane, for the same reason the null fix needed one: both
@@ -328,6 +354,17 @@ pub struct PushReport {
     pub peers_failed: usize,
 }
 
+/// Who served an author's slot in the most recent reconciliation that carried it.
+///
+/// `entry_ts` is the docs record timestamp, kept so a burst of `InsertRemote`s for the same author
+/// (one lane after the other, or two peers finishing at once) settles on the newest entry rather
+/// than the last event polled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ServingPeer {
+    peer: [u8; 32],
+    entry_ts: u64,
+}
+
 /// Wraps an iroh-docs replica: our own namespace (we are its sole writer) plus any friend
 /// namespaces we've imported for replication + reads.
 pub struct TrailDocs {
@@ -340,6 +377,16 @@ pub struct TrailDocs {
     own_ns: NamespaceId,
     /// All docs we can read (own + imported friends), keyed by namespace bytes.
     handles: Mutex<HashMap<[u8; 32], Doc>>,
+    /// Per envelope-author, the peer that last handed us their entry during a reconciliation.
+    ///
+    /// Keyed by author rather than by namespace because that is the question the UI asks — "who
+    /// delivered Maya's fix" — and because a namespace has exactly one writer but any number of
+    /// peers willing to serve it. Bounded by the pool size: one slot per author we replicate.
+    ///
+    /// Deliberately in-memory and delivery-scoped. An entry already in the replica produces no
+    /// `InsertRemote`, so a read after a quiet sync reports no peer — which is the truth: nobody
+    /// delivered it this time.
+    serving_peers: Mutex<HashMap<[u8; 32], ServingPeer>>,
 }
 
 impl TrailDocs {
@@ -382,6 +429,7 @@ impl TrailDocs {
             author,
             own_ns,
             handles: Mutex::new(handles),
+            serving_peers: Mutex::new(HashMap::new()),
         })
     }
 
@@ -530,6 +578,16 @@ impl TrailDocs {
             .ok_or_else(|| anyhow!("namespace not found in local replica"))?;
         self.handles.lock().await.insert(ns.to_bytes(), doc.clone());
         Ok(doc)
+    }
+
+    /// The peer that last served `author`'s slot in a reconciliation, if one did.
+    ///
+    /// `None` is an ordinary answer, not a failure: it means no entry for that author was
+    /// *delivered* into this replica (nothing new to reconcile, or the process was restarted since
+    /// it was). A caller may only ever say "this peer handed it over", never "no-one did".
+    pub async fn serving_peer(&self, author: &[u8]) -> Option<[u8; 32]> {
+        let key: [u8; 32] = author.try_into().ok()?;
+        self.serving_peers.lock().await.get(&key).map(|s| s.peer)
     }
 
     /// Import a friend's trail from their docs read-ticket and begin replicating it. Returns the
@@ -827,6 +885,19 @@ impl TrailDocs {
             match timeout(Duration::from_secs(wait), events.next()).await {
                 // All reconciled entries have their content locally — the clean finish.
                 Ok(Some(Ok(LiveEvent::PendingContentReady))) => break,
+                // The one place a peer is named per entry. `read_latest_sealed` reads the replica
+                // afterwards and cannot tell a freshly delivered slot from one that was already
+                // there, so provenance has to be captured here, as it arrives.
+                Ok(Some(Ok(LiveEvent::InsertRemote { from, entry, .. }))) => {
+                    saw_event = true;
+                    let mut peers = self.serving_peers.lock().await;
+                    record_serving_peer(
+                        &mut peers,
+                        entry.key(),
+                        *from.as_bytes(),
+                        entry.timestamp(),
+                    );
+                }
                 Ok(Some(Ok(_))) => saw_event = true,
                 Ok(Some(Err(_))) | Ok(None) => break,
                 Err(_) => break, // idle timeout — settle for what transferred
@@ -1093,6 +1164,52 @@ mod tests {
         assert!(decode_key(b"zz/fix").is_none()); // non-hex author
                                                   // Pre-LWW `hex(author)/{seq:020}` keys left by older builds stay invisible.
         assert!(decode_key(b"abab/00000000000000000001").is_none());
+    }
+
+    // ── serving-peer attribution ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn serving_peer_records_both_fix_lanes() {
+        let author = [0x22u8; 32];
+        let peer = [0x33u8; 32];
+        let mut peers = HashMap::new();
+        record_serving_peer(&mut peers, &encode_key(&author), peer, 10);
+        assert_eq!(peers.get(&author).map(|s| s.peer), Some(peer));
+
+        let mut nul = HashMap::new();
+        record_serving_peer(&mut nul, &encode_nul_key(&author), peer, 10);
+        assert_eq!(nul.get(&author).map(|s| s.peer), Some(peer));
+    }
+
+    /// Two peers can finish reconciling the same author within one sync. The newest entry is the
+    /// one that actually moved the friend's dot, so it is the one whose deliverer we name.
+    #[test]
+    fn serving_peer_keeps_the_newest_entry() {
+        let author = [0x22u8; 32];
+        let old_peer = [0x01u8; 32];
+        let new_peer = [0x02u8; 32];
+        let key = encode_key(&author);
+        let mut peers = HashMap::new();
+
+        record_serving_peer(&mut peers, &key, new_peer, 20);
+        record_serving_peer(&mut peers, &key, old_peer, 10);
+        assert_eq!(peers.get(&author).map(|s| s.peer), Some(new_peer));
+
+        // …and a genuinely newer delivery replaces it.
+        record_serving_peer(&mut peers, &key, old_peer, 30);
+        assert_eq!(peers.get(&author).map(|s| s.peer), Some(old_peer));
+    }
+
+    /// A control or resync entry says nothing about who delivered a location.
+    #[test]
+    fn serving_peer_ignores_non_fix_lanes() {
+        let author = [0x22u8; 32];
+        let peer = [0x33u8; 32];
+        let mut peers = HashMap::new();
+        record_serving_peer(&mut peers, &encode_ctl_key(&author), peer, 10);
+        record_serving_peer(&mut peers, &encode_rsy_key(&author), peer, 10);
+        record_serving_peer(&mut peers, b"abab/00000000000000000001", peer, 10);
+        assert!(peers.is_empty());
     }
 
     // ── control-entry keys (ARCHITECTURE §9c) ────────────────────────────────────────────

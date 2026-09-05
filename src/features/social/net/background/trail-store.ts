@@ -37,9 +37,15 @@ export interface TrailPoint {
    *
    * First writer wins: a fix received live and later re-seen during reconciliation keeps its live
    * label, because that is how it actually got here. The one exception is
-   * {@link UNRESOLVED_VIA} — see {@link mergeVia}.
+   * {@link UNRESOLVED_VIA} — see {@link mergeProvenance}.
    */
   via?: FixTransport;
+  /**
+   * WHO performed that hop — the endpoint that handed the envelope over. Kept as one unit with
+   * {@link via}: a label from one delivery beside a peer from another would read as a fact and be
+   * a fiction, which is the only way this row can lie. See {@link mergeProvenance}.
+   */
+  viaPeer?: string;
 }
 
 /**
@@ -52,16 +58,25 @@ export interface TrailPoint {
  */
 export const UNRESOLVED_VIA: FixTransport = 'sync';
 
+/** The `(via, viaPeer)` pair, which is stored, merged and rendered as one thing. */
+export interface Provenance {
+  via?: FixTransport;
+  viaPeer?: string;
+}
+
 /**
  * Provenance kept on upsert: first writer wins, except that {@link UNRESOLVED_VIA} yields to any
  * label that actually names the serving peer or link. Mirrored in the SQLite `ON CONFLICT` clause.
+ *
+ * The pair moves together or not at all. Adopting an incoming `viaPeer` next to a `via` from an
+ * earlier delivery would produce a sentence nothing ever observed — "relayed by the stash", say,
+ * from a live label and a reconciliation peer — so the whole record is replaced or the whole
+ * record survives. An incoming record with no `via` names no delivery and never replaces one.
  */
-export function mergeVia(
-  existing: FixTransport | undefined,
-  incoming: FixTransport | undefined
-): FixTransport | undefined {
-  if (!existing) return incoming;
-  if (existing === UNRESOLVED_VIA && incoming && incoming !== UNRESOLVED_VIA) return incoming;
+export function mergeProvenance(existing: Provenance, incoming: Provenance): Provenance {
+  if (!incoming.via) return existing;
+  if (!existing.via) return incoming;
+  if (existing.via === UNRESOLVED_VIA && incoming.via !== UNRESOLVED_VIA) return incoming;
   return existing;
 }
 
@@ -76,8 +91,9 @@ export interface TrailStorage {
    * the one already stored is ignored, so an out-of-order delivery — reconciliation routinely
    * delivers old entries after new ones — cannot move a friend backwards on the map.
    *
-   * Re-delivery of the fix already stored is not a no-op: it still merges {@link TrailPoint.via},
-   * so a precise transport label can sharpen an {@link UNRESOLVED_VIA} one. See {@link mergeVia}.
+   * Re-delivery of the fix already stored is not a no-op: it still merges the provenance pair, so
+   * a precise transport label can sharpen an {@link UNRESOLVED_VIA} one. See
+   * {@link mergeProvenance}.
    */
   putFriendLatest(point: TrailPoint): Promise<void>;
   /** Every friend's current fix — at most one per author. */
@@ -123,7 +139,12 @@ export class InMemoryTrailStorage implements TrailStorage {
     // takes the newer write, so `receivedAt` reflects the latest receipt. Mirrors the SQLite
     // `ON CONFLICT` clause in persistence.ts.
     if (point.seq === current.seq && point.fix.ts === current.fix.ts) {
-      this.friends.set(point.author, { ...point, via: mergeVia(current.via, point.via) });
+      const { via, viaPeer } = mergeProvenance(current, point);
+      this.friends.set(point.author, {
+        ...point,
+        ...(via ? { via } : {}),
+        ...(viaPeer ? { viaPeer } : {}),
+      });
     }
   }
 
@@ -182,7 +203,8 @@ export function createTrailStore(opts: TrailStoreOptions): TrailStore {
         seq: incoming.seq,
         fix: incoming.fix,
         receivedAt: incoming.receivedAt ?? now(),
-        via: incoming.via ?? (incoming.backfill ? 'sync' : 'live'),
+        via: incoming.via ?? (incoming.backfill ? UNRESOLVED_VIA : 'live'),
+        ...(incoming.viaPeer ? { viaPeer: incoming.viaPeer } : {}),
       });
     },
     async selfTrail(sinceTs = 0): Promise<TrailPoint[]> {

@@ -31,6 +31,33 @@ const fix = (lat: number, lon: number, ts: number): LocationFix => ({
 });
 
 describe('friend presence', () => {
+  it('carries the deliverer alongside the transport label', () => {
+    const peer = 'bb'.repeat(32);
+    const [presence] = buildFriendPresence({
+      friends: [friend('aabb', '@moth')],
+      latest: [
+        { author: 'aabb', fix: fix(1, 2, 900), receivedAt: 900, via: 'relay', viaPeer: peer },
+      ],
+      selfFix: null,
+      now: 1000,
+    });
+
+    expect(presence.via).toBe('relay');
+    expect(presence.viaPeer).toBe(peer);
+  });
+
+  it('drops both halves of the provenance when there is no fix to explain', () => {
+    const [presence] = buildFriendPresence({
+      friends: [friend('aabb', '@moth')],
+      latest: [],
+      selfFix: null,
+      now: 1000,
+    });
+
+    expect(presence.via).toBeUndefined();
+    expect(presence.viaPeer).toBeUndefined();
+  });
+
   it('matches endpoint IDs case-insensitively and ignores unknown authors', () => {
     const result = buildFriendPresence({
       friends: [friend('AABB', '@moth')],

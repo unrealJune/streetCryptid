@@ -161,6 +161,84 @@ describe('trail store', () => {
     expect((await friend(store, 'f'))?.via).toBe('stash');
   });
 
+  it('keeps the transport label and the deliverer as one record', async () => {
+    const storage = new InMemoryTrailStorage();
+    const store = createTrailStore({ storage });
+    await store.recordFriendLatest({
+      author: 'f',
+      seq: 1,
+      fix: fix(100),
+      receivedAt: 0,
+      via: 'relay',
+      viaPeer: 'aa'.repeat(32),
+    });
+    // A later re-read of the replica names a different peer. Taking it would pair a reconciliation
+    // peer with a live label and describe a delivery that never happened.
+    await store.recordFriendLatest({
+      author: 'f',
+      seq: 1,
+      fix: fix(100),
+      receivedAt: 5,
+      backfill: true,
+      via: 'docs',
+      viaPeer: 'bb'.repeat(32),
+    });
+
+    const held = await friend(store, 'f');
+    expect(held?.via).toBe('relay');
+    expect(held?.viaPeer).toBe('aa'.repeat(32));
+  });
+
+  it('takes the whole record when an unresolved label is sharpened', async () => {
+    const storage = new InMemoryTrailStorage();
+    const store = createTrailStore({ storage });
+    await store.recordFriendLatest({
+      author: 'f',
+      seq: 1,
+      fix: fix(100),
+      receivedAt: 0,
+      backfill: true,
+    });
+    await store.recordFriendLatest({
+      author: 'f',
+      seq: 1,
+      fix: fix(100),
+      receivedAt: 1,
+      backfill: true,
+      via: 'docs',
+      viaPeer: 'cc'.repeat(32),
+    });
+
+    const held = await friend(store, 'f');
+    expect(held?.via).toBe('docs');
+    expect(held?.viaPeer).toBe('cc'.repeat(32));
+  });
+
+  it('lets a strictly newer fix bring its own deliverer', async () => {
+    const storage = new InMemoryTrailStorage();
+    const store = createTrailStore({ storage });
+    await store.recordFriendLatest({
+      author: 'f',
+      seq: 1,
+      fix: fix(100),
+      receivedAt: 0,
+      via: 'relay',
+      viaPeer: 'aa'.repeat(32),
+    });
+    await store.recordFriendLatest({
+      author: 'f',
+      seq: 2,
+      fix: fix(200),
+      receivedAt: 1,
+      via: 'lan',
+      viaPeer: 'bb'.repeat(32),
+    });
+
+    const held = await friend(store, 'f');
+    expect(held?.via).toBe('lan');
+    expect(held?.viaPeer).toBe('bb'.repeat(32));
+  });
+
   it('leaves our own points unlabelled', async () => {
     const storage = new InMemoryTrailStorage();
     const store = createTrailStore({ storage });

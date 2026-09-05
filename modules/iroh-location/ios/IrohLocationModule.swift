@@ -56,7 +56,8 @@ private final class BluetoothRadioProbe: NSObject, CBCentralManagerDelegate {
 // into this target (see IrohLocation.podspec -> vendored xcframework + generated/*.swift).
 // They expose: `LocationNode`, `Subscription`, the `FixListener` protocol, the profile /
 // pairing / BLE records + enums, and the free functions `deriveTopic(authorEndpointId:)`,
-// `generateRecvKeypair()`, `encodePairInvite(invite:)`, and `decodePairInvite(token:)`.
+// `generateRecvKeypair()`, `encodePairInvite(invite:)`, `decodePairInvite(token:)`, and
+// `endpointIdFromTicket(ticket:)`.
 //
 // Regenerate with `just bindgen-ios` on macOS (source bindings can also be produced from a
 // host library via `uniffi-bindgen ... --language swift`; only the XCFramework needs macOS).
@@ -364,8 +365,11 @@ private final class EventBridge: FixListener {
   }
   // `backfill` is `true` when the fix arrived via durable range-reconciliation (iroh-docs
   // catch-up) rather than the live gossip path. `via` names the last hop into this device
-  // (`relay` | `direct` | `lan` | `ble` | `live` | `docs` | `stash`).
-  func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String) {
+  // (`relay` | `direct` | `lan` | `ble` | `live` | `docs` | `stash`); `viaPeer` names the device
+  // that performed it, which is not necessarily the fix's author.
+  func onFix(
+    author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String, viaPeer: String?
+  ) {
     module?.sendEvent(
       "onFix",
       [
@@ -374,6 +378,7 @@ private final class EventBridge: FixListener {
         "fix": fixToDict(fix),
         "backfill": backfill,
         "via": via,
+        "viaPeer": viaPeer as Any,
       ])
   }
   func onOpaque(author: Data, seq: UInt64) {
@@ -831,6 +836,7 @@ public final class IrohLocationModule: Module {
           "ts": incoming.ts,
           "kind": incoming.kind,
           "fix": incoming.fix.map { fixToDict($0) } as Any,
+          "viaPeer": incoming.viaPeer as Any,
         ]
       }
     }
@@ -994,6 +1000,11 @@ public final class IrohLocationModule: Module {
 
     AsyncFunction("decodePairInvite") { (token: String) throws -> [String: Any] in
       pairInviteDict(try decodePairInvite(token: token))
+    }
+
+    // Pure decode, node-free: lets JS recognise a configured stash by its EndpointId.
+    AsyncFunction("endpointIdFromTicket") { (ticket: String) throws -> String in
+      try endpointIdFromTicket(ticket: ticket)
     }
 
     // ── BLE status (honest stub off-device) — ARCHITECTURE.md §2 ───────────────────────────

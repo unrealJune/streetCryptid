@@ -202,6 +202,18 @@ recovered from the durable trail. It is deliberately not a claim about the autho
 gossip is epidemic, so a live fix may have been forwarded by any neighbour in the swarm, and a
 `stash` fix was served by the mirror rather than by the friend. The browser build omits `via`.
 
+Beside it rides `viaPeer`: **who** performed that hop — the hex EndpointId of the neighbour whose
+datagram this was, which is exact where `via` is a classification. It is frequently NOT the fix's
+author, and that is the point: the swarm belongs to the author, so any of _their_ recipients can
+carry their fix here, including devices this one has never paired with, and the stash. Absent means
+nobody delivered it on that path — `readLatest` reports `viaPeer` only for a slot a reconciliation
+actually brought in (captured from iroh-docs' `InsertRemote`), never for one read back out of the
+replica. The app pairs the two values and never mixes a label from one delivery with a peer from
+another; see `describeDelivery` in `src/features/social/core/fix-transport.ts`.
+
+`endpointIdFromTicket(ticket)` decodes an endpoint ticket to its EndpointId without a node, which
+is how the app recognises a configured stash as the deliverer instead of an unpaired device.
+
 ## Trail-stash desktop debug client
 
 The host-side `trail-stash-client` uses the same `LocationNode`, envelope crypto, and mandatory

@@ -75,6 +75,8 @@ export interface LatestLocationPoint {
   receivedAt: number;
   /** How the fix reached this device. Absent on rows stored before provenance was recorded. */
   via?: FixTransport;
+  /** Endpoint that performed that hop, when one was recorded. Travels with {@link via}. */
+  viaPeer?: string;
 }
 
 export interface FriendPresence {
@@ -99,6 +101,12 @@ export interface FriendPresence {
    * the sole surviving surface for transport provenance.
    */
   via?: FixTransport;
+  /**
+   * WHO handed {@link fix} over — an endpoint id, which may be the author, a mutual friend, the
+   * stash, or a device this user has never paired with. Read with {@link via}, never apart from
+   * it; `describeDelivery` in `core/fix-transport.ts` is the only thing that should interpret it.
+   */
+  viaPeer?: string;
 }
 
 interface FriendPresenceInput {
@@ -236,6 +244,7 @@ export function buildFriendPresence(input: FriendPresenceInput): FriendPresence[
         contactKnown: contact.known,
         state: presenceStateFor(fix, positionAgeMs, contactAgeMs),
         via: point?.via,
+        viaPeer: point?.viaPeer,
         distanceM:
           input.selfFix && isValidFix(input.selfFix)
             ? distanceBetweenFixes(input.selfFix, fix)

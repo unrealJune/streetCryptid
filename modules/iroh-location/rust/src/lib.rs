@@ -312,6 +312,10 @@ pub struct RatchetEvent {
     pub ts: u64,
     pub kind: String,
     pub fix: Option<LocationFix>,
+    /// Hex EndpointId of the peer that served this author's entry during the last reconciliation,
+    /// when one was observed. `None` means the entry was already in the replica — read back, not
+    /// just delivered — so there is no serving peer to name.
+    pub via_peer: Option<String>,
 }
 
 /// Foreign (Swift/Kotlin) access to this device's identity, wherever the platform keeps it.
@@ -360,7 +364,19 @@ pub trait FixListener: Send + Sync + 'static {
     ///
     /// On the live path it is the CLOSEST open path to the delivering neighbour rather than the
     /// carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
-    fn on_fix(&self, author: Vec<u8>, seq: u64, fix: LocationFix, backfill: bool, via: String);
+    ///
+    /// `via_peer` is WHO performed that last hop: the hex EndpointId of the neighbour that handed
+    /// us the datagram. It is reported verbatim, including when it equals `author` (a fix straight
+    /// from its own author) — deciding what to call that device is the app's job, not this seam's.
+    fn on_fix(
+        &self,
+        author: Vec<u8>,
+        seq: u64,
+        fix: LocationFix,
+        backfill: bool,
+        via: String,
+        via_peer: Option<String>,
+    );
     /// A fix we received but could NOT decrypt (not addressed to us / revoked). Useful
     /// for presence metrics without leaking content.
     fn on_opaque(&self, author: Vec<u8>, seq: u64);
@@ -1205,14 +1221,15 @@ impl LocationNode {
     }
 
     async fn read_latest_ratcheted_events_inner(&self) -> Result<Vec<RatchetEvent>, LocationError> {
-        let sealed = {
+        let (trail, sealed) = {
             let guard = self.inner.lock().await;
             let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
-            started
+            let sealed = started
                 .trail
                 .read_latest_sealed()
                 .await
-                .map_err(|e| LocationError::Network(e.to_string()))?
+                .map_err(|e| LocationError::Network(e.to_string()))?;
+            (started.trail.clone(), sealed)
         };
         let manager = self.session_manager().await?;
         let now = now_ms();
@@ -1262,12 +1279,16 @@ impl LocationNode {
                 source = "durable",
                 "ratchet response received"
             );
+            // Who served this author's slot in the reconciliation that just ran. Absent for an
+            // entry that was already in the replica — this reports delivery, never mere presence.
+            let via_peer = trail.serving_peer(&author).await.map(|id| encode_hex(&id));
             out.push(RatchetEvent {
                 author,
                 seq: verified.seq,
                 ts: verified.ts,
                 kind: kind.to_string(),
                 fix,
+                via_peer,
             });
         }
         Ok(out)
@@ -2094,6 +2115,7 @@ impl LocationNode {
                             sc.author = tracing::field::Empty,
                             sc.seq = tracing::field::Empty,
                             sc.via = tracing::field::Empty,
+                            sc.via_peer = %telemetry::short_hex(msg.delivered_from.as_bytes()),
                             outcome = tracing::field::Empty,
                         );
                         // Signature first, then session state (§4.2): `verify_v3` hands back a
@@ -2109,6 +2131,9 @@ impl LocationNode {
                             }
                             _ => "live".to_string(),
                         };
+                        // WHO handed it over, as opposed to over which kind of path. Unlike `via`
+                        // this is exact: gossip tells us the neighbour it came from.
+                        let via_peer = encode_hex(msg.delivered_from.as_bytes());
                         let _guard = span.enter();
                         match opened {
                             GossipOpen::Delivered {
@@ -2143,6 +2168,7 @@ impl LocationNode {
                                             fix,
                                             false,
                                             via,
+                                            Some(via_peer),
                                         );
                                     }
                                     // A null fix is a watcher publishing on cadence so the
@@ -3972,6 +3998,19 @@ fn ble_peer(p: &ble::BlePeerView) -> BlePeer {
         consecutive_failures: p.consecutive_failures,
         connect_path: p.connect_path.clone(),
     }
+}
+
+/// The EndpointId (hex) inside an endpoint ticket, without dialling anything.
+///
+/// Pure decode, deliberately node-free: the app uses it to recognise the configured stash as the
+/// device that handed over a fix, and that question comes up before (and independently of) any
+/// node being started. Same parse as the bootstrap loop in [`LocationNode::subscribe`].
+#[uniffi::export]
+pub fn endpoint_id_from_ticket(ticket: String) -> Result<String, LocationError> {
+    let parsed: EndpointTicket = ticket
+        .parse()
+        .map_err(|_| LocationError::Decode("bad endpoint ticket".into()))?;
+    Ok(encode_hex(parsed.endpoint_addr().id.as_bytes()))
 }
 
 /// Encode a [`PairInvite`] into an opaque, dependency-free `scpair1:<hex>` token for QR / links.
