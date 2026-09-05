@@ -1,54 +1,23 @@
 import { Platform } from 'react-native';
 
 import type { SpanContext } from '@/features/dev/telemetry';
-import { backgroundOutbox } from './background-outbox';
-import { defineBackgroundLocationTask, isBackgroundLocationAvailable } from './background-task';
 import { defineBackgroundRefreshTask, isBackgroundRefreshAvailable } from './refresh-task';
 import { defineReviveTask, isReviveFenceAvailable } from './revive-task';
-import {
-  createBackgroundFixDispatcher,
-  type ActiveBackgroundFixHandler,
-} from './background-dispatch';
 
 /**
- * Wires the headless background-location task to a process-wide dispatcher.
- * A mounted runtime publishes immediately; a fresh TaskManager context stores
- * the batch durably, restores the persisted iroh identity/pool, and drains it.
+ * Registers the OS task handlers that still exist on this side.
  *
- * This module is imported by the app entry so `TaskManager.defineTask` runs in
- * global scope before React mounts, as required by Expo Location.
+ * Location capture is NOT one of them any more. It used to route an `expo-location` TaskManager
+ * batch to a mounted runtime or a headless one; both are gone, because the thing that made the
+ * whole arrangement necessary — needing a JS context to receive a fix — is what kept a Pixel from
+ * publishing for eleven and a half hours. Capture and publish now happen in the native runtime
+ * (`BackgroundLocationService` / `BackgroundLocationRuntime`), which does not need one.
  *
- * The outbox is backed by expo-sqlite, so captures survive process death.
+ * What remains are the two tasks that are still about JS work: the periodic refresh, which drives
+ * the RECEIVE side, and the iOS revive fence.
+ *
+ * Imported by the app entry so `TaskManager.defineTask` runs in global scope before React mounts.
  */
-export { backgroundOutbox } from './background-outbox';
-
-let registered = false;
-const dispatcher = createBackgroundFixDispatcher({
-  outbox: backgroundOutbox,
-  flushHeadless: async (parent) => {
-    const { flushBackgroundOutboxHeadless } = await import('./headless-runtime');
-    await flushBackgroundOutboxHeadless(parent);
-  },
-  onActiveError: (error) => {
-    console.warn('[background-location] live publisher failed; fix queued for retry', error);
-  },
-});
-
-/** Register the TaskManager handler exactly once. Safe to call repeatedly. */
-export function ensureBackgroundTaskRegistered(): void {
-  if (registered) return;
-  registered = true;
-  defineBackgroundLocationTask(() => ({
-    onBackgroundFixes: (fixes, parent) => dispatcher.dispatch(fixes, parent),
-  }));
-}
-
-/** Route TaskManager fixes through the mounted service while the app runtime is alive. */
-export function registerActiveBackgroundFixHandler(
-  handler: ActiveBackgroundFixHandler
-): () => void {
-  return dispatcher.registerActiveHandler(handler);
-}
 
 // The mounted runtime's periodic refresh (heartbeat + outbox drain + current-fix sync), registered
 // while background sharing runs. The periodic refresh task routes here whenever a mounted runtime is
@@ -71,10 +40,6 @@ export function registerActiveRefreshHandler(
 /** The mounted runtime's refresh runner, or null on a fresh headless launch (no runtime alive). */
 export function getActiveRefreshHandler(): ((parent?: SpanContext) => Promise<void>) | null {
   return activeRefreshHandler;
-}
-
-if (Platform.OS !== 'web' && isBackgroundLocationAvailable()) {
-  ensureBackgroundTaskRegistered();
 }
 
 if (Platform.OS !== 'web' && isBackgroundRefreshAvailable()) {

@@ -1,5 +1,5 @@
 import type { Attributes } from '@/features/dev/telemetry';
-import type { PersistentKV } from './fix-outbox';
+import type { PersistentKV } from './persistent-kv';
 
 /**
  * "When did this phone last manage to do X?" — the durable timestamps that make the
@@ -10,8 +10,8 @@ import type { PersistentKV } from './fix-outbox';
  * a second ago produce identical records, and telling them apart means reconstructing a timeline
  * from spans that may never have been exported.
  *
- * All four live in ONE KV row, deliberately: they are stamped on the hot path (a live-mode publish
- * runs every few seconds) and four separate writes would be four SQLite statements per fix. The
+ * They all live in ONE KV row, deliberately: they are stamped on the hot path (a live-mode publish
+ * runs every few seconds) and separate writes would be a SQLite statement each, per fix. The
  * row is small and last-write-wins — losing a stamp costs a slightly stale age, never correctness,
  * so nothing here is worth a transaction.
  *
@@ -26,18 +26,46 @@ export const WATERMARKS_KEY = 'sc.social.watermarks';
 export type WatermarkKind =
   /** The OS delivered a location batch to our background task. */
   | 'wake'
-  /** A fix passed the confidence gate and was accepted by the engine. */
+  /**
+   * The OS actually ran the periodic refresh task.
+   *
+   * Distinct from `task.refresh_registered`, which only says the handler is known to TaskManager.
+   * Both platforms will happily report a task as registered and permitted while never scheduling
+   * it: on 2026-08-29 one iPhone read `refresh_registered: true` + `refresh_status: available` for
+   * thirty hours without the task running once, and an Android phone's interval decayed
+   * 15 → 24 → 214 → 687 minutes under App Standby with every flag still green. Registration is
+   * what we asked for; this is what we got, and only the gap between them is diagnostic.
+   */
+  | 'refresh'
+  /**
+   * A fix passed the confidence gate and was accepted.
+   *
+   * Authoritatively stamped in Rust now (`GateState.last_accepted_at`), as are `publish` and
+   * `push`: the drain moved into the native core, and these three describe moments only it sees.
+   * `device.health` overlays the native answers on top of this row — see `nativeWatermarks`.
+   * The JS stamps are kept as a fallback for a binary predating the export, not as the truth.
+   */
   | 'fix'
-  /** `publishFix` completed — the envelope was sealed and broadcast. */
+  /**
+   * A drain put at least one envelope on the wire.
+   *
+   * Native: `GateState.last_published_at`. Note this is not the same as the fixes having left the
+   * device — see `push`, and keep them apart.
+   */
   | 'publish'
-  /** `pushTrail` completed — the envelope actually left the device. */
+  /**
+   * A push completed, so the envelopes actually left the device.
+   *
+   * Native: `GateState.last_pushed_at`. The gap between this and `publish` is a phone talking to
+   * its own replica and reaching nobody, which is why they are two stamps and not one.
+   */
   | 'push'
   /** A `device.health` record was emitted. */
   | 'health';
 
 export type Watermarks = Partial<Record<WatermarkKind, number>>;
 
-const KINDS: WatermarkKind[] = ['wake', 'fix', 'publish', 'push', 'health'];
+const KINDS: WatermarkKind[] = ['wake', 'refresh', 'fix', 'publish', 'push', 'health'];
 
 function parse(raw: string | null): Watermarks {
   if (!raw) return {};

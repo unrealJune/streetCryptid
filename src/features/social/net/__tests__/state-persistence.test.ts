@@ -70,6 +70,45 @@ class FakeNativeModule {
   }
 }
 
+/**
+ * A binary that has the native counter. `FakeNativeModule` deliberately does NOT — it stands in
+ * for an installed build predating the API, which is the fallback path the `typeof` guards exist
+ * for, and which the rest of this file exercises.
+ */
+/** A binary with the native device-identity store the background drain path reads. */
+class NativeSecretsModule extends FakeNativeModule {
+  saved: { identity: string; recv: string }[] = [];
+  provisioned = false;
+  failSave = false;
+  async saveDeviceSecrets(identityHex: string, recvHex: string) {
+    if (this.failSave) throw new Error('keystore refused the write');
+    this.saved.push({ identity: identityHex, recv: recvHex });
+    this.provisioned = true;
+  }
+  deviceSecretsProvisioned() {
+    return this.provisioned;
+  }
+}
+
+class NativeSeqModule extends FakeNativeModule {
+  counter = 0;
+  seeds: number[] = [];
+  failSeed = false;
+  failNext = false;
+  async seedSeq(floor: number) {
+    this.seeds.push(floor);
+    if (this.failSeed) throw new Error('native seed failed');
+    if (floor <= this.counter) return false;
+    this.counter = floor;
+    return true;
+  }
+  async nextSeq() {
+    if (this.failNext) throw new Error('native counter write failed');
+    this.counter += 1;
+    return this.counter;
+  }
+}
+
 const mockHolder: { mod: FakeNativeModule } = { mod: new FakeNativeModule() };
 
 jest.mock('iroh-location', () => ({
@@ -156,6 +195,167 @@ describe('persistence semantics (step 0)', () => {
         svc.publishFix({ lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 200 })
       ).resolves.toBeGreaterThan(0);
       expect(mockHolder.mod.calls.publish).toHaveLength(1);
+    } finally {
+      await svc.shutdownAsync();
+    }
+  });
+});
+
+/**
+ * The counter moved into the native node (`seq_store.rs`) because every headless JS callback gets
+ * a fresh context, so each held its own copy of it and each handed out `n + 1`. These assert the
+ * two things that migration must not break: the native counter never starts below what SecureStore
+ * already published, and a binary without the API keeps working.
+ */
+/**
+ * The identity has to reach a store the background path can read, because that path builds a node
+ * with no JS context alive. `expo-secure-store` cannot serve it, so this is a mirror — safe here
+ * only because the identity is immutable, unlike `seq`, which had to move rather than be copied.
+ */
+describe('native device-secret mirror', () => {
+  it('writes the identity this session is actually using', async () => {
+    const mod = new NativeSecretsModule();
+    mockHolder.mod = mod;
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    try {
+      expect(mod.saved).toEqual([{ identity: 'ii', recv: 'rr' }]);
+    } finally {
+      await svc.shutdownAsync();
+    }
+  });
+
+  it('writes every launch, even when the store already looks provisioned', async () => {
+    // The dangerous shortcut: an entry can survive an app uninstall on iOS, so "already
+    // provisioned" can mean "holds an identity this install has never used". A background node
+    // built on that would publish under an endpoint no friend has paired with — invisible from the
+    // app, and absent from every trail.
+    const mod = new NativeSecretsModule();
+    mod.provisioned = true;
+    mockHolder.mod = mod;
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    try {
+      expect(mod.saved).toHaveLength(1);
+    } finally {
+      await svc.shutdownAsync();
+    }
+  });
+
+  it('still starts when the keystore refuses the write', async () => {
+    // The mounted path reads expo-secure-store and is untouched; what is lost is background
+    // publishing. Failing init here would trade a degraded feature for a dead app.
+    const mod = new NativeSecretsModule();
+    mod.failSave = true;
+    mockHolder.mod = mod;
+    const svc = new LocationSharingService();
+    await expect(svc.init('@me', 'mothman')).resolves.not.toThrow();
+    await svc.shutdownAsync();
+  });
+
+  it('is skipped entirely on a binary built before the native store existed', async () => {
+    mockHolder.mod = new FakeNativeModule();
+    const svc = new LocationSharingService();
+    await expect(svc.init('@me', 'mothman')).resolves.not.toThrow();
+    await svc.shutdownAsync();
+  });
+});
+
+describe('native seq counter', () => {
+  it('seeds native with the persisted floor before anything can publish', async () => {
+    await saveSeq(8_706);
+    const mod = new NativeSeqModule();
+    mockHolder.mod = mod;
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    try {
+      expect(mod.seeds).toEqual([8_706]);
+      // Starting from 1 here would re-issue every key up to 8706 — the exact failure this guards.
+      await expect(
+        svc.publishFix({ lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 100 })
+      ).resolves.toBe(8_707);
+    } finally {
+      await svc.shutdownAsync();
+    }
+  });
+
+  it('mirrors each native value back to SecureStore as downgrade insurance', async () => {
+    // An OTA that rolls the JS bundle back onto this binary resumes using state-store.ts; a
+    // mirror left behind at the pre-migration value would re-issue everything published since.
+    const mod = new NativeSeqModule();
+    mod.counter = 500;
+    mockHolder.mod = mod;
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    try {
+      await svc.publishFix({ lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 100 });
+      await expect(loadSeq()).resolves.toBe(501);
+    } finally {
+      await svc.shutdownAsync();
+    }
+  });
+
+  it('keeps publishing when the SecureStore mirror fails — native already persisted', async () => {
+    const mod = new NativeSeqModule();
+    mockHolder.mod = mod;
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    try {
+      mockSecureStore.failKeys.add(SEQ_KEY);
+      await expect(
+        svc.publishFix({ lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 100 })
+      ).resolves.toBe(1);
+      expect(mod.calls.publish).toHaveLength(1);
+    } finally {
+      await svc.shutdownAsync();
+    }
+  });
+
+  it('stays fail-stop: a native counter that cannot persist aborts the publish', async () => {
+    const mod = new NativeSeqModule();
+    mockHolder.mod = mod;
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    try {
+      mod.failNext = true;
+      await expect(
+        svc.publishFix({ lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 100 })
+      ).rejects.toThrow('native counter write failed');
+      expect(mod.calls.publish).toHaveLength(0);
+      expect(mod.calls.docsWrite).toHaveLength(0);
+    } finally {
+      await svc.shutdownAsync();
+    }
+  });
+
+  it('falls back to SecureStore rather than drawing from an unseeded native counter', async () => {
+    // If the seed did not land, native does not know the floor. Using it anyway would restart
+    // below values already on the wire, so the old path — monotonic on its own — is the safe one.
+    await saveSeq(300);
+    const mod = new NativeSeqModule();
+    mod.failSeed = true;
+    mockHolder.mod = mod;
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    try {
+      await expect(
+        svc.publishFix({ lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 100 })
+      ).resolves.toBe(301);
+      expect(mod.counter).toBe(0);
+    } finally {
+      await svc.shutdownAsync();
+    }
+  });
+
+  it('uses SecureStore on a binary built before the native counter existed', async () => {
+    await saveSeq(12);
+    mockHolder.mod = new FakeNativeModule();
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    try {
+      await expect(
+        svc.publishFix({ lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 100 })
+      ).resolves.toBe(13);
     } finally {
       await svc.shutdownAsync();
     }

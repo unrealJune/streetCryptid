@@ -1,5 +1,3 @@
-import { AppState } from 'react-native';
-
 import type { ContactCard, IncomingFix } from '../../core/types';
 import {
   createTelemetry,
@@ -30,6 +28,11 @@ class FakeNativeModule {
     pollResync: [] as { peer: string; recvPub: string }[],
     forgetSession: [] as string[],
     clearResync: 0,
+    setDeliveryConfig: [] as {
+      peerTickets: string[];
+      stashBaseUrl: string | null;
+      stashPsk: string | null;
+    }[],
   };
   private handlers: Record<string, (e: unknown) => void> = {};
   readonly unsubscribeFailures = new Set<string>();
@@ -115,6 +118,13 @@ class FakeNativeModule {
       ...(traceparent ? { traceparent } : {}),
     });
   }
+  async setDeliveryConfig(
+    peerTickets: string[],
+    stashBaseUrl: string | null,
+    stashPsk: string | null
+  ) {
+    this.calls.setDeliveryConfig.push({ peerTickets, stashBaseUrl, stashPsk });
+  }
   trailFixes: {
     author: string;
     seq: number;
@@ -183,12 +193,8 @@ jest.mock('expo-sqlite', () => ({
 // The watcher lifecycle installs an AppState listener in `init`. Spy on the real one to capture it:
 // spreading `requireActual('react-native')` eagerly evaluates every getter in the RN index (DevMenu,
 // FlatList, ...) and blows up under jest-expo, so a module mock is not an option here.
-const appStateListeners = new Set<(s: string) => void>();
 
 /** Drive an AppState transition through every listener the service installed. */
-function emitAppState(next: string): void {
-  for (const cb of [...appStateListeners]) cb(next);
-}
 
 // eslint-disable-next-line import/first
 import { LocationSharingService, type SharingSnapshot } from '../location-sharing';
@@ -360,6 +366,60 @@ describe('LocationSharingService — durable trail wiring', () => {
     await svc.init('@me', 'mothman');
     await svc.syncTrail(0);
     expect(mockHolder.mod.calls.syncLatest).toEqual([{ peerTickets: [] }]);
+  });
+
+  it('moves our own dot from the replica, not only from a manual push', async () => {
+    // Regression, 2026-08-30: "I cannot hit the location button (greyed out) after restarting the
+    // app. It seems to only work when a push has happened."
+    //
+    // The locate-me control is gated on `!hasLiveSelfFix || !selfFix`, and `hasLiveSelfFix` comes
+    // from `onLocalFix`. When capture moved into Rust, `ingestAndTrackLocal` — the only thing that
+    // fed our own dot from the pipeline — was left uncalled and nothing replaced it, so the sole
+    // live writer of `latestLocalFix` was the debug Push button. The user's description was an
+    // exact statement of the bug.
+    //
+    // The native runtime publishes with no JS alive, so the replica is where our own position has
+    // to come from now.
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+
+    const seen: { lat: number; lon: number; ts: number }[] = [];
+    svc.onLocalFix((fix) => seen.push(fix));
+    expect(seen).toHaveLength(0);
+
+    mockHolder.mod.trailFixes.push({
+      author: 'aa11',
+      seq: 9,
+      fix: { lat: 47.6062, lon: -122.3321, accuracyM: 12, headingDeg: 0, ts: 5_000 },
+    });
+    await svc.syncTrail(0);
+
+    expect(seen.at(-1)).toMatchObject({ lat: 47.6062, lon: -122.3321, ts: 5_000 });
+  });
+
+  it('never walks our own dot backwards from a replayed replica entry', async () => {
+    // `readLatest` is re-read in full on every sync, so the same entry arrives repeatedly and an
+    // older one can arrive after a newer publish. The dot must not jump back to it.
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+
+    const seen: { ts: number }[] = [];
+    svc.onLocalFix((fix) => seen.push(fix));
+
+    mockHolder.mod.trailFixes.push({
+      author: 'aa11',
+      seq: 9,
+      fix: { lat: 47.6062, lon: -122.3321, accuracyM: 12, headingDeg: 0, ts: 5_000 },
+    });
+    await svc.syncTrail(0);
+
+    await svc.forceLocationPush(
+      { lat: 47.61, lon: -122.33, accuracyM: 8, headingDeg: 0, ts: 9_000 },
+      'manual'
+    );
+    await svc.syncTrail(0);
+
+    expect(seen.at(-1)?.ts).toBe(9_000);
   });
 
   it('syncTrail explicitly targets the configured stash when opted in', async () => {
@@ -602,158 +662,88 @@ describe('LocationSharingService — durable trail wiring', () => {
   });
 });
 
-/**
- * The WATCHER half of live mode. Live mode used to be entirely send-side: the subject sped up, but
- * nothing on this end pulled any faster, so a watcher whose gossip link was not carrying — the
- * normal case for a distant friend behind a relay — saw the whole window arrive in one batch on
- * some later unrelated sync. These cover the pull loop and, just as importantly, that it can never
- * outlive the session it serves.
- */
-describe('LocationSharingService — live watch pull', () => {
+describe('LocationSharingService — native delivery targets', () => {
+  // Publishing is not delivery. `docsWrite` writes the LOCAL replica and iroh-docs broadcasts a
+  // local insert only for namespaces the live engine has marked as syncing, which a publish-only
+  // context never does — so a native drain that does not know who to push to seals correctly,
+  // reports success, and delivers nothing. Two phones ran a full day in that state on 2026-08-31.
+  // These assert the app tells native where to send, at every point the answer can change.
   beforeEach(() => {
     mockHolder.mod = new FakeNativeModule();
     mockHolder.stashConfig = null;
     setTelemetryForTesting(undefined);
-    // The durable journal is what the shipper drains, so spans carry between tests unless it is
-    // cleared here too — the telemetry singleton is no longer the whole of the exported state.
     resetEventLogForTesting();
-    appStateListeners.clear();
-    jest.spyOn(AppState, 'addEventListener').mockImplementation(((
-      _event: string,
-      cb: (state: string) => void
-    ) => {
-      appStateListeners.add(cb);
-      return { remove: () => appStateListeners.delete(cb) };
-    }) as unknown as typeof AppState.addEventListener);
-    jest.useFakeTimers();
   });
 
-  afterEach(() => {
-    jest.runOnlyPendingTimers();
-    jest.useRealTimers();
-    jest.restoreAllMocks();
+  it('seeds the native push targets on init, before anything has changed', async () => {
+    // A device whose pool has not changed since the last launch would otherwise leave native
+    // holding a list nobody refreshed, and a background wake would publish to nowhere.
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+
+    expect(mockHolder.mod.calls.setDeliveryConfig.length).toBeGreaterThan(0);
   });
 
-  /** A service with a friend added and sharing on, ready to be asked to watch. */
-  async function watching(): Promise<LocationSharingService> {
-    const svc = makeService({ randomBytes: async (n: number) => new Uint8Array(n).fill(7) });
+  it('mirrors a friend ticket to native when the pool changes', async () => {
+    const svc = makeService();
     await svc.init('@me', 'mothman');
     await svc.addFriend(friend);
-    await svc.shareWith(friend.endpointId);
-    return svc;
-  }
 
-  /** syncTrail calls since a mark, ignoring the ones add/share themselves trigger. */
-  function syncsSince(svc: LocationSharingService, mark: number): number {
-    void svc;
-    return mockHolder.mod.calls.syncLatest.length - mark;
-  }
-
-  it('pulls the trail on an interval while a live session is active', async () => {
-    const svc = await watching();
-    await svc.requestLive(friend.endpointId, 5 * 60_000);
-    const mark = mockHolder.mod.calls.syncLatest.length;
-
-    await jest.advanceTimersByTimeAsync(8_000);
-    expect(syncsSince(svc, mark)).toBe(1);
-
-    await jest.advanceTimersByTimeAsync(24_000);
-    expect(syncsSince(svc, mark)).toBe(4);
+    expect(mockHolder.mod.calls.setDeliveryConfig.at(-1)?.peerTickets).toContain('ticket-b');
   });
 
-  it('writes the request into our own namespace rather than uploading anything', async () => {
-    const svc = await watching();
-    await svc.requestLive(friend.endpointId, 5 * 60_000);
-
-    // Wrapped for exactly one recipient: nobody else, including the stash, can tell a request was
-    // sent, let alone to whom.
-    expect(mockHolder.mod.calls.docsWriteControl).toHaveLength(1);
-    expect(mockHolder.mod.calls.docsWriteControl[0][1]).toEqual([friend.recvPublic]);
-  });
-
-  it('stops pulling when the request is withdrawn', async () => {
-    const svc = await watching();
-    await svc.requestLive(friend.endpointId, 5 * 60_000);
-    await jest.advanceTimersByTimeAsync(8_000);
-
-    await svc.cancelLiveRequest(friend.endpointId);
-    const mark = mockHolder.mod.calls.syncLatest.length;
-
-    await jest.advanceTimersByTimeAsync(40_000);
-    expect(syncsSince(svc, mark)).toBe(0);
-  });
-
-  it('stops pulling once the window it was serving has lapsed', async () => {
-    const svc = await watching();
-    // Clamped up to LIVE_TTL_MIN_MS (60s), so the session expires a minute in.
-    await svc.requestLive(friend.endpointId, 1_000);
-
-    await jest.advanceTimersByTimeAsync(8_000);
-    const beforeExpiry = mockHolder.mod.calls.syncLatest.length;
-    expect(beforeExpiry).toBeGreaterThan(0);
-
-    await jest.advanceTimersByTimeAsync(70_000);
-    const afterExpiry = mockHolder.mod.calls.syncLatest.length;
-
-    // A lapsed session must not keep a timer alive behind it.
-    await jest.advanceTimersByTimeAsync(40_000);
-    expect(mockHolder.mod.calls.syncLatest.length).toBe(afterExpiry);
-  });
-
-  // Backgrounding withdraws the ask: a watcher not looking at the screen has no use for a friend's
-  // real-time GPS, and leaving it standing keeps their phone at the live cadence for the whole TTL.
-  it('withdraws the request and stops pulling when the app is backgrounded', async () => {
-    const svc = await watching();
-    await svc.requestLive(friend.endpointId, 5 * 60_000);
-    await jest.advanceTimersByTimeAsync(8_000);
-
-    emitAppState('background');
-    await jest.advanceTimersByTimeAsync(0);
-
-    // A cancel is written into our control slot, superseding the request.
-    expect(mockHolder.mod.calls.docsWriteControl.length).toBeGreaterThanOrEqual(2);
-
-    const mark = mockHolder.mod.calls.syncLatest.length;
-    await jest.advanceTimersByTimeAsync(40_000);
-    expect(syncsSince(svc, mark)).toBe(0);
-  });
-
-  it('does not overlap ticks when a sync runs longer than the interval', async () => {
-    const svc = await watching();
-    const original = mockHolder.mod.syncLatest.bind(mockHolder.mod);
-    const gates: (() => void)[] = [];
-    let inFlight = 0;
-    let maxConcurrent = 0;
-    mockHolder.mod.syncLatest = async (...args: Parameters<typeof original>) => {
-      inFlight += 1;
-      maxConcurrent = Math.max(maxConcurrent, inFlight);
-      await original(...args);
-      await new Promise<void>((resolve) => gates.push(resolve));
-      inFlight -= 1;
+  it('sends the stash URL only once it is opted into, and the ticket leads', async () => {
+    // Gated on the opt-in rather than on the stash being built into this bundle: uploading for a
+    // user who switched it off would PUT sealed envelopes into a namespace nothing registered.
+    mockHolder.stashConfig = {
+      baseUrl: 'https://stash.example.com',
+      ticket: 'ticket-stash',
+      psk: null,
     };
+    const stash = { configured: true, registerNamespace: async () => {} };
+    const svc = makeService({ stash });
+    await svc.init('@me', 'mothman');
 
-    await svc.requestLive(friend.endpointId, 5 * 60_000);
-    // Four ticks' worth of interval against a sync that never finishes on its own.
-    await jest.advanceTimersByTimeAsync(32_000);
+    expect(mockHolder.mod.calls.setDeliveryConfig.at(-1)?.stashBaseUrl).toBeNull();
 
-    expect(maxConcurrent).toBe(1);
+    await svc.setStashOptIn(true);
 
-    // Let the held sync finish so nothing is left pending when the test ends.
-    for (const open of gates.splice(0)) open();
-    await jest.advanceTimersByTimeAsync(0);
-    mockHolder.mod.syncLatest = original;
+    const latest = mockHolder.mod.calls.setDeliveryConfig.at(-1);
+    expect(latest?.stashBaseUrl).toBe('https://stash.example.com');
+    // Same order as `durablePeerTickets`: the stash is always-on and usually answers immediately.
+    expect(latest?.peerTickets[0]).toBe('ticket-stash');
+  });
+
+  it('stops naming the stash when the user opts back out', async () => {
+    mockHolder.stashConfig = {
+      baseUrl: 'https://stash.example.com',
+      ticket: 'ticket-stash',
+      psk: null,
+    };
+    const stash = { configured: true, registerNamespace: async () => {} };
+    const svc = makeService({ stash });
+    await svc.init('@me', 'mothman');
+    await svc.setStashOptIn(true);
+    await svc.setStashOptIn(false);
+
+    const latest = mockHolder.mod.calls.setDeliveryConfig.at(-1);
+    expect(latest?.stashBaseUrl).toBeNull();
+    expect(latest?.peerTickets).not.toContain('ticket-stash');
+  });
+
+  it('tolerates a binary built before the native push path existed', async () => {
+    // A phone can run an older binary than the JS bundle; the guard must report the truth rather
+    // than throwing inside a pool change.
+    const mod = new FakeNativeModule();
+    (mod as { setDeliveryConfig?: unknown }).setDeliveryConfig = undefined;
+    mockHolder.mod = mod;
+    const svc = makeService();
+
+    await expect(svc.init('@me', 'mothman')).resolves.not.toThrow();
+    await expect(svc.addFriend(friend)).resolves.not.toThrow();
   });
 });
 
-/**
- * Symmetric lanes — FORWARD-SECRECY.md §4.1 / §7 step 5.
- *
- * Every sharing relationship runs the protocol in both directions: a friend we do NOT share
- * position with still receives an envelope from us on the same cadence, carrying an empty padded
- * payload instead of a position. These tests pin the *routing* (who gets which lane, and that the
- * two lanes never address the same person or the same durable slot); the constant-ciphertext-length
- * property they depend on is pinned Rust-side in `modules/iroh-location/rust/tests/pad.rs`.
- */
 describe('LocationSharingService — symmetric lanes (null fixes)', () => {
   const watcherFriend: ContactCard = {
     endpointId: 'cc33',

@@ -8,7 +8,7 @@ import {
   useState,
   type PropsWithChildren,
 } from 'react';
-import { AppState, Platform } from 'react-native';
+import { Platform } from 'react-native';
 
 import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
 import { runDevCommand as runDevCommandImpl } from '@/features/dev/commands/dev-commands';
@@ -43,6 +43,16 @@ export type LocationRuntimeStatus =
  * permission prompt — for any app requesting ACCESS_BACKGROUND_LOCATION. `pending` gates the app
  * behind `LocationDisclosureScreen`; `loading` is the brief KV read on boot.
  */
+/** Options for {@link LocationSharingContextValue.locateNow}. */
+export interface LocateOptions {
+  /**
+   * Whether a missing permission may be requested. Defaults to `true`, which is correct for a
+   * user-initiated read; pass `false` from anything that runs by itself, so the OS dialog can never
+   * precede the in-app disclosure screen.
+   */
+  prompt?: boolean;
+}
+
 export type LocationDisclosureStatus = 'loading' | 'pending' | 'accepted' | 'declined';
 
 interface LocationSharingContextValue {
@@ -71,9 +81,7 @@ interface LocationSharingContextValue {
   refreshTransportDiagnostics(): Promise<void>;
   toggleShare(endpointId: string, on: boolean): Promise<void>;
   /** Ask a friend for real-time location, or withdraw the ask (ARCHITECTURE §9c). */
-  toggleWatch(endpointId: string, on: boolean): Promise<void>;
   /** End a friend's live window on us immediately. */
-  stopWatcher(endpointId: string): Promise<void>;
   removeFriend(endpointId: string): Promise<void>;
   retryLocation(): Promise<void>;
   /** Opt in/out of offline delivery via the trail stash. */
@@ -82,6 +90,13 @@ interface LocationSharingContextValue {
   setTransportEnabled(transport: keyof TransportPreferences, enabled: boolean): Promise<void>;
   /** Change how often location is published. One of `SHARE_INTERVAL_OPTIONS_MS`. */
   setShareInterval(intervalMs: number): Promise<void>;
+  /**
+   * Read the user's current position for the UI, asking the OS if we do not have one.
+   *
+   * Deliberately unrelated to sharing: it publishes nothing, needs only foreground permission, and
+   * resolves `null` when location is refused. This is what "show me where I am" runs on.
+   */
+  locateNow(options?: LocateOptions): Promise<LocationFix | null>;
   /** Capture and publish a fresh GPS fix immediately, bypassing normal sampling. */
   forceLocationPush(trigger?: 'manual' | 'scheduled'): Promise<number>;
   /**
@@ -233,17 +248,6 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       setLocationError(errorMessage(startError));
     }
   }, []);
-
-  useEffect(() => {
-    if (locationStatus !== 'permission-denied') return;
-    const subscription = AppState.addEventListener('change', (state) => {
-      if (state !== 'active') return;
-      const service = serviceRef.current;
-      if (!service) return;
-      void service.stopBackground().then(() => startLocation(service));
-    });
-    return () => subscription.remove();
-  }, [locationStatus, startLocation]);
 
   // Fires once both the node is ready and the user has accepted the in-app disclosure — whichever
   // resolves last. Covers a returning user (disclosure already 'accepted' from a prior session, node
@@ -510,6 +514,41 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     },
     [run]
   );
+  /**
+   * Where the user is, right now, for the UI — independent of the sharing pipeline entirely.
+   *
+   * "Show me where I am" and "have I published a fix" are different questions, and tying the first
+   * to the second is what left a freshly installed, correctly paired app unable to centre its own
+   * map: `hasLiveSelfFix` was only ever set by something reaching the publish path, so until a fix
+   * had been sealed and written to the replica the app behaved as though it had no idea where the
+   * user was. It always did — it just had not asked.
+   *
+   * Needs only foreground permission, which is the same grant the map itself runs on. Returns
+   * `null` rather than throwing: the caller is a map control, and a refused read is a thing to stop
+   * quietly on, not an error to raise over the map.
+   */
+  const locateNow = useCallback(async (options?: LocateOptions): Promise<LocationFix | null> => {
+    try {
+      const provider =
+        foregroundLocationProviderRef.current ??
+        (foregroundLocationProviderRef.current = new ExpoLocationProvider());
+      // `prompt: false` is for callers that run on their own rather than in response to a tap.
+      // Google Play requires the in-app disclosure screen to precede the OS dialog, so an automatic
+      // read must be able to decline to ask; a tap is exactly the moment when asking is right.
+      const allowed =
+        options?.prompt === false
+          ? await provider.hasPermission()
+          : await provider.ensurePermission();
+      if (!allowed) return null;
+      const fix = await provider.getCurrent();
+      // Keep it, so the self marker and the initial camera stop waiting on a publish too.
+      setLiveSelfFix((current) => (!current || fix.ts >= current.ts ? fix : current));
+      return fix;
+    } catch {
+      return null;
+    }
+  }, []);
+
   const forceLocationPush = useCallback(async (trigger: 'manual' | 'scheduled' = 'manual') => {
     const service = serviceRef.current;
     if (!service) {
@@ -558,28 +597,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     },
     [run]
   );
-  /**
-   * Ask a friend to switch to the real-time cadence, or withdraw the ask (ARCHITECTURE §9c).
-   * Surfaces failures — "this build cannot send live requests yet" on an iOS binary predating the
-   * control bindings is a real answer the user needs, not something to swallow.
-   */
-  const toggleWatch = useCallback(
-    (endpointId: string, on: boolean) => {
-      setServiceError(null);
-      return run((service) =>
-        on ? service.requestLive(endpointId) : service.cancelLiveRequest(endpointId)
-      );
-    },
-    [run]
-  );
   /** End a friend's live window on us right now. */
-  const stopWatcher = useCallback(
-    (endpointId: string) => {
-      setServiceError(null);
-      return run((service) => service.stopWatcher(endpointId));
-    },
-    [run]
-  );
   const removeFriend = useCallback(async (endpointId: string) => {
     setServiceError(null);
     const service = serviceRef.current;
@@ -612,7 +630,21 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       }),
     [snapshot?.friends, friendFixes, hasLiveSelfFix, selfFix]
   );
-  const error = locationError ?? serviceError;
+  // `permission-denied` is a claim about the OS, and it is the one bit of location state that goes
+  // stale in our hand. It is set once, from whatever `startBackground` read at start-up; the service
+  // re-derives the real answer on every foreground and reports it on the snapshot. Derived rather
+  // than written back, so there is one source of truth and no cascading render.
+  //
+  // This replaces an effect that tore the whole runtime down and restarted it on every foreground
+  // while the status was denied — which on 2026-08-30 was a phone that had held `authorizedAlways`
+  // the entire time and had merely read the permission one beat too early on a fresh install. A
+  // genuine denial leaves `backgroundAccess` at `foreground`, and the banner correctly stands.
+  const accessRecovered =
+    locationStatus === 'permission-denied' && snapshot?.backgroundAccess === 'full';
+  const effectiveLocationStatus: LocationRuntimeStatus = accessRecovered
+    ? 'running'
+    : locationStatus;
+  const error = (accessRecovered ? null : locationError) ?? serviceError;
 
   const transportReport = useMemo<TransportReport>(
     () =>
@@ -651,7 +683,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       selfFix,
       hasLiveSelfFix,
       friends,
-      locationStatus,
+      locationStatus: effectiveLocationStatus,
       error,
       disclosureStatus,
       acknowledgeLocationDisclosure,
@@ -667,13 +699,12 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       refreshPairing,
       refreshTransportDiagnostics,
       toggleShare,
-      toggleWatch,
-      stopWatcher,
       removeFriend,
       retryLocation,
       setStashOptIn,
       setTransportEnabled,
       setShareInterval,
+      locateNow,
       forceLocationPush,
       runDevCommand,
       transportReport,
@@ -686,7 +717,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       selfFix,
       hasLiveSelfFix,
       friends,
-      locationStatus,
+      effectiveLocationStatus,
       disclosureStatus,
       acknowledgeLocationDisclosure,
       error,
@@ -702,13 +733,12 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       refreshPairing,
       refreshTransportDiagnostics,
       toggleShare,
-      toggleWatch,
-      stopWatcher,
       removeFriend,
       retryLocation,
       setStashOptIn,
       setTransportEnabled,
       setShareInterval,
+      locateNow,
       forceLocationPush,
       runDevCommand,
       transportReport,

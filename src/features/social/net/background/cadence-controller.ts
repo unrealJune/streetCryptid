@@ -1,8 +1,7 @@
 import type { BatterySource } from './battery-source';
-import type { BackgroundStartConfig } from './background-task';
 import { getTelemetry } from '@/features/dev/telemetry';
 import type { EngineState } from './location-engine';
-import type { SamplingDecision } from './types';
+import type { AccuracyTier, SamplingDecision } from './types';
 
 /**
  * Bridges the engine's sampling decisions to the OS location task. Without it, the engine computes
@@ -21,9 +20,24 @@ import type { SamplingDecision } from './types';
  * two `startLocationUpdatesAsync` calls never race the same OS task.
  */
 
-/** The provider seam: re-arm the running OS task without re-requesting permission. */
+/**
+ * What a cadence looks like to the thing being re-armed.
+ *
+ * Three fields, not a whole task config: the native runtime owns its own notification, providers
+ * and background modes, so the only things a policy decision changes are how often we publish, how
+ * far the phone must move before the OS bothers us, and which accuracy tier to ask for.
+ */
+export interface CadenceTarget {
+  /** The publish slot the native gate enforces. */
+  intervalMs: number;
+  /** Distance filter. On iOS this is the only hardware-facing control — `timeInterval` is ignored. */
+  distanceIntervalM: number;
+  accuracy: AccuracyTier;
+}
+
+/** The provider seam: re-arm the running native runtime without re-requesting permission. */
 export interface CadenceProvider {
-  reprogram(cfg: BackgroundStartConfig): Promise<void>;
+  reprogram(cfg: CadenceTarget): Promise<void>;
 }
 
 /** The slice of the engine the controller observes. */
@@ -32,22 +46,14 @@ export interface CadenceEngine {
   reevaluate(): Promise<unknown>;
 }
 
-/** Foreground-service notification carried through every re-arm (unchanged by cadence). */
-export interface CadenceNotification {
-  title: string;
-  body: string;
-  color?: string;
-}
-
 export interface CadenceControllerOptions {
   engine: CadenceEngine;
   provider: CadenceProvider;
   battery: BatterySource;
-  notification: CadenceNotification;
   /** Caller-supplied start options that must remain fixed across policy-driven re-arms. */
-  overrides?: Partial<BackgroundStartConfig>;
+  overrides?: Partial<CadenceTarget>;
   /** The cfg the OS was first armed with, so we don't redundantly re-arm on the first decision. */
-  seed?: BackgroundStartConfig;
+  seed?: CadenceTarget;
   onError?(error: unknown): void;
 }
 
@@ -56,48 +62,38 @@ export interface CadenceController {
   start(): () => Promise<void>;
 }
 
-/** Translate a sampling decision into a full OS re-arm config. */
-export function cfgFromDecision(
-  decision: SamplingDecision,
-  notification: CadenceNotification
-): BackgroundStartConfig {
+/**
+ * Translate a sampling decision into what the native runtime needs.
+ *
+ * Much smaller than it was, because the runtime owns the rest. The notification text, the
+ * foreground-service type, the background modes and the auto-pause flag are all its business now —
+ * notably auto-pause, which is `false` there and was `true` here, and is what cost an iPhone
+ * nineteen hours (see `BackgroundLocationRuntime.swift`).
+ */
+export function cfgFromDecision(decision: SamplingDecision): CadenceTarget {
   return {
     accuracy: decision.accuracy,
-    timeIntervalMs: decision.timeIntervalMs,
+    intervalMs: decision.timeIntervalMs,
     distanceIntervalM: decision.distanceIntervalM,
-    deferredUpdatesIntervalMs: decision.deferredUpdatesIntervalMs,
-    // Pinned to `other`. This used to track the motion class (fitness/automotive), which let Core
-    // Location pace itself — but it is derived from movement, and we no longer classify movement at
-    // all. A constant hint also keeps the OS request identical whatever the user is doing.
-    activityType: 'other',
-    // Apple recommends auto-pause for sustained background tracking. Expo also registers the
-    // significant-change service, and our revive fence covers terminated-process recovery.
-    pausesUpdatesAutomatically: true,
-    notificationTitle: notification.title,
-    notificationBody: notification.body,
-    ...(notification.color ? { notificationColor: notification.color } : {}),
   };
 }
 
-/** Whether two configs differ in any cadence-relevant field (notification text is ignored). */
-export function cadenceDiffers(a: BackgroundStartConfig, b: BackgroundStartConfig): boolean {
+/** Whether two targets differ in anything worth re-arming for. */
+export function cadenceDiffers(a: CadenceTarget, b: CadenceTarget): boolean {
   return (
     a.accuracy !== b.accuracy ||
-    a.timeIntervalMs !== b.timeIntervalMs ||
-    a.distanceIntervalM !== b.distanceIntervalM ||
-    (a.deferredUpdatesIntervalMs ?? 0) !== (b.deferredUpdatesIntervalMs ?? 0) ||
-    (a.activityType ?? 'other') !== (b.activityType ?? 'other') ||
-    (a.pausesUpdatesAutomatically ?? false) !== (b.pausesUpdatesAutomatically ?? false)
+    a.intervalMs !== b.intervalMs ||
+    a.distanceIntervalM !== b.distanceIntervalM
   );
 }
 
 export function createCadenceController(opts: CadenceControllerOptions): CadenceController {
-  const { engine, provider, battery, notification, overrides, seed, onError } = opts;
+  const { engine, provider, battery, overrides, seed, onError } = opts;
 
   return {
     start(): () => Promise<void> {
-      let armed: BackgroundStartConfig | null = seed ?? null;
-      let desired: BackgroundStartConfig | null = seed ?? null;
+      let armed: CadenceTarget | null = seed ?? null;
+      let desired: CadenceTarget | null = seed ?? null;
       let driving = false;
       let stopped = false;
       let drivePromise: Promise<void> | null = null;
@@ -121,9 +117,9 @@ export function createCadenceController(opts: CadenceControllerOptions): Cadence
                 getTelemetry()
                   .startSpan('cadence.rearm', {
                     attributes: {
-                      'requested.interval_ms': target.timeIntervalMs,
+                      'requested.interval_ms': target.intervalMs,
                       'requested.distance_m': target.distanceIntervalM,
-                      'armed.interval_ms': armed?.timeIntervalMs,
+                      'armed.interval_ms': armed?.intervalMs,
                       'armed.distance_m': armed?.distanceIntervalM,
                       'sc.drop_reason': 'cadence-rearm-failed',
                       'exception.message': error instanceof Error ? error.message : String(error),
@@ -143,7 +139,7 @@ export function createCadenceController(opts: CadenceControllerOptions): Cadence
       const offState = engine.onState((state) => {
         if (!state.decision) return;
         const cfg = {
-          ...cfgFromDecision(state.decision, notification),
+          ...cfgFromDecision(state.decision),
           ...overrides,
         };
         desired = cfg;

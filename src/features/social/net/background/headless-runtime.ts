@@ -11,11 +11,11 @@ import {
   loadSharingEnabled,
   saveTeardownWatermark,
 } from '../persistence';
-import { backgroundOutbox } from './background-outbox';
 import { recordDeviceHealth } from './device-health';
-import type { PersistentKV } from './fix-outbox';
+import type { PersistentKV } from './persistent-kv';
+import type { LocationFix } from '../../core/types';
+import { tryGetIrohLocation } from 'iroh-location';
 import { reportStrandedTeardown } from './teardown-watermark';
-import { isBackgroundLocationRunning, startBackgroundLocation } from './background-task';
 import { createBatterySource } from './battery-source';
 import { cfgFromDecision } from './cadence-controller';
 import {
@@ -266,7 +266,10 @@ export async function ensureSharingArmedHeadless(
   // The OS may have brought the task back on its own (boot receiver, START_REDELIVER_INTENT), in
   // which case there is nothing to do — but "nothing to do" and "never ran" are different
   // diagnoses on a phone that has gone quiet, so both are recorded.
-  if (await isBackgroundLocationRunning()) return skip('already-running');
+  // The OS may have brought the runtime back on its own (boot receiver, START_REDELIVER_INTENT),
+  // in which case there is nothing to do — but "nothing to do" and "never ran" are different
+  // diagnoses on a phone that has gone quiet, so both are recorded.
+  if (tryGetIrohLocation()?.nativeBackgroundRunning?.()) return skip('already-running');
 
   const span = getTelemetry().startSpan('bg.selfheal', {
     parent,
@@ -282,13 +285,13 @@ export async function ensureSharingArmedHeadless(
     // mode compounds instead of ending.
     const decision = policy.decide({ battery: await createBatterySource().read() });
     span.setAttribute('decision.interval_ms', decision.timeIntervalMs);
-    await startBackgroundLocation(
-      cfgFromDecision(decision, {
-        title: 'streetCryptid',
-        body: "Keeping your friends' map current.",
-        color: '#C6791A',
-      })
-    );
+    // Restart the native runtime rather than an OS task. On Android this is the documented
+    // geofence exemption to the ban on starting a foreground service from the background, which is
+    // the only legal window a self-heal has (see `revive-task.ts`).
+    const mod = tryGetIrohLocation();
+    const target = cfgFromDecision(decision);
+    mod?.setBackgroundCadence?.(target.intervalMs, target.distanceIntervalM, target.accuracy);
+    mod?.startNativeBackground?.();
     span.setStatus('ok');
     return true;
   } catch (err) {
@@ -317,15 +320,22 @@ export async function ensureSharingArmedHeadless(
  * killed. Called by the location TaskManager handler after it persists a batch. No-op while active
  * (the mounted runtime drains the outbox itself) or when nothing is queued.
  */
-export function flushBackgroundOutboxHeadless(parent?: SpanContext): Promise<number> {
+export function ingestFixesHeadless(
+  fixes: readonly LocationFix[],
+  parent?: SpanContext
+): Promise<number> {
   return runHeadless({
-    precheck: async () => (await backgroundOutbox.pending()) > 0,
+    // Being handed fixes IS the precheck now. The old one asked the JS outbox whether anything was
+    // queued; the queue is native, and asking it would mean building the very node we are trying
+    // to avoid building for nothing.
+    precheck: async () => fixes.length > 0,
     fallback: 0,
     trigger: 'drain',
     run: async (service) => {
-      const published = await backgroundOutbox.drain(async (fix, drainParent) => {
-        await service.publishFix(fix, drainParent);
-      }, parent);
+      let published = 0;
+      for (const fix of fixes) {
+        published += await service.ingestNativeFix(fix, parent);
+      }
       // `publishFix` only broadcasts live (to a swarm that is usually empty out here) and writes
       // the LOCAL docs replica. Without this push the envelopes never leave the phone, so a friend
       // who wasn't online at this exact moment never sees them — the whole reason the stash exists.
@@ -380,11 +390,9 @@ function runRefresh(parent?: SpanContext): Promise<void> {
       // just published and pulls what friends left at the stash. Syncing first (as this did) meant
       // every fix published here waited for the *next* OS wake to be pushed — ~15 min at best on
       // Android, and on iOS potentially never.
-      if ((await backgroundOutbox.pending()) > 0) {
-        await backgroundOutbox.drain(async (fix, drainParent) => {
-          await service.publishFix(fix, drainParent);
-        }, parent);
-      }
+      // The native heartbeat fills any slots that elapsed while this phone was frozen AND drains
+      // whatever was already queued, so one call covers both halves of what this used to do.
+      await service.heartbeatNativeFix(parent);
       await service.syncTrail(0, parent);
     },
   });

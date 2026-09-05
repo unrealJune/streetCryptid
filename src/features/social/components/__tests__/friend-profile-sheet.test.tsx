@@ -42,16 +42,12 @@ function renderSheet(presence: FriendPresence): ReactTestRenderer {
         presence={presence}
         visible
         sharing
-        watching={false}
-        watchedUntil={null}
         ratchetActivity={{
           fix: { seq: 12, receivedAt: Date.now(), source: 'live' },
           null: { seq: 13, receivedAt: Date.now() - 120_000, source: 'durable' },
         }}
         onClose={() => {}}
         onToggleShare={noop}
-        onToggleWatch={noop}
-        onStopWatcher={noop}
         onViewMap={() => {}}
         onRemove={noop}
       />

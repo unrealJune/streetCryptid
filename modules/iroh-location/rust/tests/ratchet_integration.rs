@@ -75,7 +75,10 @@ async fn replicate(
         .await
         .expect("stash imports author trail");
     stash
-        .sync_latest(vec![author.ticket().await.expect("author endpoint ticket")], None)
+        .sync_latest(
+            vec![author.ticket().await.expect("author endpoint ticket")],
+            None,
+        )
         .await
         .expect("stash reconciles with author");
     reader
@@ -83,7 +86,10 @@ async fn replicate(
         .await
         .expect("reader imports friend trail");
     reader
-        .sync_latest(vec![stash.ticket().await.expect("stash endpoint ticket")], None)
+        .sync_latest(
+            vec![stash.ticket().await.expect("stash endpoint ticket")],
+            None,
+        )
         .await
         .expect("reader reconciles with stash");
 }
