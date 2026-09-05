@@ -627,7 +627,7 @@ internal interface UniffiCallbackInterfaceDeviceSecretsMethod1 : com.sun.jna.Cal
     fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceFixListenerMethod0 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`via`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`via`: RustBuffer.ByValue,`viaPeer`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceFixListenerMethod1 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
@@ -706,243 +706,245 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckApiChecksums(this)
     }
     external fun uniffi_iroh_location_checksum_func_decode_mvt_bundle(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_decode_mvt_tile(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_decode_pair_invite(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_derive_topic(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_encode_pair_invite(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_generate_recv_keypair(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_h3_cells_for_polygon(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_mesh_capsule_header(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_mesh_capsule_open(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_mesh_capsule_seal(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_mesh_constants(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_mesh_epoch(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_mesh_expected_tags(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_mesh_open_fix(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_mesh_seal_fix(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_configure_telemetry(
-    ): Int
-    external fun uniffi_iroh_location_checksum_func_flush_telemetry(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_devicesecrets_identity_secret(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_devicesecrets_recv_secret(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_fixlistener_on_fix(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_fixlistener_on_opaque(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_fixlistener_on_status(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_begin_session(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_ble_available(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_ble_capabilities(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_ble_has_scan_hint(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_cancel_pair(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_clear_outbox(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_clear_resync(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_complete_session(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_confirm_pair_display(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_create_invite(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_current_seq(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_delivery_config(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_doc_ticket(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_control(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_inner(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted_traced(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null_traced(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_inner(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_traced(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_traced(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_endpoint_id(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_forget_session(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_has_session(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_identity_secret(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_import_doc_ticket(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_import_profile_ticket(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair_by_ticket(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_is_desynced(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_list_pair_sessions(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_nearby_ble_peers(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_network_changed(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_next_seq(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_outbox_pending(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_pair_result(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_pair_sas_challenge(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_pair_state(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_pairing_ready(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_poll_pair_events(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_poll_profile_events(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_poll_resync(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_profile_ticket(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_prune_trail(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_publish_profile(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_publish_resync(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_publish_watermarks(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_push_trail(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_read_control(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_read_latest(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted_events(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_read_profile(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_recv_public(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_recv_secret(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_resolve_bump_peer(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_respond_pair(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_resync_count(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_seed_seq(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_set_delivery_config(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_set_transport_config(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_sharing_recipients(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_shutdown(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_start(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_start_stored(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_submit_pair_choice(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_subscribe(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_sync_latest(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_ticket(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_trail_replica_status(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_locationnode_upload_trail_content(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_deliver(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_have(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_insert(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_latest(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_prune(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_meshcapsulestore_stats(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_subscription_heartbeat_fix(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_subscription_ingest_fix(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_subscription_publish(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_subscription_publish_inner(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_subscription_publish_null(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_subscription_publish_null_traced(
-    ): Int
-    external fun uniffi_iroh_location_checksum_method_subscription_publish_traced(
-    ): Int
-    external fun uniffi_iroh_location_checksum_constructor_locationnode_from_device_secrets(
-    ): Int
-    external fun uniffi_iroh_location_checksum_constructor_locationnode_new(
-    ): Int
-    external fun uniffi_iroh_location_checksum_constructor_locationnode_new_at_dirs(
-    ): Int
-    external fun uniffi_iroh_location_checksum_constructor_meshcapsulestore_new(
-    ): Int
-    external fun ffi_iroh_location_uniffi_contract_version(
-    ): Int
+): Int
+external fun uniffi_iroh_location_checksum_func_decode_mvt_tile(
+): Int
+external fun uniffi_iroh_location_checksum_func_decode_pair_invite(
+): Int
+external fun uniffi_iroh_location_checksum_func_derive_topic(
+): Int
+external fun uniffi_iroh_location_checksum_func_encode_pair_invite(
+): Int
+external fun uniffi_iroh_location_checksum_func_endpoint_id_from_ticket(
+): Int
+external fun uniffi_iroh_location_checksum_func_generate_recv_keypair(
+): Int
+external fun uniffi_iroh_location_checksum_func_h3_cells_for_polygon(
+): Int
+external fun uniffi_iroh_location_checksum_func_mesh_capsule_header(
+): Int
+external fun uniffi_iroh_location_checksum_func_mesh_capsule_open(
+): Int
+external fun uniffi_iroh_location_checksum_func_mesh_capsule_seal(
+): Int
+external fun uniffi_iroh_location_checksum_func_mesh_constants(
+): Int
+external fun uniffi_iroh_location_checksum_func_mesh_epoch(
+): Int
+external fun uniffi_iroh_location_checksum_func_mesh_expected_tags(
+): Int
+external fun uniffi_iroh_location_checksum_func_mesh_open_fix(
+): Int
+external fun uniffi_iroh_location_checksum_func_mesh_seal_fix(
+): Int
+external fun uniffi_iroh_location_checksum_func_configure_telemetry(
+): Int
+external fun uniffi_iroh_location_checksum_func_flush_telemetry(
+): Int
+external fun uniffi_iroh_location_checksum_method_devicesecrets_identity_secret(
+): Int
+external fun uniffi_iroh_location_checksum_method_devicesecrets_recv_secret(
+): Int
+external fun uniffi_iroh_location_checksum_method_fixlistener_on_fix(
+): Int
+external fun uniffi_iroh_location_checksum_method_fixlistener_on_opaque(
+): Int
+external fun uniffi_iroh_location_checksum_method_fixlistener_on_status(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_begin_session(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_ble_available(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_ble_capabilities(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_ble_has_scan_hint(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_cancel_pair(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_clear_outbox(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_clear_resync(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_complete_session(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_confirm_pair_display(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_create_invite(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_current_seq(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_delivery_config(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_doc_ticket(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_docs_write(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_control(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_inner(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted_traced(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_null_traced(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_inner(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_traced(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_traced(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_endpoint_id(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_forget_session(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_has_session(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_identity_secret(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_import_doc_ticket(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_import_profile_ticket(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair_by_ticket(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_is_desynced(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_list_pair_sessions(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_nearby_ble_peers(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_network_changed(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_next_seq(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_outbox_pending(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_pair_result(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_pair_sas_challenge(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_pair_state(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_pairing_ready(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_poll_pair_events(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_poll_profile_events(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_poll_resync(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_profile_ticket(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_prune_trail(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_publish_profile(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_publish_resync(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_publish_watermarks(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_push_trail(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_read_control(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_read_latest(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted_events(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_read_profile(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_recv_public(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_recv_secret(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_resolve_bump_peer(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_respond_pair(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_resync_count(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_seed_seq(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_set_delivery_config(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_set_transport_config(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_sharing_recipients(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_shutdown(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_start(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_start_stored(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_submit_pair_choice(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_subscribe(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_sync_latest(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_ticket(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_trail_replica_status(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_upload_trail_content(
+): Int
+external fun uniffi_iroh_location_checksum_method_meshcapsulestore_deliver(
+): Int
+external fun uniffi_iroh_location_checksum_method_meshcapsulestore_have(
+): Int
+external fun uniffi_iroh_location_checksum_method_meshcapsulestore_insert(
+): Int
+external fun uniffi_iroh_location_checksum_method_meshcapsulestore_latest(
+): Int
+external fun uniffi_iroh_location_checksum_method_meshcapsulestore_prune(
+): Int
+external fun uniffi_iroh_location_checksum_method_meshcapsulestore_stats(
+): Int
+external fun uniffi_iroh_location_checksum_method_subscription_heartbeat_fix(
+): Int
+external fun uniffi_iroh_location_checksum_method_subscription_ingest_fix(
+): Int
+external fun uniffi_iroh_location_checksum_method_subscription_publish(
+): Int
+external fun uniffi_iroh_location_checksum_method_subscription_publish_inner(
+): Int
+external fun uniffi_iroh_location_checksum_method_subscription_publish_null(
+): Int
+external fun uniffi_iroh_location_checksum_method_subscription_publish_null_traced(
+): Int
+external fun uniffi_iroh_location_checksum_method_subscription_publish_traced(
+): Int
+external fun uniffi_iroh_location_checksum_constructor_locationnode_from_device_secrets(
+): Int
+external fun uniffi_iroh_location_checksum_constructor_locationnode_new(
+): Int
+external fun uniffi_iroh_location_checksum_constructor_locationnode_new_at_dirs(
+): Int
+external fun uniffi_iroh_location_checksum_constructor_meshcapsulestore_new(
+): Int
+external fun ffi_iroh_location_uniffi_contract_version(
+): Int
 
-        
+    
 }
 
 internal object UniffiLib {
@@ -975,7 +977,7 @@ external fun uniffi_iroh_location_fn_free_fixlistener(`handle`: Long,uniffi_out_
 ): Unit
 external fun uniffi_iroh_location_fn_init_callback_vtable_fixlistener(`vtable`: UniffiVTableCallbackInterfaceFixListener,
 ): Unit
-external fun uniffi_iroh_location_fn_method_fixlistener_on_fix(`ptr`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`via`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+external fun uniffi_iroh_location_fn_method_fixlistener_on_fix(`ptr`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`via`: RustBuffer.ByValue,`viaPeer`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_iroh_location_fn_method_fixlistener_on_opaque(`ptr`: Long,`author`: RustBuffer.ByValue,`seq`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1193,6 +1195,8 @@ external fun uniffi_iroh_location_fn_func_derive_topic(`authorEndpointId`: RustB
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_encode_pair_invite(`invite`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_endpoint_id_from_ticket(`ticket`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_generate_recv_keypair(uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_h3_cells_for_polygon(`coordinates`: RustBuffer.ByValue,`resolution`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -1351,6 +1355,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_func_encode_pair_invite() != 8507) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_func_endpoint_id_from_ticket() != 28437) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_func_generate_recv_keypair() != 62550) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1393,7 +1400,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_devicesecrets_recv_secret() != 59366) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 28882) {
+    if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 31892) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_fixlistener_on_opaque() != 14800) {
@@ -2645,8 +2652,12 @@ public interface FixListener {
      *
      * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
      * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
+     *
+     * `via_peer` is WHO performed that last hop: the hex EndpointId of the neighbour that handed
+     * us the datagram. It is reported verbatim, including when it equals `author` (a fix straight
+     * from its own author) — deciding what to call that device is the app's job, not this seam's.
      */
-    fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean, `via`: kotlin.String)
+    fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean, `via`: kotlin.String, `viaPeer`: kotlin.String?)
     
     /**
      * A fix we received but could NOT decrypt (not addressed to us / revoked). Useful
@@ -2771,13 +2782,17 @@ open class FixListenerImpl: Disposable, AutoCloseable, FixListener
      *
      * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
      * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
-     */override fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean, `via`: kotlin.String)
+     *
+     * `via_peer` is WHO performed that last hop: the hex EndpointId of the neighbour that handed
+     * us the datagram. It is reported verbatim, including when it equals `author` (a fix straight
+     * from its own author) — deciding what to call that device is the app's job, not this seam's.
+     */override fun `onFix`(`author`: kotlin.ByteArray, `seq`: kotlin.ULong, `fix`: LocationFix, `backfill`: kotlin.Boolean, `via`: kotlin.String, `viaPeer`: kotlin.String?)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_iroh_location_fn_method_fixlistener_on_fix(
         it,
-        FfiConverterByteArray.lower(`author`),FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterBoolean.lower(`backfill`),FfiConverterString.lower(`via`),_status)
+        FfiConverterByteArray.lower(`author`),FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),FfiConverterBoolean.lower(`backfill`),FfiConverterString.lower(`via`),FfiConverterOptionalString.lower(`viaPeer`),_status)
 }
     }
     
@@ -2833,7 +2848,7 @@ open class FixListenerImpl: Disposable, AutoCloseable, FixListener
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceFixListener {
     internal object `onFix`: UniffiCallbackInterfaceFixListenerMethod0 {
-        override fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`via`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+        override fun callback(`uniffiHandle`: Long,`author`: RustBuffer.ByValue,`seq`: Long,`fix`: RustBuffer.ByValue,`backfill`: Byte,`via`: RustBuffer.ByValue,`viaPeer`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeFixListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
                 uniffiObj.`onFix`(
@@ -2842,6 +2857,7 @@ internal object uniffiCallbackInterfaceFixListener {
                     FfiConverterTypeLocationFix.lift(`fix`),
                     FfiConverterBoolean.lift(`backfill`),
                     FfiConverterString.lift(`via`),
+                    FfiConverterOptionalString.lift(`viaPeer`),
                 )
             }
             val writeReturn = { _: Unit -> Unit }
@@ -8225,6 +8241,13 @@ data class RatchetEvent (
     var `kind`: kotlin.String
     , 
     var `fix`: LocationFix?
+    , 
+    /**
+     * Hex EndpointId of the peer that served this author's entry during the last reconciliation,
+     * when one was observed. `None` means the entry was already in the replica — read back, not
+     * just delivered — so there is no serving peer to name.
+     */
+    var `viaPeer`: kotlin.String?
     
 ){
     
@@ -8246,6 +8269,7 @@ public object FfiConverterTypeRatchetEvent: FfiConverterRustBuffer<RatchetEvent>
             FfiConverterULong.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalTypeLocationFix.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -8254,7 +8278,8 @@ public object FfiConverterTypeRatchetEvent: FfiConverterRustBuffer<RatchetEvent>
             FfiConverterULong.allocationSize(value.`seq`) +
             FfiConverterULong.allocationSize(value.`ts`) +
             FfiConverterString.allocationSize(value.`kind`) +
-            FfiConverterOptionalTypeLocationFix.allocationSize(value.`fix`)
+            FfiConverterOptionalTypeLocationFix.allocationSize(value.`fix`) +
+            FfiConverterOptionalString.allocationSize(value.`viaPeer`)
     )
 
     override fun write(value: RatchetEvent, buf: ByteBuffer) {
@@ -8263,6 +8288,7 @@ public object FfiConverterTypeRatchetEvent: FfiConverterRustBuffer<RatchetEvent>
             FfiConverterULong.write(value.`ts`, buf)
             FfiConverterString.write(value.`kind`, buf)
             FfiConverterOptionalTypeLocationFix.write(value.`fix`, buf)
+            FfiConverterOptionalString.write(value.`viaPeer`, buf)
     }
 }
 
@@ -9728,6 +9754,24 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
     UniffiLib.uniffi_iroh_location_fn_func_encode_pair_invite(
     
         FfiConverterTypePairInvite.lower(`invite`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The EndpointId (hex) inside an endpoint ticket, without dialling anything.
+         *
+         * Pure decode, deliberately node-free: the app uses it to recognise the configured stash as the
+         * device that handed over a fix, and that question comes up before (and independently of) any
+         * node being started. Same parse as the bootstrap loop in [`LocationNode::subscribe`].
+         */
+    @Throws(LocationException::class) fun `endpointIdFromTicket`(`ticket`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(LocationException) { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_endpoint_id_from_ticket(
+    
+        FfiConverterString.lower(`ticket`),_status)
 }
     )
     }

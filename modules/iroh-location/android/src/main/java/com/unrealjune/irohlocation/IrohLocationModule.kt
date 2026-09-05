@@ -55,6 +55,7 @@ import uniffi.iroh_location.decodeMvtTile
 import uniffi.iroh_location.decodePairInvite
 import uniffi.iroh_location.deriveTopic
 import uniffi.iroh_location.encodePairInvite
+import uniffi.iroh_location.endpointIdFromTicket
 import uniffi.iroh_location.flushTelemetry
 import uniffi.iroh_location.h3CellsForPolygon
 
@@ -449,13 +450,15 @@ class IrohLocationModule : Module() {
   private inner class EventBridge(private val subscriptionId: String) : FixListener {
     // `backfill` is true when the fix arrived via durable range-reconciliation (iroh-docs
     // catch-up) rather than the live gossip path. `via` names the last hop into this device
-    // (`relay` | `direct` | `lan` | `ble` | `live` | `docs` | `stash`).
+    // (`relay` | `direct` | `lan` | `ble` | `live` | `docs` | `stash`); `viaPeer` names the
+    // device that performed it, which is not necessarily the fix's author.
     override fun onFix(
       author: ByteArray,
       seq: ULong,
       fix: LocationFix,
       backfill: Boolean,
       via: String,
+      viaPeer: String?,
     ) {
       sendEvent(
         "onFix",
@@ -472,6 +475,7 @@ class IrohLocationModule : Module() {
             ),
           "backfill" to backfill,
           "via" to via,
+          "viaPeer" to viaPeer,
         ),
       )
     }
@@ -960,6 +964,7 @@ class IrohLocationModule : Module() {
                 "ts" to fix.ts.toLong(),
               )
             },
+            "viaPeer" to incoming.viaPeer,
           )
         }
       }
@@ -1125,6 +1130,9 @@ class IrohLocationModule : Module() {
 
     AsyncFunction("decodePairInvite") Coroutine
       { token: String -> pairInviteMap(decodePairInvite(token)) }
+
+    // Pure decode, node-free: lets JS recognise a configured stash by its EndpointId.
+    AsyncFunction("endpointIdFromTicket") Coroutine { ticket: String -> endpointIdFromTicket(ticket) }
 
     AsyncFunction("transportDiagnostics") Coroutine
       { peerEndpointIdsHex: List<String> ->

@@ -123,9 +123,16 @@ peer catching up reconciles one entry rather than a back-catalogue. The key form
 `author/seq` for compatibility with peers on older builds; they simply find one entry where they
 used to find many.
 
-Each retained fix keeps a `via` label recording how it reached this device (see
-`modules/iroh-location/README.md`). Since a friend's history is gone, that label surfaces once — as
-the profile sheet's SIGNAL PATH row for their current fix — rather than per row of a timeline.
+Each retained fix keeps a `via` label recording how it reached this device, and a `viaPeer`
+recording **who** performed that hop (see `modules/iroh-location/README.md`). Since a friend's
+history is gone, both surface once — as the profile sheet's SIGNAL PATH row for their current fix —
+rather than per row of a timeline; the row opens to name the deliverer. The two are stored and
+merged as one record, because a label from one delivery beside a peer from another would read as a
+fact and be a fiction.
+
+Only endpoints in this device's own pool are named. A fix can be forwarded by any recipient of the
+author's topic, and that neighbourhood is the author's rather than ours, so a deliverer we have not
+paired with is shown as a truncated endpoint id and nothing else.
 
 This is a privacy decision first — nobody needs a searchable movement history of their friends —
 but it also fixed a severe performance bug. iroh-docs reconciliation does not trickle: when it

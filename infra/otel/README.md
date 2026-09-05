@@ -94,12 +94,12 @@ bg.wake            (fixes, net/battery/app state; ALSO emitted with fixes=0 for 
     └ outbox.enqueue (coalesced / overflow?)
     └ outbox.drain   (published/retained, publish.failed reason)
       └ publish.fix        (sc.seq)
-        ├ gossip.publish*  (sc.entry_hash)  ─ live path ───────►  gossip.receive (sc.entry_hash, outcome)
+        ├ gossip.publish*  (sc.entry_hash)  ─ live path ───────►  gossip.receive (sc.entry_hash, sc.via_peer, outcome)
         └ docs.write*      (sc.entry_hash)  ─ LOCAL replica only
     └ trail.push.app                        ─ durable path ─►  stash.entry.received (sc.entry_hash)
       └ trail.push*        (entries_sent, finished)
                                                                   └ trail.sync.app (recovered)
-                                                                    └ fix.received.app (sc.seq, drop?)
+                                                                    └ fix.received.app (sc.seq, transport_peer?, drop?)
 ```
 
 `docs.write` does **not** reach the stash on its own — it writes the local replica, and iroh-docs
@@ -226,6 +226,17 @@ long after bind a neighbour appears:
 
 If receives badly trail publishes, live fixes are arriving at stash-sync granularity and "live" is
 not live. Worth checking before building anything further on top of it.
+
+**Who is actually carrying whose fixes.** `sc.via_peer` on `gossip.receive` (and `transport_peer`
+on `fix.received.app`, the app-side echo) is the short id of the neighbour that handed the envelope
+over, which is only sometimes the author. It answers "is this pool relaying at all, or is every
+device talking to exactly one peer" — and, when a phone's own publishes are landing nowhere, whether
+its fixes are still reaching people second-hand:
+
+```traceql
+{ name = "gossip.receive" && span.sc.via_peer != span.sc.author }
+{ name = "fix.received.app" && span.transport_peer != "" }
+```
 
 Logs (Grafana → Explore → Loki). iroh's relay / net_report / magicsock diagnostics from the
 phones land here — this is the network-state view when sync dies after a wifi↔cellular roam:
