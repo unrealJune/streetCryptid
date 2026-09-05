@@ -13,6 +13,8 @@ export interface MapLayerToggles {
   readonly highways: boolean;
   /** Rail / tram / subway / ferry lines drawn over the dot field. */
   readonly transit: boolean;
+  /** Building footprints and airport surfaces drawn over the dot field. */
+  readonly structures: boolean;
 }
 
 export type MapLayerId = keyof MapLayerToggles;
@@ -27,6 +29,7 @@ const LAYERS: { readonly id: MapLayerId; readonly title: string }[] = [
   { id: 'exploration', title: 'Exploration' },
   { id: 'highways', title: 'Highways' },
   { id: 'transit', title: 'Transit' },
+  { id: 'structures', title: 'Buildings' },
 ];
 
 /** A compact map-layer control that expands in place instead of opening a modal. */

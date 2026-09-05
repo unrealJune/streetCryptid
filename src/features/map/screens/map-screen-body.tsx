@@ -93,6 +93,7 @@ export default function MapScreenBody() {
     exploration: true,
     highways: true,
     transit: false,
+    structures: true,
   });
   const explorationEnabled = layers.exploration;
   const setLayer = useCallback((layer: MapLayerId, enabled: boolean) => {
@@ -329,7 +330,7 @@ export default function MapScreenBody() {
         explorationEnabled ? 'Exploration overlay on.' : 'Exploration overlay off.'
       } ${layers.highways ? 'Highways shown.' : 'Highways hidden.'} ${
         layers.transit ? 'Transit overlay on.' : 'Transit overlay off.'
-      } ${locationCopy} ${
+      } ${layers.structures ? 'Buildings shown.' : 'Buildings hidden.'} ${locationCopy} ${
         mapFriends.length > 0
           ? `${mapFriends.length} friend${mapFriends.length === 1 ? '' : 's'} on the map: ${friendNames}.`
           : 'No friend locations are available.'
@@ -370,6 +371,7 @@ export default function MapScreenBody() {
           explorationEnabled={explorationEnabled}
           highwaysEnabled={layers.highways}
           transitEnabled={layers.transit}
+          structuresEnabled={layers.structures}
           key={mapSessionKey}
           onReadout={onReadout}
           initialCenter={initialCenter}
@@ -481,6 +483,7 @@ function MapSession({
   explorationEnabled,
   highwaysEnabled,
   transitEnabled,
+  structuresEnabled,
   onReadout,
   onSelectFriend,
   onSelectSelf,
@@ -498,6 +501,7 @@ function MapSession({
   explorationEnabled: boolean;
   highwaysEnabled: boolean;
   transitEnabled: boolean;
+  structuresEnabled: boolean;
   onReadout(readout: MapReadout): void;
   onSelectFriend(friendId: string): void;
   onSelectSelf(): void;
@@ -513,6 +517,7 @@ function MapSession({
       explorationEnabled={explorationEnabled}
       highwaysEnabled={highwaysEnabled}
       transitEnabled={transitEnabled}
+      structuresEnabled={structuresEnabled}
       onReadout={onReadout}
       initialCenter={sessionCenter}
       locateTarget={locateTarget}

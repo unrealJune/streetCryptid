@@ -1,7 +1,9 @@
 import {
   AlphaType,
+  ClipOp,
   ColorType,
   drawAsImageFromPicture,
+  FillType,
   FilterMode,
   MipmapMode,
   PaintStyle,
@@ -16,14 +18,28 @@ import {
 
 import { buildPaletteLut } from '../core/region';
 import type { RoadLayerOptions } from '../core/road-lod';
-import type { MapPalette, TransitMode } from '../core/types';
+import type { AeroAreaKind, AeroLineKind, MapPalette, Rgb, TransitMode } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
 import { buildCellStateImage } from './cell-state-image';
 import { cellLatticePath, cellRimPath } from './cell-overlay-paths';
 import { getDotFieldEffect } from './dot-field-shader';
 import { buildMaskImage } from './mask-image';
+import { buildHatchPath, buildStructurePaths } from './structure-paths';
 import { buildTransitPaths } from './transit-paths';
 import { FERRY_DASH, transitWidthFor } from '../core/transit-lod';
+import {
+  AERODROME_DASH,
+  AERODROME_STROKE_WIDTH,
+  AERO_AREA_STYLE,
+  AERO_LINE_ALPHA,
+  aeroLineWidthFor,
+  BUILDING_FILL_ALPHA,
+  BUILDING_HATCH_ALPHA,
+  BUILDING_HATCH_WIDTH,
+  BUILDING_STROKE_ALPHA,
+  buildingHatchVisible,
+  buildingStrokeWidthFor,
+} from '../core/structure-lod';
 import {
   DOT_FIELD_UNIFORM_FLOATS,
   lodForZoom,
@@ -41,6 +57,15 @@ const LATTICE_WIDTH = 1.0;
 const LATTICE_ALPHA = 0.09;
 const RIM_WIDTH = 1.25;
 const RIM_ALPHA = 0.42;
+
+/**
+ * Painter's order for the structure layer, back to front. Deliberately not the
+ * `AERO_*_KINDS` declaration order — those are the wire encoding, and drawing in
+ * them would put the apron fill over the aerodrome dashes and the taxiway mesh
+ * over the runways.
+ */
+const AERO_AREA_DRAW_ORDER: readonly AeroAreaKind[] = ['apron', 'aerodrome'];
+const AERO_LINE_DRAW_ORDER: readonly AeroLineKind[] = ['taxiway', 'runway'];
 
 /**
  * Transit-line opacity per mode. Rapid transit (subway/light rail/monorail) is
@@ -96,6 +121,8 @@ export interface RegionImageInput {
   readonly explorationEnabled?: boolean;
   /** Stroke the transit lines over the dot field (default false). */
   readonly transitEnabled?: boolean;
+  /** Draw building footprints and aeroway surfaces over the dot field (default false). */
+  readonly structuresEnabled?: boolean;
   /**
    * Resolution multiplier (default 1). Intermediate reveal frames pass < 1 so the
    * heavy 45-tap dot shader rasterizes fewer pixels during the ~320ms wipe; the
@@ -129,6 +156,7 @@ export function renderRegionImage({
   reveal = 1,
   explorationEnabled = true,
   transitEnabled = false,
+  structuresEnabled = false,
   quality = 1,
 }: RegionImageInput): SkImage | null {
   const effect = getDotFieldEffect();
@@ -179,6 +207,12 @@ export function renderRegionImage({
   const picture = Skia.PictureRecorder();
   const canvas = picture.beginRecording(Skia.XYWHRect(0, 0, width, height));
   canvas.drawPaint(paint);
+  // Structures sit directly on the dot field, under the exploration line work:
+  // the ghost lattice and the amber frontier rim are navigation, and must stay
+  // legible over a building footprint.
+  if (structuresEnabled) {
+    drawStructures(canvas, region, palette, pixelRatio, reveal);
+  }
   if (explorationEnabled) {
     drawCellOverlays(canvas, region, palette, pixelRatio, reveal);
   }
@@ -222,6 +256,127 @@ function drawCellOverlays(
     if (rim) canvas.drawPath(rim, strokePaint(palette.accent, RIM_WIDTH, rimAlpha));
   }
   canvas.restore();
+}
+
+/**
+ * Building footprints and aeroway surfaces over the dot field, in region-logical
+ * coords. Vectors for the same reason transit is: the dot lattice would scatter
+ * an outline into unrelated dots.
+ *
+ * Drawn back to front — apron fill, aerodrome boundary, taxiways, runways, then
+ * buildings (see {@link AERO_AREA_DRAW_ORDER}) — so the ground reads first and
+ * the terminal sits on top of the apron it stands on. Fills use NON-ZERO winding for the reason `mask-image.ts`
+ * documents: neighbouring MVT tiles share a clip buffer, so area features
+ * genuinely overlap and even-odd would XOR the overlap into a hole.
+ *
+ * The ink is `palette.building` — its own scheme entry, because this layer has
+ * to read as built *material* rather than as a label drawn over the field. Older
+ * saved custom schemes that predate the field fall back to `streetLabel`.
+ */
+function drawStructures(
+  canvas: SkCanvas,
+  region: MapRegion,
+  palette: MapPalette,
+  pixelRatio: number,
+  reveal: number
+): void {
+  if (reveal <= 0) return;
+  const paths = buildStructurePaths(region.geometry, region.spec);
+  const ink: Rgb = palette.building;
+
+  canvas.save();
+  canvas.scale(pixelRatio, pixelRatio);
+
+  // Explicit back-to-front order, not the enum's: the paved ground goes down
+  // first so the property boundary's dashes stay on top of it.
+  for (const kind of AERO_AREA_DRAW_ORDER) {
+    const svg = paths.aeroAreas[kind];
+    if (!svg) continue;
+    const style = AERO_AREA_STYLE[kind];
+    if (style.fillAlpha > 0) drawWindingFill(canvas, svg, fillPaint(ink, style.fillAlpha * reveal));
+    if (style.strokeAlpha > 0) {
+      const path = Skia.Path.MakeFromSVGString(svg);
+      if (!path) continue;
+      const paint = strokePaint(ink, AERODROME_STROKE_WIDTH, style.strokeAlpha * reveal);
+      // The aerodrome boundary is a limit, not a wall — dash it so it never
+      // reads as another building edge.
+      if (kind === 'aerodrome') {
+        const dash = Skia.PathEffect.MakeDash([AERODROME_DASH[0], AERODROME_DASH[1]]);
+        if (dash) paint.setPathEffect(dash);
+      }
+      canvas.drawPath(path, paint);
+    }
+  }
+
+  // Taxiways under runways: a runway is the landmark and must never be crossed
+  // out by the taxiway network that feeds it.
+  for (const kind of AERO_LINE_DRAW_ORDER) {
+    const svg = paths.aeroLines[kind];
+    const width = aeroLineWidthFor(kind, region.spec.zoom);
+    if (width === null || !svg) continue;
+    const path = Skia.Path.MakeFromSVGString(svg);
+    if (!path) continue;
+    const paint = strokePaint(ink, width, AERO_LINE_ALPHA[kind] * reveal);
+    paint.setStrokeCap(StrokeCap.Round);
+    canvas.drawPath(path, paint);
+  }
+
+  const buildingWidth = buildingStrokeWidthFor(region.spec.zoom);
+  if (paths.buildings && buildingWidth !== null) {
+    drawWindingFill(canvas, paths.buildings, fillPaint(ink, BUILDING_FILL_ALPHA * reveal));
+    drawBuildingHatch(canvas, paths.buildings, region, ink, reveal);
+    const path = Skia.Path.MakeFromSVGString(paths.buildings);
+    if (path) {
+      canvas.drawPath(path, strokePaint(ink, buildingWidth, BUILDING_STROKE_ALPHA * reveal));
+    }
+  }
+
+  canvas.restore();
+}
+
+/**
+ * The diagonal hatch that gives footprints a material of their own, clipped to
+ * the batched building path.
+ *
+ * One region-wide hatch path clipped once, rather than per-footprint hatching:
+ * a city region holds thousands of buildings, and they all want the same lines.
+ * Drawn between the fill and the outline so the outline stays the crispest edge.
+ */
+function drawBuildingHatch(
+  canvas: SkCanvas,
+  buildingsSvg: string,
+  region: MapRegion,
+  ink: Rgb,
+  reveal: number
+): void {
+  if (!buildingHatchVisible(region.spec.zoom)) return;
+  const clip = Skia.Path.MakeFromSVGString(buildingsSvg);
+  if (!clip) return;
+  clip.setFillType(FillType.Winding);
+  const hatch = Skia.Path.MakeFromSVGString(buildHatchPath(region.spec));
+  if (!hatch) return;
+
+  canvas.save();
+  canvas.clipPath(clip, ClipOp.Intersect, true);
+  canvas.drawPath(hatch, strokePaint(ink, BUILDING_HATCH_WIDTH, BUILDING_HATCH_ALPHA * reveal));
+  canvas.restore();
+}
+
+/** Fill one batched sub-path string with non-zero winding (unions overlaps). */
+function drawWindingFill(canvas: SkCanvas, svg: string, paint: SkPaint): void {
+  if (!svg) return;
+  const path = Skia.Path.MakeFromSVGString(svg);
+  if (!path) return;
+  path.setFillType(FillType.Winding);
+  canvas.drawPath(path, paint);
+}
+
+function fillPaint(rgb: Rgb, alpha: number): SkPaint {
+  const paint = Skia.Paint();
+  paint.setColor(Skia.Color(`rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`));
+  paint.setStyle(PaintStyle.Fill);
+  paint.setAntiAlias(true);
+  return paint;
 }
 
 /**

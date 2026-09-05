@@ -47,10 +47,25 @@
 //!   coords[2*totalPoints] f32  (dx,dy)
 //! -- label streets (`transportation_name`; APPENDED AFTER transit) --
 //!   same layout as streets
+//! -- buildings (`building` polygons; APPENDED AFTER label streets) --
+//!   areas section
+//! -- aero areas (`aeroway` polygons) --
+//!   count u32, totalRings u32, totalPoints u32
+//!   kind[count]       u8   (index into AERO_AREA_KINDS in core/types.ts)  (pad→4)
+//!   nameRef[count]    i32
+//!   ringOff[count+1]  u32
+//!   pointOff[totalRings+1] u32
+//!   coords[2*totalPoints] f32
+//! -- aero lines (`aeroway` runway/taxiway) --
+//!   count u32, totalPoints u32
+//!   kind[count]       u8   (index into AERO_LINE_KINDS in core/types.ts)  (pad→4)
+//!   pointOff[count+1] u32
+//!   coords[2*totalPoints] f32
 //! ```
-//! Appended sections are ordered transit, then label streets. A JS reader can
-//! detect each by "there are bytes left", so buffers from older native binaries
-//! still parse and simply carry no data for sections they predate.
+//! Appended sections are ordered transit, label streets, buildings, aero areas,
+//! aero lines. A JS reader can detect each by "there are bytes left", so buffers
+//! from older native binaries still parse and simply carry no data for sections
+//! they predate.
 //! An "areas section" (rings grouped per feature): count u32, totalRings u32,
 //! totalPoints u32, nameRef[count] i32, ringOff[count+1] u32, pointOff[totalRings+1]
 //! u32, coords[2*totalPoints] f32.
@@ -196,6 +211,34 @@ fn transit_mode_of(class: &str, subclass: &str) -> Option<u8> {
 /// `TRANSIT_MODES` index of 'ferry' (the list's last entry).
 const TRANSIT_FERRY: u8 = 6;
 
+/// OMT `aeroway.class` -> an `AERO_AREA_KINDS` index, for the layer's polygons.
+/// `helipad` folds into `apron` (same paved surface); runway polygons go through
+/// [`aero_line_kind_of`] instead.
+///
+/// Mirrored exactly by `aeroAreaKindOf` in
+/// `src/features/map/tiles/mvt-mapping.ts` -- change both together.
+fn aero_area_kind_of(class: &str) -> Option<u8> {
+    match class {
+        "aerodrome" => Some(0),
+        "apron" | "helipad" => Some(1),
+        _ => None,
+    }
+}
+
+/// OMT `aeroway.class` -> an `AERO_LINE_KINDS` index. Applied to line features
+/// and to `runway` polygons (whose rings are stroked as closed lines). `gate` is
+/// a point layer with nothing to stroke, so it returns None with the rest.
+///
+/// Mirrored exactly by `aeroLineKindOf` in
+/// `src/features/map/tiles/mvt-mapping.ts` -- change both together.
+fn aero_line_kind_of(class: &str) -> Option<u8> {
+    match class {
+        "runway" => Some(0),
+        "taxiway" => Some(1),
+        _ => None,
+    }
+}
+
 fn is_park_landcover(class: &str) -> bool {
     matches!(class, "grass" | "wood")
 }
@@ -218,6 +261,9 @@ struct Geometry {
     rivers: Vec<Line>,
     water: Vec<Area>,
     parks: Vec<Area>,
+    buildings: Vec<Area>,
+    aero_areas: Vec<AeroArea>,
+    aero_lines: Vec<AeroLine>,
     places: Vec<Place>,
     strings: Interner,
 }
@@ -238,6 +284,15 @@ struct Line {
 struct Area {
     name: i32,
     rings: Vec<Vec<[f32; 2]>>,
+}
+struct AeroArea {
+    kind: u8,
+    name: i32,
+    rings: Vec<Vec<[f32; 2]>>,
+}
+struct AeroLine {
+    kind: u8,
+    points: Vec<[f32; 2]>,
 }
 struct Place {
     name: i32,
@@ -688,6 +743,50 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                 }
             }
         }
+        "building" => {
+            for f in &layer.features {
+                if f.geom_type != GEOM_POLYGON {
+                    continue;
+                }
+                let rings = decode_geometry(&f.geometry, proj);
+                if !rings.is_empty() {
+                    geo.buildings.push(Area { name: -1, rings });
+                }
+            }
+        }
+        "aeroway" => {
+            for f in &layer.features {
+                let class = layer
+                    .prop(f, "class")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if f.geom_type == GEOM_POLYGON {
+                    if let Some(kind) = aero_area_kind_of(class) {
+                        let rings = decode_geometry(&f.geometry, proj);
+                        if !rings.is_empty() {
+                            geo.aero_areas.push(AeroArea {
+                                kind,
+                                name: -1,
+                                rings,
+                            });
+                        }
+                        continue;
+                    }
+                }
+                if f.geom_type != GEOM_POLYGON && f.geom_type != GEOM_LINE {
+                    continue;
+                }
+                // A runway mapped as an area strokes each ring as a closed line.
+                let Some(kind) = aero_line_kind_of(class) else {
+                    continue;
+                };
+                for line in decode_geometry(&f.geometry, proj) {
+                    if line.len() >= 2 {
+                        geo.aero_lines.push(AeroLine { kind, points: line });
+                    }
+                }
+            }
+        }
         "place" => {
             for f in &layer.features {
                 let Some(name) = layer.prop(f, "name").and_then(|v| v.as_str()) else {
@@ -915,7 +1014,77 @@ fn encode(geo: &Geometry, origin: (f64, f64)) -> Vec<u8> {
     // label streets ----------------------------------------------------------
     write_streets(&mut w, &geo.label_streets);
 
+    // buildings + aeroway ------------------------------------------------------
+    write_areas(&mut w, &geo.buildings);
+    write_aero_areas(&mut w, &geo.aero_areas);
+    write_aero_lines(&mut w, &geo.aero_lines);
+
     w.buf
+}
+
+fn write_aero_areas(w: &mut Writer, areas: &[AeroArea]) {
+    let total_rings: u32 = areas.iter().map(|a| a.rings.len() as u32).sum();
+    let total_pts: u32 = areas
+        .iter()
+        .flat_map(|a| a.rings.iter())
+        .map(|r| r.len() as u32)
+        .sum();
+    w.u32(areas.len() as u32);
+    w.u32(total_rings);
+    w.u32(total_pts);
+    for a in areas {
+        w.u8(a.kind);
+    }
+    w.align4();
+    for a in areas {
+        w.i32(a.name);
+    }
+    let mut racc = 0u32;
+    for a in areas {
+        w.u32(racc);
+        racc += a.rings.len() as u32;
+    }
+    w.u32(racc);
+    let mut pacc = 0u32;
+    for a in areas {
+        for r in &a.rings {
+            w.u32(pacc);
+            pacc += r.len() as u32;
+        }
+    }
+    w.u32(pacc);
+    w.align4();
+    for a in areas {
+        for r in &a.rings {
+            for p in r {
+                w.f32(p[0]);
+                w.f32(p[1]);
+            }
+        }
+    }
+}
+
+fn write_aero_lines(w: &mut Writer, lines: &[AeroLine]) {
+    let total_pts: u32 = lines.iter().map(|l| l.points.len() as u32).sum();
+    w.u32(lines.len() as u32);
+    w.u32(total_pts);
+    for l in lines {
+        w.u8(l.kind);
+    }
+    w.align4();
+    let mut acc = 0u32;
+    for l in lines {
+        w.u32(acc);
+        acc += l.points.len() as u32;
+    }
+    w.u32(acc);
+    w.align4();
+    for l in lines {
+        for p in &l.points {
+            w.f32(p[0]);
+            w.f32(p[1]);
+        }
+    }
 }
 
 fn write_streets(w: &mut Writer, streets: &[Street]) {
@@ -1307,6 +1476,94 @@ mod tests {
         assert!((g2.places[0].pos[0] as f64 - span * 0.5).abs() < 1e-6);
     }
 
+    #[test]
+    fn aero_kind_mapping_matches_ts() {
+        assert_eq!(aero_area_kind_of("aerodrome"), Some(0));
+        assert_eq!(aero_area_kind_of("apron"), Some(1));
+        // helipad folds into apron: same paved surface.
+        assert_eq!(aero_area_kind_of("helipad"), Some(1));
+        for class in ["runway", "taxiway", "gate", ""] {
+            assert_eq!(aero_area_kind_of(class), None, "{class}");
+        }
+
+        assert_eq!(aero_line_kind_of("runway"), Some(0));
+        assert_eq!(aero_line_kind_of("taxiway"), Some(1));
+        for class in ["aerodrome", "apron", "helipad", "gate", ""] {
+            assert_eq!(aero_line_kind_of(class), None, "{class}");
+        }
+    }
+
+    #[test]
+    fn decodes_building_polygons() {
+        let tile = build_layer(
+            "building",
+            &["render_height"],
+            &[value_uint(12)],
+            &[
+                (
+                    GEOM_POLYGON,
+                    vec![0, 0],
+                    geom_cmds(&[(0, 0), (100, 0), (100, 100), (0, 100)], true),
+                ),
+                // A stray line feature in the layer must be ignored, not filled.
+                (GEOM_LINE, vec![], geom_cmds(&[(0, 0), (50, 50)], false)),
+            ],
+        );
+        let mut geo = Geometry::default();
+        let o = tile_min(14, 2625, 5732);
+        decode_tile_into(&tile, 14, 2625, 5732, (o.0, o.1), &mut geo);
+        assert_eq!(geo.buildings.len(), 1);
+        assert_eq!(geo.buildings[0].rings.len(), 1);
+        // 4 distinct points + the ClosePath-appended copy of the first
+        assert_eq!(geo.buildings[0].rings[0].len(), 5);
+    }
+
+    #[test]
+    fn routes_aeroway_by_class_and_geometry() {
+        let ring = geom_cmds(&[(0, 0), (100, 0), (100, 100), (0, 100)], true);
+        let line = geom_cmds(&[(0, 0), (500, 500)], false);
+        let tile = build_layer(
+            "aeroway",
+            &["class"],
+            &[
+                value_str("apron"),
+                value_str("helipad"),
+                value_str("aerodrome"),
+                value_str("runway"),
+                value_str("taxiway"),
+                value_str("gate"),
+            ],
+            &[
+                (GEOM_POLYGON, vec![0, 0], ring.clone()),
+                (GEOM_POLYGON, vec![0, 1], ring.clone()),
+                (GEOM_POLYGON, vec![0, 2], ring.clone()),
+                // A runway mapped as an area strokes its ring as a closed line.
+                (GEOM_POLYGON, vec![0, 3], ring.clone()),
+                (GEOM_LINE, vec![0, 3], line.clone()),
+                (GEOM_LINE, vec![0, 4], line.clone()),
+                // Gates are points with nothing to stroke.
+                (1, vec![0, 5], geom_cmds(&[(2048, 2048)], false)),
+            ],
+        );
+        let mut geo = Geometry::default();
+        let o = tile_min(14, 2625, 5732);
+        decode_tile_into(&tile, 14, 2625, 5732, (o.0, o.1), &mut geo);
+
+        // apron + helipad (both kind 1) and aerodrome (kind 0)
+        assert_eq!(geo.aero_areas.len(), 3);
+        assert_eq!(geo.aero_areas[0].kind, 1);
+        assert_eq!(geo.aero_areas[1].kind, 1);
+        assert_eq!(geo.aero_areas[2].kind, 0);
+
+        // runway polygon ring + runway line + taxiway line; the gate is dropped
+        assert_eq!(geo.aero_lines.len(), 3);
+        assert_eq!(geo.aero_lines[0].kind, 0);
+        assert_eq!(geo.aero_lines[0].points.len(), 5);
+        assert_eq!(geo.aero_lines[1].kind, 0);
+        assert_eq!(geo.aero_lines[1].points.len(), 2);
+        assert_eq!(geo.aero_lines[2].kind, 1);
+    }
+
     /// Parity against the real JS `decodeMvtTile` on a live z10 Seattle tile.
     /// Ground-truth counts captured by running the actual TS decoder (bun).
     #[test]
@@ -1341,6 +1598,10 @@ mod tests {
         assert_eq!(geo.parks.len(), 108, "parks");
         assert_eq!(park_pts, 9000, "parkPts");
         assert_eq!(geo.places.len(), 94, "places");
+        // No `building` layer at z10 — OMT starts it at z13. `aeroway` is here.
+        assert_eq!(geo.buildings.len(), 0, "buildings");
+        assert_eq!(geo.aero_areas.len(), 4, "aeroAreas");
+        assert_eq!(geo.aero_lines.len(), 45, "aeroLines");
         // Transit rides the same layer the roads come from; the JS decoder's
         // counts for this tile are asserted in scg1.test.ts / mvt-mapping.test.ts.
         assert!(!geo.transit.is_empty(), "transit");
@@ -1358,17 +1619,72 @@ mod tests {
         assert_eq!(geo.places[0].rank, 3);
     }
 
-    /// Writes the SCG1 buffer for the real z10 tile so the JS `parseScg1` test can
-    /// assert byte-for-byte agreement with this encoder. Gated: run with
+    /// Counts over the real SeaTac z14 tile — the only fixture that carries the
+    /// `building` layer (OMT starts it at z13) alongside a full `aeroway` one.
+    #[test]
+    fn decodes_buildings_and_aeroway_on_real_z14_tile() {
+        let bytes = include_bytes!("../tests/fixtures/z14_2625_5732.mvt");
+        let mut geo = Geometry::default();
+        let o = tile_min(14, 2625, 5732);
+        decode_tile_into(bytes, 14, 2625, 5732, (o.0, o.1), &mut geo);
+
+        // Ground truth captured by running the TS decoder (bun) on the same tile.
+        assert_eq!(geo.buildings.len(), 4, "buildings");
+        let building_pts: usize = geo
+            .buildings
+            .iter()
+            .flat_map(|b| b.rings.iter())
+            .map(Vec::len)
+            .sum();
+        assert_eq!(building_pts, 505, "buildingPts");
+        assert_eq!(geo.aero_areas.len(), 16, "aeroAreas");
+        assert_eq!(
+            geo.aero_areas.iter().filter(|a| a.kind == 0).count(),
+            1,
+            "aerodrome"
+        );
+        assert_eq!(geo.aero_lines.len(), 82, "aeroLines");
+        assert_eq!(
+            geo.aero_lines.iter().filter(|l| l.kind == 0).count(),
+            3,
+            "runways"
+        );
+        // The terminal: the biggest footprint spans ~15% of the tile.
+        let widest = geo
+            .buildings
+            .iter()
+            .flat_map(|b| b.rings.iter())
+            .map(|r| {
+                let xs = r.iter().map(|p| p[0]);
+                let min = xs.clone().fold(f32::MAX, f32::min);
+                let max = xs.fold(f32::MIN, f32::max);
+                max - min
+            })
+            .fold(0.0f32, f32::max);
+        let (_, _, span) = tile_min(14, 2625, 5732);
+        assert!(widest as f64 > span * 0.1, "widest building {widest}");
+    }
+
+    /// Writes the SCG1 buffers for the real fixture tiles so the JS `parseScg1`
+    /// test can assert byte-for-byte agreement with this encoder. Gated: run with
     /// `GEN_FIXTURES=1 cargo test generate_scg1_fixture` to refresh.
     #[test]
     fn generate_scg1_fixture() {
         if std::env::var("GEN_FIXTURES").is_err() {
             return;
         }
-        let bytes = include_bytes!("../tests/fixtures/z10_164_357.mvt");
-        let buf = decode_tile(bytes, 10, 164, 357);
-        std::fs::write("tests/fixtures/z10_164_357.scg1", &buf).unwrap();
+        let z10 = include_bytes!("../tests/fixtures/z10_164_357.mvt");
+        std::fs::write(
+            "tests/fixtures/z10_164_357.scg1",
+            decode_tile(z10, 10, 164, 357),
+        )
+        .unwrap();
+        let z14 = include_bytes!("../tests/fixtures/z14_2625_5732.mvt");
+        std::fs::write(
+            "tests/fixtures/z14_2625_5732.scg1",
+            decode_tile(z14, 14, 2625, 5732),
+        )
+        .unwrap();
     }
 
     #[test]

@@ -12,13 +12,21 @@
 
 import type { Place } from '../core/types';
 import type {
+  PackedAeroAreas,
+  PackedAeroLines,
   PackedAreas,
   PackedLines,
   PackedStreets,
   PackedTile,
   PackedTransit,
 } from './packed-geometry';
-import { EMPTY_PACKED_STREETS, EMPTY_PACKED_TRANSIT } from './packed-geometry';
+import {
+  EMPTY_PACKED_AERO_AREAS,
+  EMPTY_PACKED_AERO_LINES,
+  EMPTY_PACKED_AREAS,
+  EMPTY_PACKED_STREETS,
+  EMPTY_PACKED_TRANSIT,
+} from './packed-geometry';
 import { addMapPerfMetric, type MapPerfMetricScope } from '../perf/map-perf';
 
 const SCG1_MAGIC = 0x31474353; // "SCG1" little-endian
@@ -163,6 +171,38 @@ export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null)
     return { count, roadClass, names: resolveNames(nameRef), pointOff, coords };
   }
 
+  // Buildings + aeroway, appended after label streets. Same "there are bytes
+  // left" detection: a phone running a pre-buildings native binary emits a
+  // buffer that simply ends earlier, and these degrade to empty sections.
+  const buildings = p + 12 <= buf.byteLength ? toAreas(readAreas()) : EMPTY_PACKED_AREAS;
+  const aeroAreas = p + 12 <= buf.byteLength ? readAeroAreas() : EMPTY_PACKED_AERO_AREAS;
+  const aeroLines = p + 8 <= buf.byteLength ? readAeroLines() : EMPTY_PACKED_AERO_LINES;
+
+  function readAeroAreas(): PackedAeroAreas {
+    const count = u32();
+    const totalRings = u32();
+    const totalPoints = u32();
+    const kind = viewU8(count);
+    align4();
+    const nameRef = readI32(count);
+    const ringOff = viewU32(count + 1);
+    const pointOff = viewU32(totalRings + 1);
+    align4();
+    const coords = viewF32(totalPoints * 2);
+    return { count, kind, names: resolveNames(nameRef), ringOff, pointOff, coords };
+  }
+
+  function readAeroLines(): PackedAeroLines {
+    const count = u32();
+    const total = u32();
+    const kind = viewU8(count);
+    align4();
+    const pointOff = viewU32(count + 1);
+    align4();
+    const coords = viewF32(total * 2);
+    return { count, kind, pointOff, coords };
+  }
+
   const streets: PackedStreets = {
     count: sCount,
     roadClass,
@@ -171,13 +211,17 @@ export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null)
     coords: sCoords,
   };
   const rivers: PackedLines = { count: rCount, pointOff: rPointOff, coords: rCoords };
-  const toAreas = (a: ReturnType<typeof readAreas>): PackedAreas => ({
-    count: a.count,
-    names: resolveNames(a.nameRef),
-    ringOff: a.ringOff,
-    pointOff: a.pointOff,
-    coords: a.coords,
-  });
+  // A declaration, not a const: the appended buildings section is read above,
+  // before this point in the source.
+  function toAreas(a: ReturnType<typeof readAreas>): PackedAreas {
+    return {
+      count: a.count,
+      names: resolveNames(a.nameRef),
+      ringOff: a.ringOff,
+      pointOff: a.pointOff,
+      coords: a.coords,
+    };
+  }
 
   const places: Place[] = new Array(plCount);
   for (let i = 0; i < plCount; i++) {
@@ -198,6 +242,9 @@ export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null)
     rivers,
     water: toAreas(water),
     parks: toAreas(parks),
+    buildings,
+    aeroAreas,
+    aeroLines,
     places,
   };
 }
