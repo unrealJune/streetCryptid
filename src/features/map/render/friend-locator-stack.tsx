@@ -14,6 +14,8 @@ export interface FriendLocatorStackItem {
   readonly selected: boolean;
   readonly self?: boolean;
   readonly stale?: boolean;
+  /** They have stopped and said so. Rendered, never dimmed — see `FriendLocator`. */
+  readonly parked?: boolean;
 }
 
 interface FriendLocatorStackProps {
@@ -102,6 +104,7 @@ export function FriendLocatorStack({
             {
               backgroundColor: panelColor,
               borderColor: friend.color,
+              borderStyle: friend.parked ? 'dashed' : 'solid',
               height: metrics.height,
               left: index * ART_OFFSET_X,
               opacity: friend.stale ? 0.58 : 1,

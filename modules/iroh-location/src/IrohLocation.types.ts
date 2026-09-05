@@ -30,8 +30,24 @@ export interface NativeLocationFix {
   lon: number;
   accuracyM: number;
   headingDeg: number;
-  /** ms since epoch */
+  /** ms since epoch — when the POSITION was measured. Does not advance on a heartbeat. */
   ts: number;
+  /**
+   * One of `FIX_STATE_*` (declared in `features/social/core/types.ts`, mirroring `rust/src/lib.rs`,
+   * which is the source of truth). Absent ⇒ the sender predates the field, so fall back to age.
+   *
+   * Present only on RECEIVED fixes: it is stamped at seal time, so a capture never carries one.
+   */
+  state?: number;
+  /**
+   * Seconds between {@link ts} and the moment the sender sealed this envelope.
+   *
+   * The second clock, and the one that means "their phone was alive". `ts + publishedDeltaS * 1000`
+   * is the last moment we can prove the sending process ran; {@link ts} only says when the position
+   * under it was measured. A parked phone republishes an hours-old position from a live process,
+   * which is why one number could never separate "stopped moving" from "stopped running".
+   */
+  publishedDeltaS?: number;
 }
 
 /** Key material returned by `createNode`; persist the secrets in the OS secure store. */

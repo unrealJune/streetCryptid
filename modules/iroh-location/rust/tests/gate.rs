@@ -6,7 +6,7 @@
 //! read (FORWARD-SECRECY.md §4.1).
 
 use iroh_location::gate::{
-    assess_fix, critically_low, due_slots, BatteryState, FixQualityConfig, FixRejection,
+    assess_fix, critically_low, due_slots, BatteryState, FixQualityConfig, FixRejection, GateStore,
     MAX_BACKFILL_MS,
 };
 use iroh_location::LocationFix;
@@ -20,6 +20,8 @@ fn at(ts: u64, accuracy_m: f64) -> LocationFix {
         accuracy_m,
         heading_deg: 0.0,
         ts,
+        state: None,
+        published_delta_s: None,
     }
 }
 
@@ -30,6 +32,8 @@ fn moved(ts: u64, accuracy_m: f64, degrees_north: f64) -> LocationFix {
         accuracy_m,
         heading_deg: 0.0,
         ts,
+        state: None,
+        published_delta_s: None,
     }
 }
 
@@ -238,4 +242,103 @@ fn low_power_alone_does_not_suspend() {
         low_power: true,
     };
     assert!(!critically_low(&saver));
+}
+
+// ---------------------------------------------------------------------------
+// Upgrade compatibility of the persisted state
+// ---------------------------------------------------------------------------
+
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("sc-gate-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `GateState` exactly as it was persisted before `last_state` was appended.
+///
+/// Written by hand rather than captured, so this keeps testing the upgrade even as the current
+/// struct grows further — the point is a record that is SHORTER than what the code now expects.
+#[derive(serde::Serialize)]
+struct LegacyGateState {
+    last_known_fix: Option<LegacyStoredFix>,
+    last_accepted_at: Option<u64>,
+    last_published_slot: Option<u64>,
+    last_published_at: Option<u64>,
+    last_pushed_at: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+struct LegacyStoredFix {
+    lat: f64,
+    lon: f64,
+    accuracy_m: f64,
+    heading_deg: f64,
+    ts: u64,
+}
+
+/// Gate state written by an older build must survive the upgrade with `last_known_fix` intact.
+///
+/// This is the test that guards the worst regression available in this file. `GateStore::open`
+/// falls back to `GateState::default()` on any decode failure, which is right for corruption and
+/// catastrophic for a struct change: losing `last_known_fix` leaves `heartbeat` with no position to
+/// republish, so it returns 0 and the device publishes NOTHING until it happens to catch a fresh
+/// acceptable fix. On a parked phone that is hours, it is silent, and it would have happened to
+/// every device at once on upgrade — the 2026-08-30 failure, reintroduced by a field.
+#[test]
+fn gate_state_written_before_last_state_existed_still_loads() {
+    let scratch = Scratch::new("legacy-upgrade");
+    let dir = scratch.0.join("gate");
+    std::fs::create_dir_all(&dir).unwrap();
+    let legacy = LegacyGateState {
+        last_known_fix: Some(LegacyStoredFix {
+            lat: 47.6062,
+            lon: -122.3321,
+            accuracy_m: 18.0,
+            heading_deg: 0.0,
+            ts: 1_786_000_000_000,
+        }),
+        last_accepted_at: Some(1_786_000_000_000),
+        last_published_slot: Some(5_953_333),
+        last_published_at: Some(1_786_000_001_000),
+        last_pushed_at: Some(1_786_000_002_000),
+    };
+    std::fs::write(dir.join("state"), postcard::to_allocvec(&legacy).unwrap()).unwrap();
+
+    let state = GateStore::open(&scratch.0).unwrap().get();
+
+    let known = state
+        .last_known_fix
+        .expect("the position an older build accepted must survive the upgrade");
+    assert_eq!(known.ts, 1_786_000_000_000);
+    assert_eq!(known.accuracy_m, 18.0);
+    assert_eq!(state.last_published_slot, Some(5_953_333));
+    assert_eq!(state.last_pushed_at, Some(1_786_000_002_000));
+    // Absent rather than defaulted to a state we did not observe.
+    assert_eq!(state.last_state, None);
+}
+
+/// The round trip a current build does with itself.
+#[test]
+fn gate_state_round_trips_through_the_store() {
+    let scratch = Scratch::new("round-trip");
+    let store = GateStore::open(&scratch.0).unwrap();
+    let mut next = store.get();
+    next.last_state = Some(iroh_location::FIX_STATE_PARKED);
+    next.last_published_slot = Some(42);
+    store.set(next);
+
+    let reopened = GateStore::open(&scratch.0).unwrap().get();
+    assert_eq!(reopened.last_state, Some(iroh_location::FIX_STATE_PARKED));
+    assert_eq!(reopened.last_published_slot, Some(42));
 }

@@ -24,6 +24,8 @@ fn fix(ts: u64, accuracy_m: f64) -> LocationFix {
         accuracy_m,
         heading_deg: 0.0,
         ts,
+        state: None,
+        published_delta_s: None,
     }
 }
 
@@ -135,6 +137,13 @@ impl GateStateStore for FakeGate {
 #[derive(Default)]
 struct FakeSink {
     sent: Mutex<Vec<(u64, u64, Vec<String>)>>,
+    /// The envelope stamps of everything sent, in order: `(state, published_delta_s)`.
+    ///
+    /// Kept beside `sent` rather than folded into it so the existing positional assertions keep
+    /// reading as they did. These are what tell a receiver a parked friend apart from a dead one,
+    /// so they are worth asserting directly rather than inferring from a position that, by
+    /// construction, does not change.
+    stamps: Mutex<Vec<(Option<u8>, Option<u32>)>>,
     /// The watcher lane, kept apart so a test can assert one without the other.
     nulls: Mutex<Vec<(u64, u64, Vec<String>)>>,
     /// Start failing once this many envelopes have gone out — a wake that loses the network.
@@ -165,6 +174,10 @@ impl PublishSink for FakeSink {
             }
         }
         sent.push((seq, fix.ts, recipients));
+        self.stamps
+            .lock()
+            .unwrap()
+            .push((fix.state, fix.published_delta_s));
         Ok(())
     }
 
@@ -895,5 +908,158 @@ async fn a_flush_with_nowhere_to_send_is_not_recorded_as_a_push() {
         *h.sink.flushes.lock().unwrap(),
         1,
         "the flush was still attempted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Envelope stamps: telling a parked phone apart from a dead one
+// ---------------------------------------------------------------------------
+//
+// Everything below asserts the same underlying fact from a different angle: the position on the
+// wire is identical in all three cases, and the stamp is the only thing that differs. That is the
+// whole problem these fields were added for — until 2026-09-05 a friend who parked and a friend
+// whose app died both froze at a stale position, and no amount of looking at the position could
+// separate them.
+
+#[tokio::test]
+async fn an_accepted_fix_goes_out_marked_live() {
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+
+    h.engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(stamps[0].0, Some(iroh_location::FIX_STATE_LIVE));
+    assert_eq!(
+        stamps[0].1,
+        Some(0),
+        "a fresh fix is sealed in the same second it was measured"
+    );
+}
+
+#[tokio::test]
+async fn a_heartbeat_goes_out_marked_parked_carrying_an_old_position() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+
+    // An hour later, still parked, no new fix has passed the gate.
+    let later = base + 60 * 60_000;
+    h.engine()
+        .heartbeat(healthy_battery(), INTERVAL, later)
+        .await
+        .unwrap();
+
+    let sent = h.sink.sent.lock().unwrap();
+    let stamps = h.sink.stamps.lock().unwrap();
+    let last = stamps.len() - 1;
+
+    // The position has not moved and its timestamp has not moved either — deliberately.
+    assert_eq!(
+        sent[last].1, base,
+        "the anchor keeps its ORIGINAL timestamp"
+    );
+    // ...and this is what makes that legible instead of indistinguishable from death.
+    assert_eq!(stamps[last].0, Some(iroh_location::FIX_STATE_PARKED));
+    assert_eq!(
+        stamps[last].1,
+        Some(3_600),
+        "sealed an hour after the position was measured"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_fix_goes_out_marked_no_fix_not_parked() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+
+    // Moving, but nothing usable — a tunnel, or reduced accuracy. The slot still fills with the
+    // last good position, so the wire looks exactly like the parked case above.
+    let later = base + INTERVAL;
+    let out = h
+        .engine()
+        .ingest(fix(later, 5_000.0), healthy_battery(), INTERVAL, later)
+        .await
+        .unwrap();
+    assert!(!out.accepted, "precondition: the gate refused this fix");
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    let last = stamps.len() - 1;
+    assert_eq!(
+        stamps[last].0,
+        Some(iroh_location::FIX_STATE_NO_FIX),
+        "'somewhere on the Underground' is not 'parked at the pub'"
+    );
+}
+
+#[tokio::test]
+async fn a_backfilled_burst_is_stamped_as_one_wake() {
+    // What a parked iPhone actually does: the process is suspended, the OS eventually grants a
+    // wake, and one drain backfills every slot that came due. All of those envelopes were minted
+    // at the same moment by the same phone, and they say so.
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+
+    let woke = base + INTERVAL * 5;
+    let out = h
+        .engine()
+        .heartbeat(healthy_battery(), INTERVAL, woke)
+        .await
+        .unwrap();
+    assert!(out.enqueued > 1, "precondition: this wake backfilled slots");
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    let burst = &stamps[1..];
+    assert!(
+        burst
+            .iter()
+            .all(|s| s.0 == Some(iroh_location::FIX_STATE_PARKED)),
+        "every envelope in the burst is parked"
+    );
+    let delta = (woke - base) / 1000;
+    assert!(
+        burst.iter().all(|s| s.1 == Some(delta as u32)),
+        "and every one is stamped with the moment the wake actually happened"
+    );
+}
+
+#[tokio::test]
+async fn a_parked_tick_that_fills_no_slot_still_records_that_the_phone_parked() {
+    // `plan.due == 0` is the COMMON case on a parked phone: the current slot is already covered,
+    // so the tick enqueues nothing. It has still learned the device has settled, and a leftover
+    // envelope from an earlier failed drain must not go out stamped `live` from a parked phone.
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+
+    // Same slot: nothing comes due.
+    let out = h
+        .engine()
+        .heartbeat(healthy_battery(), INTERVAL, base + 1_000)
+        .await
+        .unwrap();
+    assert_eq!(out.enqueued, 0, "precondition: this tick filled no slot");
+
+    assert_eq!(
+        h.gate.0.lock().unwrap().last_state,
+        Some(iroh_location::FIX_STATE_PARKED),
+        "the parked declaration is persisted by the tick that had nothing to send"
     );
 }

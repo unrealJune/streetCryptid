@@ -8,7 +8,7 @@ import { CryptidThemes, Spacing } from '@/constants/theme';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import { useTheme } from '@/hooks/use-theme';
 import { fixTransportBadge, fixTransportDescription } from '../core/fix-transport';
-import { formatDistance, formatPresenceAge, type FriendPresence } from '../core/presence';
+import { describePresence, formatAge, formatDistance, type FriendPresence } from '../core/presence';
 import type { RatchetActivity } from '../core/types';
 
 interface FriendProfileSheetProps {
@@ -138,7 +138,20 @@ export function FriendProfileSheet({
 
         <View style={[styles.details, { borderColor: theme.backgroundSelected }]}>
           <DetailRow label="LOCATION" value={locationLine} />
-          <DetailRow label="LAST SIGNAL" value={formatPresenceAge(presence.ageMs)} />
+          <DetailRow label="LAST SIGNAL" value={describePresence(presence)} />
+          {/*
+            The two clocks, side by side, and only when they disagree. While someone is moving
+            they are the same number and a second row would be noise; the moment they diverge, the
+            gap IS the answer to "is she parked or is her phone dead", so it is worth the line.
+            Omitted entirely for a sender that predates the envelope stamps — we would be showing
+            a fallback, not a measurement.
+          */}
+          {presence.contactKnown &&
+          presence.contactAgeMs !== null &&
+          presence.positionAgeMs !== null &&
+          presence.positionAgeMs - presence.contactAgeMs > 60_000 ? (
+            <DetailRow label="LAST CONTACT" value={`${formatAge(presence.contactAgeMs)} ago`} />
+          ) : null}
           {presence.fix ? (
             <DetailRow
               accessibilityLabel={fixTransportDescription(presence.via)}
