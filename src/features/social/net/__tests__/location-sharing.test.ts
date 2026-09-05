@@ -431,7 +431,7 @@ describe('LocationSharingService — durable trail wiring', () => {
     const stash = { configured: true, registerNamespace: async () => {} };
     const svc = makeService({ stash });
     await svc.init('@me', 'mothman');
-    await svc.setStashOptIn(true);
+    await svc.setDeliveryMode('stash');
 
     await svc.syncTrail(123);
 
@@ -464,7 +464,7 @@ describe('LocationSharingService — durable trail wiring', () => {
       stash: { configured: true, registerNamespace: async () => {} },
     });
     await svc.init('@me', 'mothman');
-    await svc.setStashOptIn(true);
+    await svc.setDeliveryMode('stash');
 
     await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
     await telemetry.flush();
@@ -706,7 +706,7 @@ describe('LocationSharingService — native delivery targets', () => {
 
     expect(mockHolder.mod.calls.setDeliveryConfig.at(-1)?.stashBaseUrl).toBeNull();
 
-    await svc.setStashOptIn(true);
+    await svc.setDeliveryMode('stash');
 
     const latest = mockHolder.mod.calls.setDeliveryConfig.at(-1);
     expect(latest?.stashBaseUrl).toBe('https://stash.example.com');
@@ -714,7 +714,7 @@ describe('LocationSharingService — native delivery targets', () => {
     expect(latest?.peerTickets[0]).toBe('ticket-stash');
   });
 
-  it('stops naming the stash when the user opts back out', async () => {
+  it('stops naming the stash when the user switches back to direct', async () => {
     mockHolder.stashConfig = {
       baseUrl: 'https://stash.example.com',
       ticket: 'ticket-stash',
@@ -723,12 +723,50 @@ describe('LocationSharingService — native delivery targets', () => {
     const stash = { configured: true, registerNamespace: async () => {} };
     const svc = makeService({ stash });
     await svc.init('@me', 'mothman');
-    await svc.setStashOptIn(true);
-    await svc.setStashOptIn(false);
+    await svc.setDeliveryMode('stash');
+    await svc.setDeliveryMode('direct');
 
     const latest = mockHolder.mod.calls.setDeliveryConfig.at(-1);
     expect(latest?.stashBaseUrl).toBeNull();
     expect(latest?.peerTickets).not.toContain('ticket-stash');
+  });
+
+  it('does not upload to the stash when the route chosen is the mutual relay', async () => {
+    // `mutual` is not `stash` and is not `direct`: a three-way choice must not collapse into
+    // "stash or not", or picking the middle option would quietly keep using the server.
+    mockHolder.stashConfig = {
+      baseUrl: 'https://stash.example.com',
+      ticket: 'ticket-stash',
+      psk: null,
+    };
+    const stash = { configured: true, registerNamespace: async () => {} };
+    const svc = makeService({ stash });
+    await svc.init('@me', 'mothman');
+    await svc.setDeliveryMode('mutual');
+
+    const latest = mockHolder.mod.calls.setDeliveryConfig.at(-1);
+    expect(latest?.stashBaseUrl).toBeNull();
+    expect(latest?.peerTickets).not.toContain('ticket-stash');
+  });
+
+  it('reports the stash as chosen-but-unavailable rather than silently using it', async () => {
+    // No stash deployed for this build. The preference is kept as given — the same install can
+    // gain a stash on the next build — but the effective route is direct, and the screen has to
+    // be able to tell the difference in order to say so.
+    mockHolder.stashConfig = null;
+    const stash = { configured: false, registerNamespace: async () => {} };
+    const svc = makeService({ stash });
+    // `snapshot()` is private to the service; observe the emissions instead.
+    const snapshots: SharingSnapshot[] = [];
+    svc.onChange((snapshot) => snapshots.push(snapshot));
+    await svc.init('@me', 'mothman');
+    await svc.setDeliveryMode('stash');
+
+    const delivery = snapshots.at(-1)!.delivery;
+    expect(delivery.mode).toBe('stash');
+    expect(delivery.effectiveMode).toBe('direct');
+    expect(delivery.stashConfigured).toBe(false);
+    expect(mockHolder.mod.calls.setDeliveryConfig.at(-1)?.stashBaseUrl).toBeNull();
   });
 
   it('tolerates a binary built before the native push path existed', async () => {

@@ -34,6 +34,12 @@ import {
   type SpanContext,
 } from '@/features/dev/telemetry';
 import { encodeContactCard } from '../core/contact-card';
+import {
+  DEFAULT_DELIVERY_MODE,
+  effectiveDeliveryMode,
+  type DeliveryAvailability,
+  type DeliveryMode,
+} from '../core/delivery-mode';
 import { decodePairLink, encodePairLink, isPairLink, PAIR_TOKEN_PREFIX } from '../core/pair-link';
 import {
   deriveLookupId,
@@ -78,7 +84,8 @@ import {
   loadPool,
   loadRatchetActivity,
   loadShareIntervalMs,
-  loadStashOptIn,
+  loadDeliveryMode,
+  saveDeliveryMode,
   loadTransportPreferences,
   savePool,
   saveRatchetActivity,
@@ -87,7 +94,6 @@ import {
   loadSharingEnabled,
   saveShareIntervalMs,
   saveSharingEnabled,
-  saveStashOptIn,
   saveTransportPreferences,
   SHARE_INTERVAL_OPTIONS_MS,
   type TransportPreferences,
@@ -196,6 +202,14 @@ export interface PairingSnapshot {
 }
 
 /** An immutable view of the sharing state for the UI. */
+/** The delivery picker's state: the stored choice, what it resolves to, and why. */
+export interface DeliveryStateSnapshot extends DeliveryAvailability {
+  /** Exactly what the user picked, preserved even when this build cannot honour it. */
+  readonly mode: DeliveryMode;
+  /** What the delivery path will actually do — see `effectiveDeliveryMode`. */
+  readonly effectiveMode: DeliveryMode;
+}
+
 export interface SharingSnapshot {
   ready: boolean;
   status: string;
@@ -212,6 +226,8 @@ export interface SharingSnapshot {
   lastSyncRecovered: number | null;
   /** Offline-delivery stash: whether a stash is deployed and whether the user opted in. */
   stash: { available: boolean; optedIn: boolean };
+  /** Which route sealed envelopes take, what was asked for, and what this build can offer. */
+  delivery: DeliveryStateSnapshot;
   /** Live iroh endpoint addresses and known peer path usage for the diagnostics screen. */
   transportDiagnostics: {
     snapshot: TransportDiagnostics | null;
@@ -517,7 +533,7 @@ export class LocationSharingService {
   /** The stash's dial ticket for reconciliation bootstrap, or null when not configured. */
   private readonly stashTicket: string | null = this.stashConfig?.ticket ?? null;
   /** Per-user opt-in (persisted). Defaults false — the stash is never used unless turned on. */
-  private stashOptIn = false;
+  private deliveryMode: DeliveryMode = DEFAULT_DELIVERY_MODE;
   /** Persisted native endpoint transports. All paths are enabled by default. */
   private transportPreferences: TransportPreferences = { ...DEFAULT_TRANSPORT_PREFERENCES };
   private pairingActivity = '';
@@ -599,9 +615,34 @@ export class LocationSharingService {
     this.stash = deps.stash ?? createDefaultStashClient();
   }
 
-  /** Whether offline delivery via the stash is both configured (deployed) and opted into. */
+  /**
+   * What the delivery path is permitted to do right now, as opposed to what was asked for.
+   *
+   * `relaySupported` is guarded on the native export rather than assumed, per the standing rule
+   * that a phone can be running an older binary than the JS bundle — and relay is the newest of
+   * the three routes, so on most installs this is the one that is actually absent.
+   */
+  private deliveryAvailability(): DeliveryAvailability {
+    return {
+      stashConfigured: this.stash.configured,
+      mutualSupported: typeof this.mod?.setMutualRelayConfig === 'function',
+    };
+  }
+
+  /** The route sealed envelopes will really take, after unavailable choices are resolved away. */
+  private effectiveDelivery(): DeliveryMode {
+    return effectiveDeliveryMode(this.deliveryMode, this.deliveryAvailability());
+  }
+
+  /**
+   * Whether offline delivery via the stash is both deployed and chosen.
+   *
+   * Still the single chokepoint every stash decision reads — grants, bootstrap sets, the native
+   * delivery config, the push path. Only its definition changed when the boolean opt-in became a
+   * three-way route: "opted in" is now "picked stash, and stash is what we can actually do".
+   */
   private stashEnabled(): boolean {
-    return this.stashOptIn && this.stash.configured && this.stashTicket !== null;
+    return this.effectiveDelivery() === 'stash' && this.stashTicket !== null;
   }
 
   /** The stash dial ticket to fold into subscribe() bootstrap sets, or [] when disabled. */
@@ -611,7 +652,17 @@ export class LocationSharingService {
 
   /** Current opt-in state for the UI: whether a stash exists and whether it's turned on. */
   stashState(): { available: boolean; optedIn: boolean } {
-    return { available: this.stash.configured, optedIn: this.stashOptIn };
+    return { available: this.stash.configured, optedIn: this.deliveryMode === 'stash' };
+  }
+
+  /** The delivery picker's whole world: what was chosen, what will happen, and what exists. */
+  deliveryState(): DeliveryStateSnapshot {
+    const availability = this.deliveryAvailability();
+    return {
+      mode: this.deliveryMode,
+      effectiveMode: effectiveDeliveryMode(this.deliveryMode, availability),
+      ...availability,
+    };
   }
 
   /** Current endpoint transport set. */
@@ -651,13 +702,19 @@ export class LocationSharingService {
   }
 
   /**
-   * Opt in/out of offline delivery via the stash. Persists the choice; on opt-in, grants the stash
-   * replication of our own + friends' trail namespaces and folds its ticket into our subscription.
+   * Choose how sealed envelopes leave this phone. Persists the choice; when the choice resolves
+   * to the stash, grants it replication of our own + friends' trail namespaces and folds its
+   * ticket into our subscription.
+   *
+   * Switching AWAY matters as much as switching to: the push targets mirrored into the native
+   * store are what the background path reads, so a mode change that did not reach
+   * `pushDeliveryConfig` would leave a headless wake uploading to a stash the user had just
+   * moved off. That is why the mirror is unconditional and not inside the branch.
    */
-  async setStashOptIn(optedIn: boolean): Promise<void> {
-    this.stashOptIn = optedIn;
-    await saveStashOptIn(this.kv, optedIn);
-    if (optedIn) {
+  async setDeliveryMode(mode: DeliveryMode): Promise<void> {
+    this.deliveryMode = mode;
+    await saveDeliveryMode(this.kv, mode);
+    if (this.stashEnabled()) {
       await this.syncStashGrants();
       await this.ensureMySubscription();
     }
@@ -811,7 +868,7 @@ export class LocationSharingService {
     // `sharing.recipients=1` from the JS pool the whole time. The two had diverged and only the
     // native one was ever consulted.
     this.pushSharingRecipients();
-    this.stashOptIn = await loadStashOptIn(this.kv);
+    this.deliveryMode = await loadDeliveryMode(this.kv);
     // Seed the native push targets from the pool and opt-in we have just loaded — after both, for
     // the same reason, or the stash would be mirrored as off on every launch.
     this.pushDeliveryConfig();
@@ -1499,7 +1556,7 @@ export class LocationSharingService {
         'sc.author': this.keys ? this.keys.endpointId.slice(0, 10) : undefined,
         'stash.client_configured': this.stash.configured,
         'stash.ticket_configured': this.stashTicket !== null,
-        'stash.opted_in': this.stashOptIn,
+        'stash.opted_in': this.deliveryMode === 'stash',
         'stash.replication_enabled': stashReplicationEnabled,
       },
     });
@@ -3238,6 +3295,7 @@ export class LocationSharingService {
       backgroundAccess: this.backgroundAccess,
       lastSyncRecovered: this.lastSyncRecovered,
       stash: this.stashState(),
+      delivery: this.deliveryState(),
       transportDiagnostics: {
         snapshot: this.transportDiagnostics,
         updatedAt: this.transportDiagnosticsUpdatedAt,

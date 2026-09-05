@@ -1,5 +1,6 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
+import type { DeliveryMode } from '@/features/social/core/delivery-mode';
 import SettingsScreen from '../settings-screen';
 import { SettingsMenuRow } from '../../components/settings-menu-row';
 
@@ -20,10 +21,10 @@ jest.mock('expo-router', () => ({
 
 const snapshot: {
   transports: { relay: boolean; ip: boolean; ble: boolean };
-  stash: { available: boolean; optedIn: boolean };
+  delivery: { mode: DeliveryMode; effectiveMode: DeliveryMode };
 } = {
   transports: { relay: true, ip: true, ble: true },
-  stash: { available: true, optedIn: true },
+  delivery: { mode: 'stash', effectiveMode: 'stash' },
 };
 
 jest.mock('@/features/social/hooks/use-location-sharing', () => ({
@@ -63,18 +64,20 @@ describe('SettingsScreen', () => {
     const byHref = new Map(rows().map((row) => [row.href, row.value]));
 
     expect(byHref.get('/settings/transports')).toBe('3/3 on');
-    expect(byHref.get('/settings/delivery')).toBe('Stash on');
+    expect(byHref.get('/settings/delivery')).toBe('Stash server');
     expect(byHref.get('/settings/appearance')).toBe('Graphite');
   });
 
-  it('distinguishes a stash that is off from one that was never deployed', () => {
-    snapshot.stash = { available: true, optedIn: false };
-    expect(rows().find((row) => row.href === '/settings/delivery')?.value).toBe('Stash off');
+  it('names the route that is actually in use, not the one that was asked for', () => {
+    // A build with no stash deployed is travelling direct whatever the stored preference says,
+    // and the menu is a summary of what is happening.
+    snapshot.delivery = { mode: 'stash', effectiveMode: 'direct' };
+    expect(rows().find((row) => row.href === '/settings/delivery')?.value).toBe('Direct');
 
     act(() => renderer.unmount());
-    snapshot.stash = { available: false, optedIn: false };
-    expect(rows().find((row) => row.href === '/settings/delivery')?.value).toBe('No stash');
+    snapshot.delivery = { mode: 'mutual', effectiveMode: 'mutual' };
+    expect(rows().find((row) => row.href === '/settings/delivery')?.value).toBe('Mutual relay');
 
-    snapshot.stash = { available: true, optedIn: true };
+    snapshot.delivery = { mode: 'stash', effectiveMode: 'stash' };
   });
 });

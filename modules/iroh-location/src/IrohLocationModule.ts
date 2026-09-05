@@ -254,6 +254,23 @@ export declare class IrohLocationNativeModule
     stashPsk: string | null
   ): Promise<void>;
   /**
+   * Enrol this device as a blind carrier for the given mutual friends' trail namespaces, and
+   * name the mutuals our own trail may be handed to. Both directions in one call, because
+   * mutual relay is symmetric by construction: you only carry for someone who carries for you.
+   *
+   * `mutualTickets` are read-tickets, exactly as the stash is granted — replication of sealed
+   * envelopes, never decryption. A carrier can see WHICH namespaces it holds, which is the
+   * metadata cost the picker states out loud ("mutual friends can tell that you are all
+   * friends"); it can never open one.
+   *
+   * An empty list means "carry for nobody", which is how the mode is switched off. Distinct
+   * from the method being absent, which means this binary cannot do it at all.
+   *
+   * OPTIONAL, and the presence of this export is what `DeliveryAvailability.mutualSupported`
+   * tests — a phone can be running an older binary than the JS bundle.
+   */
+  setMutualRelayConfig?(mutualTickets: string[]): Promise<void>;
+  /**
    * When the native drain last accepted a fix, published, and pushed (ms since epoch, or null).
    *
    * `device.health` turns these into `last_*_age_ms`. They are read from native rather than from
