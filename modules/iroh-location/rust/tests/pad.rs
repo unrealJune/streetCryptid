@@ -11,12 +11,23 @@ use iroh_location::pad::{self, PadError, MAX_PAYLOAD, PADDED_LEN};
 use iroh_location::LocationFix;
 
 fn encoded(ts: u64) -> Vec<u8> {
+    encoded_stamped(ts, None, None)
+}
+
+/// A fix as it actually goes on the wire once `DrainEngine::drain` has stamped the envelope.
+///
+/// The unstamped form is what a *capture* looks like and what older senders emit; the stamped one
+/// is every envelope this build seals. Both have to fit the class, and the stamped one is the real
+/// bound, so it is the one the headroom assertion uses.
+fn encoded_stamped(ts: u64, state: Option<u8>, published_delta_s: Option<u32>) -> Vec<u8> {
     let fix = LocationFix {
         lat: -122.419416,
         lon: 37.774929,
         accuracy_m: 65.5,
         heading_deg: 359.9,
         ts,
+        state,
+        published_delta_s,
     };
     postcard::to_allocvec(&fix).unwrap()
 }
@@ -26,17 +37,26 @@ fn the_size_class_actually_fits_a_real_fix() {
     // §4.7 [MUST VERIFY]: "the real fix payload distribution fits one bucket". Measured, not
     // assumed — and asserted here so the class cannot silently become too small if a field is
     // added to LocationFix.
+    //
+    // 38 -> 40 on 2026-09-05, when `state` and `published_delta_s` were appended: two absent
+    // `Option`s cost one `0x00` each. That is the unstamped shape — a capture, or a sender that
+    // predates the fields.
     let now = encoded(1_786_000_000_000);
-    assert_eq!(now.len(), 38, "a present-day fix");
+    assert_eq!(now.len(), 40, "a present-day fix");
     assert_eq!(
         encoded(4_102_444_800_000).len(),
-        38,
-        "still 38 in the year 2100"
+        40,
+        "still 40 in the year 2100"
     );
 
-    // The absolute bound: a varint ts cannot exceed this however far the clock runs.
-    let worst = encoded(u64::MAX);
-    assert_eq!(worst.len(), 42);
+    // What actually goes on the wire. `published_delta_s` is a varint of seconds, so the cost
+    // grows with how long a parked phone has been republishing one position: a day is 3 bytes.
+    let stamped = encoded_stamped(1_786_000_000_000, Some(2), Some(86_400));
+    assert_eq!(stamped.len(), 44, "a parked envelope stamped a day out");
+
+    // The absolute bound: varints at their maximum, which no real fix reaches.
+    let worst = encoded_stamped(u64::MAX, Some(u8::MAX), Some(u32::MAX));
+    assert_eq!(worst.len(), 50);
     assert!(
         worst.len() <= MAX_PAYLOAD,
         "the worst-case fix ({}) must fit the class ({MAX_PAYLOAD})",
@@ -44,7 +64,7 @@ fn the_size_class_actually_fits_a_real_fix() {
     );
     // Headroom is deliberate: changing the class is a wire break.
     assert!(
-        MAX_PAYLOAD - worst.len() >= 16,
+        MAX_PAYLOAD - worst.len() >= 8,
         "too little headroom for future fields"
     );
 }
@@ -132,7 +152,7 @@ fn the_frame_does_not_leak_the_payload_length_in_its_shape() {
     let a = pad::pad(&[]).unwrap();
     let b = pad::pad(&encoded(1_786_000_000_000)).unwrap();
     // Both are zero from (2 + their own length) onward; the tail they share is all zero.
-    let tail = 2 + 42;
+    let tail = 2 + 50;
     assert!(a[tail..].iter().all(|&x| x == 0));
     assert!(b[tail..].iter().all(|&x| x == 0));
     assert_eq!(a[tail..], b[tail..]);

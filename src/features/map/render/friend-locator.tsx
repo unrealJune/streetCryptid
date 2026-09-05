@@ -16,6 +16,8 @@ interface FriendLocatorProps {
   panelColor: string;
   selected?: boolean;
   stale?: boolean;
+  /** They have stopped and said so. Shown, but never dimmed — the position is correct. */
+  parked?: boolean;
   onPress(): void;
 }
 
@@ -55,6 +57,7 @@ export function FriendLocator({
   panelColor,
   selected = false,
   stale = false,
+  parked = false,
   onPress,
 }: FriendLocatorProps) {
   const art = normalizeAsciiArt(sigil || '?');
@@ -90,7 +93,11 @@ export function FriendLocator({
     >
       <Pressable
         accessibilityHint="Shows this friend's retained location trail"
-        accessibilityLabel={`Open ${handle}'s location history`}
+        accessibilityLabel={
+          parked
+            ? `Open ${handle}'s location history. Parked here.`
+            : `Open ${handle}'s location history`
+        }
         accessibilityRole="button"
         hitSlop={6}
         onPress={onPress}
@@ -109,6 +116,10 @@ export function FriendLocator({
             {
               backgroundColor: panelColor,
               borderColor: color,
+              // A dashed edge for "settled here", at full opacity. Reads as deliberate rather
+              // than degraded, which is exactly the distinction being drawn: dimming is reserved
+              // for a friend we have actually lost.
+              borderStyle: parked ? 'dashed' : 'solid',
               height: metrics.height,
               width: metrics.width,
             },

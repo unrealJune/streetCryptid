@@ -84,5 +84,21 @@ Conventions when changing that code:
   `just bindgen-android`) and the iOS XCFramework (macOS + full Xcode, via `just bindgen-ios`) —
   and EAS iOS builds produce that themselves in `scripts/eas-build-pre-install.sh`. Run the `just`
   recipes locally when you want a local device/simulator build; CI covers the rest.
+- **A frozen dot has two possible causes and the wire carries which.** `LocationFix.ts` says when the
+  POSITION was measured and deliberately does not advance on a heartbeat; `published_delta_s` says
+  when the ENVELOPE was sealed, which is the only proof the sending process was alive. `state`
+  (`FIX_STATE_*`) says why the position is what it is. Both are stamped in `DrainEngine::drain`, are
+  `None` on capture and in storage, and drive `PresenceState` in `features/social/core/presence.ts`
+  — a parked friend is rendered at full opacity with a dashed marker, not dimmed. Do NOT infer
+  liveness from contact continuing: on iOS parked publishing rides on `BGProcessing` wakes, measured
+  at p50 5 min / p90 92 min / max 17 h between contacts on a phone that was working throughout.
+- **The wire is append-only, `Option`-only, and end-only.** `decode_fix_payload` decodes across the
+  padding's zero fill, so appended `Option` fields read as `None` on a payload from an older sender
+  (postcard writes `None` as `0x00`, and `unpad` has already proven the fill is zero). That is what
+  makes appending safe in BOTH directions with no version byte — insert a field anywhere but the end,
+  or make it non-`Option`, and older peers decode as garbage or vanish silently. Storage is a
+  separate frozen type (`StoredFix`) on purpose: the outbox and gate discard everything on a decode
+  failure, so growing the type they persist would wipe `last_known_fix` fleet-wide on upgrade and
+  silence every parked phone.
 - Guard newly added native exports anyway (`typeof mod.configureTelemetry === 'function'`). Not
   because of bindgen now, but because a phone can be running an older binary than the JS bundle.

@@ -109,6 +109,32 @@ broadcasts a local insert only for namespaces `start_sync` has marked as syncing
 
 `*` Native spans are direct children of `publish.fix` on Android and iOS.
 
+**`publish.fix` is emitted by whichever path published — read it as "this device put an envelope on
+the wire", not "JS published".** That is true as of 2026-09-05 and was not before: the span existed
+only in `location-sharing.ts`, so the native drain reached the wire without ever opening one. Over a
+48-hour window that read:
+
+| author       | `publish.fix` | `gossip.publish` |
+| ------------ | ------------: | ---------------: |
+| `6942d8b97f` |             0 |              474 |
+| `84f86b144a` |             0 |              148 |
+| `e19f0a9735` |           186 |              494 |
+
+Two of three devices published hundreds of envelopes and emitted no `publish.fix` at all, because
+the span fired only when a JS context happened to be alive — on iOS, roughly "while moving with the
+app up". So the dashboard that answers _is this device publishing_ went blank in precisely the
+conditions worth watching, and every query below silently under-counted. `SubscriptionSink::publish`
+now opens it (`lane = "native"`; the JS path has no `lane`), so **counts before and after that date
+are not comparable** — a step change in `publish.fix` volume on 2026-09-05 is this, not a fleet that
+suddenly started working.
+
+`publish.fix` also carries the envelope's own account of itself: `fix_state` (1 live, 2 parked,
+3 no-fix — `FIX_STATE_*`, 0 when the sender predates the field), `published_delta_s` (seconds
+between the position being measured and the envelope being sealed) and `payload_ts`. Those are the
+two clocks: a gap in a friend's trail can be read back to whether the sender was parked or had
+stopped running, which `payload_ts` alone can never say, because a heartbeat deliberately preserves
+the original timestamp.
+
 Device B is no longer woken by the stash: push-token upload was removed (ARCHITECTURE §10), so
 there is no `stash.wake.push` → `push.wake` hop any more. B pulls on its own schedule — the
 periodic refresh or the live-request poll — which is why a gap of up to one refresh interval
@@ -137,6 +163,18 @@ Every hop of one envelope, on any device or the stash:
 ```traceql
 { span.sc.entry_hash = "ab12cd34ef" }
 ```
+
+Was a quiet phone parked, or had it stopped running? (the question the map could not answer)
+
+```
+{ name = "publish.fix" && span.fix_state = 2 }
+```
+
+`fix_state = 2` is a phone that had settled and said so. Its `payload_ts` will be hours old and that
+is correct — compare `published_delta_s` (how stale the POSITION was when sealed) against the gap to
+the next `publish.fix` from the same author (how long the DEVICE was quiet). A parked phone with a
+climbing `published_delta_s` and a steady contact cadence is healthy. A long gap with no `publish.fix`
+of any state at either end is a phone that stopped.
 
 Everything device A published in a window (get the author id from any of its spans):
 

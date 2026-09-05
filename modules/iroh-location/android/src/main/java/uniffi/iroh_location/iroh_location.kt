@@ -7380,6 +7380,19 @@ public object FfiConverterTypeIngestOutcome: FfiConverterRustBuffer<IngestOutcom
 
 /**
  * A decrypted location fix handed to the app.
+ *
+ * The first five fields describe a **position**. The last two describe the **envelope that
+ * carried it**, and they are the difference between a friend who has stopped moving and a friend
+ * whose phone has died — which looked identical on the map until 2026-09-05, because the only
+ * clock the UI had was [`ts`](Self::ts), and a heartbeat deliberately preserves the ORIGINAL `ts`
+ * (see [`crate::publish::DrainEngine::heartbeat`]).
+ *
+ * They are stamped at seal time by [`crate::publish::DrainEngine::drain`] and are `None`
+ * everywhere else: on capture, in the outbox, and in the gate's `last_known_fix`. A position does
+ * not have a "when was this sent" or a "was the phone parked"; a transmission does.
+ *
+ * `None` on a *received* fix means the sender predates these fields. See [`decode_fix_payload`]
+ * for why that decodes rather than failing.
  */
 data class LocationFix (
     var `lat`: kotlin.Double
@@ -7391,6 +7404,25 @@ data class LocationFix (
     var `headingDeg`: kotlin.Double
     , 
     var `ts`: kotlin.ULong
+    , 
+    /**
+     * Why the position is what it is, as one of `FIX_STATE_*`.
+     *
+     * A plain `u8` for the same reason `CTL_KIND_*` is: an unknown future value from a newer peer
+     * must degrade to "I do not recognise this" rather than fail the whole payload.
+     */
+    var `state`: kotlin.UByte?
+    , 
+    /**
+     * Seconds between [`ts`](Self::ts) and the moment this envelope was sealed.
+     *
+     * Delta-encoded rather than absolute because it is always small and always non-negative — a
+     * position cannot be sent before it is measured — and a varint of a day's worth of seconds is
+     * three bytes where an absolute epoch-ms is six. The receiver reads liveness as
+     * `ts + published_delta_s * 1000`, which is a different clock from `ts` itself: a parked phone
+     * republishes an hours-old position from a process that is alive right now.
+     */
+    var `publishedDeltaS`: kotlin.UInt?
     
 ){
     
@@ -7412,6 +7444,8 @@ public object FfiConverterTypeLocationFix: FfiConverterRustBuffer<LocationFix> {
             FfiConverterDouble.read(buf),
             FfiConverterDouble.read(buf),
             FfiConverterULong.read(buf),
+            FfiConverterOptionalUByte.read(buf),
+            FfiConverterOptionalUInt.read(buf),
         )
     }
 
@@ -7420,7 +7454,9 @@ public object FfiConverterTypeLocationFix: FfiConverterRustBuffer<LocationFix> {
             FfiConverterDouble.allocationSize(value.`lon`) +
             FfiConverterDouble.allocationSize(value.`accuracyM`) +
             FfiConverterDouble.allocationSize(value.`headingDeg`) +
-            FfiConverterULong.allocationSize(value.`ts`)
+            FfiConverterULong.allocationSize(value.`ts`) +
+            FfiConverterOptionalUByte.allocationSize(value.`state`) +
+            FfiConverterOptionalUInt.allocationSize(value.`publishedDeltaS`)
     )
 
     override fun write(value: LocationFix, buf: ByteBuffer) {
@@ -7429,6 +7465,8 @@ public object FfiConverterTypeLocationFix: FfiConverterRustBuffer<LocationFix> {
             FfiConverterDouble.write(value.`accuracyM`, buf)
             FfiConverterDouble.write(value.`headingDeg`, buf)
             FfiConverterULong.write(value.`ts`, buf)
+            FfiConverterOptionalUByte.write(value.`state`, buf)
+            FfiConverterOptionalUInt.write(value.`publishedDeltaS`, buf)
     }
 }
 
@@ -8862,6 +8900,38 @@ public object FfiConverterTypeSasRoleKind: FfiConverterRustBuffer<SasRoleKind> {
 /**
  * @suppress
  */
+public object FfiConverterOptionalUByte: FfiConverterRustBuffer<kotlin.UByte?> {
+    override fun read(buf: ByteBuffer): kotlin.UByte? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUByte.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UByte?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUByte.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UByte?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUByte.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalShort: FfiConverterRustBuffer<kotlin.Short?> {
     override fun read(buf: ByteBuffer): kotlin.Short? {
         if (buf.get().toInt() == 0) {
@@ -8884,6 +8954,38 @@ public object FfiConverterOptionalShort: FfiConverterRustBuffer<kotlin.Short?> {
         } else {
             buf.put(1)
             FfiConverterShort.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalUInt: FfiConverterRustBuffer<kotlin.UInt?> {
+    override fun read(buf: ByteBuffer): kotlin.UInt? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUInt.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UInt?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUInt.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UInt?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUInt.write(value, buf)
         }
     }
 }

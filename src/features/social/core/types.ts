@@ -4,13 +4,55 @@
 export type Hex = string;
 
 /** A decrypted location fix. */
+/**
+ * What the sender says about the envelope a position arrived in.
+ *
+ * Mirrors `FIX_STATE_*` in `modules/iroh-location/rust/src/lib.rs`, which is the source of truth;
+ * the numbers are on the wire and must stay in step with it.
+ *
+ * Numbers rather than a string union because that is what is transmitted: a value from a newer
+ * peer that we do not recognise has to degrade to "this sender says something we cannot read" —
+ * which behaves like a sender that says nothing — rather than fail the payload.
+ */
+/** The position is fresh: it passed the sender's confidence gate on that wake. */
+export const FIX_STATE_LIVE = 1;
+/**
+ * The sender has parked. The position is the anchor it settled on, and it will not advance until
+ * they move again — so silence after this envelope is EXPLAINED, not evidence of death.
+ *
+ * This is the one that earns its byte. Liveness cannot be inferred from contact continuing,
+ * because on iOS it does not: parked publishing rides on `BGProcessing` wakes the OS grants a few
+ * times a day, and the measured gap between contacts is p50 5 min but p90 92 min with a 17-hour
+ * maximum, on phones that were working the whole time.
+ */
+export const FIX_STATE_PARKED = 2;
+/**
+ * The sender is not parked, but nothing passed its quality gate — indoors, a tunnel, reduced
+ * accuracy. The position is the last accepted one and they may well be moving.
+ *
+ * On the wire this is byte-identical to {@link FIX_STATE_PARKED} in every respect except this
+ * field, which is the point: "parked at the pub" and "somewhere on the Underground" look the same
+ * from outside and need different sentences.
+ */
+export const FIX_STATE_NO_FIX = 3;
+
 export interface LocationFix {
   lat: number;
   lon: number;
   accuracyM: number;
   headingDeg: number;
-  /** ms since epoch */
+  /**
+   * ms since epoch — when the POSITION was measured.
+   *
+   * Deliberately does NOT advance when a parked phone republishes this position on cadence, so it
+   * is honest about how old the dot is. That also means it says nothing about whether the sender
+   * is still running: see {@link publishedDeltaS}.
+   */
   ts: number;
+  /** One of `FIX_STATE_*`. Absent ⇒ the sender predates the field. */
+  state?: number;
+  /** Seconds between {@link ts} and the moment the sender sealed the envelope. */
+  publishedDeltaS?: number;
 }
 
 /**

@@ -142,10 +142,31 @@ private func excludeFromBackup(_ dir: URL) {
 }
 
 /// Build the UniFFI `LocationFix` from the JS bridge dict.
+///
+/// The envelope stamps are always `nil` here. This is the CAPTURE direction — a position the OS
+/// just handed us — and `state` / `publishedDeltaS` describe a transmission that has not happened
+/// yet. `DrainEngine::drain` fills them in at seal time.
 private func locationFix(from fix: [String: Double]) -> LocationFix {
   LocationFix(
     lat: fix["lat"] ?? 0, lon: fix["lon"] ?? 0, accuracyM: fix["accuracyM"] ?? 0,
-    headingDeg: fix["headingDeg"] ?? 0, ts: UInt64(fix["ts"] ?? 0))
+    headingDeg: fix["headingDeg"] ?? 0, ts: UInt64(fix["ts"] ?? 0),
+    state: nil, publishedDeltaS: nil)
+}
+
+/// The JS shape of a decrypted fix, including what the envelope says about itself.
+///
+/// Absent stamps are OMITTED rather than sent as null, so JS sees `undefined` — which reads as
+/// "this sender does not tell us", the honest meaning of a fix from a build that predates the
+/// fields. A sender that says nothing and a sender we cannot understand must not collapse into the
+/// same value, because the UI's answer differs: one falls back to age, the other is a bug.
+private func fixToDict(_ fix: LocationFix) -> [String: Any] {
+  var out: [String: Any] = [
+    "lat": fix.lat, "lon": fix.lon, "accuracyM": fix.accuracyM,
+    "headingDeg": fix.headingDeg, "ts": fix.ts,
+  ]
+  if let state = fix.state { out["state"] = Int(state) }
+  if let delta = fix.publishedDeltaS { out["publishedDeltaS"] = Int(delta) }
+  return out
 }
 
 /// Build the UniFFI `ControlMsg` from the JS bridge dict (see `NativeControlMsg`; `nonce` is hex).
@@ -350,10 +371,7 @@ private final class EventBridge: FixListener {
       [
         "author": dataToHex(author),
         "seq": seq,
-        "fix": [
-          "lat": fix.lat, "lon": fix.lon, "accuracyM": fix.accuracyM,
-          "headingDeg": fix.headingDeg, "ts": fix.ts,
-        ],
+        "fix": fixToDict(fix),
         "backfill": backfill,
         "via": via,
       ])
@@ -812,12 +830,7 @@ public final class IrohLocationModule: Module {
           "seq": incoming.seq,
           "ts": incoming.ts,
           "kind": incoming.kind,
-          "fix": incoming.fix.map { fix in
-            [
-              "lat": fix.lat, "lon": fix.lon, "accuracyM": fix.accuracyM,
-              "headingDeg": fix.headingDeg, "ts": fix.ts,
-            ]
-          } as Any,
+          "fix": incoming.fix.map { fixToDict($0) } as Any,
         ]
       }
     }

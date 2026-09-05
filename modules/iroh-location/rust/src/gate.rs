@@ -19,7 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::LocationFix;
+use crate::{LocationFix, StoredFix};
 
 /// Battery inputs to the suspend decision. Supplied by the platform layer with each fix, because
 /// the native path has no JS context to ask.
@@ -206,7 +206,10 @@ pub fn due_slots(now: u64, interval_ms: u64, last_published_slot: Option<u64>) -
 pub struct GateState {
     /// Latest position that passed the confidence gate, republished for slots that produce no fix
     /// — and for slots whose only fixes were rejected.
-    pub last_known_fix: Option<LocationFix>,
+    ///
+    /// [`StoredFix`], not [`LocationFix`]: this is the field whose loss silences a parked phone,
+    /// and it must not move when the wire type grows. See [`StoredFix`].
+    pub last_known_fix: Option<StoredFix>,
     pub last_accepted_at: Option<u64>,
     /// Index of the last wall-clock slot we put an envelope on the wire for.
     pub last_published_slot: Option<u64>,
@@ -227,6 +230,18 @@ pub struct GateState {
     /// and the gap between these two is exactly the failure that made a phone look healthy while
     /// delivering nothing.
     pub last_pushed_at: Option<u64>,
+    /// Why the last envelope this device sealed said the position was what it was — one of
+    /// `crate::FIX_STATE_*`, stamped onto the wire by [`crate::publish::DrainEngine::drain`].
+    ///
+    /// Lives in the gate rather than on the queued fix because it describes the *moment of
+    /// sending*, which is when a drain runs, not when a capture was filed. A burst that backfills
+    /// six slots at one wake is six envelopes minted under one set of circumstances, and stamping
+    /// them all with the state at drain time is the honest reading of that.
+    ///
+    /// MUST STAY LAST. [`GateStore::open`] zero-extends short reads so state written before this
+    /// field existed still decodes, and that only works for fields appended at the very end — a
+    /// field inserted above shifts everything after it and reads as garbage.
+    pub last_state: Option<u8>,
 }
 
 /// Durable home for [`GateState`], next to the outbox it feeds.
@@ -234,6 +249,12 @@ pub struct GateState {
 /// No writer claim: unlike the counter, a torn or lost gate state costs at most one duplicated or
 /// skipped slot, and both are already normal outcomes of a process dying mid-wake. Paying for a
 /// claim here would buy nothing and would add a second way for the node to refuse to start.
+/// How many zero bytes [`GateStore::open`] appends before decoding.
+///
+/// One byte per trailing `Option` field that may be missing from an older record, with room to
+/// spare — surplus zeros are ignored, so this only has to be an over-estimate.
+const GATE_STATE_ZERO_EXTEND: usize = 8;
+
 #[derive(Debug)]
 pub struct GateStore {
     dir: std::path::PathBuf,
@@ -251,7 +272,19 @@ impl GateStore {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("state");
         let current = match std::fs::read(&path) {
-            Ok(raw) => postcard::from_bytes::<GateState>(&raw).unwrap_or_default(),
+            // Zero-extended before decoding, so state written by a build that predates a trailing
+            // `Option` field still reads. postcard spells `None` as a single `0x00` and ignores
+            // trailing bytes, so a short record gains `None`s and a current one is unaffected.
+            //
+            // Without this, adding a field would make every existing gate state undecodable, and
+            // `unwrap_or_default()` would quietly throw away `last_known_fix` — which is not a lost
+            // cache but a phone that stops publishing until it next catches a clean fix. Corruption
+            // and "written by yesterday's build" must not have the same consequence.
+            Ok(raw) => {
+                let mut buf = raw;
+                buf.extend_from_slice(&[0u8; GATE_STATE_ZERO_EXTEND]);
+                postcard::from_bytes::<GateState>(&buf).unwrap_or_default()
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => GateState::default(),
             Err(e) => return Err(e),
         };
