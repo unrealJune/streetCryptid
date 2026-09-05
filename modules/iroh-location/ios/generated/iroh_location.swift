@@ -5093,6 +5093,19 @@ public func FfiConverterTypeIngestOutcome_lower(_ value: IngestOutcome) -> RustB
 
 /**
  * A decrypted location fix handed to the app.
+ *
+ * The first five fields describe a **position**. The last two describe the **envelope that
+ * carried it**, and they are the difference between a friend who has stopped moving and a friend
+ * whose phone has died — which looked identical on the map until 2026-09-05, because the only
+ * clock the UI had was [`ts`](Self::ts), and a heartbeat deliberately preserves the ORIGINAL `ts`
+ * (see [`crate::publish::DrainEngine::heartbeat`]).
+ *
+ * They are stamped at seal time by [`crate::publish::DrainEngine::drain`] and are `None`
+ * everywhere else: on capture, in the outbox, and in the gate's `last_known_fix`. A position does
+ * not have a "when was this sent" or a "was the phone parked"; a transmission does.
+ *
+ * `None` on a *received* fix means the sender predates these fields. See [`decode_fix_payload`]
+ * for why that decodes rather than failing.
  */
 public struct LocationFix: Equatable, Hashable {
     public var lat: Double
@@ -5100,15 +5113,49 @@ public struct LocationFix: Equatable, Hashable {
     public var accuracyM: Double
     public var headingDeg: Double
     public var ts: UInt64
+    /**
+     * Why the position is what it is, as one of `FIX_STATE_*`.
+     *
+     * A plain `u8` for the same reason `CTL_KIND_*` is: an unknown future value from a newer peer
+     * must degrade to "I do not recognise this" rather than fail the whole payload.
+     */
+    public var state: UInt8?
+    /**
+     * Seconds between [`ts`](Self::ts) and the moment this envelope was sealed.
+     *
+     * Delta-encoded rather than absolute because it is always small and always non-negative — a
+     * position cannot be sent before it is measured — and a varint of a day's worth of seconds is
+     * three bytes where an absolute epoch-ms is six. The receiver reads liveness as
+     * `ts + published_delta_s * 1000`, which is a different clock from `ts` itself: a parked phone
+     * republishes an hours-old position from a process that is alive right now.
+     */
+    public var publishedDeltaS: UInt32?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(lat: Double, lon: Double, accuracyM: Double, headingDeg: Double, ts: UInt64) {
+    public init(lat: Double, lon: Double, accuracyM: Double, headingDeg: Double, ts: UInt64, 
+        /**
+         * Why the position is what it is, as one of `FIX_STATE_*`.
+         *
+         * A plain `u8` for the same reason `CTL_KIND_*` is: an unknown future value from a newer peer
+         * must degrade to "I do not recognise this" rather than fail the whole payload.
+         */state: UInt8?, 
+        /**
+         * Seconds between [`ts`](Self::ts) and the moment this envelope was sealed.
+         *
+         * Delta-encoded rather than absolute because it is always small and always non-negative — a
+         * position cannot be sent before it is measured — and a varint of a day's worth of seconds is
+         * three bytes where an absolute epoch-ms is six. The receiver reads liveness as
+         * `ts + published_delta_s * 1000`, which is a different clock from `ts` itself: a parked phone
+         * republishes an hours-old position from a process that is alive right now.
+         */publishedDeltaS: UInt32?) {
         self.lat = lat
         self.lon = lon
         self.accuracyM = accuracyM
         self.headingDeg = headingDeg
         self.ts = ts
+        self.state = state
+        self.publishedDeltaS = publishedDeltaS
     }
 
     
@@ -5131,7 +5178,9 @@ public struct FfiConverterTypeLocationFix: FfiConverterRustBuffer {
                 lon: FfiConverterDouble.read(from: &buf), 
                 accuracyM: FfiConverterDouble.read(from: &buf), 
                 headingDeg: FfiConverterDouble.read(from: &buf), 
-                ts: FfiConverterUInt64.read(from: &buf)
+                ts: FfiConverterUInt64.read(from: &buf), 
+                state: FfiConverterOptionUInt8.read(from: &buf), 
+                publishedDeltaS: FfiConverterOptionUInt32.read(from: &buf)
         )
     }
 
@@ -5141,6 +5190,8 @@ public struct FfiConverterTypeLocationFix: FfiConverterRustBuffer {
         FfiConverterDouble.write(value.accuracyM, into: &buf)
         FfiConverterDouble.write(value.headingDeg, into: &buf)
         FfiConverterUInt64.write(value.ts, into: &buf)
+        FfiConverterOptionUInt8.write(value.state, into: &buf)
+        FfiConverterOptionUInt32.write(value.publishedDeltaS, into: &buf)
     }
 }
 
@@ -7110,6 +7161,30 @@ public func FfiConverterTypeSasRoleKind_lower(_ value: SasRoleKind) -> RustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt8: FfiConverterRustBuffer {
+    typealias SwiftType = UInt8?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt8.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt8.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionInt16: FfiConverterRustBuffer {
     typealias SwiftType = Int16?
 
@@ -7126,6 +7201,30 @@ fileprivate struct FfiConverterOptionInt16: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterInt16.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
