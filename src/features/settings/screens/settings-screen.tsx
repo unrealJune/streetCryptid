@@ -4,6 +4,7 @@ import { useFocusEffect } from 'expo-router';
 
 import { CryptidThemes } from '@/constants/theme';
 import { DEV_TELEMETRY_ENABLED } from '@/features/dev/telemetry';
+import { DELIVERY_MODE_COPY } from '@/features/social/core/delivery-mode';
 import { useMapColorScheme } from '@/features/map/hooks/use-map-color-scheme';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 
@@ -44,7 +45,9 @@ export default function SettingsScreen() {
   const transports = snapshot?.transports ?? { relay: true, ip: true, ble: true };
   const transportValues = Object.values(transports);
   const transportsOn = transportValues.filter(Boolean).length;
-  const stash = snapshot?.stash ?? { available: false, optedIn: false };
+  // The EFFECTIVE route, not the stored one: the menu is a summary of what is happening, and a
+  // build with no stash deployed is travelling direct whatever the preference still says.
+  const delivery = snapshot?.delivery.effectiveMode ?? 'mutual';
 
   return (
     <SettingsPage
@@ -69,9 +72,9 @@ export default function SettingsScreen() {
         <SettingsMenuRow
           href="/settings/delivery"
           label="Delivery options"
-          detail="Offline delivery, background access, and how often you publish."
-          value={stash.available ? (stash.optedIn ? 'Stash on' : 'Stash off') : 'No stash'}
-          accent={stash.available && stash.optedIn ? chrome.green : undefined}
+          detail="How your location travels, background access, and how often you publish."
+          value={DELIVERY_MODE_COPY[delivery].title}
+          accent={chrome.green}
         />
         <SettingsMenuRow
           href="/settings/appearance"
