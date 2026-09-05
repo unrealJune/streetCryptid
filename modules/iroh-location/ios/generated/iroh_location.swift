@@ -1423,7 +1423,7 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func initiatePair(invite: PairInvite) async throws  -> Data
     
     /**
-     * Begin an invite-based pair from an opaque invite token (`scpair1:…`). Returns the session id.
+     * Begin an invite-based pair from an opaque invite token (`scpair2:…`). Returns the session id.
      */
     func initiatePairByTicket(token: String) async throws  -> Data
     
@@ -2619,7 +2619,7 @@ open func initiatePair(invite: PairInvite)async throws  -> Data  {
 }
     
     /**
-     * Begin an invite-based pair from an opaque invite token (`scpair1:…`). Returns the session id.
+     * Begin an invite-based pair from an opaque invite token (`scpair2:…`). Returns the session id.
      */
 open func initiatePairByTicket(token: String)async throws  -> Data  {
     return
@@ -7844,7 +7844,7 @@ public func decodeMvtTile(bytes: Data, z: UInt32, x: UInt32, y: UInt32) -> Data 
 })
 }
 /**
- * Decode an opaque `scpair1:<hex>` token back into a [`PairInvite`].
+ * Decode an opaque `scpair2:<base64url>` token back into a [`PairInvite`].
  */
 public func decodePairInvite(token: String)throws  -> PairInvite  {
     return try  FfiConverterTypePairInvite_lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
@@ -7864,7 +7864,7 @@ public func deriveTopic(authorEndpointId: Data) -> Data  {
 })
 }
 /**
- * Encode a [`PairInvite`] into an opaque, dependency-free `scpair1:<hex>` token for QR / links.
+ * Encode a [`PairInvite`] into an opaque, dependency-free `scpair2:<base64url>` token for QR / links.
  */
 public func encodePairInvite(invite: PairInvite)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
@@ -8053,13 +8053,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_func_decode_mvt_tile() != 45603) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_func_decode_pair_invite() != 566) {
+    if (uniffi_iroh_location_checksum_func_decode_pair_invite() != 65503) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_derive_topic() != 20218) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_func_encode_pair_invite() != 8507) {
+    if (uniffi_iroh_location_checksum_func_encode_pair_invite() != 1284) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_generate_recv_keypair() != 62550) {
@@ -8206,7 +8206,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_initiate_pair() != 61841) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_initiate_pair_by_ticket() != 32241) {
+    if (uniffi_iroh_location_checksum_method_locationnode_initiate_pair_by_ticket() != 17133) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby() != 64589) {
