@@ -6,6 +6,17 @@ appId: com.unrealjune.streetcryptid
 # wiping any in-memory issued-invite record before it can be redeemed. Run this
 # immediately after create-invite.yaml in the same session, with no launchApp
 # in between.
+#
+# Settings is a menu with pages under it now, and "Close settings" only exists on the
+# menu itself — create-invite.yaml leaves us one page deep, on "Link pairing". Pop back
+# to the menu first if we are on a subpage; the step is conditional because this flow is
+# also run from the menu directly.
+- runFlow:
+    when:
+      visible: 'Back to settings'
+      timeout: 5000
+    commands:
+      - tapOn: 'Back to settings'
 - scrollUntilVisible:
     element: 'Close settings'
     direction: UP

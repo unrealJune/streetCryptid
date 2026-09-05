@@ -1,4 +1,9 @@
 import { reportStorageDegraded } from './storage-health';
+import {
+  deliveryModeFromLegacyStashOptIn,
+  parseDeliveryMode,
+  type DeliveryMode,
+} from '../core/delivery-mode';
 import type { PoolState } from '../core/pool';
 import type { RatchetActivity } from '../core/types';
 import { InMemoryKV, type PersistentKV } from './background/persistent-kv';
@@ -399,6 +404,34 @@ export async function loadStashOptIn(kv: PersistentKV): Promise<boolean> {
 /** Persist the trail-stash opt-in choice. */
 export async function saveStashOptIn(kv: PersistentKV, optedIn: boolean): Promise<void> {
   await kv.set(STASH_OPTIN_KEY, optedIn ? '1' : '0');
+}
+
+const DELIVERY_MODE_KEY = 'sc.social.deliveryMode';
+
+/**
+ * Which route sealed envelopes are allowed to take off this phone.
+ *
+ * Falls back to the legacy `stashOptIn` boolean when no mode has been written yet, so an
+ * install that had offline delivery switched on comes back as `stash` rather than being
+ * quietly demoted to `direct` on the update that introduced the picker. The old key is left
+ * in place: rolling back to a build that only understands the boolean must still find it.
+ */
+export async function loadDeliveryMode(kv: PersistentKV): Promise<DeliveryMode> {
+  const raw = await kv.get(DELIVERY_MODE_KEY);
+  if (raw !== null && raw !== undefined) return parseDeliveryMode(raw);
+  return deliveryModeFromLegacyStashOptIn(await loadStashOptIn(kv));
+}
+
+/**
+ * Persist the delivery choice, mirroring it back onto the legacy boolean.
+ *
+ * The mirror is not redundancy for its own sake — `loadStashOptIn` is still what a rolled-back
+ * build reads, and leaving it stale would silently keep uploading to a stash the user had just
+ * switched away from.
+ */
+export async function saveDeliveryMode(kv: PersistentKV, mode: DeliveryMode): Promise<void> {
+  await kv.set(DELIVERY_MODE_KEY, mode);
+  await saveStashOptIn(kv, mode === 'stash');
 }
 
 const LOCATION_DISCLOSURE_KEY = 'sc.social.locationDisclosureAck';

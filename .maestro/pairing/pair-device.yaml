@@ -44,6 +44,8 @@ appId: com.unrealjune.streetcryptid
       true: ${ROLE === 'invite'}
     commands:
       - tapOn: 'Settings'
+      # Settings is a menu now; the invite-link controls live on its "Link pairing" page.
+      - tapOn: 'Link pairing'
       - scrollUntilVisible:
           element: 'Share a one-time pairing link'
           direction: DOWN

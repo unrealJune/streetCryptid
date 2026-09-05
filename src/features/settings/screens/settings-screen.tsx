@@ -1,286 +1,109 @@
 import { useCallback } from 'react';
-import { Pressable, ScrollView, StyleSheet, View, useColorScheme } from 'react-native';
-import { useFocusEffect, useRouter } from 'expo-router';
-import { SymbolView } from 'expo-symbols';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { View, StyleSheet, useColorScheme } from 'react-native';
+import { useFocusEffect } from 'expo-router';
 
-import { ThemedText } from '@/components/themed-text';
-import { CryptidThemes, MaxContentWidth, Spacing } from '@/constants/theme';
-import { StashSettingRow } from '@/features/social/components/stash-setting-row';
-import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
-import { DEFAULT_SHARE_INTERVAL_MS } from '@/features/social/net/background/sampling-policy';
-import { useTheme } from '@/hooks/use-theme';
-
-import { ProfileOnboardingPreview } from '@/features/account/components/profile-onboarding-preview';
-import { useExplorationBackup } from '@/features/map/hooks/use-exploration-backup';
-
-import { AppProvenanceDetails } from '../components/app-provenance';
-import { AuthorIdRow } from '../components/author-id-row';
-import { DebugLocationControls } from '../components/debug-location-controls';
+import { CryptidThemes } from '@/constants/theme';
 import { DEV_TELEMETRY_ENABLED } from '@/features/dev/telemetry';
-import { EventLogPanel } from '../components/event-log-panel';
-import { ExplorationBackupRow } from '../components/exploration-backup-row';
+import { DELIVERY_MODE_COPY } from '@/features/social/core/delivery-mode';
+import { useMapColorScheme } from '@/features/map/hooks/use-map-color-scheme';
+import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
+
+import { getAppProvenance } from '../core/app-provenance';
 import { IdentityRow } from '../components/identity-row';
-import { LocationAccessRow } from '../components/location-access-row';
-import { MapColorSchemeRow } from '../components/map-color-scheme-row';
-import { ShareIntervalRow } from '../components/share-interval-row';
-import { TransportControls } from '../components/transport-controls';
-import { TransportDiagnostic } from '../components/transport-diagnostic';
-import { PairLinkAction } from '@/features/social/components/pair-link-action';
+import { SettingsMenuRow } from '../components/settings-menu-row';
+import { SettingsPage } from '../components/settings-page';
 
 /**
- * Settings, pulled over the map as a sheet — there is no tab bar to return to, so
- * it owns its own close affordance.
+ * The Settings menu — the sheet's root, pulled over the map.
  *
- * It is the app's one centralized surface: offline-delivery (trail stash) opt-in, a live
- * transport diagnostic covering every path the node can use, and per-transport debug
- * switches. Everything degrades honestly when the native module is absent (web / Expo Go):
- * the diagnostic shows "unavailable"/"n/a" rows and the toggles persist as preferences.
+ * This used to be one scroll containing every control in the app, which had grown
+ * past the point where anything could be found in it. It is now a menu: your own
+ * identity first (unchanged — it was already a row that opens a page), then one
+ * entry per area, each with the state it currently holds so the menu still answers
+ * "what is switched on" without opening anything.
  *
- * It is also where the two social controls that are not "who is out there" now live: your
- * own identity, and the invite-link pairing fallback for when two phones cannot
- * physically meet.
+ * The pages themselves live in `../screens/`, mounted at `src/app/settings/*`. There
+ * is no tab bar and no native header anywhere in the sheet, so every page draws its
+ * own dismissal — see {@link SettingsPage}.
  */
 export default function SettingsScreen() {
-  const theme = useTheme();
   const scheme = useColorScheme();
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
-  const insets = useSafeAreaInsets();
-  const router = useRouter();
 
-  const { busy: backupBusy, exportBackup, restoreBackup } = useExplorationBackup();
+  const { snapshot, refreshPairing } = useLocationSharing();
+  const { selected: mapScheme } = useMapColorScheme();
 
-  const {
-    snapshot,
-    pairing,
-    transportReport,
-    refreshPairing,
-    refreshTransportDiagnostics,
-    setStashOptIn,
-    setTransportEnabled,
-    setShareInterval,
-    disclosureStatus,
-    acknowledgeLocationDisclosure,
-    forceLocationPush,
-    createPairInvite,
-    pairFromInput,
-    respondPair,
-  } = useLocationSharing();
-
+  // The menu's summaries come straight off the sharing snapshot, which is pushed;
+  // pairing is the one piece that has to be pulled, and the pairing page needs it
+  // to be warm by the time it mounts.
   useFocusEffect(
     useCallback(() => {
       void refreshPairing();
-      void refreshTransportDiagnostics();
-      const timer = setInterval(() => void refreshTransportDiagnostics(), 1000);
-      return () => clearInterval(timer);
-    }, [refreshPairing, refreshTransportDiagnostics])
+    }, [refreshPairing])
   );
 
-  const stash = snapshot?.stash ?? { available: false, optedIn: false };
   const transports = snapshot?.transports ?? { relay: true, ip: true, ble: true };
-  const shareIntervalMs = snapshot?.shareIntervalMs ?? DEFAULT_SHARE_INTERVAL_MS;
+  const transportValues = Object.values(transports);
+  const transportsOn = transportValues.filter(Boolean).length;
+  // The EFFECTIVE route, not the stored one: the menu is a summary of what is happening, and a
+  // build with no stash deployed is travelling direct whatever the preference still says.
+  const delivery = snapshot?.delivery.effectiveMode ?? 'mutual';
 
   return (
-    <ScrollView
-      style={{ backgroundColor: theme.background }}
-      contentContainerStyle={[
-        styles.content,
-        {
-          paddingTop: insets.top + Spacing.four,
-          paddingBottom: insets.bottom + Spacing.six,
-        },
-      ]}
+    <SettingsPage
+      kind="root"
+      title="Settings"
+      subtitle="Identity, transports, and offline delivery"
     >
-      <View style={styles.header}>
-        <View style={styles.headerCopy}>
-          <ThemedText type="subtitle">Settings</ThemedText>
-          <ThemedText type="small" themeColor="textSecondary">
-            Identity, transports, and offline delivery
-          </ThemedText>
-        </View>
-        <Pressable
-          accessibilityLabel="Close settings"
-          accessibilityRole="button"
-          hitSlop={6}
-          onPress={() => router.back()}
-          style={({ pressed }) => [
-            styles.close,
-            { borderColor: theme.backgroundSelected, opacity: pressed ? 0.55 : 1 },
-          ]}
-        >
-          <SymbolView
-            name={{ ios: 'xmark', android: 'close', web: 'close' }}
-            size={17}
-            tintColor={theme.text}
-          />
-        </Pressable>
-      </View>
-
-      <View style={styles.section}>
-        <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
-          IDENTITY
-        </ThemedText>
+      <View style={styles.menu}>
         <IdentityRow accent={chrome.amber} />
-      </View>
-
-      <View style={styles.section}>
-        <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
-          TRANSPORTS
-        </ThemedText>
-        <TransportDiagnostic
-          report={transportReport}
-          activeColor={chrome.green}
-          availableColor={chrome.amber}
+        <SettingsMenuRow
+          href="/settings/transports"
+          label="Transports"
+          detail="Which paths the node may use, and what each one is doing right now."
+          value={`${transportsOn}/${transportValues.length} on`}
+          accent={transportsOn > 0 ? chrome.green : chrome.amber}
         />
-        <TransportControls
+        <SettingsMenuRow
+          href="/settings/pairing"
+          label="Link pairing"
+          detail="Pair by invite link when two phones cannot physically meet."
+        />
+        <SettingsMenuRow
+          href="/settings/delivery"
+          label="Delivery options"
+          detail="How your location travels, background access, and how often you publish."
+          value={DELIVERY_MODE_COPY[delivery].title}
           accent={chrome.green}
-          preferences={transports}
-          onToggle={(transport, enabled) => void setTransportEnabled(transport, enabled)}
+        />
+        <SettingsMenuRow
+          href="/settings/appearance"
+          label="Appearance"
+          detail="The map's color scheme, in light and dark."
+          value={mapScheme.name}
+        />
+        <SettingsMenuRow
+          href="/settings/app-data"
+          label="App & data"
+          detail="Exploration backup, your author ID, and which build this is."
+          value={getAppProvenance().appVersion}
+        />
+        <SettingsMenuRow
+          href="/settings/debug"
+          label="Debug"
+          detail="Forced pushes, the onboarding preview, and the event journal."
+          value={DEV_TELEMETRY_ENABLED ? 'Telemetry on' : null}
+          accent={DEV_TELEMETRY_ENABLED ? chrome.amber : undefined}
         />
       </View>
-
-      <View style={styles.section}>
-        <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
-          PAIRING LINKS
-        </ThemedText>
-        <ThemedText type="small" themeColor="textSecondary">
-          Bump lives on the map: open the FRIENDS tab and touch two phones together. Use a link only
-          when you cannot meet in person.
-        </ThemedText>
-        {pairing ? (
-          <PairLinkAction
-            accent={chrome.green}
-            errorAccent={chrome.amber}
-            pairing={pairing}
-            onCreateInvite={createPairInvite}
-            onPairInput={pairFromInput}
-            onReject={(sessionId) => respondPair(sessionId, false)}
-          />
-        ) : null}
-      </View>
-
-      <View style={styles.section}>
-        <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
-          DEBUG
-        </ThemedText>
-        <DebugLocationControls
-          accent={chrome.green}
-          warningColor={chrome.amber}
-          onPush={forceLocationPush}
-        />
-        <ProfileOnboardingPreview accent={chrome.green} />
-        {/* The journal does not exist in a stripped build, so the viewer would render a
-            permanently empty list and read as a bug rather than as an absent feature. */}
-        {DEV_TELEMETRY_ENABLED ? (
-          <EventLogPanel activeColor={chrome.green} warningColor={chrome.amber} />
-        ) : null}
-        {pairing?.inviteLink ? (
-          // Plain-text mirror of the most recently created invite link. The Share
-          // Sheet's "Copy" action doesn't reliably surface on the iOS Simulator's
-          // pasteboard for `simctl pbpaste`/E2E tooling to read back, so this gives
-          // Maestro (and anyone debugging by hand) a way to read the exact token
-          // straight out of the accessibility tree instead.
-          <ThemedText testID="debug-invite-link" type="small" themeColor="textSecondary" selectable>
-            {pairing.inviteLink}
-          </ThemedText>
-        ) : null}
-      </View>
-
-      <View style={styles.section}>
-        <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
-          OFFLINE DELIVERY
-        </ThemedText>
-        {stash.available ? (
-          <StashSettingRow
-            accent={chrome.green}
-            optedIn={stash.optedIn}
-            onToggle={(optedIn) => void setStashOptIn(optedIn)}
-          />
-        ) : (
-          <ThemedText type="small" themeColor="textSecondary">
-            No trail stash is deployed for this app, so offline delivery is unavailable. Point
-            EXPO_PUBLIC_TRAIL_STASH_URL/TICKET at a stash to enable it.
-          </ThemedText>
-        )}
-      </View>
-
-      <View style={styles.section}>
-        <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
-          LOCATION HISTORY
-        </ThemedText>
-        <ExplorationBackupRow
-          accent={chrome.green}
-          warningColor={chrome.amber}
-          busy={backupBusy}
-          onExport={exportBackup}
-          onRestore={restoreBackup}
-        />
-      </View>
-
-      <View style={styles.section}>
-        <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
-          PRIVACY
-        </ThemedText>
-        <LocationAccessRow
-          accent={chrome.amber}
-          status={disclosureStatus}
-          onTurnOn={() => void acknowledgeLocationDisclosure(true)}
-        />
-        <ShareIntervalRow
-          accent={chrome.amber}
-          intervalMs={shareIntervalMs}
-          onSelect={(intervalMs) => void setShareInterval(intervalMs)}
-        />
-      </View>
-
-      <View style={styles.section}>
-        <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
-          APPEARANCE
-        </ThemedText>
-        <MapColorSchemeRow />
-      </View>
-
-      <View style={styles.section}>
-        <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
-          APP
-        </ThemedText>
-        <AuthorIdRow authorId={snapshot?.self?.endpointId ?? null} />
-        <AppProvenanceDetails />
-      </View>
-    </ScrollView>
+    </SettingsPage>
   );
 }
 
 const styles = StyleSheet.create({
-  content: {
-    alignSelf: 'center',
-    gap: Spacing.five,
-    maxWidth: MaxContentWidth,
-    paddingHorizontal: Spacing.four,
-    width: '100%',
-  },
-  header: {
-    alignItems: 'flex-start',
-    flexDirection: 'row',
-    gap: Spacing.three,
-    justifyContent: 'space-between',
-  },
-  headerCopy: {
-    flex: 1,
-    gap: Spacing.one,
-  },
-  close: {
-    alignItems: 'center',
-    borderRadius: 22,
-    borderWidth: StyleSheet.hairlineWidth,
-    height: 44,
-    justifyContent: 'center',
-    width: 44,
-  },
-  section: {
-    gap: Spacing.two,
-  },
-  sectionLabel: {
-    letterSpacing: 1,
+  // No gap: each row draws its own hairline, so the entries butt together into one
+  // continuous list the way IdentityRow already did on its own.
+  menu: {
+    gap: 0,
   },
 });

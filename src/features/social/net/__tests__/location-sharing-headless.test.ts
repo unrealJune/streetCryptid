@@ -1,6 +1,7 @@
 import { setTelemetryForTesting } from '@/features/dev/telemetry';
 import type { Telemetry } from '@/features/dev/telemetry';
 
+import type { DeliveryMode } from '../../core/delivery-mode';
 import type { PoolState } from '../../core/pool';
 
 /**
@@ -83,8 +84,8 @@ const mockHolder: {
   mod: FakeNativeModule;
   stashConfig: { baseUrl: string; ticket: string; psk: null } | null;
   pool: PoolState | null;
-  stashOptIn: boolean;
-} = { mod: new FakeNativeModule(), stashConfig: null, pool: null, stashOptIn: false };
+  deliveryMode: DeliveryMode;
+} = { mod: new FakeNativeModule(), stashConfig: null, pool: null, deliveryMode: 'mutual' };
 
 jest.mock('iroh-location', () => ({
   getIrohLocation: () => mockHolder.mod,
@@ -101,8 +102,10 @@ jest.mock('../persistence', () => ({
   ...jest.requireActual('../persistence'),
   loadPool: async () => mockHolder.pool,
   savePool: async () => {},
-  loadStashOptIn: async () => mockHolder.stashOptIn,
-  saveStashOptIn: async () => {},
+  // `loadDeliveryMode` reads the legacy `stashOptIn` key through a module-internal call, which a
+  // mocked export cannot intercept — so mock the function the service actually calls.
+  loadDeliveryMode: async () => mockHolder.deliveryMode,
+  saveDeliveryMode: async () => {},
 }));
 
 // eslint-disable-next-line import/first
@@ -187,7 +190,7 @@ describe('LocationSharingService — headless init', () => {
     captureTelemetry();
     mockHolder.mod = new FakeNativeModule();
     mockHolder.stashConfig = null;
-    mockHolder.stashOptIn = false;
+    mockHolder.deliveryMode = 'mutual';
     mockHolder.pool = {
       friends: { [friendA.endpointId]: friendA, [friendB.endpointId]: friendB },
       sharingWith: [friendA.endpointId, friendB.endpointId],
@@ -281,7 +284,7 @@ describe('LocationSharingService — headless init', () => {
 
   it('pushes the durable trail to the opted-in stash and to every pool member', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
-    mockHolder.stashOptIn = true;
+    mockHolder.deliveryMode = 'stash';
     const svc = makeService(stashDeps());
     await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
 
@@ -299,7 +302,7 @@ describe('LocationSharingService — headless init', () => {
    */
   it('still pushes to the pool when the stash is configured but not opted into', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
-    mockHolder.stashOptIn = false;
+    mockHolder.deliveryMode = 'mutual';
     const svc = makeService(stashDeps());
     await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
 
@@ -310,7 +313,7 @@ describe('LocationSharingService — headless init', () => {
 
   it('uploads trail content to the stash when it is opted into', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
-    mockHolder.stashOptIn = true;
+    mockHolder.deliveryMode = 'stash';
     const svc = makeService(stashDeps());
     await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
 
@@ -327,7 +330,7 @@ describe('LocationSharingService — headless init', () => {
    */
   it('does not upload content to the stash when the user has opted out', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
-    mockHolder.stashOptIn = false;
+    mockHolder.deliveryMode = 'mutual';
     const svc = makeService(stashDeps());
     await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
 
@@ -359,7 +362,7 @@ describe('LocationSharingService — headless init', () => {
    */
   it('reports a binary whose bindings predate pushTrail rather than silently dropping fixes', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
-    mockHolder.stashOptIn = true;
+    mockHolder.deliveryMode = 'stash';
     // Assigned on the INSTANCE: `pushTrail` is a prototype method, so `delete` on the instance
     // silently does nothing and the test would pass without ever exercising the guard.
     (mockHolder.mod as unknown as Record<string, unknown>).pushTrail = undefined;

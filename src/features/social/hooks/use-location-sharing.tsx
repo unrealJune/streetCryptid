@@ -12,6 +12,7 @@ import { Platform } from 'react-native';
 
 import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
 import { runDevCommand as runDevCommandImpl } from '@/features/dev/commands/dev-commands';
+import type { DeliveryMode } from '@/features/social/core/delivery-mode';
 import { buildFriendPresence, type FriendPresence } from '@/features/social/core/presence';
 import type { IncomingFix, LocationFix } from '@/features/social/core/types';
 import { type TrailPoint } from '@/features/social/net/background/trail-store';
@@ -84,8 +85,8 @@ interface LocationSharingContextValue {
   /** End a friend's live window on us immediately. */
   removeFriend(endpointId: string): Promise<void>;
   retryLocation(): Promise<void>;
-  /** Opt in/out of offline delivery via the trail stash. */
-  setStashOptIn(optedIn: boolean): Promise<void>;
+  /** Choose how sealed envelopes leave this phone: direct, via mutuals, or via the stash. */
+  setDeliveryMode(mode: DeliveryMode): Promise<void>;
   /** Enable or disable one native endpoint transport. */
   setTransportEnabled(transport: keyof TransportPreferences, enabled: boolean): Promise<void>;
   /** Change how often location is published. One of `SHARE_INTERVAL_OPTIONS_MS`. */
@@ -493,10 +494,10 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     () => run((service) => service.refreshTransportDiagnostics()),
     [run]
   );
-  const setStashOptIn = useCallback(
-    (optedIn: boolean) => {
+  const setDeliveryMode = useCallback(
+    (mode: DeliveryMode) => {
       setServiceError(null);
-      return run((service) => service.setStashOptIn(optedIn));
+      return run((service) => service.setDeliveryMode(mode));
     },
     [run]
   );
@@ -701,7 +702,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       toggleShare,
       removeFriend,
       retryLocation,
-      setStashOptIn,
+      setDeliveryMode,
       setTransportEnabled,
       setShareInterval,
       locateNow,
@@ -735,7 +736,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       toggleShare,
       removeFriend,
       retryLocation,
-      setStashOptIn,
+      setDeliveryMode,
       setTransportEnabled,
       setShareInterval,
       locateNow,

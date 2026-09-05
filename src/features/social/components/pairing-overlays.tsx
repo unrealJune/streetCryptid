@@ -63,12 +63,17 @@ export function PairingOverlays() {
   // it (see the class doc above) — back out of Settings so the overlay is reachable.
   // Keyed on the leading session id so a second, later challenge triggers this again
   // even if the user has since reopened Settings.
+  //
+  // Settings is a stack now (`/settings`, `/settings/transports`, …), so this has to
+  // match the whole subtree and unwind all of it. `router.back()` would pop one page
+  // and leave the challenge stranded behind the Settings menu — which is the exact
+  // bug this effect exists to prevent, just one level up.
   const dismissedForSessionId = useRef<string | null>(null);
   useEffect(() => {
     if (!leadSessionId || dismissedForSessionId.current === leadSessionId) return;
-    if (pathname !== '/settings') return;
+    if (pathname !== '/settings' && !pathname.startsWith('/settings/')) return;
     dismissedForSessionId.current = leadSessionId;
-    router.back();
+    router.dismissTo('/');
   }, [leadSessionId, pathname, router]);
 
   useEffect(() => {
