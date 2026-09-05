@@ -9,6 +9,10 @@
 import { VectorTile, VectorTileFeature, VectorTileLayer } from '@mapbox/vector-tile';
 
 import type {
+  AeroArea,
+  AeroAreaKind,
+  AeroLineKind,
+  AeroWay,
   AreaFeature,
   MapGeometry,
   Place,
@@ -83,6 +87,45 @@ export function transitModeOf(omtClass: string, subclass: string): TransitMode |
   }
 }
 
+/**
+ * OMT `aeroway.class` → an area kind, for the layer's polygon features.
+ * `helipad` folds into `apron` (same paved surface). Runway polygons are handled
+ * by {@link aeroLineKindOf} instead, and everything else returns null.
+ *
+ * Mirrored exactly by `aero_area_kind_of` in
+ * `modules/iroh-location/rust/src/mvt.rs` — change both together.
+ */
+export function aeroAreaKindOf(omtClass: string): AeroAreaKind | null {
+  switch (omtClass) {
+    case 'aerodrome':
+      return 'aerodrome';
+    case 'apron':
+    case 'helipad':
+      return 'apron';
+    default:
+      return null;
+  }
+}
+
+/**
+ * OMT `aeroway.class` → a line kind. Applied to line features, and to `runway`
+ * polygons (whose rings are stroked as closed lines). `gate` is a point layer
+ * with nothing to stroke, so it returns null along with everything else.
+ *
+ * Mirrored exactly by `aero_line_kind_of` in
+ * `modules/iroh-location/rust/src/mvt.rs` — change both together.
+ */
+export function aeroLineKindOf(omtClass: string): AeroLineKind | null {
+  switch (omtClass) {
+    case 'runway':
+      return 'runway';
+    case 'taxiway':
+      return 'taxiway';
+    default:
+      return null;
+  }
+}
+
 /** Landcover/landuse classes that read as parkland in the dot field. */
 const PARK_LANDCOVER = new Set(['grass', 'wood']);
 const PARK_LANDUSE = new Set(['cemetery', 'grass', 'recreation_ground', 'stadium', 'pitch']);
@@ -102,6 +145,9 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
   const rivers: RiverWay[] = [];
   const water: AreaFeature[] = [];
   const parks: AreaFeature[] = [];
+  const buildings: AreaFeature[] = [];
+  const aeroAreas: AeroArea[] = [];
+  const aeroLines: AeroWay[] = [];
   const places: Place[] = [];
 
   function toWorld(layer: VectorTileLayer, px: number, py: number): WorldPoint {
@@ -177,6 +223,37 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
       pushPark(f, layer);
   });
 
+  eachFeature('building', (f, layer) => {
+    if (f.type !== GEOM_POLYGON) return;
+    const rings = lines(layer, f);
+    if (rings.length) buildings.push({ rings });
+  });
+
+  eachFeature('aeroway', (f, layer) => {
+    const omtClass = String(f.properties.class ?? '');
+    if (f.type === GEOM_POLYGON) {
+      const areaKind = aeroAreaKindOf(omtClass);
+      if (areaKind !== null) {
+        const rings = lines(layer, f);
+        if (rings.length) aeroAreas.push({ kind: areaKind, rings });
+        return;
+      }
+      // A runway mapped as an area: stroke each ring as a closed line.
+      const lineKind = aeroLineKindOf(omtClass);
+      if (lineKind === null) return;
+      for (const points of lines(layer, f)) {
+        if (points.length >= 2) aeroLines.push({ kind: lineKind, points });
+      }
+      return;
+    }
+    if (f.type !== GEOM_LINE) return;
+    const lineKind = aeroLineKindOf(omtClass);
+    if (lineKind === null) return;
+    for (const points of lines(layer, f)) {
+      if (points.length >= 2) aeroLines.push({ kind: lineKind, points });
+    }
+  });
+
   eachFeature('place', (f, layer) => {
     const name = f.properties.name;
     if (typeof name !== 'string' || !name) return;
@@ -191,5 +268,16 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
     });
   });
 
-  return { streets, labelStreets, transit, rivers, water, parks, places };
+  return {
+    streets,
+    labelStreets,
+    transit,
+    rivers,
+    water,
+    parks,
+    buildings,
+    aeroAreas,
+    aeroLines,
+    places,
+  };
 }

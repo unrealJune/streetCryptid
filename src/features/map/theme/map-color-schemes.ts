@@ -7,6 +7,11 @@ export interface MapPaletteInput {
   readonly water: readonly string[];
   readonly park: readonly string[];
   readonly transit: string;
+  /**
+   * Built-ground ink. Optional: schemes authored before the buildings layer —
+   * including any the user has already saved — fall back to `streetLabel`.
+   */
+  readonly building?: string;
   readonly streetLabel: string;
   readonly parkLabel: string;
   readonly effects?: MapRenderEffects;
@@ -51,6 +56,7 @@ function palette(input: MapPaletteInput): MapPalette {
     water: ramp(input.water),
     park: ramp(input.park),
     transit: rgb(input.transit),
+    building: rgb(input.building ?? input.streetLabel),
     streetLabel: rgb(input.streetLabel),
     parkLabel: rgb(input.parkLabel),
     ...(input.effects ? { effects: input.effects } : {}),
@@ -79,6 +85,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#96C0E0', '#4A8CC4', '#1E68AA'],
       park: ['#9EC8A8', '#50A46E', '#228050'],
       transit: '#7C4AB0',
+      building: '#1B3B50',
       streetLabel: '#2E4E62',
       parkLabel: '#1E6E4E',
     },
@@ -89,6 +96,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#1A4A80', '#266EB0', '#56A8E8'],
       park: ['#1E543A', '#368C56', '#78CE84'],
       transit: '#B28AF0',
+      building: '#8FBEC4',
       streetLabel: '#B8D0D8',
       parkLabel: '#84C696',
     }
@@ -103,6 +111,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#ABC9C6', '#6A9E9A', '#386F72'],
       park: ['#B9C89C', '#819B62', '#506C3A'],
       transit: '#8A5A44',
+      building: '#3B392E',
       streetLabel: '#514F43',
       parkLabel: '#49613A',
     },
@@ -113,6 +122,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#244A4A', '#397878', '#72B1AC'],
       park: ['#30452C', '#587447', '#9AB577'],
       transit: '#D59B7E',
+      building: '#BFBDA2',
       streetLabel: '#D1CEB9',
       parkLabel: '#A8BE87',
     }
@@ -127,6 +137,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#AFC9EC', '#728DD0', '#4A58A7'],
       park: ['#B6D5CC', '#70A99B', '#3E776F'],
       transit: '#287F96',
+      building: '#43355C',
       streetLabel: '#584A6B',
       parkLabel: '#386B63',
     },
@@ -137,6 +148,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#202B68', '#4153B0', '#7895EE'],
       park: ['#243F48', '#397780', '#70C1B5'],
       transit: '#69D4E7',
+      building: '#B6AEDC',
       streetLabel: '#D2CBE8',
       parkLabel: '#91D4C9',
     }
@@ -151,6 +163,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#D7F0F2', '#82CAD2', '#278CA4'],
       park: ['#E1E8BE', '#A8C96F', '#568A52'],
       transit: '#8D3FB0',
+      building: '#5A3140',
       streetLabel: '#684050',
       parkLabel: '#426A43',
       effects: { neonGlow: 0.16, scanlines: 0.06 },
@@ -162,6 +175,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#101D3D', '#174D78', '#2AA8C0'],
       park: ['#253329', '#52643A', '#9DAF4B'],
       transit: '#E18AF0',
+      building: '#E8B08C',
       streetLabel: '#FFD6B5',
       parkLabel: '#CAD477',
       effects: { neonGlow: 0.56, scanlines: 0.18 },
@@ -177,6 +191,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#9DE9F2', '#3BC7DD', '#1682B2'],
       park: ['#B8F0D0', '#55CE9E', '#239070'],
       transit: '#FF6B35',
+      building: '#452663',
       streetLabel: '#593376',
       parkLabel: '#237B67',
     },
@@ -187,6 +202,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#071C58', '#075EA8', '#00D4E8'],
       park: ['#10394D', '#087F84', '#35F2B2'],
       transit: '#FF8A32',
+      building: '#D9A6F0',
       streetLabel: '#F0C5FF',
       parkLabel: '#6CFFD0',
     }
@@ -201,6 +217,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#A5E5FF', '#42AEE0', '#3368BC'],
       park: ['#C5F58A', '#72D65A', '#22A568'],
       transit: '#E149A9',
+      building: '#17485E',
       streetLabel: '#245C69',
       parkLabel: '#19744F',
     },
@@ -211,6 +228,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#0A3267', '#176FB0', '#45C8F0'],
       park: ['#164D42', '#27A65E', '#A3F55F'],
       transit: '#FF68C3',
+      building: '#9EE3D2',
       streetLabel: '#C4FFF0',
       parkLabel: '#B9FF83',
     }
@@ -225,6 +243,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#D4F4FA', '#78D7E8', '#008EAE'],
       park: ['#D9F5E8', '#76D9AB', '#168768'],
       transit: '#E000A8',
+      building: '#232838',
       streetLabel: '#30364A',
       parkLabel: '#116B57',
       effects: { neonGlow: 0.2, scanlines: 0.12 },
@@ -236,6 +255,7 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
       water: ['#07172F', '#0A4770', '#00BBD4'],
       park: ['#09251F', '#0B604A', '#42F5AD'],
       transit: '#FF2DAA',
+      building: '#AFC6CE',
       streetLabel: '#D5E7EC',
       parkLabel: '#74F7C2',
       effects: { neonGlow: 0.75, scanlines: 0.42 },
@@ -298,6 +318,16 @@ function validatePalette(value: unknown, path: string): MapPaletteInput {
       )
     : undefined;
 
+  const optionalColor = (key: 'building'): string | undefined => {
+    const candidate = input[key];
+    if (candidate === undefined) return undefined;
+    if (typeof candidate !== 'string' || !HEX_COLOR.test(candidate)) {
+      throw new Error(`${path}.${key} must be a six-digit hex color`);
+    }
+    return candidate.toUpperCase();
+  };
+  const building = optionalColor('building');
+
   return {
     bg: color('bg'),
     accent: color('accent'),
@@ -305,6 +335,7 @@ function validatePalette(value: unknown, path: string): MapPaletteInput {
     water: colors('water'),
     park: colors('park'),
     transit: color('transit'),
+    ...(building ? { building } : {}),
     streetLabel: color('streetLabel'),
     parkLabel: color('parkLabel'),
     ...(validatedEffects ? { effects: validatedEffects } : {}),
@@ -356,6 +387,7 @@ export const CUSTOM_MAP_COLOR_SCHEME_TEMPLATE = JSON.stringify(
       water: ['#BAE6FD', '#0284C7'],
       park: ['#BBF7D0', '#15803D'],
       transit: '#7C3AED',
+      building: '#243447',
       streetLabel: '#334155',
       parkLabel: '#166534',
     },
@@ -366,6 +398,7 @@ export const CUSTOM_MAP_COLOR_SCHEME_TEMPLATE = JSON.stringify(
       water: ['#075985', '#38BDF8'],
       park: ['#14532D', '#86EFAC'],
       transit: '#C4B5FD',
+      building: '#94A3B8',
       streetLabel: '#CBD5E1',
       parkLabel: '#BBF7D0',
     },

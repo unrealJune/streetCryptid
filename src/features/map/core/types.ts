@@ -84,6 +84,30 @@ export interface RiverWay {
 }
 
 /**
+ * OMT `aeroway` polygon classes we draw, ordered coarse→fine so the numeric code
+ * (the index here) is what the packed geometry and the SCG1 buffer carry.
+ *
+ * `aerodrome` is the airport's whole property boundary — an outline only, because
+ * filling it would tint a region-sized area. `apron` is the paved ground planes
+ * stand on, and OMT's small `helipad` polygons fold into it: same surface, and a
+ * separate kind for eighteen features in a metro area buys nothing.
+ */
+export const AERO_AREA_KINDS = ['aerodrome', 'apron'] as const;
+
+export type AeroAreaKind = (typeof AERO_AREA_KINDS)[number];
+
+/**
+ * OMT `aeroway` line classes we draw. Runways also arrive as the occasional
+ * polygon (1 of 20 around SeaTac); those contribute their rings here as closed
+ * lines rather than earning a section of their own.
+ *
+ * `gate` is deliberately absent: it is a point layer with no geometry to stroke.
+ */
+export const AERO_LINE_KINDS = ['runway', 'taxiway'] as const;
+
+export type AeroLineKind = (typeof AERO_LINE_KINDS)[number];
+
+/**
  * A filled area (water body or park). `rings` follow the even-odd rule: outer
  * boundaries and holes are all listed here, exactly as they come out of an MVT
  * polygon feature.
@@ -91,6 +115,17 @@ export interface RiverWay {
 export interface AreaFeature {
   readonly name?: string;
   readonly rings: readonly (readonly WorldPoint[])[];
+}
+
+/** An {@link AreaFeature} carrying the aeroway class it was decoded from. */
+export interface AeroArea extends AreaFeature {
+  readonly kind: AeroAreaKind;
+}
+
+/** A runway/taxiway centerline, stroked as a vector over the dot field. */
+export interface AeroWay {
+  readonly kind: AeroLineKind;
+  readonly points: readonly WorldPoint[];
 }
 
 /** A named locality (city/town/suburb/neighbourhood) used for the island readout. */
@@ -112,6 +147,15 @@ export interface MapGeometry {
   readonly rivers: readonly RiverWay[];
   readonly water: readonly AreaFeature[];
   readonly parks: readonly AreaFeature[];
+  /**
+   * OpenMapTiles `building` footprints. Optional like {@link labelStreets}: the
+   * layer only exists from z13, and a pre-buildings SCG1 buffer carries none.
+   */
+  readonly buildings?: readonly AreaFeature[];
+  /** OpenMapTiles `aeroway` polygons (aerodrome boundary, apron/helipad). */
+  readonly aeroAreas?: readonly AeroArea[];
+  /** OpenMapTiles `aeroway` lines (runway, taxiway). */
+  readonly aeroLines?: readonly AeroWay[];
   readonly places: readonly Place[];
 }
 
@@ -169,6 +213,14 @@ export interface MapPalette {
   readonly park: readonly RampStop[];
   /** Transit-line ink — its own accent, never the amber reserved for YOU/frontier. */
   readonly transit: Rgb;
+  /**
+   * Built-ground ink: building footprints and airport surfaces. Its own entry
+   * rather than a reuse of {@link streetLabel} because it has to read as a
+   * *material* against the dot field, not as a label over it — usually the
+   * darkest step of the scheme's terrain family in light mode, and a mid-bright
+   * one in dark mode.
+   */
+  readonly building: Rgb;
   /** Hex-lattice / street-label ink. */
   readonly streetLabel: Rgb;
   readonly parkLabel: Rgb;

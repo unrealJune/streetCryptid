@@ -194,6 +194,7 @@ export function MapView({
   explorationEnabled = true,
   highwaysEnabled = true,
   transitEnabled = false,
+  structuresEnabled = true,
   accessibilityLabel,
   onSelectSelf,
   onSelectFriend,
@@ -219,6 +220,8 @@ export function MapView({
   /** Draw motorways (default true) — the widest strokes on the map. */
   highwaysEnabled?: boolean;
   transitEnabled?: boolean;
+  /** Draw building footprints and aeroway surfaces (default true). */
+  structuresEnabled?: boolean;
   accessibilityLabel?: string;
   onSelectSelf?: () => void;
   onSelectFriend?: (friendId: string) => void;
@@ -295,7 +298,7 @@ export function MapView({
     const renderExploration = explorationEnabled && region.spec.cellRes !== null;
     const layerKey = `${renderExploration ? 'x' : '-'}${highwaysEnabled ? 'h' : '-'}${
       transitEnabled ? 't' : '-'
-    }`;
+    }${structuresEnabled ? 'b' : '-'}`;
     const cached = regionRenderCache.get(region, lutImage, layerKey);
     if (cached) {
       const timing: RegionRenderTiming = {
@@ -332,6 +335,7 @@ export function MapView({
             lutImage,
             explorationEnabled: renderExploration,
             transitEnabled,
+            structuresEnabled,
           })
         : null;
     const rasterMs = measure ? perfNow() - rasterStarted : 0;
@@ -360,6 +364,7 @@ export function MapView({
     explorationEnabled,
     highwaysEnabled,
     transitEnabled,
+    structuresEnabled,
     regionRenderCache,
   ]);
 

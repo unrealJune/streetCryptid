@@ -3,7 +3,13 @@ import type { FeatureCollection, Feature, LineString, Polygon, Point } from 'geo
 import geojsonvt from 'geojson-vt';
 import vtpbf from 'vt-pbf';
 
-import { decodeMvtTile, roadClassOf, transitModeOf } from '../mvt-mapping';
+import {
+  aeroAreaKindOf,
+  aeroLineKindOf,
+  decodeMvtTile,
+  roadClassOf,
+  transitModeOf,
+} from '../mvt-mapping';
 import { tileWorldRect } from '../tile-math';
 
 // ─── roadClassOf ───────────────────────────────────────────────────────────────
@@ -27,6 +33,36 @@ describe('roadClassOf', () => {
 
   it.each([['rail'], ['ferry'], ['transit'], ['aerialway'], ['']])('%s → null', (omtClass) => {
     expect(roadClassOf(omtClass)).toBeNull();
+  });
+});
+
+// ─── aeroAreaKindOf / aeroLineKindOf ──────────────────────────────────────────
+
+describe('aeroAreaKindOf', () => {
+  it.each([
+    ['aerodrome', 'aerodrome'],
+    ['apron', 'apron'],
+    // helipad folds into apron: same paved surface, too few to earn a kind
+    ['helipad', 'apron'],
+  ] as const)('%s → %s', (omtClass, expected) => {
+    expect(aeroAreaKindOf(omtClass)).toBe(expected);
+  });
+
+  it.each([['runway'], ['taxiway'], ['gate'], ['']])('%s → null', (omtClass) => {
+    expect(aeroAreaKindOf(omtClass)).toBeNull();
+  });
+});
+
+describe('aeroLineKindOf', () => {
+  it.each([
+    ['runway', 'runway'],
+    ['taxiway', 'taxiway'],
+  ] as const)('%s → %s', (omtClass, expected) => {
+    expect(aeroLineKindOf(omtClass)).toBe(expected);
+  });
+
+  it.each([['aerodrome'], ['apron'], ['helipad'], ['gate'], ['']])('%s → null', (omtClass) => {
+    expect(aeroLineKindOf(omtClass)).toBeNull();
   });
 });
 
@@ -409,6 +445,104 @@ describe('decodeMvtTile empty tile', () => {
     expect(geom.rivers).toHaveLength(0);
     expect(geom.water).toHaveLength(0);
     expect(geom.parks).toHaveLength(0);
+    expect(geom.buildings).toHaveLength(0);
+    expect(geom.aeroAreas).toHaveLength(0);
+    expect(geom.aeroLines).toHaveLength(0);
     expect(geom.places).toHaveLength(0);
+  });
+});
+
+/**
+ * The `building` and `aeroway` layers, routed by class and geometry type. These
+ * are the layers that made SeaTac render as blank ground: the terminal is a
+ * building, and the expanse inside the car loops is apron, runway and taxiway.
+ */
+describe('decodeMvtTile buildings and aeroway', () => {
+  const LON = -122.3016;
+  const LAT = 47.4435;
+  const Z = 14;
+  const [worldX, worldY] = lonLatToWorld(LON, LAT);
+  const TILE = { z: Z, x: Math.floor(worldX * 2 ** Z), y: Math.floor(worldY * 2 ** Z) };
+  const d = 0.0002;
+
+  const box = (cx: number, cy: number, r: number): Polygon => ({
+    type: 'Polygon',
+    coordinates: [
+      [
+        [cx - r, cy - r],
+        [cx + r, cy - r],
+        [cx + r, cy + r],
+        [cx - r, cy + r],
+        [cx - r, cy - r],
+      ],
+    ],
+  });
+  const seg = (dy: number): LineString => ({
+    type: 'LineString',
+    coordinates: [
+      [LON - d, LAT + dy],
+      [LON + d, LAT + dy],
+    ],
+  });
+  const feature = (geometry: Feature['geometry'], properties: Feature['properties']): Feature => ({
+    type: 'Feature',
+    geometry,
+    properties,
+  });
+
+  const tile = (layers: Record<string, Feature[]>): Uint8Array => {
+    const tiles: Record<
+      string,
+      NonNullable<ReturnType<ReturnType<typeof geojsonvt>['getTile']>>
+    > = {};
+    for (const [name, features] of Object.entries(layers)) {
+      const index = geojsonvt({ type: 'FeatureCollection', features } as FeatureCollection, {
+        maxZoom: Z,
+        indexMaxZoom: Z,
+        tolerance: 0,
+      });
+      const t = index.getTile(TILE.z, TILE.x, TILE.y);
+      if (t) tiles[name] = t;
+    }
+    return new Uint8Array(vtpbf.fromGeojsonVt(tiles, { version: 2 }));
+  };
+
+  it('decodes building polygons and ignores non-polygon features', () => {
+    const geom = decodeMvtTile(
+      tile({
+        building: [
+          feature(box(LON, LAT, d), { render_height: 12 }),
+          feature(seg(d * 0.5), { render_height: 4 }),
+        ],
+      }),
+      TILE
+    );
+    expect(geom.buildings).toHaveLength(1);
+    expect(geom.buildings?.[0].rings).toHaveLength(1);
+  });
+
+  it('routes aeroway features by class and geometry type', () => {
+    const geom = decodeMvtTile(
+      tile({
+        aeroway: [
+          feature(box(LON, LAT, d * 2), { class: 'aerodrome' }),
+          feature(box(LON, LAT, d), { class: 'apron' }),
+          feature(box(LON + d * 3, LAT, d * 0.5), { class: 'helipad' }),
+          // a runway mapped as an area strokes its ring as a closed line
+          feature(box(LON, LAT + d * 3, d * 0.5), { class: 'runway' }),
+          feature(seg(d * 0.4), { class: 'runway' }),
+          feature(seg(d * 0.6), { class: 'taxiway' }),
+          // gates are points: nothing to stroke
+          feature({ type: 'Point', coordinates: [LON, LAT] } satisfies Point, { class: 'gate' }),
+        ],
+      }),
+      TILE
+    );
+
+    expect(geom.aeroAreas?.map((a) => a.kind)).toEqual(['aerodrome', 'apron', 'apron']);
+    expect(geom.aeroLines?.map((l) => l.kind)).toEqual(['runway', 'runway', 'taxiway']);
+    // The runway polygon contributed a closed ring, so it has more points than
+    // the two-point line does.
+    expect(geom.aeroLines![0].points.length).toBeGreaterThan(2);
   });
 });
