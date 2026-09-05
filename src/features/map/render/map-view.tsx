@@ -146,6 +146,12 @@ export interface MapFriendLocation {
   location: LatLon;
   latestTs: number;
   stale?: boolean;
+  /**
+   * The friend told us they have stopped. Distinct from {@link stale}, which means we have lost
+   * them — these used to be the same rendering and that was the bug: a settled friend and a dead
+   * phone both froze at a position and both faded.
+   */
+  parked?: boolean;
 }
 
 export interface MapTrailLocation {
@@ -977,6 +983,7 @@ export function MapView({
                       key={locator.id}
                       onPress={() => onSelectFriend?.(locator.id)}
                       panelColor={theme.chrome.island}
+                      parked={locator.parked}
                       scale={k}
                       selected={locator.id === selectedFriendId}
                       sigil={locator.sigil}

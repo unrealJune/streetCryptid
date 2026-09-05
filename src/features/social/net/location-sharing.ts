@@ -2128,6 +2128,13 @@ export class LocationSharingService {
         accuracyM: nf.fix.accuracyM,
         headingDeg: nf.fix.headingDeg,
         ts: nf.fix.ts,
+        // The durable path carries the envelope stamps too. It has to: a phone that was offline
+        // when a friend parked learns about it from the replica, not from live gossip, and that is
+        // exactly the case where "is she parked or gone" is being asked.
+        ...(nf.fix.state !== undefined ? { state: nf.fix.state } : {}),
+        ...(nf.fix.publishedDeltaS !== undefined
+          ? { publishedDeltaS: nf.fix.publishedDeltaS }
+          : {}),
       };
       // `sinceTs` is the caller's inclusive lower bound; the watermark is what we have already
       // ingested. Compared on `(ts, seq)` so a republish at the same timestamp is not mistaken for
@@ -3155,6 +3162,13 @@ export class LocationSharingService {
         accuracyM: event.fix.accuracyM,
         headingDeg: event.fix.headingDeg,
         ts: event.fix.ts,
+        // Carried through rather than dropped: these are the only things that distinguish a
+        // friend who has parked from a friend whose phone has died, and both look like a frozen
+        // dot without them.
+        ...(event.fix.state !== undefined ? { state: event.fix.state } : {}),
+        ...(event.fix.publishedDeltaS !== undefined
+          ? { publishedDeltaS: event.fix.publishedDeltaS }
+          : {}),
       },
       receivedAt: Date.now(),
       ...(event.backfill ? { backfill: true } : {}),

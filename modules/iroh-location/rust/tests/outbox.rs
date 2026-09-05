@@ -35,6 +35,8 @@ fn fix(ts: u64) -> LocationFix {
         accuracy_m: 8.0,
         heading_deg: 0.0,
         ts,
+        state: None,
+        published_delta_s: None,
     }
 }
 
@@ -240,4 +242,62 @@ fn a_bad_watcher_leaves_both_lists_untouched() {
 
     assert_eq!(store.get(), vec!["aa11".to_string()]);
     assert_eq!(store.watchers(), vec!["bb22".to_string()]);
+}
+
+// ---------------------------------------------------------------------------
+// Upgrade compatibility of the queued bytes
+// ---------------------------------------------------------------------------
+
+/// A queued fix exactly as builds before 2026-09-05 encoded it.
+#[derive(serde::Serialize)]
+struct LegacyQueuedFix {
+    lat: f64,
+    lon: f64,
+    accuracy_m: f64,
+    heading_deg: f64,
+    ts: u64,
+}
+
+/// The queue's on-disk bytes must not change when the WIRE type grows.
+///
+/// `Outbox::open` reads an undecodable queue as EMPTY — right for corruption, catastrophic for a
+/// struct change, because the two are indistinguishable from inside. Every fix a phone had waiting
+/// would be discarded on upgrade, silently, fleet-wide, and the phones with the most queued (the
+/// ones that have been unable to publish for hours) would lose the most.
+///
+/// `StoredFix` is what makes that a non-event: five fields in the same order as the old
+/// `LocationFix`, so postcard emits identical bytes and yesterday's queue file is still today's
+/// queue file. Asserted rather than assumed, because the failure is invisible.
+#[test]
+fn a_queue_written_before_the_envelope_stamps_still_loads() {
+    let scratch = Scratch::new("legacy-queue");
+    let dir = scratch.0.join("outbox");
+    std::fs::create_dir_all(&dir).unwrap();
+    let legacy = vec![
+        LegacyQueuedFix {
+            lat: 47.6062,
+            lon: -122.3321,
+            accuracy_m: 12.0,
+            heading_deg: 0.0,
+            ts: 1_786_000_000_000,
+        },
+        LegacyQueuedFix {
+            lat: 47.6100,
+            lon: -122.3300,
+            accuracy_m: 18.0,
+            heading_deg: 90.0,
+            ts: 1_786_000_300_000,
+        },
+    ];
+    std::fs::write(dir.join("queue"), postcard::to_allocvec(&legacy).unwrap()).unwrap();
+
+    let outbox = Outbox::open(&scratch.0).unwrap();
+
+    assert_eq!(outbox.pending(), 2, "queued fixes must survive the upgrade");
+    let head = outbox.peek().expect("oldest fix still there");
+    assert_eq!(head.ts, 1_786_000_000_000, "and in capture order");
+    assert_eq!(head.accuracy_m, 12.0);
+    // Absent, not invented: these describe a send that has not happened. `drain` stamps them.
+    assert_eq!(head.state, None);
+    assert_eq!(head.published_delta_s, None);
 }

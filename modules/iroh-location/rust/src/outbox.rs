@@ -28,7 +28,7 @@ use std::sync::Mutex;
 
 use crate::durable::{claim_dir, write_atomic, WriterClaim};
 use crate::publish::EnqueueOutcome;
-use crate::LocationFix;
+use crate::{LocationFix, StoredFix};
 
 /// Subdirectory under the node's state dir.
 const OUTBOX_DIR: &str = "outbox";
@@ -55,11 +55,15 @@ impl From<std::io::Error> for OutboxError {
 }
 
 /// The single writer of this device's pending-fix queue.
+///
+/// Stores [`StoredFix`], not [`LocationFix`]: see that type for why the on-disk shape is frozen
+/// independently of the wire. The envelope stamps a fix carries are assigned at seal time in
+/// `DrainEngine::drain`, so a queued fix has nothing to lose by not carrying them.
 #[derive(Debug)]
 pub struct Outbox {
     dir: PathBuf,
     path: PathBuf,
-    items: Mutex<Vec<LocationFix>>,
+    items: Mutex<Vec<StoredFix>>,
     _claim: WriterClaim,
 }
 
@@ -76,7 +80,7 @@ impl Outbox {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(QUEUE_FILE);
         let items = match std::fs::read(&path) {
-            Ok(raw) => postcard::from_bytes::<Vec<LocationFix>>(&raw).unwrap_or_else(|err| {
+            Ok(raw) => postcard::from_bytes::<Vec<StoredFix>>(&raw).unwrap_or_else(|err| {
                 tracing::warn!(error = %err, "outbox: unreadable queue, starting empty");
                 Vec::new()
             }),
@@ -99,7 +103,7 @@ impl Outbox {
     /// Append a captured fix, enforcing the bound. Durable before it returns.
     pub fn enqueue(&self, fix: LocationFix) -> Result<EnqueueOutcome, OutboxError> {
         let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
-        items.push(fix);
+        items.push(StoredFix::from(&fix));
         let overflow_dropped = items.len().saturating_sub(MAX_ITEMS);
         if overflow_dropped > 0 {
             items.drain(..overflow_dropped);
@@ -124,7 +128,7 @@ impl Outbox {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .first()
-            .cloned()
+            .map(LocationFix::from)
     }
 
     /// Remove the oldest fix after it has been published. Durable before it returns.
@@ -148,7 +152,7 @@ impl Outbox {
         Self::persist(&self.dir, &self.path, &items)
     }
 
-    fn persist(dir: &Path, path: &Path, items: &[LocationFix]) -> Result<(), OutboxError> {
+    fn persist(dir: &Path, path: &Path, items: &[StoredFix]) -> Result<(), OutboxError> {
         let bytes = postcard::to_allocvec(items).map_err(|e| OutboxError::Encode(e.to_string()))?;
         write_atomic(dir, path, &bytes)?;
         Ok(())

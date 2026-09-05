@@ -938,7 +938,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // Zero is how the gate spells "untestable", so it skips the check rather than passing it.
       accuracyM: location.horizontalAccuracy >= 0 ? location.horizontalAccuracy : 0,
       headingDeg: location.course >= 0 ? location.course : 0,
-      ts: UInt64(location.timestamp.timeIntervalSince1970 * 1000))
+      ts: UInt64(location.timestamp.timeIntervalSince1970 * 1000),
+      // Capture-side: the envelope stamps belong to a send that has not happened yet.
+      state: nil,
+      publishedDeltaS: nil)
   }
 
   /// Unknown battery reports as full rather than empty: a critical level is a hard stop in the

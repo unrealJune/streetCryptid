@@ -29,7 +29,11 @@ import {
 import { sampleTrailForMap } from '@/features/map/core/trail-sampling';
 import { BumpPairingStrip } from '@/features/social/components/bump-pairing-strip';
 import { FriendProfileSheet } from '@/features/social/components/friend-profile-sheet';
-import { formatPresenceAge } from '@/features/social/core/presence';
+import {
+  describePresence,
+  isPresenceOnline,
+  isPresenceStale,
+} from '@/features/social/core/presence';
 import type { LocationFix } from '@/features/social/core/types';
 import { useArmedBump } from '@/features/social/hooks/use-armed-bump';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
@@ -142,7 +146,11 @@ export default function MapScreenBody() {
             color: resolveSignalColor(presence.friend.color, theme.chrome.green),
             location: { lat: presence.fix.lat, lon: presence.fix.lon },
             latestTs: presence.fix.ts,
-            stale: presence.freshness === 'stale',
+            // Parked is deliberately NOT stale. A friend who has stopped moving is showing you
+            // the right position; dimming them says "this may be wrong", which is the opposite of
+            // true. Only genuine loss of contact dims.
+            stale: isPresenceStale(presence.state),
+            parked: presence.state === 'parked',
           },
         ];
       }),
@@ -159,8 +167,8 @@ export default function MapScreenBody() {
         cryptidName: presence.friend.cryptidName,
         color: resolveSignalColor(presence.friend.color, theme.chrome.green),
         distanceM: presence.distanceM,
-        status: formatPresenceAge(presence.ageMs).toUpperCase(),
-        online: presence.freshness === 'live' || presence.freshness === 'recent',
+        status: describePresence(presence).toUpperCase(),
+        online: isPresenceOnline(presence.state),
         locatable: presence.fix !== null,
       })),
     [friends, theme.chrome.green]

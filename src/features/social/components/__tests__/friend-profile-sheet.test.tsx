@@ -24,8 +24,10 @@ function presenceWith(via?: FixTransport, viaPeer?: string): FriendPresence {
     friend,
     fix: { lat: 40.1, lon: -80.2, accuracyM: 10, headingDeg: 0, ts: 1_700_000_000_000 },
     distanceM: 120,
-    ageMs: 60_000,
-    freshness: 'live',
+    positionAgeMs: 60_000,
+    contactAgeMs: 60_000,
+    contactKnown: true,
+    state: 'live',
     ...(via ? { via } : {}),
     ...(viaPeer ? { viaPeer } : {}),
   };
@@ -121,7 +123,14 @@ describe('FriendProfileSheet signal path', () => {
   });
 
   it('omits the signal path entirely when no fix has ever arrived', () => {
-    renderer = renderSheet({ ...presenceWith('relay'), fix: null, distanceM: null, ageMs: null });
+    renderer = renderSheet({
+      ...presenceWith('relay'),
+      fix: null,
+      distanceM: null,
+      positionAgeMs: null,
+      contactAgeMs: null,
+      state: 'unknown',
+    });
     expect(strings(renderer)).not.toContain('SIGNAL PATH');
   });
 

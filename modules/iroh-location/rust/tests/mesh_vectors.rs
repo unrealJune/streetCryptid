@@ -314,6 +314,8 @@ fn seal_fix_produces_one_capsule_per_recipient_and_opens_back_to_the_fix() {
         accuracy_m: 8.0,
         heading_deg: 271.0,
         ts: NOW_SECS * 1000,
+        state: None,
+        published_delta_s: None,
     };
     let epoch = mesh::epoch_at(NOW_SECS);
     let recipients = vec![

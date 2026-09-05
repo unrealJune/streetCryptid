@@ -71,7 +71,29 @@ private fun locationFixOf(fix: Map<String, Double>): LocationFix =
     fix["accuracyM"] ?: 0.0,
     fix["headingDeg"] ?: 0.0,
     (fix["ts"] ?: 0.0).toLong().toULong(),
+    // The CAPTURE direction: `state` / `publishedDeltaS` describe a transmission that has not
+    // happened yet, and `DrainEngine::drain` fills them in at seal time.
+    state = null,
+    publishedDeltaS = null,
   )
+
+/**
+ * The JS shape of a decrypted fix, including what the envelope says about itself.
+ *
+ * Absent stamps are OMITTED rather than mapped to null, so JS sees `undefined` — which reads as
+ * "this sender does not tell us", the honest meaning of a fix from a build that predates the
+ * fields. A sender that says nothing and a sender we cannot understand must not collapse into one
+ * value: the first falls back to age, the second is a bug.
+ */
+private fun fixToMap(fix: LocationFix): Map<String, Any> = buildMap {
+  put("lat", fix.lat)
+  put("lon", fix.lon)
+  put("accuracyM", fix.accuracyM)
+  put("headingDeg", fix.headingDeg)
+  put("ts", fix.ts.toLong())
+  fix.state?.let { put("state", it.toInt()) }
+  fix.publishedDeltaS?.let { put("publishedDeltaS", it.toLong()) }
+}
 
 /** Build a control message from the JS object (see `NativeControlMsg`). `nonce` crosses as hex. */
 private fun controlMsgOf(msg: Map<String, Any?>): ControlMsg =
@@ -465,14 +487,7 @@ class IrohLocationModule : Module() {
         mapOf(
           "author" to author.toHex(),
           "seq" to seq.toLong(),
-          "fix" to
-            mapOf(
-              "lat" to fix.lat,
-              "lon" to fix.lon,
-              "accuracyM" to fix.accuracyM,
-              "headingDeg" to fix.headingDeg,
-              "ts" to fix.ts.toLong(),
-            ),
+          "fix" to fixToMap(fix),
           "backfill" to backfill,
           "via" to via,
           "viaPeer" to viaPeer,
@@ -955,15 +970,7 @@ class IrohLocationModule : Module() {
             "seq" to incoming.seq.toLong(),
             "ts" to incoming.ts.toLong(),
             "kind" to incoming.kind,
-            "fix" to incoming.fix?.let { fix ->
-              mapOf(
-                "lat" to fix.lat,
-                "lon" to fix.lon,
-                "accuracyM" to fix.accuracyM,
-                "headingDeg" to fix.headingDeg,
-                "ts" to fix.ts.toLong(),
-              )
-            },
+            "fix" to incoming.fix?.let { fixToMap(it) },
             "viaPeer" to incoming.viaPeer,
           )
         }
@@ -1223,14 +1230,7 @@ class IrohLocationModule : Module() {
               "charging" to battery.charging,
               "lowPower" to battery.lowPower,
             ),
-          "fix" to
-            mapOf(
-              "lat" to fix.lat,
-              "lon" to fix.lon,
-              "accuracyM" to fix.accuracyM,
-              "headingDeg" to fix.headingDeg,
-              "ts" to fix.ts.toLong(),
-            ),
+          "fix" to fixToMap(fix),
         ),
       )
       return true
