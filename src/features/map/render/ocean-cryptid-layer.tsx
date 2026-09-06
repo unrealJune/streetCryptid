@@ -12,7 +12,6 @@ import Animated, {
 } from 'react-native-reanimated';
 
 import { worldToScreen } from '../core/camera';
-import { ramp } from '../core/color';
 import { oceanCryptidOpacity, type PlacedCryptid } from '../core/ocean-cryptids';
 import type { CameraState, MapPalette, Viewport } from '../core/types';
 
@@ -36,7 +35,7 @@ const DRIFT_MS = 9000;
 const DRIFT_X = 14;
 const DRIFT_Y = 7;
 /** Ceiling on the layer's own opacity, so cryptids never compete with the map. */
-const MAX_OPACITY = 0.45;
+const MAX_OPACITY = 0.55;
 
 /**
  * Sea cryptids drifting through the oceans and the polar void at far-out zooms.
@@ -65,9 +64,14 @@ export function OceanCryptidLayer({
   const opacity = oceanCryptidOpacity(zoom) * MAX_OPACITY;
   if (cryptids.length === 0 || opacity <= 0) return null;
 
-  // Deep water, so they read as part of the sea rather than as chrome over it.
-  const [r, g, b] = ramp(palette.water, 0.82);
-  const color = `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`;
+  // The lattice ink, not a step of the water ramp. These sit on TWO very
+  // different grounds — deep water inside the world, and the bare canvas in the
+  // letterbox void past the poles — so an ink drawn from the water ramp
+  // disappears into the sea in one and into the background in the other.
+  // `streetLabel` is the palette's quiet line work and is built to read against
+  // the canvas in both schemes, which is exactly the job here.
+  const [r, g, b] = palette.streetLabel;
+  const color = `rgb(${r}, ${g}, ${b})`;
 
   return (
     <>

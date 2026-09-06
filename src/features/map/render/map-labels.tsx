@@ -58,9 +58,11 @@ export function MapLabelLayer({
         const rgb =
           label.kind === 'area'
             ? palette.parkLabel
-            : label.kind === 'poi' || label.kind === 'housenumber'
-              ? palette.building
-              : palette.streetLabel;
+            : label.kind === 'transit'
+              ? palette.transit
+              : label.kind === 'poi' || label.kind === 'housenumber'
+                ? palette.building
+                : palette.streetLabel;
         return (
           <MapLabelChip
             angle={label.angle}

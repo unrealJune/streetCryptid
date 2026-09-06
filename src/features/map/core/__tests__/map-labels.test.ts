@@ -6,6 +6,7 @@ import {
   LABEL_MIN_ZOOM,
   POI_LABEL_MIN_ZOOM,
   poiRankBudget,
+  TRANSIT_STOP_MIN_ZOOM,
   selectMapLabels,
 } from '../map-labels';
 import type { RegionSpec } from '../region';
@@ -281,6 +282,96 @@ describe('selectMapLabels — POIs (the building-label source)', () => {
       ],
     });
     expect(found).toHaveLength(1);
+  });
+
+  it('routes stops to the transit kind and keeps stations as places', () => {
+    const zoom = 17;
+    const at = (world: WorldPoint, name: string, kind: string, subclass: string) => ({
+      name,
+      world,
+      kind,
+      subclass,
+      rank: 1,
+    });
+    const found = labelsAt(zoom, {
+      pois: [
+        // Every corner stop is a rank-1 POI named for its intersection, so left
+        // among the places they beat real buildings on the tie-break.
+        at([0.5, 0.5], '5th Avenue North & Republican Street', 'bus', 'bus_stop'),
+        at([0.52, 0.5], 'Terry & Thomas', 'railway', 'tram_stop'),
+        // …but a light-rail station is a landmark, not a pole on a corner.
+        at([0.48, 0.5], 'Westlake Station', 'railway', 'station'),
+      ],
+    });
+    const byText = new Map(found.map((l) => [l.text, l.kind]));
+    expect(byText.get('WESTLAKE STATION')).toBe('poi');
+    expect(byText.get('5TH AVENUE NORTH & REPUBLICAN STREET')).toBe('transit');
+    expect(byText.get('TERRY & THOMAS')).toBe('transit');
+  });
+
+  it('leaves stops unnamed until the transit tier', () => {
+    const stop = {
+      name: 'Terry & Thomas',
+      world: [0.5, 0.5] as WorldPoint,
+      kind: 'railway',
+      subclass: 'tram_stop',
+      rank: 1,
+    };
+    expect(labelsAt(TRANSIT_STOP_MIN_ZOOM - 0.01, { pois: [stop] })).toHaveLength(0);
+    expect(labelsAt(TRANSIT_STOP_MIN_ZOOM, { pois: [stop] }).map((l) => l.kind)).toEqual([
+      'transit',
+    ]);
+  });
+
+  it('never lets a stop displace the building it stands outside', () => {
+    const zoom = 17;
+    const world: WorldPoint = [0.5, 0.5];
+    const found = labelsAt(zoom, {
+      pois: [
+        { name: 'Terry & Thomas', world, kind: 'railway', subclass: 'tram_stop', rank: 1 },
+        { name: 'ACT Theatre', world, kind: 'attraction', subclass: 'theatre', rank: 9 },
+      ],
+    });
+    // Same anchor: the place is placed first even though the stop outranks it.
+    expect(found.map((l) => l.text)).toEqual(['ACT THEATRE']);
+  });
+
+  it('spends its cap near the camera, not out in the region padding', () => {
+    // A region is 3x the viewport, so most of it is off screen. A point label
+    // has no length to reach into frame with, so ordering by importance alone
+    // spent the whole cap on padding: measured downtown at z17, 1275 candidates
+    // were eligible, 14 were placed and none were visible.
+    const zoom = 17;
+    const spec = specAt(zoom);
+    const cx = (spec.rect.minX + spec.rect.maxX) / 2;
+    const cy = (spec.rect.minY + spec.rect.maxY) / 2;
+
+    // One important POI far out in the padding, and a crowd of duller ones on
+    // top of the camera. The near crowd must win the budget.
+    const far = {
+      name: 'Far Landmark',
+      world: [cx + 0.3, cy + 0.3] as WorldPoint,
+      kind: 'x',
+      subclass: 'x',
+      rank: 1,
+    };
+    // Spaced far enough apart on screen that the collision pass keeps them all,
+    // and numerous enough to exhaust the cap on their own.
+    const px = scaleFor(zoom);
+    const near = Array.from({ length: 20 }, (_, i) => ({
+      name: `Near ${i}`,
+      world: [cx + (i % 4) * (70 / px), cy + Math.floor(i / 4) * (25 / px)] as WorldPoint,
+      kind: 'x',
+      subclass: 'x',
+      rank: 5,
+    }));
+
+    const texts = labelsAt(zoom, { pois: [far, ...near] }).map((l) => l.text);
+    expect(texts.length).toBeGreaterThan(10);
+    expect(texts).toContain('NEAR 0');
+    // The cap is spent entirely on what is near the camera; the distant rank-1
+    // landmark never gets a slot despite being the most important candidate.
+    expect(texts).not.toContain('FAR LANDMARK');
   });
 
   it('outranks a street name it would collide with', () => {

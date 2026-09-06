@@ -26,7 +26,7 @@ import { CLASS_MIN_ZOOM } from './road-lod';
 import type { WorldPoint } from './types';
 import type { PackedAreas, PackedGeometry, PackedStreets } from '../tiles/packed-geometry';
 
-export type MapLabelKind = 'street' | 'area' | 'poi' | 'housenumber';
+export type MapLabelKind = 'street' | 'area' | 'poi' | 'transit' | 'housenumber';
 
 /** One placed label: where it goes in world space and how it is turned. */
 export interface MapLabel {
@@ -73,6 +73,42 @@ export const POI_LABEL_MIN_ZOOM = 13.5;
 export const HOUSENUMBER_MIN_ZOOM = 17;
 
 /**
+ * OMT `poi` classes that are street furniture, and never earn a name at all.
+ */
+const POI_EXCLUDED_CLASSES: ReadonlySet<string> = new Set(['waste_basket', 'bench']);
+
+/**
+ * `subclass` values that make a POI a TRANSIT STOP rather than a place.
+ *
+ * These are not dropped — they become their own label kind, drawn in the transit
+ * ink alongside the transit lines. Separating them is what keeps them usable:
+ * every corner bus stop is a POI named for its intersection AT RANK 1, so mixed
+ * in with places they win every tie-break and bury the actual buildings under
+ * the longest strings on screen (measured downtown, four of them crowded out
+ * most of a block). A light-rail STATION stays a place — it is a landmark, not
+ * a pole on a corner.
+ */
+const TRANSIT_STOP_SUBCLASSES: ReadonlySet<string> = new Set([
+  'tram_stop',
+  'bus_stop',
+  'platform',
+  'stop_position',
+  'halt',
+]);
+
+/**
+ * Below this zoom transit stops go unnamed. Far denser than places — a downtown
+ * z14 tile carries a stop on nearly every corner — so they only make sense once
+ * you are close enough to walk to one.
+ */
+export const TRANSIT_STOP_MIN_ZOOM = 16;
+
+/** True when a POI is a stop on a line rather than a place in a building. */
+export function isTransitStop(poi: { readonly kind: string; readonly subclass: string }): boolean {
+  return poi.kind === 'bus' || TRANSIT_STOP_SUBCLASSES.has(poi.subclass);
+}
+
+/**
  * How many POI ranks to admit at `zoom` (OMT `rank` is 1-based, lower = more
  * prominent). Doubles per zoom level, so the city view names only the couple of
  * landmarks the tileset kept at z13 and the deepest view names most of a block.
@@ -101,9 +137,8 @@ const MIN_AREA_PX = 2600;
 const MAX_STREET_LABELS = 16;
 const MAX_AREA_LABELS = 5;
 const MAX_POI_LABELS = 14;
+const MAX_TRANSIT_STOP_LABELS = 10;
 const MAX_HOUSENUMBER_LABELS = 24;
-
-/** Smallest on-screen park (px²) worth naming — below this the chip covers it. */
 
 /** Extra breathing room around each placed chip when testing for collisions. */
 const COLLISION_MARGIN_PX = 3;
@@ -140,6 +175,7 @@ export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): Map
   const areas = areaCandidates(geometry, spec, pxPerWorld).slice(0, MAX_AREA_LABELS);
   const streets = streetCandidates(geometry, spec, pxPerWorld);
   const pois = poiCandidates(geometry, spec);
+  const transitStops = transitStopCandidates(geometry, spec);
   const houseNumbers = houseNumberCandidates(geometry, spec);
 
   const placed: PlacedBox[] = [];
@@ -177,6 +213,14 @@ export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): Map
     if (tryPlace(candidate)) streetCount++;
   }
 
+  // Transit stops after the streets they stand on: useful, but a stop name is
+  // navigation furniture and must not outrank the road or the building.
+  let transitCount = 0;
+  for (const candidate of transitStops) {
+    if (transitCount >= MAX_TRANSIT_STOP_LABELS) break;
+    if (tryPlace(candidate)) transitCount++;
+  }
+
   // House numbers last, filling whatever gaps are left — they are the least
   // important thing on the map and must never displace a name.
   let numberCount = 0;
@@ -209,6 +253,8 @@ function poiCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] 
   for (const part of geometry.parts) {
     for (const poi of part.pois) {
       if (!poi.name) continue;
+      if (POI_EXCLUDED_CLASSES.has(poi.kind)) continue;
+      if (isTransitStop(poi)) continue; // drawn by `transitStopCandidates` instead
       // An absent rank means the tileset did not rank it; treat it as lowest
       // priority rather than dropping it, so a bake without ranks still labels.
       const rank = poi.rank ?? budget;
@@ -229,9 +275,56 @@ function poiCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] 
     }
   }
 
+  // Nearest the camera first, rank only breaking ties.
+  //
+  // This ordering is load-bearing, not cosmetic. A region is 3x the viewport on
+  // each axis (see `padFor`), so the view is about a ninth of its area — and a
+  // POI is a POINT, so unlike a street it has no length to reach into frame with.
+  // Ranking these by importance alone spends the whole cap on padding the user
+  // cannot see: measured downtown at z17, 1275 candidates were under budget, 14
+  // were placed, and ZERO of them landed on screen. `computeRegionSpec` builds
+  // the rect symmetrically around the camera, so distance from the region centre
+  // IS distance from what the user is looking at.
+  const cx = (spec.rect.minX + spec.rect.maxX) / 2;
+  const cy = (spec.rect.minY + spec.rect.maxY) / 2;
+  const distSq = (c: Candidate) => (c.world[0] - cx) ** 2 + (c.world[1] - cy) ** 2;
   return [...best.values()].sort(
-    (a, b) => b.priority - a.priority || a.text.length - b.text.length
+    (a, b) => distSq(a) - distSq(b) || b.priority - a.priority || a.text.length - b.text.length
   );
+}
+
+/**
+ * Stops on the transit network, drawn in the transit ink beside the lines they
+ * belong to. Kept apart from places for the reason {@link TRANSIT_STOP_SUBCLASSES}
+ * documents; the render layer hides these with the transit layer toggle, exactly
+ * as highway chips hide with their roads.
+ */
+function transitStopCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] {
+  if (spec.zoom < TRANSIT_STOP_MIN_ZOOM) return [];
+
+  // One chip per name: a route's stops repeat the same intersection name on both
+  // sides of the street, and a stop on a tile seam arrives twice.
+  const best = new Map<string, Candidate>();
+  for (const part of geometry.parts) {
+    for (const poi of part.pois) {
+      if (!poi.name || !isTransitStop(poi)) continue;
+      const text = poi.name.toUpperCase();
+      if (best.has(text)) continue;
+      best.set(text, {
+        id: `transit:${text}`,
+        kind: 'transit',
+        text,
+        world: poi.world,
+        angle: 0,
+        priority: -(poi.rank ?? 0),
+      });
+    }
+  }
+
+  const cx = (spec.rect.minX + spec.rect.maxX) / 2;
+  const cy = (spec.rect.minY + spec.rect.maxY) / 2;
+  const distSq = (c: Candidate) => (c.world[0] - cx) ** 2 + (c.world[1] - cy) ** 2;
+  return [...best.values()].sort((a, b) => distSq(a) - distSq(b) || b.priority - a.priority);
 }
 
 /** Street numbers, drawn only at the deepest zoom and only where nothing else is. */
@@ -257,7 +350,17 @@ function houseNumberCandidates(geometry: PackedGeometry, spec: RegionSpec): Cand
       });
     }
   }
-  return out;
+  // Nearest the camera first, for the reason `poiCandidates` documents — with
+  // ~1100 numbers per z14 tile this is the difference between numbering the
+  // block on screen and numbering one two viewports away.
+  const cx = (spec.rect.minX + spec.rect.maxX) / 2;
+  const cy = (spec.rect.minY + spec.rect.maxY) / 2;
+  return out.sort(
+    (a, b) =>
+      (a.world[0] - cx) ** 2 +
+      (a.world[1] - cy) ** 2 -
+      ((b.world[0] - cx) ** 2 + (b.world[1] - cy) ** 2)
+  );
 }
 
 // ---------------------------------------------------------------------------

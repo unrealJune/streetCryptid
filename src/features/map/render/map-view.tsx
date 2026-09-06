@@ -404,10 +404,14 @@ export function MapView({
   // Highway name chips belong to highway geometry: hiding one hides the other.
   const visibleLabels = useMemo(
     () =>
-      highwaysEnabled
-        ? (region?.labels ?? [])
-        : (region?.labels ?? []).filter((label) => label.roadClass !== HIGHWAY_CLASS),
-    [region, highwaysEnabled]
+      (region?.labels ?? []).filter((label) => {
+        // A name belongs to the geometry it names: hiding a layer hides its
+        // chips too, or the map grows labels for things that are not drawn.
+        if (!highwaysEnabled && label.roadClass === HIGHWAY_CLASS) return false;
+        if (!transitEnabled && label.kind === 'transit') return false;
+        return true;
+      }),
+    [region, highwaysEnabled, transitEnabled]
   );
 
   const animateProfileCamera = useCallback(
