@@ -89,7 +89,7 @@ export interface ContactCard {
  * - `legacy`  — added out-of-band via a `streetcryptid://contact?…` card (pre-pairing).
  * - `nearby`  — invite-less BLE nearby pairing.
  * - `invite`  — a scanned/opened `streetcryptid:///social?token=…` invite link.
- * - `code`    — a raw `scpair1:` token pasted by hand, or a short human pairing code redeemed via
+ * - `code`    — a raw `scpair2:` token pasted by hand, or a short human pairing code redeemed via
  *   the encrypted pairing mailbox (see `core/pairing-code.ts`).
  */
 export type PairingMethod = 'legacy' | 'nearby' | 'invite' | 'code';

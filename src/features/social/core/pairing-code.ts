@@ -9,7 +9,7 @@ import {
 } from 'expo-crypto';
 
 import { bytesToHex } from './hex';
-import { PAIR_TOKEN_PREFIX } from './pair-link';
+import { isPairToken } from './pair-link';
 
 /**
  * Short human pairing codes for the encrypted mailbox handoff. A code is an 80-bit random
@@ -17,7 +17,7 @@ import { PAIR_TOKEN_PREFIX } from './pair-link';
  * secret alone (never sent anywhere) deterministically derives:
  *  - a **lookup id** — the mailbox address, a random-looking 32-hex-char string that carries no
  *    identity or key material by construction; and
- *  - an **AES-256 key** used to seal/open the opaque `scpair1:` invite token entirely on-device.
+ *  - an **AES-256 key** used to seal/open the opaque `scpair2:` invite token entirely on-device.
  *
  * The mailbox server only ever sees the lookup id and the sealed capsule bytes — never the code,
  * the secret, the key, or the plaintext token. This module owns that seal/open + code codec; the
@@ -31,7 +31,7 @@ export const PAIRING_CODE_LENGTH = 16;
 /** Version prefix for a sealed mailbox capsule: `<prefix><base64 iv‖ciphertext‖tag>`. */
 export const CAPSULE_PREFIX = 'scmail1:';
 
-/** Hard bound on the plaintext `scpair1:` token we'll ever seal (real invites are far smaller). */
+/** Hard bound on the plaintext `scpair2:` token we'll ever seal (real invites are far smaller). */
 export const MAX_TOKEN_BYTES = 4096;
 /** Hard bound on a capsule string's length — comfortably under the mailbox's 16 KiB limit. */
 export const MAX_CAPSULE_BYTES = 8192;
@@ -281,7 +281,7 @@ export interface OpenCryptoOverrides {
 }
 
 /**
- * Seal an opaque `scpair1:` token for the mailbox: derives the AES-256 key from `secret` and
+ * Seal an opaque `scpair2:` token for the mailbox: derives the AES-256 key from `secret` and
  * encrypts under a fixed AAD context, returning `scmail1:<base64 iv‖ciphertext‖tag>`.
  */
 export async function sealPairToken(
@@ -289,8 +289,8 @@ export async function sealPairToken(
   secret: Uint8Array,
   overrides: SealCryptoOverrides = {}
 ): Promise<string> {
-  if (!token.startsWith(PAIR_TOKEN_PREFIX)) {
-    throw new PairingCodeError('pairing capsule: expected an scpair1: token');
+  if (!isPairToken(token)) {
+    throw new PairingCodeError('pairing capsule: expected an scpair2: token');
   }
   const tokenBytes = utf8Bytes(token);
   if (tokenBytes.byteLength > MAX_TOKEN_BYTES) {
@@ -307,7 +307,7 @@ export async function sealPairToken(
 }
 
 /**
- * Open a mailbox capsule back into the opaque `scpair1:` token: validates the `scmail1:` prefix,
+ * Open a mailbox capsule back into the opaque `scpair2:` token: validates the `scmail1:` prefix,
  * derives the AES-256 key from `secret`, decrypts, and validates the resulting token prefix.
  * Throws {@link PairingCodeError} for a bad prefix, oversized payload, or failed
  * decryption/authentication (wrong code or a tampered capsule) — never falls back silently.
@@ -338,8 +338,8 @@ export async function openPairCapsule(
     );
   }
   const token = utf8Decode(plaintext);
-  if (!token.startsWith(PAIR_TOKEN_PREFIX)) {
-    throw new PairingCodeError('pairing capsule: decrypted payload is not a valid scpair1: token');
+  if (!isPairToken(token)) {
+    throw new PairingCodeError('pairing capsule: decrypted payload is not a valid scpair2: token');
   }
   return token;
 }

@@ -152,7 +152,7 @@ describe('sealPairToken / openPairCapsule (deterministic, Node-crypto AES)', () 
     expect(opened).toBe(token);
   });
 
-  it('rejects sealing a non scpair1: token', async () => {
+  it('rejects sealing a non scpair2: token', async () => {
     await expect(sealPairToken('not-a-token', secret, CRYPTO_OVERRIDES)).rejects.toThrow(
       PairingCodeError
     );
@@ -184,7 +184,7 @@ describe('sealPairToken / openPairCapsule (deterministic, Node-crypto AES)', () 
     );
   });
 
-  it('rejects a decrypted payload that is not an scpair1: token', async () => {
+  it('rejects a decrypted payload that is not an scpair2: token', async () => {
     const combinedBase64 = await nodeAesEncrypt(
       await deriveKeyForTest(secret),
       new TextEncoder().encode('not-an-invite-token'),

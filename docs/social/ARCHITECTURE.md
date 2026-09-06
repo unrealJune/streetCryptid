@@ -502,10 +502,15 @@ declined prompt left the strip with no action to offer.
 
 ### Remote: link or blind short code
 
-- A shareable `streetcryptid:///social?token=scpair1:…` link opens the map with the friends
+- A shareable `streetcryptid:///social?token=scpair2:…` link opens the map with the friends
   island showing and carries the opaque native invite directly. Android native intents
   normalize both this canonical form and legacy `streetcryptid://social` / `/pair` links
   into `/?pair=<token>`.
+- **`scpair2:` does not interoperate with the `scpair1:` tokens shipped in v1.0.0–v2.4.0.** The
+  break is deliberate and bidirectional, and it covers the short code too — the code's capsule
+  seals the same token, so a cross-version code decrypts and is only then rejected on the token
+  prefix. Both people must be on the same side of that boundary to pair by link or code; nearby
+  BLE pairing works across it, since it carries no invite token. See `INVITE_V` in `pairing.rs`.
 - Settings also provides a visible input for a full sharing link, raw token, or short code.
 - Remote pairing still requires both people to compare the ASCII challenge over a trusted voice or
   video call. Possession of a link/code starts the authenticated transport exchange; it does not

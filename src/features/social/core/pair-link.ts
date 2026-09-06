@@ -1,6 +1,6 @@
 /**
  * Pair-link codec. A bilateral-pairing invite is shared as a `streetcryptid:///social?token=<token>`
- * deep link (QR / tappable link) that wraps an opaque native `scpair1:` invite token. This is
+ * deep link (QR / tappable link) that wraps an opaque native `scpair2:` invite token. This is
  * deliberately a *separate* scheme+path from the legacy `streetcryptid://contact?…` card: a contact
  * link seeds a one-way friend add, whereas a pair link bootstraps the two-way pairing handshake.
  * The two must never be conflated. See docs/social/ARCHITECTURE.md §4.
@@ -11,8 +11,8 @@
 
 export const PAIR_SCHEME = 'streetcryptid';
 export const PAIR_PATH = 'social';
-/** Prefix of the opaque native invite token (`scpair1:<hex>`). */
-export const PAIR_TOKEN_PREFIX = 'scpair1:';
+/** Prefix of the opaque native invite token (`scpair2:<base64url>`). */
+export const PAIR_TOKEN_PREFIX = 'scpair2:';
 
 const PAIR_LINK_PREFIX = `${PAIR_SCHEME}:///${PAIR_PATH}`;
 const LEGACY_SOCIAL_LINK_PREFIX = `${PAIR_SCHEME}://${PAIR_PATH}`;
@@ -25,12 +25,12 @@ const ACCEPTED_LINK_PREFIXES = [
   LEGACY_TRIPLE_PAIR_LINK_PREFIX,
 ] as const;
 
-/** True when `s` is a raw opaque native invite token (`scpair1:<…>`). */
+/** True when `s` is a raw opaque native invite token (`scpair2:<…>`). */
 export function isPairToken(s: string): boolean {
   return s.startsWith(PAIR_TOKEN_PREFIX) && s.length > PAIR_TOKEN_PREFIX.length;
 }
 
-/** True when `s` is a streetCryptid pair link or a raw `scpair1:` token. */
+/** True when `s` is a streetCryptid pair link or a raw `scpair2:` token. */
 export function isPairLink(s: string): boolean {
   const trimmed = s.trim();
   return (
@@ -43,7 +43,7 @@ export function isPairLink(s: string): boolean {
 export function encodePairLink(token: string): string {
   const trimmed = token.trim();
   if (!isPairToken(trimmed)) {
-    throw new Error('pair link: expected a scpair1: token');
+    throw new Error('pair link: expected a scpair2: token');
   }
   return `${PAIR_LINK_PREFIX}?token=${encodeURIComponent(trimmed)}`;
 }
@@ -63,8 +63,8 @@ function parseQuery(input: string): Map<string, string> {
 }
 
 /**
- * Decode a pair link (or a raw `scpair1:` token) back into the opaque native token. Rejects legacy
- * `streetcryptid://contact?…` cards and anything that isn't a pair link, so the two schemes can't be
+ * Decode a pair link (or a raw `scpair2:` token) back into the opaque native token.
+ * Rejects legacy `streetcryptid://contact?…` cards and anything that isn't a pair link, so the two schemes can't be
  * confused.
  */
 export function decodePairLink(input: string): string {
@@ -77,7 +77,7 @@ export function decodePairLink(input: string): string {
   }
   const token = parseQuery(trimmed).get('token') ?? '';
   if (!isPairToken(token)) {
-    throw new Error('pair link: missing or invalid scpair1: token');
+    throw new Error('pair link: missing or invalid scpair2: token');
   }
   return token;
 }

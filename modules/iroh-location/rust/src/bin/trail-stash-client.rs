@@ -1213,8 +1213,8 @@ mod tests {
     #[test]
     fn pair_link_matches_the_app_codec() {
         assert_eq!(
-            pair_link("scpair1:abcd"),
-            "streetcryptid:///social?token=scpair1%3Aabcd"
+            pair_link("scpair2:abcd"),
+            "streetcryptid:///social?token=scpair2%3Aabcd"
         );
     }
 

@@ -6,7 +6,7 @@ import { PairLinkAction } from '../pair-link-action';
 
 jest.mock('@/global.css', () => ({}));
 
-const LINK = 'streetcryptid:///social?token=scpair1%3Aabcdef';
+const LINK = 'streetcryptid:///social?token=scpair2%3Aabcdef';
 
 const PAIRING: PairingSnapshot = {
   available: true,

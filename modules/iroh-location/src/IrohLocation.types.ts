@@ -249,9 +249,9 @@ export interface PairInvite {
   expiresAtMs: number;
 }
 
-/** A freshly minted invite plus its opaque, shareable `scpair1:<hex>` token (QR / deep link). */
+/** A freshly minted invite plus its opaque, shareable `scpair2:<base64url>` token (QR / deep link). */
 export interface PairInviteWithToken extends PairInvite {
-  /** Opaque encoded token (`scpair1:<hex>`) for QR codes / links. */
+  /** Opaque encoded token (`scpair2:<base64url>`) for QR codes / links. */
   token: string;
 }
 
@@ -964,12 +964,12 @@ export interface IrohLocationApi {
   pairingReady(): Promise<boolean>;
   /**
    * Mint a one-shot, time-limited invite carrying only immutable bootstrap material. Returns the
-   * invite fields plus the opaque `scpair1:<hex>` {@link PairInviteWithToken.token} for QR / links.
+   * invite fields plus the opaque `scpair2:<base64url>` {@link PairInviteWithToken.token} for QR / links.
    */
   createPairInvite(ttlSecs: number): Promise<PairInviteWithToken>;
   /** Begin an invite-based pair from a decoded {@link PairInvite}. Returns the session id (hex). */
   initiatePair(invite: PairInvite): Promise<string>;
-  /** Begin an invite-based pair from an opaque `scpair1:<hex>` token. Returns the session id (hex). */
+  /** Begin an invite-based pair from an opaque `scpair2:` token. Returns the session id (hex). */
   initiatePairByToken(token: string): Promise<string>;
   /** Begin an invite-less **nearby** pair with a BLE-discovered peer. Returns the session id (hex). */
   initiatePairNearby(peerEndpointIdHex: string): Promise<string>;
@@ -1006,9 +1006,9 @@ export interface IrohLocationApi {
   listPairSessions(): Promise<PairStateRecord[]>;
   /** The completed-pair result for a session (enriched with the peer's profile), or `null`. */
   pairResult(sessionIdHex: string): Promise<PairResult | null>;
-  /** Encode a {@link PairInvite} into an opaque `scpair1:<hex>` token for QR / links. */
+  /** Encode a {@link PairInvite} into an opaque `scpair2:<base64url>` token for QR / links. */
   encodePairInvite(invite: PairInvite): Promise<string>;
-  /** Decode an opaque `scpair1:<hex>` token back into a {@link PairInvite}. */
+  /** Decode an opaque `scpair2:<base64url>` token back into a {@link PairInvite}. */
   decodePairInvite(token: string): Promise<PairInvite>;
 
   /**

@@ -61,6 +61,7 @@ use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use iroh_tickets::endpoint::EndpointTicket;
+use iroh_tickets::Ticket;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -82,7 +83,23 @@ pub const PAIR_ALPN: &[u8] = b"streetcryptid/pair/3";
 pub const PAIR_WIRE_V: u8 = 3;
 
 /// Invite schema version carried in every [`InviteData`].
-pub const INVITE_V: u8 = 1;
+///
+/// v1 — postcard over the base32 ticket *string*, hex-encoded, under an `scpair1:` prefix — DID
+/// ship, in every release from v1.0.0 through v2.4.0, with invite creation reachable from the
+/// pairing screen. It is deliberately not decoded here: this build rejects a v1 token rather than
+/// carrying a second codec.
+///
+/// That break is bidirectional and covers BOTH token paths, because the sealed pairing-code
+/// capsule carries the same token: a v1 peer cannot redeem a v2 link or code, and vice versa. The
+/// capsule case fails late and confusingly — the AES key derives from the human code and is
+/// unchanged, so a v1 capsule DECRYPTS on this build and is only then rejected on the token
+/// prefix. Nearby BLE pairing is unaffected: it derives its session id from the two endpoint ids
+/// and carries no invite token, and [`PAIR_ALPN`]/[`PAIR_WIRE_V`] are unchanged.
+///
+/// To pair across that boundary, decode-side compat would have to be added here (keep the v1
+/// `InviteWire`, dispatch on prefix, keep encoding v2). That only ever fixes v1 -> v2, since the
+/// tolerance would have had to ship in v1 to fix the other direction.
+pub const INVITE_V: u8 = 2;
 
 /// Hard ceiling on a single framed pairing message body, enforced on read and write. Pairing
 /// messages are tiny (two tickets at most), so 64 KiB is generous and bounds memory on the
@@ -135,7 +152,7 @@ const SAS_ACCEPTED_GRACE_MS: u64 = 10_000;
 const SAS_MIN_SEPARATION: u16 = 8;
 
 /// Opaque token prefix for an encoded invite.
-const INVITE_PREFIX: &str = "scpair1:";
+const INVITE_PREFIX: &str = "scpair2:";
 
 const SESSION_ID_LEN: usize = 16;
 const INVITE_SECRET_LEN: usize = 16;
@@ -160,30 +177,69 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-// ── Hex (dependency-free, round-trips with hex_decode) ────────────────────────────────────
+// ── Base64url (dependency-free, round-trips with b64url_decode) ───────────────────────────
 
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+/// URL-safe base64 alphabet (RFC 4648 §5). Every character is unreserved in a URL query, so a
+/// token encoded with it survives `encodeURIComponent` untouched — which is the whole point of
+/// using it over standard base64, whose `+`/`/`/`=` percent-encode to three characters each and
+/// would end up *longer* than the hex it replaced.
+const B64URL_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// Encode to unpadded base64url. Padding is omitted: it carries no information and the decoder
+/// recovers the length from the remainder.
+fn b64url_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        // 3 bytes → 4 characters; a 1- or 2-byte tail emits only the 2 or 3 characters that
+        // carry real bits.
+        let chars = chunk.len() + 1;
+        for i in 0..chars {
+            let idx = ((n >> (18 - 6 * i)) & 0x3f) as usize;
+            out.push(B64URL_ALPHABET[idx] as char);
+        }
     }
-    s
+    out
 }
 
-fn hex_decode(s: &str) -> Result<Vec<u8>> {
-    if s.len() % 2 != 0 {
-        bail!("odd-length hex");
-    }
-    let mut out = Vec::with_capacity(s.len() / 2);
+fn b64url_value(c: u8) -> Option<u32> {
+    Some(match c {
+        b'A'..=b'Z' => (c - b'A') as u32,
+        b'a'..=b'z' => (c - b'a') as u32 + 26,
+        b'0'..=b'9' => (c - b'0') as u32 + 52,
+        b'-' => 62,
+        b'_' => 63,
+        _ => return None,
+    })
+}
+
+/// Decode unpadded base64url. Rejects padding, non-alphabet characters, a 1-character tail (which
+/// encodes no whole byte), and non-zero unused tail bits — so a given byte string has exactly one
+/// valid encoding and a token can't be malleated into an equivalent one.
+fn b64url_decode(s: &str) -> Result<Vec<u8>> {
     let bytes = s.as_bytes();
-    for pair in bytes.chunks_exact(2) {
-        let hi = (pair[0] as char)
-            .to_digit(16)
-            .ok_or_else(|| anyhow!("bad hex digit"))?;
-        let lo = (pair[1] as char)
-            .to_digit(16)
-            .ok_or_else(|| anyhow!("bad hex digit"))?;
-        out.push(((hi << 4) | lo) as u8);
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        if chunk.len() == 1 {
+            bail!("bad base64url length");
+        }
+        let mut n = 0u32;
+        for (i, &c) in chunk.iter().enumerate() {
+            let v = b64url_value(c).ok_or_else(|| anyhow!("bad base64url character"))?;
+            n |= v << (18 - 6 * i);
+        }
+        let full = chunk.len() - 1;
+        for i in 0..full {
+            out.push(((n >> (16 - 8 * i)) & 0xff) as u8);
+        }
+        // Bits below the decoded bytes are padding and must be zero.
+        if chunk.len() < 4 && (n & ((1u32 << (24 - 8 * full)) - 1)) != 0 {
+            bail!("non-canonical base64url tail");
+        }
     }
     Ok(out)
 }
@@ -390,58 +446,66 @@ pub struct InviteData {
     pub expires_at_ms: u64,
 }
 
+/// Invite payload. Two things keep it short: the endpoint address rides as the endpoint
+/// ticket's own **binary** form (`Ticket::encode_bytes`) rather than its ~150-character base32
+/// string, and the endpoint id is not repeated — it is already inside that address. Fixed-size
+/// arrays avoid postcard's length prefixes for the two fields whose length is a constant.
 #[derive(Serialize, Deserialize)]
 struct InviteWire {
     v: u8,
-    invite_id: Vec<u8>,
-    secret: Vec<u8>,
-    endpoint_id: Vec<u8>,
-    endpoint_ticket: String,
+    invite_id: [u8; SESSION_ID_LEN],
+    secret: [u8; INVITE_SECRET_LEN],
+    /// `EndpointTicket::encode_bytes` — the same bytes the base32 ticket string wraps.
+    endpoint_ticket: Vec<u8>,
     expires_at_ms: u64,
 }
 
-/// Encode an invite to an opaque, dependency-free `scpair1:<hex>` token.
+/// Encode an invite to an opaque, dependency-free `scpair2:<base64url>` token.
+///
+/// Encoding requires a parseable ticket whose endpoint id matches `inv.endpoint_id`, because the
+/// token stores only the ticket — the endpoint id is read back out of it. A mismatch is refused
+/// rather than silently resolved, since the decoded invite would otherwise name a different peer
+/// than the one encoded.
 pub fn encode_invite(inv: &InviteData) -> Result<String> {
+    if inv.version != INVITE_V {
+        bail!("unsupported invite version {}", inv.version);
+    }
+    let ticket: EndpointTicket = inv
+        .endpoint_ticket
+        .parse()
+        .map_err(|e| anyhow!("invite endpoint ticket unparseable: {e}"))?;
+    if ticket.endpoint_addr().id.as_bytes() != &inv.endpoint_id {
+        bail!("invite endpoint id does not match its endpoint ticket");
+    }
     let w = InviteWire {
         v: inv.version,
-        invite_id: inv.invite_id.to_vec(),
-        secret: inv.secret.to_vec(),
-        endpoint_id: inv.endpoint_id.to_vec(),
-        endpoint_ticket: inv.endpoint_ticket.clone(),
+        invite_id: inv.invite_id,
+        secret: inv.secret,
+        endpoint_ticket: ticket.encode_bytes(),
         expires_at_ms: inv.expires_at_ms,
     };
     let bytes = postcard::to_allocvec(&w).map_err(|e| anyhow!("encode invite: {e}"))?;
-    Ok(format!("{INVITE_PREFIX}{}", hex_encode(&bytes)))
+    Ok(format!("{INVITE_PREFIX}{}", b64url_encode(&bytes)))
 }
 
-/// Decode + structurally validate an `scpair1:` invite token.
+/// Decode + structurally validate an `scpair2:<base64url>` invite token.
 pub fn decode_invite(s: &str) -> Result<InviteData> {
-    let hex = s
+    let payload = s
         .strip_prefix(INVITE_PREFIX)
         .ok_or_else(|| anyhow!("bad invite prefix"))?;
-    let bytes = hex_decode(hex)?;
+    let bytes = b64url_decode(payload)?;
     let w: InviteWire = postcard::from_bytes(&bytes).map_err(|e| anyhow!("decode invite: {e}"))?;
     if w.v != INVITE_V {
         bail!("unsupported invite version {}", w.v);
     }
-    let invite_id: [u8; SESSION_ID_LEN] = w
-        .invite_id
-        .try_into()
-        .map_err(|_| anyhow!("bad invite id length"))?;
-    let secret: [u8; INVITE_SECRET_LEN] = w
-        .secret
-        .try_into()
-        .map_err(|_| anyhow!("bad invite secret length"))?;
-    let endpoint_id: [u8; ENDPOINT_LEN] = w
-        .endpoint_id
-        .try_into()
-        .map_err(|_| anyhow!("bad endpoint id length"))?;
+    let ticket = EndpointTicket::decode_bytes(&w.endpoint_ticket)
+        .map_err(|e| anyhow!("bad invite endpoint ticket: {e}"))?;
     Ok(InviteData {
-        version: w.v,
-        invite_id,
-        secret,
-        endpoint_id,
-        endpoint_ticket: w.endpoint_ticket,
+        version: INVITE_V,
+        invite_id: w.invite_id,
+        secret: w.secret,
+        endpoint_id: *ticket.endpoint_addr().id.as_bytes(),
+        endpoint_ticket: ticket.to_string(),
         expires_at_ms: w.expires_at_ms,
     })
 }
@@ -2409,6 +2473,32 @@ mod tests {
         (sk.to_bytes(), sk.verifying_key().to_bytes())
     }
 
+    /// A real endpoint ticket for `endpoint` shaped like the ones `our_endpoint_ticket` mints:
+    /// a relay URL plus a direct address.
+    fn sample_ticket(endpoint: &[u8; ENDPOINT_LEN]) -> String {
+        let id = EndpointId::from_bytes(endpoint).expect("valid endpoint id");
+        let mut addr = EndpointAddr::from(id);
+        addr.addrs.insert(iroh::TransportAddr::Relay(
+            "https://euw1-1.relay.iroh.network./".parse().unwrap(),
+        ));
+        addr.addrs.insert(iroh::TransportAddr::Ip(
+            "192.168.1.24:52913".parse().unwrap(),
+        ));
+        EndpointTicket::new(addr).to_string()
+    }
+
+    fn sample_invite() -> InviteData {
+        let (_, endpoint) = identity();
+        InviteData {
+            version: INVITE_V,
+            invite_id: [3u8; SESSION_ID_LEN],
+            secret: [9u8; INVITE_SECRET_LEN],
+            endpoint_id: endpoint,
+            endpoint_ticket: sample_ticket(&endpoint),
+            expires_at_ms: 1_700_000_000_000,
+        }
+    }
+
     fn recv_pub() -> Vec<u8> {
         let mut b = vec![0u8; RECV_PUB_LEN];
         OsRng.fill_bytes(&mut b);
@@ -2568,23 +2658,82 @@ mod tests {
 
     #[test]
     fn invite_codec_roundtrip() {
-        let inv = InviteData {
-            version: INVITE_V,
-            invite_id: [3u8; SESSION_ID_LEN],
-            secret: [9u8; INVITE_SECRET_LEN],
-            endpoint_id: [5u8; ENDPOINT_LEN],
-            endpoint_ticket: "endpoint-ticket-abc".into(),
-            expires_at_ms: 1_700_000_000_000,
-        };
+        let inv = sample_invite();
         let token = encode_invite(&inv).unwrap();
         assert!(token.starts_with(INVITE_PREFIX));
         let back = decode_invite(&token).unwrap();
         assert_eq!(inv, back);
     }
 
+    /// The token is the thing a human pastes into a chat, so its length is a property worth
+    /// pinning rather than merely hoping for. A relay-plus-direct-address invite encodes to ~168
+    /// characters; the ceiling is loose enough to absorb a longer relay URL but tight enough to
+    /// catch a regression that re-introduces a second encoding layer (which cost ~260 characters).
+    #[test]
+    fn invite_token_stays_short() {
+        let token = encode_invite(&sample_invite()).unwrap();
+        assert!(
+            token.len() < 220,
+            "invite token grew to {} chars",
+            token.len()
+        );
+    }
+
+    /// Base64url is only a win because none of its characters percent-encode in a URL query.
+    #[test]
+    fn invite_token_is_url_safe() {
+        let token = encode_invite(&sample_invite()).unwrap();
+        let payload = token.strip_prefix(INVITE_PREFIX).unwrap();
+        assert!(payload
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
+    }
+
     #[test]
     fn invite_bad_prefix_rejected() {
         assert!(decode_invite("nope:deadbeef").is_err());
+        // The v1 prefix shipped (v1.0.0..=v2.4.0) but is deliberately not decoded — it is simply
+        // not our prefix. See INVITE_V for what that break costs.
+        assert!(decode_invite("scpair1:deadbeef").is_err());
+    }
+
+    #[test]
+    fn invite_endpoint_id_must_match_its_ticket() {
+        let (_, other) = identity();
+        let inv = InviteData {
+            endpoint_id: other,
+            ..sample_invite()
+        };
+        assert!(encode_invite(&inv).is_err());
+    }
+
+    #[test]
+    fn invite_unparseable_ticket_rejected() {
+        let inv = InviteData {
+            endpoint_ticket: "endpoint-ticket-abc".into(),
+            ..sample_invite()
+        };
+        assert!(encode_invite(&inv).is_err());
+    }
+
+    #[test]
+    fn b64url_roundtrips_every_tail_length() {
+        // 0..=3 exercises the empty input and all three chunk remainders.
+        for len in 0..=64usize {
+            let bytes: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(37)).collect();
+            let encoded = b64url_encode(&bytes);
+            assert!(!encoded.contains('='), "padding leaked: {encoded}");
+            assert_eq!(b64url_decode(&encoded).unwrap(), bytes, "len {len}");
+        }
+    }
+
+    #[test]
+    fn b64url_rejects_malformed_input() {
+        assert!(b64url_decode("AAAA=").is_err()); // padding
+        assert!(b64url_decode("A+/A").is_err()); // standard-base64 alphabet
+        assert!(b64url_decode("A").is_err()); // 1-character tail encodes no whole byte
+        assert!(b64url_decode("AA").is_ok()); // one byte, unused tail bits zero
+        assert!(b64url_decode("AB").is_err()); // non-zero unused tail bits
     }
 
     #[test]

@@ -24,21 +24,34 @@ describe('pair-link codec', () => {
   });
 
   it('round-trips a token with url-unsafe characters', () => {
+    // Real v2 payloads are base64url and never contain these, but the codec must not depend on
+    // that: the raw special characters have to be percent-encoded on the wire either way.
     const token = `${PAIR_TOKEN_PREFIX}ab+cd/ef=gh`;
     const link = encodePairLink(token);
-    // The raw special characters must be percent-encoded on the wire.
     expect(link).not.toContain('+cd/ef=gh');
     expect(decodePairLink(link)).toBe(token);
   });
 
-  it('accepts a raw scpair1: token directly', () => {
+  it('leaves a base64url payload untouched apart from the prefix colon', () => {
+    const token = `${PAIR_TOKEN_PREFIX}Ab9-_xyZ`;
+    expect(encodePairLink(token)).toBe('streetcryptid:///social?token=scpair2%3AAb9-_xyZ');
+  });
+
+  it('rejects the shipped-but-unsupported scpair1: prefix', () => {
+    const legacy = 'scpair1:deadbeefcafe';
+    expect(isPairToken(legacy)).toBe(false);
+    expect(isPairLink(legacy)).toBe(false);
+    expect(() => decodePairLink(legacy)).toThrow(/pair link/);
+  });
+
+  it('accepts a raw scpair2: token directly', () => {
     expect(decodePairLink(TOKEN)).toBe(TOKEN);
     expect(decodePairLink(`  ${TOKEN}  `)).toBe(TOKEN);
   });
 
   it('recognizes pair links and tokens', () => {
     expect(isPairToken(TOKEN)).toBe(true);
-    expect(isPairToken('scpair1:')).toBe(false); // prefix only, no payload
+    expect(isPairToken('scpair2:')).toBe(false); // prefix only, no payload
     expect(isPairLink(TOKEN)).toBe(true);
     expect(isPairLink(encodePairLink(TOKEN))).toBe(true);
   });
@@ -50,7 +63,7 @@ describe('pair-link codec', () => {
   });
 
   it('rejects encoding a non-token', () => {
-    expect(() => encodePairLink('not-a-token')).toThrow(/scpair1/);
+    expect(() => encodePairLink('not-a-token')).toThrow(/scpair2/);
   });
 
   it('rejects a pair link without a valid token', () => {

@@ -1346,13 +1346,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_func_decode_mvt_tile() != 45603) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_func_decode_pair_invite() != 566) {
+    if (lib.uniffi_iroh_location_checksum_func_decode_pair_invite() != 65503) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_derive_topic() != 20218) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_func_encode_pair_invite() != 8507) {
+    if (lib.uniffi_iroh_location_checksum_func_encode_pair_invite() != 1284) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_endpoint_id_from_ticket() != 28437) {
@@ -1502,7 +1502,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_initiate_pair() != 61841) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_initiate_pair_by_ticket() != 32241) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_initiate_pair_by_ticket() != 17133) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby() != 64589) {
@@ -3264,7 +3264,7 @@ public interface LocationNodeInterface {
     suspend fun `initiatePair`(`invite`: PairInvite): kotlin.ByteArray
     
     /**
-     * Begin an invite-based pair from an opaque invite token (`scpair1:…`). Returns the session id.
+     * Begin an invite-based pair from an opaque invite token (`scpair2:…`). Returns the session id.
      */
     suspend fun `initiatePairByTicket`(`token`: kotlin.String): kotlin.ByteArray
     
@@ -4587,7 +4587,7 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Begin an invite-based pair from an opaque invite token (`scpair1:…`). Returns the session id.
+     * Begin an invite-based pair from an opaque invite token (`scpair2:…`). Returns the session id.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -9821,7 +9821,7 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
     
 
         /**
-         * Decode an opaque `scpair1:<hex>` token back into a [`PairInvite`].
+         * Decode an opaque `scpair2:<base64url>` token back into a [`PairInvite`].
          */
     @Throws(LocationException::class) fun `decodePairInvite`(`token`: kotlin.String): PairInvite {
             return FfiConverterTypePairInvite.lift(
@@ -9848,7 +9848,7 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
     
 
         /**
-         * Encode a [`PairInvite`] into an opaque, dependency-free `scpair1:<hex>` token for QR / links.
+         * Encode a [`PairInvite`] into an opaque, dependency-free `scpair2:<base64url>` token for QR / links.
          */
     @Throws(LocationException::class) fun `encodePairInvite`(`invite`: PairInvite): kotlin.String {
             return FfiConverterString.lift(
