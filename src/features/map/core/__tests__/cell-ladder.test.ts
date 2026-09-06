@@ -6,6 +6,13 @@ describe('resForZoom', () => {
     expect(resForZoom(H3_MIN_RENDER_ZOOM)).toBe(H3_DISPLAY_RES);
   });
 
+  it('keeps explored hexes visible one zoom level farther out', () => {
+    expect(resForZoom(12.5)).toBe(H3_DISPLAY_RES);
+    expect(resForZoom(12)).toBe(H3_DISPLAY_RES);
+    expect(resForZoom(11.5)).toBe(H3_DISPLAY_RES);
+    expect(resForZoom(11.49)).toBeNull();
+  });
+
   it('disables exploration below the readable zoom', () => {
     expect(resForZoom(H3_MIN_RENDER_ZOOM - 0.01)).toBeNull();
     expect(resForZoom(1)).toBeNull();

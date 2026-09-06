@@ -8,7 +8,7 @@
 export const H3_DISPLAY_RES = 9;
 
 /** Smallest camera zoom at which res-9 cells remain useful on screen. */
-export const H3_MIN_RENDER_ZOOM = 12.5;
+export const H3_MIN_RENDER_ZOOM = 11.5;
 
 /** Fixed H3 resolution to render, or null when exploration should be hidden. */
 export function resForZoom(zoom: number): number | null {

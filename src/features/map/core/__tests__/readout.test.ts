@@ -64,8 +64,14 @@ describe('coverageInView', () => {
     expect(cov).toBeCloseTo(1 / visibleCells.length, 10);
   });
 
+  it('keeps coverage enabled at the farther-out render threshold', () => {
+    const zoomedOut: CameraState = { ...camera, zoom: 11.5 };
+    const index = createExplorationIndex(visibleCells);
+    expect(coverageInView(index, grid, zoomedOut, viewport)).toBeGreaterThan(0);
+  });
+
   it('disables coverage when zoomed out below the render threshold', () => {
-    const zoomedOut: CameraState = { ...camera, zoom: 12 };
+    const zoomedOut: CameraState = { ...camera, zoom: 11.49 };
     const index = createExplorationIndex(visibleCells);
     expect(coverageInView(index, grid, zoomedOut, viewport)).toBe(0);
   });
