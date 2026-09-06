@@ -14,6 +14,7 @@
  *   bun scripts/map-shot.ts --scheme tokyo --mode dark --places westcoast --zooms 13
  *   bun scripts/map-shot.ts --out /tmp/shots --highways   # keep motorways on
  *   bun scripts/map-shot.ts --places seatac --no-structures  # buildings/aeroway off
+ *   bun scripts/map-shot.ts --places seattle --zooms 13,15 --highways --transit
  */
 
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -29,6 +30,8 @@ import {
 } from '../src/features/map/core/region';
 import { roadWidthFor, type RoadLayerOptions } from '../src/features/map/core/road-lod';
 import { riverWidthFor } from '../src/features/map/core/water-lod';
+import { FERRY_DASH, transitColorFor, transitWidthFor } from '../src/features/map/core/transit-lod';
+import { TRANSIT_MODES } from '../src/features/map/core/types';
 import { ROAD_VALUES } from '../src/features/map/core/masks';
 import type {
   AeroAreaKind,
@@ -39,6 +42,7 @@ import type {
 } from '../src/features/map/core/types';
 import { DOT_FIELD_SKSL } from '../src/features/map/render/dot-field-sksl';
 import { buildMaskPaths } from '../src/features/map/render/mask-paths';
+import { buildTransitPaths } from '../src/features/map/render/transit-paths';
 import { buildHatchPath, buildStructurePaths } from '../src/features/map/render/structure-paths';
 import {
   AERODROME_DASH,
@@ -219,6 +223,7 @@ function renderShot({
   layers,
 }: ShotInput): Uint8Array {
   const mask = buildMask(CanvasKit, geometry, spec, layers);
+  const transit = args.transit ? buildTransitMask(CanvasKit, geometry, spec, palette) : null;
   // Exploration is off in these shots, so an all-black cell texture is exactly
   // what the shader wants: explored is ignored (uExploration=0) and reveal
   // order 0 means "fully revealed" at uReveal=1.
@@ -248,6 +253,7 @@ function renderShot({
     0, // uExploration — plain city render, no fog of war
     palette.effects?.neonGlow ?? 0,
     palette.effects?.scanlines ?? 0,
+    args.transit ? 1 : 0, // uTransit
   ];
 
   const shader = effect.makeShaderWithChildren(uniforms, [
@@ -267,6 +273,12 @@ function renderShot({
       CanvasKit.TileMode.Clamp,
       CanvasKit.TileMode.Clamp,
       CanvasKit.FilterMode.Linear,
+      CanvasKit.MipmapMode.None
+    ),
+    (transit ?? mask).makeShaderOptions(
+      CanvasKit.TileMode.Clamp,
+      CanvasKit.TileMode.Clamp,
+      CanvasKit.FilterMode.Nearest,
       CanvasKit.MipmapMode.None
     ),
   ]);
@@ -300,6 +312,7 @@ function renderShot({
   paint.delete();
   surface.delete();
   mask.delete();
+  transit?.delete();
   cells.delete();
   return png as Uint8Array;
 }
@@ -454,6 +467,42 @@ function buildMask(
   return image;
 }
 
+/** Mirrors the mode-colored coverage texture in `render/mask-image.ts`. */
+function buildTransitMask(
+  CanvasKit: any,
+  geometry: PackedGeometry,
+  spec: RegionSpec,
+  palette: MapPalette
+) {
+  const paths = buildTransitPaths(geometry, spec);
+  const surface = CanvasKit.MakeSurface(spec.maskWidth, spec.maskHeight);
+  if (!surface) throw new Error('transit mask surface failed');
+  const canvas = surface.getCanvas();
+  canvas.clear(CanvasKit.TRANSPARENT);
+  for (const mode of TRANSIT_MODES) {
+    const svg = paths[mode];
+    const width = transitWidthFor(mode, spec.zoom);
+    if (!svg || width === null) continue;
+    const path = CanvasKit.Path.MakeFromSVGString(svg);
+    if (!path) continue;
+    const ink = transitColorFor(mode, palette).map(Math.round);
+    const paint = new CanvasKit.Paint();
+    paint.setColor(CanvasKit.Color(ink[0], ink[1], ink[2], 1));
+    paint.setStyle(CanvasKit.PaintStyle.Stroke);
+    paint.setStrokeWidth(width);
+    paint.setStrokeCap(CanvasKit.StrokeCap.Round);
+    paint.setStrokeJoin(CanvasKit.StrokeJoin.Round);
+    paint.setAntiAlias(true);
+    if (mode === 'ferry') paint.setPathEffect(CanvasKit.PathEffect.MakeDash([...FERRY_DASH]));
+    canvas.drawPath(path, paint);
+    paint.delete();
+    path.delete();
+  }
+  const image = surface.makeImageSnapshot();
+  surface.delete();
+  return image;
+}
+
 function imageFrom(CanvasKit: any, data: Uint8Array, width: number, height: number) {
   const image = CanvasKit.MakeImage(
     {
@@ -483,6 +532,7 @@ interface Args {
   places?: string[];
   zooms?: number[];
   highways?: boolean;
+  transit?: boolean;
   noStructures?: boolean;
   legacyRivers?: boolean;
   scheme?: string;
@@ -502,6 +552,7 @@ function parseArgs(argv: readonly string[]): Args {
       if (mode !== 'light' && mode !== 'dark') throw new Error('--mode expects light or dark');
       out.mode = mode;
     } else if (arg === '--highways') out.highways = true;
+    else if (arg === '--transit') out.transit = true;
     else if (arg === '--no-structures') out.noStructures = true;
     else if (arg === '--legacy-rivers') out.legacyRivers = true;
     else throw new Error(`unknown flag ${arg}`);

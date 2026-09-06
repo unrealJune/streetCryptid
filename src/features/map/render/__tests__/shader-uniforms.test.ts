@@ -81,6 +81,7 @@ describe('packDotFieldUniforms', () => {
     expect(u[11]).toBe(0); // uLod: build zoom 15 → full detail
     expect(u[12]).toBe(1); // uExploration defaults to visible
     expect(u.slice(13, 15)).toEqual([0, 0]); // renderer effects default off
+    expect(u[15]).toBe(0); // transit defaults off
   });
 
   it('honors a custom lattice step', () => {
@@ -102,6 +103,12 @@ describe('packDotFieldUniforms', () => {
 
   it('can disable explored/unexplored styling', () => {
     expect(packDotFieldUniforms({ ...base, explorationEnabled: false })[12]).toBe(0);
+  });
+
+  it('enables transit independently of exploration', () => {
+    const u = packDotFieldUniforms({ ...base, explorationEnabled: false, transitEnabled: true });
+    expect(u[12]).toBe(0);
+    expect(u[15]).toBe(1);
   });
 
   it('packs optional renderer effects', () => {

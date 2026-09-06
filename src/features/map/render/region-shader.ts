@@ -18,15 +18,13 @@ import {
 
 import { buildPaletteLut } from '../core/region';
 import type { RoadLayerOptions } from '../core/road-lod';
-import type { AeroAreaKind, AeroLineKind, MapPalette, Rgb, TransitMode } from '../core/types';
+import type { AeroAreaKind, AeroLineKind, MapPalette, Rgb } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
 import { buildCellStateImage } from './cell-state-image';
 import { cellLatticePath, cellRimPath } from './cell-overlay-paths';
 import { getDotFieldEffect } from './dot-field-shader';
-import { buildMaskImage } from './mask-image';
+import { buildMaskImage, buildTransitMaskImage } from './mask-image';
 import { buildHatchPath, buildStructurePaths } from './structure-paths';
-import { buildTransitPaths } from './transit-paths';
-import { FERRY_DASH, transitWidthFor } from '../core/transit-lod';
 import {
   AERODROME_DASH,
   AERODROME_STROKE_WIDTH,
@@ -67,21 +65,6 @@ const RIM_ALPHA = 0.42;
 const AERO_AREA_DRAW_ORDER: readonly AeroAreaKind[] = ['apron', 'aerodrome'];
 const AERO_LINE_DRAW_ORDER: readonly AeroLineKind[] = ['taxiway', 'runway'];
 
-/**
- * Transit-line opacity per mode. Rapid transit (subway/light rail/monorail) is
- * the spine people navigate by, so it reads strongest; heavy rail, trams and
- * ferries sit back a step so the layer never competes with the dot field.
- */
-const TRANSIT_ALPHA: Record<TransitMode, number> = {
-  rail: 0.5,
-  subway: 0.82,
-  light_rail: 0.82,
-  tram: 0.58,
-  monorail: 0.72,
-  funicular: 0.58,
-  ferry: 0.5,
-};
-
 /** Wrap a tightly-packed opaque RGBA8888 buffer as an SkImage. */
 function imageFromRgba(data: Uint8Array, width: number, height: number): SkImage | null {
   const bytes = Skia.Data.fromBytes(data);
@@ -119,7 +102,7 @@ export interface RegionImageInput {
   readonly reveal?: number;
   /** Show the explored/unexplored fog treatment (default true). */
   readonly explorationEnabled?: boolean;
-  /** Stroke the transit lines over the dot field (default false). */
+  /** Render mode-colored transit with the highway dot treatment (default false). */
   readonly transitEnabled?: boolean;
   /** Draw building footprints and aeroway surfaces over the dot field (default false). */
   readonly structuresEnabled?: boolean;
@@ -176,6 +159,7 @@ export function renderRegionImage({
     pixelRatio,
     reveal,
     explorationEnabled,
+    transitEnabled,
   });
   if (__DEV__ && uniforms.length !== DOT_FIELD_UNIFORM_FLOATS) {
     console.warn(
@@ -183,6 +167,10 @@ export function renderRegionImage({
     );
   }
 
+  const transitImage = transitEnabled
+    ? buildTransitMaskImage(region.geometry, region.spec, palette)
+    : null;
+  if (transitEnabled && !transitImage) return null;
   const shader = effect.makeShaderWithChildren(uniforms, [
     maskImage.makeShaderOptions(
       TileMode.Clamp,
@@ -197,6 +185,13 @@ export function renderRegionImage({
       MipmapMode.None
     ),
     lutImage.makeShaderOptions(TileMode.Clamp, TileMode.Clamp, FilterMode.Linear, MipmapMode.None),
+    // The disabled branch never samples this child; reuse a texture rather than allocate one.
+    (transitImage ?? maskImage).makeShaderOptions(
+      TileMode.Clamp,
+      TileMode.Clamp,
+      FilterMode.Nearest,
+      MipmapMode.None
+    ),
   ]);
 
   const width = Math.max(1, Math.round(logical.width * pixelRatio));
@@ -216,12 +211,10 @@ export function renderRegionImage({
   if (explorationEnabled) {
     drawCellOverlays(canvas, region, palette, pixelRatio, reveal);
   }
-  if (transitEnabled) {
-    drawTransitLines(canvas, region, palette, pixelRatio, reveal);
-  }
   const recorded = picture.finishRecordingAsPicture();
 
   const image = drawAsImageFromPicture(recorded, { width, height });
+  transitImage?.dispose();
   if (!image && __DEV__) console.warn(`[map] region raster failed (${width}×${height})`);
   return image;
 }
@@ -260,8 +253,7 @@ function drawCellOverlays(
 
 /**
  * Building footprints and aeroway surfaces over the dot field, in region-logical
- * coords. Vectors for the same reason transit is: the dot lattice would scatter
- * an outline into unrelated dots.
+ * coords. Vectors because the dot lattice would scatter an outline into unrelated dots.
  *
  * Drawn back to front — apron fill, aerodrome boundary, taxiways, runways, then
  * buildings (see {@link AERO_AREA_DRAW_ORDER}) — so the ground reads first and
@@ -377,42 +369,6 @@ function fillPaint(rgb: Rgb, alpha: number): SkPaint {
   paint.setStyle(PaintStyle.Fill);
   paint.setAntiAlias(true);
   return paint;
-}
-
-/**
- * Transit lines over the dot field, in region-logical coords (the canvas scale
- * maps them to device px). Vectors rather than mask coverage on purpose: the
- * dot lattice would break a continuous rail line into an unreadable dotted
- * trail. Fades with `reveal` alongside the cell overlays.
- */
-function drawTransitLines(
-  canvas: SkCanvas,
-  region: MapRegion,
-  palette: MapPalette,
-  pixelRatio: number,
-  reveal: number
-): void {
-  if (reveal <= 0) return;
-  const paths = buildTransitPaths(region.geometry, region.spec);
-
-  canvas.save();
-  canvas.scale(pixelRatio, pixelRatio);
-  for (const [mode, svg] of Object.entries(paths) as [TransitMode, string][]) {
-    const width = transitWidthFor(mode, region.spec.zoom);
-    if (width === null || !svg) continue;
-    const path = Skia.Path.MakeFromSVGString(svg);
-    if (!path) continue;
-    const paint = strokePaint(palette.transit, width, TRANSIT_ALPHA[mode] * reveal);
-    // Ferries are a route over open water, not track — dash them so they read
-    // as a crossing rather than a rail line.
-    if (mode === 'ferry') {
-      const effect = Skia.PathEffect.MakeDash([FERRY_DASH[0], FERRY_DASH[1]]);
-      if (effect) paint.setPathEffect(effect);
-    }
-    paint.setStrokeCap(StrokeCap.Round);
-    canvas.drawPath(path, paint);
-  }
-  canvas.restore();
 }
 
 function strokePaint(

@@ -19,14 +19,15 @@
  * ghost lattice and frontier rim are drawn as vector paths over this bitmap
  * (`cell-overlay-paths.ts`), no longer in-shader.
  *
- * Inputs are three child image-shaders + numeric uniforms from
+ * Inputs are four child image-shaders + numeric uniforms from
  * `packDotFieldUniforms`:
  *   - `maskTex`  RGBA feature mask, R=street G=park B=water (nearest).
  *   - `cellTex`  RGBA cell state, R=fraction G=jitter B=reveal order (nearest).
  *   - `lut`      256×3 palette LUT, rows 0=terr 1=water 2=park (linear).
+ *   - `transitTex` mode-colored coverage, alpha=coverage (nearest).
  *
  * The mask records every feature that covers a point, so a dot that is both
- * park and water has to pick one. Precedence is street > water > park > ground.
+ * park and water has to pick one. Precedence is transit > street > water > park > ground.
  */
 export const DOT_FIELD_SKSL = `
 uniform float  uPixelRatio;   // render (device) px per region-logical px
@@ -40,16 +41,30 @@ uniform float  uLod;          // zoom LOD 0 (street detail) .. 1 (city): simplif
 uniform float  uExploration;  // 1 = explored/unexplored treatment, 0 = unmasked city
 uniform float  uNeonGlow;     // additive road halo amount 0..1
 uniform float  uScanlines;    // map-anchored CRT scanline amount 0..1
+uniform float  uTransit;      // 1 = transit coverage enabled
 
 uniform shader maskTex;
 uniform shader cellTex;
 uniform shader lut;
+uniform shader transitTex;
 
 // region-logical px -> region-local world (0 at rect.min)
 float2 toWorld(float2 s) { return s / uScale; }
 // region-local world -> mask pixel coord
 float2 toMaskPx(float2 w) { return w / uRectSize * uMaskSize; }
 float3 maskAt(float2 s) { return maskTex.eval(toMaskPx(toWorld(s))).rgb; }
+float4 transitAt(float2 s) {
+  if (uTransit < 0.5) return float4(0.0);
+  return transitTex.eval(toMaskPx(toWorld(s)));
+}
+// Pick coverage, not channel maxima: mixing mode inks would invent colors at crossings.
+float4 strongerTransit(float4 a, float4 b) { return b.a > a.a ? b : a; }
+float4 transitMax5(float2 s, float o) {
+  if (uTransit < 0.5) return float4(0.0);
+  return strongerTransit(transitAt(s),
+    strongerTransit(strongerTransit(transitAt(s + float2(o, 0.0)), transitAt(s - float2(o, 0.0))),
+                    strongerTransit(transitAt(s + float2(0.0, o)), transitAt(s - float2(0.0, o)))));
+}
 // cell state (fraction, jitter, reveal order) at a region-logical point
 float3 cellAt(float2 s) { return cellTex.eval(toMaskPx(toWorld(s))).rgb; }
 
@@ -104,7 +119,12 @@ float4 dotAt(float ix, float iy, float2 frag) {
                  maskAt(center + float2(0.0, -o)).r)))) * 255.0;
 
   float3 color; float val; float isArea; int kind;    // 0 street 1 park 2 water 3 bg
-  if (sv > 28.0) {
+  float4 transit = transitMax5(center, o);
+  if (transit.a > 28.0 / 255.0) {
+    val = transit.a;
+    color = transit.rgb / transit.a;                 // unpremultiply the coverage texture
+    isArea = 0.0; kind = 0;                          // highway dot size, opacity and fog
+  } else if (sv > 28.0) {
     val = clamp(sv / 255.0, 0.0, 1.0);
     color = rampLut(val, 0.0);
     isArea = 0.0; kind = 0;
@@ -173,6 +193,12 @@ half4 main(float2 fragCoord) {
     float halo = clamp(nearStreet - street * 0.72, 0.0, 1.0) * uNeonGlow;
     float3 glow = rampLut(nearStreet, 0.0);
     col = 1.0 - (1.0 - col) * (1.0 - glow * halo * 0.28);
+    if (uTransit > 0.5) {
+      float4 nearTransit = strongerTransit(transitMax5(frag, 3.0), transitMax5(frag, 6.0));
+      float transitHalo = clamp(nearTransit.a - transitAt(frag).a * 0.72, 0.0, 1.0) * uNeonGlow;
+      float3 transitGlow = nearTransit.rgb / max(nearTransit.a, 0.001);
+      col = 1.0 - (1.0 - col) * (1.0 - transitGlow * transitHalo * 0.28);
+    }
   }
 
   if (uScanlines > 0.001) {

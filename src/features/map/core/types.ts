@@ -71,7 +71,7 @@ export const TRANSIT_MODES = [
 
 export type TransitMode = (typeof TRANSIT_MODES)[number];
 
-/** A transit line, rendered as a stroked polyline over the dot field. */
+/** A transit line, rendered as mode-colored highway-like coverage in the dot field. */
 export interface TransitWay {
   readonly mode: TransitMode;
   readonly name?: string;

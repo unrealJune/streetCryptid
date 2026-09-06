@@ -1,5 +1,5 @@
-import { scaleFor } from '../core/camera';
-import type { RegionSpec } from '../core/region';
+import { worldToScreen } from '../core/camera';
+import { regionMaskCamera, type RegionSpec } from '../core/region';
 import { transitWidthFor } from '../core/transit-lod';
 import { TRANSIT_MODES, type TransitMode, type WorldPoint } from '../core/types';
 import type { PackedGeometry } from '../tiles/packed-geometry';
@@ -9,20 +9,16 @@ import type { PackedGeometry } from '../tiles/packed-geometry';
  * `cell-overlay-paths.ts` pattern: no Skia, unit-testable, one parse per batch
  * on the render side).
  *
- * Unlike streets, transit does NOT bake into the feature mask: the dot field
- * quantizes everything it touches to the lattice, which turns a single rail
- * line into a broken dotted trail. Transit lines are stroked as vectors over
- * the finished region bitmap instead, in **region-logical px** (0 at rect.min,
- * `scaleFor(spec.zoom)` px per world unit) — the same space the ghost lattice
- * and frontier rim use.
+ * Paths use the same mask-pixel coordinates as streets. A separate colored
+ * coverage texture preserves mode tints while the dot field gives transit
+ * the same weight, fog and reveal treatment as highways.
  */
 
 /** One SVG polyline batch per mode; modes with nothing to draw are omitted. */
 export type TransitPaths = Partial<Record<TransitMode, string>>;
 
 export function buildTransitPaths(geometry: PackedGeometry, spec: RegionSpec): TransitPaths {
-  const scale = scaleFor(spec.zoom);
-  const { minX, minY } = spec.rect;
+  const { camera, viewport } = regionMaskCamera(spec);
 
   // Zoom LOD: skip building paths for modes that won't be stroked at all.
   const active = TRANSIT_MODES.map((mode) => transitWidthFor(mode, spec.zoom) !== null);
@@ -30,10 +26,8 @@ export function buildTransitPaths(geometry: PackedGeometry, spec: RegionSpec): T
 
   for (const part of geometry.parts) {
     const { originX, originY } = part;
-    const project = (x: number, y: number): WorldPoint => [
-      (originX + x - minX) * scale,
-      (originY + y - minY) * scale,
-    ];
+    const project = (x: number, y: number): WorldPoint =>
+      worldToScreen(camera, viewport, [originX + x, originY + y]);
 
     const t = part.transit;
     for (let i = 0; i < t.count; i++) {
@@ -51,7 +45,7 @@ export function buildTransitPaths(geometry: PackedGeometry, spec: RegionSpec): T
   return paths;
 }
 
-/** An SVG "M…L…" open polyline in region-logical px (1-decimal rounded). */
+/** An SVG "M…L…" open polyline in mask px (1-decimal rounded). */
 function polyline(
   coords: Float32Array,
   from: number,

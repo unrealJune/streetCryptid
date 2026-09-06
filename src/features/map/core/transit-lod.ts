@@ -1,23 +1,22 @@
-import { clamp } from './color';
-import { TRANSIT_MODES, type TransitMode } from './types';
+import { mix, ramp } from './color';
+import { roadWidthScale } from './road-lod';
+import { TRANSIT_MODES, type MapPalette, type Rgb, type TransitMode } from './types';
 
 /**
  * Transit-line stroke widths and zoom cutoffs — the transit twin of
- * `road-lod.ts`. Transit is drawn as vector paths over the finished region
- * bitmap (`render/transit-paths.ts`), so these are region-**logical** px, not
- * mask px: a transit line is line work, not a coverage stamp, and stays a
- * consistent hairline weight regardless of the mask resolution.
+ * `road-lod.ts`. Transit uses mask-pixel coverage and the same dot-field
+ * treatment as highways, including their zoom-dependent width taper.
  */
 
-/** Base stroke width per mode, region-logical px. Keyed by {@link TransitMode}. */
+/** Base stroke width per mode, mask px. Keyed by {@link TransitMode}. */
 export const TRANSIT_WIDTHS: Record<TransitMode, number> = {
-  rail: 1.6,
-  subway: 2.2,
-  light_rail: 2.2,
-  tram: 1.4,
-  monorail: 1.6,
-  funicular: 1.4,
-  ferry: 1.2,
+  rail: 5,
+  subway: 5,
+  light_rail: 4.5,
+  tram: 3.8,
+  monorail: 4.5,
+  funicular: 3,
+  ferry: 4,
 };
 
 /**
@@ -36,15 +35,15 @@ export const TRANSIT_MIN_ZOOM: Record<TransitMode, number> = {
 };
 
 /** Ferries are a route over water, not track: dashed, so they read as such. */
-export const FERRY_DASH: readonly [number, number] = [5, 4];
+export const FERRY_DASH: readonly [number, number] = [8, 5];
 
-/** Global stroke-width multiplier: full weight at z>=14, tapering to 0.7 by z<=11. */
+/** Match the highway taper: full weight at z>=15, 0.4 by z<=11. */
 export function transitWidthScale(zoom: number): number {
-  return clamp(0.7 + (0.3 * (zoom - 11)) / 3, 0.7, 1);
+  return roadWidthScale(zoom);
 }
 
 /**
- * Effective stroke width (region-logical px) for a transit mode at a build
+ * Effective stroke width (mask px) for a transit mode at a build
  * zoom, or null when the mode should be omitted at this zoom.
  */
 export function transitWidthFor(mode: TransitMode, zoom: number): number | null {
@@ -55,4 +54,19 @@ export function transitWidthFor(mode: TransitMode, zoom: number): number | null 
 /** The modes that draw at `zoom`, in {@link TRANSIT_MODES} order. */
 export function activeTransitModes(zoom: number): readonly TransitMode[] {
   return TRANSIT_MODES.filter((mode) => transitWidthFor(mode, zoom) !== null);
+}
+
+/** Theme-relative mode tints, so custom palettes need no new required fields. */
+export function transitColorFor(mode: TransitMode, palette: MapPalette): Rgb {
+  switch (mode) {
+    case 'rail':
+      return mix(palette.transit, ramp(palette.terr, 0.9), 0.3);
+    case 'ferry':
+      return mix(palette.transit, ramp(palette.water, 0.8), 0.45);
+    case 'tram':
+    case 'funicular':
+      return mix(palette.transit, ramp(palette.park, 0.8), 0.25);
+    default:
+      return palette.transit;
+  }
 }

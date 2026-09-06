@@ -21,7 +21,7 @@ import type { PackedAreas, PackedGeometry } from '../tiles/packed-geometry';
  * `transit-paths.ts` pattern: no Skia, unit-testable, one parse per batch on the
  * render side).
  *
- * Like transit and unlike streets, none of this bakes into the feature mask: the
+ * Unlike streets and transit, none of this bakes into the feature mask: the
  * dot field quantizes everything it touches to the lattice, which would scatter
  * a building outline into unrelated dots. These are stroked and filled as vectors
  * over the finished region bitmap, in **region-logical px** (0 at rect.min,

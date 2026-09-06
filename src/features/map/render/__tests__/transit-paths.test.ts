@@ -1,4 +1,3 @@
-import { scaleFor } from '../../core/camera';
 import { computeRegionSpec } from '../../core/region';
 import type { CameraState, MapGeometry, Viewport, WorldPoint } from '../../core/types';
 import { packGeometry } from '../../tiles/packed-geometry';
@@ -46,17 +45,16 @@ describe('buildTransitPaths', () => {
     expect(paths.ferry?.match(/M/g)).toHaveLength(1);
   });
 
-  it('projects into region-logical px (0 at rect.min)', () => {
+  it('projects into mask px (0 at rect.min), matching highway coverage', () => {
     const paths = buildTransitPaths(geometry([{ mode: 'rail', points: line(0, 0.5) }]), spec);
-    const scale = scaleFor(spec.zoom);
     // f32 world coords cost ~0.1px here, so compare the parsed numbers.
     const [, start, end] = paths.rail!.match(/^M([\d.-]+ [\d.-]+)L([\d.-]+ [\d.-]+)$/)!;
     const [x0, y0] = start.split(' ').map(Number);
     const [x1, y1] = end.split(' ').map(Number);
     expect(x0).toBeCloseTo(0, 0);
     expect(y0).toBeCloseTo(0, 0);
-    expect(x1).toBeCloseTo((maxX - minX) * 0.5 * scale, 0);
-    expect(y1).toBeCloseTo((maxY - minY) * 0.5 * scale, 0);
+    expect(x1).toBeCloseTo(spec.maskWidth * 0.5, 0);
+    expect(y1).toBeCloseTo(spec.maskHeight * 0.5, 0);
   });
 
   it('omits modes the zoom LOD drops (funicular only draws from z13)', () => {
