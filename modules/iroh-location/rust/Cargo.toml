@@ -3,6 +3,7 @@ name = "iroh-location"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "AGPL-3.0-or-later"
 description = "streetCryptid decentralized, E2E-encrypted friend location sharing (iroh + gossip + per-recipient crypto)"
 
 # cdylib  -> the .so / .dylib loaded by the Swift/Kotlin bindings on device

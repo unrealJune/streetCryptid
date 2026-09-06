@@ -313,7 +313,25 @@ Both fakes reject the call outright if a credential arrives on argv.
 
 ## License
 
-The app is MIT-licensed; see [LICENSE](./LICENSE). The vendored experimental
-iroh BLE transport is AGPL-3.0-or-later. See
-[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) before distributing native
-builds.
+Copyright (C) 2026 June Philip and the streetCryptid contributors.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program. If not, see <https://www.gnu.org/licenses/>.
+
+The full license text is in [LICENSE](./LICENSE); the SPDX identifier is
+`AGPL-3.0-or-later`. Vendored third-party components keep their own upstream
+copyright holders — see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
+
+Because the app links AGPL code, anyone you distribute a build to (TestFlight
+and Play testers included) is entitled to the corresponding source for that
+build. `app.config.ts` stamps the commit into every build, which is what makes
+that answerable.
