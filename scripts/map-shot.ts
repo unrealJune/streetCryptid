@@ -14,6 +14,12 @@
  *   bun scripts/map-shot.ts --scheme tokyo --mode dark --places westcoast --zooms 13
  *   bun scripts/map-shot.ts --out /tmp/shots --highways   # keep motorways on
  *   bun scripts/map-shot.ts --places seatac --no-structures  # buildings/aeroway off
+ *   bun scripts/map-shot.ts --places seattle --zooms 12,10,8 --exploration
+ *
+ * `--exploration` seeds the deterministic demo walk at the place and renders the
+ * real exploration layer — the same `buildCellField` → cell-state texture →
+ * ghost lattice + amber rim path the app runs — so the resolution ladder
+ * (`core/cell-ladder.ts`) can be eyeballed rung by rung.
  */
 
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -37,6 +43,18 @@ import type {
   MapPalette,
   Viewport,
 } from '../src/features/map/core/types';
+import { buildCellField } from '../src/features/map/core/cell-field';
+import {
+  createExplorationIndex,
+  demoExploration,
+} from '../src/features/map/core/exploration-index';
+import { createExplorationRollup } from '../src/features/map/core/exploration-rollup';
+import { createH3Grid, realH3 } from '../src/features/map/core/h3-grid';
+import {
+  cellLatticePath,
+  cellRimPath,
+  cellStateFills,
+} from '../src/features/map/render/cell-overlay-paths';
 import { DOT_FIELD_SKSL } from '../src/features/map/render/dot-field-sksl';
 import { buildMaskPaths } from '../src/features/map/render/mask-paths';
 import { buildHatchPath, buildStructurePaths } from '../src/features/map/render/structure-paths';
@@ -148,19 +166,50 @@ async function main(): Promise<void> {
   const lut = imageFrom(CanvasKit, buildPaletteLut(palette), 256, 3);
   const source = createSource(tileUrl!);
 
+  // One grid + one rollup for the whole run, exactly as `MapEngine` holds them,
+  // so the coarse-rung ancestor sets are built once and reused across zooms.
+  const grid = createH3Grid(realH3());
+  const rollup = args.exploration ? createExplorationRollup(grid) : null;
+
   for (const place of places) {
+    const home = latLonToWorld({ lat: place.lat, lon: place.lon });
+    // The same deterministic walk the fixture dataset uses, so the shot shows a
+    // plausible territory rather than a blank or a contrived blob.
+    const exploration = args.exploration
+      ? createExplorationIndex(demoExploration(grid, home))
+      : null;
+
     for (const zoom of zooms) {
-      const camera: CameraState = {
-        center: latLonToWorld({ lat: place.lat, lon: place.lon }),
-        zoom,
-      };
+      const camera: CameraState = { center: home, zoom };
       const spec = computeRegionSpec(camera, VIEWPORT, { dataZooms: PLANET_DATA_ZOOMS });
       const geometry = await loadGeometry(source, spec);
-      const png = renderShot({ CanvasKit, effect, lut, geometry, spec, camera, palette, layers });
+      // The ladder decides the resolution; `spec.cellRes` is null once the
+      // camera drops below its coarsest rung, which is exactly when the layer
+      // should vanish from the shot too.
+      const cellField =
+        args.exploration && spec.cellRes !== null
+          ? buildCellField(grid, spec.rect, spec.cellRes, exploration!, rollup!)
+          : null;
+      const png = renderShot({
+        CanvasKit,
+        effect,
+        lut,
+        geometry,
+        spec,
+        camera,
+        palette,
+        layers,
+        cellField,
+      });
       const suffix = selectedScheme ? `-${selectedScheme.id}-${args.mode ?? 'light'}` : '';
       const file = join(outDir, `${place.id}-z${zoom}${suffix}.png`);
       await writeFile(file, png);
-      console.log(`${file}  ${place.label} z${zoom}  mask ${spec.maskWidth}x${spec.maskHeight}`);
+      console.log(
+        `${file}  ${place.label} z${zoom}  mask ${spec.maskWidth}x${spec.maskHeight}` +
+          (args.exploration
+            ? `  cellRes ${spec.cellRes ?? 'hidden'} (${cellField?.cells.length ?? 0} cells)`
+            : '')
+      );
     }
   }
 }
@@ -206,6 +255,8 @@ interface ShotInput {
   camera: CameraState;
   palette: MapPalette;
   layers: RoadLayerOptions;
+  /** Baked exploration cells for this region, or null for a plain city render. */
+  cellField: ReturnType<typeof buildCellField> | null;
 }
 
 function renderShot({
@@ -217,17 +268,21 @@ function renderShot({
   camera,
   palette,
   layers,
+  cellField,
 }: ShotInput): Uint8Array {
   const mask = buildMask(CanvasKit, geometry, spec, layers);
-  // Exploration is off in these shots, so an all-black cell texture is exactly
-  // what the shader wants: explored is ignored (uExploration=0) and reveal
-  // order 0 means "fully revealed" at uReveal=1.
-  const cells = imageFrom(
-    CanvasKit,
-    blackRgba(spec.maskWidth, spec.maskHeight),
-    spec.maskWidth,
-    spec.maskHeight
-  );
+  // Without --exploration an all-black cell texture is exactly what the shader
+  // wants: explored is ignored (uExploration=0) and reveal order 0 means "fully
+  // revealed" at uReveal=1. With it, the real baked cell state goes in instead.
+  const field = cellField;
+  const cells = field
+    ? buildCellTexture(CanvasKit, field, spec)
+    : imageFrom(
+        CanvasKit,
+        blackRgba(spec.maskWidth, spec.maskHeight),
+        spec.maskWidth,
+        spec.maskHeight
+      );
 
   const scale = scaleFor(spec.zoom);
   const rectW = spec.rect.maxX - spec.rect.minX;
@@ -245,7 +300,7 @@ function renderShot({
     palette.bg[2] / 255,
     1, // uReveal
     lodForZoom(spec.zoom), // uLod
-    0, // uExploration — plain city render, no fog of war
+    cellField ? 1 : 0, // uExploration — fog of war only with --exploration
     palette.effects?.neonGlow ?? 0,
     palette.effects?.scanlines ?? 0,
   ];
@@ -292,6 +347,7 @@ function renderShot({
     paint
   );
   if (!args.noStructures) drawStructures(CanvasKit, canvas, geometry, spec, palette);
+  if (cellField) drawCellOverlays(CanvasKit, canvas, cellField, spec, palette);
   canvas.restore();
 
   const snapshot = surface.makeImageSnapshot();
@@ -396,6 +452,80 @@ function drawStructures(
 }
 
 /** The feature mask, built exactly like `render/mask-image.ts` but on CanvasKit. */
+/**
+ * The region's cell field baked into the RGBA texture the shader samples
+ * (R = occupancy, G = jitter, B = reveal order) — the CanvasKit twin of
+ * `render/cell-state-image.ts`, driven by the same pure geometry builder.
+ */
+function buildCellTexture(
+  CanvasKit: any,
+  field: ReturnType<typeof buildCellField>,
+  spec: RegionSpec
+) {
+  const surface = CanvasKit.MakeSurface(spec.maskWidth, spec.maskHeight);
+  if (!surface) throw new Error('cell surface failed');
+  const canvas = surface.getCanvas();
+  canvas.clear(CanvasKit.BLACK);
+
+  const paint = new CanvasKit.Paint();
+  paint.setStyle(CanvasKit.PaintStyle.Fill);
+  // Off, exactly as in the app: a blended edge texel would smear one cell's
+  // occupancy and reveal order into its neighbour.
+  paint.setAntiAlias(false);
+
+  // The SVG-string builder rather than the geometry one the app uses: CanvasKit
+  // only exposes `Path.MakeFromSVGString` here. Same channel encoding either way.
+  for (const fill of cellStateFills(field, spec)) {
+    const [r, g, b] = fill.color.match(/\d+/g)!.map(Number);
+    paint.setColor(CanvasKit.Color(r, g, b, 1));
+    const path = CanvasKit.Path.MakeFromSVGString(fill.path);
+    if (!path) continue;
+    canvas.drawPath(path, paint);
+    path.delete();
+  }
+  paint.delete();
+
+  const snapshot = surface.makeImageSnapshot();
+  surface.delete();
+  return snapshot;
+}
+
+/**
+ * Ghost lattice + amber frontier rim, mirroring `drawCellOverlays` in
+ * `render/region-shader.ts` (same paths, same alphas, same LOD fade).
+ */
+function drawCellOverlays(
+  CanvasKit: any,
+  canvas: any,
+  field: ReturnType<typeof buildCellField>,
+  spec: RegionSpec,
+  palette: MapPalette
+): void {
+  const lod = lodForZoom(spec.zoom);
+  const latticeAlpha = 0.09 * (1 - lod * 0.7);
+  const rimAlpha = 0.42;
+
+  canvas.save();
+  canvas.scale(PIXEL_RATIO, PIXEL_RATIO);
+  const stroke = (svg: string, rgb: readonly number[], width: number, alpha: number) => {
+    if (!svg || alpha <= 0) return;
+    const path = CanvasKit.Path.MakeFromSVGString(svg);
+    if (!path) return;
+    const paint = new CanvasKit.Paint();
+    paint.setColor(CanvasKit.Color(rgb[0], rgb[1], rgb[2], alpha));
+    paint.setStyle(CanvasKit.PaintStyle.Stroke);
+    paint.setStrokeWidth(width);
+    paint.setStrokeJoin(CanvasKit.StrokeJoin.Round);
+    paint.setAntiAlias(true);
+    canvas.drawPath(path, paint);
+    paint.delete();
+    path.delete();
+  };
+  stroke(cellLatticePath(field, spec), palette.streetLabel, 1.0, latticeAlpha);
+  stroke(cellRimPath(field, spec), palette.accent, 1.25, rimAlpha);
+  canvas.restore();
+}
+
 function buildMask(
   CanvasKit: any,
   geometry: PackedGeometry,
@@ -482,6 +612,7 @@ interface Args {
   out?: string;
   places?: string[];
   zooms?: number[];
+  exploration?: boolean;
   highways?: boolean;
   noStructures?: boolean;
   legacyRivers?: boolean;
@@ -495,6 +626,7 @@ function parseArgs(argv: readonly string[]): Args {
     const arg = argv[i];
     if (arg === '--out') out.out = argv[++i];
     else if (arg === '--places') out.places = argv[++i].split(',');
+    else if (arg === '--exploration') out.exploration = true;
     else if (arg === '--zooms') out.zooms = argv[++i].split(',').map(Number);
     else if (arg === '--scheme') out.scheme = argv[++i];
     else if (arg === '--mode') {
