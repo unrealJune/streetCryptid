@@ -1,7 +1,7 @@
 {
   "name": "streetcryptid",
   "main": "expo-router/entry",
-  "version": "2.8.0",
+  "version": "2.8.1",
   "license": "AGPL-3.0-or-later",
   "dependencies": {
     "@expo-google-fonts/ibm-plex-mono": "^0.4.1",
