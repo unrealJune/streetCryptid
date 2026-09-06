@@ -1,5 +1,8 @@
 import { DEFAULT_SIGNAL_COLOR, isSignalColor } from '@/constants/signal-colors';
 
+/** Every signal color sits at full HSV brightness — see `constants/signal-colors`. */
+export const SIGNAL_COLOR_VALUE = 1;
+
 export interface HsvColor {
   hue: number;
   saturation: number;
@@ -73,12 +76,11 @@ export function colorWheelPosition(
   };
 }
 
-export function colorAtWheelPosition(
-  x: number,
-  y: number,
-  diameter: number,
-  value: number
-): HsvColor {
+/**
+ * The wheel carries hue and saturation only: brightness is locked at
+ * `SIGNAL_COLOR_VALUE`, so a touch anywhere on it is a complete color.
+ */
+export function colorAtWheelPosition(x: number, y: number, diameter: number): HsvColor {
   const radius = diameter / 2;
   const dx = x - radius;
   const dy = y - radius;
@@ -86,6 +88,6 @@ export function colorAtWheelPosition(
   return {
     hue: angle < 0 ? angle + 360 : angle,
     saturation: clampUnit(Math.hypot(dx, dy) / radius),
-    value: clampUnit(value),
+    value: SIGNAL_COLOR_VALUE,
   };
 }
