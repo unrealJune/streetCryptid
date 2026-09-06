@@ -8,8 +8,8 @@ import type { AeroAreaKind, AeroLineKind } from './types';
  * Unlike streets and transit, these are **region-logical px**: buildings and
  * runways are stroked as vectors over the finished region bitmap
  * (`render/structure-paths.ts`), not stamped as coverage into the feature mask,
- * so mask resolution never enters the arithmetic. The dot lattice quantizes anything it touches, which
- * would turn a building outline into a scatter of unrelated dots.
+ * so mask resolution never enters the arithmetic. The dot lattice quantizes
+ * anything it touches, which would scatter a building outline into unrelated dots.
  *
  * The load-bearing lever here is NOT a zoom cutoff but {@link BUILDING_MIN_PX}.
  * Filtering on **projected** size means large structures appear the moment the
@@ -115,8 +115,7 @@ export const AERO_LINE_ALPHA: Record<AeroLineKind, number> = {
 
 /**
  * Global structure stroke-width multiplier: full weight at z>=14, tapering to
- * 0.7 by z<=11 — the same taper `transitWidthScale` uses, so the whole
- * over-the-bitmap line layer thins together as the camera pulls back.
+ * 0.7 by z<=11, so the over-the-bitmap line layer thins as the camera pulls back.
  */
 export function structureWidthScale(zoom: number): number {
   return clamp(0.7 + (0.3 * (zoom - 11)) / 3, 0.7, 1);

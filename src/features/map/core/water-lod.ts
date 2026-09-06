@@ -5,7 +5,7 @@ import { clamp } from './color';
  *
  * Widths here are **mask px**, like {@link ROAD_WIDTHS}: rivers are coverage
  * stamped into the water channel of the feature mask, not line work drawn over
- * the finished bitmap (that's `transit-lod.ts`). The mask is rasterized at
+ * the finished bitmap (that's `structure-lod.ts`). The mask is rasterized at
  * `maskScale` (0.4) of logical resolution, so one mask px is ~2.5 logical px on
  * screen — which is exactly the trap the old fixed `RIVER_WIDTH = 5` fell into.
  * It was lifted verbatim from the design mock, where the mask canvas was 1:1
