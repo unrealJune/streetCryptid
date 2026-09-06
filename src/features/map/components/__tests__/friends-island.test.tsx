@@ -46,19 +46,22 @@ describe('FriendsIsland', () => {
   function render(
     friends: readonly MapRosterFriend[],
     onSelect = jest.fn(),
-    onOpenProfile = jest.fn()
+    onOpenProfile = jest.fn(),
+    onToggleMinimize = jest.fn()
   ) {
     act(() => {
       renderer = create(
         <FriendsIsland
           friends={friends}
+          minimized={false}
           onOpenProfile={onOpenProfile}
           onSelect={onSelect}
+          onToggleMinimize={onToggleMinimize}
           theme={CryptidThemes.daybreak}
         />
       );
     });
-    return { onSelect, onOpenProfile };
+    return { onSelect, onOpenProfile, onToggleMinimize };
   }
 
   it('lists every friend and counts only the near ones as nearby', () => {
@@ -82,8 +85,10 @@ describe('FriendsIsland', () => {
       renderer = create(
         <FriendsIsland
           friends={[]}
+          minimized={false}
           onOpenProfile={jest.fn()}
           onSelect={jest.fn()}
+          onToggleMinimize={jest.fn()}
           pairing={<Text>SEARCHING FOR A BUMP</Text>}
           theme={CryptidThemes.daybreak}
         />
@@ -145,6 +150,39 @@ describe('FriendsIsland', () => {
     expect(findText(renderer, '1 NEARBY')).toHaveLength(1);
     expect(findText(renderer, '@faraway')).toHaveLength(1);
     expect(findText(renderer, '40 KM')).toHaveLength(1);
+  });
+
+  it('collapses to the header line, on the same chevron ME uses', () => {
+    const { onToggleMinimize } = render([mothman, jackalope]);
+
+    const minimize = renderer.root.findByProps({ accessibilityLabel: 'Minimize friends roster' });
+    expect(minimize.props.accessibilityState).toEqual({ expanded: true });
+    act(() => minimize.props.onPress());
+    expect(onToggleMinimize).toHaveBeenCalledTimes(1);
+
+    // The screen owns the state, so re-render with it applied.
+    act(() => {
+      renderer.update(
+        <FriendsIsland
+          friends={[mothman, jackalope]}
+          minimized
+          onOpenProfile={jest.fn()}
+          onSelect={jest.fn()}
+          onToggleMinimize={onToggleMinimize}
+          pairing={<Text>SEARCHING FOR A BUMP</Text>}
+          theme={CryptidThemes.daybreak}
+        />
+      );
+    });
+
+    // Header line only: the count survives, the roster and the pairing strip do not.
+    expect(findText(renderer, '1 NEARBY')).toHaveLength(1);
+    expect(findText(renderer, '@wanderer')).toHaveLength(0);
+    expect(findText(renderer, 'SEARCHING FOR A BUMP')).toHaveLength(0);
+    expect(
+      renderer.root.findByProps({ accessibilityLabel: 'Expand friends roster' }).props
+        .accessibilityState
+    ).toEqual({ expanded: false });
   });
 
   it('points an empty atlas at pairing instead of showing a bare list', () => {

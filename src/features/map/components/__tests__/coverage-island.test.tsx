@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Text } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
@@ -10,6 +11,26 @@ jest.mock('expo-symbols', () => ({
 }));
 jest.mock('@/global.css', () => ({}));
 
+/**
+ * `minimized` is owned by the screen — collapsing the body and taking the drawer's detents away
+ * are one act — so the test supplies the state the screen would.
+ */
+function Harness({ sectorsVisible, coverage }: { sectorsVisible: boolean; coverage: number }) {
+  const [minimized, setMinimized] = useState(false);
+
+  return (
+    <CoverageIsland
+      coverage={coverage}
+      minimized={minimized}
+      onToggleMinimize={() => setMinimized((current) => !current)}
+      placeName="Capitol Hill"
+      sectorsVisible={sectorsVisible}
+      signal="#2F9E6A"
+      theme={CryptidThemes.daybreak}
+    />
+  );
+}
+
 describe('CoverageIsland', () => {
   let renderer: ReactTestRenderer;
   const SIGNAL = '#2F9E6A';
@@ -20,15 +41,7 @@ describe('CoverageIsland', () => {
 
   it('toggles between the detailed and compact location summaries', () => {
     act(() => {
-      renderer = create(
-        <CoverageIsland
-          theme={CryptidThemes.daybreak}
-          signal={SIGNAL}
-          placeName="Capitol Hill"
-          coverage={0.42}
-          sectorsVisible
-        />
-      );
+      renderer = create(<Harness coverage={0.42} sectorsVisible />);
     });
 
     expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(1);
@@ -61,6 +74,8 @@ describe('CoverageIsland', () => {
           signal={SIGNAL}
           placeName="Capitol Hill"
           coverage={0}
+          minimized={false}
+          onToggleMinimize={jest.fn()}
           sectorsVisible={false}
         />
       );
@@ -78,15 +93,7 @@ describe('CoverageIsland', () => {
 
   it('restores the user’s own minimize choice when sectors come back', () => {
     act(() => {
-      renderer = create(
-        <CoverageIsland
-          theme={CryptidThemes.daybreak}
-          signal={SIGNAL}
-          placeName="Capitol Hill"
-          coverage={0.42}
-          sectorsVisible
-        />
-      );
+      renderer = create(<Harness coverage={0.42} sectorsVisible />);
     });
     // User expands nothing — it starts expanded. Minimize it by hand.
     act(() =>
@@ -96,26 +103,10 @@ describe('CoverageIsland', () => {
 
     // Zoom out past the cutoff and back in: still minimized, not re-expanded.
     act(() => {
-      renderer.update(
-        <CoverageIsland
-          theme={CryptidThemes.daybreak}
-          signal={SIGNAL}
-          placeName="Capitol Hill"
-          coverage={0}
-          sectorsVisible={false}
-        />
-      );
+      renderer.update(<Harness coverage={0} sectorsVisible={false} />);
     });
     act(() => {
-      renderer.update(
-        <CoverageIsland
-          theme={CryptidThemes.daybreak}
-          signal={SIGNAL}
-          placeName="Capitol Hill"
-          coverage={0.42}
-          sectorsVisible
-        />
-      );
+      renderer.update(<Harness coverage={0.42} sectorsVisible />);
     });
 
     expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(0);

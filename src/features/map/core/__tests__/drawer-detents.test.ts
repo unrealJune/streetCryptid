@@ -5,7 +5,7 @@ import {
   type DrawerDetent,
 } from '../../core/drawer-detents';
 
-const SCREEN = { screenHeight: 844, insetTop: 59, insetBottom: 34, margin: 16 };
+const SCREEN = { screenHeight: 844, insetTop: 59, insetBottom: 34, margin: 16, gripHeight: 18 };
 
 describe('detentHeights', () => {
   it('caps peek so a long roster does not open at full length', () => {
@@ -16,6 +16,17 @@ describe('detentHeights', () => {
     expect(short.peek).toBeLessThan(long.peek);
     // …and a long one stops at the ceiling rather than swallowing the map.
     expect(long.peek).toBeCloseTo(844 * 0.38, 5);
+  });
+
+  it('counts only the chrome that lives INSIDE the drawer', () => {
+    // The bottom inset and the island margin are the drawer's own marginBottom at peek. Counting
+    // them here too left a band of empty island under the body that minimizing could not close.
+    const withGrip = detentHeights({ ...SCREEN, peekBody: 160 });
+    expect(withGrip.peek).toBe(160 + 60 + 18);
+
+    // A single-detent body renders no grip, so peek must not reserve its strip either.
+    const noGrip = detentHeights({ ...SCREEN, peekBody: 160, gripHeight: 0 });
+    expect(noGrip.peek).toBe(160 + 60);
   });
 
   it('opens at full height before the body has measured', () => {
@@ -32,6 +43,7 @@ describe('detentHeights', () => {
       insetTop: 59,
       insetBottom: 34,
       margin: 16,
+      gripHeight: 18,
       peekBody: 90,
     });
 
@@ -51,6 +63,7 @@ describe('detentHeights', () => {
       insetTop: 59,
       insetBottom: 34,
       margin: 16,
+      gripHeight: 18,
       peekBody: 0,
     });
 
