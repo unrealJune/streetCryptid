@@ -1,6 +1,6 @@
 import { SymbolView } from 'expo-symbols';
 import type { ReactNode } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { CryptidTheme } from '@/constants/cryptid-theme';
 import { Spacing } from '@/constants/theme';
@@ -20,6 +20,11 @@ export interface MapRosterFriend {
   readonly status: string;
   /** Live presence — offline rows dim rather than disappear. */
   readonly online: boolean;
+  /**
+   * Reachable AND close enough to be worth the word (`isPresenceNearby`). This is what the header
+   * counts; `online` alone counted a friend on another continent as NEARBY.
+   */
+  readonly nearby: boolean;
   /** Whether we have a location to fly the map to. */
   readonly locatable: boolean;
 }
@@ -33,20 +38,21 @@ interface FriendsIslandProps {
   onOpenProfile(friendId: string): void;
 }
 
-/** Tallest the roster grows before it scrolls — the map stays the hero. */
-const MAX_LIST_HEIGHT = 268;
-
 /**
- * The island's FRIENDS body (`renders/social-roster-*`): the same island swapped
- * from "where you are" to "who is out there", without ever leaving the map.
+ * The drawer's FRIENDS body (`renders/social-roster-*`): the same panel swapped from "where you
+ * are" to "who is out there", without ever leaving the map.
  *
- * Hairline dividers, not cards. One signal color per friend. Offline rows dim
- * instead of vanishing, so the roster's shape is stable. There is deliberately
- * no "shared ground" bar here — the mock showed one, but the app has no overlap
- * metric yet and a fabricated number would break the one-honest-signal rule.
+ * Hairline dividers, not cards. One signal color per friend. Offline rows dim instead of
+ * vanishing, so the roster's shape is stable. There is deliberately no "shared ground" bar here —
+ * the mock showed one, but the app has no overlap metric yet and a fabricated number would break
+ * the one-honest-signal rule.
  *
- * The card surface and the FRIENDS label both belong to `MapIsland`, so the
- * header leads with the one fact the tab cannot carry: how many are live.
+ * The list is no longer height-capped. It used to stop at 268px and scroll inside a fixed island;
+ * now the drawer it sits in is the thing that grows, so capping here would put a second scroll
+ * region inside a surface whose whole job is to get taller.
+ *
+ * The card surface and the FRIENDS label both belong to `MapDrawer`, so the header leads with the
+ * one fact the tab cannot carry: how many are near you.
  */
 export function FriendsIsland({
   friends,
@@ -56,7 +62,7 @@ export function FriendsIsland({
   onOpenProfile,
 }: FriendsIslandProps) {
   const { chrome } = theme;
-  const nearby = friends.filter((friend) => friend.online).length;
+  const nearby = friends.filter((friend) => friend.nearby).length;
 
   return (
     <View style={styles.body}>
@@ -66,7 +72,7 @@ export function FriendsIsland({
         accessibilityLabel={
           friends.length === 0
             ? 'No friends in your atlas yet.'
-            : `${friends.length} friend${friends.length === 1 ? '' : 's'}, ${nearby} sharing live.`
+            : `${friends.length} friend${friends.length === 1 ? '' : 's'}, ${nearby} nearby.`
         }
         style={styles.header}
       >
@@ -81,11 +87,7 @@ export function FriendsIsland({
           No cryptids in your atlas yet. Touch two phones together while both are on this tab.
         </Text>
       ) : (
-        <ScrollView
-          style={styles.list}
-          contentContainerStyle={styles.listContent}
-          showsVerticalScrollIndicator={false}
-        >
+        <View style={styles.list}>
           {friends.map((friend, index) => (
             <FriendRow
               divider={index > 0}
@@ -96,7 +98,7 @@ export function FriendsIsland({
               theme={theme}
             />
           ))}
-        </ScrollView>
+        </View>
       )}
     </View>
   );
@@ -233,9 +235,6 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.two,
   },
   list: {
-    maxHeight: MAX_LIST_HEIGHT,
-  },
-  listContent: {
     paddingBottom: Spacing.one,
   },
   row: {

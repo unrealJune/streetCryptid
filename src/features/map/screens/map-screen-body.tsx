@@ -1,6 +1,6 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, View, type LayoutChangeEvent } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { resolveSignalColor } from '@/constants/signal-colors';
@@ -11,12 +11,14 @@ import {
   FriendsIsland,
   hexToRgb,
   LocateMeControl,
-  MapIsland,
+  MapDrawer,
   MapLayersControl,
   MapView,
+  PlaceHeader,
   rgbToHex,
   SettingsControl,
   useMapTheme,
+  type DrawerDetent,
   type IslandTab,
   type MapFriendLocation,
   type MapTrailLocation,
@@ -28,9 +30,10 @@ import {
 } from '@/features/map';
 import { sampleTrailForMap } from '@/features/map/core/trail-sampling';
 import { BumpPairingStrip } from '@/features/social/components/bump-pairing-strip';
-import { FriendProfileSheet } from '@/features/social/components/friend-profile-sheet';
+import { FriendDetailIsland } from '@/features/social/components/friend-detail-island';
 import {
   describePresence,
+  isPresenceNearby,
   isPresenceOnline,
   isPresenceStale,
 } from '@/features/social/core/presence';
@@ -104,7 +107,8 @@ export default function MapScreenBody() {
     setLayers((current) => ({ ...current, [layer]: enabled }));
   }, []);
   const [islandTab, setIslandTab] = useState<IslandTab>('me');
-  const [profileEndpoint, setProfileEndpoint] = useState<string | null>(null);
+  const [detent, setDetent] = useState<DrawerDetent>('peek');
+  const [screenHeight, setScreenHeight] = useState(0);
   const [locateTarget, setLocateTarget] = useState<{
     requestId: number;
     location: MapFriendLocation['location'];
@@ -118,6 +122,11 @@ export default function MapScreenBody() {
     coverage: 0,
     sectorsVisible: true,
   });
+
+  const onScreenLayout = useCallback((event: LayoutChangeEvent) => {
+    const measured = Math.round(event.nativeEvent.layout.height);
+    setScreenHeight((current) => (current === measured ? current : measured));
+  }, []);
 
   const onReadout = useCallback((next: MapReadout) => {
     setReadout((current) =>
@@ -169,6 +178,7 @@ export default function MapScreenBody() {
         distanceM: presence.distanceM,
         status: describePresence(presence).toUpperCase(),
         online: isPresenceOnline(presence.state),
+        nearby: isPresenceNearby(presence),
         locatable: presence.fix !== null,
       })),
     [friends, theme.chrome.green]
@@ -204,7 +214,12 @@ export default function MapScreenBody() {
   const toggleSelection = useCallback(
     (id: string) => {
       if (selectedEndpoint !== id) {
-        setIslandTab('me');
+        // A friend opens their pane in the drawer at its summary height; selecting yourself only
+        // lights up your own trail, so it belongs to whichever tab you were already reading.
+        if (id !== SELF_AUTHOR) {
+          setIslandTab('friends');
+          setDetent('peek');
+        }
         setSelection((current) => ({ ...current, selectedId: id }));
         return;
       }
@@ -265,6 +280,7 @@ export default function MapScreenBody() {
     (tab: IslandTab) => {
       closeHistory();
       setIslandTab(tab);
+      setDetent('peek');
     },
     [closeHistory]
   );
@@ -273,11 +289,14 @@ export default function MapScreenBody() {
   // visible, but the FRIENDS tab stays lit — you drilled in from there, and
   // closing the trace should put you back on the roster, not on ME.
   const focusRosterFriend = useCallback(
-    (friendId: string) => {
-      const target = mapFriends.find((friend) => friend.id === friendId);
-      if (!target) return;
+    (friendId: string, openAt: DrawerDetent = 'peek') => {
       setIslandTab('friends');
       setSelection((current) => ({ ...current, selectedId: friendId }));
+      setDetent(openAt);
+      // A friend with no fix still opens their pane — that is where sharing and remove live, and
+      // both have to work for someone whose phone has gone quiet. Only the fly-to needs a fix.
+      const target = mapFriends.find((friend) => friend.id === friendId);
+      if (!target) return;
       setLocateTarget((current) => ({
         requestId: (current?.requestId ?? 0) + 1,
         location: target.location,
@@ -286,10 +305,19 @@ export default function MapScreenBody() {
     [mapFriends]
   );
 
-  const profilePresence = useMemo(
-    () => friends.find((presence) => presence.friend.endpointId === profileEndpoint) ?? null,
-    [friends, profileEndpoint]
+  // The friend whose pane the drawer is showing. Selecting a locator on the map and tapping a
+  // roster row are the same act now, so there is one piece of state behind both.
+  const detailPresence = useMemo(
+    () =>
+      selectedEndpoint && selectedEndpoint !== SELF_AUTHOR
+        ? (friends.find((presence) => presence.friend.endpointId === selectedEndpoint) ?? null)
+        : null,
+    [friends, selectedEndpoint]
   );
+  const closeDetail = useCallback(() => {
+    closeHistory();
+    setDetent('peek');
+  }, [closeHistory]);
   // A `streetcryptid://…?token=` invite lands here now that the Friends route is
   // gone. Redeem it once, show the roster so the handshake has somewhere to land,
   // then drop the token from the URL so a re-render cannot replay it.
@@ -369,10 +397,18 @@ export default function MapScreenBody() {
   // bar consumed it — there is no tab bar any more, so ignoring it parks the
   // segmented bar right on top of the gesture handle. `Spacing.three` matches the
   // island's own side inset, so it sits in a square margin rather than a slot.
-  const islandBottomPadding = insets.bottom + Spacing.three;
+  // The drawer's body decides how far it may open. ME is a fixed-height readout with nothing
+  // behind it, so giving it detents would offer a gesture that reveals blank island.
+  const drawerMax = detailPresence || rosterOpen ? 'full' : 'peek';
+  const detailSharing = detailPresence
+    ? (snapshot?.sharingWith ?? []).includes(detailPresence.friend.endpointId)
+    : false;
 
   return (
-    <View style={[styles.container, { backgroundColor: theme.chrome.bg }]}>
+    <View
+      onLayout={onScreenLayout}
+      style={[styles.container, { backgroundColor: theme.chrome.bg }]}
+    >
       <View style={styles.mapLayer}>
         <MapSession
           accessibilityLabel={mapAccessibilityLabel}
@@ -395,34 +431,57 @@ export default function MapScreenBody() {
           selfFix={hasLiveSelfFix ? selfFix : null}
         />
       </View>
-      {/* The app's only top chrome: attribution on the left, Settings on the right.
-          `pointerEvents="box-none"` so the empty span between them still pans the map. */}
+      {/* The app's only top chrome: the place name and attribution on the left, Settings on the
+          right. `pointerEvents="box-none"` so the empty span between them still pans the map.
+          The header stands down while a friend's pane is open — that pane's hero is already
+          naming the place, and the same words twice on one screen is what the declutter law is
+          for. */}
       <View pointerEvents="box-none" style={[styles.topLayer, { top: insets.top + Spacing.three }]}>
-        <Text
-          pointerEvents="none"
-          style={[styles.attribution, { color: theme.chrome.steel }]}
-          numberOfLines={1}
-        >
-          © OPENSTREETMAP
-        </Text>
+        <PlaceHeader placeName={detailPresence ? null : readout.placeName} theme={theme} />
         <SettingsControl onPress={() => router.push('/settings')} theme={theme} />
       </View>
-      {/* Only map affordances float now: layers and locate. Switching what the
-          island is about belongs to the island's own segmented bar, so the map's
-          corners stay about the map. */}
-      <View
-        pointerEvents="box-none"
-        style={[styles.islandLayer, { paddingBottom: islandBottomPadding }]}
-      >
+      {/* Only map affordances float: layers and locate. They ride above the drawer and are
+          pushed off-screen as it docks, which is correct — a full sheet is not a map view. */}
+      <View pointerEvents="box-none" style={styles.islandLayer}>
         <View pointerEvents="box-none" style={styles.controls}>
           <MapLayersControl layers={layers} onChange={setLayer} theme={theme} />
           <LocateMeControl busy={locating} onPress={locateSelf} theme={theme} />
         </View>
-        <MapIsland active={islandTab} onSelect={selectIslandTab} signal={selfSignal} theme={theme}>
-          {rosterOpen ? (
+        <MapDrawer
+          activeTab={islandTab}
+          detent={detent}
+          insetBottom={insets.bottom}
+          insetTop={insets.top}
+          maxDetent={drawerMax}
+          onDetentChange={setDetent}
+          onSelectTab={selectIslandTab}
+          screenHeight={screenHeight}
+          signal={selfSignal}
+          theme={theme}
+        >
+          {detailPresence ? (
+            <FriendDetailIsland
+              detent={detent}
+              onBack={closeDetail}
+              onRemove={async () => {
+                await removeFriend(detailPresence.friend.endpointId);
+                closeDetail();
+              }}
+              onToggleShare={async (on) => {
+                await toggleShare(detailPresence.friend.endpointId, on);
+              }}
+              peers={snapshot?.friends}
+              placeName={readout.placeName}
+              presence={detailPresence}
+              ratchetActivity={snapshot?.ratchetActivity[detailPresence.friend.endpointId]}
+              sharing={detailSharing}
+              stashEndpointId={snapshot?.stash.endpointId ?? null}
+              theme={theme}
+            />
+          ) : rosterOpen ? (
             <FriendsIsland
               friends={rosterFriends}
-              onOpenProfile={setProfileEndpoint}
+              onOpenProfile={(friendId) => focusRosterFriend(friendId, 'mid')}
               onSelect={focusRosterFriend}
               pairing={
                 <BumpPairingStrip
@@ -439,45 +498,13 @@ export default function MapScreenBody() {
           ) : (
             <CoverageIsland
               coverage={readout.coverage}
-              placeName={readout.placeName}
               sectorsVisible={readout.sectorsVisible}
               signal={selfSignal}
               theme={theme}
             />
           )}
-        </MapIsland>
+        </MapDrawer>
       </View>
-
-      <FriendProfileSheet
-        presence={profilePresence}
-        visible={profilePresence !== null}
-        peers={snapshot?.friends}
-        stashEndpointId={snapshot?.stash.endpointId ?? null}
-        sharing={
-          profilePresence
-            ? (snapshot?.sharingWith ?? []).includes(profilePresence.friend.endpointId)
-            : false
-        }
-        ratchetActivity={
-          profilePresence ? snapshot?.ratchetActivity[profilePresence.friend.endpointId] : undefined
-        }
-        onClose={() => setProfileEndpoint(null)}
-        onToggleShare={async (on) => {
-          if (!profilePresence) return;
-          await toggleShare(profilePresence.friend.endpointId, on);
-        }}
-        onViewMap={() => {
-          if (!profilePresence) return;
-          const endpointId = profilePresence.friend.endpointId;
-          setProfileEndpoint(null);
-          focusRosterFriend(endpointId);
-        }}
-        onRemove={async () => {
-          if (!profilePresence) return;
-          await removeFriend(profilePresence.friend.endpointId);
-          setProfileEndpoint(null);
-        }}
-      />
     </View>
   );
 }
@@ -559,30 +586,24 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFill,
   },
   islandLayer: {
-    position: 'absolute',
-    left: Spacing.three,
-    right: Spacing.three,
     bottom: 0,
+    left: 0,
+    position: 'absolute',
+    right: 0,
   },
   controls: {
     alignItems: 'flex-end',
     gap: Spacing.two,
     marginBottom: Spacing.three,
+    paddingHorizontal: Spacing.three,
   },
   topLayer: {
     position: 'absolute',
     left: Spacing.three,
     right: Spacing.three,
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     justifyContent: 'space-between',
     gap: Spacing.three,
-  },
-  attribution: {
-    flexShrink: 1,
-    fontFamily: 'IBMPlexMono_500Medium',
-    fontSize: 10,
-    letterSpacing: 1.2,
-    opacity: 0.55,
   },
 });

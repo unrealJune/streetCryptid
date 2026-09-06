@@ -8,76 +8,65 @@ import { Spacing } from '@/constants/theme';
 const SEGMENTS = 26;
 
 /**
- * Side of the chevron's touch target, and the header's floor. The chevron is
- * what sets the island's collapsed height, so when it is hidden (below the
- * exploration cutoff) the header would otherwise shrink to the 28pt minimized
- * hero line and the island would read visibly thinner. One constant for both
- * keeps the two states the same height by construction.
+ * Side of the chevron's touch target, and the header's floor. The chevron is what sets the
+ * island's collapsed height, so when it is hidden (below the exploration cutoff) the header would
+ * otherwise shrink and the body would read visibly thinner. One constant for both keeps the two
+ * states the same height by construction.
  */
 const TOGGLE_SIZE = 48;
 
 interface CoverageIslandProps {
   readonly theme: CryptidTheme;
-  /** Hero place name; em-dash placeholder while tiles are still loading. */
-  readonly placeName: string | null;
   /** Discovered fraction of the visible sectors, 0–1. */
   readonly coverage: number;
   /**
-   * Whether the exploration layer is drawn at this zoom. When false the whole
-   * sector readout is suppressed — `coverage` would otherwise render a
-   * misleading 0%. The user's own minimize choice is kept untouched, so zooming
-   * back in restores whatever state they left it in.
+   * Whether the exploration layer is drawn at this zoom. When false the whole sector readout is
+   * suppressed — `coverage` would otherwise render a misleading 0%. The user's own minimize choice
+   * is kept untouched, so zooming back in restores whatever state they left it in.
    */
   readonly sectorsVisible: boolean;
   /**
-   * Your chosen signal color. The flip-dot bar counts ground *you* covered, so
-   * it fills in your color rather than the canvas amber, which now belongs only
-   * to the frontier rim.
+   * Your chosen signal color. The flip-dot bar counts ground *you* covered, so it fills in your
+   * color rather than the canvas amber, which now belongs only to the frontier rim.
    */
   readonly signal: string;
 }
 
 /**
- * The island's ME body: hero place name, one mono sub line, one flip-dot
- * coverage bar, one percentage — and nothing else (declutter law). Doubles as
- * the screen-reader text model for the canvas (PRODUCT.md P0).
+ * The drawer's ME body: how much of what you are looking at you have actually walked.
  *
- * The card surface belongs to `MapIsland`; this only supplies its own padding.
+ * It used to lead with the place name as a 34pt hero. That name is now `PlaceHeader`, at the top
+ * of the screen, true on both tabs — so leading with it here would be the same words twice, which
+ * is the one thing the declutter law names outright. What is left is the thing only this body can
+ * say: SECTORS IN VIEW, one flip-dot bar, one percentage.
+ *
+ * The card surface belongs to `MapDrawer`; this only supplies its own padding.
  */
-export function CoverageIsland({
-  theme,
-  placeName,
-  coverage,
-  sectorsVisible,
-  signal,
-}: CoverageIslandProps) {
+export function CoverageIsland({ theme, coverage, sectorsVisible, signal }: CoverageIslandProps) {
   const { chrome } = theme;
   const [isMinimized, setIsMinimized] = useState(false);
   const pct = Math.round(coverage * 100);
   const lit = Math.round(coverage * SEGMENTS);
-  const hero = placeName ?? '—';
-  // Zooming past the exploration cutoff collapses the island like the chevron
-  // would, WITHOUT writing `isMinimized` — zooming back in restores the user's
-  // own choice rather than whatever the zoom left behind.
+  // Zooming past the exploration cutoff collapses the body like the chevron would, WITHOUT
+  // writing `isMinimized` — zooming back in restores the user's own choice rather than whatever
+  // the zoom left behind.
   const showSectors = sectorsVisible && !isMinimized;
-  const summary = sectorsVisible
-    ? `${hero}. ${pct} percent of visible sectors explored.`
-    : `${hero}. Sector coverage is hidden at this zoom.`;
 
   return (
-    <View style={showSectors ? styles.bodyExpanded : styles.bodyMinimized}>
+    <View style={styles.body}>
       <View style={styles.header}>
         <View
           accessible
           accessibilityRole="summary"
-          accessibilityLabel={summary}
+          accessibilityLabel={
+            sectorsVisible
+              ? `${pct} percent of visible sectors explored.`
+              : 'Sector coverage is hidden at this zoom.'
+          }
           style={styles.summary}
         >
-          <Text
-            style={[styles.hero, !showSectors && styles.heroMinimized, { color: chrome.ink }]}
-            numberOfLines={1}
-          >
-            {hero}
+          <Text style={[styles.title, { color: chrome.ink }]} numberOfLines={1}>
+            {sectorsVisible ? 'SECTORS IN VIEW' : 'ZOOM IN FOR SECTORS'}
           </Text>
           {sectorsVisible && isMinimized ? (
             <Text style={[styles.compactPct, { color: chrome.ink }]}>{pct}%</Text>
@@ -112,9 +101,6 @@ export function CoverageIsland({
 
       {showSectors ? (
         <View accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-          <Text style={[styles.sub, { color: chrome.steel }]} numberOfLines={1}>
-            SECTORS IN VIEW
-          </Text>
           <View style={styles.barRow}>
             <View style={styles.bar}>
               {Array.from({ length: SEGMENTS }, (_, i) => (
@@ -133,38 +119,31 @@ export function CoverageIsland({
 }
 
 const styles = StyleSheet.create({
-  bodyExpanded: {
+  body: {
+    paddingBottom: Spacing.two,
     paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.two,
-  },
-  bodyMinimized: {
-    paddingLeft: Spacing.four,
-    paddingRight: Spacing.three,
-    paddingVertical: Spacing.one,
+    paddingTop: Spacing.one,
   },
   header: {
-    flexDirection: 'row',
     alignItems: 'center',
+    flexDirection: 'row',
     gap: Spacing.two,
-    // Floor, not a fixed height: with the chevron present the row already
-    // measures TOGGLE_SIZE, so this only takes effect when it is hidden.
+    // Floor, not a fixed height: with the chevron present the row already measures TOGGLE_SIZE,
+    // so this only takes effect when it is hidden.
     minHeight: TOGGLE_SIZE,
   },
   summary: {
-    flex: 1,
-    minWidth: 0,
-    flexDirection: 'row',
     alignItems: 'center',
+    flex: 1,
+    flexDirection: 'row',
     gap: Spacing.two,
+    minWidth: 0,
   },
-  hero: {
+  title: {
     flex: 1,
     fontFamily: 'Rajdhani_700Bold',
-    fontSize: 34,
-    lineHeight: 38,
-  },
-  heroMinimized: {
     fontSize: 24,
+    letterSpacing: 3,
     lineHeight: 28,
   },
   compactPct: {
@@ -174,26 +153,21 @@ const styles = StyleSheet.create({
     textAlign: 'right',
   },
   toggle: {
-    width: TOGGLE_SIZE,
-    height: TOGGLE_SIZE,
-    borderRadius: TOGGLE_SIZE / 2,
     alignItems: 'center',
+    borderRadius: TOGGLE_SIZE / 2,
+    height: TOGGLE_SIZE,
     justifyContent: 'center',
+    width: TOGGLE_SIZE,
   },
   togglePressed: {
     opacity: 0.55,
   },
-  sub: {
-    fontFamily: 'IBMPlexMono_500Medium',
-    fontSize: 10,
-    letterSpacing: 1.2,
-    marginTop: Spacing.half,
-  },
   barRow: {
-    flexDirection: 'row',
     alignItems: 'center',
-    marginTop: Spacing.three,
+    flexDirection: 'row',
     gap: Spacing.two,
+    marginTop: Spacing.one,
+    paddingBottom: Spacing.two,
   },
   bar: {
     flex: 1,
@@ -201,9 +175,9 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   seg: {
+    borderRadius: 1.5,
     flex: 1,
     height: 8,
-    borderRadius: 1.5,
   },
   pct: {
     fontFamily: 'Rajdhani_600SemiBold',

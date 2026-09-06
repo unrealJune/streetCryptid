@@ -108,16 +108,31 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
 
 ## Chrome & layout — Apple-Maps "islands"
 
-- **Full-bleed map. There is no tab bar and no header.** The map is the whole app. The
-  only chrome is floating: attribution and a Settings gear across the top, a right-side
+- **Full-bleed map. There is no tab bar.** The map is the whole app. The only chrome is
+  floating: a **place-name header** and a Settings gear across the top, a right-side
   control stack of **map affordances only** (layers · locate [amber]), and one bottom
-  island. Everything else is either that island or a sheet pulled over it.
+  drawer. Everything else is that drawer.
+- **The header names where the CAMERA is** — not where you are — on its own small island,
+  with attribution as a faint mono line beneath it. It was the ME body's hero until it
+  became clear that "where you are looking" is true of the whole screen rather than of one
+  of two tabs, and that a fact which scrolls away with a drawer is a fact you cannot rely
+  on. It carries **no** coverage percentage: that number belongs beside the bar that
+  explains it. It **stands down** while a friend's pane is open, because that pane's hero
+  is already naming the place.
 - **Settings is one gear, top-right,** in neutral steel — never an accent, because it is
   not a signal. It opens as a modal over the map with its own close affordance, so leaving
   it always returns you to exactly the view you left.
-- **One island, with its own segmented bar** (ME · FRIENDS) along its bottom edge — the
-  app's only navigation. Find My's model: the sheet owns the switch, so the map's corners
-  stay about the map and nothing floats that isn't a map affordance. Selection is carried
+- **One drawer with three detents** (peek · mid · full) and its own segmented bar
+  (ME · FRIENDS) along its bottom edge — the app's only navigation. Find My's model: the
+  sheet owns the switch, so the map's corners stay about the map and nothing floats that
+  isn't a map affordance. **HEIGHT animates, not translation**, so the bar stays welded to
+  the bottom edge and the list grows with the drawer. At peek and mid it keeps the island's
+  16px inset and 26px radius; at full it **docks** edge-to-edge with only its top corners
+  rounded — one surface moving, never a second kind of panel. **Peek is the body's own
+  height**, capped at 38% of the screen so a long roster does not open at full length; a
+  body with nothing behind it (ME) gets no detents at all rather than a gesture that
+  reveals blank island. **The list scrolls only at the top detent** — below it, a drag on
+  the body belongs to the drawer, which is what makes dragging up on the roster grow it. Selection is carried
   by **contrast, not colour** (ink on a `seg` pill vs steel) — with one exception: the ME
   glyph wears **your** signal color while ME is open, so the tab and your dot on the map
   read as the same thing. The bar carries **no badge**: presence is already stated by the
@@ -126,11 +141,17 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
 - **The island floats clear of the system gesture bar** — `insets.bottom` plus a real
   margin, on both platforms. (It once special-cased Android to skip the inset, which was
   true only while a native tab bar was consuming it.)
-- **ME is zoom-aware "where you are":** hero place name (Rajdhani) + one mono
-  uppercase sub + **one** flip-dot coverage bar **in your signal color** (it counts ground
-  _you_ covered) + **one** % — retitled per tier (BLOCKS / SECTORS / HOODS / CITIES).
-  **No legend** (removed). Declutter law: one live dot, one coverage number, one accent —
-  never duplicate badges or status text.
+- **ME is "how much of this have you walked":** SECTORS IN VIEW + **one** flip-dot coverage
+  bar **in your signal color** (it counts ground _you_ covered) + **one** %. It no longer
+  leads with the place name — that is the header now, and leading with it here would be the
+  same words twice. **No legend** (removed). Declutter law: one live dot, one coverage
+  number, one accent — never duplicate badges or status text.
+- **Flying somewhere has a zoom floor, not a zoom target.** Tapping a friend, tapping a
+  roster row and pressing Locate Me all land at **z13 or closer** (~5 km across a phone —
+  town-wide, where the street grid is legible). Fly-to used to preserve whatever zoom you
+  were on, so Locate Me from a regional view re-centred on a dot in an unreadable field and
+  looked like it had done nothing. Someone already closer than the floor keeps their zoom:
+  they chose it.
 - **A selected trace is a drill-down, not a third tab.** It replaces the island's body while
   the bar stays lit on the tab you came from, so closing it returns you where you were and
   either tab is always a way out.
@@ -149,8 +170,12 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
   (% of streets you've _both_ walked). Hairline dividers, **not** cards; offline rows
   dimmed. The roster is the island's FRIENDS tab — it swaps the bottom island from "where
   you are" to "who is out there" without leaving the map, and tapping a row flies there and
-  opens that friend's trace. It leads with `N NEARBY` rather than a "FRIENDS" title,
-  because the lit tab below already names the view. _Shipped without the shared-ground bar:_
+  opens that friend's pane. It leads with `N NEARBY` rather than a "FRIENDS" title,
+  because the lit tab below already names the view. **NEARBY is a radius** — reachable
+  _and_ within ~25 km, roughly the same city — not simply "reachable", which counted a
+  friend on another continent. The radius is deliberately **not captioned**: it is a
+  threshold the code uses, not a fact the reader needs. Everyone stays in the list; only
+  the count is filtered. _Shipped without the shared-ground bar:_
   the app has no overlap metric yet, and the declutter law says a fabricated number is worse
   than no number.
 - **Friend profile is also friend _management_:** big cryptid hero, sharing state, retained
