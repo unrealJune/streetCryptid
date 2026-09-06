@@ -111,9 +111,21 @@ export function MapDrawer({
 
   const detents = useMemo(() => allowedDetents(maxDetent), [maxDetent]);
   const topDetent = detents[detents.length - 1];
+  // A body with a single detent gets no grip: there is nothing to drag it to, and the strip would
+  // be a handle on a surface that cannot move. Minimized, that is also what turns the drawer back
+  // into the bare bubble the island used to collapse to.
+  const hasGrip = detents.length > 1;
   const heights = useMemo(
-    () => detentHeights({ peekBody, screenHeight, insetTop, insetBottom, margin: Spacing.three }),
-    [peekBody, screenHeight, insetTop, insetBottom]
+    () =>
+      detentHeights({
+        peekBody,
+        screenHeight,
+        insetTop,
+        insetBottom,
+        margin: Spacing.three,
+        gripHeight: hasGrip ? GRIP_HEIGHT : 0,
+      }),
+    [peekBody, screenHeight, insetTop, insetBottom, hasGrip]
   );
   const resolved = heights[detents.includes(detent) ? detent : topDetent];
 
@@ -233,18 +245,20 @@ export function MapDrawer({
     >
       <GestureDetector gesture={pan}>
         <View style={styles.sheet}>
-          <View
-            accessibilityRole="adjustable"
-            accessibilityLabel="Panel size"
-            accessibilityValue={{ text: DETENT_LABEL[detent] }}
-            accessibilityActions={ADJUST_ACTIONS}
-            onAccessibilityAction={(event) =>
-              step(event.nativeEvent.actionName === 'increment' ? 1 : -1)
-            }
-            style={styles.grip}
-          >
-            <View style={[styles.gripBar, { backgroundColor: chrome.seg }]} />
-          </View>
+          {hasGrip ? (
+            <View
+              accessibilityRole="adjustable"
+              accessibilityLabel="Panel size"
+              accessibilityValue={{ text: DETENT_LABEL[detent] }}
+              accessibilityActions={ADJUST_ACTIONS}
+              onAccessibilityAction={(event) =>
+                step(event.nativeEvent.actionName === 'increment' ? 1 : -1)
+              }
+              style={styles.grip}
+            >
+              <View style={[styles.gripBar, { backgroundColor: chrome.seg }]} />
+            </View>
+          ) : null}
 
           <GestureDetector gesture={nativeScroll}>
             <ScrollView

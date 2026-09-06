@@ -21,7 +21,11 @@ const FLING_SPEED = 550;
 
 /** `IslandTabs`: 44pt targets plus its own 8pt padding, top and bottom. */
 export const TAB_BAR_HEIGHT = 60;
-/** Grip strip height — the drawer's own affordance, above whatever body it carries. */
+/**
+ * Grip strip height — the drawer's own affordance, above whatever body it carries. Only counted
+ * when the drawer actually has somewhere to go: a body with one detent renders no grip, because a
+ * handle on a surface that cannot move is 18px of furniture claiming to be a control.
+ */
 export const GRIP_HEIGHT = 18;
 
 /**
@@ -48,10 +52,15 @@ export function detentHeights(input: {
   insetBottom: number;
   /** The island's own margin (`Spacing.three`), passed in so this module stays free of theme. */
   margin: number;
+  /** `GRIP_HEIGHT` when the drawer renders a grip, 0 when it has a single detent and does not. */
+  gripHeight: number;
 }): Record<DrawerDetent, number> {
-  const { peekBody, screenHeight, insetTop, insetBottom, margin } = input;
+  const { peekBody, screenHeight, insetTop, insetBottom, margin, gripHeight } = input;
   const full = Math.max(0, screenHeight - insetTop - margin);
-  const chrome = TAB_BAR_HEIGHT + GRIP_HEIGHT + insetBottom + margin;
+  // Only what the drawer carries INSIDE itself. The bottom inset and the island margin are the
+  // drawer's own `marginBottom` at peek — counting them here too added a band of empty island
+  // under the body that no amount of minimizing could close, because it was never the body's.
+  const chrome = TAB_BAR_HEIGHT + gripHeight;
   // Before the body has measured, peek and full coincide: opening at zero height would flash an
   // empty island on the first frame.
   const peek =

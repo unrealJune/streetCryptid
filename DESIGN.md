@@ -126,7 +126,11 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
   rounded — one surface moving, never a second kind of panel. **Peek is the body's own
   height**, capped at 38% of the screen so a long roster does not open at full length; a
   body with nothing behind it (ME) gets no detents at all rather than a gesture that
-  reveals blank island. **The list scrolls only at the top detent** — below it, a drag on
+  reveals blank island. Peek counts only the chrome the drawer carries _inside_ itself
+  (bar, and the grip when there is one) — the bottom inset and the island margin are its
+  own `marginBottom`, and counting them twice left a band of empty island under the body
+  that minimizing could not close. A single-detent drawer draws **no grip**: a handle on a
+  surface that cannot move is furniture claiming to be a control. **The list scrolls only at the top detent** — below it, a drag on
   the body belongs to the drawer, which is what makes dragging up on the roster grow it. Selection is carried
   by **contrast, not colour** (ink on a `seg` pill vs steel) — with one exception: the ME
   glyph wears **your** signal color while ME is open, so the tab and your dot on the map
@@ -136,6 +140,15 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
 - **The island floats clear of the system gesture bar** — `insets.bottom` plus a real
   margin, on both platforms. (It once special-cased Android to skip the inset, which was
   true only while a native tab bar was consuming it.)
+- **Either tab minimizes, to the same bubble.** One chevron, at the right of the body's
+  header, collapses ME or FRIENDS to its header line — place name + %, or the NEARBY
+  count — and the drawer drops to peek with its detents and grip withdrawn, so what is
+  left is the bare rounded island the panel used to be. Minimized is a property of the
+  **drawer**, not of a body: collapsing the content and taking the detents away are one
+  act, and a shared header height is what stops the two tabs having their own idea of
+  small. Switching tabs expands again — asking for a tab is asking to see it — and
+  minimizing the roster disarms Bump, because a radio held open behind a collapsed panel
+  is a radio quietly left listening.
 - **ME is zoom-aware "where you are":** hero place name (Rajdhani) + one mono
   uppercase sub + **one** flip-dot coverage bar **in your signal color** (it counts ground
   _you_ covered) + **one** % — retitled per tier (BLOCKS / SECTORS / HOODS / CITIES).

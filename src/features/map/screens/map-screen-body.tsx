@@ -107,6 +107,11 @@ export default function MapScreenBody() {
   }, []);
   const [islandTab, setIslandTab] = useState<IslandTab>('me');
   const [detent, setDetent] = useState<DrawerDetent>('peek');
+  // Minimized is a property of the DRAWER, not of whichever body is in it: collapsing to the
+  // header line and taking the drawer's detents away are the same act, and only this level can do
+  // both. It is also why ME and FRIENDS collapse to the same bubble instead of each having its own
+  // idea of small.
+  const [minimized, setMinimized] = useState(false);
   const [screenHeight, setScreenHeight] = useState(0);
   const [locateTarget, setLocateTarget] = useState<{
     requestId: number;
@@ -198,7 +203,9 @@ export default function MapScreenBody() {
   // Selecting a locator highlights it (and draws OUR trail when it is us). The roster is on
   // screen whenever the FRIENDS tab is up; it is also what arms bump pairing.
   const rosterOpen = islandTab === 'friends';
-  const bump = useArmedBump(rosterOpen);
+  // Minimizing hides the bump strip, which is the same class of act as leaving the tab: the radio
+  // must not stay open behind a collapsed panel with no readout to say it is listening.
+  const bump = useArmedBump(rosterOpen && !minimized);
 
   const closeHistory = useCallback(() => {
     setSelection((current) => ({ ...current, selectedId: null }));
@@ -218,6 +225,7 @@ export default function MapScreenBody() {
         if (id !== SELF_AUTHOR) {
           setIslandTab('friends');
           setDetent('peek');
+          setMinimized(false);
         }
         setSelection((current) => ({ ...current, selectedId: id }));
         return;
@@ -280,9 +288,18 @@ export default function MapScreenBody() {
       closeHistory();
       setIslandTab(tab);
       setDetent('peek');
+      // Asking for a tab is asking to see it. Carrying the collapse across would answer the tap
+      // with a one-line panel and no obvious way back.
+      setMinimized(false);
     },
     [closeHistory]
   );
+  // Collapse to the header line. The drawer comes back to peek in the same gesture, because a
+  // minimized body at mid or full would be the blank island the detents exist to avoid.
+  const toggleMinimize = useCallback(() => {
+    setMinimized((current) => !current);
+    setDetent('peek');
+  }, []);
   // Tapping a roster row is the same gesture as tapping the locator: fly there
   // and open the trace. The roster steps aside so the map it just moved is
   // visible, but the FRIENDS tab stays lit — you drilled in from there, and
@@ -292,6 +309,7 @@ export default function MapScreenBody() {
       setIslandTab('friends');
       setSelection((current) => ({ ...current, selectedId: friendId }));
       setDetent(openAt);
+      setMinimized(false);
       // A friend with no fix still opens their pane — that is where sharing and remove live, and
       // both have to work for someone whose phone has gone quiet. Only the fly-to needs a fix.
       const target = mapFriends.find((friend) => friend.id === friendId);
@@ -397,8 +415,14 @@ export default function MapScreenBody() {
   // segmented bar right on top of the gesture handle. `Spacing.three` matches the
   // island's own side inset, so it sits in a square margin rather than a slot.
   // The drawer's body decides how far it may open. ME is a fixed-height readout with nothing
-  // behind it, so giving it detents would offer a gesture that reveals blank island.
-  const drawerMax = detailPresence || rosterOpen ? 'full' : 'peek';
+  // behind it, so giving it detents would offer a gesture that reveals blank island — and a
+  // minimized body is a one-line readout by the same argument, whichever tab it belongs to. One
+  // detent is also what drops the grip, so minimized is the bare bubble and nothing else.
+  const drawerMax: DrawerDetent = detailPresence
+    ? 'full'
+    : minimized || !rosterOpen
+      ? 'peek'
+      : 'full';
   const detailSharing = detailPresence
     ? (snapshot?.sharingWith ?? []).includes(detailPresence.friend.endpointId)
     : false;
@@ -483,8 +507,10 @@ export default function MapScreenBody() {
           ) : rosterOpen ? (
             <FriendsIsland
               friends={rosterFriends}
+              minimized={minimized}
               onOpenProfile={(friendId) => focusRosterFriend(friendId, 'mid')}
               onSelect={focusRosterFriend}
+              onToggleMinimize={toggleMinimize}
               pairing={
                 <BumpPairingStrip
                   error={bump.error}
@@ -500,6 +526,8 @@ export default function MapScreenBody() {
           ) : (
             <CoverageIsland
               coverage={readout.coverage}
+              minimized={minimized}
+              onToggleMinimize={toggleMinimize}
               placeName={readout.placeName}
               sectorsVisible={readout.sectorsVisible}
               signal={selfSignal}

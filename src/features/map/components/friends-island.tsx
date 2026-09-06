@@ -6,6 +6,8 @@ import type { CryptidTheme } from '@/constants/cryptid-theme';
 import { Spacing } from '@/constants/theme';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 
+import { islandBody, IslandMinimizeToggle } from './island-minimize';
+
 /** One roster row's worth of friend, already resolved from live presence. */
 export interface MapRosterFriend {
   readonly id: string;
@@ -34,6 +36,12 @@ interface FriendsIslandProps {
   /** The bump pairing readout. The island being open is what arms it. */
   readonly pairing?: ReactNode;
   readonly theme: CryptidTheme;
+  /**
+   * Collapsed to the header line, exactly as ME collapses. Owned by the screen: minimizing also
+   * has to take the drawer's detents away, which a body cannot do from in here.
+   */
+  readonly minimized: boolean;
+  readonly onToggleMinimize: () => void;
   onSelect(friendId: string): void;
   onOpenProfile(friendId: string): void;
 }
@@ -53,11 +61,18 @@ interface FriendsIslandProps {
  *
  * The card surface and the FRIENDS label both belong to `MapDrawer`, so the header leads with the
  * one fact the tab cannot carry: how many are near you.
+ *
+ * It minimizes to that header line and nothing else, on the same chevron and at the same height as
+ * ME. The roster is the panel most worth getting out of the way — it is the tallest thing the
+ * drawer carries and it sits over the map you opened it to look at — so the tab that could not be
+ * collapsed was the one that most needed to be.
  */
 export function FriendsIsland({
   friends,
   pairing,
   theme,
+  minimized,
+  onToggleMinimize,
   onSelect,
   onOpenProfile,
 }: FriendsIslandProps) {
@@ -65,40 +80,51 @@ export function FriendsIsland({
   const nearby = friends.filter((friend) => friend.nearby).length;
 
   return (
-    <View style={styles.body}>
-      <View
-        accessible
-        accessibilityRole="summary"
-        accessibilityLabel={
-          friends.length === 0
-            ? 'No friends in your atlas yet.'
-            : `${friends.length} friend${friends.length === 1 ? '' : 's'}, ${nearby} nearby.`
-        }
-        style={styles.header}
-      >
-        <View style={[styles.pip, { backgroundColor: nearby > 0 ? chrome.green : chrome.seg }]} />
-        <Text style={[styles.title, { color: chrome.ink }]}>{nearby} NEARBY</Text>
+    <View style={minimized ? islandBody.minimized : islandBody.expanded}>
+      <View style={islandBody.header}>
+        <View
+          accessible
+          accessibilityRole="summary"
+          accessibilityLabel={
+            friends.length === 0
+              ? 'No friends in your atlas yet.'
+              : `${friends.length} friend${friends.length === 1 ? '' : 's'}, ${nearby} nearby.`
+          }
+          style={islandBody.summary}
+        >
+          <View style={[styles.pip, { backgroundColor: nearby > 0 ? chrome.green : chrome.seg }]} />
+          <Text style={[styles.title, { color: chrome.ink }]}>{nearby} NEARBY</Text>
+        </View>
+        <IslandMinimizeToggle
+          minimized={minimized}
+          onToggle={onToggleMinimize}
+          subject="friends roster"
+          theme={theme}
+        />
       </View>
 
-      {pairing}
-
-      {friends.length === 0 ? (
-        <Text style={[styles.empty, { color: chrome.steel }]}>
-          No cryptids in your atlas yet. Touch two phones together while both are on this tab.
-        </Text>
-      ) : (
-        <View style={styles.list}>
-          {friends.map((friend, index) => (
-            <FriendRow
-              divider={index > 0}
-              friend={friend}
-              key={friend.id}
-              onOpenProfile={onOpenProfile}
-              onSelect={onSelect}
-              theme={theme}
-            />
-          ))}
-        </View>
+      {minimized ? null : (
+        <>
+          {pairing}
+          {friends.length === 0 ? (
+            <Text style={[styles.empty, { color: chrome.steel }]}>
+              No cryptids in your atlas yet. Touch two phones together while both are on this tab.
+            </Text>
+          ) : (
+            <View style={styles.list}>
+              {friends.map((friend, index) => (
+                <FriendRow
+                  divider={index > 0}
+                  friend={friend}
+                  key={friend.id}
+                  onOpenProfile={onOpenProfile}
+                  onSelect={onSelect}
+                  theme={theme}
+                />
+              ))}
+            </View>
+          )}
+        </>
       )}
     </View>
   );
@@ -205,17 +231,6 @@ export function compactDistance(distanceM: number | null): string | null {
 }
 
 const styles = StyleSheet.create({
-  body: {
-    paddingBottom: Spacing.one,
-    paddingHorizontal: Spacing.four,
-    paddingTop: Spacing.three,
-  },
-  header: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: Spacing.two,
-    minHeight: 32,
-  },
   title: {
     fontFamily: 'Rajdhani_700Bold',
     fontSize: 24,
