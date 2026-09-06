@@ -21,12 +21,12 @@ import type { PackedAreas, PackedGeometry } from '../tiles/packed-geometry';
  * `transit-paths.ts` pattern: no Skia, unit-testable, one parse per batch on the
  * render side).
  *
- * Like transit and unlike streets, none of this bakes into the feature mask: the
+ * Unlike streets and transit, none of this bakes into the feature mask: the
  * dot field quantizes everything it touches to the lattice, which would scatter
  * a building outline into unrelated dots. These are stroked and filled as vectors
  * over the finished region bitmap, in **region-logical px** (0 at rect.min,
- * `scaleFor(spec.zoom)` px per world unit) — the same space the ghost lattice,
- * frontier rim and transit lines use.
+ * `scaleFor(spec.zoom)` px per world unit) — the same space the ghost lattice
+ * and frontier rim use.
  *
  * Buildings are filtered by projected size, not by zoom alone: see
  * {@link BUILDING_MIN_PX}. The bounding box falls out of the projection loop, so

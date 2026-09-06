@@ -15,8 +15,12 @@ import { ROAD_VALUES } from '../core/masks';
 import { type RegionSpec } from '../core/region';
 import { roadWidthFor, type RoadLayerOptions } from '../core/road-lod';
 import { riverWidthFor } from '../core/water-lod';
+import { rgbToHex } from '../core/color';
+import { FERRY_DASH, transitColorFor, transitWidthFor } from '../core/transit-lod';
+import { TRANSIT_MODES, type MapPalette } from '../core/types';
 import type { PackedGeometry } from '../tiles/packed-geometry';
 import { buildMaskPaths } from './mask-paths';
+import { buildTransitPaths } from './transit-paths';
 
 /**
  * Build the region's feature mask on the GPU instead of the CPU.
@@ -71,6 +75,37 @@ export function buildMaskImage(
     if (rivers) canvas.drawPath(rivers, strokePaint('rgb(0,0,255)', riverWidth));
   }
 
+  return drawAsImageFromPicture(recorder.finishRecordingAsPicture(), {
+    width: spec.maskWidth,
+    height: spec.maskHeight,
+  });
+}
+
+/** RGB = mode ink, alpha = coverage; kept separate from the street/park/water mask. */
+export function buildTransitMaskImage(
+  geometry: PackedGeometry,
+  spec: RegionSpec,
+  palette: MapPalette
+): SkImage | null {
+  const paths = buildTransitPaths(geometry, spec);
+  const recorder = Skia.PictureRecorder();
+  const canvas = recorder.beginRecording(Skia.XYWHRect(0, 0, spec.maskWidth, spec.maskHeight));
+  canvas.drawColor(Skia.Color('transparent'));
+  for (const mode of TRANSIT_MODES) {
+    const svg = paths[mode];
+    const width = transitWidthFor(mode, spec.zoom);
+    if (!svg || width === null) continue;
+    const path = Skia.Path.MakeFromSVGString(svg);
+    if (!path) continue;
+    const paint = strokePaint(rgbToHex(transitColorFor(mode, palette)), width);
+    // Source-over keeps a crossing's mode color intact instead of max-blending inks.
+    paint.setBlendMode(BlendMode.SrcOver);
+    if (mode === 'ferry') {
+      const dash = Skia.PathEffect.MakeDash([...FERRY_DASH]);
+      if (dash) paint.setPathEffect(dash);
+    }
+    canvas.drawPath(path, paint);
+  }
   return drawAsImageFromPicture(recorder.finishRecordingAsPicture(), {
     width: spec.maskWidth,
     height: spec.maskHeight,
