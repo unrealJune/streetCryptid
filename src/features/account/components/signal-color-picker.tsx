@@ -1,12 +1,4 @@
-import {
-  Canvas,
-  Circle,
-  LinearGradient,
-  RadialGradient,
-  Rect,
-  SweepGradient,
-  vec,
-} from '@shopify/react-native-skia';
+import { Canvas, Circle, RadialGradient, SweepGradient, vec } from '@shopify/react-native-skia';
 import { useMemo, useState } from 'react';
 import {
   KeyboardAvoidingView,
@@ -19,7 +11,7 @@ import {
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedTextInput } from '@/components/themed-text-input';
-import { isSignalColor, signalColorInk } from '@/constants/signal-colors';
+import { fullBrightnessColor, isSignalColor, signalColorInk } from '@/constants/signal-colors';
 import { Fonts, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import {
@@ -27,15 +19,14 @@ import {
   colorWheelPosition,
   hexToHsv,
   hsvToHex,
+  SIGNAL_COLOR_VALUE,
   type HsvColor,
 } from '../core/signal-color';
 
 const WHEEL_SIZE = 232;
 const WHEEL_RADIUS = WHEEL_SIZE / 2;
-const BRIGHTNESS_HEIGHT = 28;
 const HUE_STEP = 10;
 const SATURATION_STEP = 0.05;
-const VALUE_STEP = 0.05;
 const HUE_COLORS = ['#FF0000', '#FFFF00', '#00FF00', '#00FFFF', '#0000FF', '#FF00FF', '#FF0000'];
 
 interface SignalColorPickerProps {
@@ -43,8 +34,8 @@ interface SignalColorPickerProps {
   onChange(color: string): void;
 }
 
-function changedHsv(hsv: HsvColor, changes: Partial<HsvColor>): string {
-  return hsvToHex({ ...hsv, ...changes });
+function changedHsv(hsv: HsvColor, changes: Partial<Omit<HsvColor, 'value'>>): string {
+  return hsvToHex({ ...hsv, ...changes, value: SIGNAL_COLOR_VALUE });
 }
 
 export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
@@ -53,7 +44,6 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
   const [hexInput, setHexInput] = useState({ color: normalizedColor, value: normalizedColor });
   const hsv = useMemo(() => hexToHsv(color), [color]);
   const marker = colorWheelPosition(hsv, WHEEL_SIZE);
-  const fullBrightnessColor = hsvToHex({ ...hsv, value: 1 });
 
   if (hexInput.color !== normalizedColor) {
     setHexInput({ color: normalizedColor, value: normalizedColor });
@@ -61,11 +51,7 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
 
   const changeWheel = (event: GestureResponderEvent): void => {
     const { locationX, locationY } = event.nativeEvent;
-    onChange(hsvToHex(colorAtWheelPosition(locationX, locationY, WHEEL_SIZE, hsv.value)));
-  };
-
-  const changeBrightness = (event: GestureResponderEvent): void => {
-    onChange(changedHsv(hsv, { value: event.nativeEvent.locationX / WHEEL_SIZE }));
+    onChange(hsvToHex(colorAtWheelPosition(locationX, locationY, WHEEL_SIZE)));
   };
 
   const changeWheelWithAccessibility = (event: AccessibilityActionEvent): void => {
@@ -83,11 +69,6 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
         onChange(changedHsv(hsv, { saturation: hsv.saturation - SATURATION_STEP }));
         break;
     }
-  };
-
-  const changeBrightnessWithAccessibility = (event: AccessibilityActionEvent): void => {
-    const direction = event.nativeEvent.actionName === 'increment' ? 1 : -1;
-    onChange(changedHsv(hsv, { value: hsv.value + direction * VALUE_STEP }));
   };
 
   return (
@@ -127,13 +108,6 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
             />
           </Circle>
           <Circle
-            color="#000000"
-            cx={WHEEL_RADIUS}
-            cy={WHEEL_RADIUS}
-            opacity={1 - hsv.value}
-            r={WHEEL_RADIUS}
-          />
-          <Circle
             color="#07131F"
             cx={marker.x}
             cy={marker.y}
@@ -152,51 +126,9 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
         </Canvas>
       </View>
 
-      <View style={styles.brightnessCopy}>
-        <ThemedText style={styles.label}>Brightness</ThemedText>
-        <ThemedText type="code" themeColor="textSecondary">
-          {Math.round(hsv.value * 100)}%
-        </ThemedText>
-      </View>
-      <View
-        accessibilityActions={[
-          { name: 'increment', label: 'Increase brightness' },
-          { name: 'decrement', label: 'Decrease brightness' },
-        ]}
-        accessibilityLabel="Signal color brightness"
-        accessibilityRole="adjustable"
-        accessibilityValue={{ min: 0, max: 100, now: Math.round(hsv.value * 100) }}
-        onAccessibilityAction={changeBrightnessWithAccessibility}
-        onMoveShouldSetResponder={() => true}
-        onResponderGrant={changeBrightness}
-        onResponderMove={changeBrightness}
-        onStartShouldSetResponder={() => true}
-        style={[styles.brightness, { borderColor: theme.backgroundSelected }]}
-      >
-        <Canvas pointerEvents="none" style={styles.canvas}>
-          <Rect height={BRIGHTNESS_HEIGHT} width={WHEEL_SIZE} x={0} y={0}>
-            <LinearGradient
-              colors={['#000000', fullBrightnessColor]}
-              end={vec(WHEEL_SIZE, 0)}
-              start={vec(0, 0)}
-            />
-          </Rect>
-          <Rect
-            color="#07131F"
-            height={BRIGHTNESS_HEIGHT}
-            width={5}
-            x={hsv.value * (WHEEL_SIZE - 5)}
-            y={0}
-          />
-          <Rect
-            color="#FFFFFF"
-            height={BRIGHTNESS_HEIGHT}
-            width={2}
-            x={hsv.value * (WHEEL_SIZE - 2)}
-            y={0}
-          />
-        </Canvas>
-      </View>
+      <ThemedText type="small" themeColor="textSecondary" style={styles.lockNote}>
+        Brightness is locked at 100% so signals stay legible on the map.
+      </ThemedText>
 
       <View
         style={[
@@ -220,7 +152,7 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
               .replace(/[^0-9a-f]/gi, '')
               .slice(0, 6)}`.toUpperCase();
             setHexInput({ color: normalizedColor, value: next });
-            if (isSignalColor(next)) onChange(next);
+            if (isSignalColor(next)) onChange(fullBrightnessColor(next));
           }}
           selectTextOnFocus
           spellCheck={false}
@@ -248,22 +180,8 @@ const styles = StyleSheet.create({
   canvas: {
     flex: 1,
   },
-  brightnessCopy: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    width: WHEEL_SIZE,
-  },
-  label: {
-    fontSize: 14,
-    fontWeight: '700',
-    lineHeight: 20,
-  },
-  brightness: {
-    borderRadius: BRIGHTNESS_HEIGHT / 2,
-    borderWidth: StyleSheet.hairlineWidth,
-    height: BRIGHTNESS_HEIGHT,
-    overflow: 'hidden',
+  lockNote: {
+    textAlign: 'center',
     width: WHEEL_SIZE,
   },
   currentColor: {

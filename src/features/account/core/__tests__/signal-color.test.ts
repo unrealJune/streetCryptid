@@ -9,21 +9,26 @@ describe('signal color picker', () => {
   );
 
   it('maps wheel edges to hue and full saturation', () => {
-    expect(colorAtWheelPosition(200, 100, 200, 0.75)).toEqual({
-      hue: 0,
-      saturation: 1,
-      value: 0.75,
-    });
-    expect(colorAtWheelPosition(100, 200, 200, 1)).toEqual({
-      hue: 90,
-      saturation: 1,
-      value: 1,
-    });
+    expect(colorAtWheelPosition(200, 100, 200)).toEqual({ hue: 0, saturation: 1, value: 1 });
+    expect(colorAtWheelPosition(100, 200, 200)).toEqual({ hue: 90, saturation: 1, value: 1 });
   });
 
   it('clamps touches outside the wheel', () => {
-    expect(colorAtWheelPosition(400, 100, 200, 2).saturation).toBe(1);
-    expect(colorAtWheelPosition(400, 100, 200, 2).value).toBe(1);
+    expect(colorAtWheelPosition(400, 100, 200).saturation).toBe(1);
+  });
+
+  it('has no brightness axis: the wheel centre is white, never grey or black', () => {
+    // Brightness is locked at 100%, so every point on the wheel comes back at
+    // value 1 no matter where it was touched.
+    for (const [x, y] of [
+      [100, 100],
+      [0, 0],
+      [199, 12],
+      [55, 170],
+    ]) {
+      expect(colorAtWheelPosition(x, y, 200).value).toBe(1);
+    }
+    expect(hsvToHex(colorAtWheelPosition(100, 100, 200))).toBe('#FFFFFF');
   });
 
   it('positions a selected color on the wheel', () => {

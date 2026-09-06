@@ -18,9 +18,7 @@ import { useTheme } from '@/hooks/use-theme';
 import type { GeneratedCryptid } from '../core/cryptid-generator';
 import {
   createCryptidProfile,
-  CRYPTID_PRESETS,
   DEFAULT_SIGNAL_COLOR,
-  defaultCryptidProfileDraft,
   findCryptidPreset,
   handleInputValue,
   MAX_SIGIL_COLUMNS,
@@ -29,10 +27,10 @@ import {
   profileToDraft,
   sigilMeasurements,
   validateCryptidProfileFields,
-  type CryptidPresetId,
   type CryptidProfile,
   type CryptidProfileDraft,
 } from '../core/profile';
+import { randomPersona, type RandomPersona } from '../core/random-persona';
 import { CryptidAvatar } from './cryptid-avatar';
 import { CryptidGeneratorDialog } from './cryptid-generator-dialog';
 
@@ -49,7 +47,6 @@ const SignalColorPicker = lazy(() =>
 
 const AUTOSAVE_DELAY_MS = 450;
 const PROFILE_MAX_WIDTH = 640;
-const DEFAULT_CUSTOM_NAME = 'Custom Cryptid';
 
 type ActiveEditor = 'icon' | 'signal' | null;
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
@@ -75,6 +72,23 @@ function profileKey(profile: CryptidProfile): string {
   return JSON.stringify(profile);
 }
 
+/** The three fields a roll of the dice replaces, together. */
+type PersonaFields = RandomPersona;
+
+/**
+ * First run starts on a rolled persona rather than an empty form: the point of the
+ * randomizer is that you are handed an identity, so the very first thing you see
+ * is one. Older profiles that stored a `presetId` are unpacked into the same
+ * editable fields, since the preset grid they came from is gone.
+ */
+function startingDraft(profile: CryptidProfile | null | undefined): CryptidProfileDraft {
+  if (!profile) return { handle: '', presetId: null, ...randomPersona() };
+  const draft = profileToDraft(profile);
+  const preset = findCryptidPreset(draft.presetId);
+  if (!preset) return draft;
+  return { ...draft, cryptidName: preset.name, sigil: preset.art, presetId: null };
+}
+
 export function CryptidProfileEditor({
   mode,
   initialProfile,
@@ -86,18 +100,12 @@ export function CryptidProfileEditor({
   const scheme = useColorScheme();
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
   const insets = useSafeAreaInsets();
-  const [initialDraft] = useState<CryptidProfileDraft>(() =>
-    initialProfile ? profileToDraft(initialProfile) : defaultCryptidProfileDraft()
-  );
-  const initialPreset = findCryptidPreset(initialDraft.presetId);
+  const [initialDraft] = useState<CryptidProfileDraft>(() => startingDraft(initialProfile));
   const initialColor = initialDraft.color || DEFAULT_SIGNAL_COLOR;
 
   const [handle, setHandle] = useState(handleInputValue(initialDraft.handle));
-  const [selectedPresetId, setSelectedPresetId] = useState<CryptidPresetId | null>(
-    initialPreset?.id ?? null
-  );
-  const [customName, setCustomName] = useState(initialPreset ? '' : initialDraft.cryptidName);
-  const [customArt, setCustomArt] = useState(initialPreset ? '' : initialDraft.sigil);
+  const [cryptidName, setCryptidName] = useState(initialDraft.cryptidName);
+  const [sigil, setSigil] = useState(initialDraft.sigil);
   const [color, setColor] = useState(initialColor);
   // Nothing opens by default: username is always visible now, and onboarding used
   // to open it here.
@@ -109,13 +117,15 @@ export function CryptidProfileEditor({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [finishing, setFinishing] = useState(false);
   const [generatorOpen, setGeneratorOpen] = useState(false);
+  // Set only in `edit` mode, and only between a roll and the decision about it:
+  // holds the persona the roll displaced, so Revert has something to go back to.
+  // While it is set the profile does NOT autosave — an unconfirmed roll must not
+  // reach storage or friends' maps.
+  const [displacedPersona, setDisplacedPersona] = useState<PersonaFields | null>(null);
 
-  const selectedPreset = findCryptidPreset(selectedPresetId);
-  const cryptidName = selectedPreset?.name ?? customName;
-  const sigil = selectedPreset?.art ?? customArt;
   const draft = useMemo<CryptidProfileDraft>(
-    () => ({ handle, cryptidName, sigil, color, presetId: selectedPresetId }),
-    [color, cryptidName, handle, selectedPresetId, sigil]
+    () => ({ handle, cryptidName, sigil, color, presetId: null }),
+    [color, cryptidName, handle, sigil]
   );
   const fieldIssues = useMemo(() => validateCryptidProfileFields(draft), [draft]);
   const hasIssues = Object.values(fieldIssues).some((issues) => issues.length > 0);
@@ -145,6 +155,7 @@ export function CryptidProfileEditor({
   const mountedRef = useRef(true);
   const onSaveRef = useRef(onSave);
   const latestValidProfileRef = useRef(validProfile);
+  const displacedPersonaRef = useRef(displacedPersona);
   const lastSavedKeyRef = useRef(initialProfile ? profileKey(initialProfile) : null);
   const desiredSaveRef = useRef<QueuedProfile | null>(null);
   const activeSaveRef = useRef<Promise<void> | null>(null);
@@ -157,6 +168,10 @@ export function CryptidProfileEditor({
   useEffect(() => {
     latestValidProfileRef.current = validProfile;
   }, [validProfile]);
+
+  useEffect(() => {
+    displacedPersonaRef.current = displacedPersona;
+  }, [displacedPersona]);
 
   const drainSaveQueue = useCallback((): Promise<void> => {
     if (activeSaveRef.current) return activeSaveRef.current;
@@ -218,7 +233,8 @@ export function CryptidProfileEditor({
   useEffect(() => {
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
 
-    if (!validProfile) {
+    // An unconfirmed roll is held back until Keep (or Done) accepts it.
+    if (!validProfile || displacedPersona) {
       desiredSaveRef.current = null;
       return;
     }
@@ -236,13 +252,16 @@ export function CryptidProfileEditor({
     return () => {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
-  }, [requestProfileSave, validProfile]);
+  }, [displacedPersona, requestProfileSave, validProfile]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+      // Leaving without deciding discards the roll: dismissing the sheet is a
+      // revert, not a silent Keep.
+      if (displacedPersonaRef.current) return;
       const profile = latestValidProfileRef.current;
       if (profile) void requestProfileSave(profile).catch(() => undefined);
     };
@@ -268,6 +287,9 @@ export function CryptidProfileEditor({
       return;
     }
 
+    // Done is a decision: it keeps whatever is on screen, roll included.
+    setDisplacedPersona(null);
+    displacedPersonaRef.current = null;
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     setFinishing(true);
     try {
@@ -280,25 +302,41 @@ export function CryptidProfileEditor({
     }
   };
 
-  const choosePreset = (presetId: CryptidPresetId | null): void => {
+  const applyPersona = (persona: PersonaFields | Omit<PersonaFields, 'color'>): void => {
     setSaveError(null);
     setSaveStatus('idle');
-    setSelectedPresetId(presetId);
-    if (presetId === null) {
-      setCustomName((current) => current.trim() || DEFAULT_CUSTOM_NAME);
-      setCustomNameTouched(false);
-      setCustomArtTouched(false);
+    setCryptidName(persona.cryptidName);
+    setSigil(persona.sigil);
+    if ('color' in persona) setColor(persona.color);
+    setCustomNameTouched(false);
+    setCustomArtTouched(false);
+  };
+
+  /**
+   * Rolls a whole persona — cryptid, title, and signal color. In `edit` mode the
+   * previous one is parked in `displacedPersona` first, which both freezes
+   * autosave and puts the Keep/Revert bar on screen. Rolling repeatedly keeps the
+   * ORIGINAL persona parked, so Revert always lands where you started rather than
+   * on the previous roll.
+   */
+  const rollPersona = (): void => {
+    const rolled = randomPersona({ avoid: { cryptidName } });
+    if (mode === 'edit') {
+      setDisplacedPersona((current) => current ?? { cryptidName, sigil, color });
     }
+    applyPersona(rolled);
+  };
+
+  const keepRolledPersona = (): void => setDisplacedPersona(null);
+
+  const revertRolledPersona = (): void => {
+    if (!displacedPersona) return;
+    applyPersona(displacedPersona);
+    setDisplacedPersona(null);
   };
 
   const useGeneratedCryptid = (generated: GeneratedCryptid): void => {
-    setSaveError(null);
-    setSaveStatus('idle');
-    setSelectedPresetId(null);
-    setCustomName(generated.name);
-    setCustomArt(generated.sigil);
-    setCustomNameTouched(false);
-    setCustomArtTouched(false);
+    applyPersona({ cryptidName: generated.name, sigil: generated.sigil });
     setActiveEditor('icon');
     setGeneratorOpen(false);
   };
@@ -418,6 +456,75 @@ export function CryptidProfileEditor({
                   {bareHandle ? `@${bareHandle}` : 'Not set'}
                 </ThemedText>
               </Pressable>
+
+              <Pressable
+                accessibilityHint="Replaces the cryptid, its title, and your signal color"
+                accessibilityLabel="Randomize persona"
+                accessibilityRole="button"
+                testID="randomize-persona"
+                onPress={rollPersona}
+                style={({ pressed }) => [
+                  styles.rollButton,
+                  { backgroundColor: color, opacity: pressed ? 0.72 : 1 },
+                ]}
+              >
+                <ThemedText style={[styles.rollGlyph, { color: signalColorInk(color) }]}>
+                  {'(*)'}
+                </ThemedText>
+                <ThemedText style={[styles.rollLabel, { color: signalColorInk(color) }]}>
+                  {displacedPersona ? 'Roll again' : 'Randomize'}
+                </ThemedText>
+              </Pressable>
+              <ThemedText type="small" themeColor="textSecondary" style={styles.rollHint}>
+                Rolls a cryptid, a title, and a color. Everything stays editable.
+              </ThemedText>
+
+              {displacedPersona ? (
+                <View
+                  accessibilityLiveRegion="polite"
+                  style={[
+                    styles.rollDecision,
+                    { backgroundColor: theme.background, borderColor: chrome.amber },
+                  ]}
+                >
+                  <ThemedText type="smallBold">Not saved yet</ThemedText>
+                  <ThemedText type="small" themeColor="textSecondary">
+                    {`Keep this persona, or go back to ${displacedPersona.cryptidName.trim() || 'your previous one'}.`}
+                  </ThemedText>
+                  <View style={styles.rollDecisionActions}>
+                    <Pressable
+                      accessibilityLabel="Keep the new persona"
+                      accessibilityRole="button"
+                      testID="keep-rolled-persona"
+                      onPress={keepRolledPersona}
+                      style={({ pressed }) => [
+                        styles.rollDecisionButton,
+                        { backgroundColor: color, borderColor: color, opacity: pressed ? 0.72 : 1 },
+                      ]}
+                    >
+                      <ThemedText type="smallBold" style={{ color: signalColorInk(color) }}>
+                        Keep it
+                      </ThemedText>
+                    </Pressable>
+                    <Pressable
+                      accessibilityLabel="Revert to the previous persona"
+                      accessibilityRole="button"
+                      testID="revert-rolled-persona"
+                      onPress={revertRolledPersona}
+                      style={({ pressed }) => [
+                        styles.rollDecisionButton,
+                        {
+                          backgroundColor: theme.backgroundElement,
+                          borderColor: theme.backgroundSelected,
+                          opacity: pressed ? 0.72 : 1,
+                        },
+                      ]}
+                    >
+                      <ThemedText type="smallBold">Revert</ThemedText>
+                    </Pressable>
+                  </View>
+                </View>
+              ) : null}
             </View>
 
             <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
@@ -476,37 +583,15 @@ export function CryptidProfileEditor({
 
             {activeEditor === 'icon' ? (
               <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
-                <ThemedText style={styles.fieldLabel}>Choose an icon</ThemedText>
-                <View accessibilityLabel="Profile icon choices" style={styles.presetGrid}>
-                  {CRYPTID_PRESETS.map((preset) => {
-                    const selected = selectedPresetId === preset.id;
-                    return (
-                      <Pressable
-                        accessibilityLabel={preset.name}
-                        accessibilityRole="radio"
-                        accessibilityState={{ checked: selected }}
-                        key={preset.id}
-                        onPress={() => choosePreset(preset.id)}
-                        style={({ pressed }) => [
-                          styles.presetButton,
-                          {
-                            backgroundColor: selected ? `${color}14` : theme.backgroundElement,
-                            borderColor: selected ? color : theme.backgroundSelected,
-                            opacity: pressed ? 0.62 : 1,
-                          },
-                        ]}
-                      >
-                        <CryptidAvatar art={preset.art} name={preset.name} color={color} />
-                      </Pressable>
-                    );
-                  })}
+                <ThemedText style={styles.fieldLabel}>Make an icon</ThemedText>
+                <View style={styles.iconActions}>
                   <Pressable
-                    accessibilityLabel="Generate a profile icon"
+                    accessibilityHint="Rolls a new cryptid, title, and signal color"
+                    accessibilityLabel="Randomize persona"
                     accessibilityRole="button"
-                    onPress={() => setGeneratorOpen(true)}
+                    onPress={rollPersona}
                     style={({ pressed }) => [
-                      styles.presetButton,
-                      styles.customButton,
+                      styles.iconActionButton,
                       {
                         backgroundColor: theme.backgroundElement,
                         borderColor: theme.backgroundSelected,
@@ -514,111 +599,110 @@ export function CryptidProfileEditor({
                       },
                     ]}
                   >
-                    <ThemedText style={[styles.generatorGlyph, { color }]}>{'{*}'}</ThemedText>
-                    <ThemedText type="small" style={styles.customLabel}>
-                      Generate
+                    <ThemedText style={[styles.iconActionGlyph, { color }]}>{'(*)'}</ThemedText>
+                    <ThemedText type="small" style={styles.iconActionLabel}>
+                      Random
                     </ThemedText>
                   </Pressable>
                   <Pressable
-                    accessibilityLabel="Custom profile icon"
-                    accessibilityRole="radio"
-                    accessibilityState={{ checked: selectedPresetId === null }}
-                    onPress={() => choosePreset(null)}
+                    accessibilityHint="Draws an icon from a description, on this phone"
+                    accessibilityLabel="Generate a profile icon"
+                    accessibilityRole="button"
+                    onPress={() => setGeneratorOpen(true)}
                     style={({ pressed }) => [
-                      styles.presetButton,
-                      styles.customButton,
+                      styles.iconActionButton,
                       {
-                        backgroundColor:
-                          selectedPresetId === null ? `${color}14` : theme.backgroundElement,
-                        borderColor: selectedPresetId === null ? color : theme.backgroundSelected,
+                        backgroundColor: theme.backgroundElement,
+                        borderColor: theme.backgroundSelected,
                         opacity: pressed ? 0.62 : 1,
                       },
                     ]}
                   >
-                    <ThemedText style={[styles.customGlyph, { color }]}>+</ThemedText>
-                    <ThemedText type="small" style={styles.customLabel}>
-                      Custom
+                    <ThemedText style={[styles.iconActionGlyph, { color }]}>{'{*}'}</ThemedText>
+                    <ThemedText type="small" style={styles.iconActionLabel}>
+                      Generate
                     </ThemedText>
                   </Pressable>
                 </View>
 
-                {selectedPresetId === null ? (
-                  <View style={styles.customFields}>
-                    <ThemedText style={styles.fieldLabel}>Icon name</ThemedText>
-                    <TextInput
-                      accessibilityLabel="Custom profile icon name"
-                      autoCapitalize="words"
-                      maxLength={24}
-                      onBlur={() => setCustomNameTouched(true)}
-                      onChangeText={(value) => {
-                        setSaveError(null);
-                        setSaveStatus('idle');
-                        setCustomNameTouched(true);
-                        setCustomName(value);
-                      }}
-                      placeholder="Icon name"
-                      placeholderTextColor={theme.textSecondary}
-                      selectionColor={color}
-                      style={[
-                        styles.textInput,
-                        {
-                          backgroundColor: theme.backgroundElement,
-                          borderColor:
-                            customNameErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
-                          color: theme.text,
-                        },
-                      ]}
-                      value={customName}
-                    />
-                    <FieldNote
-                      errorColor={chrome.amberDark}
-                      issues={customNameErrors}
-                      hint="Use 1-24 characters."
-                    />
+                {/* Custom is not a mode any more — the fields below ARE the custom
+                    option, and they stay open so a rolled or generated icon can be
+                    edited straight away. */}
+                <View style={styles.customFields}>
+                  <ThemedText style={styles.fieldLabel}>Icon name</ThemedText>
+                  <TextInput
+                    accessibilityLabel="Custom profile icon name"
+                    autoCapitalize="words"
+                    maxLength={24}
+                    onBlur={() => setCustomNameTouched(true)}
+                    onChangeText={(value) => {
+                      setSaveError(null);
+                      setSaveStatus('idle');
+                      setCustomNameTouched(true);
+                      setCryptidName(value);
+                    }}
+                    placeholder="Icon name"
+                    placeholderTextColor={theme.textSecondary}
+                    selectionColor={color}
+                    style={[
+                      styles.textInput,
+                      {
+                        backgroundColor: theme.backgroundElement,
+                        borderColor:
+                          customNameErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
+                        color: theme.text,
+                      },
+                    ]}
+                    value={cryptidName}
+                  />
+                  <FieldNote
+                    errorColor={chrome.amberDark}
+                    issues={customNameErrors}
+                    hint="Use 1-24 characters."
+                  />
 
-                    <View style={styles.asciiLabelRow}>
-                      <ThemedText style={styles.fieldLabel}>ASCII art</ThemedText>
-                      <ThemedText type="code" themeColor="textSecondary">
-                        {measurements.lines}/{MAX_SIGIL_LINES} lines · {measurements.columns}/
-                        {MAX_SIGIL_COLUMNS} columns
-                      </ThemedText>
-                    </View>
-                    <TextInput
-                      accessibilityLabel="Custom ASCII profile icon"
-                      allowFontScaling={false}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      multiline
-                      onBlur={() => setCustomArtTouched(true)}
-                      onChangeText={(value) => {
-                        setSaveError(null);
-                        setSaveStatus('idle');
-                        setCustomArtTouched(true);
-                        setCustomArt(normalizeAsciiArt(value));
-                      }}
-                      placeholder={'Enter ASCII art.\nSpaces and line breaks are preserved.'}
-                      placeholderTextColor={theme.textSecondary}
-                      selectionColor={color}
-                      spellCheck={false}
-                      style={[
-                        styles.asciiInput,
-                        {
-                          backgroundColor: theme.backgroundElement,
-                          borderColor:
-                            customArtErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
-                          color,
-                        },
-                      ]}
-                      textAlignVertical="top"
-                      value={customArt}
-                    />
-                    <FieldNote
-                      errorColor={chrome.amberDark}
-                      issues={customArtErrors}
-                      hint="ASCII characters only. Spacing and line breaks are preserved."
-                    />
+                  <View style={styles.asciiLabelRow}>
+                    <ThemedText style={styles.fieldLabel}>ASCII art</ThemedText>
+                    <ThemedText type="code" themeColor="textSecondary">
+                      {measurements.lines}/{MAX_SIGIL_LINES} lines · {measurements.columns}/
+                      {MAX_SIGIL_COLUMNS} columns
+                    </ThemedText>
                   </View>
-                ) : null}
+                  <TextInput
+                    accessibilityLabel="Custom ASCII profile icon"
+                    allowFontScaling={false}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    multiline
+                    onBlur={() => setCustomArtTouched(true)}
+                    onChangeText={(value) => {
+                      setSaveError(null);
+                      setSaveStatus('idle');
+                      setCustomArtTouched(true);
+                      setSigil(normalizeAsciiArt(value));
+                    }}
+                    placeholder={'Enter ASCII art.\nSpaces and line breaks are preserved.'}
+                    placeholderTextColor={theme.textSecondary}
+                    selectionColor={color}
+                    spellCheck={false}
+                    style={[
+                      styles.asciiInput,
+                      {
+                        backgroundColor: theme.backgroundElement,
+                        borderColor:
+                          customArtErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
+                        color,
+                      },
+                    ]}
+                    textAlignVertical="top"
+                    value={sigil}
+                  />
+                  <FieldNote
+                    errorColor={chrome.amberDark}
+                    issues={customArtErrors}
+                    hint="ASCII characters only. Spacing and line breaks are preserved."
+                  />
+                </View>
               </View>
             ) : null}
 
@@ -873,6 +957,54 @@ const styles = StyleSheet.create({
     paddingBottom: 2,
     textAlign: 'center',
   },
+  rollButton: {
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    borderRadius: 12,
+    flexDirection: 'row',
+    gap: Spacing.two,
+    justifyContent: 'center',
+    minHeight: 54,
+    paddingHorizontal: Spacing.three,
+  },
+  rollGlyph: {
+    fontFamily: Fonts.mono,
+    fontSize: 18,
+    fontWeight: '700',
+    lineHeight: 24,
+  },
+  rollLabel: {
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+    lineHeight: 22,
+  },
+  rollHint: {
+    textAlign: 'center',
+  },
+  rollDecision: {
+    alignSelf: 'stretch',
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    gap: Spacing.one,
+    padding: Spacing.three,
+  },
+  rollDecisionActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.two,
+    paddingTop: Spacing.one,
+  },
+  rollDecisionButton: {
+    alignItems: 'center',
+    borderRadius: 999,
+    borderWidth: 1,
+    flexBasis: 120,
+    flexGrow: 1,
+    justifyContent: 'center',
+    minHeight: 44,
+    paddingHorizontal: Spacing.three,
+  },
   divider: {
     height: StyleSheet.hairlineWidth,
     width: '100%',
@@ -928,37 +1060,30 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.one,
     paddingVertical: Spacing.two,
   },
-  presetGrid: {
+  iconActions: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: Spacing.two,
   },
-  presetButton: {
+  iconActionButton: {
+    alignItems: 'center',
     borderRadius: 12,
     borderWidth: 1,
-    flexBasis: '30%',
+    flexBasis: '46%',
     flexGrow: 1,
+    gap: Spacing.one,
     justifyContent: 'center',
-    minHeight: 104,
-    minWidth: 96,
+    minHeight: 88,
+    minWidth: 120,
     padding: Spacing.two,
   },
-  customButton: {
-    alignItems: 'center',
-    gap: Spacing.one,
-  },
-  customGlyph: {
-    fontSize: 30,
-    fontWeight: '400',
-    lineHeight: 34,
-  },
-  generatorGlyph: {
+  iconActionGlyph: {
     fontFamily: Fonts.mono,
     fontSize: 24,
     fontWeight: '600',
     lineHeight: 34,
   },
-  customLabel: {
+  iconActionLabel: {
     fontWeight: '700',
   },
   customFields: {

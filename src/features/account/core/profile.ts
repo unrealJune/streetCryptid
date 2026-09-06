@@ -1,7 +1,16 @@
-import { DEFAULT_SIGNAL_COLOR, isSignalColor } from '@/constants/signal-colors';
+import {
+  DEFAULT_SIGNAL_COLOR,
+  fullBrightnessColor,
+  isSignalColor,
+} from '@/constants/signal-colors';
 
 const art = (...lines: string[]): string => lines.join('\n');
 
+/**
+ * Legacy icon presets. The editor no longer offers these — a persona is rolled or
+ * hand-written now — but profiles saved before that still carry a `presetId`, and
+ * `parseCryptidProfile` resolves it so those icons keep rendering.
+ */
 export const CRYPTID_PRESETS = [
   {
     id: 'mothman',
@@ -182,7 +191,9 @@ export function createCryptidProfile(draft: CryptidProfileDraft): CryptidProfile
     handle: normalizeHandle(draft.handle),
     cryptidName: draft.cryptidName.trim(),
     sigil: normalizeAsciiArt(draft.sigil),
-    color: draft.color.trim().toUpperCase(),
+    // Brightness is not a stored degree of freedom: anything read back out of
+    // storage or typed in by hand is pulled up to value = 1 like everything else.
+    color: fullBrightnessColor(draft.color.trim().toUpperCase()),
     presetId: findCryptidPreset(draft.presetId)?.id ?? null,
   };
   const issues = validateCryptidProfile(normalized);
