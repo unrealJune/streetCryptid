@@ -5,6 +5,7 @@ import {
 } from '../core/cell-field';
 import { H3_DISPLAY_RES } from '../core/cell-ladder';
 import type { ExplorationIndex } from '../core/exploration-index';
+import { createExplorationRollup, type ExplorationRollup } from '../core/exploration-rollup';
 import type { H3Grid } from '../core/h3-grid';
 import { selectMapLabels, type MapLabel } from '../core/map-labels';
 import { computeRegionSpec, shouldPrefetchRegion, type RegionSpec } from '../core/region';
@@ -119,6 +120,14 @@ export class MapEngine {
   private readonly dataZooms: DataZoomRange;
   private readonly onTiming?: (timing: RegionTiming) => void;
 
+  /**
+   * Coarse-rung occupancy, owned for the engine's lifetime so its per-resolution
+   * ancestor sets are built once and then extended by newly explored cells only
+   * — not re-derived on every region build. Assigned in the constructor, not as a
+   * field initializer: those run before the constructor body sets `this.grid`.
+   */
+  private readonly rollup: ExplorationRollup;
+
   private busy = false;
   private queued: {
     request: RegionRequest;
@@ -134,6 +143,7 @@ export class MapEngine {
     this.grid = options.grid;
     this.dataZooms = options.dataZooms;
     this.onTiming = options.onTiming;
+    this.rollup = createExplorationRollup(options.grid);
   }
 
   get lastRegion(): MapRegion | null {
@@ -324,7 +334,8 @@ export class MapEngine {
             this.grid,
             spec.rect,
             spec.cellRes,
-            request.exploration
+            request.exploration,
+            this.rollup
           );
         } catch (error) {
           if (this.last) return this.last;

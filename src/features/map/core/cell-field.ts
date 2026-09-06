@@ -1,6 +1,6 @@
-import { H3_DISPLAY_RES } from './cell-ladder';
 import type { CellIndex, H3Grid } from './h3-grid';
 import type { ExplorationIndex } from './exploration-index';
+import { createExplorationRollup, type ExplorationRollup } from './exploration-rollup';
 import type { WorldPoint, WorldRect } from './types';
 
 /**
@@ -14,7 +14,11 @@ export interface FieldCell {
   /** Cell outline, lng-unwrapped world coords (from {@link H3Grid.boundaryWorld}). */
   readonly boundary: readonly WorldPoint[];
   readonly center: WorldPoint;
-  /** Explored fraction 0 or 1 at the fixed display resolution. */
+  /**
+   * Explored occupancy, 0 or 1. At the display resolution that is the recorded
+   * truth; on the coarser ladder rungs it is presence rolled up from it (see
+   * `exploration-rollup.ts`), which is why it stays binary either way.
+   */
   readonly fraction: number;
   /** Discovered cell bordering undiscovered ground — amber rim. */
   readonly frontier: boolean;
@@ -47,38 +51,46 @@ export function cellHash(cell: CellIndex): number {
 
 /**
  * Enumerate and annotate the exploration cells of one region.
+ *
+ * `rollup` supplies occupancy on the coarse ladder rungs. It is stateful (it
+ * caches ancestor sets across builds), so real callers pass the ONE instance
+ * their session owns; the default exists for tests and one-shot tooling, and is
+ * correct but rebuilds its sets every call.
  */
 export function buildCellField(
   grid: H3Grid,
   rect: WorldRect,
   res: number,
-  index: ExplorationIndex
+  index: ExplorationIndex,
+  rollup: ExplorationRollup = createExplorationRollup(grid)
 ): RegionCellField {
-  return buildCellFieldWithTiming(grid, rect, res, index).field;
+  return buildCellFieldWithTiming(grid, rect, res, index, rollup).field;
 }
 
 export function buildCellFieldWithTiming(
   grid: H3Grid,
   rect: WorldRect,
   res: number,
-  index: ExplorationIndex
+  index: ExplorationIndex,
+  rollup: ExplorationRollup = createExplorationRollup(grid)
 ): { readonly field: RegionCellField; readonly timing: CellFieldTiming } {
   const enumerateStarted = now();
   const ids = grid.cellsInRect(rect, res);
   const centersStarted = now();
-  return buildFromIds(grid, rect, res, index, ids, enumerateStarted, centersStarted);
+  return buildFromIds(grid, rect, res, index, rollup, ids, enumerateStarted, centersStarted);
 }
 
 export async function buildCellFieldWithTimingAsync(
   grid: H3Grid,
   rect: WorldRect,
   res: number,
-  index: ExplorationIndex
+  index: ExplorationIndex,
+  rollup: ExplorationRollup = createExplorationRollup(grid)
 ): Promise<{ readonly field: RegionCellField; readonly timing: CellFieldTiming }> {
   const enumerateStarted = now();
   const ids = await grid.cellsInRectAsync(rect, res);
   const centersStarted = now();
-  return buildFromIds(grid, rect, res, index, ids, enumerateStarted, centersStarted);
+  return buildFromIds(grid, rect, res, index, rollup, ids, enumerateStarted, centersStarted);
 }
 
 function buildFromIds(
@@ -86,6 +98,7 @@ function buildFromIds(
   rect: WorldRect,
   res: number,
   index: ExplorationIndex,
+  rollup: ExplorationRollup,
   ids: readonly CellIndex[],
   enumerateStarted: number,
   centersStarted: number
@@ -103,11 +116,11 @@ function buildFromIds(
   const annotateStarted = now();
 
   const cells = ids.map((id, i): FieldCell => {
-    const fraction = index.fractionAt(id);
+    const fraction = rollup.occupancyAt(index, id, res);
+    // The rim follows the ladder: at every rung it outlines discovered ground
+    // that borders undiscovered ground, so a bloomed territory keeps its edge.
     const frontier =
-      res === H3_DISPLAY_RES &&
-      fraction >= 1 &&
-      grid.neighborsOf(id).some((n) => !index.cells.has(n));
+      fraction >= 1 && grid.neighborsOf(id).some((n) => rollup.occupancyAt(index, n, res) < 1);
     return {
       cell: id,
       boundary: grid.boundaryWorld(id),

@@ -1,9 +1,9 @@
 import { visibleWorldRect } from '../camera';
-import { resForZoom } from '../cell-ladder';
+import { H3_DISPLAY_RES, H3_MIN_RENDER_ZOOM, resForZoom } from '../cell-ladder';
 import { createExplorationIndex } from '../exploration-index';
 import { createH3Grid, realH3 } from '../h3-grid';
 import { latLonToWorld } from '../mercator';
-import { coverageInView, nearestPlaceName } from '../readout';
+import { coverageInView, coverageMeasurable, nearestPlaceName } from '../readout';
 import type { CameraState, Place, Viewport, WorldPoint } from '../types';
 
 describe('nearestPlaceName', () => {
@@ -64,9 +64,21 @@ describe('coverageInView', () => {
     expect(cov).toBeCloseTo(1 / visibleCells.length, 10);
   });
 
-  it('disables coverage when zoomed out below the render threshold', () => {
-    const zoomedOut: CameraState = { ...camera, zoom: 12 };
+  it('disables coverage below the display-resolution band', () => {
+    // The layer still DRAWS here (the ladder has coarser rungs) — but presence
+    // rolled up to res 8 would report a walk as most of a county, so the number
+    // is withheld rather than inflated.
+    const zoomedOut: CameraState = { ...camera, zoom: H3_MIN_RENDER_ZOOM - 0.5 };
+    expect(resForZoom(zoomedOut.zoom)).not.toBeNull();
+    expect(resForZoom(zoomedOut.zoom)).not.toBe(H3_DISPLAY_RES);
+
     const index = createExplorationIndex(visibleCells);
     expect(coverageInView(index, grid, zoomedOut, viewport)).toBe(0);
+  });
+
+  it('is measurable exactly on the display-resolution band', () => {
+    expect(coverageMeasurable(H3_MIN_RENDER_ZOOM)).toBe(true);
+    expect(coverageMeasurable(H3_MIN_RENDER_ZOOM - 0.01)).toBe(false);
+    expect(coverageMeasurable(1)).toBe(false);
   });
 });

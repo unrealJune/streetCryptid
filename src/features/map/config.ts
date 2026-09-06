@@ -21,7 +21,14 @@ import { WORLD_RECT, type DataZoomRange } from './tiles/tile-math';
  */
 export const CAMERA_MIN_ZOOM = 11;
 export const PLANET_CAMERA_MIN_ZOOM = 1;
-export const CAMERA_MAX_ZOOM = 16;
+/**
+ * Zoom-in ceiling. Four levels past the tileset's z14 bake: `dataZoomFor` clamps
+ * the fetch at z13 either way, so this costs no extra tiles — it only lets the
+ * camera magnify vectors it already has. Every LOD width scale (road/structure/
+ * transit/river) saturates at 1 by z14–15 and `lodForZoom` clamps to 0 above
+ * z14, so nothing downstream needs a new band.
+ */
+export const CAMERA_MAX_ZOOM = 18;
 export const CAMERA_INITIAL_ZOOM = 15;
 
 /** The planet bake's contiguous data zooms; the fixture carries only z12–14. */

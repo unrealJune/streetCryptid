@@ -1,5 +1,5 @@
 import { visibleWorldRect } from './camera';
-import { resForZoom } from './cell-ladder';
+import { H3_DISPLAY_RES, resForZoom } from './cell-ladder';
 import type { ExplorationIndex } from './exploration-index';
 import type { H3Grid } from './h3-grid';
 import type { CameraState, Place, Viewport, WorldPoint } from './types';
@@ -28,8 +28,13 @@ export function nearestPlaceName(places: readonly Place[], center: WorldPoint): 
 }
 
 /**
- * Explored fraction (0–1) of fixed-resolution cells currently in view.
- * Returns zero while the exploration layer is disabled at low zoom.
+ * Explored fraction (0–1) of DISPLAY-resolution cells currently in view.
+ *
+ * Deliberately narrower than the render ladder: the coarse rungs carry presence
+ * rolled up from res 9 (`exploration-rollup.ts`), so measuring them would report
+ * a city walk as most of a county. Below the res-9 band the layer keeps drawing
+ * and this returns zero — `sectorsVisible` is what tells the chrome to hide the
+ * readout rather than render a meaningless number.
  */
 export function coverageInView(
   exploration: ExplorationIndex,
@@ -37,11 +42,19 @@ export function coverageInView(
   camera: CameraState,
   viewport: Viewport
 ): number {
-  const resolution = resForZoom(camera.zoom);
-  if (resolution === null) return 0;
-  const cells = grid.cellsInRect(visibleWorldRect(camera, viewport), resolution);
+  if (!coverageMeasurable(camera.zoom)) return 0;
+  const cells = grid.cellsInRect(visibleWorldRect(camera, viewport), H3_DISPLAY_RES);
   if (!cells.length) return 0;
   let total = 0;
   for (const cell of cells) total += exploration.fractionAt(cell);
   return total / cells.length;
+}
+
+/**
+ * Whether a coverage percentage means anything at `zoom` — i.e. whether the
+ * ladder is on its display-resolution rung. The chrome hides the sector readout
+ * when this is false; the map layer itself keeps drawing well past it.
+ */
+export function coverageMeasurable(zoom: number): boolean {
+  return resForZoom(zoom) === H3_DISPLAY_RES;
 }
