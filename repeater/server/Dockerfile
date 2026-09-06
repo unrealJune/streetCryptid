@@ -30,7 +30,7 @@ FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 # OCI provenance for local/manual builds. CI (docker/metadata-action) injects source+revision on top.
 LABEL org.opencontainers.image.title="trail-stash" \
       org.opencontainers.image.description="Ciphertext-blind, stateless iroh-docs replica + push waker (offline trail delivery)" \
-      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
       org.opencontainers.image.source="https://github.com/unrealJune/trail-stash"
 
 COPY --from=build /trail-stash /trail-stash
