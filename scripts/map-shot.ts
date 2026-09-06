@@ -158,6 +158,14 @@ const LEGACY_RIVER_WIDTH = 5;
 /** Line break inside a cryptid's ASCII art. */
 const NEWLINE = '\n';
 
+/**
+ * Halo blur sigma, and how many times to lay it down. RN's `textShadowRadius` is
+ * a solid glow; one blurred Skia pass is far fainter, so it is repeated to reach
+ * a comparable weight.
+ */
+const HALO_SIGMA = 2.2;
+const HALO_PASSES = 4;
+
 const args = parseArgs(process.argv.slice(2));
 const tileUrl = process.env.EXPO_PUBLIC_TILE_URL;
 if (!tileUrl) {
@@ -212,6 +220,16 @@ async function main(): Promise<void> {
         )
       : null;
   if ((args.labels || args.cryptids) && !typeface) throw new Error('failed to load IBM Plex Mono');
+  // The cryptid layer uses the heavier face the app loads for it.
+  const boldTypeface = args.cryptids
+    ? CanvasKit.Typeface.MakeFreeTypeFaceFromData(
+        (
+          await readFile(
+            'node_modules/@expo-google-fonts/ibm-plex-mono/600SemiBold/IBMPlexMono_600SemiBold.ttf'
+          )
+        ).buffer
+      )
+    : null;
 
   for (const place of places) {
     const home = latLonToWorld({ lat: place.lat, lon: place.lon });
@@ -243,6 +261,7 @@ async function main(): Promise<void> {
         layers,
         cellField,
         typeface,
+        boldTypeface,
         // The real selectors, called exactly as the app calls them.
         // Mirrors `map-view.tsx`: a stop name hides with the lines it belongs to.
         labels: args.labels
@@ -310,6 +329,7 @@ interface ShotInput {
   /** Baked exploration cells for this region, or null for a plain city render. */
   cellField: ReturnType<typeof buildCellField> | null;
   typeface: any;
+  boldTypeface: any;
   /** Name chips to draw over the field (--labels), or null. */
   labels: readonly MapLabel[] | null;
   /** Sea cryptids to draw (--cryptids), or null. */
@@ -328,6 +348,7 @@ function renderShot({
   layers,
   cellField,
   typeface,
+  boldTypeface,
   labels,
   cryptids,
   chrome,
@@ -419,8 +440,8 @@ function renderShot({
   if (labels && typeface) {
     drawLabels(CanvasKit, canvas, labels, spec, palette, chrome, typeface, offX, offY);
   }
-  if (cryptids && typeface) {
-    drawCryptids(CanvasKit, canvas, cryptids, spec, camera, palette, typeface, offX, offY);
+  if (cryptids && boldTypeface) {
+    drawCryptids(CanvasKit, canvas, cryptids, spec, camera, palette, boldTypeface, offX, offY);
   }
 
   const snapshot = surface.makeImageSnapshot();
@@ -659,29 +680,52 @@ function drawCryptids(
   spec: RegionSpec,
   camera: CameraState,
   palette: MapPalette,
-  typeface: any,
+  boldTypeface: any,
   offX: number,
   offY: number
 ): void {
   const scale = scaleFor(spec.zoom);
-  const opacity = oceanCryptidOpacity(camera.zoom) * 0.55;
+  const opacity = oceanCryptidOpacity(camera.zoom) * 0.85;
   if (opacity <= 0) return;
   const [r, g, b] = palette.streetLabel;
 
-  const font = new CanvasKit.Font(typeface, 11);
+  const font = new CanvasKit.Font(boldTypeface, 15);
   const paint = new CanvasKit.Paint();
   paint.setColor(CanvasKit.Color(r, g, b, opacity));
   paint.setAntiAlias(true);
+  const wavePaint = new CanvasKit.Paint();
+  wavePaint.setColor(CanvasKit.Color(r, g, b, opacity * 0.7));
+  wavePaint.setAntiAlias(true);
+  // The layer's `textShadow` halo, as a blurred pass underneath. Same job: clear
+  // a little background so thin ASCII does not dissolve into the dot field.
+  const [hr, hg, hb] = palette.bg;
+  const haloPaint = new CanvasKit.Paint();
+  haloPaint.setColor(CanvasKit.Color(hr, hg, hb, opacity));
+  haloPaint.setAntiAlias(true);
+  haloPaint.setMaskFilter(
+    CanvasKit.MaskFilter.MakeBlur(CanvasKit.BlurStyle.Normal, HALO_SIGMA, false)
+  );
 
   canvas.save();
   canvas.scale(PIXEL_RATIO, PIXEL_RATIO);
   for (const cryptid of cryptids) {
     const x = (cryptid.world[0] - spec.rect.minX) * scale - offX;
     const y = (cryptid.world[1] - spec.rect.minY) * scale - offY;
-    cryptid.art.split(NEWLINE).forEach((line, i) => {
-      canvas.drawText(line, x, y + i * 12 + 9, paint, font);
+    const lines = [...cryptid.art.split(NEWLINE), cryptid.waves];
+    // Halo first for every row, so one glyph's glow never washes out its neighbour.
+    lines.forEach((line, i) => {
+      const baseline = y + i * 16 + 12;
+      for (let pass = 0; pass < HALO_PASSES; pass++) {
+        canvas.drawText(line, x, baseline, haloPaint, font);
+      }
+    });
+    lines.forEach((line, i) => {
+      const isWaves = i === lines.length - 1;
+      canvas.drawText(line, x, y + i * 16 + 12, isWaves ? wavePaint : paint, font);
     });
   }
+  haloPaint.delete();
+  wavePaint.delete();
   paint.delete();
   font.delete();
   canvas.restore();

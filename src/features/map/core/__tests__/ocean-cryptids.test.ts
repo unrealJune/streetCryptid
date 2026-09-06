@@ -5,6 +5,7 @@ import {
   OCEAN_CRYPTID_MAX_ZOOM,
   oceanCryptidOpacity,
   SEA_CRYPTIDS,
+  SEA_WAVES,
   visibleOceanCryptids,
 } from '../ocean-cryptids';
 import type { CameraState, Viewport } from '../types';
@@ -79,6 +80,17 @@ describe('visibleOceanCryptids', () => {
 
   it('is deterministic for the same camera', () => {
     expect(visibleOceanCryptids(globe, viewport)).toEqual(visibleOceanCryptids(globe, viewport));
+  });
+
+  it('gives every figure a wave row from the table', () => {
+    const placed = visibleOceanCryptids(globe, viewport);
+    expect(placed.length).toBeGreaterThan(0);
+    for (const cryptid of placed) {
+      expect(SEA_WAVES).toContain(cryptid.waves);
+      expect(cryptid.waves).toContain('~');
+    }
+    // Waves vary across figures, so a row of them doesn't read as one ruled line.
+    expect(new Set(placed.map((c) => c.waves)).size).toBeGreaterThan(1);
   });
 
   it('gives each figure a distinct drift phase', () => {

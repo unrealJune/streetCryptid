@@ -36,6 +36,19 @@ export const SEA_CRYPTIDS: readonly SeaCryptid[] = [
   { id: 'drifter', art: art('   ___', '  (o o)', ' <  .  >', '  \\___/') },
 ] as const;
 
+/**
+ * Wave rows drawn under a cryptid, so it reads as something IN water rather than
+ * a glyph floating over it. Chosen per anchor by the same hash that seeds the
+ * drift, and drifting counter to the figure — the relative motion is what sells
+ * the swim; a wave that moved with the creature would just look like part of it.
+ */
+export const SEA_WAVES: readonly string[] = [
+  '~~~   ~~~~  ~~',
+  ' ~~~~~   ~~   ',
+  '~~  ~~~~   ~~~',
+  '  ~~~   ~~~~ ~',
+] as const;
+
 /** A cryptid parked at a fixed spot in the world. */
 export interface OceanAnchor {
   readonly id: string;
@@ -111,6 +124,8 @@ export interface PlacedCryptid {
   readonly id: string;
   readonly world: WorldPoint;
   readonly art: string;
+  /** The wave row drawn beneath it — see {@link SEA_WAVES}. */
+  readonly waves: string;
   /** Stable 0–1 seed: staggers each figure's drift so they never move in lockstep. */
   readonly phase: number;
 }
@@ -150,11 +165,13 @@ export function visibleOceanCryptids(
     if (placed.length >= max) break;
     const [x, y] = anchor.world;
     if (x < grown.minX || x > grown.maxX || y < grown.minY || y > grown.maxY) continue;
+    const phase = anchorPhase(anchor.id);
     placed.push({
       id: anchor.id,
       world: anchor.world,
       art: SEA_CRYPTIDS[anchor.figure % SEA_CRYPTIDS.length].art,
-      phase: anchorPhase(anchor.id),
+      waves: SEA_WAVES[Math.floor(phase * SEA_WAVES.length) % SEA_WAVES.length],
+      phase,
     });
   }
   return placed;
