@@ -157,6 +157,30 @@ export interface MapGeometry {
   /** OpenMapTiles `aeroway` lines (runway, taxiway). */
   readonly aeroLines?: readonly AeroWay[];
   readonly places: readonly Place[];
+  /**
+   * OpenMapTiles `poi` points. Optional like {@link buildings}: the layer starts
+   * at z13 (rank-filtered to landmarks) and only gets dense at z14, and a
+   * pre-POI SCG1 buffer carries none. This is where building labels come from —
+   * the `building` layer has geometry and heights but no name.
+   */
+  readonly pois?: readonly MapPoiFeature[];
+  /** OpenMapTiles `housenumber` points — z14 only. */
+  readonly houseNumbers?: readonly HouseNumberFeature[];
+}
+
+/** A named point of interest in world space (OpenMapTiles `poi`). */
+export interface MapPoiFeature {
+  readonly name: string;
+  readonly world: WorldPoint;
+  readonly kind: string;
+  readonly subclass: string;
+  readonly rank?: number;
+}
+
+/** A street number stamped on a building (OpenMapTiles `housenumber`). */
+export interface HouseNumberFeature {
+  readonly number: string;
+  readonly world: WorldPoint;
 }
 
 /**

@@ -26,7 +26,7 @@ import { CLASS_MIN_ZOOM } from './road-lod';
 import type { WorldPoint } from './types';
 import type { PackedAreas, PackedGeometry, PackedStreets } from '../tiles/packed-geometry';
 
-export type MapLabelKind = 'street' | 'area';
+export type MapLabelKind = 'street' | 'area' | 'poi' | 'housenumber';
 
 /** One placed label: where it goes in world space and how it is turned. */
 export interface MapLabel {
@@ -58,6 +58,30 @@ export const LABEL_MIN_ZOOM = [15.5, 14.0, 12.5, 11.0, 9.0] as const;
 export const AREA_LABEL_MIN_ZOOM = 11;
 
 /**
+ * Below this zoom no POI is named. The `poi` layer exists from data zoom 13, but
+ * the tileset rank-filters it hard there (a handful of landmarks per tile), so
+ * this tier shows exactly those — and then opens up on its own as the camera
+ * crosses `DATA_ZOOM_FULL_DETAIL_ZOOM` and the dense z14 layer arrives.
+ */
+export const POI_LABEL_MIN_ZOOM = 13.5;
+
+/**
+ * Below this zoom house numbers are not drawn. They are the last thing a map
+ * should say, and there are ~1100 per z14 tile — they only make sense once a
+ * single block fills the screen.
+ */
+export const HOUSENUMBER_MIN_ZOOM = 17;
+
+/**
+ * How many POI ranks to admit at `zoom` (OMT `rank` is 1-based, lower = more
+ * prominent). Doubles per zoom level, so the city view names only the couple of
+ * landmarks the tileset kept at z13 and the deepest view names most of a block.
+ */
+export function poiRankBudget(zoom: number): number {
+  return Math.max(1, Math.round(2 * Math.pow(2, zoom - POI_LABEL_MIN_ZOOM)));
+}
+
+/**
  * Mono chip metrics, logical px. These MUST stay in step with the styles in
  * `render/map-labels.tsx`: the fit and collision gates are measured here but
  * the text is laid out there, and a mismatch shows up as overlap.
@@ -76,6 +100,10 @@ const MIN_AREA_PX = 2600;
 /** Hard caps, so a dense downtown region can't spend the frame on chips. */
 const MAX_STREET_LABELS = 16;
 const MAX_AREA_LABELS = 5;
+const MAX_POI_LABELS = 14;
+const MAX_HOUSENUMBER_LABELS = 24;
+
+/** Smallest on-screen park (px²) worth naming — below this the chip covers it. */
 
 /** Extra breathing room around each placed chip when testing for collisions. */
 const COLLISION_MARGIN_PX = 3;
@@ -111,6 +139,8 @@ export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): Map
   const pxPerWorld = scaleFor(spec.zoom);
   const areas = areaCandidates(geometry, spec, pxPerWorld).slice(0, MAX_AREA_LABELS);
   const streets = streetCandidates(geometry, spec, pxPerWorld);
+  const pois = poiCandidates(geometry, spec);
+  const houseNumbers = houseNumberCandidates(geometry, spec);
 
   const placed: PlacedBox[] = [];
   const out: MapLabel[] = [];
@@ -132,12 +162,101 @@ export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): Map
 
   for (const candidate of areas) tryPlace(candidate);
 
+  // POIs before streets: past `POI_LABEL_MIN_ZOOM` a named landmark is what a
+  // person is actually looking for, and a service road's name is not worth
+  // suppressing "Harborview Medical Center" for. Both still lose to a park.
+  let poiCount = 0;
+  for (const candidate of pois) {
+    if (poiCount >= MAX_POI_LABELS) break;
+    if (tryPlace(candidate)) poiCount++;
+  }
+
   let streetCount = 0;
   for (const candidate of streets) {
     if (streetCount >= MAX_STREET_LABELS) break;
     if (tryPlace(candidate)) streetCount++;
   }
 
+  // House numbers last, filling whatever gaps are left — they are the least
+  // important thing on the map and must never displace a name.
+  let numberCount = 0;
+  for (const candidate of houseNumbers) {
+    if (numberCount >= MAX_HOUSENUMBER_LABELS) break;
+    if (tryPlace(candidate)) numberCount++;
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// POIs and house numbers (OpenMapTiles `poi` / `housenumber` points)
+// ---------------------------------------------------------------------------
+
+/**
+ * Named points inside buildings — the only source of a building label, since the
+ * `building` layer carries footprints and heights but never a name.
+ *
+ * No fit gate (a point has no length to measure against) and no rotation: these
+ * sit upright on their anchor and rely purely on the rank budget, the cap, and
+ * the shared collision pass.
+ */
+function poiCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] {
+  if (spec.zoom < POI_LABEL_MIN_ZOOM) return [];
+  const budget = poiRankBudget(spec.zoom);
+
+  // One chip per name: a POI on a tile seam arrives from both tiles.
+  const best = new Map<string, Candidate>();
+  for (const part of geometry.parts) {
+    for (const poi of part.pois) {
+      if (!poi.name) continue;
+      // An absent rank means the tileset did not rank it; treat it as lowest
+      // priority rather than dropping it, so a bake without ranks still labels.
+      const rank = poi.rank ?? budget;
+      if (rank > budget) continue;
+      const text = poi.name.toUpperCase();
+      const existing = best.get(text);
+      if (existing && existing.priority >= -rank) continue;
+      best.set(text, {
+        id: `poi:${text}`,
+        kind: 'poi',
+        text,
+        world: poi.world,
+        angle: 0,
+        // Lower OMT rank = more prominent, but the collision pass sorts by
+        // DESCENDING priority — so negate.
+        priority: -rank,
+      });
+    }
+  }
+
+  return [...best.values()].sort(
+    (a, b) => b.priority - a.priority || a.text.length - b.text.length
+  );
+}
+
+/** Street numbers, drawn only at the deepest zoom and only where nothing else is. */
+function houseNumberCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] {
+  if (spec.zoom < HOUSENUMBER_MIN_ZOOM) return [];
+  const out: Candidate[] = [];
+  const seen = new Set<string>();
+  for (const part of geometry.parts) {
+    for (const entry of part.houseNumbers) {
+      if (!entry.number) continue;
+      // Numbers repeat constantly; key on position so two different buildings
+      // sharing "1200" both survive, but a seam duplicate does not.
+      const id = `housenumber:${entry.number}@${entry.world[0].toFixed(6)},${entry.world[1].toFixed(6)}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({
+        id,
+        kind: 'housenumber',
+        text: entry.number,
+        world: entry.world,
+        angle: 0,
+        priority: 0,
+      });
+    }
+  }
   return out;
 }
 

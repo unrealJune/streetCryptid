@@ -1,5 +1,13 @@
 import { scaleFor } from '../camera';
-import { AREA_LABEL_MIN_ZOOM, labelWidthPx, LABEL_MIN_ZOOM, selectMapLabels } from '../map-labels';
+import {
+  AREA_LABEL_MIN_ZOOM,
+  HOUSENUMBER_MIN_ZOOM,
+  labelWidthPx,
+  LABEL_MIN_ZOOM,
+  POI_LABEL_MIN_ZOOM,
+  poiRankBudget,
+  selectMapLabels,
+} from '../map-labels';
 import type { RegionSpec } from '../region';
 import type { AreaFeature, MapGeometry, RoadClass, StreetWay, WorldPoint } from '../types';
 import { packGeometry } from '../../tiles/packed-geometry';
@@ -223,5 +231,101 @@ describe('selectMapLabels — parks', () => {
     const zoom = 15;
     const anonymous = { rings: park('x', 300, zoom, [0.5, 0.5]).rings };
     expect(labelsAt(zoom, { parks: [anonymous] })).toEqual([]);
+  });
+});
+
+describe('selectMapLabels — POIs (the building-label source)', () => {
+  const poi = (name: string, rank: number, world: WorldPoint) => ({
+    name,
+    world,
+    kind: 'hospital',
+    subclass: 'hospital',
+    rank,
+  });
+
+  it('names nothing below the POI tier', () => {
+    const found = labelsAt(POI_LABEL_MIN_ZOOM - 0.01, {
+      pois: [poi('Harborview Medical Center', 1, [0.5, 0.5])],
+    });
+    expect(found).toHaveLength(0);
+  });
+
+  it('names a top-ranked landmark at the city tier', () => {
+    const found = labelsAt(POI_LABEL_MIN_ZOOM, {
+      pois: [poi('Harborview Medical Center', 1, [0.5, 0.5])],
+    });
+    expect(found.map((l) => l.text)).toEqual(['HARBORVIEW MEDICAL CENTER']);
+    expect(found[0].kind).toBe('poi');
+    // Points sit upright; only streets follow their geometry.
+    expect(found[0].angle).toBe(0);
+  });
+
+  it('admits more ranks the further in you zoom', () => {
+    expect(poiRankBudget(POI_LABEL_MIN_ZOOM)).toBe(2);
+    expect(poiRankBudget(POI_LABEL_MIN_ZOOM + 1)).toBeGreaterThan(
+      poiRankBudget(POI_LABEL_MIN_ZOOM)
+    );
+    expect(poiRankBudget(18)).toBeGreaterThan(poiRankBudget(16));
+
+    // A rank the city tier rejects is admitted once the camera is deep enough.
+    const low = poi('ZoomCare', 20, [0.5, 0.5]);
+    expect(labelsAt(POI_LABEL_MIN_ZOOM, { pois: [low] })).toHaveLength(0);
+    expect(labelsAt(17, { pois: [low] })).toHaveLength(1);
+  });
+
+  it('keeps one chip per name when a POI straddles a tile seam', () => {
+    const found = labelsAt(17, {
+      pois: [
+        poi('Seattle Surgery Center', 3, [0.5, 0.5]),
+        poi('Seattle Surgery Center', 3, [0.5, 0.5]),
+      ],
+    });
+    expect(found).toHaveLength(1);
+  });
+
+  it('outranks a street name it would collide with', () => {
+    const zoom = 17;
+    const road = street({ name: 'James Street', roadClass: 2, lengthPx: 900, zoom });
+    // A street chip sits at its arc-length MIDPOINT, so take the anchor from a
+    // street-only pass rather than assuming it is the way's start.
+    const [anchor] = labelsAt(zoom, { streets: [road] });
+    expect(anchor.kind).toBe('street');
+
+    const found = labelsAt(zoom, {
+      pois: [poi('Harborview Medical Center', 1, anchor.world)],
+      streets: [road],
+    });
+    // Same anchor: the POI is placed first and the street chip is rejected.
+    expect(found.map((l) => l.kind)).toEqual(['poi']);
+  });
+});
+
+describe('selectMapLabels — house numbers', () => {
+  const number = (n: string, world: WorldPoint) => ({ number: n, world });
+
+  it('draws nothing until the deepest zoom', () => {
+    const parts = { houseNumbers: [number('325', [0.5, 0.5])] };
+    expect(labelsAt(HOUSENUMBER_MIN_ZOOM - 0.01, parts)).toHaveLength(0);
+    expect(labelsAt(HOUSENUMBER_MIN_ZOOM, parts).map((l) => l.text)).toEqual(['325']);
+  });
+
+  it('never displaces a name', () => {
+    const zoom = HOUSENUMBER_MIN_ZOOM;
+    const road = street({ name: 'James Street', roadClass: 2, lengthPx: 900, zoom });
+    const [anchor] = labelsAt(zoom, { streets: [road] });
+
+    const found = labelsAt(zoom, {
+      houseNumbers: [number('325', anchor.world)],
+      streets: [road],
+    });
+    // The street chip wins the shared anchor; the number is dropped.
+    expect(found.map((l) => l.kind)).toEqual(['street']);
+  });
+
+  it('keeps the same number at two different addresses', () => {
+    const found = labelsAt(HOUSENUMBER_MIN_ZOOM, {
+      houseNumbers: [number('1200', [0.2, 0.2]), number('1200', [0.8, 0.8])],
+    });
+    expect(found).toHaveLength(2);
   });
 });

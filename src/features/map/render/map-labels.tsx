@@ -52,13 +52,22 @@ export function MapLabelLayer({
     <>
       {labels.map((label) => {
         const [x, y] = worldToScreen(anchor, viewport, label.world);
-        const rgb = label.kind === 'area' ? palette.parkLabel : palette.streetLabel;
+        // POIs read as built ground (the `building` ink) rather than as street
+        // furniture — they name what the footprints under them are. House
+        // numbers use the same ink, dimmed, so they never compete with a name.
+        const rgb =
+          label.kind === 'area'
+            ? palette.parkLabel
+            : label.kind === 'poi' || label.kind === 'housenumber'
+              ? palette.building
+              : palette.streetLabel;
         return (
           <MapLabelChip
             angle={label.angle}
             chipColor={chipColor}
             color={`rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`}
             key={label.id}
+            opacity={label.kind === 'housenumber' ? 0.62 : 1}
             scale={scale}
             text={label.text}
             translateX={translateX}
@@ -76,6 +85,7 @@ function MapLabelChip({
   angle,
   chipColor,
   color,
+  opacity,
   scale,
   text,
   translateX,
@@ -86,6 +96,7 @@ function MapLabelChip({
   readonly angle: number;
   readonly chipColor: string;
   readonly color: string;
+  readonly opacity: number;
   readonly scale: SharedValue<number>;
   readonly text: string;
   readonly translateX: SharedValue<number>;
@@ -115,7 +126,7 @@ function MapLabelChip({
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
       pointerEvents="none"
-      style={[styles.chip, { backgroundColor: chipColor, width }, positionStyle]}
+      style={[styles.chip, { backgroundColor: chipColor, opacity, width }, positionStyle]}
     >
       <Text allowFontScaling={false} numberOfLines={1} style={[styles.text, { color }]}>
         {text}

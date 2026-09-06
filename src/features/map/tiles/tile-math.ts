@@ -35,10 +35,31 @@ export function tileKeyOf(z: number, x: number, y: number): TileKey {
  */
 export const DATA_ZOOM_BIAS = 1;
 
+/**
+ * Camera zoom at and above which the overzoom bias is dropped, so geometry is
+ * fetched at the tileset's finest level instead of one coarser.
+ *
+ * This exists for LABELS, not for streets. OpenMapTiles puts POI names — the
+ * only source of a building label, since the `building` layer carries footprints
+ * and heights but no name — in a `poi` layer that is rank-filtered to a handful
+ * of landmarks at z13 and only becomes dense at z14 (measured on our own bake:
+ * 15 features vs 2354 in the same Capitol Hill tile). `housenumber` is z14-only
+ * outright.
+ *
+ * It is not free: because the privacy anchor is fixed at z10, a cold z14 request
+ * pulls the whole 16×16 descendant square — 256 tiles, ~22 MiB, against ~3.3 MiB
+ * for the 64-tile z13 bundle (infra/tiles/PLAN.md). That is one fetch per z10
+ * cell, then cached in SQLite for the tile TTL, and it is only ever paid by
+ * someone who zooms all the way in — which is why the threshold sits well past
+ * the everyday street zoom rather than at the z14 data edge.
+ */
+export const DATA_ZOOM_FULL_DETAIL_ZOOM = 16;
+
 /** The (overzoomed) tile zoom to fetch geometry at, clamped to what the tileset carries. */
 export function dataZoomFor(cameraZoom: number, range: DataZoomRange): number {
   const tileZoom = Math.max(range.min, Math.min(range.max, Math.floor(cameraZoom)));
-  return Math.max(range.min, tileZoom - DATA_ZOOM_BIAS);
+  const bias = cameraZoom >= DATA_ZOOM_FULL_DETAIL_ZOOM ? 0 : DATA_ZOOM_BIAS;
+  return Math.max(range.min, tileZoom - bias);
 }
 
 /** World rect covered by a tile ([0,1]² world space, y south). */
