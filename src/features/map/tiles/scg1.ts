@@ -12,6 +12,8 @@
 
 import type { Place } from '../core/types';
 import type {
+  HouseNumber,
+  MapPoi,
   PackedAeroAreas,
   PackedAeroLines,
   PackedAreas,
@@ -203,6 +205,47 @@ export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null)
     return { count, kind, pointOff, coords };
   }
 
+  // POIs + house numbers, appended after aeroway. Same trailing-bytes detection:
+  // a phone on a pre-POI native binary emits a buffer that ends earlier, and
+  // both degrade to empty rather than misreading whatever follows.
+  const pois = p + 4 <= buf.byteLength ? readPois() : [];
+  const houseNumbers = p + 4 <= buf.byteLength ? readHouseNumbers() : [];
+
+  function readPois(): MapPoi[] {
+    const count = u32();
+    const nameRef = readI32(count);
+    const kindRef = readI32(count);
+    const subclassRef = readI32(count);
+    const rank = readI32(count);
+    align4();
+    const xs = viewF32(count);
+    const ys = viewF32(count);
+    const out: MapPoi[] = new Array(count);
+    for (let i = 0; i < count; i++) {
+      out[i] = {
+        name: strings[nameRef[i]] ?? '',
+        world: [originX + xs[i], originY + ys[i]],
+        kind: strings[kindRef[i]] ?? '',
+        subclass: strings[subclassRef[i]] ?? '',
+        rank: rank[i] >= 0 ? rank[i] : undefined,
+      };
+    }
+    return out;
+  }
+
+  function readHouseNumbers(): HouseNumber[] {
+    const count = u32();
+    const numberRef = readI32(count);
+    align4();
+    const xs = viewF32(count);
+    const ys = viewF32(count);
+    const out: HouseNumber[] = new Array(count);
+    for (let i = 0; i < count; i++) {
+      out[i] = { number: strings[numberRef[i]] ?? '', world: [originX + xs[i], originY + ys[i]] };
+    }
+    return out;
+  }
+
   const streets: PackedStreets = {
     count: sCount,
     roadClass,
@@ -246,5 +289,7 @@ export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null)
     aeroAreas,
     aeroLines,
     places,
+    pois,
+    houseNumbers,
   };
 }

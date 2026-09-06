@@ -1,4 +1,11 @@
-import { DATA_ZOOM_BIAS, dataZoomFor, tileKeyOf, tileWorldRect, tilesCovering } from '../tile-math';
+import {
+  DATA_ZOOM_BIAS,
+  DATA_ZOOM_FULL_DETAIL_ZOOM,
+  dataZoomFor,
+  tileKeyOf,
+  tileWorldRect,
+  tilesCovering,
+} from '../tile-math';
 
 describe('dataZoomFor', () => {
   const planet = { min: 0, max: 14 };
@@ -7,9 +14,17 @@ describe('dataZoomFor', () => {
   it('overzooms geometry by DATA_ZOOM_BIAS levels below the display tile zoom', () => {
     expect(DATA_ZOOM_BIAS).toBe(1);
     expect(dataZoomFor(15, planet)).toBe(13); // capped display zoom 14 − bias
-    expect(dataZoomFor(16, planet)).toBe(13);
     expect(dataZoomFor(14, planet)).toBe(13);
     expect(dataZoomFor(8.7, planet)).toBe(7);
+  });
+
+  it('drops the bias past the full-detail zoom, to reach the POI layer', () => {
+    // Below the threshold the bias still applies…
+    expect(dataZoomFor(DATA_ZOOM_FULL_DETAIL_ZOOM - 0.01, planet)).toBe(13);
+    // …and at it, geometry comes from the tileset's finest level, which is the
+    // only one carrying a dense `poi` layer (and `housenumber` at all).
+    expect(dataZoomFor(DATA_ZOOM_FULL_DETAIL_ZOOM, planet)).toBe(14);
+    expect(dataZoomFor(18, planet)).toBe(14);
   });
 
   it('clamps into the range at both ends', () => {
@@ -17,12 +32,22 @@ describe('dataZoomFor', () => {
     expect(dataZoomFor(-3, planet)).toBe(0);
     expect(dataZoomFor(0, fixture)).toBe(12);
     expect(dataZoomFor(12.9, fixture)).toBe(12);
-    expect(dataZoomFor(20, fixture)).toBe(13);
+    expect(dataZoomFor(20, fixture)).toBe(14);
+  });
+
+  it('never asks for a zoom the tileset does not carry', () => {
+    for (const range of [planet, fixture]) {
+      for (let z = -2; z <= 22; z += 0.25) {
+        const dz = dataZoomFor(z, range);
+        expect(dz).toBeGreaterThanOrEqual(range.min);
+        expect(dz).toBeLessThanOrEqual(range.max);
+      }
+    }
   });
 
   it('is monotonically non-decreasing in camera zoom', () => {
     let prev = -Infinity;
-    for (let z = 0; z <= 16.5; z += 0.25) {
+    for (let z = 0; z <= 20; z += 0.25) {
       const dz = dataZoomFor(z, planet);
       expect(dz).toBeGreaterThanOrEqual(prev);
       prev = dz;

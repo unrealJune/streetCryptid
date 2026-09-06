@@ -58,6 +58,7 @@ import type {
   WorldRect,
 } from '../core/types';
 import { clusterMarkers } from '../core/marker-clusters';
+import { visibleOceanCryptids } from '../core/ocean-cryptids';
 import type { MapRegion } from '../engine/map-engine';
 import { useMapEngine } from '../hooks/use-map-engine';
 import { latLonToWorld } from '../core/mercator';
@@ -70,8 +71,10 @@ import {
 } from '../perf/map-perf';
 import { useMapPerfRunner } from '../perf/use-map-perf-runner';
 import { FriendLocator } from './friend-locator';
+import { FriendClusterPuck } from './friend-cluster-puck';
 import { FriendLocatorStack } from './friend-locator-stack';
 import { MapLabelLayer } from './map-labels';
+import { OceanCryptidLayer } from './ocean-cryptid-layer';
 import { RegionRenderCache } from './render-bundle-cache';
 import {
   makeCellStateImage,
@@ -112,6 +115,29 @@ const FRIEND_PREFETCH_MAX = 4;
 /** Double-tap zoom-in factor and animation length. */
 const DOUBLE_TAP_FACTOR = 2;
 const DOUBLE_TAP_MS = 260;
+/**
+ * Screen-space distance (logical px) within which two locators are considered
+ * overlapping. Converted into anchor-space before clustering — markers are drawn
+ * at `x·k + tx`, so a fixed anchor-space budget silently stops working the moment
+ * the camera leaves the anchor zoom, which is why zoomed-out pins used to pile up
+ * without ever grouping.
+ */
+const CLUSTER_OVERLAP_PX = 44;
+/**
+ * Largest group still worth drawing as a full stack of avatars and name rows.
+ * Past this it collapses to one `FriendClusterPuck` — a dozen stacked ASCII
+ * panels is taller than the viewport and reads as noise.
+ */
+const CLUSTER_STACK_MAX = 4;
+/**
+ * How far apart a cluster's members must land after a puck tap, as a multiple of
+ * the overlap budget — enough to actually break the group up rather than
+ * re-cluster one zoom level in.
+ */
+const CLUSTER_SEPARATION_FACTOR = 2.2;
+/** Bounds on that zoom, so a degenerate (co-located) cluster still does something sane. */
+const CLUSTER_ZOOM_MIN_FACTOR = 1.5;
+const CLUSTER_ZOOM_MAX_FACTOR = 8;
 /** Locate-me camera animation length. */
 const LOCATE_ME_MS = 360;
 
@@ -259,6 +285,7 @@ export function MapView({
     theme,
     region,
     pending,
+    camera,
     anchor,
     limits,
     coverage,
@@ -377,10 +404,14 @@ export function MapView({
   // Highway name chips belong to highway geometry: hiding one hides the other.
   const visibleLabels = useMemo(
     () =>
-      highwaysEnabled
-        ? (region?.labels ?? [])
-        : (region?.labels ?? []).filter((label) => label.roadClass !== HIGHWAY_CLASS),
-    [region, highwaysEnabled]
+      (region?.labels ?? []).filter((label) => {
+        // A name belongs to the geometry it names: hiding a layer hides its
+        // chips too, or the map grows labels for things that are not drawn.
+        if (!highwaysEnabled && label.roadClass === HIGHWAY_CLASS) return false;
+        if (!transitEnabled && label.kind === 'transit') return false;
+        return true;
+      }),
+    [region, highwaysEnabled, transitEnabled]
   );
 
   const animateProfileCamera = useCallback(
@@ -569,7 +600,25 @@ export function MapView({
         ]
       : anchoredFriends;
   }, [anchor, friends, selfAnchor, selfInk, viewport]);
-  const locatorClusters = useMemo(() => clusterMarkers(locatorAnchors), [locatorAnchors]);
+  /**
+   * Anchor-space px per screen px at the COMMITTED camera. Every overlay is laid
+   * out in anchor space and only translated by the live UI-thread transform, so
+   * a screen-space budget has to be divided by this to mean anything. It follows
+   * the committed camera (gesture end), exactly like the region layer does —
+   * clusters resettle when the pinch does.
+   */
+  const committedScale = Math.pow(2, camera.zoom - anchor.zoom);
+  const locatorClusters = useMemo(
+    () => clusterMarkers(locatorAnchors, CLUSTER_OVERLAP_PX / committedScale),
+    [locatorAnchors, committedScale]
+  );
+  // Decorative sea cryptids for the far-out view, where the exploration ladder
+  // has run out of legible rungs and the world is a small rectangle in a lot of
+  // void. Chosen off the committed camera, so they don't churn mid-gesture.
+  const oceanCryptids = useMemo(
+    () => (viewport ? visibleOceanCryptids(camera, viewport) : []),
+    [camera, viewport]
+  );
   const selfTrailPoints = useMemo(
     () =>
       viewport
@@ -646,6 +695,61 @@ export function MapView({
     // when the user taps locate again at the same coordinates.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locateTarget?.requestId, viewport, anchor, limits, reducedMotion, commit]);
+
+  /**
+   * Zoom in on a cluster until its members separate. Reuses the double-tap path
+   * exactly — `applyPinch` around the puck's own screen position, one shared
+   * timing curve for (k, tx, ty) so the tapped point stays fixed — rather than
+   * introducing a second way to move the camera. The factor is derived from the
+   * group's actual anchor-space spread, so a tight pair gets a big push and a
+   * loose group gets a small one; a co-located group falls back to the floor.
+   */
+  const separateCluster = useCallback(
+    (cluster: readonly { readonly anchor: ScreenPoint }[]) => {
+      if (!limits) return;
+      cancelAnimation(k);
+      cancelAnimation(tx);
+      cancelAnimation(ty);
+      decaysLeft.value = 0;
+
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const { anchor: point } of cluster) {
+        minX = Math.min(minX, point[0]);
+        maxX = Math.max(maxX, point[0]);
+        minY = Math.min(minY, point[1]);
+        maxY = Math.max(maxY, point[1]);
+      }
+      const spreadAnchor = Math.max(maxX - minX, maxY - minY);
+
+      const from: ViewTransform = { k: k.value, tx: tx.value, ty: ty.value };
+      const spreadScreen = spreadAnchor * from.k;
+      const wanted = CLUSTER_SEPARATION_FACTOR * CLUSTER_OVERLAP_PX;
+      const factor = Math.min(
+        CLUSTER_ZOOM_MAX_FACTOR,
+        Math.max(CLUSTER_ZOOM_MIN_FACTOR, wanted / Math.max(spreadScreen, 1))
+      );
+
+      // Pinch around where the puck actually sits on screen, so the group stays
+      // under the finger while the map opens up around it.
+      const centerAnchor: ScreenPoint = [(minX + maxX) / 2, (minY + maxY) / 2];
+      const focalX = centerAnchor[0] * from.k + from.tx;
+      const focalY = centerAnchor[1] * from.k + from.ty;
+      const to = applyPinch(from, factor, focalX, focalY, limits);
+
+      const cfg = { duration: reducedMotion ? 0 : DOUBLE_TAP_MS, easing: Easing.out(Easing.cubic) };
+      k.value = withTiming(to.k, cfg);
+      tx.value = withTiming(to.tx, cfg);
+      ty.value = withTiming(to.ty, cfg, (finished) => {
+        if (finished) runOnJS(commit)(to);
+      });
+    },
+    // Shared values are stable refs; `limits`/`commit` are the real inputs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [limits, commit, reducedMotion]
+  );
 
   const requestPrefetch = useCallback(
     (t: ViewTransform) => {
@@ -943,6 +1047,20 @@ export function MapView({
             )}
           </View>
 
+          {viewport ? (
+            <OceanCryptidLayer
+              anchor={anchor}
+              cryptids={oceanCryptids}
+              palette={theme.canvas}
+              reducedMotion={reducedMotion}
+              scale={k}
+              translateX={tx}
+              translateY={ty}
+              viewport={viewport}
+              zoom={camera.zoom}
+            />
+          ) : null}
+
           {viewport && region ? (
             <MapLabelLayer
               anchor={anchor}
@@ -1000,6 +1118,33 @@ export function MapView({
                   (sum, locator) => [sum[0] + locator.anchor[0], sum[1] + locator.anchor[1]],
                   [0, 0]
                 );
+                const clusterKey = cluster
+                  .map((locator) => `${locator.kind}:${locator.id}`)
+                  .join(':');
+
+                // Too many to stack: one puck with the count, tap to zoom until
+                // the group breaks apart again.
+                if (cluster.length > CLUSTER_STACK_MAX) {
+                  return (
+                    <FriendClusterPuck
+                      inkColor={theme.chrome.ink}
+                      key={clusterKey}
+                      members={cluster.map((locator) => ({
+                        id: locator.id,
+                        color: locator.color,
+                        self: locator.kind === 'self',
+                      }))}
+                      onPress={() => separateCluster(cluster)}
+                      panelColor={theme.chrome.island}
+                      scale={k}
+                      translateX={tx}
+                      translateY={ty}
+                      x={anchorSum[0] / cluster.length}
+                      y={anchorSum[1] / cluster.length}
+                    />
+                  );
+                }
+
                 return (
                   <FriendLocatorStack
                     friends={cluster.map((locator) =>
@@ -1017,7 +1162,7 @@ export function MapView({
                             selected: locator.id === selectedFriendId,
                           }
                     )}
-                    key={cluster.map((locator) => `${locator.kind}:${locator.id}`).join(':')}
+                    key={clusterKey}
                     onPress={(friendId) => onSelectFriend?.(friendId)}
                     onPressSelf={() => onSelectSelf?.()}
                     panelColor={theme.chrome.island}

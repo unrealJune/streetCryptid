@@ -14,7 +14,9 @@ import type {
   AeroLineKind,
   AeroWay,
   AreaFeature,
+  HouseNumberFeature,
   MapGeometry,
+  MapPoiFeature,
   Place,
   RiverWay,
   RoadClass,
@@ -149,6 +151,8 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
   const aeroAreas: AeroArea[] = [];
   const aeroLines: AeroWay[] = [];
   const places: Place[] = [];
+  const pois: MapPoiFeature[] = [];
+  const houseNumbers: HouseNumberFeature[] = [];
 
   function toWorld(layer: VectorTileLayer, px: number, py: number): WorldPoint {
     return [rect.minX + (px / layer.extent) * spanX, rect.minY + (py / layer.extent) * spanY];
@@ -254,6 +258,28 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
     }
   });
 
+  eachFeature('poi', (f, layer) => {
+    const name = f.properties.name;
+    if (typeof name !== 'string' || !name) return;
+    const geom = f.loadGeometry();
+    if (!geom.length || !geom[0].length) return;
+    pois.push({
+      name,
+      world: toWorld(layer, geom[0][0].x, geom[0][0].y),
+      kind: String(f.properties.class ?? ''),
+      subclass: String(f.properties.subclass ?? ''),
+      rank: typeof f.properties.rank === 'number' ? f.properties.rank : undefined,
+    });
+  });
+
+  eachFeature('housenumber', (f, layer) => {
+    const number = f.properties.housenumber;
+    if (typeof number !== 'string' || !number) return;
+    const geom = f.loadGeometry();
+    if (!geom.length || !geom[0].length) return;
+    houseNumbers.push({ number, world: toWorld(layer, geom[0][0].x, geom[0][0].y) });
+  });
+
   eachFeature('place', (f, layer) => {
     const name = f.properties.name;
     if (typeof name !== 'string' || !name) return;
@@ -278,6 +304,8 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
     buildings,
     aeroAreas,
     aeroLines,
+    pois,
+    houseNumbers,
     places,
   };
 }

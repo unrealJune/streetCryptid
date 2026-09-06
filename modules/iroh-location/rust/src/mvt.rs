@@ -265,6 +265,8 @@ struct Geometry {
     aero_areas: Vec<AeroArea>,
     aero_lines: Vec<AeroLine>,
     places: Vec<Place>,
+    pois: Vec<Poi>,
+    housenumbers: Vec<HouseNumber>,
     strings: Interner,
 }
 
@@ -298,6 +300,20 @@ struct Place {
     name: i32,
     kind: i32,
     rank: i32,
+    pos: [f32; 2],
+}
+/// OpenMapTiles `poi` point: the named things inside buildings. The `building`
+/// layer itself carries no name — this is where a building label comes from.
+struct Poi {
+    name: i32,
+    kind: i32,
+    subclass: i32,
+    rank: i32,
+    pos: [f32; 2],
+}
+/// OpenMapTiles `housenumber` point (z14 only): a street number, no name.
+struct HouseNumber {
+    number: i32,
     pos: [f32; 2],
 }
 
@@ -818,6 +834,61 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                 });
             }
         }
+        "poi" => {
+            for f in &layer.features {
+                let Some(name) = layer.prop(f, "name").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                let rings = decode_geometry(&f.geometry, proj);
+                let Some(first) = rings.first().and_then(|r| r.first()) else {
+                    continue;
+                };
+                let name_ref = geo.strings.intern(name);
+                let kind_ref = geo
+                    .strings
+                    .intern(layer.prop(f, "class").and_then(|v| v.as_str()).unwrap_or(""));
+                let subclass_ref = geo.strings.intern(
+                    layer
+                        .prop(f, "subclass")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                );
+                let rank = layer
+                    .prop(f, "rank")
+                    .and_then(|v| v.as_num())
+                    .map(|n| n as i32)
+                    .unwrap_or(-1);
+                geo.pois.push(Poi {
+                    name: name_ref,
+                    kind: kind_ref,
+                    subclass: subclass_ref,
+                    rank,
+                    pos: *first,
+                });
+            }
+        }
+        "housenumber" => {
+            for f in &layer.features {
+                let Some(number) = layer.prop(f, "housenumber").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if number.is_empty() {
+                    continue;
+                }
+                let rings = decode_geometry(&f.geometry, proj);
+                let Some(first) = rings.first().and_then(|r| r.first()) else {
+                    continue;
+                };
+                let number_ref = geo.strings.intern(number);
+                geo.housenumbers.push(HouseNumber {
+                    number: number_ref,
+                    pos: *first,
+                });
+            }
+        }
         _ => {}
     }
 }
@@ -1018,6 +1089,42 @@ fn encode(geo: &Geometry, origin: (f64, f64)) -> Vec<u8> {
     write_areas(&mut w, &geo.buildings);
     write_aero_areas(&mut w, &geo.aero_areas);
     write_aero_lines(&mut w, &geo.aero_lines);
+
+    // pois + housenumbers ------------------------------------------------------
+    // Appended last, after the string table like every section above, so their
+    // name refs resolve and an older JS reader simply stops before them.
+    w.u32(geo.pois.len() as u32);
+    for p in &geo.pois {
+        w.i32(p.name);
+    }
+    for p in &geo.pois {
+        w.i32(p.kind);
+    }
+    for p in &geo.pois {
+        w.i32(p.subclass);
+    }
+    for p in &geo.pois {
+        w.i32(p.rank);
+    }
+    w.align4();
+    for p in &geo.pois {
+        w.f32(p.pos[0]);
+    }
+    for p in &geo.pois {
+        w.f32(p.pos[1]);
+    }
+
+    w.u32(geo.housenumbers.len() as u32);
+    for h in &geo.housenumbers {
+        w.i32(h.number);
+    }
+    w.align4();
+    for h in &geo.housenumbers {
+        w.f32(h.pos[0]);
+    }
+    for h in &geo.housenumbers {
+        w.f32(h.pos[1]);
+    }
 
     w.buf
 }
@@ -1644,6 +1751,15 @@ mod tests {
             "aerodrome"
         );
         assert_eq!(geo.aero_lines.len(), 82, "aeroLines");
+        // The `building` layer has no name field, so a building label can only
+        // come from the `poi` layer sitting on top of it.
+        assert!(!geo.pois.is_empty(), "pois");
+        assert!(
+            geo.pois
+                .iter()
+                .all(|p| !geo.strings.list[p.name as usize].is_empty()),
+            "every POI carries a name"
+        );
         assert_eq!(
             geo.aero_lines.iter().filter(|l| l.kind == 0).count(),
             3,

@@ -14,9 +14,25 @@
  *   bun scripts/map-shot.ts --scheme tokyo --mode dark --places westcoast --zooms 13
  *   bun scripts/map-shot.ts --out /tmp/shots --highways   # keep motorways on
  *   bun scripts/map-shot.ts --places seatac --no-structures  # buildings/aeroway off
+ *   bun scripts/map-shot.ts --places seattle --zooms 12,10,8 --exploration
+ *   bun scripts/map-shot.ts --places seattle --zooms 17 --labels
+ *   bun scripts/map-shot.ts --places pacific --zooms 3 --cryptids
+ *   bun scripts/map-shot.ts --places seattle --zooms 17 --labels --transit
+ *
+ * `--exploration` seeds the deterministic demo walk at the place and renders the
+ * real exploration layer — the same `buildCellField` → cell-state texture →
+ * ghost lattice + amber rim path the app runs — so the resolution ladder
+ * (`core/cell-ladder.ts`) can be eyeballed rung by rung.
+ *
+ * `--labels` and `--cryptids` draw the two React overlays the shotter otherwise
+ * cannot show: the name chips `selectMapLabels` places (street, park, POI, house
+ * number) and the sea cryptids `visibleOceanCryptids` places. Both call the same
+ * pure selectors the app calls and reuse the app's own metrics, so what comes
+ * out is the real placement — the only difference is CanvasKit drawing the glyphs
+ * instead of react-native <Text>.
  */
 
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 
@@ -37,9 +53,33 @@ import type {
   MapPalette,
   Viewport,
 } from '../src/features/map/core/types';
+import { buildCellField } from '../src/features/map/core/cell-field';
+import {
+  createExplorationIndex,
+  demoExploration,
+} from '../src/features/map/core/exploration-index';
+import { createExplorationRollup } from '../src/features/map/core/exploration-rollup';
+import { createH3Grid, realH3 } from '../src/features/map/core/h3-grid';
+import {
+  labelWidthPx,
+  selectMapLabels,
+  LABEL_FONT_SIZE,
+  LABEL_HEIGHT_PX,
+  LABEL_LETTER_SPACING,
+  type MapLabel,
+} from '../src/features/map/core/map-labels';
+import { oceanCryptidOpacity, visibleOceanCryptids } from '../src/features/map/core/ocean-cryptids';
+import {
+  cellLatticePath,
+  cellRimPath,
+  cellStateFills,
+} from '../src/features/map/render/cell-overlay-paths';
 import { DOT_FIELD_SKSL } from '../src/features/map/render/dot-field-sksl';
 import { buildMaskPaths } from '../src/features/map/render/mask-paths';
 import { buildHatchPath, buildStructurePaths } from '../src/features/map/render/structure-paths';
+import { buildTransitPaths } from '../src/features/map/render/transit-paths';
+import { FERRY_DASH, transitWidthFor } from '../src/features/map/core/transit-lod';
+import type { TransitMode } from '../src/features/map/core/types';
 import {
   AERODROME_DASH,
   AERODROME_STROKE_WIDTH,
@@ -95,6 +135,9 @@ const PLACES: readonly Place[] = [
   // Home, and the densest built ground in the fixture set: downtown towers on
   // one side of I-5, Capitol Hill's blocks on the other.
   { id: 'seattle', label: 'Seattle — downtown / Capitol Hill', lat: 47.6097, lon: -122.3331 },
+  // Open water at globe zoom: what `--cryptids` exists to show, and the one view
+  // where the exploration ladder has deliberately gone dark.
+  { id: 'pacific', label: 'North Pacific — open water', lat: 25, lon: -150 },
 ];
 
 /**
@@ -111,6 +154,17 @@ const PIXEL_RATIO = 2;
  * `--legacy-rivers` restores it so a before/after pair comes out of one build.
  */
 const LEGACY_RIVER_WIDTH = 5;
+
+/** Line break inside a cryptid's ASCII art. */
+const NEWLINE = '\n';
+
+/**
+ * Halo blur sigma, and how many times to lay it down. RN's `textShadowRadius` is
+ * a solid glow; one blurred Skia pass is far fainter, so it is repeated to reach
+ * a comparable weight.
+ */
+const HALO_SIGMA = 2.2;
+const HALO_PASSES = 4;
 
 const args = parseArgs(process.argv.slice(2));
 const tileUrl = process.env.EXPO_PUBLIC_TILE_URL;
@@ -148,19 +202,85 @@ async function main(): Promise<void> {
   const lut = imageFrom(CanvasKit, buildPaletteLut(palette), 256, 3);
   const source = createSource(tileUrl!);
 
+  // One grid + one rollup for the whole run, exactly as `MapEngine` holds them,
+  // so the coarse-rung ancestor sets are built once and reused across zooms.
+  const grid = createH3Grid(realH3());
+  const rollup = args.exploration ? createExplorationRollup(grid) : null;
+
+  // The overlays are type, so they need a real face. IBM Plex Mono 500 is the
+  // one `render/map-labels.tsx` and `render/ocean-cryptid-layer.tsx` both name.
+  const typeface =
+    args.labels || args.cryptids
+      ? CanvasKit.Typeface.MakeFreeTypeFaceFromData(
+          (
+            await readFile(
+              'node_modules/@expo-google-fonts/ibm-plex-mono/500Medium/IBMPlexMono_500Medium.ttf'
+            )
+          ).buffer
+        )
+      : null;
+  if ((args.labels || args.cryptids) && !typeface) throw new Error('failed to load IBM Plex Mono');
+  // The cryptid layer uses the heavier face the app loads for it.
+  const boldTypeface = args.cryptids
+    ? CanvasKit.Typeface.MakeFreeTypeFaceFromData(
+        (
+          await readFile(
+            'node_modules/@expo-google-fonts/ibm-plex-mono/600SemiBold/IBMPlexMono_600SemiBold.ttf'
+          )
+        ).buffer
+      )
+    : null;
+
   for (const place of places) {
+    const home = latLonToWorld({ lat: place.lat, lon: place.lon });
+    // The same deterministic walk the fixture dataset uses, so the shot shows a
+    // plausible territory rather than a blank or a contrived blob.
+    const exploration = args.exploration
+      ? createExplorationIndex(demoExploration(grid, home))
+      : null;
+
     for (const zoom of zooms) {
-      const camera: CameraState = {
-        center: latLonToWorld({ lat: place.lat, lon: place.lon }),
-        zoom,
-      };
+      const camera: CameraState = { center: home, zoom };
       const spec = computeRegionSpec(camera, VIEWPORT, { dataZooms: PLANET_DATA_ZOOMS });
       const geometry = await loadGeometry(source, spec);
-      const png = renderShot({ CanvasKit, effect, lut, geometry, spec, camera, palette, layers });
+      // The ladder decides the resolution; `spec.cellRes` is null once the
+      // camera drops below its coarsest rung, which is exactly when the layer
+      // should vanish from the shot too.
+      const cellField =
+        args.exploration && spec.cellRes !== null
+          ? buildCellField(grid, spec.rect, spec.cellRes, exploration!, rollup!)
+          : null;
+      const png = renderShot({
+        CanvasKit,
+        effect,
+        lut,
+        geometry,
+        spec,
+        camera,
+        palette,
+        layers,
+        cellField,
+        typeface,
+        boldTypeface,
+        // The real selectors, called exactly as the app calls them.
+        // Mirrors `map-view.tsx`: a stop name hides with the lines it belongs to.
+        labels: args.labels
+          ? selectMapLabels(geometry, spec).filter(
+              (label) => args.transit || label.kind !== 'transit'
+            )
+          : null,
+        cryptids: args.cryptids ? visibleOceanCryptids(camera, VIEWPORT) : null,
+        chrome: CryptidThemes.daybreak.chrome,
+      });
       const suffix = selectedScheme ? `-${selectedScheme.id}-${args.mode ?? 'light'}` : '';
       const file = join(outDir, `${place.id}-z${zoom}${suffix}.png`);
       await writeFile(file, png);
-      console.log(`${file}  ${place.label} z${zoom}  mask ${spec.maskWidth}x${spec.maskHeight}`);
+      console.log(
+        `${file}  ${place.label} z${zoom}  mask ${spec.maskWidth}x${spec.maskHeight}` +
+          (args.exploration
+            ? `  cellRes ${spec.cellRes ?? 'hidden'} (${cellField?.cells.length ?? 0} cells)`
+            : '')
+      );
     }
   }
 }
@@ -206,6 +326,15 @@ interface ShotInput {
   camera: CameraState;
   palette: MapPalette;
   layers: RoadLayerOptions;
+  /** Baked exploration cells for this region, or null for a plain city render. */
+  cellField: ReturnType<typeof buildCellField> | null;
+  typeface: any;
+  boldTypeface: any;
+  /** Name chips to draw over the field (--labels), or null. */
+  labels: readonly MapLabel[] | null;
+  /** Sea cryptids to draw (--cryptids), or null. */
+  cryptids: ReturnType<typeof visibleOceanCryptids> | null;
+  chrome: { readonly island: string; readonly ink: string };
 }
 
 function renderShot({
@@ -217,17 +346,26 @@ function renderShot({
   camera,
   palette,
   layers,
+  cellField,
+  typeface,
+  boldTypeface,
+  labels,
+  cryptids,
+  chrome,
 }: ShotInput): Uint8Array {
   const mask = buildMask(CanvasKit, geometry, spec, layers);
-  // Exploration is off in these shots, so an all-black cell texture is exactly
-  // what the shader wants: explored is ignored (uExploration=0) and reveal
-  // order 0 means "fully revealed" at uReveal=1.
-  const cells = imageFrom(
-    CanvasKit,
-    blackRgba(spec.maskWidth, spec.maskHeight),
-    spec.maskWidth,
-    spec.maskHeight
-  );
+  // Without --exploration an all-black cell texture is exactly what the shader
+  // wants: explored is ignored (uExploration=0) and reveal order 0 means "fully
+  // revealed" at uReveal=1. With it, the real baked cell state goes in instead.
+  const field = cellField;
+  const cells = field
+    ? buildCellTexture(CanvasKit, field, spec)
+    : imageFrom(
+        CanvasKit,
+        blackRgba(spec.maskWidth, spec.maskHeight),
+        spec.maskWidth,
+        spec.maskHeight
+      );
 
   const scale = scaleFor(spec.zoom);
   const rectW = spec.rect.maxX - spec.rect.minX;
@@ -245,7 +383,7 @@ function renderShot({
     palette.bg[2] / 255,
     1, // uReveal
     lodForZoom(spec.zoom), // uLod
-    0, // uExploration — plain city render, no fog of war
+    cellField ? 1 : 0, // uExploration — fog of war only with --exploration
     palette.effects?.neonGlow ?? 0,
     palette.effects?.scanlines ?? 0,
   ];
@@ -292,7 +430,19 @@ function renderShot({
     paint
   );
   if (!args.noStructures) drawStructures(CanvasKit, canvas, geometry, spec, palette);
+  if (args.transit) drawTransitLines(CanvasKit, canvas, geometry, spec, palette);
+  if (cellField) drawCellOverlays(CanvasKit, canvas, cellField, spec, palette);
   canvas.restore();
+
+  // The React overlays sit in SCREEN space, not region space — so they are drawn
+  // after the region translate is popped, positioned the way the layers position
+  // them (anchor-space point minus the region offset).
+  if (labels && typeface) {
+    drawLabels(CanvasKit, canvas, labels, spec, palette, chrome, typeface, offX, offY);
+  }
+  if (cryptids && boldTypeface) {
+    drawCryptids(CanvasKit, canvas, cryptids, spec, camera, palette, boldTypeface, offX, offY);
+  }
 
   const snapshot = surface.makeImageSnapshot();
   const png = snapshot.encodeToBytes();
@@ -396,6 +546,265 @@ function drawStructures(
 }
 
 /** The feature mask, built exactly like `render/mask-image.ts` but on CanvasKit. */
+/**
+ * Transit lines over the dot field, mirroring `drawTransitLines` in
+ * `render/region-shader.ts` (same widths, same per-mode alphas, same ferry dash).
+ */
+function drawTransitLines(
+  CanvasKit: any,
+  canvas: any,
+  geometry: PackedGeometry,
+  spec: RegionSpec,
+  palette: MapPalette
+): void {
+  const alphas: Record<TransitMode, number> = {
+    rail: 0.5,
+    subway: 0.82,
+    light_rail: 0.82,
+    tram: 0.58,
+    monorail: 0.72,
+    funicular: 0.58,
+    ferry: 0.5,
+  };
+  const paths = buildTransitPaths(geometry, spec);
+
+  canvas.save();
+  canvas.scale(PIXEL_RATIO, PIXEL_RATIO);
+  for (const [mode, svg] of Object.entries(paths) as [TransitMode, string][]) {
+    const width = transitWidthFor(mode, spec.zoom);
+    if (width === null || !svg) continue;
+    const path = CanvasKit.Path.MakeFromSVGString(svg);
+    if (!path) continue;
+    const ink = palette.transit;
+    const paint = new CanvasKit.Paint();
+    paint.setColor(CanvasKit.Color(ink[0], ink[1], ink[2], alphas[mode]));
+    paint.setStyle(CanvasKit.PaintStyle.Stroke);
+    paint.setStrokeWidth(width);
+    paint.setStrokeJoin(CanvasKit.StrokeJoin.Round);
+    paint.setStrokeCap(CanvasKit.StrokeCap.Round);
+    paint.setAntiAlias(true);
+    if (mode === 'ferry') {
+      paint.setPathEffect(CanvasKit.PathEffect.MakeDash([FERRY_DASH[0], FERRY_DASH[1]]));
+    }
+    canvas.drawPath(path, paint);
+    paint.delete();
+    path.delete();
+  }
+  canvas.restore();
+}
+
+/**
+ * Name chips over the dot field — the CanvasKit twin of `render/map-labels.tsx`.
+ *
+ * The placement is not re-derived: `selectMapLabels` already chose and collided
+ * these, and the chip geometry here reuses `labelWidthPx` and `LABEL_HEIGHT_PX`,
+ * the very constants the RN styles are built from. So a chip that overlaps here
+ * would overlap on the phone.
+ */
+function drawLabels(
+  CanvasKit: any,
+  canvas: any,
+  labels: readonly MapLabel[],
+  spec: RegionSpec,
+  palette: MapPalette,
+  chrome: { readonly island: string; readonly ink: string },
+  typeface: any,
+  offX: number,
+  offY: number
+): void {
+  const scale = scaleFor(spec.zoom);
+  const font = new CanvasKit.Font(typeface, LABEL_FONT_SIZE);
+  const chipPaint = new CanvasKit.Paint();
+  chipPaint.setAntiAlias(true);
+  // The island surface is a translucent rgba() in the theme; approximate it with
+  // the near-white it resolves to over the daybreak canvas.
+  chipPaint.setColor(CanvasKit.Color(255, 255, 255, 0.9));
+
+  canvas.save();
+  canvas.scale(PIXEL_RATIO, PIXEL_RATIO);
+  for (const label of labels) {
+    const width = labelWidthPx(label.text);
+    const cx = (label.world[0] - spec.rect.minX) * scale - offX;
+    const cy = (label.world[1] - spec.rect.minY) * scale - offY;
+    if (cx < -width || cy < -LABEL_HEIGHT_PX || cx > VIEWPORT.width + width) continue;
+
+    const rgb =
+      label.kind === 'area'
+        ? palette.parkLabel
+        : label.kind === 'poi' || label.kind === 'housenumber'
+          ? palette.building
+          : palette.streetLabel;
+    const alpha = label.kind === 'housenumber' ? 0.62 : 1;
+
+    canvas.save();
+    canvas.translate(cx, cy);
+    canvas.rotate((label.angle * 180) / Math.PI, 0, 0);
+    chipPaint.setAlphaf(0.9 * alpha);
+    canvas.drawRRect(
+      CanvasKit.RRectXY(
+        CanvasKit.XYWHRect(-width / 2, -LABEL_HEIGHT_PX / 2, width, LABEL_HEIGHT_PX),
+        3,
+        3
+      ),
+      chipPaint
+    );
+
+    // Mono + letter spacing: place each glyph on the same advance the RN text
+    // layout uses (LABEL_CHAR_PX), rather than letting Skia shape it.
+    const textPaint = new CanvasKit.Paint();
+    textPaint.setColor(CanvasKit.Color(rgb[0], rgb[1], rgb[2], alpha));
+    textPaint.setAntiAlias(true);
+    const advance = LABEL_FONT_SIZE * 0.6 + LABEL_LETTER_SPACING;
+    let x = -((label.text.length * advance) / 2);
+    for (const ch of label.text) {
+      canvas.drawText(ch, x, LABEL_FONT_SIZE * 0.36, textPaint, font);
+      x += advance;
+    }
+    textPaint.delete();
+    canvas.restore();
+  }
+  chipPaint.delete();
+  font.delete();
+  canvas.restore();
+}
+
+/**
+ * Sea cryptids — the CanvasKit twin of `render/ocean-cryptid-layer.tsx`, at the
+ * layer's own fade and ink. Drawn at their resting position: the drift is a
+ * UI-thread animation and a still frame is one moment of it.
+ */
+function drawCryptids(
+  CanvasKit: any,
+  canvas: any,
+  cryptids: ReturnType<typeof visibleOceanCryptids>,
+  spec: RegionSpec,
+  camera: CameraState,
+  palette: MapPalette,
+  boldTypeface: any,
+  offX: number,
+  offY: number
+): void {
+  const scale = scaleFor(spec.zoom);
+  const opacity = oceanCryptidOpacity(camera.zoom) * 0.85;
+  if (opacity <= 0) return;
+  const [r, g, b] = palette.streetLabel;
+
+  const font = new CanvasKit.Font(boldTypeface, 15);
+  const paint = new CanvasKit.Paint();
+  paint.setColor(CanvasKit.Color(r, g, b, opacity));
+  paint.setAntiAlias(true);
+  const wavePaint = new CanvasKit.Paint();
+  wavePaint.setColor(CanvasKit.Color(r, g, b, opacity * 0.7));
+  wavePaint.setAntiAlias(true);
+  // The layer's `textShadow` halo, as a blurred pass underneath. Same job: clear
+  // a little background so thin ASCII does not dissolve into the dot field.
+  const [hr, hg, hb] = palette.bg;
+  const haloPaint = new CanvasKit.Paint();
+  haloPaint.setColor(CanvasKit.Color(hr, hg, hb, opacity));
+  haloPaint.setAntiAlias(true);
+  haloPaint.setMaskFilter(
+    CanvasKit.MaskFilter.MakeBlur(CanvasKit.BlurStyle.Normal, HALO_SIGMA, false)
+  );
+
+  canvas.save();
+  canvas.scale(PIXEL_RATIO, PIXEL_RATIO);
+  for (const cryptid of cryptids) {
+    const x = (cryptid.world[0] - spec.rect.minX) * scale - offX;
+    const y = (cryptid.world[1] - spec.rect.minY) * scale - offY;
+    const lines = [...cryptid.art.split(NEWLINE), cryptid.waves];
+    // Halo first for every row, so one glyph's glow never washes out its neighbour.
+    lines.forEach((line, i) => {
+      const baseline = y + i * 16 + 12;
+      for (let pass = 0; pass < HALO_PASSES; pass++) {
+        canvas.drawText(line, x, baseline, haloPaint, font);
+      }
+    });
+    lines.forEach((line, i) => {
+      const isWaves = i === lines.length - 1;
+      canvas.drawText(line, x, y + i * 16 + 12, isWaves ? wavePaint : paint, font);
+    });
+  }
+  haloPaint.delete();
+  wavePaint.delete();
+  paint.delete();
+  font.delete();
+  canvas.restore();
+}
+
+/**
+ * The region's cell field baked into the RGBA texture the shader samples
+ * (R = occupancy, G = jitter, B = reveal order) — the CanvasKit twin of
+ * `render/cell-state-image.ts`, driven by the same pure geometry builder.
+ */
+function buildCellTexture(
+  CanvasKit: any,
+  field: ReturnType<typeof buildCellField>,
+  spec: RegionSpec
+) {
+  const surface = CanvasKit.MakeSurface(spec.maskWidth, spec.maskHeight);
+  if (!surface) throw new Error('cell surface failed');
+  const canvas = surface.getCanvas();
+  canvas.clear(CanvasKit.BLACK);
+
+  const paint = new CanvasKit.Paint();
+  paint.setStyle(CanvasKit.PaintStyle.Fill);
+  // Off, exactly as in the app: a blended edge texel would smear one cell's
+  // occupancy and reveal order into its neighbour.
+  paint.setAntiAlias(false);
+
+  // The SVG-string builder rather than the geometry one the app uses: CanvasKit
+  // only exposes `Path.MakeFromSVGString` here. Same channel encoding either way.
+  for (const fill of cellStateFills(field, spec)) {
+    const [r, g, b] = fill.color.match(/\d+/g)!.map(Number);
+    paint.setColor(CanvasKit.Color(r, g, b, 1));
+    const path = CanvasKit.Path.MakeFromSVGString(fill.path);
+    if (!path) continue;
+    canvas.drawPath(path, paint);
+    path.delete();
+  }
+  paint.delete();
+
+  const snapshot = surface.makeImageSnapshot();
+  surface.delete();
+  return snapshot;
+}
+
+/**
+ * Ghost lattice + amber frontier rim, mirroring `drawCellOverlays` in
+ * `render/region-shader.ts` (same paths, same alphas, same LOD fade).
+ */
+function drawCellOverlays(
+  CanvasKit: any,
+  canvas: any,
+  field: ReturnType<typeof buildCellField>,
+  spec: RegionSpec,
+  palette: MapPalette
+): void {
+  const lod = lodForZoom(spec.zoom);
+  const latticeAlpha = 0.09 * (1 - lod * 0.7);
+  const rimAlpha = 0.42;
+
+  canvas.save();
+  canvas.scale(PIXEL_RATIO, PIXEL_RATIO);
+  const stroke = (svg: string, rgb: readonly number[], width: number, alpha: number) => {
+    if (!svg || alpha <= 0) return;
+    const path = CanvasKit.Path.MakeFromSVGString(svg);
+    if (!path) return;
+    const paint = new CanvasKit.Paint();
+    paint.setColor(CanvasKit.Color(rgb[0], rgb[1], rgb[2], alpha));
+    paint.setStyle(CanvasKit.PaintStyle.Stroke);
+    paint.setStrokeWidth(width);
+    paint.setStrokeJoin(CanvasKit.StrokeJoin.Round);
+    paint.setAntiAlias(true);
+    canvas.drawPath(path, paint);
+    paint.delete();
+    path.delete();
+  };
+  stroke(cellLatticePath(field, spec), palette.streetLabel, 1.0, latticeAlpha);
+  stroke(cellRimPath(field, spec), palette.accent, 1.25, rimAlpha);
+  canvas.restore();
+}
+
 function buildMask(
   CanvasKit: any,
   geometry: PackedGeometry,
@@ -482,6 +891,10 @@ interface Args {
   out?: string;
   places?: string[];
   zooms?: number[];
+  exploration?: boolean;
+  labels?: boolean;
+  cryptids?: boolean;
+  transit?: boolean;
   highways?: boolean;
   noStructures?: boolean;
   legacyRivers?: boolean;
@@ -495,6 +908,10 @@ function parseArgs(argv: readonly string[]): Args {
     const arg = argv[i];
     if (arg === '--out') out.out = argv[++i];
     else if (arg === '--places') out.places = argv[++i].split(',');
+    else if (arg === '--exploration') out.exploration = true;
+    else if (arg === '--labels') out.labels = true;
+    else if (arg === '--cryptids') out.cryptids = true;
+    else if (arg === '--transit') out.transit = true;
     else if (arg === '--zooms') out.zooms = argv[++i].split(',').map(Number);
     else if (arg === '--scheme') out.scheme = argv[++i];
     else if (arg === '--mode') {

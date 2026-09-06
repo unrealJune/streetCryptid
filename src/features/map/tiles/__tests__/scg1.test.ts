@@ -118,6 +118,29 @@ describe('wrapScg1 parity on a z14 tile with buildings', () => {
     expect(native.aeroLines?.map((l) => l.kind)).toEqual(js.aeroLines?.map((l) => l.kind));
   });
 
+  it('matches the POI layer — the only source of a building name', () => {
+    // The `building` layer carries footprints and heights but never a name, so
+    // a labelled building is really a `poi` point sitting on it.
+    expect(js.pois?.length).toBeGreaterThan(0);
+    expect(native.pois).toHaveLength(js.pois?.length ?? 0);
+    expect(native.pois?.map((p) => p.name)).toEqual(js.pois?.map((p) => p.name));
+    expect(native.pois?.map((p) => p.kind)).toEqual(js.pois?.map((p) => p.kind));
+    expect(native.pois?.map((p) => p.subclass)).toEqual(js.pois?.map((p) => p.subclass));
+    expect(native.pois?.map((p) => p.rank)).toEqual(js.pois?.map((p) => p.rank));
+
+    const [nx, ny] = native.pois![0].world;
+    const [jx, jy] = js.pois![0].world;
+    expect(nx).toBeCloseTo(jx, 5);
+    expect(ny).toBeCloseTo(jy, 5);
+  });
+
+  it('matches house numbers', () => {
+    expect(native.houseNumbers).toHaveLength(js.houseNumbers?.length ?? 0);
+    expect(native.houseNumbers?.map((h) => h.number)).toEqual(
+      js.houseNumbers?.map((h) => h.number)
+    );
+  });
+
   it('matches the first building ring to f32 precision', () => {
     const [nx, ny] = native.buildings![0].rings[0][0];
     const [jx, jy] = js.buildings![0].rings[0][0];
@@ -156,13 +179,19 @@ describe('wrapScg1 on a pre-transit buffer', () => {
   /** aero lines: header + kind u8 + pointOff u32 + coords (no names). */
   const aeroLineBytes = (l: { count: number; coords: Float32Array }): number =>
     8 + align4(l.count) + (l.count + 1) * 4 + l.coords.length * 4;
+  /** pois: count + name/kind/subclass/rank i32 + x f32 + y f32. */
+  const poiBytes = (count: number): number => 4 + count * 4 * 4 + count * 2 * 4;
+  /** house numbers: count + number i32 + x f32 + y f32. */
+  const houseNumberBytes = (count: number): number => 4 + count * 4 + count * 2 * 4;
 
   const tailBytes =
     classedLineBytes(full.transit) +
     classedLineBytes(full.labelStreets) +
     areaBytes(full.buildings, false) +
     areaBytes(full.aeroAreas, true) +
-    aeroLineBytes(full.aeroLines);
+    aeroLineBytes(full.aeroLines) +
+    poiBytes(full.pois.length) +
+    houseNumberBytes(full.houseNumbers.length);
   const truncated = scg1.slice(0, scg1.byteLength - tailBytes);
 
   it('decodes the rest of the tile and reports no appended sections', () => {
@@ -172,6 +201,8 @@ describe('wrapScg1 on a pre-transit buffer', () => {
     expect(tile.buildings.count).toBe(0);
     expect(tile.aeroAreas.count).toBe(0);
     expect(tile.aeroLines.count).toBe(0);
+    expect(tile.pois).toHaveLength(0);
+    expect(tile.houseNumbers).toHaveLength(0);
     expect(tile.streets.count).toBe(full.streets.count);
     expect(tile.places).toHaveLength(full.places.length);
   });

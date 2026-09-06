@@ -10,8 +10,7 @@ import { applyViewTransform, clampCamera, scaleFor, type ViewTransform } from '.
 import { makeViewLimits, type ViewLimits } from '../core/gesture';
 import { createH3Grid, realH3 } from '../core/h3-grid';
 import { createNativeH3Enumerator } from '../core/native-h3-enumerator';
-import { resForZoom } from '../core/cell-ladder';
-import { coverageInView, nearestPlaceName } from '../core/readout';
+import { coverageInView, coverageMeasurable, nearestPlaceName } from '../core/readout';
 import { coversView, shouldPrefetchRegion } from '../core/region';
 import type { CameraState, LatLon, Viewport, WorldPoint, WorldRect } from '../core/types';
 import { latLonToWorld } from '../core/mercator';
@@ -58,12 +57,14 @@ export interface MapEngineState {
   readonly anchor: CameraState;
   /** Zoom/bounds limits in anchor-space pixels, for the UI-thread clamps. */
   readonly limits: ViewLimits | null;
-  /** Explored fraction of fixed-resolution cells in view, or 0 when hidden. */
+  /** Explored fraction of DISPLAY-resolution cells in view, or 0 when unmeasurable. */
   readonly coverage: number;
   /**
-   * Whether the exploration layer renders at the on-screen zoom. False below
-   * the render cutoff, where {@link coverage} is a meaningless 0 rather than a
-   * real "nothing explored" — chrome should hide the readout, not show 0%.
+   * Whether a coverage percentage is meaningful at the on-screen zoom. False
+   * below the display-resolution band, where {@link coverage} is a meaningless 0
+   * rather than a real "nothing explored" — chrome should hide the readout, not
+   * show 0%. This is NOT "the layer is drawn": the resolution ladder keeps
+   * drawing coarse rolled-up rungs far below this (see `core/cell-ladder.ts`).
    */
   readonly sectorsVisible: boolean;
   /** Nearest prominent place name to the camera center, for the island. */
@@ -321,8 +322,10 @@ export function useMapEngine(
   );
 
   // The same cutoff `coverageInView` uses to bail — read it directly so the
-  // chrome can tell "0% explored" apart from "the layer isn't drawn here".
-  const sectorsVisible = useMemo(() => resForZoom(camera.zoom) !== null, [camera.zoom]);
+  // chrome can tell "0% explored" apart from "no number means anything here".
+  // NOT the same as whether the layer draws: the ladder keeps drawing coarse
+  // rungs far below this, they just aren't measurable (see `coverageInView`).
+  const sectorsVisible = useMemo(() => coverageMeasurable(camera.zoom), [camera.zoom]);
 
   const placeName = useMemo(
     () => (region ? nearestPlaceName(region.places, camera.center) : null),

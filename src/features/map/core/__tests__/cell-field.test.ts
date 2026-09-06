@@ -1,4 +1,4 @@
-import { H3_DISPLAY_RES } from '../cell-ladder';
+import { H3_COARSEST_RES, H3_DISPLAY_RES } from '../cell-ladder';
 import { buildCellField, cellHash } from '../cell-field';
 import { createExplorationIndex, demoExploration } from '../exploration-index';
 import { createH3Grid, realH3 } from '../h3-grid';
@@ -75,5 +75,41 @@ describe('buildCellField', () => {
     const a = buildCellField(grid, rect, H3_DISPLAY_RES, exploration);
     const b = buildCellField(grid, rect, H3_DISPLAY_RES, exploration);
     expect(a).toEqual(b);
+  });
+});
+
+describe('buildCellField on the coarse ladder rungs', () => {
+  const homeCell = grid.cellAt(HOME, H3_DISPLAY_RES);
+  const exploration = createExplorationIndex([homeCell]);
+
+  it('blooms a single explored cell into its coarse ancestor', () => {
+    const res = H3_DISPLAY_RES - 3;
+    const parent = grid.parentOf(homeCell, res);
+    const field = buildCellField(grid, rectAround(HOME, 4e-3), res, exploration);
+
+    expect(field.res).toBe(res);
+    const byId = new Map(field.cells.map((c) => [c.cell, c]));
+    expect(byId.get(parent)?.fraction).toBe(1);
+    // Occupancy stays binary on every rung — the shader and the cell texture
+    // depend on that.
+    for (const cell of field.cells) expect([0, 1]).toContain(cell.fraction);
+  });
+
+  it('keeps the frontier rim on the coarse rungs', () => {
+    const res = H3_DISPLAY_RES - 3;
+    const field = buildCellField(grid, rectAround(HOME, 4e-3), res, exploration);
+    const lit = field.cells.filter((c) => c.fraction >= 1);
+
+    expect(lit.length).toBeGreaterThan(0);
+    // A lone bloomed cell borders nothing but undiscovered ground, so it is all rim.
+    expect(lit.every((c) => c.frontier)).toBe(true);
+    expect(field.cells.every((c) => !c.frontier || c.fraction >= 1)).toBe(true);
+  });
+
+  it('draws far fewer cells over the same ground at the coarsest rung', () => {
+    const rect = rectAround(HOME, 2e-3);
+    const fine = buildCellField(grid, rect, H3_DISPLAY_RES, exploration);
+    const coarse = buildCellField(grid, rect, H3_COARSEST_RES, exploration);
+    expect(coarse.cells.length).toBeLessThan(fine.cells.length);
   });
 });

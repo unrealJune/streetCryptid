@@ -120,6 +120,33 @@ export interface PackedTile {
   /** OpenMapTiles `aeroway` lines, classed by {@link AERO_LINE_KINDS}. */
   readonly aeroLines: PackedAeroLines;
   readonly places: readonly Place[];
+  /**
+   * OpenMapTiles `poi` points — the named things inside buildings, and the only
+   * place a building label can come from: the `building` layer carries geometry
+   * and `render_height`, never a name. Sparse at data zoom 13 (rank-filtered to
+   * landmarks) and dense at 14; empty from an older native binary.
+   */
+  readonly pois: readonly MapPoi[];
+  /** OpenMapTiles `housenumber` points — z14 only, empty otherwise. */
+  readonly houseNumbers: readonly HouseNumber[];
+}
+
+/** A named point of interest, positioned in world space. */
+export interface MapPoi {
+  readonly name: string;
+  readonly world: WorldPoint;
+  /** OpenMapTiles `class` (e.g. `hospital`, `shop`, `railway`). */
+  readonly kind: string;
+  /** OpenMapTiles `subclass` — the specific tag value (e.g. `clinic`). */
+  readonly subclass: string;
+  /** OpenMapTiles importance rank; lower is more prominent. Undefined when absent. */
+  readonly rank?: number;
+}
+
+/** A street number stamped on a building. */
+export interface HouseNumber {
+  readonly number: string;
+  readonly world: WorldPoint;
 }
 
 /** A region's worth of geometry: per-tile parts plus their merged places. */
@@ -159,7 +186,9 @@ export function packedTileToGeometry(tile: PackedTile): PackedGeometry {
     tile.buildings.count === 0 &&
     tile.aeroAreas.count === 0 &&
     tile.aeroLines.count === 0 &&
-    tile.places.length === 0;
+    tile.places.length === 0 &&
+    tile.pois.length === 0 &&
+    tile.houseNumbers.length === 0;
   return empty ? EMPTY_PACKED : { parts: [tile], places: tile.places };
 }
 
@@ -297,6 +326,8 @@ export function packGeometry(g: MapGeometry): PackedGeometry {
     aeroAreas,
     aeroLines,
     places: g.places,
+    pois: g.pois ?? [],
+    houseNumbers: g.houseNumbers ?? [],
   };
   return packedTileToGeometry(tile);
 }
@@ -415,5 +446,7 @@ export function unpackPacked(g: PackedGeometry): MapGeometry {
     aeroAreas,
     aeroLines,
     places: [...g.places],
+    pois: g.parts.flatMap((part) => [...part.pois]),
+    houseNumbers: g.parts.flatMap((part) => [...part.houseNumbers]),
   };
 }
