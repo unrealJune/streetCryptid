@@ -57,6 +57,7 @@ import type {
   WorldPoint,
   WorldRect,
 } from '../core/types';
+import { LOCATE_MIN_ZOOM } from '../config';
 import { clusterMarkers } from '../core/marker-clusters';
 import { visibleOceanCryptids } from '../core/ocean-cryptids';
 import type { MapRegion } from '../engine/map-engine';
@@ -674,10 +675,19 @@ export function MapView({
       tx: tx.value,
       ty: ty.value,
     });
+    // A floor on the fly-to, never a snap: someone looking at the whole region is taken in to
+    // town-wide, and someone already closer than that keeps the zoom they chose. The dataset's
+    // own limits still win — `limits` carries them as k, so they come back as zooms here.
+    const zoomCeiling = anchor.zoom + Math.log2(limits.kMax);
+    const zoomFloor = anchor.zoom + Math.log2(limits.kMin);
+    const zoom = Math.min(
+      Math.max(current.zoom, LOCATE_MIN_ZOOM, zoomFloor),
+      Math.max(zoomCeiling, zoomFloor)
+    );
     const to = clampTranslation(
       viewTransformFor(anchor, viewport, {
         center: latLonToWorld(locateTarget.location),
-        zoom: current.zoom,
+        zoom,
       }),
       limits
     );

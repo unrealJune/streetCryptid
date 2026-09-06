@@ -19,6 +19,7 @@ const mothman: MapRosterFriend = {
   distanceM: 320,
   status: 'UPDATED 4 MIN AGO',
   online: true,
+  nearby: true,
   locatable: true,
 };
 
@@ -31,6 +32,7 @@ const jackalope: MapRosterFriend = {
   distanceM: null,
   status: 'WAITING FOR LOCATION',
   online: false,
+  nearby: false,
   locatable: false,
 };
 
@@ -59,7 +61,7 @@ describe('FriendsIsland', () => {
     return { onSelect, onOpenProfile };
   }
 
-  it('lists every friend and counts only the live ones as nearby', () => {
+  it('lists every friend and counts only the near ones as nearby', () => {
     render([mothman, jackalope]);
 
     expect(findText(renderer, '@wanderer')).toHaveLength(1);
@@ -127,6 +129,22 @@ describe('FriendsIsland', () => {
       accessibilityLabel: 'Manage @nightowl',
     });
     expect(manage.props.disabled).toBeUndefined();
+  });
+
+  it('leaves a reachable but distant friend out of the count, and in the list', () => {
+    // Online, so the row is live and shows a distance — but 40 km away is not NEARBY.
+    const faraway: MapRosterFriend = {
+      ...mothman,
+      id: 'endpoint-faraway',
+      handle: '@faraway',
+      distanceM: 40_000,
+      nearby: false,
+    };
+    render([mothman, faraway]);
+
+    expect(findText(renderer, '1 NEARBY')).toHaveLength(1);
+    expect(findText(renderer, '@faraway')).toHaveLength(1);
+    expect(findText(renderer, '40 KM')).toHaveLength(1);
   });
 
   it('points an empty atlas at pairing instead of showing a bare list', () => {

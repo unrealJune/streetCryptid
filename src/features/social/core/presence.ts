@@ -186,6 +186,31 @@ export function isPresenceOnline(state: PresenceState): boolean {
   return state === 'live' || state === 'recent' || state === 'parked' || state === 'no-fix';
 }
 
+/**
+ * How close counts as NEARBY: roughly "in the same city".
+ *
+ * The roster header used to count every reachable friend, so someone on another continent read as
+ * NEARBY — a word that means a distance, answering a question about connectivity. 25 km clears a
+ * large metro from its centre without reaching the next one.
+ *
+ * Deliberately NOT surfaced as a caption in the UI. The number is a threshold the code uses, not a
+ * fact the reader needs; "3 NEARBY" is the honest reading of a word people already understand.
+ */
+export const NEARBY_RADIUS_M = 25_000;
+
+/**
+ * Whether a friend is both reachable and close enough to be worth the word.
+ *
+ * A friend with no distance is NOT nearby — but that is a statement about what we know, not about
+ * where they are, so callers that count nearby friends must not read the absence as "far away" in
+ * any user-visible sentence. Unknown distance and known-far look identical here and should not
+ * look identical on screen.
+ */
+export function isPresenceNearby(presence: FriendPresence): boolean {
+  if (!isPresenceOnline(presence.state)) return false;
+  return presence.distanceM !== null && presence.distanceM <= NEARBY_RADIUS_M;
+}
+
 /** Great-circle distance between two location fixes in metres. */
 export function distanceBetweenFixes(a: LocationFix, b: LocationFix): number {
   const radiusM = 6_371_000;

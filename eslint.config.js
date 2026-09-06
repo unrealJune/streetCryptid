@@ -49,10 +49,12 @@ module.exports = defineConfig([
   // by design and must be written inside gesture worklets (`sv.value += …`). The
   // react-compiler `immutability` rule (eslint-config-expo@57) doesn't model
   // reanimated shared values and false-positives on these idiomatic writes — and
-  // it can't be silenced with inline disables — so turn it off for render/ only.
-  // The pure map logic the rule protects lives in core/ (no shared values).
+  // it can't be silenced with inline disables — so turn it off where they live.
+  // The pure map logic the rule protects lives in core/ (no shared values), and
+  // that includes the drawer's detent arithmetic — only the component that
+  // animates a height is exempt, not the rules deciding what the height is.
   {
-    files: ['src/features/map/render/**'],
+    files: ['src/features/map/render/**', 'src/features/map/components/map-drawer.tsx'],
     rules: {
       'react-hooks/immutability': 'off',
     },

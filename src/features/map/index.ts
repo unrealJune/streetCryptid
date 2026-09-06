@@ -6,7 +6,7 @@ export type { MapRosterFriend } from './components/friends-island';
 export { IslandTabs } from './components/island-tabs';
 export type { IslandTab } from './components/island-tabs';
 export { LocateMeControl } from './components/locate-me-control';
-export { MapIsland } from './components/map-island';
+export { MapDrawer, type DrawerDetent } from './components/map-drawer';
 export {
   MapLayersControl,
   type MapLayerId,

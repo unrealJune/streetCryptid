@@ -31,6 +31,18 @@ export const PLANET_CAMERA_MIN_ZOOM = 1;
 export const CAMERA_MAX_ZOOM = 18;
 export const CAMERA_INITIAL_ZOOM = 15;
 
+/**
+ * Closest the camera is allowed to be when it flies somewhere on purpose — tapping a friend,
+ * tapping a roster row, pressing Locate Me. About 5 km across a phone screen: town-wide, where
+ * the street grid is legible and "who is near me" is answerable at a glance.
+ *
+ * A FLOOR, not a target. Fly-to used to preserve whatever zoom the user was on, so pressing
+ * Locate Me from a regional view re-centred on a dot in an unreadable field and looked like it
+ * had done nothing. Someone already zoomed closer than this keeps their zoom — they chose it, and
+ * yanking them back out is the same failure in the other direction.
+ */
+export const LOCATE_MIN_ZOOM = 13;
+
 /** The planet bake's contiguous data zooms; the fixture carries only z12–14. */
 export const PLANET_DATA_ZOOMS: DataZoomRange = { min: 0, max: 14 };
 export const FIXTURE_DATA_ZOOMS: DataZoomRange = { min: 12, max: 14 };

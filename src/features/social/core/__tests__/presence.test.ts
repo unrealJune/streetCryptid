@@ -11,7 +11,9 @@ import {
   distanceBetweenFixes,
   formatAge,
   formatDistance,
+  isPresenceNearby,
   isPresenceStale,
+  NEARBY_RADIUS_M,
 } from '../presence';
 
 const friend = (endpointId: string, handle: string): Friend => ({
@@ -231,5 +233,87 @@ describe('a friend who stopped moving vs a friend whose phone died', () => {
     })[0];
 
     expect(presence.state).toBe('out-of-contact');
+  });
+});
+
+describe('nearby is a radius, not a heartbeat', () => {
+  const now = 1_000_000;
+  const here = fix(47.62, -122.32, now);
+
+  /** One friend, at a given distance north of us, freshly heard from. */
+  function presenceAt(distanceM: number) {
+    // ~111.32 km per degree of latitude — close enough to place a friend at a known range.
+    const away = fix(47.62 + distanceM / 111_320, -122.32, now);
+    const [presence] = buildFriendPresence({
+      friends: [friend('aabb', '@moth')],
+      latest: [{ author: 'aabb', fix: { ...away, state: FIX_STATE_LIVE }, receivedAt: now }],
+      selfFix: here,
+      now,
+    });
+    return presence;
+  }
+
+  it('counts a friend inside the radius', () => {
+    const presence = presenceAt(4_000);
+
+    expect(presence.state).toBe('live');
+    expect(isPresenceNearby(presence)).toBe(true);
+  });
+
+  it('does not count a reachable friend on the other side of the world', () => {
+    const presence = presenceAt(NEARBY_RADIUS_M * 40);
+
+    // Still online — the roster keeps them and still says so. Just not NEARBY.
+    expect(presence.state).toBe('live');
+    expect(isPresenceNearby(presence)).toBe(false);
+  });
+
+  it('holds the radius as an inclusive edge', () => {
+    expect(isPresenceNearby(presenceAt(NEARBY_RADIUS_M - 100))).toBe(true);
+    expect(isPresenceNearby(presenceAt(NEARBY_RADIUS_M + 100))).toBe(false);
+  });
+
+  it('is not nearby when we cannot say how far away they are', () => {
+    const [presence] = buildFriendPresence({
+      friends: [friend('aabb', '@moth')],
+      latest: [{ author: 'aabb', fix: { ...here, state: FIX_STATE_LIVE }, receivedAt: now }],
+      // No fix of our own: distance is unknown, which is NOT the same as far.
+      selfFix: null,
+      now,
+    });
+
+    expect(presence.distanceM).toBeNull();
+    expect(isPresenceNearby(presence)).toBe(false);
+  });
+
+  it('is not nearby once we have lost contact, however close the last fix was', () => {
+    const stale = fix(47.62, -122.32, now - 30 * 60 * 60 * 1000);
+    const [presence] = buildFriendPresence({
+      friends: [friend('aabb', '@moth')],
+      latest: [{ author: 'aabb', fix: stale, receivedAt: now }],
+      selfFix: here,
+      now,
+    });
+
+    expect(presence.state).toBe('lapsed');
+    expect(presence.distanceM).toBe(0);
+    expect(isPresenceNearby(presence)).toBe(false);
+  });
+
+  it('counts a parked friend, who is exactly where they say they are', () => {
+    const parked = {
+      ...fix(47.625, -122.32, now - 40 * 60 * 1000),
+      state: FIX_STATE_PARKED,
+      publishedDeltaS: 39 * 60,
+    };
+    const [presence] = buildFriendPresence({
+      friends: [friend('aabb', '@moth')],
+      latest: [{ author: 'aabb', fix: parked, receivedAt: now }],
+      selfFix: here,
+      now,
+    });
+
+    expect(presence.state).toBe('parked');
+    expect(isPresenceNearby(presence)).toBe(true);
   });
 });

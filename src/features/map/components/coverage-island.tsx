@@ -38,11 +38,16 @@ interface CoverageIslandProps {
 }
 
 /**
- * The island's ME body: hero place name, one mono sub line, one flip-dot
+ * The drawer's ME body: hero place name, one mono sub line, one flip-dot
  * coverage bar, one percentage — and nothing else (declutter law). Doubles as
  * the screen-reader text model for the canvas (PRODUCT.md P0).
  *
- * The card surface belongs to `MapIsland`; this only supplies its own padding.
+ * The place name is the hero HERE, not in the top chrome. It was briefly promoted to a
+ * floating header on the theory that "where the camera is" is true of the whole screen; in
+ * practice it put a second panel over the map to say what this one already said well, and
+ * the map is the thing the chrome is supposed to stay out of the way of.
+ *
+ * The card surface belongs to `MapDrawer`; this only supplies its own padding.
  */
 export function CoverageIsland({
   theme,
