@@ -210,3 +210,22 @@ src/
   node.rs          in-memory replica + HTTP API               [live feature]
   bin/trail-stash.rs  main                                     [live feature]
 ```
+
+## License
+
+Copyright (C) 2026 June Philip.
+
+trail-stash is licensed under the **GNU Affero General Public License v3.0 or
+later** (`AGPL-3.0-or-later`). The full text is in [LICENSE](./LICENSE); the
+copyright and warranty notice is in [NOTICE](./NOTICE).
+
+Section 13 is the operative clause for this project: because trail-stash is
+software you interact with over a network, anyone running a modified version as
+a service must offer its users the corresponding source of that modified
+version. That is deliberate. The server is ciphertext-blind by construction —
+it holds envelopes it cannot read — and a claim like that is only worth
+something if the code answering the network can be checked against the code
+published here.
+
+Self-hosting a stock, unmodified build imposes no obligation beyond keeping
+these notices intact.

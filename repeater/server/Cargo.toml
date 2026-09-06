@@ -3,7 +3,7 @@ name = "trail-stash"
 version = "0.2.0"
 edition = "2021"
 publish = false
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 description = "streetCryptid always-on, ciphertext-blind, stateless iroh-docs replica + push-to-sync waker (offline trail delivery)"
 
 [lib]
