@@ -541,7 +541,12 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
           ? await provider.hasPermission()
           : await provider.ensurePermission();
       if (!allowed) return null;
-      const fix = await provider.getCurrent();
+      // Bounded, and cache-first: `getCurrentPositionAsync` has no timeout and can stay pending
+      // forever with the capture pipeline already holding the location manager, which is exactly
+      // what left the locate button spinning for the rest of the session. See
+      // `ExpoLocationProvider.getCurrentWithin`.
+      const fix = await provider.getCurrentWithin();
+      if (!fix) return null;
       // Keep it, so the self marker and the initial camera stop waiting on a publish too.
       setLiveSelfFix((current) => (!current || fix.ts >= current.ts ? fix : current));
       return fix;
