@@ -84,7 +84,21 @@ pub const PAIR_WIRE_V: u8 = 3;
 
 /// Invite schema version carried in every [`InviteData`].
 ///
-/// v1 (postcard over a base32 ticket *string*, hex-encoded) never shipped and is not decoded.
+/// v1 — postcard over the base32 ticket *string*, hex-encoded, under an `scpair1:` prefix — DID
+/// ship, in every release from v1.0.0 through v2.4.0, with invite creation reachable from the
+/// pairing screen. It is deliberately not decoded here: this build rejects a v1 token rather than
+/// carrying a second codec.
+///
+/// That break is bidirectional and covers BOTH token paths, because the sealed pairing-code
+/// capsule carries the same token: a v1 peer cannot redeem a v2 link or code, and vice versa. The
+/// capsule case fails late and confusingly — the AES key derives from the human code and is
+/// unchanged, so a v1 capsule DECRYPTS on this build and is only then rejected on the token
+/// prefix. Nearby BLE pairing is unaffected: it derives its session id from the two endpoint ids
+/// and carries no invite token, and [`PAIR_ALPN`]/[`PAIR_WIRE_V`] are unchanged.
+///
+/// To pair across that boundary, decode-side compat would have to be added here (keep the v1
+/// `InviteWire`, dispatch on prefix, keep encoding v2). That only ever fixes v1 -> v2, since the
+/// tolerance would have had to ship in v1 to fix the other direction.
 pub const INVITE_V: u8 = 2;
 
 /// Hard ceiling on a single framed pairing message body, enforced on read and write. Pairing
@@ -2678,7 +2692,8 @@ mod tests {
     #[test]
     fn invite_bad_prefix_rejected() {
         assert!(decode_invite("nope:deadbeef").is_err());
-        // The never-shipped v1 prefix is not a special case — it is simply not our prefix.
+        // The v1 prefix shipped (v1.0.0..=v2.4.0) but is deliberately not decoded — it is simply
+        // not our prefix. See INVITE_V for what that break costs.
         assert!(decode_invite("scpair1:deadbeef").is_err());
     }
 

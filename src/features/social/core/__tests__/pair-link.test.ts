@@ -37,7 +37,7 @@ describe('pair-link codec', () => {
     expect(encodePairLink(token)).toBe('streetcryptid:///social?token=scpair2%3AAb9-_xyZ');
   });
 
-  it('rejects the never-shipped scpair1: prefix', () => {
+  it('rejects the shipped-but-unsupported scpair1: prefix', () => {
     const legacy = 'scpair1:deadbeefcafe';
     expect(isPairToken(legacy)).toBe(false);
     expect(isPairLink(legacy)).toBe(false);
