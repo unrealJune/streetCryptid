@@ -13,6 +13,7 @@
  *   bun scripts/map-shot.ts --out /tmp/shots --places westcoast,europe --zooms 4,8,12
  *   bun scripts/map-shot.ts --scheme tokyo --mode dark --places westcoast --zooms 13
  *   bun scripts/map-shot.ts --out /tmp/shots --highways   # keep motorways on
+ *   bun scripts/map-shot.ts --places seatac --no-structures  # buildings/aeroway off
  */
 
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -29,9 +30,29 @@ import {
 import { roadWidthFor, type RoadLayerOptions } from '../src/features/map/core/road-lod';
 import { riverWidthFor } from '../src/features/map/core/water-lod';
 import { ROAD_VALUES } from '../src/features/map/core/masks';
-import type { CameraState, MapPalette, Viewport } from '../src/features/map/core/types';
+import type {
+  AeroAreaKind,
+  AeroLineKind,
+  CameraState,
+  MapPalette,
+  Viewport,
+} from '../src/features/map/core/types';
 import { DOT_FIELD_SKSL } from '../src/features/map/render/dot-field-sksl';
 import { buildMaskPaths } from '../src/features/map/render/mask-paths';
+import { buildHatchPath, buildStructurePaths } from '../src/features/map/render/structure-paths';
+import {
+  AERODROME_DASH,
+  AERODROME_STROKE_WIDTH,
+  AERO_AREA_STYLE,
+  AERO_LINE_ALPHA,
+  aeroLineWidthFor,
+  BUILDING_FILL_ALPHA,
+  BUILDING_HATCH_ALPHA,
+  BUILDING_HATCH_WIDTH,
+  BUILDING_STROKE_ALPHA,
+  buildingHatchVisible,
+  buildingStrokeWidthFor,
+} from '../src/features/map/core/structure-lod';
 import { lodForZoom } from '../src/features/map/render/shader-uniforms';
 import { mergePacked, type PackedGeometry } from '../src/features/map/tiles/packed-geometry';
 import { BundleFetchByteSource } from '../src/features/map/tiles/bundle-fetch';
@@ -68,6 +89,12 @@ const PLACES: readonly Place[] = [
   { id: 'africa', label: 'Central Africa — Kinshasa / Congo', lat: -4.3, lon: 15.31 },
   { id: 'india', label: 'Northern India — Varanasi / Ganges', lat: 25.32, lon: 83.01 },
   { id: 'europe', label: 'Europe — Cologne / Rhine', lat: 50.94, lon: 6.96 },
+  // Not a river city: the case the building/aeroway layer exists for. A big
+  // terminal, a huge apron, and runways that are otherwise blank ground.
+  { id: 'seatac', label: 'SeaTac airport — Seattle', lat: 47.4435, lon: -122.3016 },
+  // Home, and the densest built ground in the fixture set: downtown towers on
+  // one side of I-5, Capitol Hill's blocks on the other.
+  { id: 'seattle', label: 'Seattle — downtown / Capitol Hill', lat: 47.6097, lon: -122.3331 },
 ];
 
 /**
@@ -264,6 +291,7 @@ function renderShot({
     CanvasKit.XYWHRect(0, 0, rectW * scale * PIXEL_RATIO, rectH * scale * PIXEL_RATIO),
     paint
   );
+  if (!args.noStructures) drawStructures(CanvasKit, canvas, geometry, spec, palette);
   canvas.restore();
 
   const snapshot = surface.makeImageSnapshot();
@@ -274,6 +302,97 @@ function renderShot({
   mask.delete();
   cells.delete();
   return png as Uint8Array;
+}
+
+/**
+ * Buildings + aeroway over the dot field, mirroring `drawStructures` in
+ * `render/region-shader.ts`. Called inside the region translate, so it only has
+ * to scale region-logical px up to device px.
+ */
+function drawStructures(
+  CanvasKit: any,
+  canvas: any,
+  geometry: PackedGeometry,
+  spec: RegionSpec,
+  palette: MapPalette
+): void {
+  const paths = buildStructurePaths(geometry, spec);
+  const ink = palette.building;
+
+  const paintOf = (alpha: number, width: number | null, dash?: readonly [number, number]) => {
+    const paint = new CanvasKit.Paint();
+    paint.setColor(CanvasKit.Color(ink[0], ink[1], ink[2], alpha));
+    paint.setAntiAlias(true);
+    if (width === null) {
+      paint.setStyle(CanvasKit.PaintStyle.Fill);
+    } else {
+      paint.setStyle(CanvasKit.PaintStyle.Stroke);
+      paint.setStrokeWidth(width);
+      paint.setStrokeJoin(CanvasKit.StrokeJoin.Round);
+      paint.setStrokeCap(CanvasKit.StrokeCap.Round);
+      if (dash) paint.setPathEffect(CanvasKit.PathEffect.MakeDash([dash[0], dash[1]]));
+    }
+    return paint;
+  };
+  const draw = (
+    svg: string,
+    alpha: number,
+    width: number | null,
+    dash?: readonly [number, number]
+  ) => {
+    if (!svg || alpha <= 0) return;
+    const path = CanvasKit.Path.MakeFromSVGString(svg);
+    if (!path) return;
+    if (width === null) path.setFillType(CanvasKit.FillType.Winding);
+    const paint = paintOf(alpha, width, dash);
+    canvas.drawPath(path, paint);
+    paint.delete();
+    path.delete();
+  };
+
+  canvas.save();
+  canvas.scale(PIXEL_RATIO, PIXEL_RATIO);
+
+  // Same painter's order as `drawStructures` in render/region-shader.ts.
+  for (const kind of ['apron', 'aerodrome'] as const satisfies readonly AeroAreaKind[]) {
+    const svg = paths.aeroAreas[kind];
+    if (!svg) continue;
+    const style = AERO_AREA_STYLE[kind];
+    draw(svg, style.fillAlpha, null);
+    draw(
+      svg,
+      style.strokeAlpha,
+      AERODROME_STROKE_WIDTH,
+      kind === 'aerodrome' ? AERODROME_DASH : undefined
+    );
+  }
+  for (const kind of ['taxiway', 'runway'] as const satisfies readonly AeroLineKind[]) {
+    const svg = paths.aeroLines[kind];
+    if (svg) draw(svg, AERO_LINE_ALPHA[kind], aeroLineWidthFor(kind, spec.zoom));
+  }
+  const buildingWidth = buildingStrokeWidthFor(spec.zoom);
+  if (buildingWidth !== null && paths.buildings) {
+    draw(paths.buildings, BUILDING_FILL_ALPHA, null);
+    // Hatch clipped to the footprints — mirrors `drawBuildingHatch`.
+    if (buildingHatchVisible(spec.zoom)) {
+      const clip = CanvasKit.Path.MakeFromSVGString(paths.buildings);
+      const hatch = CanvasKit.Path.MakeFromSVGString(buildHatchPath(spec));
+      if (clip && hatch) {
+        clip.setFillType(CanvasKit.FillType.Winding);
+        canvas.save();
+        canvas.clipPath(clip, CanvasKit.ClipOp.Intersect, true);
+        const paint = paintOf(BUILDING_HATCH_ALPHA, BUILDING_HATCH_WIDTH);
+        canvas.drawPath(hatch, paint);
+        paint.delete();
+        canvas.restore();
+      }
+      clip?.delete();
+      hatch?.delete();
+    }
+    draw(paths.buildings, BUILDING_STROKE_ALPHA, buildingWidth);
+  }
+
+  canvas.restore();
 }
 
 /** The feature mask, built exactly like `render/mask-image.ts` but on CanvasKit. */
@@ -364,6 +483,7 @@ interface Args {
   places?: string[];
   zooms?: number[];
   highways?: boolean;
+  noStructures?: boolean;
   legacyRivers?: boolean;
   scheme?: string;
   mode?: 'light' | 'dark';
@@ -382,6 +502,7 @@ function parseArgs(argv: readonly string[]): Args {
       if (mode !== 'light' && mode !== 'dark') throw new Error('--mode expects light or dark');
       out.mode = mode;
     } else if (arg === '--highways') out.highways = true;
+    else if (arg === '--no-structures') out.noStructures = true;
     else if (arg === '--legacy-rivers') out.legacyRivers = true;
     else throw new Error(`unknown flag ${arg}`);
   }

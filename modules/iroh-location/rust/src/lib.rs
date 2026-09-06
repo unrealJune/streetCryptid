@@ -161,6 +161,19 @@ impl From<mesh::MeshError> for LocationError {
 }
 
 /// A decrypted location fix handed to the app.
+///
+/// The first five fields describe a **position**. The last two describe the **envelope that
+/// carried it**, and they are the difference between a friend who has stopped moving and a friend
+/// whose phone has died — which looked identical on the map until 2026-09-05, because the only
+/// clock the UI had was [`ts`](Self::ts), and a heartbeat deliberately preserves the ORIGINAL `ts`
+/// (see [`crate::publish::DrainEngine::heartbeat`]).
+///
+/// They are stamped at seal time by [`crate::publish::DrainEngine::drain`] and are `None`
+/// everywhere else: on capture, in the outbox, and in the gate's `last_known_fix`. A position does
+/// not have a "when was this sent" or a "was the phone parked"; a transmission does.
+///
+/// `None` on a *received* fix means the sender predates these fields. See [`decode_fix_payload`]
+/// for why that decodes rather than failing.
 #[derive(Debug, Clone, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct LocationFix {
     pub lat: f64,
@@ -168,7 +181,87 @@ pub struct LocationFix {
     pub accuracy_m: f64,
     pub heading_deg: f64,
     pub ts: u64,
+    /// Why the position is what it is, as one of `FIX_STATE_*`.
+    ///
+    /// A plain `u8` for the same reason `CTL_KIND_*` is: an unknown future value from a newer peer
+    /// must degrade to "I do not recognise this" rather than fail the whole payload.
+    pub state: Option<u8>,
+    /// Seconds between [`ts`](Self::ts) and the moment this envelope was sealed.
+    ///
+    /// Delta-encoded rather than absolute because it is always small and always non-negative — a
+    /// position cannot be sent before it is measured — and a varint of a day's worth of seconds is
+    /// three bytes where an absolute epoch-ms is six. The receiver reads liveness as
+    /// `ts + published_delta_s * 1000`, which is a different clock from `ts` itself: a parked phone
+    /// republishes an hours-old position from a process that is alive right now.
+    pub published_delta_s: Option<u32>,
 }
+
+/// The frozen on-disk twin of [`LocationFix`].
+///
+/// The outbox and the gate persist positions with postcard, and both DISCARD everything on a
+/// decode failure — `outbox.rs` starts with an empty queue, `gate.rs` falls back to
+/// `GateState::default()`. That fallback is deliberate and correct for corruption, but it makes a
+/// struct change indistinguishable from corruption: a `GateState` that loses `last_known_fix` has
+/// nothing for `heartbeat` to republish, so it returns 0 and the phone publishes nothing until it
+/// happens to catch a fresh acceptable fix. On a parked phone that is hours. It is the 2026-08-30
+/// silence exactly, and growing [`LocationFix`] would have re-armed it on every device at once, on
+/// upgrade, with no way to tell it had happened.
+///
+/// So storage gets a type that never changes, and the FFI/wire type is free to grow. The envelope
+/// stamps are absent here rather than stored as `None` — they describe a transmission that has not
+/// happened yet, and a queued fix has no answer for them.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StoredFix {
+    pub lat: f64,
+    pub lon: f64,
+    pub accuracy_m: f64,
+    pub heading_deg: f64,
+    pub ts: u64,
+}
+
+impl From<&LocationFix> for StoredFix {
+    fn from(f: &LocationFix) -> Self {
+        Self {
+            lat: f.lat,
+            lon: f.lon,
+            accuracy_m: f.accuracy_m,
+            heading_deg: f.heading_deg,
+            ts: f.ts,
+        }
+    }
+}
+
+impl From<&StoredFix> for LocationFix {
+    fn from(f: &StoredFix) -> Self {
+        Self {
+            lat: f.lat,
+            lon: f.lon,
+            accuracy_m: f.accuracy_m,
+            heading_deg: f.heading_deg,
+            ts: f.ts,
+            state: None,
+            published_delta_s: None,
+        }
+    }
+}
+
+/// The position is fresh: it passed the confidence gate on this wake.
+pub const FIX_STATE_LIVE: u8 = 1;
+/// The phone has parked. The position is the anchor it settled on and will not advance until it
+/// moves again — so a silence that follows this envelope is *explained*, and the UI should say
+/// "parked", not "offline".
+///
+/// This is the whole reason the field exists. Liveness cannot be inferred from contact continuing,
+/// because on iOS it does not: parked publishing rides on `BGProcessing` wakes the OS grants a
+/// handful of times a day, so the observed gap between contacts is p50 5 min but p90 92 min with a
+/// 17-hour maximum — on a phone that was working the entire time. A declaration survives that
+/// silence; a heartbeat does not.
+pub const FIX_STATE_PARKED: u8 = 2;
+/// The phone is not parked, but nothing passed the gate — indoors, a tunnel, reduced accuracy. The
+/// position is the last accepted one and the person may be moving. Distinct from
+/// [`FIX_STATE_PARKED`] because "parked at the pub" and "somewhere on the Underground" are
+/// different sentences, and only the sender can tell them apart (see `IngestOutcome::rejection`).
+pub const FIX_STATE_NO_FIX: u8 = 3;
 
 /// Control message kind. Not a uniffi enum: the wire carries a plain `u8` so an unknown future
 /// kind decodes cleanly and is ignored by an older peer rather than failing the whole payload.
@@ -219,6 +312,10 @@ pub struct RatchetEvent {
     pub ts: u64,
     pub kind: String,
     pub fix: Option<LocationFix>,
+    /// Hex EndpointId of the peer that served this author's entry during the last reconciliation,
+    /// when one was observed. `None` means the entry was already in the replica — read back, not
+    /// just delivered — so there is no serving peer to name.
+    pub via_peer: Option<String>,
 }
 
 /// Foreign (Swift/Kotlin) access to this device's identity, wherever the platform keeps it.
@@ -267,7 +364,19 @@ pub trait FixListener: Send + Sync + 'static {
     ///
     /// On the live path it is the CLOSEST open path to the delivering neighbour rather than the
     /// carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
-    fn on_fix(&self, author: Vec<u8>, seq: u64, fix: LocationFix, backfill: bool, via: String);
+    ///
+    /// `via_peer` is WHO performed that last hop: the hex EndpointId of the neighbour that handed
+    /// us the datagram. It is reported verbatim, including when it equals `author` (a fix straight
+    /// from its own author) — deciding what to call that device is the app's job, not this seam's.
+    fn on_fix(
+        &self,
+        author: Vec<u8>,
+        seq: u64,
+        fix: LocationFix,
+        backfill: bool,
+        via: String,
+        via_peer: Option<String>,
+    );
     /// A fix we received but could NOT decrypt (not addressed to us / revoked). Useful
     /// for presence metrics without leaking content.
     fn on_opaque(&self, author: Vec<u8>, seq: u64);
@@ -1112,14 +1221,15 @@ impl LocationNode {
     }
 
     async fn read_latest_ratcheted_events_inner(&self) -> Result<Vec<RatchetEvent>, LocationError> {
-        let sealed = {
+        let (trail, sealed) = {
             let guard = self.inner.lock().await;
             let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
-            started
+            let sealed = started
                 .trail
                 .read_latest_sealed()
                 .await
-                .map_err(|e| LocationError::Network(e.to_string()))?
+                .map_err(|e| LocationError::Network(e.to_string()))?;
+            (started.trail.clone(), sealed)
         };
         let manager = self.session_manager().await?;
         let now = now_ms();
@@ -1169,12 +1279,16 @@ impl LocationNode {
                 source = "durable",
                 "ratchet response received"
             );
+            // Who served this author's slot in the reconciliation that just ran. Absent for an
+            // entry that was already in the replica — this reports delivery, never mere presence.
+            let via_peer = trail.serving_peer(&author).await.map(|id| encode_hex(&id));
             out.push(RatchetEvent {
                 author,
                 seq: verified.seq,
                 ts: verified.ts,
                 kind: kind.to_string(),
                 fix,
+                via_peer,
             });
         }
         Ok(out)
@@ -2001,6 +2115,7 @@ impl LocationNode {
                             sc.author = tracing::field::Empty,
                             sc.seq = tracing::field::Empty,
                             sc.via = tracing::field::Empty,
+                            sc.via_peer = %telemetry::short_hex(msg.delivered_from.as_bytes()),
                             outcome = tracing::field::Empty,
                         );
                         // Signature first, then session state (§4.2): `verify_v3` hands back a
@@ -2016,6 +2131,9 @@ impl LocationNode {
                             }
                             _ => "live".to_string(),
                         };
+                        // WHO handed it over, as opposed to over which kind of path. Unlike `via`
+                        // this is exact: gossip tells us the neighbour it came from.
+                        let via_peer = encode_hex(msg.delivered_from.as_bytes());
                         let _guard = span.enter();
                         match opened {
                             GossipOpen::Delivered {
@@ -2050,6 +2168,7 @@ impl LocationNode {
                                             fix,
                                             false,
                                             via,
+                                            Some(via_peer),
                                         );
                                     }
                                     // A null fix is a watcher publishing on cadence so the
@@ -3881,6 +4000,19 @@ fn ble_peer(p: &ble::BlePeerView) -> BlePeer {
     }
 }
 
+/// The EndpointId (hex) inside an endpoint ticket, without dialling anything.
+///
+/// Pure decode, deliberately node-free: the app uses it to recognise the configured stash as the
+/// device that handed over a fix, and that question comes up before (and independently of) any
+/// node being started. Same parse as the bootstrap loop in [`LocationNode::subscribe`].
+#[uniffi::export]
+pub fn endpoint_id_from_ticket(ticket: String) -> Result<String, LocationError> {
+    let parsed: EndpointTicket = ticket
+        .parse()
+        .map_err(|_| LocationError::Decode("bad endpoint ticket".into()))?;
+    Ok(encode_hex(parsed.endpoint_addr().id.as_bytes()))
+}
+
 /// Encode a [`PairInvite`] into an opaque, dependency-free `scpair2:<base64url>` token for QR / links.
 #[uniffi::export]
 pub fn encode_pair_invite(invite: PairInvite) -> Result<String, LocationError> {
@@ -3928,7 +4060,24 @@ fn decode_fix_payload(payload: &[u8]) -> Result<Option<LocationFix>, LocationErr
     if inner.is_empty() {
         return Ok(None);
     }
-    postcard::from_bytes::<LocationFix>(inner)
+    // Decode across the zero fill, NOT across `inner`, and this is load-bearing rather than
+    // incidental.
+    //
+    // `from_bytes` ignores trailing bytes, so an old peer reading a new payload simply drops the
+    // appended fields — appending is safe in that direction for free. The other direction is not:
+    // `unpad` trims to the declared length, so a new build reading a payload written before
+    // `state` / `published_delta_s` existed would run out of input on the first `Option` tag,
+    // return `Err`, and `latest_fix_to_incoming` would swallow it into `None`. A new build would go
+    // silently blind to every friend still on an old one.
+    //
+    // postcard writes `Option::None` as a single `0x00`, and `unpad` has just PROVEN the fill is
+    // zero (it rejects a dirty tail as a covert channel). So decoding the payload followed by its
+    // own zero fill makes every appended `Option` field read as `None` on an old payload. That
+    // makes appending compatible in both directions with no version byte and no two-shot decode —
+    // a second dividend from a rule that was added for an unrelated security reason.
+    //
+    // The invariant this rests on: appended fields MUST be `Option` and MUST go at the end.
+    postcard::from_bytes::<LocationFix>(&payload[2..])
         .map(Some)
         .map_err(|_| LocationError::Decode("decode fix".into()))
 }
@@ -4040,23 +4189,62 @@ struct SubscriptionSink<'a> {
 }
 
 impl publish::PublishSink for SubscriptionSink<'_> {
+    /// One envelope, both lanes, under one `publish.fix` span.
+    ///
+    /// # Why this span exists
+    ///
+    /// `publish.fix` was a JS span only, and `infra/otel/README.md` claimed native spans were its
+    /// children on both platforms. They were not — the native drain reached the wire without ever
+    /// opening one, so on 2026-09-05 a 48-hour window looked like this:
+    ///
+    /// | author | `publish.fix` | `gossip.publish` |
+    /// |--------|--------------:|-----------------:|
+    /// | `6942d8b97f` | 0 | 474 |
+    /// | `84f86b144a` | 0 | 148 |
+    /// | `e19f0a9735` | 186 | 494 |
+    ///
+    /// Two of three devices published hundreds of envelopes and emitted no `publish.fix` at all.
+    /// The span fires when a JS context happens to be alive, which on iOS means roughly "while the
+    /// phone is moving and the app is up" — so the one dashboard that answers "is this device
+    /// publishing" went blank in exactly the conditions worth watching, and a parked phone was
+    /// indistinguishable from a dead one *in the telemetry* as well as on the map.
+    ///
+    /// Opening it here makes `{ name = "publish.fix" }` mean what every query already assumes it
+    /// means: this device put an envelope on the wire, whoever was driving.
     async fn publish(
         &self,
         seq: u64,
         fix: LocationFix,
         recipients: Vec<String>,
     ) -> Result<(), publish::PublishError> {
-        // Live lane first, durable mirror second — the order `location-sharing.ts` uses.
-        self.subscription
-            .publish(seq, fix.clone(), recipients.clone())
-            .await
-            .map_err(|e| publish::PublishError::Send(e.to_string()))?;
-        self.subscription
-            .node
-            .docs_write_ratcheted(self.subscription_id.clone(), seq, fix, recipients)
-            .await
-            .map_err(|e| publish::PublishError::Send(e.to_string()))?;
-        Ok(())
+        use tracing::Instrument;
+        let span = tracing::info_span!(
+            "publish.fix",
+            sc.author = %telemetry::short_hex(&self.subscription.node.endpoint_id()),
+            sc.seq = seq,
+            recipients = recipients.len(),
+            // The two clocks, on the span as well as on the wire, so a gap in a friend's trail can
+            // be read back to whether the sender was parked or had stopped running.
+            payload_ts = fix.ts,
+            fix_state = fix.state.unwrap_or(0),
+            published_delta_s = fix.published_delta_s.unwrap_or(0),
+            lane = "native",
+        );
+        async move {
+            // Live lane first, durable mirror second — the order `location-sharing.ts` uses.
+            self.subscription
+                .publish(seq, fix.clone(), recipients.clone())
+                .await
+                .map_err(|e| publish::PublishError::Send(e.to_string()))?;
+            self.subscription
+                .node
+                .docs_write_ratcheted(self.subscription_id.clone(), seq, fix, recipients)
+                .await
+                .map_err(|e| publish::PublishError::Send(e.to_string()))?;
+            Ok(())
+        }
+        .instrument(span)
+        .await
     }
 
     async fn publish_null(
@@ -4337,7 +4525,10 @@ impl Subscription {
 
 #[cfg(test)]
 mod null_fix_tests {
-    use super::{decode_fix_payload, encode_fix_payload, LocationFix};
+    use super::{
+        decode_fix_payload, encode_fix_payload, pad, LocationFix, FIX_STATE_LIVE, FIX_STATE_NO_FIX,
+        FIX_STATE_PARKED,
+    };
     use crate::crypto;
     use crate::docs::{encode_ctl_key, encode_key, encode_nul_key};
 
@@ -4348,6 +4539,93 @@ mod null_fix_tests {
             accuracy_m: 12.5,
             heading_deg: 91.0,
             ts: 1_786_000_000_000,
+            state: None,
+            published_delta_s: None,
+        }
+    }
+
+    /// A `LocationFix` as it was encoded before the envelope stamps existed.
+    ///
+    /// Field-for-field the first five of the real one, so postcard produces exactly the bytes an
+    /// older build puts on the wire. Both compatibility tests below are written against this
+    /// rather than against a hand-typed byte array, so they keep testing the real thing if the
+    /// position fields ever change.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct LegacyFix {
+        lat: f64,
+        lon: f64,
+        accuracy_m: f64,
+        heading_deg: f64,
+        ts: u64,
+    }
+
+    /// New build, old sender: the direction that silently breaks.
+    ///
+    /// `unpad` trims to the declared length, so decoding the trimmed slice would hit end-of-input
+    /// on the first appended `Option` tag and return `Err` — and `latest_fix_to_incoming` turns a
+    /// decode error into `None`, i.e. the friend's fix vanishes with no error anywhere. A build
+    /// that shipped this would go blind to every peer still running the previous one, and nothing
+    /// would say so.
+    #[test]
+    fn a_fix_from_a_sender_that_predates_the_envelope_stamps_still_decodes() {
+        let legacy = LegacyFix {
+            lat: -122.419416,
+            lon: 37.774929,
+            accuracy_m: 12.5,
+            heading_deg: 91.0,
+            ts: 1_786_000_000_000,
+        };
+        let frame = pad::pad(&postcard::to_allocvec(&legacy).unwrap()).unwrap();
+
+        let decoded = decode_fix_payload(&frame)
+            .expect("an older peer's fix must decode, not error")
+            .expect("and must carry a position");
+
+        assert_eq!(decoded.ts, 1_786_000_000_000);
+        assert_eq!(decoded.lat, -122.419416);
+        // Absent, not guessed. "This sender does not tell us" and "this sender says live" are
+        // different claims and the UI has to keep them apart.
+        assert_eq!(decoded.state, None);
+        assert_eq!(decoded.published_delta_s, None);
+    }
+
+    /// Old build, new sender: the direction that is free.
+    ///
+    /// `postcard::from_bytes` drops whatever it does not consume, so appended fields are invisible
+    /// to a peer that does not know about them and the fix still lands.
+    #[test]
+    fn an_older_peer_reads_a_stamped_fix_and_ignores_the_stamps() {
+        let stamped = LocationFix {
+            state: Some(FIX_STATE_PARKED),
+            published_delta_s: Some(3_600),
+            ..fix()
+        };
+        let frame = encode_fix_payload(Some(&stamped)).unwrap();
+
+        let seen_by_old_build: LegacyFix =
+            postcard::from_bytes(pad::unpad(&frame).unwrap()).expect("must still decode");
+        assert_eq!(seen_by_old_build.ts, stamped.ts);
+        assert_eq!(seen_by_old_build.lat, stamped.lat);
+    }
+
+    /// The stamps survive a real seal/open round trip, not just an encode.
+    #[test]
+    fn the_envelope_stamps_survive_the_padded_round_trip() {
+        for (state, delta) in [
+            (Some(FIX_STATE_LIVE), Some(0u32)),
+            (Some(FIX_STATE_PARKED), Some(62_400)),
+            (Some(FIX_STATE_NO_FIX), Some(300)),
+            (None, None),
+        ] {
+            let sent = LocationFix {
+                state,
+                published_delta_s: delta,
+                ..fix()
+            };
+            let frame = encode_fix_payload(Some(&sent)).unwrap();
+            let back = decode_fix_payload(&frame).unwrap().unwrap();
+            assert_eq!(back.state, state);
+            assert_eq!(back.published_delta_s, delta);
         }
     }
 

@@ -55,6 +55,7 @@ import uniffi.iroh_location.decodeMvtTile
 import uniffi.iroh_location.decodePairInvite
 import uniffi.iroh_location.deriveTopic
 import uniffi.iroh_location.encodePairInvite
+import uniffi.iroh_location.endpointIdFromTicket
 import uniffi.iroh_location.flushTelemetry
 import uniffi.iroh_location.h3CellsForPolygon
 
@@ -70,7 +71,29 @@ private fun locationFixOf(fix: Map<String, Double>): LocationFix =
     fix["accuracyM"] ?: 0.0,
     fix["headingDeg"] ?: 0.0,
     (fix["ts"] ?: 0.0).toLong().toULong(),
+    // The CAPTURE direction: `state` / `publishedDeltaS` describe a transmission that has not
+    // happened yet, and `DrainEngine::drain` fills them in at seal time.
+    state = null,
+    publishedDeltaS = null,
   )
+
+/**
+ * The JS shape of a decrypted fix, including what the envelope says about itself.
+ *
+ * Absent stamps are OMITTED rather than mapped to null, so JS sees `undefined` — which reads as
+ * "this sender does not tell us", the honest meaning of a fix from a build that predates the
+ * fields. A sender that says nothing and a sender we cannot understand must not collapse into one
+ * value: the first falls back to age, the second is a bug.
+ */
+private fun fixToMap(fix: LocationFix): Map<String, Any> = buildMap {
+  put("lat", fix.lat)
+  put("lon", fix.lon)
+  put("accuracyM", fix.accuracyM)
+  put("headingDeg", fix.headingDeg)
+  put("ts", fix.ts.toLong())
+  fix.state?.let { put("state", it.toInt()) }
+  fix.publishedDeltaS?.let { put("publishedDeltaS", it.toLong()) }
+}
 
 /** Build a control message from the JS object (see `NativeControlMsg`). `nonce` crosses as hex. */
 private fun controlMsgOf(msg: Map<String, Any?>): ControlMsg =
@@ -449,29 +472,25 @@ class IrohLocationModule : Module() {
   private inner class EventBridge(private val subscriptionId: String) : FixListener {
     // `backfill` is true when the fix arrived via durable range-reconciliation (iroh-docs
     // catch-up) rather than the live gossip path. `via` names the last hop into this device
-    // (`relay` | `direct` | `lan` | `ble` | `live` | `docs` | `stash`).
+    // (`relay` | `direct` | `lan` | `ble` | `live` | `docs` | `stash`); `viaPeer` names the
+    // device that performed it, which is not necessarily the fix's author.
     override fun onFix(
       author: ByteArray,
       seq: ULong,
       fix: LocationFix,
       backfill: Boolean,
       via: String,
+      viaPeer: String?,
     ) {
       sendEvent(
         "onFix",
         mapOf(
           "author" to author.toHex(),
           "seq" to seq.toLong(),
-          "fix" to
-            mapOf(
-              "lat" to fix.lat,
-              "lon" to fix.lon,
-              "accuracyM" to fix.accuracyM,
-              "headingDeg" to fix.headingDeg,
-              "ts" to fix.ts.toLong(),
-            ),
+          "fix" to fixToMap(fix),
           "backfill" to backfill,
           "via" to via,
+          "viaPeer" to viaPeer,
         ),
       )
     }
@@ -951,15 +970,8 @@ class IrohLocationModule : Module() {
             "seq" to incoming.seq.toLong(),
             "ts" to incoming.ts.toLong(),
             "kind" to incoming.kind,
-            "fix" to incoming.fix?.let { fix ->
-              mapOf(
-                "lat" to fix.lat,
-                "lon" to fix.lon,
-                "accuracyM" to fix.accuracyM,
-                "headingDeg" to fix.headingDeg,
-                "ts" to fix.ts.toLong(),
-              )
-            },
+            "fix" to incoming.fix?.let { fixToMap(it) },
+            "viaPeer" to incoming.viaPeer,
           )
         }
       }
@@ -1126,6 +1138,9 @@ class IrohLocationModule : Module() {
     AsyncFunction("decodePairInvite") Coroutine
       { token: String -> pairInviteMap(decodePairInvite(token)) }
 
+    // Pure decode, node-free: lets JS recognise a configured stash by its EndpointId.
+    AsyncFunction("endpointIdFromTicket") Coroutine { ticket: String -> endpointIdFromTicket(ticket) }
+
     AsyncFunction("transportDiagnostics") Coroutine
       { peerEndpointIdsHex: List<String> ->
         val n = node ?: throw IllegalStateException("call createNode first")
@@ -1215,14 +1230,7 @@ class IrohLocationModule : Module() {
               "charging" to battery.charging,
               "lowPower" to battery.lowPower,
             ),
-          "fix" to
-            mapOf(
-              "lat" to fix.lat,
-              "lon" to fix.lon,
-              "accuracyM" to fix.accuracyM,
-              "headingDeg" to fix.headingDeg,
-              "ts" to fix.ts.toLong(),
-            ),
+          "fix" to fixToMap(fix),
         ),
       )
       return true

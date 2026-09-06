@@ -18,7 +18,7 @@
 //! worth substituting.
 
 use crate::gate::{self, BatteryState, FixQualityConfig, GateState};
-use crate::LocationFix;
+use crate::{LocationFix, StoredFix, FIX_STATE_LIVE, FIX_STATE_NO_FIX, FIX_STATE_PARKED};
 
 /// What can go wrong reaching persisted publish state.
 ///
@@ -227,17 +227,28 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // Quality first — and note it does NOT stop the clock. A refused fix falls through to the
         // slot logic below, which republishes the last accepted position, so a stretch of bad GPS
         // is indistinguishable on the wire from a stretch of sitting still.
+        let last_known = state.last_known_fix.as_ref().map(LocationFix::from);
         let rejection = gate::assess_fix(
             &fix,
-            state.last_known_fix.as_ref(),
+            last_known.as_ref(),
             state.last_accepted_at,
             now_ms,
             &self.quality,
         );
         if rejection.is_none() {
-            state.last_known_fix = Some(fix.clone());
+            state.last_known_fix = Some(StoredFix::from(&fix));
             state.last_accepted_at = Some(now_ms);
         }
+
+        // Record WHY the position about to go out is the position it is. A rejected fix still
+        // fills its slot with the last accepted one, so from the wire a stretch of bad GPS and a
+        // stretch of sitting still are byte-identical — which is correct for privacy and useless
+        // for the UI. This is the one bit that separates them, and only the sender has it.
+        state.last_state = Some(if rejection.is_none() {
+            FIX_STATE_LIVE
+        } else {
+            FIX_STATE_NO_FIX
+        });
 
         // A hard stop, indistinguishable from the phone dying. Deliberately not a slower cadence:
         // the interval is observable to the stash, so backing it off would put the charge level on
@@ -247,7 +258,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             return Ok(self.outcome(rejection, 0, 0, 0, 0, true));
         }
 
-        let Some(known) = state.last_known_fix.clone() else {
+        let Some(known) = state.last_known_fix.as_ref().map(LocationFix::from) else {
             // Refused before we ever had a position. Nothing to republish, so no slot to fill; the
             // next acceptable fix anchors the grid.
             self.gate.set(state);
@@ -302,11 +313,19 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         if gate::critically_low(&battery) {
             return Ok(self.outcome(None, 0, 0, 0, 0, true));
         }
-        let Some(known) = state.last_known_fix.clone() else {
+        let Some(known) = state.last_known_fix.as_ref().map(LocationFix::from) else {
             // Nothing has ever passed the gate, so there is no position to repeat. The first
             // acceptable fix anchors the grid.
             return Ok(self.outcome(None, 0, 0, 0, 0, false));
         };
+
+        // The declaration this whole field exists for. `heartbeat` is only reached from a phone
+        // that has settled — iOS's parked coarse stream, Android's no-delivery tick — so the
+        // envelopes this wake produces are the ones that should say so. Whichever of them turns
+        // out to be the last before a silence is then self-describing, which matters because the
+        // silence is not bounded: parked publishing rides on OS wakes, and p90 between contacts on
+        // iOS is 92 minutes with a 17-hour tail.
+        state.last_state = Some(FIX_STATE_PARKED);
 
         let plan = gate::due_slots(now_ms, interval_ms, state.last_published_slot);
         let mut overflow_dropped = 0u32;
@@ -315,8 +334,14 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         }
         if plan.due > 0 {
             state.last_published_slot = Some(plan.current_slot);
-            self.gate.set(state);
         }
+        // Saved unconditionally, unlike the slot index it carries. `plan.due == 0` — the current
+        // slot is already covered — is the COMMON case on a parked phone, and the parked
+        // declaration is the whole point of this call: a wake that had no slot to fill has still
+        // learned that the device has settled. Gating the write on `due` would leave the stamp
+        // unsaved through exactly the ticks that prove it, and any envelope left over from an
+        // earlier failed drain would then go out stamped `live` from a phone that is parked.
+        self.gate.set(state);
 
         let published = self.drain(now_ms).await?;
         Ok(self.outcome(
@@ -343,11 +368,30 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         let watchers = self.recipients.watchers();
         let mut published = 0u32;
 
-        while let Some(fix) = self.queue.peek() {
+        // Read once for the whole drain: every envelope this wake seals is minted under the same
+        // circumstances, whether it fills the current slot or backfills five that came due while
+        // the process was suspended.
+        let state_stamp = self.gate.get().last_state;
+
+        while let Some(mut fix) = self.queue.peek() {
             // A counter that cannot persist DOES stop us: handing out a seq we failed to record
             // is the one failure that corrupts rather than delays.
             let seq = self.seq.next()?;
             let ts = fix.ts;
+
+            // Stamp the envelope, here and nowhere earlier. `fix.ts` says when the POSITION was
+            // measured and deliberately does not move on a heartbeat; this says when the envelope
+            // was SEALED, which is the only moment we can prove the sending process was alive.
+            // Two clocks, and the gap between them is exactly "parked" — a fresh envelope carrying
+            // an hours-old position. One clock is what made a parked friend and a dead one render
+            // identically.
+            fix.state = state_stamp;
+            fix.published_delta_s = Some(
+                now_ms
+                    .saturating_sub(ts)
+                    .saturating_div(1000)
+                    .min(u32::MAX as u64) as u32,
+            );
             if self
                 .sink
                 .publish(seq, fix, recipients.clone())

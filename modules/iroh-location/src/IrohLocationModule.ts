@@ -372,6 +372,8 @@ export declare class IrohLocationNativeModule
   pairResult(sessionIdHex: string): Promise<PairResult | null>;
   encodePairInvite(invite: PairInvite): Promise<string>;
   decodePairInvite(token: string): Promise<PairInvite>;
+  /** Optional for compatibility with installed binaries built before deliverer attribution. */
+  endpointIdFromTicket?(ticket: string): Promise<string>;
   transportDiagnostics(peerEndpointIdsHex: string[]): Promise<TransportDiagnostics>;
   /** Optional for compatibility with installed iOS binaries built before the replica query. */
   trailReplicaStatus?(): Promise<TrailReplicaAuthor[]>;

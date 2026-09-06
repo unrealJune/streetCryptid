@@ -34,6 +34,12 @@ import {
   type SpanContext,
 } from '@/features/dev/telemetry';
 import { encodeContactCard } from '../core/contact-card';
+import {
+  DEFAULT_DELIVERY_MODE,
+  effectiveDeliveryMode,
+  type DeliveryAvailability,
+  type DeliveryMode,
+} from '../core/delivery-mode';
 import { decodePairLink, encodePairLink, isPairLink, isPairToken } from '../core/pair-link';
 import {
   deriveLookupId,
@@ -78,7 +84,8 @@ import {
   loadPool,
   loadRatchetActivity,
   loadShareIntervalMs,
-  loadStashOptIn,
+  loadDeliveryMode,
+  saveDeliveryMode,
   loadTransportPreferences,
   savePool,
   saveRatchetActivity,
@@ -87,7 +94,6 @@ import {
   loadSharingEnabled,
   saveShareIntervalMs,
   saveSharingEnabled,
-  saveStashOptIn,
   saveTransportPreferences,
   SHARE_INTERVAL_OPTIONS_MS,
   type TransportPreferences,
@@ -196,6 +202,14 @@ export interface PairingSnapshot {
 }
 
 /** An immutable view of the sharing state for the UI. */
+/** The delivery picker's state: the stored choice, what it resolves to, and why. */
+export interface DeliveryStateSnapshot extends DeliveryAvailability {
+  /** Exactly what the user picked, preserved even when this build cannot honour it. */
+  readonly mode: DeliveryMode;
+  /** What the delivery path will actually do — see `effectiveDeliveryMode`. */
+  readonly effectiveMode: DeliveryMode;
+}
+
 export interface SharingSnapshot {
   ready: boolean;
   status: string;
@@ -210,8 +224,15 @@ export interface SharingSnapshot {
   backgroundAccess: BackgroundAccess;
   /** Fixes recovered by the last durable sync, or null if none yet. */
   lastSyncRecovered: number | null;
-  /** Offline-delivery stash: whether a stash is deployed and whether the user opted in. */
-  stash: { available: boolean; optedIn: boolean };
+  /**
+   * Offline-delivery stash: whether a stash is deployed, whether the user opted in, and — once
+   * resolved from its dial ticket — its EndpointId, so a fix it served can be attributed to it
+   * rather than to "a device you haven't paired with". Optional: absent on binaries without
+   * `endpointIdFromTicket`, and on every snapshot literal written before it existed.
+   */
+  stash: { available: boolean; optedIn: boolean; endpointId?: string | null };
+  /** Which route sealed envelopes take, what was asked for, and what this build can offer. */
+  delivery: DeliveryStateSnapshot;
   /** Live iroh endpoint addresses and known peer path usage for the diagnostics screen. */
   transportDiagnostics: {
     snapshot: TransportDiagnostics | null;
@@ -516,8 +537,17 @@ export class LocationSharingService {
   private readonly stashConfig = getStashConfig();
   /** The stash's dial ticket for reconciliation bootstrap, or null when not configured. */
   private readonly stashTicket: string | null = this.stashConfig?.ticket ?? null;
+  /**
+   * The stash's EndpointId, decoded from {@link stashTicket} once the node exists.
+   *
+   * Only needed to recognise the stash as the DELIVERER of someone's fix — it dials by ticket, so
+   * nothing else here needs the id. Null while unresolved, and on binaries without
+   * `endpointIdFromTicket`; the profile sheet then describes it as an unpaired device, which is
+   * uninformative but never wrong.
+   */
+  private stashEndpointId: string | null = null;
   /** Per-user opt-in (persisted). Defaults false — the stash is never used unless turned on. */
-  private stashOptIn = false;
+  private deliveryMode: DeliveryMode = DEFAULT_DELIVERY_MODE;
   /** Persisted native endpoint transports. All paths are enabled by default. */
   private transportPreferences: TransportPreferences = { ...DEFAULT_TRANSPORT_PREFERENCES };
   private pairingActivity = '';
@@ -599,9 +629,49 @@ export class LocationSharingService {
     this.stash = deps.stash ?? createDefaultStashClient();
   }
 
-  /** Whether offline delivery via the stash is both configured (deployed) and opted into. */
+  /**
+   * What the delivery path is permitted to do right now, as opposed to what was asked for.
+   *
+   * Only the stash can be absent. Peer relay is not a feature this app turns on, it is the
+   * shape of the thing: every publish live-syncs our namespace to every pool member, and every
+   * member bootstraps every other member's topic.
+   */
+  private deliveryAvailability(): DeliveryAvailability {
+    return { stashConfigured: this.stash.configured };
+  }
+
+  /** The route sealed envelopes will really take, after unavailable choices are resolved away. */
+  private effectiveDelivery(): DeliveryMode {
+    return effectiveDeliveryMode(this.deliveryMode, this.deliveryAvailability());
+  }
+
+  /**
+   * Whether offline delivery via the stash is both deployed and chosen.
+   *
+   * Still the single chokepoint every stash decision reads — grants, bootstrap sets, the native
+   * delivery config, the push path. Only its definition changed when the boolean opt-in became a
+   * three-way route: "opted in" is now "picked stash, and stash is what we can actually do".
+   */
   private stashEnabled(): boolean {
-    return this.stashOptIn && this.stash.configured && this.stashTicket !== null;
+    return this.effectiveDelivery() === 'stash' && this.stashTicket !== null;
+  }
+
+  /**
+   * Decode {@link stashTicket} into the stash's EndpointId, once per node.
+   *
+   * Guarded and best-effort by design: the id is only ever used to put a name on a delivery, so a
+   * binary without the export, or a ticket that will not parse, costs a nicer sentence and nothing
+   * else. Never throws into `init`.
+   */
+  private async resolveStashEndpointId(): Promise<void> {
+    if (this.stashEndpointId || !this.stashTicket) return;
+    const decode = this.mod?.endpointIdFromTicket;
+    if (typeof decode !== 'function') return;
+    try {
+      this.stashEndpointId = await decode.call(this.mod, this.stashTicket);
+    } catch {
+      // A stash we cannot name is still a stash we can use.
+    }
   }
 
   /** The stash dial ticket to fold into subscribe() bootstrap sets, or [] when disabled. */
@@ -610,8 +680,22 @@ export class LocationSharingService {
   }
 
   /** Current opt-in state for the UI: whether a stash exists and whether it's turned on. */
-  stashState(): { available: boolean; optedIn: boolean } {
-    return { available: this.stash.configured, optedIn: this.stashOptIn };
+  stashState(): { available: boolean; optedIn: boolean; endpointId: string | null } {
+    return {
+      available: this.stash.configured,
+      optedIn: this.deliveryMode === 'stash',
+      endpointId: this.stashEndpointId,
+    };
+  }
+
+  /** The delivery picker's whole world: what was chosen, what will happen, and what exists. */
+  deliveryState(): DeliveryStateSnapshot {
+    const availability = this.deliveryAvailability();
+    return {
+      mode: this.deliveryMode,
+      effectiveMode: effectiveDeliveryMode(this.deliveryMode, availability),
+      ...availability,
+    };
   }
 
   /** Current endpoint transport set. */
@@ -651,13 +735,19 @@ export class LocationSharingService {
   }
 
   /**
-   * Opt in/out of offline delivery via the stash. Persists the choice; on opt-in, grants the stash
-   * replication of our own + friends' trail namespaces and folds its ticket into our subscription.
+   * Choose how sealed envelopes leave this phone. Persists the choice; when the choice resolves
+   * to the stash, grants it replication of our own + friends' trail namespaces and folds its
+   * ticket into our subscription.
+   *
+   * Switching AWAY matters as much as switching to: the push targets mirrored into the native
+   * store are what the background path reads, so a mode change that did not reach
+   * `pushDeliveryConfig` would leave a headless wake uploading to a stash the user had just
+   * moved off. That is why the mirror is unconditional and not inside the branch.
    */
-  async setStashOptIn(optedIn: boolean): Promise<void> {
-    this.stashOptIn = optedIn;
-    await saveStashOptIn(this.kv, optedIn);
-    if (optedIn) {
+  async setDeliveryMode(mode: DeliveryMode): Promise<void> {
+    this.deliveryMode = mode;
+    await saveDeliveryMode(this.kv, mode);
+    if (this.stashEnabled()) {
       await this.syncStashGrants();
       await this.ensureMySubscription();
     }
@@ -787,6 +877,7 @@ export class LocationSharingService {
     await this.mod.start(this.transportPreferences);
     // After `start`, which is where the native drain path's stores are opened.
     await this.adoptNativeSeq();
+    await this.resolveStashEndpointId();
     await this.mirrorTransportConfig();
     if (interactive) {
       this.ticketStr = await this.mod.ticket();
@@ -811,7 +902,7 @@ export class LocationSharingService {
     // `sharing.recipients=1` from the JS pool the whole time. The two had diverged and only the
     // native one was ever consulted.
     this.pushSharingRecipients();
-    this.stashOptIn = await loadStashOptIn(this.kv);
+    this.deliveryMode = await loadDeliveryMode(this.kv);
     // Seed the native push targets from the pool and opt-in we have just loaded — after both, for
     // the same reason, or the stash would be mirrored as off on every launch.
     this.pushDeliveryConfig();
@@ -1498,7 +1589,7 @@ export class LocationSharingService {
         'sc.author': this.keys ? this.keys.endpointId.slice(0, 10) : undefined,
         'stash.client_configured': this.stash.configured,
         'stash.ticket_configured': this.stashTicket !== null,
-        'stash.opted_in': this.stashOptIn,
+        'stash.opted_in': this.deliveryMode === 'stash',
         'stash.replication_enabled': stashReplicationEnabled,
       },
     });
@@ -2036,6 +2127,13 @@ export class LocationSharingService {
         accuracyM: nf.fix.accuracyM,
         headingDeg: nf.fix.headingDeg,
         ts: nf.fix.ts,
+        // The durable path carries the envelope stamps too. It has to: a phone that was offline
+        // when a friend parked learns about it from the replica, not from live gossip, and that is
+        // exactly the case where "is she parked or gone" is being asked.
+        ...(nf.fix.state !== undefined ? { state: nf.fix.state } : {}),
+        ...(nf.fix.publishedDeltaS !== undefined
+          ? { publishedDeltaS: nf.fix.publishedDeltaS }
+          : {}),
       };
       // `sinceTs` is the caller's inclusive lower bound; the watermark is what we have already
       // ingested. Compared on `(ts, seq)` so a republish at the same timestamp is not mistaken for
@@ -2067,6 +2165,11 @@ export class LocationSharingService {
           fix,
           receivedAt: Date.now(),
           backfill: true,
+          // A peer is named only for a slot that was actually DELIVERED into the replica by this
+          // sync; an entry that was already there produces no attribution and stays the coarse
+          // `sync` label. So a peer is exactly what promotes this to `docs` — "reconciled from a
+          // peer's replica" — rather than "read out of the durable trail, source unknown".
+          ...(nf.viaPeer ? { via: 'docs' as const, viaPeer: nf.viaPeer } : {}),
         });
         recoveredFriendFixes += 1;
       } else {
@@ -3041,6 +3144,7 @@ export class LocationSharingService {
         payload_accuracy_m: event.fix.accuracyM,
         payload_heading_deg: event.fix.headingDeg,
         transport_path: event.via ?? (event.backfill ? 'durable-trail' : 'live-gossip'),
+        ...(event.viaPeer ? { transport_peer: event.viaPeer.slice(0, 10) } : {}),
         ...(known ? {} : { 'sc.drop_reason': 'unknown-or-removing-author' }),
       },
     });
@@ -3057,10 +3161,18 @@ export class LocationSharingService {
         accuracyM: event.fix.accuracyM,
         headingDeg: event.fix.headingDeg,
         ts: event.fix.ts,
+        // Carried through rather than dropped: these are the only things that distinguish a
+        // friend who has parked from a friend whose phone has died, and both look like a frozen
+        // dot without them.
+        ...(event.fix.state !== undefined ? { state: event.fix.state } : {}),
+        ...(event.fix.publishedDeltaS !== undefined
+          ? { publishedDeltaS: event.fix.publishedDeltaS }
+          : {}),
       },
       receivedAt: Date.now(),
       ...(event.backfill ? { backfill: true } : {}),
       ...(event.via ? { via: event.via } : {}),
+      ...(event.viaPeer ? { viaPeer: event.viaPeer } : {}),
     };
     void this.trail
       .recordFriendLatest(fix)
@@ -3237,6 +3349,7 @@ export class LocationSharingService {
       backgroundAccess: this.backgroundAccess,
       lastSyncRecovered: this.lastSyncRecovered,
       stash: this.stashState(),
+      delivery: this.deliveryState(),
       transportDiagnostics: {
         snapshot: this.transportDiagnostics,
         updatedAt: this.transportDiagnosticsUpdatedAt,

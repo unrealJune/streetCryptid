@@ -46,6 +46,7 @@ internal object NativeBackgroundRuntime {
       fix: LocationFix,
       backfill: Boolean,
       via: String,
+      viaPeer: String?,
     ) = Unit
 
     override fun onOpaque(author: ByteArray, seq: ULong) = Unit

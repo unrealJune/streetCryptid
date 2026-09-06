@@ -94,12 +94,12 @@ bg.wake            (fixes, net/battery/app state; ALSO emitted with fixes=0 for 
     └ outbox.enqueue (coalesced / overflow?)
     └ outbox.drain   (published/retained, publish.failed reason)
       └ publish.fix        (sc.seq)
-        ├ gossip.publish*  (sc.entry_hash)  ─ live path ───────►  gossip.receive (sc.entry_hash, outcome)
+        ├ gossip.publish*  (sc.entry_hash)  ─ live path ───────►  gossip.receive (sc.entry_hash, sc.via_peer, outcome)
         └ docs.write*      (sc.entry_hash)  ─ LOCAL replica only
     └ trail.push.app                        ─ durable path ─►  stash.entry.received (sc.entry_hash)
       └ trail.push*        (entries_sent, finished)
                                                                   └ trail.sync.app (recovered)
-                                                                    └ fix.received.app (sc.seq, drop?)
+                                                                    └ fix.received.app (sc.seq, transport_peer?, drop?)
 ```
 
 `docs.write` does **not** reach the stash on its own — it writes the local replica, and iroh-docs
@@ -108,6 +108,32 @@ broadcasts a local insert only for namespaces `start_sync` has marked as syncing
 `trail.push.app` after it in the same wake is a fix that never left the phone.
 
 `*` Native spans are direct children of `publish.fix` on Android and iOS.
+
+**`publish.fix` is emitted by whichever path published — read it as "this device put an envelope on
+the wire", not "JS published".** That is true as of 2026-09-05 and was not before: the span existed
+only in `location-sharing.ts`, so the native drain reached the wire without ever opening one. Over a
+48-hour window that read:
+
+| author       | `publish.fix` | `gossip.publish` |
+| ------------ | ------------: | ---------------: |
+| `6942d8b97f` |             0 |              474 |
+| `84f86b144a` |             0 |              148 |
+| `e19f0a9735` |           186 |              494 |
+
+Two of three devices published hundreds of envelopes and emitted no `publish.fix` at all, because
+the span fired only when a JS context happened to be alive — on iOS, roughly "while moving with the
+app up". So the dashboard that answers _is this device publishing_ went blank in precisely the
+conditions worth watching, and every query below silently under-counted. `SubscriptionSink::publish`
+now opens it (`lane = "native"`; the JS path has no `lane`), so **counts before and after that date
+are not comparable** — a step change in `publish.fix` volume on 2026-09-05 is this, not a fleet that
+suddenly started working.
+
+`publish.fix` also carries the envelope's own account of itself: `fix_state` (1 live, 2 parked,
+3 no-fix — `FIX_STATE_*`, 0 when the sender predates the field), `published_delta_s` (seconds
+between the position being measured and the envelope being sealed) and `payload_ts`. Those are the
+two clocks: a gap in a friend's trail can be read back to whether the sender was parked or had
+stopped running, which `payload_ts` alone can never say, because a heartbeat deliberately preserves
+the original timestamp.
 
 Device B is no longer woken by the stash: push-token upload was removed (ARCHITECTURE §10), so
 there is no `stash.wake.push` → `push.wake` hop any more. B pulls on its own schedule — the
@@ -137,6 +163,18 @@ Every hop of one envelope, on any device or the stash:
 ```traceql
 { span.sc.entry_hash = "ab12cd34ef" }
 ```
+
+Was a quiet phone parked, or had it stopped running? (the question the map could not answer)
+
+```
+{ name = "publish.fix" && span.fix_state = 2 }
+```
+
+`fix_state = 2` is a phone that had settled and said so. Its `payload_ts` will be hours old and that
+is correct — compare `published_delta_s` (how stale the POSITION was when sealed) against the gap to
+the next `publish.fix` from the same author (how long the DEVICE was quiet). A parked phone with a
+climbing `published_delta_s` and a steady contact cadence is healthy. A long gap with no `publish.fix`
+of any state at either end is a phone that stopped.
 
 Everything device A published in a window (get the author id from any of its spans):
 
@@ -226,6 +264,17 @@ long after bind a neighbour appears:
 
 If receives badly trail publishes, live fixes are arriving at stash-sync granularity and "live" is
 not live. Worth checking before building anything further on top of it.
+
+**Who is actually carrying whose fixes.** `sc.via_peer` on `gossip.receive` (and `transport_peer`
+on `fix.received.app`, the app-side echo) is the short id of the neighbour that handed the envelope
+over, which is only sometimes the author. It answers "is this pool relaying at all, or is every
+device talking to exactly one peer" — and, when a phone's own publishes are landing nowhere, whether
+its fixes are still reaching people second-hand:
+
+```traceql
+{ name = "gossip.receive" && span.sc.via_peer != span.sc.author }
+{ name = "fix.received.app" && span.transport_peer != "" }
+```
 
 Logs (Grafana → Explore → Loki). iroh's relay / net_report / magicsock diagnostics from the
 phones land here — this is the network-state view when sync dies after a wifi↔cellular roam:

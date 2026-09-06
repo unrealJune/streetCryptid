@@ -30,8 +30,24 @@ export interface NativeLocationFix {
   lon: number;
   accuracyM: number;
   headingDeg: number;
-  /** ms since epoch */
+  /** ms since epoch — when the POSITION was measured. Does not advance on a heartbeat. */
   ts: number;
+  /**
+   * One of `FIX_STATE_*` (declared in `features/social/core/types.ts`, mirroring `rust/src/lib.rs`,
+   * which is the source of truth). Absent ⇒ the sender predates the field, so fall back to age.
+   *
+   * Present only on RECEIVED fixes: it is stamped at seal time, so a capture never carries one.
+   */
+  state?: number;
+  /**
+   * Seconds between {@link ts} and the moment the sender sealed this envelope.
+   *
+   * The second clock, and the one that means "their phone was alive". `ts + publishedDeltaS * 1000`
+   * is the last moment we can prove the sending process ran; {@link ts} only says when the position
+   * under it was measured. A parked phone republishes an hours-old position from a live process,
+   * which is why one number could never separate "stopped moving" from "stopped running".
+   */
+  publishedDeltaS?: number;
 }
 
 /** Key material returned by `createNode`; persist the secrets in the OS secure store. */
@@ -89,6 +105,13 @@ export interface OnFixEvent {
   backfill?: boolean;
   /** How the fix reached this device. Absent on binaries built before per-fix transport labels. */
   via?: FixVia;
+  /**
+   * WHO performed that last hop: the hex EndpointId of the neighbour whose datagram this was.
+   * Gossip is epidemic, so this is frequently NOT {@link OnFixEvent.author} — it is whichever
+   * device in the author's swarm happened to carry the envelope here, which may be the stash or a
+   * peer this device has never paired with. Absent on binaries built before deliverer attribution.
+   */
+  viaPeer?: string;
 }
 
 export interface OnOpaqueEvent {
@@ -145,6 +168,12 @@ export interface NativeRatchetEvent {
   /** Absent on installed native binaries from before null-lane activity was surfaced. */
   kind?: 'fix' | 'null';
   fix?: NativeLocationFix;
+  /**
+   * Hex EndpointId of the peer that served this author's entry in the reconciliation that just
+   * ran. Absent when the entry was already in the replica (read back rather than delivered), and
+   * on binaries built before per-entry attribution.
+   */
+  viaPeer?: string;
 }
 
 // ── Control messages (docs/social/ARCHITECTURE.md §9c) ──────────────────────────────────────
@@ -981,6 +1010,15 @@ export interface IrohLocationApi {
   encodePairInvite(invite: PairInvite): Promise<string>;
   /** Decode an opaque `scpair2:<base64url>` token back into a {@link PairInvite}. */
   decodePairInvite(token: string): Promise<PairInvite>;
+
+  /**
+   * The EndpointId (hex) inside an endpoint ticket — a pure decode, no node required.
+   *
+   * Optional: absent in Expo Go, on web, and on installed binaries built before it existed. Guard
+   * with `typeof … === 'function'`; a caller that cannot resolve a ticket simply cannot name that
+   * device, which every consumer already has to handle.
+   */
+  endpointIdFromTicket?(ticket: string): Promise<string>;
 
   /** Local addresses plus live path usage for the requested peer EndpointIds. */
   transportDiagnostics(peerEndpointIdsHex: string[]): Promise<TransportDiagnostics>;

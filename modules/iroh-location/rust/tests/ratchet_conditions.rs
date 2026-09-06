@@ -140,6 +140,8 @@ fn fix_at(ts: u64) -> LocationFix {
         accuracy_m: 4.0,
         heading_deg: 90.0,
         ts,
+        state: None,
+        published_delta_s: None,
     }
 }
 

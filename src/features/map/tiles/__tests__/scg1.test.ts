@@ -2,7 +2,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 import { decodeMvtTile } from '../mvt-mapping';
-import { packedTileToGeometry, unpackPacked } from '../packed-geometry';
+import { packedTileToGeometry, unpackPacked, type PackedAreas } from '../packed-geometry';
 import { wrapScg1 } from '../scg1';
 import type { TileCoord } from '../tile-math';
 
@@ -78,37 +78,100 @@ describe('wrapScg1 parity with the JS decoder', () => {
     const named = js.transit.findIndex((t) => t.name);
     if (named >= 0) expect(native.transit[named].name).toBe(js.transit[named].name);
   });
+
+  it('matches the aeroway sections (no buildings exist at z10)', () => {
+    expect(native.buildings).toHaveLength(0);
+    expect(js.buildings).toHaveLength(0);
+    expect(native.aeroAreas).toHaveLength(js.aeroAreas?.length ?? 0);
+    expect(native.aeroLines).toHaveLength(js.aeroLines?.length ?? 0);
+    expect(native.aeroAreas?.map((a) => a.kind)).toEqual(js.aeroAreas?.map((a) => a.kind));
+    expect(native.aeroLines?.map((l) => l.kind)).toEqual(js.aeroLines?.map((l) => l.kind));
+  });
+});
+
+/**
+ * The `building` layer only exists from z13, so the z10 tile above can never
+ * cover it. This is the real SeaTac z14 tile: four footprints (the biggest is
+ * the terminal) and a full aeroway layer.
+ */
+describe('wrapScg1 parity on a z14 tile with buildings', () => {
+  const TILE_Z14: TileCoord = { z: 14, x: 2625, y: 5732 };
+  const mvt = new Uint8Array(readFileSync(join(DIR, 'z14_2625_5732.mvt')));
+  const scg1 = new Uint8Array(readFileSync(join(DIR, 'z14_2625_5732.scg1')));
+
+  const js = decodeMvtTile(mvt, TILE_Z14);
+  const native = unpackPacked(packedTileToGeometry(wrapScg1(scg1)));
+
+  it('matches building footprints', () => {
+    expect(js.buildings?.length).toBe(4);
+    expect(native.buildings).toHaveLength(js.buildings?.length ?? 0);
+    expect(ringPts(native.buildings ?? [])).toBe(ringPts(js.buildings ?? []));
+  });
+
+  it('matches aeroway areas and lines, kinds included', () => {
+    expect(native.aeroAreas).toHaveLength(js.aeroAreas?.length ?? 0);
+    expect(ringPts(native.aeroAreas ?? [])).toBe(ringPts(js.aeroAreas ?? []));
+    expect(native.aeroAreas?.map((a) => a.kind)).toEqual(js.aeroAreas?.map((a) => a.kind));
+
+    expect(native.aeroLines).toHaveLength(js.aeroLines?.length ?? 0);
+    expect(linePts(native.aeroLines ?? [])).toBe(linePts(js.aeroLines ?? []));
+    expect(native.aeroLines?.map((l) => l.kind)).toEqual(js.aeroLines?.map((l) => l.kind));
+  });
+
+  it('matches the first building ring to f32 precision', () => {
+    const [nx, ny] = native.buildings![0].rings[0][0];
+    const [jx, jy] = js.buildings![0].rings[0][0];
+    expect(nx).toBeCloseTo(jx, 5);
+    expect(ny).toBeCloseTo(jy, 5);
+  });
 });
 
 /**
  * A buffer from an older native binary (an already-installed dev build, or iOS
  * before `just bindgen-ios`) ends at the string table. The reader must degrade
- * to "no transit" rather than throw — everything else still decodes.
+ * to empty appended sections rather than throw — everything else still decodes.
+ *
+ * The tail is rebuilt section by section from the writers in `mvt.rs`, so adding
+ * a new appended section costs exactly one more term here.
  */
 describe('wrapScg1 on a pre-transit buffer', () => {
   const scg1 = new Uint8Array(readFileSync(join(DIR, 'z10_164_357.scg1')));
   const full = wrapScg1(scg1);
-  // Transit and label streets are append-only sections, so dropping both
-  // recreates a buffer emitted by the original SCG1 encoder.
-  const transitBytes = 8 + align4(full.transit.count) + full.transit.count * 8 + 4;
-  const labelBytes =
-    8 +
-    align4(full.labelStreets.count) +
-    full.labelStreets.count * 8 +
-    4 +
-    full.labelStreets.coords.length * 4;
-  const truncated = scg1.slice(
-    0,
-    scg1.byteLength - labelBytes - transitBytes - full.transit.coords.length * 4
-  );
 
-  function align4(n: number): number {
-    return (n + 3) & ~3;
-  }
+  const align4 = (n: number): number => (n + 3) & ~3;
+  /** streets/transit: header + kind|class u8 + nameRef i32 + pointOff u32 + coords. */
+  const classedLineBytes = (s: {
+    count: number;
+    pointOff: Uint32Array;
+    coords: Float32Array;
+  }): number => 8 + align4(s.count) + s.count * 4 + (s.count + 1) * 4 + s.coords.length * 4;
+  /** areas: header + [kind u8] + nameRef i32 + ringOff u32 + pointOff u32 + coords. */
+  const areaBytes = (a: PackedAreas, kinded: boolean): number =>
+    12 +
+    (kinded ? align4(a.count) : 0) +
+    a.count * 4 +
+    (a.count + 1) * 4 +
+    a.pointOff.length * 4 +
+    a.coords.length * 4;
+  /** aero lines: header + kind u8 + pointOff u32 + coords (no names). */
+  const aeroLineBytes = (l: { count: number; coords: Float32Array }): number =>
+    8 + align4(l.count) + (l.count + 1) * 4 + l.coords.length * 4;
 
-  it('decodes the rest of the tile and reports no transit', () => {
+  const tailBytes =
+    classedLineBytes(full.transit) +
+    classedLineBytes(full.labelStreets) +
+    areaBytes(full.buildings, false) +
+    areaBytes(full.aeroAreas, true) +
+    aeroLineBytes(full.aeroLines);
+  const truncated = scg1.slice(0, scg1.byteLength - tailBytes);
+
+  it('decodes the rest of the tile and reports no appended sections', () => {
     const tile = wrapScg1(truncated);
     expect(tile.transit.count).toBe(0);
+    expect(tile.labelStreets.count).toBe(0);
+    expect(tile.buildings.count).toBe(0);
+    expect(tile.aeroAreas.count).toBe(0);
+    expect(tile.aeroLines.count).toBe(0);
     expect(tile.streets.count).toBe(full.streets.count);
     expect(tile.places).toHaveLength(full.places.length);
   });

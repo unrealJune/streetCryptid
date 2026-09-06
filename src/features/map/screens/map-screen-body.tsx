@@ -29,7 +29,11 @@ import {
 import { sampleTrailForMap } from '@/features/map/core/trail-sampling';
 import { BumpPairingStrip } from '@/features/social/components/bump-pairing-strip';
 import { FriendProfileSheet } from '@/features/social/components/friend-profile-sheet';
-import { formatPresenceAge } from '@/features/social/core/presence';
+import {
+  describePresence,
+  isPresenceOnline,
+  isPresenceStale,
+} from '@/features/social/core/presence';
 import type { LocationFix } from '@/features/social/core/types';
 import { useArmedBump } from '@/features/social/hooks/use-armed-bump';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
@@ -93,6 +97,7 @@ export default function MapScreenBody() {
     exploration: true,
     highways: true,
     transit: false,
+    structures: true,
   });
   const explorationEnabled = layers.exploration;
   const setLayer = useCallback((layer: MapLayerId, enabled: boolean) => {
@@ -141,7 +146,11 @@ export default function MapScreenBody() {
             color: resolveSignalColor(presence.friend.color, theme.chrome.green),
             location: { lat: presence.fix.lat, lon: presence.fix.lon },
             latestTs: presence.fix.ts,
-            stale: presence.freshness === 'stale',
+            // Parked is deliberately NOT stale. A friend who has stopped moving is showing you
+            // the right position; dimming them says "this may be wrong", which is the opposite of
+            // true. Only genuine loss of contact dims.
+            stale: isPresenceStale(presence.state),
+            parked: presence.state === 'parked',
           },
         ];
       }),
@@ -158,8 +167,8 @@ export default function MapScreenBody() {
         cryptidName: presence.friend.cryptidName,
         color: resolveSignalColor(presence.friend.color, theme.chrome.green),
         distanceM: presence.distanceM,
-        status: formatPresenceAge(presence.ageMs).toUpperCase(),
-        online: presence.freshness === 'live' || presence.freshness === 'recent',
+        status: describePresence(presence).toUpperCase(),
+        online: isPresenceOnline(presence.state),
         locatable: presence.fix !== null,
       })),
     [friends, theme.chrome.green]
@@ -329,7 +338,7 @@ export default function MapScreenBody() {
         explorationEnabled ? 'Exploration overlay on.' : 'Exploration overlay off.'
       } ${layers.highways ? 'Highways shown.' : 'Highways hidden.'} ${
         layers.transit ? 'Transit overlay on.' : 'Transit overlay off.'
-      } ${locationCopy} ${
+      } ${layers.structures ? 'Buildings shown.' : 'Buildings hidden.'} ${locationCopy} ${
         mapFriends.length > 0
           ? `${mapFriends.length} friend${mapFriends.length === 1 ? '' : 's'} on the map: ${friendNames}.`
           : 'No friend locations are available.'
@@ -370,6 +379,7 @@ export default function MapScreenBody() {
           explorationEnabled={explorationEnabled}
           highwaysEnabled={layers.highways}
           transitEnabled={layers.transit}
+          structuresEnabled={layers.structures}
           key={mapSessionKey}
           onReadout={onReadout}
           initialCenter={initialCenter}
@@ -441,6 +451,8 @@ export default function MapScreenBody() {
       <FriendProfileSheet
         presence={profilePresence}
         visible={profilePresence !== null}
+        peers={snapshot?.friends}
+        stashEndpointId={snapshot?.stash.endpointId ?? null}
         sharing={
           profilePresence
             ? (snapshot?.sharingWith ?? []).includes(profilePresence.friend.endpointId)
@@ -481,6 +493,7 @@ function MapSession({
   explorationEnabled,
   highwaysEnabled,
   transitEnabled,
+  structuresEnabled,
   onReadout,
   onSelectFriend,
   onSelectSelf,
@@ -498,6 +511,7 @@ function MapSession({
   explorationEnabled: boolean;
   highwaysEnabled: boolean;
   transitEnabled: boolean;
+  structuresEnabled: boolean;
   onReadout(readout: MapReadout): void;
   onSelectFriend(friendId: string): void;
   onSelectSelf(): void;
@@ -513,6 +527,7 @@ function MapSession({
       explorationEnabled={explorationEnabled}
       highwaysEnabled={highwaysEnabled}
       transitEnabled={transitEnabled}
+      structuresEnabled={structuresEnabled}
       onReadout={onReadout}
       initialCenter={sessionCenter}
       locateTarget={locateTarget}

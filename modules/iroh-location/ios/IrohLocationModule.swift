@@ -56,7 +56,8 @@ private final class BluetoothRadioProbe: NSObject, CBCentralManagerDelegate {
 // into this target (see IrohLocation.podspec -> vendored xcframework + generated/*.swift).
 // They expose: `LocationNode`, `Subscription`, the `FixListener` protocol, the profile /
 // pairing / BLE records + enums, and the free functions `deriveTopic(authorEndpointId:)`,
-// `generateRecvKeypair()`, `encodePairInvite(invite:)`, and `decodePairInvite(token:)`.
+// `generateRecvKeypair()`, `encodePairInvite(invite:)`, `decodePairInvite(token:)`, and
+// `endpointIdFromTicket(ticket:)`.
 //
 // Regenerate with `just bindgen-ios` on macOS (source bindings can also be produced from a
 // host library via `uniffi-bindgen ... --language swift`; only the XCFramework needs macOS).
@@ -142,10 +143,31 @@ private func excludeFromBackup(_ dir: URL) {
 }
 
 /// Build the UniFFI `LocationFix` from the JS bridge dict.
+///
+/// The envelope stamps are always `nil` here. This is the CAPTURE direction — a position the OS
+/// just handed us — and `state` / `publishedDeltaS` describe a transmission that has not happened
+/// yet. `DrainEngine::drain` fills them in at seal time.
 private func locationFix(from fix: [String: Double]) -> LocationFix {
   LocationFix(
     lat: fix["lat"] ?? 0, lon: fix["lon"] ?? 0, accuracyM: fix["accuracyM"] ?? 0,
-    headingDeg: fix["headingDeg"] ?? 0, ts: UInt64(fix["ts"] ?? 0))
+    headingDeg: fix["headingDeg"] ?? 0, ts: UInt64(fix["ts"] ?? 0),
+    state: nil, publishedDeltaS: nil)
+}
+
+/// The JS shape of a decrypted fix, including what the envelope says about itself.
+///
+/// Absent stamps are OMITTED rather than sent as null, so JS sees `undefined` — which reads as
+/// "this sender does not tell us", the honest meaning of a fix from a build that predates the
+/// fields. A sender that says nothing and a sender we cannot understand must not collapse into the
+/// same value, because the UI's answer differs: one falls back to age, the other is a bug.
+private func fixToDict(_ fix: LocationFix) -> [String: Any] {
+  var out: [String: Any] = [
+    "lat": fix.lat, "lon": fix.lon, "accuracyM": fix.accuracyM,
+    "headingDeg": fix.headingDeg, "ts": fix.ts,
+  ]
+  if let state = fix.state { out["state"] = Int(state) }
+  if let delta = fix.publishedDeltaS { out["publishedDeltaS"] = Int(delta) }
+  return out
 }
 
 /// Build the UniFFI `ControlMsg` from the JS bridge dict (see `NativeControlMsg`; `nonce` is hex).
@@ -343,19 +365,20 @@ private final class EventBridge: FixListener {
   }
   // `backfill` is `true` when the fix arrived via durable range-reconciliation (iroh-docs
   // catch-up) rather than the live gossip path. `via` names the last hop into this device
-  // (`relay` | `direct` | `lan` | `ble` | `live` | `docs` | `stash`).
-  func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String) {
+  // (`relay` | `direct` | `lan` | `ble` | `live` | `docs` | `stash`); `viaPeer` names the device
+  // that performed it, which is not necessarily the fix's author.
+  func onFix(
+    author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String, viaPeer: String?
+  ) {
     module?.sendEvent(
       "onFix",
       [
         "author": dataToHex(author),
         "seq": seq,
-        "fix": [
-          "lat": fix.lat, "lon": fix.lon, "accuracyM": fix.accuracyM,
-          "headingDeg": fix.headingDeg, "ts": fix.ts,
-        ],
+        "fix": fixToDict(fix),
         "backfill": backfill,
         "via": via,
+        "viaPeer": viaPeer as Any,
       ])
   }
   func onOpaque(author: Data, seq: UInt64) {
@@ -812,12 +835,8 @@ public final class IrohLocationModule: Module {
           "seq": incoming.seq,
           "ts": incoming.ts,
           "kind": incoming.kind,
-          "fix": incoming.fix.map { fix in
-            [
-              "lat": fix.lat, "lon": fix.lon, "accuracyM": fix.accuracyM,
-              "headingDeg": fix.headingDeg, "ts": fix.ts,
-            ]
-          } as Any,
+          "fix": incoming.fix.map { fixToDict($0) } as Any,
+          "viaPeer": incoming.viaPeer as Any,
         ]
       }
     }
@@ -981,6 +1000,11 @@ public final class IrohLocationModule: Module {
 
     AsyncFunction("decodePairInvite") { (token: String) throws -> [String: Any] in
       pairInviteDict(try decodePairInvite(token: token))
+    }
+
+    // Pure decode, node-free: lets JS recognise a configured stash by its EndpointId.
+    AsyncFunction("endpointIdFromTicket") { (ticket: String) throws -> String in
+      try endpointIdFromTicket(ticket: ticket)
     }
 
     // ── BLE status (honest stub off-device) — ARCHITECTURE.md §2 ───────────────────────────

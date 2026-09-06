@@ -169,6 +169,9 @@ class BackgroundLocationService : Service() {
       accuracyM = if (hasAccuracy()) accuracy.toDouble() else 0.0,
       headingDeg = if (hasBearing()) bearing.toDouble() else 0.0,
       ts = time.toULong(),
+      // Capture-side: the envelope stamps belong to a send that has not happened yet.
+      state = null,
+      publishedDeltaS = null,
     )
 
   /**

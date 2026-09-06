@@ -7,6 +7,8 @@ appId: com.unrealjune.streetcryptid
 - launchApp:
     clearState: false
 - tapOn: 'Settings'
+# Settings is a menu now; the invite-link controls live on its "Link pairing" page.
+- tapOn: 'Link pairing'
 - scrollUntilVisible:
     element: 'Share a one-time pairing link'
     direction: DOWN

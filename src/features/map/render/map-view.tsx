@@ -146,6 +146,12 @@ export interface MapFriendLocation {
   location: LatLon;
   latestTs: number;
   stale?: boolean;
+  /**
+   * The friend told us they have stopped. Distinct from {@link stale}, which means we have lost
+   * them — these used to be the same rendering and that was the bug: a settled friend and a dead
+   * phone both froze at a position and both faded.
+   */
+  parked?: boolean;
 }
 
 export interface MapTrailLocation {
@@ -194,6 +200,7 @@ export function MapView({
   explorationEnabled = true,
   highwaysEnabled = true,
   transitEnabled = false,
+  structuresEnabled = true,
   accessibilityLabel,
   onSelectSelf,
   onSelectFriend,
@@ -219,6 +226,8 @@ export function MapView({
   /** Draw motorways (default true) — the widest strokes on the map. */
   highwaysEnabled?: boolean;
   transitEnabled?: boolean;
+  /** Draw building footprints and aeroway surfaces (default true). */
+  structuresEnabled?: boolean;
   accessibilityLabel?: string;
   onSelectSelf?: () => void;
   onSelectFriend?: (friendId: string) => void;
@@ -295,7 +304,7 @@ export function MapView({
     const renderExploration = explorationEnabled && region.spec.cellRes !== null;
     const layerKey = `${renderExploration ? 'x' : '-'}${highwaysEnabled ? 'h' : '-'}${
       transitEnabled ? 't' : '-'
-    }`;
+    }${structuresEnabled ? 'b' : '-'}`;
     const cached = regionRenderCache.get(region, lutImage, layerKey);
     if (cached) {
       const timing: RegionRenderTiming = {
@@ -332,6 +341,7 @@ export function MapView({
             lutImage,
             explorationEnabled: renderExploration,
             transitEnabled,
+            structuresEnabled,
           })
         : null;
     const rasterMs = measure ? perfNow() - rasterStarted : 0;
@@ -360,6 +370,7 @@ export function MapView({
     explorationEnabled,
     highwaysEnabled,
     transitEnabled,
+    structuresEnabled,
     regionRenderCache,
   ]);
 
@@ -972,6 +983,7 @@ export function MapView({
                       key={locator.id}
                       onPress={() => onSelectFriend?.(locator.id)}
                       panelColor={theme.chrome.island}
+                      parked={locator.parked}
                       scale={k}
                       selected={locator.id === selectedFriendId}
                       sigil={locator.sigil}

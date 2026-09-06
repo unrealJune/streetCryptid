@@ -15,6 +15,10 @@
  */
 
 import type {
+  AeroArea,
+  AeroAreaKind,
+  AeroLineKind,
+  AeroWay,
   AreaFeature,
   MapGeometry,
   Place,
@@ -25,7 +29,7 @@ import type {
   TransitWay,
   WorldPoint,
 } from '../core/types';
-import { TRANSIT_MODES } from '../core/types';
+import { AERO_AREA_KINDS, AERO_LINE_KINDS, TRANSIT_MODES } from '../core/types';
 
 /** Struct-of-arrays polylines (streets add road class + names). */
 export interface PackedLines {
@@ -67,6 +71,37 @@ export interface PackedAreas {
   readonly coords: Float32Array;
 }
 
+/** Areas carrying a class byte: `kind` holds the {@link AERO_AREA_KINDS} index. */
+export interface PackedAeroAreas extends PackedAreas {
+  readonly kind: Uint8Array;
+}
+
+/** Lines carrying a class byte: `kind` holds the {@link AERO_LINE_KINDS} index. */
+export interface PackedAeroLines extends PackedLines {
+  readonly kind: Uint8Array;
+}
+
+/** The empty areas section a pre-buildings SCG1 buffer decodes to. */
+export const EMPTY_PACKED_AREAS: PackedAreas = {
+  count: 0,
+  names: [],
+  ringOff: new Uint32Array(1),
+  pointOff: new Uint32Array(1),
+  coords: new Float32Array(0),
+};
+
+export const EMPTY_PACKED_AERO_AREAS: PackedAeroAreas = {
+  ...EMPTY_PACKED_AREAS,
+  kind: new Uint8Array(0),
+};
+
+export const EMPTY_PACKED_AERO_LINES: PackedAeroLines = {
+  count: 0,
+  kind: new Uint8Array(0),
+  pointOff: new Uint32Array(1),
+  coords: new Float32Array(0),
+};
+
 /** One decoded tile: coordinate pools plus the origin their deltas are relative to. */
 export interface PackedTile {
   readonly originX: number;
@@ -78,6 +113,12 @@ export interface PackedTile {
   readonly rivers: PackedLines;
   readonly water: PackedAreas;
   readonly parks: PackedAreas;
+  /** OpenMapTiles `building` footprints (empty below z13, or from an old binary). */
+  readonly buildings: PackedAreas;
+  /** OpenMapTiles `aeroway` polygons, classed by {@link AERO_AREA_KINDS}. */
+  readonly aeroAreas: PackedAeroAreas;
+  /** OpenMapTiles `aeroway` lines, classed by {@link AERO_LINE_KINDS}. */
+  readonly aeroLines: PackedAeroLines;
   readonly places: readonly Place[];
 }
 
@@ -115,6 +156,9 @@ export function packedTileToGeometry(tile: PackedTile): PackedGeometry {
     tile.rivers.count === 0 &&
     tile.water.count === 0 &&
     tile.parks.count === 0 &&
+    tile.buildings.count === 0 &&
+    tile.aeroAreas.count === 0 &&
+    tile.aeroLines.count === 0 &&
     tile.places.length === 0;
   return empty ? EMPTY_PACKED : { parts: [tile], places: tile.places };
 }
@@ -228,6 +272,18 @@ export function packGeometry(g: MapGeometry): PackedGeometry {
     return { count, names, ringOff, pointOff, coords };
   };
 
+  const aeroAreas = ((areas: readonly AeroArea[]): PackedAeroAreas => {
+    const kind = new Uint8Array(areas.length);
+    for (let i = 0; i < areas.length; i++) kind[i] = AERO_AREA_KINDS.indexOf(areas[i].kind);
+    return { ...packAreas(areas), kind };
+  })(g.aeroAreas ?? []);
+
+  const aeroLines = ((ways: readonly AeroWay[]): PackedAeroLines => {
+    const kind = new Uint8Array(ways.length);
+    for (let i = 0; i < ways.length; i++) kind[i] = AERO_LINE_KINDS.indexOf(ways[i].kind);
+    return { ...packLines(ways), kind };
+  })(g.aeroLines ?? []);
+
   const tile: PackedTile = {
     originX: 0,
     originY: 0,
@@ -237,6 +293,9 @@ export function packGeometry(g: MapGeometry): PackedGeometry {
     rivers: packLines(g.rivers),
     water: packAreas(g.water),
     parks: packAreas(g.parks),
+    buildings: packAreas(g.buildings ?? []),
+    aeroAreas,
+    aeroLines,
     places: g.places,
   };
   return packedTileToGeometry(tile);
@@ -252,6 +311,16 @@ export function asTransitMode(v: number): TransitMode {
   return TRANSIT_MODES[v] ?? 'rail';
 }
 
+/** Narrow a raw kind byte to the {@link AeroAreaKind} union for callers. */
+export function asAeroAreaKind(v: number): AeroAreaKind {
+  return AERO_AREA_KINDS[v] ?? 'apron';
+}
+
+/** Narrow a raw kind byte to the {@link AeroLineKind} union for callers. */
+export function asAeroLineKind(v: number): AeroLineKind {
+  return AERO_LINE_KINDS[v] ?? 'taxiway';
+}
+
 /**
  * Materialize a {@link PackedGeometry} back into {@link MapGeometry} (tuples).
  * The inverse of {@link packGeometry} — for tests and diagnostic scripts that
@@ -264,6 +333,9 @@ export function unpackPacked(g: PackedGeometry): MapGeometry {
   const rivers: RiverWay[] = [];
   const water: AreaFeature[] = [];
   const parks: AreaFeature[] = [];
+  const buildings: AreaFeature[] = [];
+  const aeroAreas: AeroArea[] = [];
+  const aeroLines: AeroWay[] = [];
 
   for (const part of g.parts) {
     const { originX, originY } = part;
@@ -297,19 +369,51 @@ export function unpackPacked(g: PackedGeometry): MapGeometry {
     for (let i = 0; i < r.count; i++)
       rivers.push({ points: pts(r.coords, r.pointOff[i], r.pointOff[i + 1]) });
 
+    const ringsOf = (areas: PackedAreas, i: number): WorldPoint[][] => {
+      const rings: WorldPoint[][] = [];
+      for (let rr = areas.ringOff[i]; rr < areas.ringOff[i + 1]; rr++) {
+        rings.push(pts(areas.coords, areas.pointOff[rr], areas.pointOff[rr + 1]));
+      }
+      return rings;
+    };
+
     for (const [areas, dst] of [
       [part.water, water],
       [part.parks, parks],
+      [part.buildings, buildings],
     ] as const) {
       for (let i = 0; i < areas.count; i++) {
-        const rings: WorldPoint[][] = [];
-        for (let rr = areas.ringOff[i]; rr < areas.ringOff[i + 1]; rr++) {
-          rings.push(pts(areas.coords, areas.pointOff[rr], areas.pointOff[rr + 1]));
-        }
-        dst.push({ name: areas.names[i], rings });
+        dst.push({ name: areas.names[i], rings: ringsOf(areas, i) });
       }
+    }
+
+    const aa = part.aeroAreas;
+    for (let i = 0; i < aa.count; i++) {
+      aeroAreas.push({
+        kind: asAeroAreaKind(aa.kind[i]),
+        name: aa.names[i],
+        rings: ringsOf(aa, i),
+      });
+    }
+    const al = part.aeroLines;
+    for (let i = 0; i < al.count; i++) {
+      aeroLines.push({
+        kind: asAeroLineKind(al.kind[i]),
+        points: pts(al.coords, al.pointOff[i], al.pointOff[i + 1]),
+      });
     }
   }
 
-  return { streets, labelStreets, transit, rivers, water, parks, places: [...g.places] };
+  return {
+    streets,
+    labelStreets,
+    transit,
+    rivers,
+    water,
+    parks,
+    buildings,
+    aeroAreas,
+    aeroLines,
+    places: [...g.places],
+  };
 }

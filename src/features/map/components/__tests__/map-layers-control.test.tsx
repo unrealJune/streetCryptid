@@ -2,14 +2,14 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import { CryptidThemes } from '@/constants/cryptid-theme';
 
-import { MapLayersControl } from '../map-layers-control';
+import { MapLayersControl, type MapLayerId } from '../map-layers-control';
 
 jest.mock('expo-symbols', () => ({
   SymbolView: () => null,
 }));
 jest.mock('@/global.css', () => ({}));
 
-const layers = { exploration: true, highways: true, transit: false };
+const layers = { exploration: true, highways: true, transit: false, structures: true };
 
 describe('MapLayersControl', () => {
   let renderer: ReactTestRenderer;
@@ -18,9 +18,7 @@ describe('MapLayersControl', () => {
     act(() => renderer?.unmount());
   });
 
-  const expand = (
-    onChange: (layer: 'exploration' | 'highways' | 'transit', enabled: boolean) => void
-  ) => {
+  const expand = (onChange: (layer: MapLayerId, enabled: boolean) => void) => {
     act(() => {
       renderer = create(
         <MapLayersControl layers={layers} onChange={onChange} theme={CryptidThemes.daybreak} />
@@ -69,5 +67,16 @@ describe('MapLayersControl', () => {
 
     act(() => row.props.onPress());
     expect(onChange).toHaveBeenCalledWith('transit', true);
+  });
+
+  it('toggles the buildings layer off', () => {
+    const onChange = jest.fn();
+    expand(onChange);
+
+    const row = renderer.root.findByProps({ accessibilityLabel: 'Buildings layer' });
+    expect(row.props.accessibilityState).toEqual({ checked: true });
+
+    act(() => row.props.onPress());
+    expect(onChange).toHaveBeenCalledWith('structures', false);
   });
 });

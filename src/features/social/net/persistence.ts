@@ -1,4 +1,9 @@
 import { reportStorageDegraded } from './storage-health';
+import {
+  deliveryModeFromLegacyStashOptIn,
+  parseDeliveryMode,
+  type DeliveryMode,
+} from '../core/delivery-mode';
 import type { PoolState } from '../core/pool';
 import type { RatchetActivity } from '../core/types';
 import { InMemoryKV, type PersistentKV } from './background/persistent-kv';
@@ -77,9 +82,18 @@ function getDb(): Promise<SqliteDb | null> {
            fix TEXT NOT NULL,
            received_at INTEGER NOT NULL,
            fix_ts INTEGER NOT NULL,
-           via TEXT
+           via TEXT,
+           via_peer TEXT
          );`
       );
+      // Add `via_peer` to a `friend_latest` that predates deliverer attribution. Guarded by the
+      // throw rather than a schema version — there is none here — exactly like the legacy-table
+      // migration below: the second run raises "duplicate column name" and is skipped.
+      try {
+        await db.execAsync('ALTER TABLE friend_latest ADD COLUMN via_peer TEXT');
+      } catch {
+        // Column already present.
+      }
       // One-shot migration off the old combined `trail` table. Our own rows move across — that
       // half is the user's own history and dropping it would erase their trail on upgrade — while
       // every friend row is left behind and destroyed with the table, which is the point: their
@@ -164,6 +178,7 @@ interface TrailRow {
   fix: string;
   received_at: number;
   via: string | null;
+  via_peer?: string | null;
 }
 
 function rowToPoint(row: TrailRow): TrailPoint {
@@ -173,6 +188,7 @@ function rowToPoint(row: TrailRow): TrailPoint {
     fix: JSON.parse(row.fix) as TrailPoint['fix'],
     receivedAt: Number(row.received_at),
     ...(row.via ? { via: row.via as NonNullable<TrailPoint['via']> } : {}),
+    ...(row.via_peer ? { viaPeer: row.via_peer } : {}),
   };
 }
 
@@ -228,22 +244,46 @@ class SqliteTrailStorage implements TrailStorage {
       // each sync and routinely beats the callback carrying the precise label. Nothing else in the
       // row changes on that path — equal `(fix_ts, seq)` is the same fix.
       await db.runAsync(
-        `INSERT INTO friend_latest (author, seq, fix, received_at, fix_ts, via) VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO friend_latest (author, seq, fix, received_at, fix_ts, via, via_peer)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(author) DO UPDATE SET
            seq = excluded.seq, fix = excluded.fix, received_at = excluded.received_at,
            fix_ts = excluded.fix_ts,
-           via = CASE WHEN friend_latest.via IS NULL OR friend_latest.via = ?
-                      THEN COALESCE(excluded.via, friend_latest.via) ELSE friend_latest.via END
+           via = CASE WHEN excluded.fix_ts > friend_latest.fix_ts
+                        OR (excluded.fix_ts = friend_latest.fix_ts
+                            AND excluded.seq > friend_latest.seq)
+                      THEN excluded.via
+                      WHEN excluded.via IS NOT NULL
+                       AND (friend_latest.via IS NULL OR friend_latest.via = ?)
+                      THEN excluded.via
+                      ELSE friend_latest.via END,
+           via_peer = CASE WHEN excluded.fix_ts > friend_latest.fix_ts
+                             OR (excluded.fix_ts = friend_latest.fix_ts
+                                 AND excluded.seq > friend_latest.seq)
+                           THEN excluded.via_peer
+                           WHEN excluded.via IS NOT NULL
+                            AND (friend_latest.via IS NULL OR friend_latest.via = ?)
+                           THEN excluded.via_peer
+                           ELSE friend_latest.via_peer END
          WHERE excluded.fix_ts > friend_latest.fix_ts
             OR (excluded.fix_ts = friend_latest.fix_ts AND excluded.seq >= friend_latest.seq)`,
-        // Bound positionally, left-to-right across the whole statement: the six VALUES first,
-        // then the CASE's comparison value.
+        // Bound positionally, left-to-right across the whole statement: the seven VALUES first,
+        // then the two CASE comparison values.
+        //
+        // Both CASEs are the same shape on purpose. Label and peer are ONE record — a peer from
+        // one delivery beside a label from another is a sentence nothing ever observed — so each
+        // arm moves both or neither, mirroring `mergeProvenance`. A strictly newer fix takes its
+        // own pair wholesale (that is how this one got here); only a re-delivery of the fix we
+        // already hold falls through to the merge, where an unresolved label yields to a precise
+        // one. Matches `InMemoryTrailStorage.putFriendLatest`.
         point.author,
         point.seq,
         JSON.stringify(point.fix),
         point.receivedAt,
         point.fix.ts,
         point.via ?? null,
+        point.viaPeer ?? null,
+        UNRESOLVED_VIA,
         UNRESOLVED_VIA
       );
     } catch (error) {
@@ -257,7 +297,7 @@ class SqliteTrailStorage implements TrailStorage {
     if (!db) return this.fallback.friendLatest();
     try {
       const rows = await db.getAllAsync<TrailRow>(
-        'SELECT author, seq, fix, received_at, via FROM friend_latest'
+        'SELECT author, seq, fix, received_at, via, via_peer FROM friend_latest'
       );
       return rows.map(rowToPoint);
     } catch (error) {
@@ -399,6 +439,34 @@ export async function loadStashOptIn(kv: PersistentKV): Promise<boolean> {
 /** Persist the trail-stash opt-in choice. */
 export async function saveStashOptIn(kv: PersistentKV, optedIn: boolean): Promise<void> {
   await kv.set(STASH_OPTIN_KEY, optedIn ? '1' : '0');
+}
+
+const DELIVERY_MODE_KEY = 'sc.social.deliveryMode';
+
+/**
+ * Which route sealed envelopes are allowed to take off this phone.
+ *
+ * Falls back to the legacy `stashOptIn` boolean when no mode has been written yet, so an
+ * install that had offline delivery switched on comes back as `stash` rather than being
+ * quietly demoted to `direct` on the update that introduced the picker. The old key is left
+ * in place: rolling back to a build that only understands the boolean must still find it.
+ */
+export async function loadDeliveryMode(kv: PersistentKV): Promise<DeliveryMode> {
+  const raw = await kv.get(DELIVERY_MODE_KEY);
+  if (raw !== null && raw !== undefined) return parseDeliveryMode(raw);
+  return deliveryModeFromLegacyStashOptIn(await loadStashOptIn(kv));
+}
+
+/**
+ * Persist the delivery choice, mirroring it back onto the legacy boolean.
+ *
+ * The mirror is not redundancy for its own sake — `loadStashOptIn` is still what a rolled-back
+ * build reads, and leaving it stale would silently keep uploading to a stash the user had just
+ * switched away from.
+ */
+export async function saveDeliveryMode(kv: PersistentKV, mode: DeliveryMode): Promise<void> {
+  await kv.set(DELIVERY_MODE_KEY, mode);
+  await saveStashOptIn(kv, mode === 'stash');
 }
 
 const LOCATION_DISCLOSURE_KEY = 'sc.social.locationDisclosureAck';
