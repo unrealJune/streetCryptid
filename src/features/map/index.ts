@@ -7,7 +7,6 @@ export { IslandTabs } from './components/island-tabs';
 export type { IslandTab } from './components/island-tabs';
 export { LocateMeControl } from './components/locate-me-control';
 export { MapDrawer, type DrawerDetent } from './components/map-drawer';
-export { PlaceHeader } from './components/place-header';
 export {
   MapLayersControl,
   type MapLayerId,

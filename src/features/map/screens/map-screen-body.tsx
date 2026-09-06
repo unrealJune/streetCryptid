@@ -1,6 +1,6 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, View, type LayoutChangeEvent } from 'react-native';
+import { StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { resolveSignalColor } from '@/constants/signal-colors';
@@ -14,7 +14,6 @@ import {
   MapDrawer,
   MapLayersControl,
   MapView,
-  PlaceHeader,
   rgbToHex,
   SettingsControl,
   useMapTheme,
@@ -431,13 +430,16 @@ export default function MapScreenBody() {
           selfFix={hasLiveSelfFix ? selfFix : null}
         />
       </View>
-      {/* The app's only top chrome: the place name and attribution on the left, Settings on the
-          right. `pointerEvents="box-none"` so the empty span between them still pans the map.
-          The header stands down while a friend's pane is open — that pane's hero is already
-          naming the place, and the same words twice on one screen is what the declutter law is
-          for. */}
+      {/* The app's only top chrome: attribution on the left, Settings on the right.
+          `pointerEvents="box-none"` so the empty span between them still pans the map. */}
       <View pointerEvents="box-none" style={[styles.topLayer, { top: insets.top + Spacing.three }]}>
-        <PlaceHeader placeName={detailPresence ? null : readout.placeName} theme={theme} />
+        <Text
+          pointerEvents="none"
+          style={[styles.attribution, { color: theme.chrome.steel }]}
+          numberOfLines={1}
+        >
+          © OPENSTREETMAP
+        </Text>
         <SettingsControl onPress={() => router.push('/settings')} theme={theme} />
       </View>
       {/* Only map affordances float: layers and locate. They ride above the drawer and are
@@ -498,6 +500,7 @@ export default function MapScreenBody() {
           ) : (
             <CoverageIsland
               coverage={readout.coverage}
+              placeName={readout.placeName}
               sectorsVisible={readout.sectorsVisible}
               signal={selfSignal}
               theme={theme}
@@ -602,8 +605,15 @@ const styles = StyleSheet.create({
     left: Spacing.three,
     right: Spacing.three,
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     justifyContent: 'space-between',
     gap: Spacing.three,
+  },
+  attribution: {
+    flexShrink: 1,
+    fontFamily: 'IBMPlexMono_500Medium',
+    fontSize: 10,
+    letterSpacing: 1.2,
+    opacity: 0.55,
   },
 });

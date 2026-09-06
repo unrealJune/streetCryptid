@@ -108,17 +108,12 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
 
 ## Chrome & layout — Apple-Maps "islands"
 
-- **Full-bleed map. There is no tab bar.** The map is the whole app. The only chrome is
-  floating: a **place-name header** and a Settings gear across the top, a right-side
+- **Full-bleed map. There is no tab bar and no header.** The map is the whole app. The
+  only chrome is floating: attribution and a Settings gear across the top, a right-side
   control stack of **map affordances only** (layers · locate [amber]), and one bottom
-  drawer. Everything else is that drawer.
-- **The header names where the CAMERA is** — not where you are — on its own small island,
-  with attribution as a faint mono line beneath it. It was the ME body's hero until it
-  became clear that "where you are looking" is true of the whole screen rather than of one
-  of two tabs, and that a fact which scrolls away with a drawer is a fact you cannot rely
-  on. It carries **no** coverage percentage: that number belongs beside the bar that
-  explains it. It **stands down** while a friend's pane is open, because that pane's hero
-  is already naming the place.
+  drawer. Everything else is that drawer. The place name stays the ME body's hero rather
+  than becoming top chrome: promoting it put a second panel over the map to say what the
+  drawer already said well.
 - **Settings is one gear, top-right,** in neutral steel — never an accent, because it is
   not a signal. It opens as a modal over the map with its own close affordance, so leaving
   it always returns you to exactly the view you left.
@@ -141,11 +136,11 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
 - **The island floats clear of the system gesture bar** — `insets.bottom` plus a real
   margin, on both platforms. (It once special-cased Android to skip the inset, which was
   true only while a native tab bar was consuming it.)
-- **ME is "how much of this have you walked":** SECTORS IN VIEW + **one** flip-dot coverage
-  bar **in your signal color** (it counts ground _you_ covered) + **one** %. It no longer
-  leads with the place name — that is the header now, and leading with it here would be the
-  same words twice. **No legend** (removed). Declutter law: one live dot, one coverage
-  number, one accent — never duplicate badges or status text.
+- **ME is zoom-aware "where you are":** hero place name (Rajdhani) + one mono
+  uppercase sub + **one** flip-dot coverage bar **in your signal color** (it counts ground
+  _you_ covered) + **one** % — retitled per tier (BLOCKS / SECTORS / HOODS / CITIES).
+  **No legend** (removed). Declutter law: one live dot, one coverage number, one accent —
+  never duplicate badges or status text.
 - **Flying somewhere has a zoom floor, not a zoom target.** Tapping a friend, tapping a
   roster row and pressing Locate Me all land at **z13 or closer** (~5 km across a phone —
   town-wide, where the street grid is legible). Fly-to used to preserve whatever zoom you
