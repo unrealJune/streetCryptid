@@ -71,17 +71,114 @@ for z13/z14 respectively: that single sample does not establish server-load
 history or explain every field report. Privacy remains fixed-z10 bundles; no
 fine-child XYZ requests, TTL reductions, or dropped descendants were introduced.
 
+### Native comparison, first iteration
+
+Three warm, interleaved pairs on the same iPhone 16 Pro simulator, iOS 18.3.1,
+402 x 874 logical viewport, Hermes/Skia/Reanimated and native MVT/H3 enabled.
+Each sample starts a fresh process with the same isolated public-Seattle harness.
+Baseline is `96aafe6`; first implementation is `65bd286`. All 12 scenarios
+completed, all timed scenarios had zero tile-network requests, and wall-clock
+versus monotonic elapsed drift was at most 1 ms. Samples ran September 8,
+15:30-15:34 UTC, after measurement resumed. These are simulator measurements,
+not measurements from the physical phone.
+
+| Median metric                        |   Before | First iteration |
+| ------------------------------------ | -------: | --------------: |
+| Warm launch to painted map           |   608 ms |          579 ms |
+| z18 final Skia build                 |  67.4 ms |         41.4 ms |
+| Cached z16 final Skia build          | 170.7 ms |        120.4 ms |
+| Cached z18 pan, worst JS frame gap   |   265 ms |           87 ms |
+| Broad cached pan, worst JS frame gap | 2,220 ms |        2,118 ms |
+| Broad cached pan, motion + settle    | 3,283 ms |        3,283 ms |
+| First z16 zoom, motion + settle      |   899 ms |          932 ms |
+
+The first z16 zoom regressed by 33 ms: a decoded-cache miss now paints a coarse
+preview and then the fine region, even when bytes are already on disk. This is
+the cost of keeping slow/offline deep zoom sharp, not a hidden win. Broad-pan
+responsiveness also remains a problem: smaller SVG work did not break the
+back-to-back JS work, and a roughly 2.1-second RAF gap remains despite a mostly
+smooth UI-thread transform. The next experiment targets that scheduling chain.
+Launch's JS sampler begins after some synchronous setup and understates initial
+blocking, so its tiny RAF gaps are not used as launch responsiveness claims.
+
+Raw samples are `native-{baseline,after}-clean-{2,3,4}.jsonl`, summarized in
+`native-map-report.json` in the session artifacts. Pair 1 is warm-up; earlier
+non-clean/paused recordings are excluded. A warm-up zoom callback failed to fire
+once despite covered geometry; it is retained as a harness anomaly, not reported
+as a proven tile-load failure.
+
+### Second iteration: give the JS event loop a frame between region builds
+
+Cached pans were chaining 7-8 region builds and React/Skia renders through
+immediately resolved promises. Reducing each SVG did not stop the chain from
+starving input and JS RAF callbacks. The engine now yields to the next animation
+frame before cell/region assembly, keeping the existing one-deep queue occupied
+so there is no parallel-build burst. `yieldMs` records scheduling time separately
+from H3 work. No geometry, quality setting, or pan headroom was removed.
+
+The first yield pilot exposed a measurement bug: a sharp z13-data preview could
+satisfy the z16 camera/coverage checks before z14 detail arrived. Those apparent
+~717 ms z16 completions are **not accepted full-detail timings**. The harness now
+requires the dataset's actual requested tile zoom, and the same corrected
+harness was applied to main, iteration one, and the yield variant.
+
+The authoritative comparison is nine accepted runs: three interleaved triplets
+with alternating order, fresh native processes and the same simulator/harness
+as above. The warm-up triplet is discarded. All 108 measured scenarios completed
+at their required detail, all used native decoding, and timed tile-network
+requests were zero. Maximum wall/monotonic drift was 13 ms (guard: 50 ms).
+Measurement window: September 8, 16:04-16:08 UTC.
+
+| Median metric                                   |     Main | First iteration | Second iteration |
+| ----------------------------------------------- | -------: | --------------: | ---------------: |
+| Warm launch to painted map                      |   616 ms |          597 ms |           605 ms |
+| Broad cached pan, worst JS gap                  | 2,246 ms |        2,105 ms |       **316 ms** |
+| Broad pan into new decoded ground, worst JS gap |   782 ms |          742 ms |       **541 ms** |
+| Broad cached pan, motion + settle               | 3,266 ms |        3,283 ms |         3,282 ms |
+| Cached z18 pan, worst JS gap                    |   282 ms |           89 ms |        **81 ms** |
+| Cached z16 zoom, motion + settle                |   849 ms |          798 ms |       **777 ms** |
+| z18 final Skia build                            |  63.9 ms |         46.1 ms |          50.5 ms |
+| Cached z16 final Skia build                     | 176.5 ms |        123.7 ms |         114.8 ms |
+| First z16 zoom, full-detail motion + settle     |   915 ms |          935 ms |       **982 ms** |
+
+The broad cached-pan JS gap is **86% smaller than main** and **85% smaller than
+iteration one**, without lengthening the requested three-second pan materially.
+All three yield runs recorded zero dropped UI frames during pan/zoom scenarios.
+This is not a claim of a 60 fps JS thread: zoom-out still has ~500-620 ms JS
+gaps, and some individual renders remain ~200 ms. The first z16 detail load is
+67 ms slower than main because preview + detail + scheduling is more work;
+the preview remains worth keeping for slow/offline loads, but that tradeoff is
+explicit. Launch's RAF metric is not comparable because yielding makes setup
+work visible to a sampler that previously missed it.
+
+Accepted run metadata, per-scenario samples, medians, exclusions, and the measured
+engine SHA-256 are committed in
+[`map-performance-2026-09-08.json`](map-performance-2026-09-08.json).
+Raw session files are `native-v3-{baseline,iteration-one,yield}-{1,2,3}.jsonl`
+with `native-v3-manifest.json`.
+
+For reproduction, use `scripts/native-map-perf.tsx` as the entry **in isolated
+source copies**, not the production entry. Set `EXPO_PUBLIC_MAP_PERF_RUN` and
+`EXPO_PUBLIC_MAP_PERF_DEEP_ZOOM=1`, explicitly load the live tile configuration,
+and capture `[map-perf]` JSON while restarting the same native dev shell between
+variants. Warm all three variants before timing; verify native decoder calls,
+full-detail target completion, and wall/monotonic drift before admitting samples.
+
 ### Experiment notebook
 
-| Experiment                                                | Observation                                                                                                              | Decision                                                                                  |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
-| Cull whole features only                                  | z15 structure SVG stayed at 1.92 million characters: OMT combines hundreds of disconnected buildings into one feature.   | Rejected as insufficient; add conservative per-ring bounds.                               |
-| Cull features and rings; reuse the building path          | z15/z16 building-path CPU fell 69%/76%, with unchanged visible geometry.                                                 | Keep; measure the actual native renderer separately.                                      |
-| Treat a prefetch headroom check as failed-build detection | Successful z10 builds retried because their intentional 0.2 padding is smaller than the 0.35 prefetch margin.            | Rejected; recovery uses region validity, not proactive headroom.                          |
-| Retry only against the last committed camera              | A live pan could succeed, then an old retry could rebuild the previous camera.                                           | Rejected; live movement invalidates the retry episode.                                    |
-| Assume newer callbacks always carry newer regions         | An older prefetch completion could replace a queued, sharper preview.                                                    | Rejected; all publications carry a monotonic engine sequence.                             |
-| Attribute cached-pan stalls to server load                | Diagnostic native runs showed multi-second JS frame gaps with zero network requests and 7-8 back-to-back region renders. | Server load is not the sole cause; profile JS scheduling and per-build work next.         |
-| Use every recorded native run as a comparison             | Some runs contain long wall-clock gaps, timeouts, or uncertain timing relative to the requested pause.                   | Preserve raw data, exclude these from performance claims, and collect fresh matched runs. |
+| Experiment                                                                   | Observation                                                                                                              | Decision                                                                                                  |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| Cull whole features only                                                     | z15 structure SVG stayed at 1.92 million characters: OMT combines hundreds of disconnected buildings into one feature.   | Rejected as insufficient; add conservative per-ring bounds.                                               |
+| Cull features and rings; reuse the building path                             | z15/z16 building-path CPU fell 69%/76%, with unchanged visible geometry.                                                 | Keep; measure the actual native renderer separately.                                                      |
+| Treat a prefetch headroom check as failed-build detection                    | Successful z10 builds retried because their intentional 0.2 padding is smaller than the 0.35 prefetch margin.            | Rejected; recovery uses region validity, not proactive headroom.                                          |
+| Retry only against the last committed camera                                 | A live pan could succeed, then an old retry could rebuild the previous camera.                                           | Rejected; live movement invalidates the retry episode.                                                    |
+| Assume newer callbacks always carry newer regions                            | An older prefetch completion could replace a queued, sharper preview.                                                    | Rejected; all publications carry a monotonic engine sequence.                                             |
+| Attribute cached-pan stalls to server load                                   | Diagnostic native runs showed multi-second JS frame gaps with zero network requests and 7-8 back-to-back region renders. | Server load is not the sole cause; profile JS scheduling and per-build work next.                         |
+| Use every recorded native run as a comparison                                | Some runs contain long wall-clock gaps, timeouts, or uncertain timing relative to the requested pause.                   | Preserve raw data, exclude these from performance claims, and collect fresh matched runs.                 |
+| Yield between cached region builds                                           | Corrected native comparison cuts broad cached-pan JS gaps from 2,105 to 316 ms versus iteration one.                     | Keep; the queue remains bounded and pan duration is effectively unchanged.                                |
+| Finish a benchmark when only camera zoom/coverage matches                    | The sharper coarse preview ended z16 timing before fine detail arrived.                                                  | Reject those apparent zoom wins; require actual data zoom and rerun all variants with the same predicate. |
+| Launch isolated copies without explicitly loading tile configuration         | The fixture fallback clamped broad pans to fixture bounds and timed out.                                                 | Exclude the pilot; load the live environment explicitly and reject runs without native tile decode.       |
+| Interpret the increased launch RAF gap after yielding as a launch regression | The old sampler missed synchronous setup; total launch remains ~600 ms.                                                  | Do not compare that RAF metric across variants; report time to painted map instead.                       |
 
 ## Headline
 

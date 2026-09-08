@@ -1,5 +1,7 @@
 import { scaleFor } from '../core/camera';
+import { coversView, PREFETCH_ZOOM_DELTA, type RegionSpec } from '../core/region';
 import type { CameraState, Viewport } from '../core/types';
+import { dataZoomFor, type DataZoomRange } from '../tiles/tile-math';
 
 export const MAP_PERF_LOG_PREFIX = '[map-perf] ';
 export const MAP_PERF_FRAME_BUDGET_MS = 1000 / 60;
@@ -22,6 +24,20 @@ export interface MapPerfScenario {
   readonly name: Exclude<MapPerfScenarioName, 'launch'>;
   readonly camera: CameraState;
   readonly durationMs: number;
+}
+
+/** A sharp coarse preview is useful, but is not a completed fine-detail workload. */
+export function mapPerfTargetReady(
+  spec: RegionSpec,
+  camera: CameraState,
+  viewport: Viewport,
+  dataZooms: DataZoomRange
+): boolean {
+  return (
+    Math.abs(spec.zoom - camera.zoom) <= PREFETCH_ZOOM_DELTA &&
+    spec.tileZoom === dataZoomFor(camera.zoom, dataZooms) &&
+    coversView(spec, camera, viewport)
+  );
 }
 
 export interface MapPipelineMetrics {

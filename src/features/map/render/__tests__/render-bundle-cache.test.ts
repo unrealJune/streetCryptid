@@ -9,6 +9,7 @@ const timing = {
   cellFieldCacheHit: false,
   sourceMs: 0,
   mergeMs: 0,
+  yieldMs: 0,
   cellFieldMs: 0,
   cellEnumerateMs: 0,
   cellCentersMs: 0,

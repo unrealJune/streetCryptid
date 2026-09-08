@@ -73,6 +73,33 @@ function makeEngine(source: GeometrySource) {
 describe('MapEngine.buildRegion', () => {
   afterEach(() => jest.restoreAllMocks());
 
+  it('yields cached region work to a frame instead of chaining it through microtasks', async () => {
+    let frame!: FrameRequestCallback;
+    let scheduled!: () => void;
+    const frameReady = new Promise<void>((resolve) => {
+      scheduled = resolve;
+    });
+    jest.spyOn(global, 'requestAnimationFrame').mockImplementation((callback) => {
+      frame = callback;
+      scheduled();
+      return 1;
+    });
+    const cellsInRectAsync = jest.fn(grid.cellsInRectAsync);
+    const source = new FakeSource();
+    const engine = new MapEngine({ source, grid: { ...grid, cellsInRectAsync }, dataZooms });
+    const pending = engine.buildRegion(baseRequest);
+    await frameReady;
+    expect(source.requests.length).toBeGreaterThan(0);
+    expect(cellsInRectAsync).not.toHaveBeenCalled();
+    expect(engine.lastRegion).toBeNull();
+
+    frame(16);
+    const built = await pending;
+    expect(cellsInRectAsync).toHaveBeenCalledTimes(1);
+    expect(built).toBe(engine.lastRegion);
+    expect(built!.timing.yieldMs).toBeGreaterThanOrEqual(0);
+  });
+
   it('re-rasterizes covered vectors at z18 before the detail download completes', async () => {
     const source = new FakeSource();
     const engine = makeEngine(source);
@@ -227,6 +254,7 @@ describe('MapEngine.buildRegion', () => {
       cellFieldCacheHit: false,
       sourceMs: expect.any(Number),
       mergeMs: expect.any(Number),
+      yieldMs: expect.any(Number),
       cellFieldMs: expect.any(Number),
       cellEnumerateMs: expect.any(Number),
       cellCentersMs: expect.any(Number),
@@ -237,7 +265,7 @@ describe('MapEngine.buildRegion', () => {
     expect(timings[0].fetchMs).toBeCloseTo(timings[0].sourceMs + timings[0].mergeMs, 6);
     expect(timings[0].buildMs).toBe(timings[0].cellFieldMs);
     expect(timings[0].totalMs).toBeCloseTo(
-      timings[0].sourceMs + timings[0].mergeMs + timings[0].cellFieldMs,
+      timings[0].sourceMs + timings[0].mergeMs + timings[0].yieldMs + timings[0].cellFieldMs,
       6
     );
   });
@@ -490,12 +518,16 @@ describe('MapEngine build progress', () => {
         secondEmitted = true;
       }
     );
-    engine.buildRegion({ ...baseRequest, camera: { center: [0.161, 0.358], zoom: 13 } }); // replaces second
+    const third = engine.buildRegion({
+      ...baseRequest,
+      camera: { center: [0.161, 0.358], zoom: 13 },
+    }); // replaces second
 
     await expect(second).resolves.toBeNull();
     source.resolveAll();
     await first;
     source.resolveAll();
+    await third;
     expect(secondEmitted).toBe(false);
   });
 });

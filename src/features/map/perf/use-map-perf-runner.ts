@@ -4,15 +4,17 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useFrameCallback, useSharedValue } from 'react-native-reanimated';
 
 import { viewTransformFor, type ViewTransform } from '../core/camera';
-import { coversView, PREFETCH_ZOOM_DELTA } from '../core/region';
+import { coversView } from '../core/region';
 import type { CameraState, Viewport } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
+import { dataZoomFor, type DataZoomRange } from '../tiles/tile-math';
 import {
   MAP_PERF_FRAME_BUDGET_MS,
   beginMapPerfScenario,
   createMapPerfScenarios,
   emitMapPerfEvent,
   isMapPerfRunEnabled,
+  mapPerfTargetReady,
   perfNow,
   snapshotMapPerfPipeline,
   summarizeFrameDeltas,
@@ -47,12 +49,14 @@ interface JsFrameSampler {
 
 export function useMapPerfRunner({
   viewport,
+  dataZooms,
   anchor,
   current,
   animate,
   commit,
 }: {
   viewport: Viewport | null;
+  dataZooms: DataZoomRange;
   anchor: CameraState;
   current: RenderedMapRegion | null;
   animate(
@@ -149,6 +153,8 @@ export function useMapPerfRunner({
           ? {
               regionChanged: rendered.region !== active.startRegion,
               zoomError: Math.abs(rendered.region.spec.zoom - active.definition.camera.zoom),
+              tileZoom: rendered.region.spec.tileZoom,
+              expectedTileZoom: dataZoomFor(active.definition.camera.zoom, dataZooms),
               covered: viewport
                 ? coversView(rendered.region.spec, active.definition.camera, viewport)
                 : false,
@@ -164,7 +170,7 @@ export function useMapPerfRunner({
         emitMapPerfEvent('run-complete', {});
       }
     },
-    [anchor, stopSampling, viewport]
+    [anchor, dataZooms, stopSampling, viewport]
   );
 
   const maybeFinish = useCallback(() => {
@@ -172,11 +178,10 @@ export function useMapPerfRunner({
     const rendered = currentRef.current;
     if (!active || active.animationEndedAt === null || !rendered || !viewport) return;
     if (rendered.region === active.startRegion) return;
-    if (Math.abs(rendered.region.spec.zoom - active.definition.camera.zoom) > PREFETCH_ZOOM_DELTA)
+    if (!mapPerfTargetReady(rendered.region.spec, active.definition.camera, viewport, dataZooms))
       return;
-    if (!coversView(rendered.region.spec, active.definition.camera, viewport)) return;
     finishScenario('complete');
-  }, [finishScenario, viewport]);
+  }, [dataZooms, finishScenario, viewport]);
 
   const onAnimationEnd = useCallback(
     (index: number) => {

@@ -1,10 +1,25 @@
 import {
   MAP_PERF_FRAME_BUDGET_MS,
   createMapPerfScenarios,
+  mapPerfTargetReady,
   summarizeFrameDeltas,
 } from '../map-perf';
+import { computeRegionSpec } from '../../core/region';
 
 describe('map performance harness', () => {
+  it('waits for fine data rather than treating a sharp coarse preview as finished', () => {
+    const camera = { center: [0.25, 0.5] as const, zoom: 18 };
+    const viewport = { width: 390, height: 780 };
+    const dataZooms = { min: 0, max: 14 };
+    const fine = computeRegionSpec(camera, viewport, { dataZooms });
+    expect(mapPerfTargetReady(fine, camera, viewport, dataZooms)).toBe(true);
+    expect(mapPerfTargetReady({ ...fine, tileZoom: 13 }, camera, viewport, dataZooms)).toBe(false);
+    expect(mapPerfTargetReady({ ...fine, zoom: 15 }, camera, viewport, dataZooms)).toBe(false);
+    expect(mapPerfTargetReady(fine, { ...camera, center: [0.5, 0.5] }, viewport, dataZooms)).toBe(
+      false
+    );
+  });
+
   it('summarizes over-budget and dropped frames against the 60 fps target', () => {
     const summary = summarizeFrameDeltas([
       MAP_PERF_FRAME_BUDGET_MS,

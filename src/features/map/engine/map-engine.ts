@@ -72,6 +72,8 @@ export interface RegionTiming {
   readonly sourceMs: number;
   /** Struct-of-arrays concatenation after all tiles land. */
   readonly mergeMs: number;
+  /** Time yielded to the UI/event loop before assembling the next region. */
+  readonly yieldMs: number;
   /** H3 enumeration, immutable geometry lookup, and exploration annotation. */
   readonly cellFieldMs: number;
   readonly cellEnumerateMs: number;
@@ -374,6 +376,12 @@ export class MapEngine {
     geometry: PackedGeometry,
     sourceTiming: Pick<RegionTiming, 'tiles' | 'coldStart' | 'sourceMs' | 'mergeMs'>
   ): Promise<MapRegion> {
+    const queuedAt = now();
+    // Cached tile promises otherwise chain region builds/renders through
+    // microtasks for seconds, starving JS input and animation-frame callbacks.
+    if (typeof requestAnimationFrame === 'function') {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
     const t2 = now();
     const cellKey = cellFieldKey(spec, request.explorationVersion);
     let cellField = this.cellFieldCache.get(cellKey);
@@ -418,12 +426,13 @@ export class MapEngine {
 
     const timing: RegionTiming = {
       ...sourceTiming,
+      yieldMs: t2 - queuedAt,
       cellFieldCacheHit,
       cellFieldMs: t3 - t2,
       cellEnumerateMs: cellTiming.enumerateMs,
       cellCentersMs: cellTiming.centersMs,
       cellAnnotateMs: cellTiming.annotateMs,
-      totalMs: sourceTiming.sourceMs + sourceTiming.mergeMs + t3 - t2,
+      totalMs: sourceTiming.sourceMs + sourceTiming.mergeMs + t3 - queuedAt,
       fetchMs: sourceTiming.sourceMs + sourceTiming.mergeMs,
       buildMs: t3 - t2,
     };

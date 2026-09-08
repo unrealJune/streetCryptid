@@ -21,6 +21,7 @@ import {
   createLiveExplorationSource,
 } from '../exploration/exploration-source';
 import { sharedExplorationStore } from '../exploration/exploration-store';
+import type { DataZoomRange } from '../tiles/tile-math';
 import { useMapTheme } from './use-map-theme';
 
 /** How long the camera must sit still before idle neighbor prefetch kicks in. */
@@ -40,6 +41,7 @@ export interface PendingLoad {
 
 export interface MapEngineState {
   readonly theme: CryptidTheme;
+  readonly dataZooms: DataZoomRange;
   /** The latest built data region (shader textures). */
   readonly region: MapRegion | null;
   /**
@@ -398,6 +400,7 @@ export function useMapEngine(
 
   return {
     theme,
+    dataZooms: dataset.dataZooms,
     region,
     pending,
     camera,

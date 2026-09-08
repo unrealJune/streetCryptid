@@ -284,6 +284,7 @@ export function MapView({
 
   const {
     theme,
+    dataZooms,
     region,
     pending,
     camera,
@@ -438,6 +439,7 @@ export function MapView({
 
   useMapPerfRunner({
     viewport,
+    dataZooms,
     anchor,
     current: curBundle,
     animate: animateProfileCamera,
