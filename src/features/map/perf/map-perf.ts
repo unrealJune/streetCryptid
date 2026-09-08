@@ -5,7 +5,18 @@ export const MAP_PERF_LOG_PREFIX = '[map-perf] ';
 export const MAP_PERF_FRAME_BUDGET_MS = 1000 / 60;
 
 export type MapPerfScenarioName =
-  'launch' | 'zoom-out-new' | 'zoom-in' | 'zoom-out-cached' | 'pan-new' | 'pan-cached';
+  | 'launch'
+  | 'zoom-out-new'
+  | 'zoom-in'
+  | 'zoom-out-cached'
+  | 'pan-new'
+  | 'pan-cached'
+  | 'zoom-16'
+  | 'zoom-17'
+  | 'zoom-18'
+  | 'pan-18-new'
+  | 'pan-18-cached'
+  | 'zoom-16-cached';
 
 export interface MapPerfScenario {
   readonly name: Exclude<MapPerfScenarioName, 'launch'>;
@@ -110,6 +121,7 @@ export function emitMapPerfEvent(type: string, detail: Readonly<Record<string, u
       scenario,
       type,
       atMs: perfNow(),
+      wallAtMs: Date.now(),
       ...detail,
     })}`
   );
@@ -160,7 +172,8 @@ export function summarizeFrameDeltas(
  */
 export function createMapPerfScenarios(
   anchor: CameraState,
-  _viewport: Viewport
+  viewport: Viewport,
+  includeDeepZoom = process.env.EXPO_PUBLIC_MAP_PERF_DEEP_ZOOM === '1'
 ): readonly MapPerfScenario[] {
   const zoomedOut: CameraState = {
     center: anchor.center,
@@ -174,7 +187,7 @@ export function createMapPerfScenarios(
   const panDistancePx = Math.abs(farCenterX - anchor.center[0]) * scaleFor(zoomedOut.zoom);
   const panDurationMs = Math.max(800, Math.min(3000, (panDistancePx / 1200) * 1000));
 
-  return [
+  const scenarios: MapPerfScenario[] = [
     { name: 'zoom-out-new', camera: zoomedOut, durationMs: 550 },
     { name: 'zoom-in', camera: anchor, durationMs: 550 },
     { name: 'zoom-out-cached', camera: zoomedOut, durationMs: 550 },
@@ -185,6 +198,28 @@ export function createMapPerfScenarios(
     },
     { name: 'pan-cached', camera: zoomedOut, durationMs: panDurationMs },
   ];
+
+  if (includeDeepZoom) {
+    const closeCamera = { center: anchor.center, zoom: 18 };
+    const panOffset = (viewport.width * 1.5) / scaleFor(closeCamera.zoom);
+    scenarios.push(
+      { name: 'zoom-16', camera: { center: anchor.center, zoom: 16 }, durationMs: 550 },
+      { name: 'zoom-17', camera: { center: anchor.center, zoom: 17 }, durationMs: 550 },
+      { name: 'zoom-18', camera: closeCamera, durationMs: 550 },
+      {
+        name: 'pan-18-new',
+        camera: {
+          center: [anchor.center[0] + direction * panOffset, anchor.center[1]],
+          zoom: 18,
+        },
+        durationMs: 1000,
+      },
+      { name: 'pan-18-cached', camera: closeCamera, durationMs: 1000 },
+      { name: 'zoom-16-cached', camera: { center: anchor.center, zoom: 16 }, durationMs: 550 }
+    );
+  }
+
+  return scenarios;
 }
 
 function emptyPipeline(): MapPipelineMetrics {

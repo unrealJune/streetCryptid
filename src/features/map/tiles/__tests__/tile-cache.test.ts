@@ -182,6 +182,42 @@ describe('CachedGeometrySource — abort', () => {
     ac.abort();
 
     await expect(cache.getTile(T1, ac.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(upstream.callCount).toBe(0);
+  });
+
+  it('honors cancellation for a caller joining an existing request without cancelling its peers', async () => {
+    const upstream = new FakeSource();
+    const cache = new CachedGeometrySource(upstream, 64);
+    const first = cache.getTile(T1);
+    const caller = new AbortController();
+    let aborted = false;
+    const joined = cache.getTile(T1, caller.signal).catch((error: Error) => {
+      expect(error.name).toBe('AbortError');
+      aborted = true;
+    });
+
+    caller.abort();
+    await Promise.resolve();
+    expect(aborted).toBe(true);
+    expect(upstream.callCount).toBe(1);
+
+    upstream.resolveLast(makeGeometry('shared'));
+    const geometry = await first;
+    await joined;
+    expect(await cache.getTile(T1)).toBe(geometry);
+  });
+
+  it('honors an already-aborted signal even for a warm tile', async () => {
+    const upstream = new FakeSource();
+    const cache = new CachedGeometrySource(upstream, 64);
+    const first = cache.getTile(T1);
+    upstream.resolveLast(makeGeometry('warm'));
+    await first;
+    const caller = new AbortController();
+    caller.abort();
+    await expect(cache.getTile(T1, caller.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
   });
 
   it('aborting mid-flight rejects the caller; upstream result is cached for later callers', async () => {

@@ -2,12 +2,12 @@ import { H3_DISPLAY_RES, resForZoom } from '../../core/cell-ladder';
 import { createExplorationIndex } from '../../core/exploration-index';
 import { createH3Grid, realH3 } from '../../core/h3-grid';
 import { latLonToWorld } from '../../core/mercator';
-import { computeRegionSpec } from '../../core/region';
+import { computeRegionSpec, shouldPrefetchRegion } from '../../core/region';
 import type { CameraState, Viewport, WorldPoint, WorldRect } from '../../core/types';
 import type { PackedGeometry } from '../../tiles/packed-geometry';
 import { EMPTY_GEOMETRY, type GeometrySource } from '../../tiles/geometry-source';
 import { tileKeyOf, tilesCovering, type TileCoord } from '../../tiles/tile-math';
-import { MapEngine, type RegionRequest, type RegionTiming } from '../map-engine';
+import { MapEngine, type MapRegion, type RegionRequest, type RegionTiming } from '../map-engine';
 
 const viewport: Viewport = { width: 100, height: 100 };
 const camera: CameraState = { center: latLonToWorld({ lat: 47.6205, lon: -122.3169 }), zoom: 14 };
@@ -71,6 +71,86 @@ function makeEngine(source: GeometrySource) {
 }
 
 describe('MapEngine.buildRegion', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('re-rasterizes covered vectors at z18 before the detail download completes', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    const coarse = await engine.buildRegion({ ...baseRequest, camera: { ...camera, zoom: 15 } });
+    source.auto = false;
+    const target = { ...baseRequest, camera: { ...camera, zoom: 18 } };
+    let publishPreview!: (region: MapRegion) => void;
+    const previewReady = new Promise<MapRegion>((resolve) => {
+      publishPreview = resolve;
+    });
+    const detail = engine.buildRegion(target, undefined, publishPreview);
+    const preview = await previewReady;
+    expect(preview.spec.zoom).toBe(18);
+    expect(preview.spec.tileZoom).toBe(13);
+    expect(preview.publication).toBeGreaterThan(coarse!.publication);
+    expect(preview.geometry).toBe(coarse!.geometry);
+    expect(shouldPrefetchRegion(preview.spec, target.camera, viewport, dataZooms)).toBe(true);
+    expect(preview.spec.rect).toEqual(
+      computeRegionSpec(target.camera, viewport, { dataZooms }).rect
+    );
+
+    source.resolveAll();
+    const full = await detail;
+    expect(full!.spec.zoom).toBe(18);
+    expect(full!.spec.tileZoom).toBe(14);
+    expect(full!.publication).toBeGreaterThan(preview.publication);
+    expect(full!.cellField).toBe(preview.cellField);
+    expect(shouldPrefetchRegion(full!.spec, target.camera, viewport, dataZooms)).toBe(false);
+  });
+
+  it('retains the sharp preview after a failed detail fetch and retries detail later', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    await engine.buildRegion({ ...baseRequest, camera: { ...camera, zoom: 15 } });
+    const target = { ...baseRequest, camera: { ...camera, zoom: 18 } };
+    const spec = computeRegionSpec(target.camera, viewport, { dataZooms });
+    const tile = tilesCovering(spec.rect, spec.tileZoom)[0];
+    source.failNext(tileKeyOf(tile.z, tile.x, tile.y), new Error('detail timeout'));
+    const preview = jest.fn();
+    const degraded = await engine.buildRegion(target, undefined, preview);
+    expect(degraded).toBe(preview.mock.calls[0][0]);
+    expect(degraded!.spec).toMatchObject({ zoom: 18, tileZoom: 13 });
+    expect(warn).toHaveBeenCalled();
+    const recovered = await engine.buildRegion(target);
+    expect(recovered!.spec).toMatchObject({ zoom: 18, tileZoom: 14 });
+  });
+
+  it('does not build an extra preview when all detailed tiles are already cached', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    await engine.buildRegion(baseRequest);
+    const target = { ...baseRequest, camera: { ...camera, zoom: 18 } };
+    const spec = computeRegionSpec(target.camera, viewport, { dataZooms });
+    source.cached = new Set(
+      tilesCovering(spec.rect, spec.tileZoom).map((tile) => tileKeyOf(tile.z, tile.x, tile.y))
+    );
+    const preview = jest.fn();
+    await engine.buildRegion(target, undefined, preview);
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  it('never labels uncovered ground as a zoom preview', async () => {
+    const source = new FakeSource();
+    const engine = makeEngine(source);
+    await engine.buildRegion(baseRequest);
+    const preview = jest.fn();
+    await engine.buildRegion(
+      {
+        ...baseRequest,
+        camera: { center: [0.8, 0.4], zoom: 18 },
+      },
+      undefined,
+      preview
+    );
+    expect(preview).not.toHaveBeenCalled();
+  });
+
   it('fetches exactly the tiles covering the region at its selected data zoom', async () => {
     const source = new FakeSource();
     const engine = makeEngine(source);
@@ -283,6 +363,7 @@ describe('MapEngine.buildRegion', () => {
   });
 
   it('degrades to the last good region when a fetch fails', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const source = new FakeSource();
     const engine = makeEngine(source);
 
@@ -295,6 +376,7 @@ describe('MapEngine.buildRegion', () => {
       camera: { ...camera, zoom: 14.4 },
     });
     expect(degraded).toBe(good);
+    expect(warn).toHaveBeenCalled();
   });
 
   it('rethrows a fetch failure when there is no region to fall back to', async () => {
@@ -309,6 +391,7 @@ describe('MapEngine.buildRegion', () => {
   });
 
   it('degrades to the last good region when cell-field construction fails', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     let failCells = false;
     const flakyGrid = {
       ...grid,
@@ -327,6 +410,7 @@ describe('MapEngine.buildRegion', () => {
       camera: { ...camera, zoom: 13 },
     });
     expect(degraded).toBe(good);
+    expect(warn).toHaveBeenCalled();
   });
 });
 

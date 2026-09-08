@@ -2,6 +2,9 @@ import { BundleFetchByteSource } from '../bundle-fetch';
 import {
   bundleRequestFor,
   bundleTiles,
+  MartinTileBundleSource,
+  TILE_BUNDLE_MEDIA_TYPE,
+  TILE_BUNDLE_VERSION,
   type TileBundleEntry,
   type TileBundleRequest,
   type TileBundleSource,
@@ -222,5 +225,76 @@ describe('BundleFetchByteSource — in-flight dedup', () => {
     expect(await p1).toEqual(tagBytes(T13));
     expect(await p2).toEqual(tagBytes(sibling));
     expect(store.putCount).toBe(1);
+  });
+
+  it('releases a timed-out shared bundle for retry, serves stale offline, and ignores a late body', async () => {
+    jest.useFakeTimers();
+    const realFetch = global.fetch;
+    try {
+      const request = bundleRequestFor(T13, 10);
+      const tiles = bundleTiles(request);
+      const emptyBundle = new Uint8Array(20 + tiles.length * 4);
+      emptyBundle.set([0x53, 0x43, 0x42, 0x31]);
+      const view = new DataView(emptyBundle.buffer);
+      view.setUint8(4, TILE_BUNDLE_VERSION);
+      view.setUint8(5, request.anchorZoom);
+      view.setUint8(6, request.tileZoom);
+      view.setUint32(8, request.anchorX);
+      view.setUint32(12, request.anchorY);
+      view.setUint32(16, tiles.length);
+      for (let offset = 20; offset < emptyBundle.length; offset += 4) {
+        view.setUint32(offset, 0xffffffff);
+      }
+      let finishLateBody!: (bytes: ArrayBuffer) => void;
+      const lateBody = new Promise<ArrayBuffer>((resolve) => {
+        finishLateBody = resolve;
+      });
+      const response = {
+        ok: true,
+        status: 200,
+        headers: {
+          get: (name: string) => (name === 'content-type' ? TILE_BUNDLE_MEDIA_TYPE : null),
+        },
+      };
+      global.fetch = jest
+        .fn()
+        .mockResolvedValueOnce({ ...response, arrayBuffer: () => lateBody })
+        .mockResolvedValueOnce({
+          ...response,
+          arrayBuffer: async () => emptyBundle.buffer,
+        });
+      const { source, store, coarse } = makeSource({
+        bundles: new MartinTileBundleSource('http://tiles.test'),
+        ttlMs: 100,
+        now: () => 200,
+      });
+      await store.putMany('planet-z10-v1', [{ tile: T13, bytes: tagBytes(T13) }], 0);
+      const stale = source.getTileBytes(T13);
+      const sibling = source.getTileBytes(tiles[0]).catch((error: Error) => error.name);
+
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(await stale).toEqual(tagBytes(T13));
+      expect(await sibling).toBe('TimeoutError');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(store.putCount).toBe(1);
+
+      await expect(source.getTileBytes(T13)).resolves.toBeNull();
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      expect(store.putCount).toBe(2);
+      expect(store.lastPutSize).toBe(64);
+      expect(coarse.requested).toEqual([]);
+      expect(global.fetch).toHaveBeenLastCalledWith(
+        'http://tiles.test/bundle/v1/164/357/13',
+        expect.anything()
+      );
+
+      finishLateBody(emptyBundle.buffer);
+      await jest.advanceTimersByTimeAsync(0);
+      expect(store.putCount).toBe(2);
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      global.fetch = realFetch;
+      jest.useRealTimers();
+    }
   });
 });

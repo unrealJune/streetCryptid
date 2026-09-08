@@ -99,9 +99,9 @@ describe('buildStructurePaths', () => {
           { kind: 'aerodrome', ...square(80, 2) },
         ],
         aeroLines: [
-          { kind: 'runway', points: line(0.0001) },
-          { kind: 'taxiway', points: line(0.0002) },
-          { kind: 'taxiway', points: line(0.0003) },
+          { kind: 'runway', points: line(0.00001) },
+          { kind: 'taxiway', points: line(0.00002) },
+          { kind: 'taxiway', points: line(0.00003) },
         ],
       }),
       spec

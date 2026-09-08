@@ -11,7 +11,7 @@ import { makeViewLimits, type ViewLimits } from '../core/gesture';
 import { createH3Grid, realH3 } from '../core/h3-grid';
 import { createNativeH3Enumerator } from '../core/native-h3-enumerator';
 import { coverageInView, coverageMeasurable, nearestPlaceName } from '../core/readout';
-import { coversView, shouldPrefetchRegion } from '../core/region';
+import { coversView, needsNewRegion, shouldPrefetchRegion } from '../core/region';
 import type { CameraState, LatLon, Viewport, WorldPoint, WorldRect } from '../core/types';
 import { latLonToWorld } from '../core/mercator';
 import { MapEngine, type MapRegion } from '../engine/map-engine';
@@ -25,6 +25,7 @@ import { useMapTheme } from './use-map-theme';
 
 /** How long the camera must sit still before idle neighbor prefetch kicks in. */
 const PREFETCH_IDLE_MS = 1200;
+const BUILD_RETRY_DELAYS_MS = [1000, 3000, 10_000] as const;
 
 /**
  * A cold region build in flight over an area no retained layer covers — the
@@ -182,6 +183,18 @@ export function useMapEngine(
   const [region, setRegion] = useState<MapRegion | null>(null);
   /** A build in flight over an uncovered area (drives the skeleton). */
   const [pending, setPending] = useState<PendingLoad | null>(null);
+  const [retryTick, setRetryTick] = useState(0);
+  const retryRef = useRef({ target, attempts: 0 });
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryEpochRef = useRef(0);
+  const cancelRetry = useCallback(() => {
+    retryEpochRef.current++;
+    if (retryTimerRef.current !== null) clearTimeout(retryTimerRef.current);
+    retryTimerRef.current = null;
+  }, []);
+  const publishRegion = useCallback((built: MapRegion) => {
+    setRegion((current) => (current && current.publication > built.publication ? current : built));
+  }, []);
 
   // Read the live region imperatively so the build effect can decide to reuse it
   // without taking it as a dependency (which would re-run on every rebuild).
@@ -195,6 +208,7 @@ export function useMapEngine(
 
   useEffect(() => {
     if (!viewport) return;
+    if (retryRef.current.target !== target) retryRef.current = { target, attempts: 0 };
     const current = regionRef.current;
     const covers = current ? coversView(current.spec, target, viewport) : false;
     // No retained layer covers the target → this swap would flash blank, so it
@@ -215,6 +229,16 @@ export function useMapEngine(
     }
 
     let live = true;
+    const retryEpoch = retryEpochRef.current;
+    const retry = () => {
+      const delay = BUILD_RETRY_DELAYS_MS[retryRef.current.attempts];
+      if (!live || retryEpoch !== retryEpochRef.current || delay === undefined) return;
+      retryRef.current.attempts++;
+      retryTimerRef.current = setTimeout(() => {
+        retryTimerRef.current = null;
+        if (retryEpoch === retryEpochRef.current) setRetryTick((tick) => tick + 1);
+      }, delay);
+    };
     engine
       .buildRegion(
         {
@@ -233,23 +257,46 @@ export function useMapEngine(
               ? { rect: progress.rect, loaded: progress.loaded, total: progress.total }
               : null
           );
+        },
+        (preview) => {
+          if (!live) return;
+          publishRegion(preview);
+          setCamera(target);
         }
       )
       .then((built) => {
         if (!live || !built) return; // superseded builds resolve null
-        builtVersionRef.current = explorationVersion;
+        builtVersionRef.current = built.explorationVersion;
         setPending(null);
-        setRegion(built);
+        publishRegion(built);
         setCamera(target);
+        if (
+          needsNewRegion(built.spec, target, viewport, dataset.dataZooms) ||
+          built.explorationVersion !== explorationVersion
+        )
+          retry();
+        else retryRef.current.attempts = 0;
       })
       .catch((error) => {
         if (live) setPending(null);
         console.warn('[map] region build failed:', error);
+        retry();
       });
     return () => {
       live = false;
+      cancelRetry();
     };
-  }, [engine, target, viewport, exploration, explorationVersion, dataset]);
+  }, [
+    engine,
+    target,
+    viewport,
+    exploration,
+    explorationVersion,
+    dataset,
+    retryTick,
+    publishRegion,
+    cancelRetry,
+  ]);
 
   // Idle prefetch: once the on-screen camera has held still for a beat, warm the
   // neighboring regions so the next pan/zoom lands on a cache hit instead of a
@@ -288,30 +335,47 @@ export function useMapEngine(
   const prefetchAt = useCallback(
     (t: ViewTransform): Promise<void> => {
       if (!viewport) return Promise.resolve();
+      // Live movement supersedes recovery for the old gesture-end camera,
+      // including retries scheduled by an old build that is still in flight.
+      cancelRetry();
       const live = clampCamera(applyViewTransform(anchor, viewport, t), viewport, constraints);
       const current = regionRef.current;
       if (current && !shouldPrefetchRegion(current.spec, live, viewport, dataset.dataZooms)) {
         return Promise.resolve();
       }
       return engine
-        .buildRegion({
-          camera: live,
-          viewport,
-          exploration: exploration.index(),
-          explorationVersion,
-        })
+        .buildRegion(
+          {
+            camera: live,
+            viewport,
+            exploration: exploration.index(),
+            explorationVersion,
+          },
+          undefined,
+          publishRegion
+        )
         .then((built) => {
           if (!built) return;
           // Ahead-of-the-finger prefetch swaps reveal like any other: the shader
           // masks off whatever the current layer already covered, so only the new
           // leading strip hex-loads in and covered ground stays put.
-          setRegion(built); // region only — the committed camera is untouched
+          publishRegion(built); // region only — the committed camera is untouched
         })
         .catch(() => {
           /* a superseded/failed prefetch is harmless; the current layer stays */
         });
     },
-    [viewport, anchor, constraints, engine, exploration, explorationVersion, dataset]
+    [
+      viewport,
+      anchor,
+      constraints,
+      engine,
+      exploration,
+      explorationVersion,
+      dataset,
+      publishRegion,
+      cancelRetry,
+    ]
   );
 
   const coverage = useMemo(

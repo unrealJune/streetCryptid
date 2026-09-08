@@ -32,6 +32,7 @@ const palette: MapPalette = {
 };
 
 const region: MapRegion = {
+  publication: 1,
   spec: {
     rect: { minX: 0.1, minY: 0.2, maxX: 0.3, maxY: 0.5 },
     maskWidth: 512,

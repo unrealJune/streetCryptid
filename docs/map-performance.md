@@ -1,5 +1,88 @@
 # Map renderer performance over time
 
+## September 7: buildings, deep zoom, and stalled tile loading
+
+Baseline: `96aafe6` (v2.8.1). These results are separate from the older simulator
+campaign below; its headline is not a measurement of current main.
+
+The September building layer exposed whole-tile SVG work on every region swap.
+OpenMapTiles batches hundreds of disconnected footprints into a single
+MultiPolygon, so feature-level culling alone was insufficient. Cached tile-local
+feature AND ring bounds now reject geometry outside the padded render region,
+including stroke/antialiasing margins. Crossing lines, enclosing polygons, holes,
+and non-zero winding remain intact. The building fill, hatch clip, and outline
+also reuse one parsed Skia path instead of parsing the same SVG three times.
+
+### Frozen-tile CPU comparison (host, not frame rate)
+
+Downtown Seattle, 390 x 780 logical viewport, unchanged layer settings and zooms.
+Real MVT inputs were saved once and replayed before/after, excluding network and
+decode. Each path builder ran once to warm up, then 25 timed iterations; the table
+reports medians in Bun 1.3.14 on the same Mac.
+
+| Work                       |   Before |   After | Reduction |
+| -------------------------- | -------: | ------: | --------: |
+| z15 feature-mask paths     | 10.46 ms | 3.95 ms |       62% |
+| z15 building/aeroway paths | 26.28 ms | 8.02 ms |       69% |
+| z16 feature-mask paths     | 13.59 ms | 6.14 ms |       55% |
+| z16 building/aeroway paths | 29.07 ms | 6.85 ms |       76% |
+| z18 feature-mask paths     |  4.00 ms | 0.62 ms |       84% |
+| z18 building/aeroway paths |  4.52 ms | 0.60 ms |       87% |
+
+Structure SVG output shrank from 1,923,929 to 560,418 characters at z15 and from
+2,216,088 to 445,029 at z16. This reduces both JS string work and native path
+parsing; the host timings above measure only the former, not Skia/GPU or device
+FPS. Matching `just map-shot --places seattle --zooms 15,17,18 --labels --highways`
+renders were pixel-identical at z15/z17. At z18, 38 of 4,867,200 RGBA channels
+differed, by at most 2/255 (raster-edge rounding), without a quality reduction.
+
+### Loading and close-zoom recovery
+
+The new camera-z16 detail threshold requests data-z14 rather than z13. A measured
+fixed-z10 Seattle bundle grows from 3,364,329 to 22,340,257 bytes (6.64x). An
+unloaded/failed detail bundle previously left the z15 bitmap magnified at z18.
+Cold zoom-ins now publish a target-resolution raster of already-covered vectors
+before detailed bytes arrive. Its actual data zoom remains unchanged, so it does
+not masquerade as full detail. Missing detail and initial load failures retry
+after 1, 3, and 10 seconds, bounded and cancelled when the target changes or the
+screen unmounts. Monotonic publications prevent older prefetch completions from
+overwriting a newer sharp preview.
+
+HTTP deadlines cover headers AND body and explicitly reject even if native
+fetch ignores abort: 30 seconds for coarse tiles and 60 seconds for bundles.
+Supplying a cancellation signal no longer disables the coarse timeout; each
+shared-cache waiter can cancel independently. A rejected request releases its
+in-flight entry so retry is possible. Stale offline bytes remain usable.
+
+SQLite persists the complete validated bundle atomically, but batches up to 124
+rows per statement (992 parameters, below the portable 999 limit). Concurrent
+bundle writes are serialized to avoid competing exclusive transactions.
+
+| Bundle         | INSERT statements, before → after | Expo prepare/execute/finalize calls | Host SQLite median, before → after |
+| -------------- | --------------------------------: | ----------------------------------: | ---------------------------------: |
+| z13, 64 tiles  |                            64 → 1 |                             192 → 3 |                     1.50 → 1.23 ms |
+| z14, 256 tiles |                           256 → 3 |                             768 → 9 |                     6.78 → 5.88 ms |
+
+The SQLite timings are five-run medians using real in-memory SQLite under Bun,
+with all persisted bytes compared, not Hermes/bridge measurements. Native-call
+counts follow Expo SQLite's three calls per `runAsync`; they are not a claim of
+an equivalent wall-clock speedup. Observed live network fetches were 1.04/1.15 s
+for z13/z14 respectively: that single sample does not establish server-load
+history or explain every field report. Privacy remains fixed-z10 bundles; no
+fine-child XYZ requests, TTL reductions, or dropped descendants were introduced.
+
+### Experiment notebook
+
+| Experiment                                                | Observation                                                                                                              | Decision                                                                                  |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| Cull whole features only                                  | z15 structure SVG stayed at 1.92 million characters: OMT combines hundreds of disconnected buildings into one feature.   | Rejected as insufficient; add conservative per-ring bounds.                               |
+| Cull features and rings; reuse the building path          | z15/z16 building-path CPU fell 69%/76%, with unchanged visible geometry.                                                 | Keep; measure the actual native renderer separately.                                      |
+| Treat a prefetch headroom check as failed-build detection | Successful z10 builds retried because their intentional 0.2 padding is smaller than the 0.35 prefetch margin.            | Rejected; recovery uses region validity, not proactive headroom.                          |
+| Retry only against the last committed camera              | A live pan could succeed, then an old retry could rebuild the previous camera.                                           | Rejected; live movement invalidates the retry episode.                                    |
+| Assume newer callbacks always carry newer regions         | An older prefetch completion could replace a queued, sharper preview.                                                    | Rejected; all publications carry a monotonic engine sequence.                             |
+| Attribute cached-pan stalls to server load                | Diagnostic native runs showed multi-second JS frame gaps with zero network requests and 7-8 back-to-back region renders. | Server load is not the sole cause; profile JS scheduling and per-build work next.         |
+| Use every recorded native run as a comparison             | Some runs contain long wall-clock gaps, timeouts, or uncertain timing relative to the requested pause.                   | Preserve raw data, exclude these from performance claims, and collect fresh matched runs. |
+
 ## Headline
 
 Eight accepted passes keep the UI-thread bitmap transform at 60 fps, cut measured zoom latency

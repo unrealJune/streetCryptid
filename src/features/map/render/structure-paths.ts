@@ -13,8 +13,10 @@ import {
   type AeroAreaKind,
   type AeroLineKind,
   type WorldPoint,
+  type WorldRect,
 } from '../core/types';
 import type { PackedAreas, PackedGeometry } from '../tiles/packed-geometry';
+import { featureBounds, intersectsBounds, ringBounds, tileLocalRect } from './geometry-bounds';
 
 /**
  * Pure SVG-path builder for the building + aeroway layer (the `mask-paths.ts` /
@@ -28,9 +30,8 @@ import type { PackedAreas, PackedGeometry } from '../tiles/packed-geometry';
  * `scaleFor(spec.zoom)` px per world unit) — the same space the ghost lattice,
  * frontier rim and transit lines use.
  *
- * Buildings are filtered by projected size, not by zoom alone: see
- * {@link BUILDING_MIN_PX}. The bounding box falls out of the projection loop, so
- * the filter costs nothing beyond the four comparisons it already needs.
+ * Cached tile-local bounds reject off-region features before projection/string
+ * building and apply the projected-size gate ({@link BUILDING_MIN_PX}).
  */
 export interface StructurePaths {
   /** Closed sub-paths for building footprints (non-zero winding); '' when empty. */
@@ -59,26 +60,30 @@ export function buildStructurePaths(geometry: PackedGeometry, spec: RegionSpec):
   for (const part of geometry.parts) {
     const { originX, originY } = part;
     const project: Project = (x, y) => [(originX + x - minX) * scale, (originY + y - minY) * scale];
+    const rect = tileLocalRect(spec.rect, part, 3 / scale); // runway half-width + AA
 
     if (buildingsActive) {
       const b = part.buildings;
+      const bounds = featureBounds(b);
       for (let i = 0; i < b.count; i++) {
-        if (!spansMinPx(b, i, project)) continue;
-        pushRings(buildingFills, b, i, project);
+        if (!intersectsBounds(bounds, i, rect) || !spansMinPx(b, i, scale)) continue;
+        pushRings(buildingFills, b, i, project, rect);
       }
     }
 
     const aa = part.aeroAreas;
+    const areaBounds = featureBounds(aa);
     for (let i = 0; i < aa.count; i++) {
       const kind = aa.kind[i];
-      if (!areaActive[kind]) continue;
-      pushRings(areaFills[kind], aa, i, project);
+      if (!areaActive[kind] || !intersectsBounds(areaBounds, i, rect)) continue;
+      pushRings(areaFills[kind], aa, i, project, rect);
     }
 
     const al = part.aeroLines;
+    const lineBounds = featureBounds(al);
     for (let i = 0; i < al.count; i++) {
       const kind = al.kind[i];
-      if (!lineActive[kind]) continue;
+      if (!lineActive[kind] || !intersectsBounds(lineBounds, i, rect)) continue;
       const line = polyline(al.coords, al.pointOff[i], al.pointOff[i + 1], project);
       if (line) lineBatches[kind].push(line);
     }
@@ -101,7 +106,7 @@ export function buildStructurePaths(geometry: PackedGeometry, spec: RegionSpec):
  * its longer side once projected. Only the first ring is measured: MVT lists the
  * exterior boundary first, and a hole can never be larger than what contains it.
  */
-function spansMinPx(areas: PackedAreas, i: number, project: Project): boolean {
+function spansMinPx(areas: PackedAreas, i: number, scale: number): boolean {
   const ring = areas.ringOff[i];
   if (ring >= areas.ringOff[i + 1]) return false;
   const from = areas.pointOff[ring];
@@ -113,18 +118,27 @@ function spansMinPx(areas: PackedAreas, i: number, project: Project): boolean {
   let maxX = -Infinity;
   let maxY = -Infinity;
   for (let j = from; j < to; j++) {
-    const [x, y] = project(areas.coords[j * 2], areas.coords[j * 2 + 1]);
+    const x = areas.coords[j * 2];
+    const y = areas.coords[j * 2 + 1];
     if (x < minX) minX = x;
     if (x > maxX) maxX = x;
     if (y < minY) minY = y;
     if (y > maxY) maxY = y;
   }
-  return Math.max(maxX - minX, maxY - minY) >= BUILDING_MIN_PX;
+  return Math.max(maxX - minX, maxY - minY) * scale >= BUILDING_MIN_PX;
 }
 
 /** Append one closed sub-path per ring of area feature `i`. */
-function pushRings(dst: string[], areas: PackedAreas, i: number, project: Project): void {
+function pushRings(
+  dst: string[],
+  areas: PackedAreas,
+  i: number,
+  project: Project,
+  rect: WorldRect
+): void {
+  const bounds = ringBounds(areas);
   for (let r = areas.ringOff[i]; r < areas.ringOff[i + 1]; r++) {
+    if (!intersectsBounds(bounds, r, rect)) continue;
     const line = polyline(areas.coords, areas.pointOff[r], areas.pointOff[r + 1], project);
     if (line) dst.push(`${line}Z`);
   }

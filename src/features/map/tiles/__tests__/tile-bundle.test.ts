@@ -123,7 +123,41 @@ describe('MartinTileBundleSource response guards', () => {
 
   afterEach(() => {
     global.fetch = realFetch;
+    jest.useRealTimers();
   });
+
+  it.each(['headers', 'body'])(
+    'settles a stalled %s request even if native fetch ignores abort',
+    async (stage) => {
+      jest.useFakeTimers();
+      let requestSignal: AbortSignal | undefined;
+      global.fetch = jest.fn().mockImplementation((_url, opts) => {
+        requestSignal = opts.signal;
+        return stage === 'headers'
+          ? new Promise(() => {})
+          : Promise.resolve({
+              ok: true,
+              status: 200,
+              headers: {
+                get: (name: string) => (name === 'content-type' ? TILE_BUNDLE_MEDIA_TYPE : null),
+              },
+              arrayBuffer: () => new Promise(() => {}),
+            });
+      });
+      let result: string | undefined;
+      void new MartinTileBundleSource('http://tiles.test')
+        .getBundle(request)
+        .catch((error: Error) => {
+          result = error.name;
+        });
+      await jest.advanceTimersByTimeAsync(59_999);
+      expect(result).toBeUndefined();
+      await jest.advanceTimersByTimeAsync(1);
+      expect(result).toBe('TimeoutError');
+      expect(requestSignal?.aborted).toBe(true);
+      expect(jest.getTimerCount()).toBe(0);
+    }
+  );
 
   it('rejects a missing bundle content type', async () => {
     global.fetch = (async () =>
