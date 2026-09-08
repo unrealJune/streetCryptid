@@ -71,41 +71,19 @@ for z13/z14 respectively: that single sample does not establish server-load
 history or explain every field report. Privacy remains fixed-z10 bundles; no
 fine-child XYZ requests, TTL reductions, or dropped descendants were introduced.
 
-### Native comparison, first iteration
+### Initial native campaign (excluded from final claims)
 
 Three warm, interleaved pairs on the same iPhone 16 Pro simulator, iOS 18.3.1,
 402 x 874 logical viewport, Hermes/Skia/Reanimated and native MVT/H3 enabled.
 Each sample starts a fresh process with the same isolated public-Seattle harness.
-Baseline is `96aafe6`; first implementation is `65bd286`. All 12 scenarios
-completed, all timed scenarios had zero tile-network requests, and wall-clock
-versus monotonic elapsed drift was at most 1 ms. Samples ran September 8,
-15:30-15:34 UTC, after measurement resumed. These are simulator measurements,
-not measurements from the physical phone.
-
-| Median metric                        |   Before | First iteration |
-| ------------------------------------ | -------: | --------------: |
-| Warm launch to painted map           |   608 ms |          579 ms |
-| z18 final Skia build                 |  67.4 ms |         41.4 ms |
-| Cached z16 final Skia build          | 170.7 ms |        120.4 ms |
-| Cached z18 pan, worst JS frame gap   |   265 ms |           87 ms |
-| Broad cached pan, worst JS frame gap | 2,220 ms |        2,118 ms |
-| Broad cached pan, motion + settle    | 3,283 ms |        3,283 ms |
-| First z16 zoom, motion + settle      |   899 ms |          932 ms |
-
-The first z16 zoom regressed by 33 ms: a decoded-cache miss now paints a coarse
-preview and then the fine region, even when bytes are already on disk. This is
-the cost of keeping slow/offline deep zoom sharp, not a hidden win. Broad-pan
-responsiveness also remains a problem: smaller SVG work did not break the
-back-to-back JS work, and a roughly 2.1-second RAF gap remains despite a mostly
-smooth UI-thread transform. The next experiment targets that scheduling chain.
-Launch's JS sampler begins after some synchronous setup and understates initial
-blocking, so its tiny RAF gaps are not used as launch responsiveness claims.
-
-Raw samples are `native-{baseline,after}-clean-{2,3,4}.jsonl`, summarized in
-`native-map-report.json` in the session artifacts. Pair 1 is warm-up; earlier
-non-clean/paused recordings are excluded. A warm-up zoom callback failed to fire
-once despite covered geometry; it is retained as a harness anomaly, not reported
-as a proven tile-load failure.
+Baseline is `96aafe6`; first implementation is `65bd286`. The initial
+`native-{baseline,after}-clean-{2,3,4}.jsonl` pairs had stable clocks but ran
+September 8, 15:30-15:34 UTC, overlapping the local quality-check window. They
+also used the earlier completion predicate. These recordings are retained as
+diagnostics, not final performance evidence; both versions were remeasured in
+the authoritative three-way comparison below. A warm-up animation callback
+failed to fire once despite covered geometry; that remains a harness anomaly,
+not a proven tile-load failure. No physical-phone profiling was captured.
 
 ### Second iteration: give the JS event loop a frame between region builds
 

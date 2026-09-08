@@ -16,7 +16,8 @@
     "All accepted timed scenarios are network-warm, not a server-load benchmark.",
     "Initial synchronous work precedes the JS RAF sampler; launch maxJsGapMs is not comparable between variants.",
     "First z16 detail completion regresses; preview and yield add work.",
-    "v2 fixture-backed pilots and earlier interrupted/clock-discontinuous runs are excluded."
+    "v2 fixture-backed pilots and earlier interrupted/clock-discontinuous runs are excluded.",
+    "Earlier clean pairs overlapping local quality checks are diagnostic only; these v3 triplets are the authoritative comparison."
   ],
   "medians": {
     "launch": {
