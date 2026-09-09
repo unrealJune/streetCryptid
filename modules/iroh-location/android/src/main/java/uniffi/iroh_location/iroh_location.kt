@@ -855,6 +855,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_publish_watermark
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_push_trail(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_push_trail_budgeted(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_read_control(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_read_latest(
@@ -1096,6 +1098,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_publish_resync(`ptr`: L
 external fun uniffi_iroh_location_fn_method_locationnode_publish_watermarks(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_push_trail(`ptr`: Long,`peerTickets`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_push_trail_budgeted(`ptr`: Long,`peers`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_read_control(`ptr`: Long,`author`: RustBuffer.ByValue,
 ): Long
@@ -1563,6 +1567,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail() != 39469) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail_budgeted() != 15776) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_read_control() != 32699) {
@@ -3445,6 +3452,22 @@ public interface LocationNodeInterface {
     suspend fun `pushTrail`(`peerTickets`: List<kotlin.String>, `traceparent`: kotlin.String?)
     
     /**
+     * Push our trail to each peer with **its own deadline**, and report what each one did.
+     *
+     * The send-side counterpart of the reachability model in
+     * `src/features/social/core/peer-reachability.ts`. JS decides the budgets — it is where
+     * presence lives and where the decision is testable — and this returns the per-peer outcomes
+     * it learns from.
+     *
+     * A budget of zero means "do not wait for this peer". The data is still handed to the live
+     * engine, so the peer reconciles on its own whenever it next wakes; we simply stop holding a
+     * background wake open for a phone we expect to be asleep. That single change is where the
+     * saving is: measured over 7 days, 74% of pushes burned the full 30s budget waiting on peers
+     * that never reported at all, at a cost of 41.7 hours a week.
+     */
+    suspend fun `pushTrailBudgeted`(`peers`: List<PeerDial>, `traceparent`: kotlin.String?): List<PeerPushReport>
+    
+    /**
      * Read `author`'s current control message, if we can open it. Returns an empty vec when
      * there is none, when it is addressed to someone else, or when the content has not
      * replicated locally yet — all indistinguishable and all "nothing to act on".
@@ -5150,6 +5173,41 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         // lift function
         { Unit },
         
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Push our trail to each peer with **its own deadline**, and report what each one did.
+     *
+     * The send-side counterpart of the reachability model in
+     * `src/features/social/core/peer-reachability.ts`. JS decides the budgets — it is where
+     * presence lives and where the decision is testable — and this returns the per-peer outcomes
+     * it learns from.
+     *
+     * A budget of zero means "do not wait for this peer". The data is still handed to the live
+     * engine, so the peer reconciles on its own whenever it next wakes; we simply stop holding a
+     * background wake open for a phone we expect to be asleep. That single change is where the
+     * saving is: measured over 7 days, 74% of pushes burned the full 30s budget waiting on peers
+     * that never reported at all, at a cost of 41.7 hours a week.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `pushTrailBudgeted`(`peers`: List<PeerDial>, `traceparent`: kotlin.String?) : List<PeerPushReport> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_push_trail_budgeted(
+                uniffiHandle,
+                FfiConverterSequenceTypePeerDial.lower(`peers`),FfiConverterOptionalString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypePeerPushReport.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -8083,6 +8141,133 @@ public object FfiConverterTypePairStateRecord: FfiConverterRustBuffer<PairStateR
 
 
 /**
+ * One peer to push to, and how long it is worth waiting for.
+ *
+ * Produced by `dialBudgetMs` in `src/features/social/core/peer-reachability.ts`. The budget lives
+ * on the JS side because that is where presence does, and because a pure function over
+ * `(presence, history)` can be tested without a node.
+ */
+data class PeerDial (
+    /**
+     * The peer's endpoint ticket, as [`LocationNode::push_trail`] takes them.
+     */
+    var `ticket`: kotlin.String
+    , 
+    /**
+     * Deadline for this peer. **Zero means do not wait**: the data is still handed to the live
+     * engine so the peer reconciles when it next wakes, but no background wake is held open for
+     * it. See [`LocationNode::push_trail_budgeted`].
+     */
+    var `budgetMs`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePeerDial: FfiConverterRustBuffer<PeerDial> {
+    override fun read(buf: ByteBuffer): PeerDial {
+        return PeerDial(
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PeerDial) = (
+            FfiConverterString.allocationSize(value.`ticket`) +
+            FfiConverterULong.allocationSize(value.`budgetMs`)
+    )
+
+    override fun write(value: PeerDial, buf: ByteBuffer) {
+            FfiConverterString.write(value.`ticket`, buf)
+            FfiConverterULong.write(value.`budgetMs`, buf)
+    }
+}
+
+
+
+/**
+ * What one peer did during a push, handed back so JS can fold it into its estimate.
+ *
+ * Mirrors `PeerObservation` in `src/features/social/core/peer-reachability.ts`.
+ */
+data class PeerPushReport (
+    /**
+     * Full lowercase hex endpoint id, directly comparable to `friend.endpointId`.
+     */
+    var `peer`: kotlin.String
+    , 
+    /**
+     * `finished` | `failed` | `silent` | `skipped`. See `docs::PeerOutcome` for why the last two
+     * are not the same thing.
+     */
+    var `outcome`: kotlin.String
+    , 
+    /**
+     * Time from `start_sync` to this peer reporting. Absent when it never did.
+     */
+    var `latencyMs`: kotlin.ULong?
+    , 
+    /**
+     * Entries handed to THIS peer. Zero unless `outcome` is `finished`.
+     */
+    var `entriesSent`: kotlin.ULong
+    , 
+    /**
+     * The deadline this peer was granted, so a truncated dial is distinguishable from a real one.
+     */
+    var `budgetMs`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePeerPushReport: FfiConverterRustBuffer<PeerPushReport> {
+    override fun read(buf: ByteBuffer): PeerPushReport {
+        return PeerPushReport(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PeerPushReport) = (
+            FfiConverterString.allocationSize(value.`peer`) +
+            FfiConverterString.allocationSize(value.`outcome`) +
+            FfiConverterOptionalULong.allocationSize(value.`latencyMs`) +
+            FfiConverterULong.allocationSize(value.`entriesSent`) +
+            FfiConverterULong.allocationSize(value.`budgetMs`)
+    )
+
+    override fun write(value: PeerPushReport, buf: ByteBuffer) {
+            FfiConverterString.write(value.`peer`, buf)
+            FfiConverterString.write(value.`outcome`, buf)
+            FfiConverterOptionalULong.write(value.`latencyMs`, buf)
+            FfiConverterULong.write(value.`entriesSent`, buf)
+            FfiConverterULong.write(value.`budgetMs`, buf)
+    }
+}
+
+
+
+/**
  * Iroh's current address knowledge for one requested peer.
  */
 data class PeerTransportDiagnostic (
@@ -9640,6 +9825,62 @@ public object FfiConverterSequenceTypePairStateRecord: FfiConverterRustBuffer<Li
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypePairStateRecord.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypePeerDial: FfiConverterRustBuffer<List<PeerDial>> {
+    override fun read(buf: ByteBuffer): List<PeerDial> {
+        val len = buf.getInt()
+        return List<PeerDial>(len) {
+            FfiConverterTypePeerDial.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<PeerDial>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypePeerDial.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<PeerDial>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypePeerDial.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypePeerPushReport: FfiConverterRustBuffer<List<PeerPushReport>> {
+    override fun read(buf: ByteBuffer): List<PeerPushReport> {
+        val len = buf.getInt()
+        return List<PeerPushReport>(len) {
+            FfiConverterTypePeerPushReport.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<PeerPushReport>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypePeerPushReport.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<PeerPushReport>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypePeerPushReport.write(it, buf)
         }
     }
 }
