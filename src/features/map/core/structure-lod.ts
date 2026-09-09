@@ -140,24 +140,20 @@ export function buildingStrokeWidthFor(zoom: number): number | null {
 }
 
 /**
- * z13 tiles merge nearby buildings into block-sized polygons. Only z14 carries
- * separated footprints; magnifying a coarse preview does not restore that detail.
+ * Style follows display zoom, not source tile detail: everyday street views and
+ * progressive previews use coarse tiles whose faint fill alone is barely visible.
  */
-export function buildingStyleFor(
-  zoom: number,
-  tileZoom: number
-): {
+export function buildingStyleFor(zoom: number): {
   readonly fillAlpha: number;
   readonly strokeWidth: number | null;
   readonly hatch: boolean;
 } | null {
   const width = buildingStrokeWidthFor(zoom);
   if (width === null) return null;
-  const individualFootprints = tileZoom >= 14;
   return {
     fillAlpha: BUILDING_FILL_ALPHA,
-    strokeWidth: individualFootprints ? width : null,
-    hatch: individualFootprints && buildingHatchVisible(zoom),
+    strokeWidth: width,
+    hatch: buildingHatchVisible(zoom),
   };
 }
 

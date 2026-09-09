@@ -18,43 +18,34 @@ import {
 import { CryptidThemes } from '@/constants/cryptid-theme';
 import { luminance } from '../color';
 import { AERO_AREA_KINDS, AERO_LINE_KINDS } from '../types';
-import { dataZoomFor } from '../../tiles/tile-math';
 
 describe('buildingStyleFor', () => {
-  it.each([13, 14, 15, 15.5, 15.99])(
-    'keeps merged footprints as faint fill, without jagged outlines or hatch, at zoom %s',
+  it.each([14, 15, 15.5, 15.99, 16, 17, 18])(
+    'keeps outlines and hatch at display zoom %s without requiring full-detail tiles',
     (zoom) => {
-      expect(buildingStyleFor(zoom, dataZoomFor(zoom, { min: 0, max: 14 }))).toEqual({
+      expect(buildingStyleFor(zoom)).toEqual({
         fillAlpha: BUILDING_FILL_ALPHA,
-        strokeWidth: null,
-        hatch: false,
+        strokeWidth: BUILDING_STROKE_WIDTH,
+        hatch: true,
       });
     }
   );
 
-  it.each([16, 17, 18])('preserves separated close-up footprints at zoom %s', (zoom) => {
-    expect(buildingStyleFor(zoom, dataZoomFor(zoom, { min: 0, max: 14 }))).toEqual({
+  it.each([13, 13.5, 13.99])('outlines without hatch below street zoom at %s', (zoom) => {
+    expect(buildingStyleFor(zoom)).toEqual({
       fillAlpha: BUILDING_FILL_ALPHA,
-      strokeWidth: BUILDING_STROKE_WIDTH,
-      hatch: true,
-    });
-  });
-
-  it('does not mistake a magnified coarse preview for individual building data', () => {
-    expect(buildingStyleFor(18, 13)).toEqual({
-      fillAlpha: BUILDING_FILL_ALPHA,
-      strokeWidth: null,
+      strokeWidth: buildingStrokeWidthFor(zoom),
       hatch: false,
     });
+    expect(buildingStyleFor(zoom)!.strokeWidth).toBeGreaterThan(0);
   });
 
-  it('uses available fine geometry even when the camera is zoomed back out', () => {
-    expect(buildingStyleFor(15, 14)?.strokeWidth).toBe(BUILDING_STROKE_WIDTH);
-    expect(buildingStyleFor(15, 14)?.hatch).toBe(true);
+  it('does not change building style at the full-detail tile transition', () => {
+    expect(buildingStyleFor(15.99)).toEqual(buildingStyleFor(16));
   });
 
   it('still drops buildings below their display threshold', () => {
-    expect(buildingStyleFor(BUILDING_MIN_ZOOM - 0.01, 14)).toBeNull();
+    expect(buildingStyleFor(BUILDING_MIN_ZOOM - 0.01)).toBeNull();
   });
 });
 
