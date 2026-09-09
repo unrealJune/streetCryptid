@@ -24,7 +24,6 @@ import {
   useReducedMotion,
   useSharedValue,
   withDecay,
-  withRepeat,
   withTiming,
 } from 'react-native-reanimated';
 
@@ -57,7 +56,7 @@ import type {
   WorldPoint,
   WorldRect,
 } from '../core/types';
-import { LOCATE_MIN_ZOOM } from '../config';
+import { locateCamera } from '../core/locate-camera';
 import { clusterMarkers } from '../core/marker-clusters';
 import { PLACED_OCEAN_CRYPTIDS } from '../core/ocean-cryptids';
 import type { MapRegion } from '../engine/map-engine';
@@ -87,6 +86,7 @@ import {
 import { getRevealMaskEffect } from './reveal-mask-shader';
 import { prevRectUniform, REVEAL_TARGET } from './reveal-mask';
 import { YouLocator } from './you-locator';
+import { LoadingHexGrid } from './loading-hex-grid';
 
 /** Crossfade duration (ms) — fallback only, when a bundle lacks its textures. */
 const CROSSFADE_MS = 200;
@@ -304,6 +304,7 @@ export function MapView({
   const k = useSharedValue(1);
   const tx = useSharedValue(0);
   const ty = useSharedValue(0);
+  const locateProgress = useSharedValue(1);
   /** Outstanding fling decay animations (x + y); commit when the last ends. */
   const decaysLeft = useSharedValue(0);
   /** Transform at the last prefetch check, to gate by movement. */
@@ -550,29 +551,11 @@ export function MapView({
     [prevRectVec]
   );
 
-  // Loading skeleton: while a cold region is fetching over an uncovered area
-  // (`pending`), a gently pulsing tint sits where the map will appear, so the
-  // long network wait reads as "loading here" instead of a blank canvas. Cheap
-  // by construction — no cell field is built for it — and mounted only while the
-  // fetch is outstanding.
+  // Analytic loading hexes need no H3 work or map bytes to appear.
   const pendingRect = useMemo(
     () => (pending && viewport ? anchorRect(pending.rect, anchor, viewport) : null),
     [pending, anchor, viewport]
   );
-  const skeletonPulse = useSharedValue(0);
-  useEffect(() => {
-    if (!pendingRect || reducedMotion) {
-      skeletonPulse.value = reducedMotion ? 1 : 0;
-      return;
-    }
-    skeletonPulse.value = 0;
-    skeletonPulse.value = withRepeat(withTiming(1, { duration: 900 }), -1, true);
-    return () => {
-      cancelAnimation(skeletonPulse);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [Boolean(pendingRect), reducedMotion]);
-  const skeletonOpacity = useDerivedValue(() => 0.05 + 0.07 * skeletonPulse.value);
   // The wipe must EXPOSE the region, not flash over it: while revealing we hide
   // the retained prev layer and back the wipe with the loading tint at the
   // region's own rect, so unrevealed hexes read as "still loading" and the flash
@@ -676,6 +659,7 @@ export function MapView({
     cancelAnimation(k);
     cancelAnimation(tx);
     cancelAnimation(ty);
+    cancelAnimation(locateProgress);
     decaysLeft.value = 0;
 
     const current = applyViewTransform(anchor, viewport, {
@@ -688,25 +672,33 @@ export function MapView({
     // own limits still win — `limits` carries them as k, so they come back as zooms here.
     const zoomCeiling = anchor.zoom + Math.log2(limits.kMax);
     const zoomFloor = anchor.zoom + Math.log2(limits.kMin);
-    const zoom = Math.min(
-      Math.max(current.zoom, LOCATE_MIN_ZOOM, zoomFloor),
-      Math.max(zoomCeiling, zoomFloor)
-    );
     const to = clampTranslation(
-      viewTransformFor(anchor, viewport, {
-        center: latLonToWorld(locateTarget.location),
-        zoom,
-      }),
+      viewTransformFor(
+        anchor,
+        viewport,
+        locateCamera(
+          current,
+          latLonToWorld(locateTarget.location),
+          viewport,
+          region?.spec ?? null,
+          zoomFloor,
+          Math.max(zoomCeiling, zoomFloor)
+        )
+      ),
       limits
     );
     const config = {
       duration: reducedMotion ? 0 : LOCATE_ME_MS,
       easing: Easing.out(Easing.cubic),
     };
+    // Start destination demand now, not after an animation callback crosses the bridge.
+    commit(to);
     lastPrefetch.value = to;
+    locateProgress.value = 0;
     k.value = withTiming(to.k, config);
     tx.value = withTiming(to.tx, config);
-    ty.value = withTiming(to.ty, config, (finished) => {
+    ty.value = withTiming(to.ty, config);
+    locateProgress.value = withTiming(1, config, (finished) => {
       if (finished) runOnJS(commit)(to);
     });
     // Shared values are stable references; requestId intentionally retriggers
@@ -728,6 +720,8 @@ export function MapView({
       cancelAnimation(k);
       cancelAnimation(tx);
       cancelAnimation(ty);
+      cancelAnimation(locateProgress);
+      locateProgress.value = 1;
       decaysLeft.value = 0;
 
       let minX = Infinity;
@@ -785,7 +779,7 @@ export function MapView({
   useAnimatedReaction(
     () => ({ k: k.value, tx: tx.value, ty: ty.value }),
     (t, prev) => {
-      if (!limits || !prev) return;
+      if (!limits || !prev || locateProgress.value < 1) return;
       if (hasScaleMotion(t, prev)) {
         wasScaling.value = true;
         if (shouldPrefetchScaleMotion(t, prev, lastPrefetch.value)) {
@@ -831,6 +825,8 @@ export function MapView({
       cancelAnimation(tx);
       cancelAnimation(ty);
       cancelAnimation(k);
+      cancelAnimation(locateProgress);
+      locateProgress.value = 1;
       decaysLeft.value = 0;
     };
 
@@ -980,19 +976,18 @@ export function MapView({
             accessible={Boolean(accessibilityLabel)}
             accessibilityLabel={accessibilityLabel}
             accessibilityRole="image"
+            accessibilityState={{ busy: Boolean(pending) }}
             style={styles.fill}
           >
             {viewport && (
               <Canvas style={styles.fill}>
                 <Group transform={transform}>
                   {loadingRect && (
-                    <Rect
-                      x={loadingRect.x}
-                      y={loadingRect.y}
-                      width={loadingRect.width}
-                      height={loadingRect.height}
-                      color={theme.chrome.island}
-                      opacity={skeletonOpacity}
+                    <LoadingHexGrid
+                      rect={loadingRect}
+                      scale={k}
+                      reducedMotion={reducedMotion}
+                      ink={theme.canvas.streetLabel}
                     />
                   )}
                   {/* Retained coverage layer — stays under the reveal now: the wipe

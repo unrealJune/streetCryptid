@@ -93,6 +93,43 @@ const T13: TileCoord = { z: 13, x: 1313, y: 2861 };
 const T14: TileCoord = { z: 14, x: 2625, y: 5723 };
 
 describe('BundleFetchByteSource — privacy contract', () => {
+  it('shares one detail stream with its complete, durably stored coarse preview', async () => {
+    let publish!: NonNullable<Parameters<TileBundleSource['getBundle']>[1]>;
+    let finish!: (entries: readonly TileBundleEntry[]) => void;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const bundles: TileBundleSource = {
+      getBundle: (_request, onStage) => {
+        publish = onStage!;
+        started();
+        return new Promise((r) => {
+          finish = r;
+        });
+      },
+    };
+    let detailDone = false;
+    const { source, store } = makeSource({ bundles });
+    const preview = source.getPreviewTiles([T14]);
+    const detail = source.getTileBytes(T14).then((bytes) => {
+      detailDone = true;
+      return bytes;
+    });
+    await ready;
+    const request = { ...bundleRequestFor(T14, 10), tileZoom: 13 };
+    const entries = bundleTiles(request).map((tile) => ({ tile, bytes: tagBytes(tile) }));
+    await publish(request, entries);
+    const coarse = await preview;
+    expect(coarse).toHaveLength(1);
+    expect(store.lastPutSize).toBe(64);
+    expect(detailDone).toBe(false);
+    expect(await store.get('planet-z10-v1', entries[0].tile)).not.toBeNull();
+    finish(bundleTiles(bundleRequestFor(T14, 10)).map((tile) => ({ tile, bytes: tagBytes(tile) })));
+    expect(await detail).toEqual(tagBytes(T14));
+    expect(store.lastPutSize).toBe(256);
+  });
+
   it('turns one z13 tile miss into one complete z10 bundle request', async () => {
     const { coarse, bundles, store, source } = makeSource();
 

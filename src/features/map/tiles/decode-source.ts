@@ -1,5 +1,5 @@
 import type { GeometrySource } from './geometry-source';
-import { EMPTY_GEOMETRY } from './geometry-source';
+import { EMPTY_GEOMETRY, mergeGeometry } from './geometry-source';
 import { decodeMvtTile } from './mvt-mapping';
 import { packGeometry, type PackedGeometry } from './packed-geometry';
 import type { TileByteSource } from './tile-bytes';
@@ -41,5 +41,15 @@ export class DecodingGeometrySource implements GeometrySource {
     addMapPerfMetric('tileDecodeCalls', 1, metrics);
     if (metrics) addMapPerfMetric('tileDecodeMs', perfNow() - decodeStarted, metrics);
     return geometry;
+  }
+
+  async getPreview(tiles: readonly TileCoord[]): Promise<PackedGeometry | null> {
+    const entries = await this.bytes.getPreviewTiles?.(tiles);
+    if (!entries) return null;
+    return mergeGeometry(
+      await Promise.all(
+        entries.map(({ tile, bytes }) => (bytes ? this.decode(bytes, tile) : EMPTY_GEOMETRY))
+      )
+    );
   }
 }

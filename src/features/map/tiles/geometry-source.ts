@@ -13,6 +13,7 @@ export interface GeometrySource {
    * for tiles the source simply doesn't carry. Honors `signal` when provided.
    */
   getTile(tile: TileCoord, signal?: AbortSignal): Promise<PackedGeometry>;
+  getPreview?(tiles: readonly TileCoord[]): Promise<PackedGeometry | null>;
 
   /**
    * Best-effort cache warm for tiles likely to be needed soon (idle prefetch of

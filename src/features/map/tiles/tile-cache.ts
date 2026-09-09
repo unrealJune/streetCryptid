@@ -21,6 +21,10 @@ export class CachedGeometrySource implements GeometrySource {
     return this.cache.has(tileKeyOf(tile.z, tile.x, tile.y));
   }
 
+  getPreview(tiles: readonly TileCoord[]): Promise<PackedGeometry | null> {
+    return this.upstream.getPreview?.(tiles) ?? Promise.resolve(null);
+  }
+
   /**
    * Idle prefetch: warm the cache one tile at a time so at most one bundle is
    * ever in flight (kind to a weak connection), skipping tiles already cached

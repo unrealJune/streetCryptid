@@ -1,12 +1,24 @@
 import { createMapDataset, FIXTURE_DATA_ZOOMS, PLANET_DATA_ZOOMS } from '../config';
 import { FIXTURE_BOUNDS, FIXTURE_HOME } from '../tiles/__fixtures__/caphill-tiles';
-import {
-  bundleTiles,
-  TILE_BUNDLE_MEDIA_TYPE,
-  TILE_BUNDLE_VERSION,
-  type TileBundleRequest,
-} from '../tiles/tile-bundle';
+import type { TileBundleRequest } from '../tiles/tile-bundle';
 import { WORLD_RECT } from '../tiles/tile-math';
+import { TILE_STREAM_MEDIA_TYPE } from '../tiles/bundle-stream';
+import { streamFixture } from '../tiles/__fixtures__/stream-fixture';
+
+jest.mock('expo-crypto', () => ({
+  CryptoDigestAlgorithm: { SHA256: 'SHA-256' },
+  digest: async (_algorithm: string, bytes: ArrayBuffer) => {
+    const { createHash } = jest.requireActual('node:crypto');
+    return new Uint8Array(createHash('sha256').update(new Uint8Array(bytes)).digest()).buffer;
+  },
+}));
+jest.mock('expo/fetch', () => ({
+  fetch: (...args: Parameters<typeof fetch>) => global.fetch(...args),
+}));
+jest.mock('../tiles/bundle-resume-store', () => {
+  const actual = jest.requireActual('../tiles/bundle-resume-store');
+  return { ...actual, sharedBundleResumeStore: async () => new actual.MemoryBundleResumeStore() };
+});
 
 function withTileUrl<T>(value: string | undefined, fn: () => T): T {
   const original = process.env.EXPO_PUBLIC_TILE_URL;
@@ -53,7 +65,7 @@ describe('createMapDataset — live chain request shape', () => {
     global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       requests.push({ url, init });
-      const match = /\/bundle\/v1\/(\d+)\/(\d+)\/(\d+)$/.exec(url);
+      const match = /\/bundle\/v2\/(\d+)\/(\d+)\/(\d+)$/.exec(url);
       if (match) {
         const request: TileBundleRequest = {
           anchorZoom: 10,
@@ -61,13 +73,29 @@ describe('createMapDataset — live chain request shape', () => {
           anchorY: Number(match[2]),
           tileZoom: Number(match[3]),
         };
-        const bytes = emptyBundle(request);
+        const bytes = streamFixture(request).all;
+        let sent = false;
         return {
           status: 200,
           ok: true,
-          headers: { get: () => TILE_BUNDLE_MEDIA_TYPE },
-          arrayBuffer: async () =>
-            bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+          headers: {
+            get: (name: string) =>
+              name === 'content-type'
+                ? TILE_STREAM_MEDIA_TYPE
+                : name === 'etag'
+                  ? '"test-v2"'
+                  : null,
+          },
+          body: {
+            getReader: () => ({
+              read: async () => {
+                if (sent) return { done: true };
+                sent = true;
+                return { done: false, value: bytes };
+              },
+              cancel: async () => {},
+            }),
+          },
         } as unknown as Response;
       }
       return { status: 204, ok: false } as Response;
@@ -83,9 +111,9 @@ describe('createMapDataset — live chain request shape', () => {
     await dataset.source.getTile({ z: 13, x: 1313, y: 2861 });
 
     expect(requests.map((request) => request.url)).toEqual([
-      'http://tiles.test/bundle/v1/164/357/13',
+      'http://tiles.test/bundle/v2/164/357/13',
     ]);
-    expect(requests[0].init?.headers).toEqual({ Accept: TILE_BUNDLE_MEDIA_TYPE });
+    expect(requests[0].init?.headers).toEqual({ Accept: TILE_STREAM_MEDIA_TYPE });
   });
 
   it('a coarse tile uses the same planet source and passes through individually', async () => {
@@ -94,21 +122,3 @@ describe('createMapDataset — live chain request shape', () => {
     expect(requests.map((request) => request.url)).toEqual(['http://tiles.test/4/2/5']);
   });
 });
-
-function emptyBundle(request: TileBundleRequest): Uint8Array {
-  const count = bundleTiles(request).length;
-  const bytes = new Uint8Array(20 + count * 4);
-  bytes.set([0x53, 0x43, 0x42, 0x31]);
-  const view = new DataView(bytes.buffer);
-  view.setUint8(4, TILE_BUNDLE_VERSION);
-  view.setUint8(5, request.anchorZoom);
-  view.setUint8(6, request.tileZoom);
-  view.setUint8(7, 0);
-  view.setUint32(8, request.anchorX);
-  view.setUint32(12, request.anchorY);
-  view.setUint32(16, count);
-  for (let offset = 20; offset < bytes.byteLength; offset += 4) {
-    view.setUint32(offset, 0xffffffff);
-  }
-  return bytes;
-}

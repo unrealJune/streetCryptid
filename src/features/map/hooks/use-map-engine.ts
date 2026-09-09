@@ -11,7 +11,12 @@ import { makeViewLimits, type ViewLimits } from '../core/gesture';
 import { createH3Grid, realH3 } from '../core/h3-grid';
 import { createNativeH3Enumerator } from '../core/native-h3-enumerator';
 import { coverageInView, coverageMeasurable, nearestPlaceName } from '../core/readout';
-import { coversView, needsNewRegion, shouldPrefetchRegion } from '../core/region';
+import {
+  computeRegionSpec,
+  coversView,
+  needsNewRegion,
+  shouldPrefetchRegion,
+} from '../core/region';
 import type { CameraState, LatLon, Viewport, WorldPoint, WorldRect } from '../core/types';
 import { latLonToWorld } from '../core/mercator';
 import { MapEngine, type MapRegion } from '../engine/map-engine';
@@ -27,6 +32,7 @@ import { useMapTheme } from './use-map-theme';
 /** How long the camera must sit still before idle neighbor prefetch kicks in. */
 const PREFETCH_IDLE_MS = 1200;
 const BUILD_RETRY_DELAYS_MS = [1000, 3000, 10_000] as const;
+const UNCOVERED_RETRY_INTERVAL_MS = 30_000;
 
 /**
  * A cold region build in flight over an area no retained layer covers — the
@@ -230,10 +236,16 @@ export function useMapEngine(
       return;
     }
 
+    if (uncovered) {
+      const spec = computeRegionSpec(target, viewport, { dataZooms: dataset.dataZooms });
+      setPending({ rect: spec.rect, loaded: 0, total: 0 });
+    }
     let live = true;
     const retryEpoch = retryEpochRef.current;
     const retry = () => {
-      const delay = BUILD_RETRY_DELAYS_MS[retryRef.current.attempts];
+      const delay =
+        BUILD_RETRY_DELAYS_MS[retryRef.current.attempts] ??
+        (uncovered ? UNCOVERED_RETRY_INTERVAL_MS : undefined);
       if (!live || retryEpoch !== retryEpochRef.current || delay === undefined) return;
       retryRef.current.attempts++;
       retryTimerRef.current = setTimeout(() => {
@@ -269,7 +281,7 @@ export function useMapEngine(
       .then((built) => {
         if (!live || !built) return; // superseded builds resolve null
         builtVersionRef.current = built.explorationVersion;
-        setPending(null);
+        if (coversView(built.spec, target, viewport)) setPending(null);
         publishRegion(built);
         setCamera(target);
         if (
@@ -280,7 +292,7 @@ export function useMapEngine(
         else retryRef.current.attempts = 0;
       })
       .catch((error) => {
-        if (live) setPending(null);
+        if (live && !uncovered) setPending(null);
         console.warn('[map] region build failed:', error);
         retry();
       });
@@ -313,8 +325,10 @@ export function useMapEngine(
       // never delays warming the ground the user is about to reach. One shared
       // signal: any camera change (or friends update) aborts the whole chain.
       void (async () => {
-        await engine.prefetchAround(camera, viewport, controller.signal);
-        await engine.prefetchPoints(friendTargets, camera.zoom, viewport, controller.signal);
+        // Idle warming must not fill the connection with 256-tile detail bundles.
+        const warmCamera = { ...camera, zoom: Math.min(camera.zoom, 15) };
+        await engine.prefetchAround(warmCamera, viewport, controller.signal);
+        await engine.prefetchPoints(friendTargets, warmCamera.zoom, viewport, controller.signal);
       })();
     }, PREFETCH_IDLE_MS);
     return () => {

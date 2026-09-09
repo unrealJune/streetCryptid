@@ -38,6 +38,7 @@
     "expo-system-ui": "~57.0.1",
     "expo-task-manager": "~57.0.4",
     "expo-web-browser": "~57.0.1",
+    "fflate": "^0.8.2",
     "h3-js": "4.5.0",
     "pbf": "^5.1.0",
     "react": "19.2.3",
