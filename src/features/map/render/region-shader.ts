@@ -323,7 +323,7 @@ function drawStructures(
     canvas.drawPath(path, paint);
   }
 
-  const buildingStyle = buildingStyleFor(region.spec.zoom, region.spec.tileZoom);
+  const buildingStyle = buildingStyleFor(region.spec.zoom);
   if (paths.buildings && buildingStyle) {
     const path = Skia.Path.MakeFromSVGString(paths.buildings);
     if (path) {

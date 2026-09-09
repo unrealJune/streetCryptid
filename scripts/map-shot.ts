@@ -529,7 +529,7 @@ function drawStructures(
     const svg = paths.aeroLines[kind];
     if (svg) draw(svg, AERO_LINE_ALPHA[kind], aeroLineWidthFor(kind, spec.zoom));
   }
-  const buildingStyle = buildingStyleFor(spec.zoom, spec.tileZoom);
+  const buildingStyle = buildingStyleFor(spec.zoom);
   if (buildingStyle && paths.buildings) {
     const explored = field ? CanvasKit.Path.MakeFromSVGString(exploredCellPath(field, spec)) : null;
     if (field) {
