@@ -19,8 +19,8 @@ import type { Friend, RatchetActivity } from '../core/types';
 interface FriendDetailIslandProps {
   readonly presence: FriendPresence;
   /**
-   * Where the map is looking — which, since selecting a friend flies the camera to them, is where
-   * they are. The hero of this pane. Null while the tiles are still resolving a name.
+   * Locality resolved at this friend's fix, independent of the camera.
+   * Null while their tiles are still resolving a name, or when no fix is available.
    */
   readonly placeName: string | null;
   /** How far open the drawer is. Everything past the summary is disclosed by pulling it up. */
@@ -93,7 +93,7 @@ export function FriendDetailIsland({
   const signalColor = resolveSignalColor(presence.friend.color, chrome.green);
   const endpointId = presence.friend.endpointId;
   const distance = formatDistance(presence.distanceM);
-  const expanded = detent !== 'peek';
+  const expanded = detent === 'mid' || detent === 'full';
   const full = detent === 'full';
   // Lower-cased keys: endpoint ids reach us from native hex, storage and tickets, and a case
   // difference between two spellings of the same device would read as two devices.

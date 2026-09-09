@@ -102,6 +102,16 @@ export function cellRimPath(field: RegionCellField, spec: RegionSpec): string {
     .join(' ');
 }
 
+/** Union of revealed cells, for clipping detail that must not escape the fog. */
+export function exploredCellPath(field: RegionCellField, spec: RegionSpec): string {
+  const project = logicalProject(spec);
+  return field.cells
+    .filter((cell) => cell.fraction >= 0.5)
+    .map((cell) => ring(cell.boundary, project))
+    .filter(Boolean)
+    .join(' ');
+}
+
 /** A closed SVG ring for one cell boundary. */
 function ring(boundary: readonly WorldPoint[], project: (p: WorldPoint) => WorldPoint): string {
   const line = polyline(boundary, project);

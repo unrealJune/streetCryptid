@@ -61,6 +61,7 @@ interface MapDrawerProps {
    * letting it climb to full would leave a screen of blank island under the last row.
    */
   readonly maxDetent?: DrawerDetent;
+  readonly minDetent?: DrawerDetent;
   readonly detent: DrawerDetent;
   onDetentChange(detent: DrawerDetent): void;
   onSelectTab(tab: IslandTab): void;
@@ -93,6 +94,7 @@ export function MapDrawer({
   insetTop,
   screenHeight,
   maxDetent = 'full',
+  minDetent = 'peek',
   detent,
   onDetentChange,
   onSelectTab,
@@ -109,7 +111,7 @@ export function MapDrawer({
   const height = useSharedValue(0);
   const startHeight = useSharedValue(0);
 
-  const detents = useMemo(() => allowedDetents(maxDetent), [maxDetent]);
+  const detents = useMemo(() => allowedDetents(maxDetent, minDetent), [maxDetent, minDetent]);
   const topDetent = detents[detents.length - 1];
   // A body with a single detent gets no grip: there is nothing to drag it to, and the strip would
   // be a handle on a surface that cannot move. Minimized, that is also what turns the drawer back
@@ -153,32 +155,40 @@ export function MapDrawer({
     [detent, onDetentChange]
   );
 
-  const pan = useMemo(() => {
+  const pans = useMemo(() => {
     const lo = heights[detents[0]];
     const hi = heights[topDetent];
     const scrolls = detent === topDetent;
-    return Gesture.Pan()
-      .simultaneousWithExternalGesture(nativeScroll)
-      .onStart(() => {
-        startHeight.value = height.value;
-      })
-      .onUpdate((event) => {
-        // At the top detent the body is a scrolling list and the gestures have to be shared: only
-        // a downward drag from the very top of that list belongs to the drawer. Below the top
-        // detent nothing scrolls, so every drag is the drawer's.
-        if (scrolls && (event.translationY <= 0 || scrollY.value > 1)) return;
-        const next = startHeight.value - event.translationY;
-        // Rubber-band past both ends rather than hard-stopping: a drawer that simply refuses to
-        // move reads as a frozen app, and the resistance says "this is as far as it goes".
-        height.value =
-          next < lo ? lo - (lo - next) * 0.35 : next > hi ? hi + (next - hi) * 0.18 : next;
-      })
-      .onEnd((event) => {
-        if (scrolls && (event.translationY <= 0 || scrollY.value > 1)) return;
-        const next = pickDetent(height.value, event.velocityY, startHeight.value, detents, heights);
-        height.value = withSpring(heights[next], SETTLE);
-        runOnJS(commitDetent)(next);
-      });
+    const makePan = (fromGrip: boolean) =>
+      Gesture.Pan()
+        .simultaneousWithExternalGesture(nativeScroll)
+        .onStart(() => {
+          startHeight.value = height.value;
+        })
+        .onUpdate((event) => {
+          // At the top detent the body is a scrolling list and the gestures have to be shared: only
+          // a downward drag from the very top of that list belongs to the drawer. Below the top
+          // detent nothing scrolls, so every drag is the drawer's.
+          if (!fromGrip && scrolls && (event.translationY <= 0 || scrollY.value > 1)) return;
+          const next = startHeight.value - event.translationY;
+          // Rubber-band past both ends rather than hard-stopping: a drawer that simply refuses to
+          // move reads as a frozen app, and the resistance says "this is as far as it goes".
+          height.value =
+            next < lo ? lo - (lo - next) * 0.35 : next > hi ? hi + (next - hi) * 0.18 : next;
+        })
+        .onEnd((event) => {
+          if (!fromGrip && scrolls && (event.translationY <= 0 || scrollY.value > 1)) return;
+          const next = pickDetent(
+            height.value,
+            event.velocityY,
+            startHeight.value,
+            detents,
+            heights
+          );
+          height.value = withSpring(heights[next], SETTLE);
+          runOnJS(commitDetent)(next);
+        });
+    return { grip: makePan(true), body: makePan(false) };
     // Shared values (`height`, `startHeight`, `scrollY`) are stable refs and are deliberately not
     // listed: the real inputs are the detents and the resolved heights.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -212,10 +222,14 @@ export function MapDrawer({
     return { paddingBottom: insetBottom * dock };
   });
 
-  const measureBody = useCallback((event: LayoutChangeEvent) => {
-    const measured = Math.ceil(event.nativeEvent.layout.height);
-    setPeekBody((current) => (Math.abs(current - measured) > 1 ? measured : current));
-  }, []);
+  const measureBody = useCallback(
+    (event: LayoutChangeEvent) => {
+      if (detent === 'collapsed') return;
+      const measured = Math.ceil(event.nativeEvent.layout.height);
+      setPeekBody((current) => (Math.abs(current - measured) > 1 ? measured : current));
+    },
+    [detent]
+  );
 
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -243,9 +257,9 @@ export function MapDrawer({
         dockStyle,
       ]}
     >
-      <GestureDetector gesture={pan}>
-        <View style={styles.sheet}>
-          {hasGrip ? (
+      <View style={styles.sheet}>
+        {hasGrip ? (
+          <GestureDetector gesture={pans.grip}>
             <View
               accessibilityRole="adjustable"
               accessibilityLabel="Panel size"
@@ -258,23 +272,29 @@ export function MapDrawer({
             >
               <View style={[styles.gripBar, { backgroundColor: chrome.seg }]} />
             </View>
-          ) : null}
-
-          <GestureDetector gesture={nativeScroll}>
-            <ScrollView
-              scrollEnabled={detent === topDetent}
-              onScroll={onScroll}
-              scrollEventThrottle={16}
-              showsVerticalScrollIndicator={false}
-              style={styles.body}
-              contentContainerStyle={styles.bodyContent}
-            >
-              {/* Measured at its natural height — that measurement is what `peek` derives from. */}
-              <View onLayout={measureBody}>{children}</View>
-            </ScrollView>
           </GestureDetector>
-        </View>
-      </GestureDetector>
+        ) : null}
+
+        <GestureDetector gesture={pans.body}>
+          <View style={styles.body}>
+            <GestureDetector gesture={nativeScroll}>
+              <ScrollView
+                accessibilityElementsHidden={detent === 'collapsed'}
+                importantForAccessibility={detent === 'collapsed' ? 'no-hide-descendants' : 'auto'}
+                scrollEnabled={detent === topDetent}
+                onScroll={onScroll}
+                scrollEventThrottle={16}
+                showsVerticalScrollIndicator={false}
+                style={styles.body}
+                contentContainerStyle={styles.bodyContent}
+              >
+                {/* Measured at its natural height — that measurement is what `peek` derives from. */}
+                <View onLayout={measureBody}>{children}</View>
+              </ScrollView>
+            </GestureDetector>
+          </View>
+        </GestureDetector>
+      </View>
 
       <Animated.View style={tabPadStyle}>
         <IslandTabs active={activeTab} onSelect={onSelectTab} signal={signal} theme={theme} />
@@ -284,7 +304,8 @@ export function MapDrawer({
 }
 
 const DETENT_LABEL: Record<DrawerDetent, string> = {
-  peek: 'Collapsed',
+  collapsed: 'Minimized',
+  peek: 'Summary',
   mid: 'Half open',
   full: 'Full screen',
 };
@@ -314,6 +335,7 @@ const styles = StyleSheet.create({
   },
   body: {
     flex: 1,
+    minHeight: 0,
   },
   bodyContent: {
     flexGrow: 1,

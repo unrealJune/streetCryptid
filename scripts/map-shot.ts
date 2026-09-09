@@ -68,11 +68,19 @@ import {
   LABEL_LETTER_SPACING,
   type MapLabel,
 } from '../src/features/map/core/map-labels';
-import { oceanCryptidOpacity, visibleOceanCryptids } from '../src/features/map/core/ocean-cryptids';
+import {
+  CRYPTID_FONT_SIZE,
+  CRYPTID_LINE_HEIGHT,
+  cryptidMetrics,
+  oceanCryptidOpacity,
+  oceanCryptidScale,
+  visibleOceanCryptids,
+} from '../src/features/map/core/ocean-cryptids';
 import {
   cellLatticePath,
   cellRimPath,
   cellStateFills,
+  exploredCellPath,
 } from '../src/features/map/render/cell-overlay-paths';
 import { DOT_FIELD_SKSL } from '../src/features/map/render/dot-field-sksl';
 import { buildMaskPaths } from '../src/features/map/render/mask-paths';
@@ -86,12 +94,12 @@ import {
   AERO_AREA_STYLE,
   AERO_LINE_ALPHA,
   aeroLineWidthFor,
-  BUILDING_FILL_ALPHA,
+  BUILDING_GHOST_ALPHA,
   BUILDING_HATCH_ALPHA,
   BUILDING_HATCH_WIDTH,
   BUILDING_STROKE_ALPHA,
-  buildingHatchVisible,
-  buildingStrokeWidthFor,
+  buildingGhostInk,
+  buildingStyleFor,
 } from '../src/features/map/core/structure-lod';
 import { lodForZoom } from '../src/features/map/render/shader-uniforms';
 import { mergePacked, type PackedGeometry } from '../src/features/map/tiles/packed-geometry';
@@ -429,7 +437,7 @@ function renderShot({
     CanvasKit.XYWHRect(0, 0, rectW * scale * PIXEL_RATIO, rectH * scale * PIXEL_RATIO),
     paint
   );
-  if (!args.noStructures) drawStructures(CanvasKit, canvas, geometry, spec, palette);
+  if (!args.noStructures) drawStructures(CanvasKit, canvas, geometry, spec, palette, cellField);
   if (args.transit) drawTransitLines(CanvasKit, canvas, geometry, spec, palette);
   if (cellField) drawCellOverlays(CanvasKit, canvas, cellField, spec, palette);
   canvas.restore();
@@ -464,10 +472,11 @@ function drawStructures(
   canvas: any,
   geometry: PackedGeometry,
   spec: RegionSpec,
-  palette: MapPalette
+  palette: MapPalette,
+  field: ReturnType<typeof buildCellField> | null
 ): void {
   const paths = buildStructurePaths(geometry, spec);
-  const ink = palette.building;
+  let ink = palette.building;
 
   const paintOf = (alpha: number, width: number | null, dash?: readonly [number, number]) => {
     const paint = new CanvasKit.Paint();
@@ -520,26 +529,50 @@ function drawStructures(
     const svg = paths.aeroLines[kind];
     if (svg) draw(svg, AERO_LINE_ALPHA[kind], aeroLineWidthFor(kind, spec.zoom));
   }
-  const buildingWidth = buildingStrokeWidthFor(spec.zoom);
-  if (buildingWidth !== null && paths.buildings) {
-    draw(paths.buildings, BUILDING_FILL_ALPHA, null);
-    // Hatch clipped to the footprints — mirrors `drawBuildingHatch`.
-    if (buildingHatchVisible(spec.zoom)) {
-      const clip = CanvasKit.Path.MakeFromSVGString(paths.buildings);
-      const hatch = CanvasKit.Path.MakeFromSVGString(buildHatchPath(spec));
-      if (clip && hatch) {
-        clip.setFillType(CanvasKit.FillType.Winding);
-        canvas.save();
-        canvas.clipPath(clip, CanvasKit.ClipOp.Intersect, true);
-        const paint = paintOf(BUILDING_HATCH_ALPHA, BUILDING_HATCH_WIDTH);
-        canvas.drawPath(hatch, paint);
-        paint.delete();
-        canvas.restore();
+  const buildingStyle = buildingStyleFor(spec.zoom, spec.tileZoom);
+  if (buildingStyle && paths.buildings) {
+    const explored = field ? CanvasKit.Path.MakeFromSVGString(exploredCellPath(field, spec)) : null;
+    if (field) {
+      canvas.save();
+      if (explored) canvas.clipPath(explored, CanvasKit.ClipOp.Difference, true);
+      ink = buildingGhostInk(palette.building, palette.bg);
+      draw(paths.buildings, buildingStyle.fillAlpha * BUILDING_GHOST_ALPHA, null);
+      if (buildingStyle.strokeWidth !== null) {
+        draw(
+          paths.buildings,
+          BUILDING_STROKE_ALPHA * BUILDING_GHOST_ALPHA,
+          buildingStyle.strokeWidth
+        );
       }
-      clip?.delete();
-      hatch?.delete();
+      ink = palette.building;
+      canvas.restore();
     }
-    draw(paths.buildings, BUILDING_STROKE_ALPHA, buildingWidth);
+    if (!field || explored) {
+      canvas.save();
+      if (explored) canvas.clipPath(explored, CanvasKit.ClipOp.Intersect, true);
+      draw(paths.buildings, buildingStyle.fillAlpha, null);
+      // Hatch clipped to the footprints — mirrors `drawBuildingHatch`.
+      if (buildingStyle.hatch) {
+        const clip = CanvasKit.Path.MakeFromSVGString(paths.buildings);
+        const hatch = CanvasKit.Path.MakeFromSVGString(buildHatchPath(spec));
+        if (clip && hatch) {
+          clip.setFillType(CanvasKit.FillType.Winding);
+          canvas.save();
+          canvas.clipPath(clip, CanvasKit.ClipOp.Intersect, true);
+          const paint = paintOf(BUILDING_HATCH_ALPHA, BUILDING_HATCH_WIDTH);
+          canvas.drawPath(hatch, paint);
+          paint.delete();
+          canvas.restore();
+        }
+        clip?.delete();
+        hatch?.delete();
+      }
+      if (buildingStyle.strokeWidth !== null) {
+        draw(paths.buildings, BUILDING_STROKE_ALPHA, buildingStyle.strokeWidth);
+      }
+      canvas.restore();
+    }
+    explored?.delete();
   }
 
   canvas.restore();
@@ -685,11 +718,11 @@ function drawCryptids(
   offY: number
 ): void {
   const scale = scaleFor(spec.zoom);
-  const opacity = oceanCryptidOpacity(camera.zoom) * 0.85;
+  const opacity = oceanCryptidOpacity(camera.zoom);
   if (opacity <= 0) return;
   const [r, g, b] = palette.streetLabel;
 
-  const font = new CanvasKit.Font(boldTypeface, 15);
+  const font = new CanvasKit.Font(boldTypeface, CRYPTID_FONT_SIZE);
   const paint = new CanvasKit.Paint();
   paint.setColor(CanvasKit.Color(r, g, b, opacity));
   paint.setAntiAlias(true);
@@ -712,17 +745,24 @@ function drawCryptids(
     const x = (cryptid.world[0] - spec.rect.minX) * scale - offX;
     const y = (cryptid.world[1] - spec.rect.minY) * scale - offY;
     const lines = [...cryptid.art.split(NEWLINE), cryptid.waves];
+    const size = oceanCryptidScale(camera.zoom);
+    const { width, height } = cryptidMetrics(cryptid.art, cryptid.waves);
+    canvas.save();
+    canvas.translate(x, y);
+    canvas.scale(size, size);
+    canvas.translate(-width / 2, -height / 2);
     // Halo first for every row, so one glyph's glow never washes out its neighbour.
     lines.forEach((line, i) => {
-      const baseline = y + i * 16 + 12;
+      const baseline = i * CRYPTID_LINE_HEIGHT + 12;
       for (let pass = 0; pass < HALO_PASSES; pass++) {
-        canvas.drawText(line, x, baseline, haloPaint, font);
+        canvas.drawText(line, 0, baseline, haloPaint, font);
       }
     });
     lines.forEach((line, i) => {
       const isWaves = i === lines.length - 1;
-      canvas.drawText(line, x, y + i * 16 + 12, isWaves ? wavePaint : paint, font);
+      canvas.drawText(line, 0, i * CRYPTID_LINE_HEIGHT + 12, isWaves ? wavePaint : paint, font);
     });
+    canvas.restore();
   }
   haloPaint.delete();
   wavePaint.delete();

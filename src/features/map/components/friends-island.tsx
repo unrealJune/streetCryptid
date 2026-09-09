@@ -36,12 +36,9 @@ interface FriendsIslandProps {
   /** The bump pairing readout. The island being open is what arms it. */
   readonly pairing?: ReactNode;
   readonly theme: CryptidTheme;
-  /**
-   * Collapsed to the header line, exactly as ME collapses. Owned by the screen: minimizing also
-   * has to take the drawer's detents away, which a body cannot do from in here.
-   */
+  /** Collapsed content; the drawer keeps its grip available to reopen it. */
   readonly minimized: boolean;
-  readonly onToggleMinimize: () => void;
+  readonly onToggleMinimize?: () => void;
   onSelect(friendId: string): void;
   onOpenProfile(friendId: string): void;
 }
@@ -62,10 +59,8 @@ interface FriendsIslandProps {
  * The card surface and the FRIENDS label both belong to `MapDrawer`, so the header leads with the
  * one fact the tab cannot carry: how many are near you.
  *
- * It minimizes to that header line and nothing else, on the same chevron and at the same height as
- * ME. The roster is the panel most worth getting out of the way — it is the tallest thing the
- * drawer carries and it sits over the map you opened it to look at — so the tab that could not be
- * collapsed was the one that most needed to be.
+ * The drawer owns minimizing through its grip. Standalone callers may supply a
+ * toggle, but the map never shows two competing collapse controls.
  */
 export function FriendsIsland({
   friends,
@@ -95,12 +90,14 @@ export function FriendsIsland({
           <View style={[styles.pip, { backgroundColor: nearby > 0 ? chrome.green : chrome.seg }]} />
           <Text style={[styles.title, { color: chrome.ink }]}>{nearby} NEARBY</Text>
         </View>
-        <IslandMinimizeToggle
-          minimized={minimized}
-          onToggle={onToggleMinimize}
-          subject="friends roster"
-          theme={theme}
-        />
+        {onToggleMinimize ? (
+          <IslandMinimizeToggle
+            minimized={minimized}
+            onToggle={onToggleMinimize}
+            subject="friends roster"
+            theme={theme}
+          />
+        ) : null}
       </View>
 
       {minimized ? null : (

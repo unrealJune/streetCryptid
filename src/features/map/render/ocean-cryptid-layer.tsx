@@ -12,7 +12,17 @@ import Animated, {
 } from 'react-native-reanimated';
 
 import { worldToScreen } from '../core/camera';
-import { oceanCryptidOpacity, type PlacedCryptid } from '../core/ocean-cryptids';
+import {
+  CRYPTID_DRIFT_X,
+  CRYPTID_DRIFT_Y,
+  CRYPTID_FONT_SIZE,
+  CRYPTID_LINE_HEIGHT,
+  CRYPTID_WAVE_DRIFT_X,
+  cryptidMetrics,
+  oceanCryptidOpacity,
+  oceanCryptidScale,
+  type PlacedCryptid,
+} from '../core/ocean-cryptids';
 import type { CameraState, MapPalette, Viewport } from '../core/types';
 
 interface OceanCryptidLayerProps {
@@ -24,22 +34,11 @@ interface OceanCryptidLayerProps {
   readonly translateX: SharedValue<number>;
   readonly translateY: SharedValue<number>;
   readonly palette: MapPalette;
-  /** Committed camera zoom — drives the layer's fade band. */
-  readonly zoom: number;
   readonly reducedMotion: boolean;
 }
 
 /** Seconds for one full drift cycle; staggered per figure by its phase. */
 const DRIFT_MS = 9000;
-/** Drift amplitude in screen px — a slow swim, not a bounce. */
-const DRIFT_X = 14;
-const DRIFT_Y = 7;
-/**
- * Ceiling on the layer's own opacity. Decoration, but decoration nobody notices
- * is not decoration — at 0.55 over a full-strength water field these read as
- * smudges rather than creatures.
- */
-const MAX_OPACITY = 1;
 /**
  * Halo radius (px) behind every glyph, painted in the canvas background.
  *
@@ -56,16 +55,13 @@ const MAX_OPACITY = 1;
 const HALO_RADIUS = 4;
 /** Waves sit behind the creature, so they stay a fraction of its weight. */
 const WAVE_OPACITY_FACTOR = 0.7;
-/** Wave drift, counter to the figure's — the relative motion is what swims. */
-const WAVE_DRIFT_X = -9;
 
 /**
  * Sea cryptids drifting through the oceans and the polar void at far-out zooms.
  *
- * Rides the live transform exactly like `MapLabelLayer` and the locators do —
- * positioned in anchor space, then only *translated* by the UI-thread shared
- * values — so a pinch moves them with the water while the ASCII itself stays a
- * constant, legible size.
+ * Rides the map's live transform, centered in anchor space,
+ * with both size and drift locked to world units.
+ * Live zoom controls the fade, independently of tile loading.
  *
  * Purely decorative: the island is the canvas's accessible text model
  * (PRODUCT.md P0), so this is hidden from screen readers and never takes a touch
@@ -80,11 +76,9 @@ export function OceanCryptidLayer({
   translateX,
   translateY,
   palette,
-  zoom,
   reducedMotion,
 }: OceanCryptidLayerProps) {
-  const opacity = oceanCryptidOpacity(zoom) * MAX_OPACITY;
-  if (cryptids.length === 0 || opacity <= 0) return null;
+  if (cryptids.length === 0) return null;
 
   // The lattice ink, not a step of the water ramp. These sit on TWO very
   // different grounds — deep water inside the world, and the bare canvas in the
@@ -107,7 +101,7 @@ export function OceanCryptidLayer({
             color={color}
             halo={halo}
             key={cryptid.id}
-            opacity={opacity}
+            anchorZoom={anchor.zoom}
             phase={cryptid.phase}
             reducedMotion={reducedMotion}
             scale={scale}
@@ -127,7 +121,7 @@ function DriftingCryptid({
   art,
   color,
   halo,
-  opacity,
+  anchorZoom,
   phase,
   reducedMotion,
   scale,
@@ -140,7 +134,7 @@ function DriftingCryptid({
   readonly art: string;
   readonly color: string;
   readonly halo: string;
-  readonly opacity: number;
+  readonly anchorZoom: number;
   readonly phase: number;
   readonly reducedMotion: boolean;
   readonly scale: SharedValue<number>;
@@ -169,24 +163,33 @@ function DriftingCryptid({
     };
   }, [drift, phase, reducedMotion]);
 
+  const { width, height } = cryptidMetrics(art, waves);
   const offset = useDerivedValue(() => {
+    if (reducedMotion) return { dx: 0, dy: 0 };
     const t = drift.value * Math.PI * 2;
-    return { dx: Math.sin(t) * DRIFT_X, dy: Math.cos(t * 0.6) * DRIFT_Y };
+    return { dx: Math.sin(t) * CRYPTID_DRIFT_X, dy: Math.cos(t) * CRYPTID_DRIFT_Y };
   });
 
-  const positionStyle = useAnimatedStyle(
-    () => ({
+  const positionStyle = useAnimatedStyle(() => {
+    const zoom = anchorZoom + Math.log2(scale.value);
+    const size = oceanCryptidScale(zoom);
+    return {
+      opacity: oceanCryptidOpacity(zoom),
       transform: [
-        { translateX: x * scale.value + translateX.value + offset.value.dx },
-        { translateY: y * scale.value + translateY.value + offset.value.dy },
+        { translateX: x * scale.value + translateX.value - width / 2 + offset.value.dx * size },
+        { translateY: y * scale.value + translateY.value - height / 2 + offset.value.dy * size },
+        { scale: size },
       ],
-    }),
-    [x, y]
-  );
+    };
+  }, [anchorZoom, x, y, width, height]);
   // The waves ride the same driver but slide the other way, so the creature
   // reads as moving THROUGH water rather than the whole glyph sliding around.
   const waveStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: Math.sin(drift.value * Math.PI * 2) * WAVE_DRIFT_X }],
+    transform: [
+      {
+        translateX: reducedMotion ? 0 : Math.sin(drift.value * Math.PI * 2) * CRYPTID_WAVE_DRIFT_X,
+      },
+    ],
   }));
 
   return (
@@ -194,15 +197,15 @@ function DriftingCryptid({
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
       pointerEvents="none"
-      style={[styles.figure, positionStyle]}
+      style={[styles.figure, { width, height }, positionStyle]}
     >
-      <Text allowFontScaling={false} style={[styles.art, haloStyle(halo), { color, opacity }]}>
+      <Text allowFontScaling={false} style={[styles.art, haloStyle(halo), { color }]}>
         {art}
       </Text>
       <Animated.View style={waveStyle}>
         <Text
           allowFontScaling={false}
-          style={[styles.art, haloStyle(halo), { color, opacity: opacity * WAVE_OPACITY_FACTOR }]}
+          style={[styles.art, haloStyle(halo), { color, opacity: WAVE_OPACITY_FACTOR }]}
         >
           {waves}
         </Text>
@@ -234,8 +237,8 @@ const styles = StyleSheet.create({
     // dissolved into the water dots; the extra weight is what makes an ASCII
     // outline hold together over a stippled field.
     fontFamily: 'IBMPlexMono_600SemiBold',
-    fontSize: 15,
+    fontSize: CRYPTID_FONT_SIZE,
     includeFontPadding: false,
-    lineHeight: 16,
+    lineHeight: CRYPTID_LINE_HEIGHT,
   },
 });

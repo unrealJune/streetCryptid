@@ -263,4 +263,10 @@ export interface MapReadout {
   readonly sectorsVisible: boolean;
   /** Nearest prominent place name to the camera center, or null. */
   readonly placeName: string | null;
+  /** A name resolved at this friend's fix, never at the camera center. */
+  readonly friendPlace?: {
+    readonly id: string;
+    readonly location: LatLon;
+    readonly name: string | null;
+  } | null;
 }

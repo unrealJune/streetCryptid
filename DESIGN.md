@@ -105,6 +105,19 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
   crossing four tiles is still one road), rotated to the road's heading, colliding labels
   dropped rather than stacked. Park names sit on the polygon centroid, gated on on-screen
   area. Mono, uppercase, letter-spaced — the map's text is data, not chrome.
+- **Buildings obey exploration.** Revealed footprints retain their fill, hatch and
+  outline. Outside revealed hexes, footprints are desaturated silhouettes at 24% of
+  normal opacity with no interior hatch. A building crossing the frontier is clipped
+  at the hex boundary; switching exploration off restores the full material everywhere.
+- **Building detail follows the source tiles, not just camera zoom.** The z13 building
+  layer merges neighbors into block-sized shapes, so it gets only a faint built-area
+  fill — no jagged outlines or hatch. Separated z14 footprints get the full material.
+  Coarse previews keep the fill-only treatment even when magnified while fine data loads;
+  this does not move the existing full-detail download threshold.
+- **Sea creatures belong to the map, not the screen.** Their centers are fixed offshore,
+  and artwork size, waves and swim distance scale together from a z4 reference footprint.
+  Their fade follows live zoom rather than the delayed tile camera. Reduced Motion
+  keeps them at rest; near-shore anchors are omitted.
 
 ## Chrome & layout — Apple-Maps "islands"
 
@@ -117,7 +130,8 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
 - **Settings is one gear, top-right,** in neutral steel — never an accent, because it is
   not a signal. It opens as a modal over the map with its own close affordance, so leaving
   it always returns you to exactly the view you left.
-- **One drawer with three detents** (peek · mid · full) and its own segmented bar
+- **One drawer with three content detents** (peek · mid · full), plus a minimized
+  grip-and-tabs stop for FRIENDS, and its own segmented bar
   (ME · FRIENDS) along its bottom edge — the app's only navigation. Find My's model: the
   sheet owns the switch, so the map's corners stay about the map and nothing floats that
   isn't a map affordance. **HEIGHT animates, not translation**, so the bar stays welded to
@@ -140,15 +154,12 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
 - **The island floats clear of the system gesture bar** — `insets.bottom` plus a real
   margin, on both platforms. (It once special-cased Android to skip the inset, which was
   true only while a native tab bar was consuming it.)
-- **Either tab minimizes, to the same bubble.** One chevron, at the right of the body's
-  header, collapses ME or FRIENDS to its header line — place name + %, or the NEARBY
-  count — and the drawer drops to peek with its detents and grip withdrawn, so what is
-  left is the bare rounded island the panel used to be. Minimized is a property of the
-  **drawer**, not of a body: collapsing the content and taking the detents away are one
-  act, and a shared header height is what stops the two tabs having their own idea of
-  small. Switching tabs expands again — asking for a tab is asking to see it — and
-  minimizing the roster disarms Bump, because a radio held open behind a collapsed panel
-  is a radio quietly left listening.
+- **FRIENDS minimizes with its grip, not a second arrow.** A single downward drag can
+  cross all stops to leave only the grip and tabs. The grip works even when the list
+  has scrolled, remains available to reopen the panel, and exposes the same stops to
+  VoiceOver. Minimized content is hidden from accessibility and Bump is disarmed.
+  ME keeps its header chevron because its fixed summary has no draggable detents.
+  Switching tabs expands again — asking for a tab is asking to see it.
 - **ME is zoom-aware "where you are":** hero place name (Rajdhani) + one mono
   uppercase sub + **one** flip-dot coverage bar **in your signal color** (it counts ground
   _you_ covered) + **one** % — retitled per tier (BLOCKS / SECTORS / HOODS / CITIES).
@@ -160,6 +171,9 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
   were on, so Locate Me from a regional view re-centred on a dot in an unreadable field and
   looked like it had done nothing. Someone already closer than the floor keeps their zoom:
   they chose it.
+- **Friend summaries name the friend's fix, not the camera.** During a fly-to, missing
+  destination tiles leave the name unresolved rather than briefly borrowing your
+  locality. Changing selection or receiving a new fix invalidates the previous name.
 - **A selected trace is a drill-down, not a third tab.** It replaces the island's body while
   the bar stays lit on the tab you came from, so closing it returns you where you were and
   either tab is always a way out.
