@@ -167,6 +167,14 @@ name = "trail-stash-client"
 path = "src/bin/trail-stash-client.rs"
 required-features = ["cli"]
 
+# Host-side pairing latency harness. See the module docs: pairing had no
+# measurement anywhere, and the unit tests never attach a runtime, so the
+# endpoint-online wait is unexercised by the whole suite.
+[[bin]]
+name = "pair-bench"
+path = "src/bin/pair-bench.rs"
+required-features = ["cli"]
+
 [profile.release]
 opt-level = "z"
 lto = true

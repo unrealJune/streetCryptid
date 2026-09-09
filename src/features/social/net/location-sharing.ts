@@ -322,6 +322,17 @@ export const BLUETOOTH_UNSUPPORTED_MESSAGE =
 
 const PAIRING_POLL_INTERVAL_MS = 4000;
 
+/**
+ * Poll cadence while a pairing session is actually in flight.
+ *
+ * The handshake itself is fast — measured host-side at ~390ms of machine time once the endpoint
+ * is online (`cargo run --features cli --bin pair-bench`) — so sampling its state every 4s meant
+ * the SAS gate could sit ready for whole seconds before the UI noticed. Bump already runs a
+ * 300ms loop for exactly this reason; pairing deserves the same while there is something to watch.
+ * Idle cost is unchanged: this only applies when a session exists.
+ */
+const PAIRING_ACTIVE_POLL_INTERVAL_MS = 300;
+
 const BUMP_POLL_INTERVAL_MS = 300;
 const BUMP_RESOLVE_TIMEOUT_MS = 12_000;
 export const BUMP_WINDOW_MS = 15_000;
@@ -583,7 +594,7 @@ export class LocationSharingService {
   private readonly profileBackfillAttempts = new Map<string, number>();
   /** When the profile backfill sweep last ran, so it paces off the pairing poll. */
   private lastProfileBackfillAt = 0;
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private pollInFlight: Promise<void> | null = null;
   /** Last poll-error message surfaced, so we don't spam listeners with identical errors. */
   private lastPollErrorSig: string | null = null;
@@ -3741,20 +3752,40 @@ export class LocationSharingService {
 
   // ── Pairing / discovery polling — ARCHITECTURE.md §2, §4 ────────────────────────────────────
 
-  /** Start the bounded pairing/discovery poll loop (idempotent; native only). */
+  /**
+   * Start the bounded pairing/discovery poll loop (idempotent; native only).
+   *
+   * The cadence follows whether a session is live: {@link PAIRING_ACTIVE_POLL_INTERVAL_MS} while
+   * one is in flight, {@link PAIRING_POLL_INTERVAL_MS} at rest. Re-armed from the poll itself
+   * rather than a fixed interval, so a handshake that starts between ticks speeds the loop up
+   * immediately instead of on the next slow tick.
+   */
   private startPairingPolling(): void {
     if (this.pollTimer || !this.mod) return;
-    const timer = setInterval(() => {
-      void this.pollPairingOnce();
-    }, PAIRING_POLL_INTERVAL_MS);
-    this.pollTimer = timer;
-    // Don't keep the Node event loop (jest / tooling) alive on our account; no-op in RN/Hermes.
-    (timer as unknown as { unref?: () => void }).unref?.();
+    const arm = (delay: number): void => {
+      const timer = setTimeout(() => {
+        void this.pollPairingOnce().finally(() => {
+          // Only re-arm if polling was not stopped while this pass ran.
+          if (this.pollTimer === timer) {
+            this.pollTimer = null;
+            arm(
+              this.pairSessions.length > 0
+                ? PAIRING_ACTIVE_POLL_INTERVAL_MS
+                : PAIRING_POLL_INTERVAL_MS
+            );
+          }
+        });
+      }, delay);
+      this.pollTimer = timer;
+      // Don't keep the Node event loop (jest / tooling) alive on our account; no-op in RN/Hermes.
+      (timer as unknown as { unref?: () => void }).unref?.();
+    };
+    arm(PAIRING_POLL_INTERVAL_MS);
   }
 
   private stopPairingPolling(): void {
     if (this.pollTimer) {
-      clearInterval(this.pollTimer);
+      clearTimeout(this.pollTimer);
       this.pollTimer = null;
     }
   }
@@ -3831,16 +3862,42 @@ export class LocationSharingService {
     if (!mod) return;
     const span = getTelemetry().startSpan('pairing.poll');
     try {
-      const [pairEvents, profileEvents, sessions, peers, caps] = await Promise.all([
-        mod.pollPairEvents(),
-        mod.pollProfileEvents(),
-        mod.listPairSessions(),
+      // TWO independent reads, not one Promise.all.
+      //
+      // `listPairSessions()` is what reveals the SAS gate. It used to share a Promise.all with
+      // three BLE calls, and Promise.all resolves at the SLOWEST member — so the visual gate
+      // waited on a Bluetooth query that has nothing to do with the handshake. Worse,
+      // `pollPairingOnce` coalesces on `pollInFlight`, so the next tick handed back the SAME
+      // stuck promise instead of re-reading: one slow BLE call stalled every pairing update for
+      // its whole duration. Tempo showed 27 polls over 1s in a day, several 10-17s.
+      //
+      // Both reads still start together; only the awaits are separated, so BLE is no slower.
+      const started = Date.now();
+      const blePromise = Promise.all([
         mod.nearbyBlePeers(),
         mod.bleCapabilities(),
         this.refreshBluetoothRadio(),
       ]);
+      // A rejected BLE read must not take the pairing path down with it; it is reported by the
+      // catch below only if the pairing read also fails.
+      blePromise.catch(() => undefined);
+
+      const [pairEvents, profileEvents, sessions] = await Promise.all([
+        mod.pollPairEvents(),
+        mod.pollProfileEvents(),
+        mod.listPairSessions(),
+      ]);
+      const pairingReadMs = Date.now() - started;
 
       this.pairSessions = sessions;
+      // EMIT NOW, before the slow tail below. Everything after this point — transport
+      // diagnostics, profile backfill, ticket imports — does I/O, and the old code emitted only
+      // once all of it had finished. The SAS challenge was known here and shown several seconds
+      // later. The tail still runs; it just no longer gates the screen.
+      this.emitIfPairingChanged();
+
+      const [peers, caps] = await blePromise;
+      const bleReadMs = Date.now() - started;
       this.nearbyPeers = peers;
       this.bleCaps = caps;
       this.pairingReadyFlag = caps.pairingReady;
@@ -3852,6 +3909,10 @@ export class LocationSharingService {
         sas_verified_sessions: sessions.filter((session) => session.sasVerified).length,
         ble_peers: peers.length,
         pairing_ready: caps.pairingReady,
+        // Split so a future stall names its culprit. The old span covered all six calls and
+        // identified none of them, which is why this took a day to find.
+        pairing_read_ms: pairingReadMs,
+        ble_read_ms: bleReadMs,
       });
       await this.pollTransportDiagnosticsOnce();
       // Pair events FIRST: `pool.applyProfile` is a no-op for an endpoint that isn't a friend yet,
