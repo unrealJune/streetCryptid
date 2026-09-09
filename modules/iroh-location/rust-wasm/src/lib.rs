@@ -470,7 +470,12 @@ impl WasmLocationNode {
         let peers: Vec<_> = peer_tickets
             .iter()
             .filter_map(|ticket| ticket.parse::<EndpointTicket>().ok())
-            .map(|ticket| ticket.endpoint_addr().clone())
+            .map(|ticket| {
+                (
+                    ticket.endpoint_addr().clone(),
+                    std::time::Duration::from_secs(docs::PUSH_TIMEOUT_SECS),
+                )
+            })
             .collect();
         let ns = trail.own_namespace();
         trail.push(ns, peers).await.map_err(to_js_err)?;
