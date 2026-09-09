@@ -24,6 +24,8 @@ import type {
   TrailReplicaAuthor,
   TransportDiagnostics,
   TransportConfig,
+  NativePeerDial,
+  NativePeerPushReport,
 } from './IrohLocation.types';
 
 /**
@@ -321,7 +323,14 @@ export declare class IrohLocationNativeModule
   forgetSession?(peerEndpointHex: string): Promise<void>;
   syncLatest(peerTickets: string[], traceparent?: string | null): Promise<void>;
   /** Optional for compatibility with installed iOS binaries built before the push API. */
+  /** Optional; absence means this binary clobbers the node on a second createNode. */
+  nativeRuntimeAdoptsNode?(): Promise<boolean>;
   pushTrail?(peerTickets: string[], traceparent?: string | null): Promise<void>;
+  /** Optional for compatibility with installed binaries built before the budgeted push API. */
+  pushTrailBudgeted?(
+    peers: NativePeerDial[],
+    traceparent?: string | null
+  ): Promise<NativePeerPushReport[]>;
   uploadTrailContent?(baseUrl: string, psk: string | null): Promise<number>;
   /** Optional for compatibility with installed iOS binaries built before the control API. */
   docsWriteControl?(msg: NativeControlMsg, recipientsHex: string[]): Promise<void>;

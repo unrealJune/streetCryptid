@@ -296,6 +296,13 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
         return;
       }
       try {
+        // Draw from local storage FIRST, before anything touches the node. Friends and their last
+        // known positions are already on disk, so the map has no reason to sit empty through node
+        // construction and two permission prompts — and no reason to go blank at all if the node
+        // fails. The read path is independent of the sending path; this is where that starts.
+        await service.hydrateFromStore();
+        if (!active) return;
+        await refreshTrail(service);
         // Initialise the shared native node exactly once across all mounts. A failed attempt
         // clears the latch (below) so a later mount retries rather than awaiting a rejected promise.
         if (!sharedServiceInit) {

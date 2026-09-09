@@ -66,7 +66,7 @@ const SYNC_FIRST_EVENT_TIMEOUT_SECS: u64 = 25;
 
 /// Upper bound on a single namespace's push. `push` only needs `SyncFinished`, not a full drain,
 /// but a peer that connects and then stalls would otherwise hold a headless context open.
-const PUSH_TIMEOUT_SECS: u64 = 30;
+pub const PUSH_TIMEOUT_SECS: u64 = 30;
 
 /// Key separator between the hex author and the zero-padded sequence number.
 pub const KEY_SEP: u8 = b'/';
@@ -344,7 +344,7 @@ pub struct ContentUploadReport {
 /// while entries were moving to the others. The documented cookbook query
 /// `{ name = "trail.push" && span.entries_sent > 0 }` therefore matched almost nothing on a
 /// healthy fleet, which is worse than no signal.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PushReport {
     /// Entries handed to peers, summed over every peer that finished.
     pub entries_sent: u64,
@@ -352,6 +352,104 @@ pub struct PushReport {
     pub peers_finished: usize,
     /// Peers that reported an error instead — unreachable, or refused.
     pub peers_failed: usize,
+    /// What each dialled peer did, individually. See [`PeerPushOutcome`].
+    pub per_peer: Vec<PeerPushOutcome>,
+}
+
+/// Which of the three things a dialled peer did.
+///
+/// The distinction between [`Failed`](PeerOutcome::Failed) and [`Silent`](PeerOutcome::Silent) is
+/// the entire diagnostic point. Measured over 7 days, 74% of pushes burned the full 30s budget with
+/// `peers_failed = 0` — the missing peers had not refused, they had said **nothing**, so the
+/// "everyone has reported" break condition could never be satisfied. Counting them together would
+/// hide exactly the population the budget model exists to stop waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerOutcome {
+    /// Reconciled. `entries_sent` is meaningful.
+    Finished,
+    /// Reported an error — refused, or a reachable peer that could not complete.
+    Failed,
+    /// Never reported at all before its budget expired. An asleep phone looks like this.
+    Silent,
+    /// Granted a budget of zero and deliberately not waited for.
+    ///
+    /// Distinct from [`Silent`](Self::Silent) because it is a statement about US, not about the
+    /// peer: we predicted it would not answer and declined to hold a background wake open. Keeping
+    /// the two apart is what makes the model auditable — a rising `skipped` count with friends
+    /// still reachable by other means is the signature of a predictor that has become too
+    /// aggressive, and it would be invisible if these were filed as silence.
+    Skipped,
+}
+
+impl PeerOutcome {
+    /// Stable lowercase name, used as a span attribute and as the JS-facing discriminant.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Finished => "finished",
+            Self::Failed => "failed",
+            Self::Silent => "silent",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+/// Complete a push's per-peer record: everything that never reported, plus everything we declined
+/// to wait for, folded in alongside the peers that did report.
+///
+/// Pure, and separated out for that reason — it decides the shape of the data the budget model is
+/// later fitted on, so it is worth testing without standing up an iroh node (see the module header
+/// on `#[cfg(test)]` coverage of the pure helpers).
+///
+/// The two things it must not do, both of which lose the signal the model needs: file a peer that
+/// was never dialled as `Silent` (that is a fact about our prediction, not about the peer), and
+/// drop the record entirely when nobody answered (a push where every peer stayed quiet is the most
+/// informative row there is).
+fn finish_outcomes(
+    mut reported: Vec<PeerPushOutcome>,
+    outstanding: &[[u8; 32]],
+    skipped: &[[u8; 32]],
+    budgets: &HashMap<[u8; 32], u64>,
+) -> Vec<PeerPushOutcome> {
+    for peer in outstanding {
+        reported.push(PeerPushOutcome {
+            peer: *peer,
+            outcome: PeerOutcome::Silent,
+            latency_ms: None,
+            entries_sent: 0,
+            budget_ms: budgets.get(peer).copied().unwrap_or_default(),
+        });
+    }
+    for peer in skipped {
+        reported.push(PeerPushOutcome {
+            peer: *peer,
+            outcome: PeerOutcome::Skipped,
+            latency_ms: None,
+            entries_sent: 0,
+            budget_ms: 0,
+        });
+    }
+    reported.sort_by_key(|outcome| outcome.peer);
+    reported
+}
+
+/// One peer's contribution to a push, recorded so the budget model can be fitted against reality.
+///
+/// This is the row `features/social/core/peer-reachability.ts` learns from, and it is deliberately
+/// per-peer-per-push rather than aggregated: the model conditions on `(peer, presence state)`, and
+/// an aggregate `peers_finished` count cannot say WHICH peer answered or how long it took. Without
+/// these rows no predictor can be validated, which is why they land before the budgets do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerPushOutcome {
+    /// The peer's endpoint id.
+    pub peer: [u8; 32],
+    /// What it did.
+    pub outcome: PeerOutcome,
+    /// Time from `start_sync` to this peer reporting. `None` when it never did.
+    pub latency_ms: Option<u64>,
+    /// Entries handed to THIS peer. Zero unless [`PeerOutcome::Finished`].
+    pub entries_sent: u64,
+    /// The deadline this peer was granted, so a truncated dial is distinguishable from a real one.
+    pub budget_ms: u64,
 }
 
 /// Who served an author's slot in the most recent reconciliation that carried it.
@@ -922,29 +1020,76 @@ impl TrailDocs {
     pub async fn push(
         &self,
         ns: NamespaceId,
-        peers: Vec<EndpointAddr>,
+        peers: Vec<(EndpointAddr, Duration)>,
     ) -> Result<Option<PushReport>> {
         let doc = self.doc_for(ns).await?;
         let mut events = doc.subscribe().await?;
-        let expected_peers = peers.len();
-        doc.start_sync(peers).await?;
 
-        // One overall budget rather than one per event. The old per-event timeout was harmless
-        // while this returned at the first `SyncFinished`; now that it waits for the others, a
-        // per-event bound would multiply by the peer count and blow a headless wake's budget.
-        let deadline = Instant::now() + Duration::from_secs(PUSH_TIMEOUT_SECS);
+        let started_at = Instant::now();
+        // Per-peer deadlines rather than one budget for the whole exchange. The old single
+        // `PUSH_TIMEOUT_SECS` deadline broke only when every dialled peer had reported, so ONE
+        // asleep phone cost the full 30s even though the stash and an awake friend had both
+        // answered in about a second — measured as 74% of all pushes, 41.7 hours a week.
+        //
+        // A budget is a DEADLINE, not a wait: a peer granted 20s that answers in 400ms costs
+        // 400ms. Being generous costs nothing; the saving comes from granting a peer we expect to
+        // stay silent a budget of zero, which drops it from `pending` before the loop even starts.
+        let mut pending: HashMap<[u8; 32], Instant> = HashMap::new();
+        let mut budgets: HashMap<[u8; 32], u64> = HashMap::new();
+        let mut skipped: Vec<[u8; 32]> = Vec::new();
+        let mut addrs: Vec<EndpointAddr> = Vec::with_capacity(peers.len());
+        for (addr, budget) in peers {
+            let peer = *addr.id.as_bytes();
+            budgets.insert(peer, budget.as_millis() as u64);
+            if budget.is_zero() {
+                skipped.push(peer);
+                continue;
+            }
+            pending.insert(peer, started_at + budget);
+            addrs.push(addr);
+        }
+
         let mut report = PushReport::default();
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
+        // Nobody was worth waiting for. Still hand the data to the live engine — `start_sync` marks
+        // the namespace syncing, so these peers reconcile on their own whenever they next wake —
+        // but do not hold a background wake open watching for events that will not come.
+        if addrs.is_empty() {
+            doc.start_sync(Vec::new()).await?;
+            report.per_peer = finish_outcomes(Vec::new(), &[], &skipped, &budgets);
+            return Ok(Some(report));
+        }
+        doc.start_sync(addrs).await?;
+
+        while !pending.is_empty() {
+            // The loop's own deadline is the LAST peer deadline still outstanding — anything
+            // shorter would abandon a peer still inside its budget.
+            let now = Instant::now();
+            let next = pending.values().copied().max().unwrap_or(now);
+            let remaining = next.saturating_duration_since(now);
             if remaining.is_zero() {
                 break;
             }
             match timeout(remaining, events.next()).await {
                 Ok(Some(Ok(LiveEvent::SyncFinished(ev)))) => {
+                    let peer = *ev.peer.as_bytes();
+                    let latency_ms = started_at.elapsed().as_millis() as u64;
+                    let budget_ms = budgets.get(&peer).copied().unwrap_or_default();
+                    // A peer we granted no budget can still report — `start_sync` was never told
+                    // about it, but a live-engine event for it may already be in flight. Record it
+                    // rather than dropping it: it is free evidence for the model.
+                    pending.remove(&peer);
                     match &ev.result {
                         Ok(details) => {
-                            report.entries_sent += details.entries_sent as u64;
+                            let sent = details.entries_sent as u64;
+                            report.entries_sent += sent;
                             report.peers_finished += 1;
+                            report.per_peer.push(PeerPushOutcome {
+                                peer,
+                                outcome: PeerOutcome::Finished,
+                                latency_ms: Some(latency_ms),
+                                entries_sent: sent,
+                                budget_ms,
+                            });
                         }
                         Err(err) => {
                             // One unreachable peer isn't the end of the exchange — keep waiting
@@ -952,27 +1097,31 @@ impl TrailDocs {
                             tracing::warn!(
                                 peer = %ev.peer.fmt_short(),
                                 error = %err,
+                                latency_ms,
                                 "trail.push: reconciliation with peer failed"
                             );
                             report.peers_failed += 1;
+                            report.per_peer.push(PeerPushOutcome {
+                                peer,
+                                outcome: PeerOutcome::Failed,
+                                latency_ms: Some(latency_ms),
+                                entries_sent: 0,
+                                budget_ms,
+                            });
                         }
-                    }
-                    // Every peer we dialled has now reported one way or the other.
-                    if report.peers_finished + report.peers_failed >= expected_peers {
-                        break;
                     }
                 }
                 Ok(Some(Ok(_))) => continue,
                 Ok(Some(Err(err))) => return Err(err),
-                // Stream ended or nothing more arrived in time. The namespace is still marked
-                // syncing, so later writes in this process broadcast — we just cannot confirm the
-                // peers that stayed silent.
+                // Stream ended, or the last outstanding budget expired. Either way the peers still
+                // in `pending` never spoke. The namespace stays marked syncing, so later writes in
+                // this process broadcast — we just cannot confirm them here.
                 Ok(None) | Err(_) => break,
             }
         }
-        if report.peers_finished == 0 && report.peers_failed == 0 {
-            return Ok(None);
-        }
+
+        let outstanding: Vec<[u8; 32]> = pending.keys().copied().collect();
+        report.per_peer = finish_outcomes(report.per_peer, &outstanding, &skipped, &budgets);
         Ok(Some(report))
     }
 
@@ -1142,6 +1291,121 @@ mod tests {
     use super::*;
 
     // ── key encoding round-trip ──────────────────────────────────────────────────────────
+    // ── per-peer push accounting ─────────────────────────────────────────────────────────
+
+    fn budget_map(entries: &[([u8; 32], u64)]) -> HashMap<[u8; 32], u64> {
+        entries.iter().copied().collect()
+    }
+
+    fn finished(peer: [u8; 32], latency_ms: u64, entries: u64) -> PeerPushOutcome {
+        PeerPushOutcome {
+            peer,
+            outcome: PeerOutcome::Finished,
+            latency_ms: Some(latency_ms),
+            entries_sent: entries,
+            budget_ms: 5_000,
+        }
+    }
+
+    #[test]
+    fn silent_peers_are_recorded_even_when_nobody_answered() {
+        // The most informative row there is: every peer stayed quiet. An earlier draft returned
+        // `None` here and threw the whole push away.
+        let a = [0xaau8; 32];
+        let b = [0xbbu8; 32];
+        let out = finish_outcomes(
+            Vec::new(),
+            &[a, b],
+            &[],
+            &budget_map(&[(a, 5_000), (b, 7_000)]),
+        );
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|p| p.outcome == PeerOutcome::Silent));
+        assert!(out.iter().all(|p| p.latency_ms.is_none()));
+        // The budget each one was granted survives, so a truncated dial stays distinguishable.
+        assert_eq!(out.iter().find(|p| p.peer == b).unwrap().budget_ms, 7_000);
+    }
+
+    #[test]
+    fn skipped_is_not_filed_as_silence() {
+        // Silence is a fact about the peer; skipped is a fact about our prediction. Conflating
+        // them would hide a predictor that had become too aggressive.
+        let dialled = [0x01u8; 32];
+        let declined = [0x02u8; 32];
+        let out = finish_outcomes(
+            vec![finished(dialled, 400, 2)],
+            &[],
+            &[declined],
+            &budget_map(&[(dialled, 5_000)]),
+        );
+        let declined_row = out.iter().find(|p| p.peer == declined).unwrap();
+        assert_eq!(declined_row.outcome, PeerOutcome::Skipped);
+        assert_eq!(declined_row.budget_ms, 0);
+        assert!(declined_row.latency_ms.is_none());
+    }
+
+    #[test]
+    fn answered_peers_keep_their_latency_and_entries() {
+        let peer = [0x07u8; 32];
+        let out = finish_outcomes(
+            vec![finished(peer, 913, 3)],
+            &[],
+            &[],
+            &budget_map(&[(peer, 5_000)]),
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].latency_ms, Some(913));
+        assert_eq!(out[0].entries_sent, 3);
+        assert_eq!(out[0].outcome, PeerOutcome::Finished);
+    }
+
+    #[test]
+    fn every_dialled_peer_appears_exactly_once() {
+        // The measured shape: stash and one friend answer, one parked phone never does, and one
+        // peer we predicted asleep was never dialled at all.
+        let stash = [0x10u8; 32];
+        let awake = [0x20u8; 32];
+        let asleep = [0x30u8; 32];
+        let declined = [0x40u8; 32];
+        let out = finish_outcomes(
+            vec![finished(stash, 800, 1), finished(awake, 1_100, 1)],
+            &[asleep],
+            &[declined],
+            &budget_map(&[(stash, 5_700), (awake, 7_200), (asleep, 2_500)]),
+        );
+        assert_eq!(out.len(), 4);
+        let mut peers: Vec<[u8; 32]> = out.iter().map(|p| p.peer).collect();
+        let sorted = {
+            let mut copy = peers.clone();
+            copy.sort_unstable();
+            copy
+        };
+        assert_eq!(peers, sorted, "outcomes must be in a stable order");
+        peers.dedup();
+        assert_eq!(peers.len(), 4, "no peer may be double-counted");
+        assert_eq!(
+            out.iter()
+                .filter(|p| p.outcome == PeerOutcome::Silent)
+                .count(),
+            1
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|p| p.outcome == PeerOutcome::Skipped)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn outcome_names_are_stable_across_the_ffi_boundary() {
+        // JS matches on these strings to fold observations; renaming one silently stops learning.
+        assert_eq!(PeerOutcome::Finished.as_str(), "finished");
+        assert_eq!(PeerOutcome::Failed.as_str(), "failed");
+        assert_eq!(PeerOutcome::Silent.as_str(), "silent");
+        assert_eq!(PeerOutcome::Skipped.as_str(), "skipped");
+    }
+
     #[test]
     fn key_round_trip() {
         let author = [0xabu8; 32];

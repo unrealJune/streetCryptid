@@ -291,6 +291,63 @@ phones land here — this is the network-state view when sync dies after a wifi�
 
 From any span, "Logs for this span" (trace→logs) jumps to that instance's logs around the span.
 
+## Tuning the per-peer dial budget
+
+Every durable push now grants each peer its **own** deadline, predicted by
+`src/features/social/core/peer-reachability.ts`. These spans exist so the prediction can be scored
+against what actually happened and the priors refitted; they are the reason the model is not
+permanently a guess.
+
+Two spans per peer per push, and you need both — they carry different halves of the row:
+
+- **`trail.push.peer`** (`streetcryptid-core`, Rust) — what the peer DID.
+  `peer.outcome` (`finished` | `failed` | `silent` | `skipped`), `peer.latency_ms`,
+  `peer.budget_ms`, `peer.answered`, `entries_sent`, `sc.peer`.
+- **`trail.push.peer.app`** (`streetcryptid-app`, JS) — what we BELIEVED, plus the conditioning
+  variable Rust cannot see. `peer.presence` (the `PresenceState` the budget was chosen from),
+  `peer.kind`, `peer.predicted_answer_rate`, `peer.samples`, and the same outcome fields.
+
+`peer.presence` is the column the whole model turns on: "parked" means a live process on an Android
+phone behind the location foreground service and no process at all on a suspended iPhone, so the
+answer rate has to be read per state, never pooled.
+
+```traceql
+# Who actually answers, by presence state — the table the priors should be fitted to.
+{ name = "trail.push.peer.app" && span.peer.presence = "parked" }
+{ name = "trail.push.peer.app" && span.peer.presence = "parked" && span.peer.outcome = "finished" }
+
+# Silence vs refusal. `silent` is the peer's doing; `skipped` is ours.
+{ name = "trail.push.peer.app" && span.peer.outcome = "silent" }
+{ name = "trail.push.peer.app" && span.peer.outcome = "skipped" }
+
+# Was the model WRONG to wait? High predicted rate, nothing back.
+{ name = "trail.push.peer.app" && span.peer.predicted_answer_rate > 0.6 && span.peer.outcome = "silent" }
+
+# Was the model wrong to give up? A peer we skipped that a later push found reachable.
+{ name = "trail.push.peer.app" && span.peer.outcome = "skipped" }
+
+# Budget truncation: answered, but only just inside its deadline. If this is common the ceiling
+# (MAX_DIAL_BUDGET_MS) is too tight.
+{ name = "trail.push.peer" && span.peer.answered = true && span.peer.latency_ms > 10000 }
+
+# What each push cost overall, and how many peers it declined to wait for.
+{ name = "trail.push.app" } | select(span.push.budget_max_ms, span.push.peers_skipped)
+{ name = "trail.push" } | select(span.peers_finished, span.peers_silent, span.peers_skipped)
+```
+
+**Reading it.** Group `trail.push.peer.app` by `peer.presence` and compare the share of
+`finished` against `peer.predicted_answer_rate`: where they diverge, `PRESENCE_PRIOR` in
+`peer-reachability.ts` is wrong and should be moved towards the observed rate. Latency percentiles
+over `peer.latency_ms` (answered rows only — a timeout says nothing about how slow a peer is) set
+`MAX_DIAL_BUDGET_MS`.
+
+**A caution about `durationMs`.** Tempo's `/api/search` returns the duration of the **trace**, not
+of the span you matched. Reading it as the span's duration attributes the whole `bg.refresh` wake
+to whatever child you searched for — which is exactly how an early pass at this mis-blamed
+`trail.sync.app` (p50 571ms) for costs that belonged to `trail.push` (p50 30s). Take
+`spanSets[].spans[].durationNanos`, or read `peer.latency_ms` here, which is unambiguous. The
+`trail.push.peer` span's own duration is meaningless — it is opened and closed after the fact.
+
 ## Reading a dropped ping, end to end
 
 1. **Did the phone even wake?** Filter `{ name = "bg.wake" }` for device A's

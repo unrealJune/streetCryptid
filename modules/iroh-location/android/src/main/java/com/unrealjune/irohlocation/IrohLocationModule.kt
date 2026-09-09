@@ -300,6 +300,26 @@ private fun ingestOutcomeToMap(o: IngestOutcome): Map<String, Any?> =
 
 class IrohLocationModule : Module() {
   private var node: LocationNode? = null
+
+  /**
+   * How many callers currently hold the node.
+   *
+   * The node is process-wide (one `LocationNode` per process) but its callers are not: a mounted
+   * app and a headless task session can both want it, and expo-task-manager restores its persisted
+   * tasks at module scope, *before* React mounts, so the overlap is routine rather than exotic.
+   * `createNode` used to `clearRuntime()` unconditionally, which meant the second caller destroyed
+   * the first one's node — and silently, because JS kept a non-null handle: `readTrail` resolved
+   * `[]`, `safeDocTicket` returned null, and every button that reached native threw. The app
+   * rendered, the map panned, and nothing worked until relaunch.
+   *
+   * JS bounded that race with a 5s wait before creating the node. Measured over 7 days that wait
+   * timed out on **11 of 11** launches that hit it — it never once resolved in time — so the
+   * mitigation was reliably paying 5s of splash and then clobbering anyway.
+   *
+   * Refcounting removes the race instead of timing it: a second `createNode` for the same identity
+   * adopts the live node, and `shutdown` only tears down when the last holder releases.
+   */
+  private var nodeRefs: Int = 0
   private val subs = mutableMapOf<String, Subscription>()
   private var multicastLock: WifiManager.MulticastLock? = null
   private var secretsStore: KeystoreDeviceSecrets? = null
@@ -452,7 +472,26 @@ class IrohLocationModule : Module() {
     multicastLock = null
   }
 
+  /**
+   * Whether the live node was built for [identityHex], so it can be adopted rather than rebuilt.
+   *
+   * A null [identityHex] means "use whatever is stored", which is how the running node was built
+   * too, so it matches. A non-null one must equal the live node's secret: adopting across a real
+   * identity change would silently run the app as the wrong device.
+   */
+  private fun nodeMatchesIdentity(identityHex: String?): Boolean {
+    val current = node ?: return false
+    if (identityHex.isNullOrEmpty()) return true
+    return identityHex.hexToBytes().contentEquals(current.identitySecret())
+  }
+
+  /**
+   * Tear the node down unconditionally, regardless of who still holds it.
+   *
+   * Only for the paths that genuinely must rebuild — a different identity, or the last release.
+   */
   private suspend fun clearRuntime() {
+    nodeRefs = 0
     subs.values.forEach { it.destroy() }
     subs.clear()
     unregisterNetworkCallback()
@@ -529,8 +568,29 @@ class IrohLocationModule : Module() {
       IrohAndroidBootstrap.install(context)
     }
 
+    /**
+     * Whether this binary refcounts the node instead of clobbering it on a second `createNode`.
+     *
+     * A capability probe rather than a version check, because a phone can be running an older
+     * binary than the JS bundle. JS uses it to decide whether the pre-`createNode` idle wait is
+     * still needed; see `awaitRuntimeIdleBounded` in `location-sharing.ts`.
+     */
+    AsyncFunction("nativeRuntimeAdoptsNode") { -> true }
+
     AsyncFunction("createNode") Coroutine
       { identityHex: String?, recvHex: String? ->
+        // Adopt rather than rebuild. The node is process-wide; the callers are not. See `nodeRefs`.
+        val adopted = node?.takeIf { nodeMatchesIdentity(identityHex) }
+        if (adopted != null) {
+          nodeRefs += 1
+          return@Coroutine mapOf(
+            "endpointId" to adopted.endpointId().toHex(),
+            "identitySecret" to adopted.identitySecret().toHex(),
+            "recvSecret" to adopted.recvSecret().toHex(),
+            "recvPublic" to adopted.recvPublic().toHex(),
+          )
+        }
+        // Either there is no node, or it belongs to a different identity and must not be adopted.
         clearRuntime()
         val context = checkNotNull(
           appContext.reactContext?.applicationContext
@@ -549,6 +609,7 @@ class IrohLocationModule : Module() {
           File(context.filesDir, "streetcryptid").absolutePath,
         )
         node = n
+        nodeRefs = 1
         mapOf(
           "endpointId" to n.endpointId().toHex(),
           "identitySecret" to n.identitySecret().toHex(),
@@ -567,7 +628,13 @@ class IrohLocationModule : Module() {
 
     AsyncFunction("shutdown") Coroutine
       { ->
-        clearRuntime()
+        // Release this caller's hold; only the last one out actually tears the node down. A
+        // headless session ending must not null the node the mounted app is using, which is the
+        // same clobber as before with the two sides swapped.
+        nodeRefs -= 1
+        if (nodeRefs <= 0) {
+          clearRuntime()
+        }
         Unit
       }
 

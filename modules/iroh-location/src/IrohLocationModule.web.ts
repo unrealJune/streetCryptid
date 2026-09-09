@@ -28,6 +28,8 @@ import type {
   TrailReplicaAuthor,
   TransportDiagnostics,
   TransportConfig,
+  NativePeerDial,
+  NativePeerPushReport,
 } from './IrohLocation.types';
 
 const ID_KEY = 'sc.iroh.identitySecret';
@@ -241,6 +243,22 @@ export class IrohLocationNativeModule
   async pushTrail(peerTickets: string[], _traceparent?: string | null): Promise<void> {
     await ensureWasm();
     await this.requireNode().push_trail(peerTickets);
+  }
+
+  /**
+   * Budgets are ignored here: the wasm node has no per-peer deadline plumbing, and the web build
+   * is never a background sender, so the cost this model exists to remove is not paid on web. The
+   * rows are still returned so a web caller folds the same observations as a device would.
+   */
+  async pushTrailBudgeted(
+    peers: NativePeerDial[],
+    _traceparent?: string | null
+  ): Promise<NativePeerPushReport[]> {
+    await this.pushTrail(
+      peers.map((peer) => peer.ticket),
+      _traceparent
+    );
+    return [];
   }
 
   // NOTE: `docsWriteControl` / `readControl` are deliberately NOT implemented here, and are

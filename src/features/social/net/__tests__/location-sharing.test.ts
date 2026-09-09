@@ -47,7 +47,21 @@ class FakeNativeModule {
   /** Endpoint ids whose next `pollResync` should report a session installed. */
   readonly resyncSucceeds = new Set<string>();
 
+  /** Set false to model a binary that still clobbers the node on a second `createNode`. */
+  adoptsNode = true;
+  /** Set true to model a binary predating the capability probe entirely. */
+  omitAdoptionProbe = false;
+  adoptionProbes = 0;
+  createNodeCalls = 0;
+
+  async nativeRuntimeAdoptsNode(): Promise<boolean> {
+    if (this.omitAdoptionProbe) throw new Error('nativeRuntimeAdoptsNode is not a function');
+    this.adoptionProbes += 1;
+    return this.adoptsNode;
+  }
+
   async createNode() {
+    this.createNodeCalls += 1;
     return { endpointId: 'aa11', identitySecret: 'ii', recvSecret: 'rr', recvPublic: 'rp' };
   }
   async start() {}
@@ -1065,5 +1079,71 @@ describe('LocationSharingService — session health and resync', () => {
     await svc.removeFriend(friend.endpointId);
 
     expect(mockHolder.mod.calls.forgetSession).toEqual([friend.endpointId]);
+  });
+});
+
+describe('LocationSharingService — the read path does not need the node', () => {
+  beforeEach(() => {
+    mockHolder.mod = new FakeNativeModule();
+    mockHolder.stashConfig = null;
+    setTelemetryForTesting(undefined);
+    resetEventLogForTesting();
+  });
+
+  it('hydrates friends from storage without creating a node', async () => {
+    // The decoupling in one assertion: everything the map draws is on disk, so it must be
+    // reachable before `init()` builds a node, starts it, and answers two permission prompts.
+    const svc = makeService();
+    await svc.hydrateFromStore();
+    expect(mockHolder.mod.createNodeCalls).toBe(0);
+  });
+
+  it('is idempotent, so repeated mounts cost one read', async () => {
+    const svc = makeService();
+    await svc.hydrateFromStore();
+    await svc.hydrateFromStore();
+    expect(mockHolder.mod.createNodeCalls).toBe(0);
+  });
+
+  it('never clobbers a pool that init() already populated', async () => {
+    // `init()` is the source of truth; hydration only fills the gap before it. Running late must
+    // not roll a live pool back to whatever was last persisted.
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+    const before = svc.snapshot().friends.map((f) => f.endpointId);
+    await svc.hydrateFromStore();
+    expect(svc.snapshot().friends.map((f) => f.endpointId)).toEqual(before);
+  });
+});
+
+describe('LocationSharingService — native node adoption', () => {
+  beforeEach(() => {
+    mockHolder.mod = new FakeNativeModule();
+    mockHolder.stashConfig = null;
+    setTelemetryForTesting(undefined);
+    resetEventLogForTesting();
+  });
+
+  it('probes the binary for node adoption on an interactive start', async () => {
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    expect(mockHolder.mod.adoptionProbes).toBeGreaterThan(0);
+  });
+
+  it('still starts on a binary that clobbers, where the idle wait is still required', async () => {
+    mockHolder.mod.adoptsNode = false;
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    expect(mockHolder.mod.createNodeCalls).toBe(1);
+  });
+
+  it('still starts on a binary predating the probe entirely', async () => {
+    // A phone can be running an older binary than the JS bundle, so absence must degrade to the
+    // old behaviour rather than throwing on the launch path.
+    mockHolder.mod.omitAdoptionProbe = true;
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    expect(mockHolder.mod.createNodeCalls).toBe(1);
   });
 });

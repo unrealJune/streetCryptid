@@ -403,11 +403,44 @@ public final class IrohLocationModule: Module {
   private var subscriptions: [String: Subscription] = [:]
   private var bridges: [String: EventBridge] = [:]
 
+  /// How many callers currently hold the node.
+  ///
+  /// The node is process-wide (one `LocationNode` per process) but its callers are not: a mounted
+  /// app and a headless task session can both want it, and expo-task-manager restores its
+  /// persisted tasks at module scope, *before* React mounts, so the overlap is routine rather than
+  /// exotic. `createNode` used to `clearRuntime()` unconditionally, which meant the second caller
+  /// destroyed the first one's node — and silently, because JS kept a non-nil handle: `readTrail`
+  /// resolved `[]`, `safeDocTicket` returned nil, and every button that reached native threw. The
+  /// app rendered, the map panned, and nothing worked until relaunch.
+  ///
+  /// JS bounded that race with a 5s wait before creating the node. Measured over 7 days that wait
+  /// timed out on **11 of 11** launches that hit it — it never once resolved in time — so the
+  /// mitigation was reliably paying 5s of splash and then clobbering anyway.
+  ///
+  /// Refcounting removes the race instead of timing it: a second `createNode` for the same identity
+  /// adopts the live node, and `shutdown` only tears down when the last holder releases.
+  private var nodeRefs: Int = 0
+
+  /// Tear the node down unconditionally, regardless of who still holds it.
+  ///
+  /// Only for the paths that genuinely must rebuild — a different identity, or the last release.
   private func clearRuntime() async throws {
     subscriptions.removeAll()
     bridges.removeAll()
     try await node?.shutdown()
     node = nil
+    nodeRefs = 0
+  }
+
+  /// Whether the live node was built for `identityHex`, so it can be adopted rather than rebuilt.
+  ///
+  /// A nil `identityHex` means "use whatever is stored", which is how the running node was built
+  /// too, so it matches. A non-nil one must equal the live node's secret: adopting across a real
+  /// identity change would silently run the app as the wrong device.
+  private func nodeMatchesIdentity(_ identityHex: String?) -> Bool {
+    guard let node = self.node else { return false }
+    guard let identityHex, !identityHex.isEmpty else { return true }
+    return hexToData(identityHex) == node.identitySecret()
   }
 
   public func definition() -> ModuleDefinition {
@@ -417,7 +450,27 @@ public final class IrohLocationModule: Module {
     // here instead. See `BackgroundLocationRuntime.eventSink`.
     Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix")
 
+    /// Whether this binary refcounts the node instead of clobbering it on a second `createNode`.
+    ///
+    /// A capability probe rather than a version check, because a phone can be running an older
+    /// binary than the JS bundle. JS uses it to decide whether the pre-`createNode` idle wait is
+    /// still needed; see `awaitRuntimeIdleBounded` in `location-sharing.ts`.
+    AsyncFunction("nativeRuntimeAdoptsNode") { () -> Bool in
+      true
+    }
+
     AsyncFunction("createNode") { (identityHex: String?, recvHex: String?) async throws -> [String: String] in
+      // Adopt rather than rebuild. The node is process-wide; the callers are not. See `nodeRefs`.
+      if let existing = self.node, self.nodeMatchesIdentity(identityHex) {
+        self.nodeRefs += 1
+        return [
+          "endpointId": dataToHex(existing.endpointId()),
+          "identitySecret": dataToHex(existing.identitySecret()),
+          "recvSecret": dataToHex(existing.recvSecret()),
+          "recvPublic": dataToHex(existing.recvPublic()),
+        ]
+      }
+      // Either there is no node, or it belongs to a different identity and must not be adopted.
       try await self.clearRuntime()
       let roots = nodeStorageRoots()
       // Stamp the exclusion *before* the node can write a session into it — a blob that is
@@ -432,6 +485,7 @@ public final class IrohLocationModule: Module {
         dataRoot: roots.data.path,
         stateRoot: roots.state.path)
       self.node = node
+      self.nodeRefs = 1
       return [
         "endpointId": dataToHex(node.endpointId()),
         "identitySecret": dataToHex(node.identitySecret()),
@@ -450,7 +504,13 @@ public final class IrohLocationModule: Module {
     }
 
     AsyncFunction("shutdown") { () async throws in
-      try await self.clearRuntime()
+      // Release this caller's hold; only the last one out actually tears the node down. A headless
+      // session ending must not nil the node the mounted app is using, which is the same clobber
+      // as before with the two sides swapped.
+      self.nodeRefs -= 1
+      if self.nodeRefs <= 0 {
+        try await self.clearRuntime()
+      }
     }
 
     // MARK: - Device identity (the background drain path's own copy)

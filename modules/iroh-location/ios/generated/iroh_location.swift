@@ -1615,6 +1615,22 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func pushTrail(peerTickets: [String], traceparent: String?) async throws 
     
     /**
+     * Push our trail to each peer with **its own deadline**, and report what each one did.
+     *
+     * The send-side counterpart of the reachability model in
+     * `src/features/social/core/peer-reachability.ts`. JS decides the budgets — it is where
+     * presence lives and where the decision is testable — and this returns the per-peer outcomes
+     * it learns from.
+     *
+     * A budget of zero means "do not wait for this peer". The data is still handed to the live
+     * engine, so the peer reconciles on its own whenever it next wakes; we simply stop holding a
+     * background wake open for a phone we expect to be asleep. That single change is where the
+     * saving is: measured over 7 days, 74% of pushes burned the full 30s budget waiting on peers
+     * that never reported at all, at a cost of 41.7 hours a week.
+     */
+    func pushTrailBudgeted(peers: [PeerDial], traceparent: String?) async throws  -> [PeerPushReport]
+    
+    /**
      * Read `author`'s current control message, if we can open it. Returns an empty vec when
      * there is none, when it is addressed to someone else, or when the content has not
      * replicated locally yet — all indistinguishable and all "nothing to act on".
@@ -3117,6 +3133,37 @@ open func pushTrail(peerTickets: [String], traceparent: String?)async throws   {
             completeFunc: ffi_iroh_location_rust_future_complete_void,
             freeFunc: ffi_iroh_location_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Push our trail to each peer with **its own deadline**, and report what each one did.
+     *
+     * The send-side counterpart of the reachability model in
+     * `src/features/social/core/peer-reachability.ts`. JS decides the budgets — it is where
+     * presence lives and where the decision is testable — and this returns the per-peer outcomes
+     * it learns from.
+     *
+     * A budget of zero means "do not wait for this peer". The data is still handed to the live
+     * engine, so the peer reconciles on its own whenever it next wakes; we simply stop holding a
+     * background wake open for a phone we expect to be asleep. That single change is where the
+     * saving is: measured over 7 days, 74% of pushes burned the full 30s budget waiting on peers
+     * that never reported at all, at a cost of 41.7 hours a week.
+     */
+open func pushTrailBudgeted(peers: [PeerDial], traceparent: String?)async throws  -> [PeerPushReport]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_push_trail_budgeted(
+                    self.uniffiCloneHandle(),
+                    FfiConverterSequenceTypePeerDial.lower(peers),FfiConverterOptionString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypePeerPushReport.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -5991,6 +6038,186 @@ public func FfiConverterTypePairStateRecord_lower(_ value: PairStateRecord) -> R
 
 
 /**
+ * One peer to push to, and how long it is worth waiting for.
+ *
+ * Produced by `dialBudgetMs` in `src/features/social/core/peer-reachability.ts`. The budget lives
+ * on the JS side because that is where presence does, and because a pure function over
+ * `(presence, history)` can be tested without a node.
+ */
+public struct PeerDial: Equatable, Hashable {
+    /**
+     * The peer's endpoint ticket, as [`LocationNode::push_trail`] takes them.
+     */
+    public var ticket: String
+    /**
+     * Deadline for this peer. **Zero means do not wait**: the data is still handed to the live
+     * engine so the peer reconciles when it next wakes, but no background wake is held open for
+     * it. See [`LocationNode::push_trail_budgeted`].
+     */
+    public var budgetMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The peer's endpoint ticket, as [`LocationNode::push_trail`] takes them.
+         */ticket: String, 
+        /**
+         * Deadline for this peer. **Zero means do not wait**: the data is still handed to the live
+         * engine so the peer reconciles when it next wakes, but no background wake is held open for
+         * it. See [`LocationNode::push_trail_budgeted`].
+         */budgetMs: UInt64) {
+        self.ticket = ticket
+        self.budgetMs = budgetMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PeerDial: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePeerDial: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PeerDial {
+        return
+            try PeerDial(
+                ticket: FfiConverterString.read(from: &buf), 
+                budgetMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PeerDial, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.ticket, into: &buf)
+        FfiConverterUInt64.write(value.budgetMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePeerDial_lift(_ buf: RustBuffer) throws -> PeerDial {
+    return try FfiConverterTypePeerDial.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePeerDial_lower(_ value: PeerDial) -> RustBuffer {
+    return FfiConverterTypePeerDial.lower(value)
+}
+
+
+/**
+ * What one peer did during a push, handed back so JS can fold it into its estimate.
+ *
+ * Mirrors `PeerObservation` in `src/features/social/core/peer-reachability.ts`.
+ */
+public struct PeerPushReport: Equatable, Hashable {
+    /**
+     * Full lowercase hex endpoint id, directly comparable to `friend.endpointId`.
+     */
+    public var peer: String
+    /**
+     * `finished` | `failed` | `silent` | `skipped`. See `docs::PeerOutcome` for why the last two
+     * are not the same thing.
+     */
+    public var outcome: String
+    /**
+     * Time from `start_sync` to this peer reporting. Absent when it never did.
+     */
+    public var latencyMs: UInt64?
+    /**
+     * Entries handed to THIS peer. Zero unless `outcome` is `finished`.
+     */
+    public var entriesSent: UInt64
+    /**
+     * The deadline this peer was granted, so a truncated dial is distinguishable from a real one.
+     */
+    public var budgetMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Full lowercase hex endpoint id, directly comparable to `friend.endpointId`.
+         */peer: String, 
+        /**
+         * `finished` | `failed` | `silent` | `skipped`. See `docs::PeerOutcome` for why the last two
+         * are not the same thing.
+         */outcome: String, 
+        /**
+         * Time from `start_sync` to this peer reporting. Absent when it never did.
+         */latencyMs: UInt64?, 
+        /**
+         * Entries handed to THIS peer. Zero unless `outcome` is `finished`.
+         */entriesSent: UInt64, 
+        /**
+         * The deadline this peer was granted, so a truncated dial is distinguishable from a real one.
+         */budgetMs: UInt64) {
+        self.peer = peer
+        self.outcome = outcome
+        self.latencyMs = latencyMs
+        self.entriesSent = entriesSent
+        self.budgetMs = budgetMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PeerPushReport: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePeerPushReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PeerPushReport {
+        return
+            try PeerPushReport(
+                peer: FfiConverterString.read(from: &buf), 
+                outcome: FfiConverterString.read(from: &buf), 
+                latencyMs: FfiConverterOptionUInt64.read(from: &buf), 
+                entriesSent: FfiConverterUInt64.read(from: &buf), 
+                budgetMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PeerPushReport, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.peer, into: &buf)
+        FfiConverterString.write(value.outcome, into: &buf)
+        FfiConverterOptionUInt64.write(value.latencyMs, into: &buf)
+        FfiConverterUInt64.write(value.entriesSent, into: &buf)
+        FfiConverterUInt64.write(value.budgetMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePeerPushReport_lift(_ buf: RustBuffer) throws -> PeerPushReport {
+    return try FfiConverterTypePeerPushReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePeerPushReport_lower(_ value: PeerPushReport) -> RustBuffer {
+    return FfiConverterTypePeerPushReport.lower(value)
+}
+
+
+/**
  * Iroh's current address knowledge for one requested peer.
  */
 public struct PeerTransportDiagnostic: Equatable, Hashable {
@@ -7773,6 +8000,56 @@ fileprivate struct FfiConverterSequenceTypePairStateRecord: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypePeerDial: FfiConverterRustBuffer {
+    typealias SwiftType = [PeerDial]
+
+    public static func write(_ value: [PeerDial], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePeerDial.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PeerDial] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PeerDial]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePeerDial.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePeerPushReport: FfiConverterRustBuffer {
+    typealias SwiftType = [PeerPushReport]
+
+    public static func write(_ value: [PeerPushReport], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePeerPushReport.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PeerPushReport] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PeerPushReport]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePeerPushReport.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePeerTransportDiagnostic: FfiConverterRustBuffer {
     typealias SwiftType = [PeerTransportDiagnostic]
 
@@ -8408,6 +8685,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_push_trail() != 39469) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_push_trail_budgeted() != 15776) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_read_control() != 32699) {

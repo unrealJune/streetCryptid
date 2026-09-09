@@ -486,6 +486,33 @@ export type IrohLocationEvents = {
 };
 
 /** The callable surface of the native module. */
+/** One peer to push to, and how long it is worth waiting for. Mirrors Rust `PeerDial`. */
+export interface NativePeerDial {
+  /** The peer's endpoint ticket. */
+  ticket: string;
+  /** Deadline for this peer. **Zero means do not wait** — see `pushTrailBudgeted`. */
+  budgetMs: number;
+}
+
+/**
+ * What one peer did during a push. Mirrors Rust `PeerPushReport`.
+ *
+ * `silent` and `skipped` are deliberately distinct: silence is a fact about the PEER (it was
+ * dialled and never answered), while skipped is a fact about US (we predicted it would not answer
+ * and declined to wait). Conflating them would hide a predictor that had become too aggressive.
+ */
+export interface NativePeerPushReport {
+  /** Full lowercase hex endpoint id, directly comparable to `friend.endpointId`. */
+  peer: string;
+  outcome: 'finished' | 'failed' | 'silent' | 'skipped';
+  /** Time from `start_sync` to this peer reporting. Absent when it never did. */
+  latencyMs?: number | null;
+  /** Entries handed to THIS peer. Zero unless `outcome` is `finished`. */
+  entriesSent: number;
+  /** The deadline this peer was granted. */
+  budgetMs: number;
+}
+
 export interface IrohLocationApi {
   /**
    * Create (or restore) the device node. Pass `null` to generate fresh keys; then
@@ -835,7 +862,38 @@ export interface IrohLocationApi {
    * OPTIONAL: absent on iOS bindings generated before this API existed (Swift bindings only
    * regenerate on macOS), so callers must guard with `typeof mod.pushTrail === 'function'`.
    */
+  /**
+   * Whether this binary refcounts the process-wide node instead of clobbering it.
+   *
+   * When true, a second `createNode` for the same identity ADOPTS the live node and `shutdown`
+   * only tears it down on the last release — so a mounted app and a headless session can overlap
+   * safely and the pre-`createNode` idle wait is unnecessary.
+   *
+   * OPTIONAL, and absence is the answer: a binary without it clobbers, so callers must keep
+   * waiting. Guard with `typeof mod.nativeRuntimeAdoptsNode === 'function'`.
+   */
+  nativeRuntimeAdoptsNode?(): Promise<boolean>;
   pushTrail?(peerTickets: string[], traceparent?: string | null): Promise<void>;
+  /**
+   * Push OUR trail namespace to each peer with **its own deadline**, and report what each did.
+   *
+   * The budgeted form of {@link pushTrail}, and the one the reachability model drives. A budget of
+   * `0` means "do not wait for this peer": the data is still handed to the live engine so the peer
+   * reconciles whenever it next wakes, but no background wake is held open for it.
+   *
+   * That distinction is the whole saving. Measured over 7 days, 74% of pushes burned the full 30s
+   * budget with `peers_failed = 0` — the missing peers had not refused, they had said nothing, and
+   * the old "wait until everyone reports" rule could never be satisfied. 41.7 hours a week.
+   *
+   * The returned rows are what `peer-reachability.ts` learns from; feed each to `foldObservation`.
+   *
+   * OPTIONAL for the same reason as {@link pushTrail}: a phone can be running an older binary than
+   * the JS bundle, so callers must guard with `typeof mod.pushTrailBudgeted === 'function'`.
+   */
+  pushTrailBudgeted?(
+    peers: NativePeerDial[],
+    traceparent?: string | null
+  ): Promise<NativePeerPushReport[]>;
   /** Upload current opaque trail slots to the stash and wait for durable HTTP receipts. */
   uploadTrailContent?(baseUrl: string, psk: string | null): Promise<number>;
   /**
