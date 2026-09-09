@@ -397,7 +397,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
     const link = await svc.createPairInvite(300);
-    expect(link).toMatch(/^streetcryptid:\/\/\/social\?token=/);
+    expect(link).toMatch(/^https:\/\/streetcrypt\.id\/pair#token=/);
 
     await svc.pairFromInput(link);
     expect(mockHolder.mod.calls.initiatePairByToken).toEqual(['scpair2:cafef00d']);

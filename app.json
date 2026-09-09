@@ -16,6 +16,7 @@
       },
       "bundleIdentifier": "com.unrealjune.streetcryptid",
       "supportsTablet": true,
+      "associatedDomains": ["applinks:streetcrypt.id"],
       "config": {
         "usesNonExemptEncryption": false
       },
@@ -49,6 +50,18 @@
             {
               "scheme": "streetcryptid",
               "host": "pair"
+            }
+          ]
+        },
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "category": ["BROWSABLE", "DEFAULT"],
+          "data": [
+            {
+              "scheme": "https",
+              "host": "streetcrypt.id",
+              "pathPrefix": "/pair"
             }
           ]
         }

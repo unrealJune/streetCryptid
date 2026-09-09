@@ -86,7 +86,15 @@ appId: com.unrealjune.streetcryptid
             { timeout: 100000 }
           );
           if (!response.ok) throw new Error('the inviting device never published an invite link');
-          output.invite = response.body;
+          // The app mints an https App Link now, because a messaging app will not linkify a
+          // custom scheme. Universal Links do not resolve through `xcrun simctl openurl` on a
+          // simulator, so the harness converts back to the custom scheme, which both platforms
+          // route straight into the app. What this flow tests is the pairing handshake; link
+          // VERIFICATION is an OS-level property that has to be checked on a real install
+          // (`adb shell pm get-app-links`), not here.
+          var published = response.body;
+          var token = published.match(/[#?]token=([^&]+)/);
+          output.invite = token ? 'streetcryptid:///social?token=' + token[1] : published;
       # openLink shells out to `xcrun simctl openurl` on a simulator (and `am start -a VIEW` on
       # Android), so unlike launchApp it does NOT restart the app.
       - openLink: ${output.invite}

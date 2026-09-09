@@ -3,6 +3,35 @@ import { redirectSystemPath } from '@/app/+native-intent';
 const TOKEN = 'scpair2:deadbeef';
 
 describe('native pair intent rewriting', () => {
+  it('routes the https App Link to the map, reading the token out of the fragment', () => {
+    expect(
+      redirectSystemPath({
+        path: `https://streetcrypt.id/pair#token=${encodeURIComponent(TOKEN)}`,
+        initial: true,
+      })
+    ).toBe(`/?pair=${encodeURIComponent(TOKEN)}`);
+  });
+
+  it('accepts the https App Link with the token in the query too', () => {
+    expect(
+      redirectSystemPath({
+        path: `https://streetcrypt.id/pair?token=${encodeURIComponent(TOKEN)}`,
+        initial: false,
+      })
+    ).toBe(`/?pair=${encodeURIComponent(TOKEN)}`);
+  });
+
+  it('opens the map when a claimed URL carries no usable token', () => {
+    expect(redirectSystemPath({ path: 'https://streetcrypt.id/pair', initial: true })).toBe('/');
+  });
+
+  it('leaves an unrelated https URL alone', () => {
+    // Only /pair is claimed; anything else on the host must reach the browser.
+    expect(redirectSystemPath({ path: 'https://streetcrypt.id/privacy', initial: true })).toBe(
+      'https://streetcrypt.id/privacy'
+    );
+  });
+
   it('routes Android-style host links to the map', () => {
     expect(
       redirectSystemPath({

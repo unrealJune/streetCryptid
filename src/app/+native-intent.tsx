@@ -1,3 +1,5 @@
+import { decodePairLink, isWebPairLink } from '@/features/social/core/pair-link';
+
 interface NativeIntentOptions {
   path: string;
   initial: boolean;
@@ -7,6 +9,12 @@ interface NativeIntentOptions {
  * There is one screen now, so every pair link lands on the map. The map opens the
  * friends island and redeems the token; `/social` no longer exists, but old links
  * in the wild still use it and must keep working.
+ *
+ * Invites now arrive as `https://streetcrypt.id/pair#token=…` — an App Link on
+ * Android, a Universal Link on iOS — because a messaging app only linkifies a
+ * fixed set of schemes and never made the `streetcryptid://` form tappable. That
+ * shape is handled by the codec rather than `URL` here: the token rides in the
+ * fragment, and React Native's `URL` shim does not reliably expose `.hash`.
  *
  * `streetcryptid://dev?cmd=…&id=…` is the second shape: the e2e harness's command
  * channel (`scripts/e2e/lib/device.sh`, `device_dev_command`). It rides the same
@@ -20,6 +28,17 @@ interface NativeIntentOptions {
  * nothing else. Running the command is the map screen's job.
  */
 export function redirectSystemPath({ path }: NativeIntentOptions): string {
+  const trimmed = path.trim();
+  if (isWebPairLink(trimmed)) {
+    try {
+      return `/?pair=${encodeURIComponent(decodePairLink(trimmed))}`;
+    } catch {
+      // A claimed URL with no usable token: the /pair page it would otherwise have
+      // reached is not available to us, so open the map rather than nothing.
+      return '/';
+    }
+  }
+
   try {
     const url = new URL(path, 'streetcryptid:///');
     if (url.protocol !== 'streetcryptid:') return path;
