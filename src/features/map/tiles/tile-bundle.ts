@@ -26,7 +26,10 @@ export interface TileBundleEntry {
 }
 
 export interface TileBundleSource {
-  getBundle(request: TileBundleRequest): Promise<readonly TileBundleEntry[]>;
+  getBundle(
+    request: TileBundleRequest,
+    onStage?: (request: TileBundleRequest, entries: readonly TileBundleEntry[]) => Promise<void>
+  ): Promise<readonly TileBundleEntry[]>;
 }
 
 export function bundleRequestFor(tile: TileCoord, anchorZoom: number): TileBundleRequest {

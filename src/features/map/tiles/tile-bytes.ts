@@ -1,4 +1,5 @@
 import type { TileCoord } from './tile-math';
+import type { TileBundleEntry } from './tile-bundle';
 
 /**
  * The byte-level seam below {@link import('./geometry-source').GeometrySource}:
@@ -13,6 +14,8 @@ export interface TileByteSource {
    * like re-fetching full ones). Rejects on failure.
    */
   getTileBytes(tile: TileCoord, signal?: AbortSignal): Promise<Uint8Array | null>;
+  /** Complete coarse stages from the same fixed-anchor detail streams, never child requests. */
+  getPreviewTiles?(tiles: readonly TileCoord[]): Promise<readonly TileBundleEntry[] | null>;
 }
 
 /** A persisted tile: its bytes (`null` = known-empty) and when it was fetched. */

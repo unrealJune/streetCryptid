@@ -337,6 +337,25 @@ export class MapEngine {
     }
 
     const t0 = now();
+    const streamedPreview =
+      coldStart && spec.tileZoom === 14 && onPreview && this.source.getPreview
+        ? this.source
+            .getPreview(tiles)
+            .then(async (geometry) => {
+              if (!geometry) return;
+              const preview = await this.buildFromGeometry(
+                request,
+                { ...spec, tileZoom: 13 },
+                geometry,
+                { tiles: tiles.length, coldStart: true, sourceMs: now() - t0, mergeMs: 0 }
+              );
+              this.last = preview;
+              onPreview(preview);
+            })
+            .catch((error: unknown) => {
+              console.warn('[map] streamed preview unavailable; waiting for detail:', error);
+            })
+        : Promise.resolve();
     let parts: PackedGeometry[];
     try {
       parts = await Promise.all(
@@ -348,7 +367,9 @@ export class MapEngine {
           })
         )
       );
+      await streamedPreview;
     } catch (error) {
+      await streamedPreview;
       if (this.last) {
         console.warn('[map] tile load failed; retaining available geometry:', error);
         return this.last;

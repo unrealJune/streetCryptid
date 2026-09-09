@@ -1,5 +1,27 @@
 # Map renderer performance over time
 
+## Cold destinations and progressive transport
+
+Uncovered friend/locate jumps now cap at camera z15; nearby covered destinations
+preserve the chosen zoom. Destination demand starts before the animation finishes,
+and intermediate fly-to positions do not generate speculative downloads. A
+shader-only hex shimmer covers pending ground immediately (including queue/retry
+time), with a static reduced-motion alternative.
+
+The app prefers the SCB2 v2 endpoint described in `docs/map-stream-protocol.md`. A z14
+transfer carries a complete checksummed z13 preview before the detailed SCB1
+stage. The engine paints that preview while detail continues, without changing
+the actual data-zoom label. Completed coarse stages persist atomically; interrupted
+transport prefixes persist separately for ETag-validated range resume, including
+across process restarts. Two active streams, bounded journals, and no-progress
+deadlines replace repeatedly restarting a large transfer after a fixed 60 seconds.
+
+These are implementation/behavior changes, **not measured physical-phone speedup
+claims**. The loading shader is checked with host CanvasKit; host and unit tests
+exercise stage publication, fragmentation, corruption, compatibility, and resume.
+The v2 endpoint must be deployed before progressive delivery/resume are available;
+old servers retain the v1 path with an explicit compatibility warning.
+
 ## September 7: buildings, deep zoom, and stalled tile loading
 
 Baseline: `96aafe6` (v2.8.1). These results are separate from the older simulator

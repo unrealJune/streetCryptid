@@ -217,12 +217,27 @@ describe('useMapEngine publication and recovery', () => {
       calls[1].resolve(regionFor(calls[1].request, 2));
       await olderPrefetch;
     });
+
     expect(latest.region).toBe(preview);
     expect(latest.region?.spec).toMatchObject({ zoom: 18, tileZoom: 13 });
 
     const detailed = await finish(2, regionFor(calls[2].request, 4));
     expect(latest.region).toBe(detailed);
     expect(latest.region?.spec.tileZoom).toBe(14);
+  });
+
+  it('warms coarse bundles while idle even when the visible camera has full detail', async () => {
+    await mount();
+    await finish(0);
+    commitZoom(18);
+    await finish(1);
+    await advance(1200);
+    expect(prefetchAround).toHaveBeenLastCalledWith(
+      expect.objectContaining({ zoom: 15 }),
+      VIEWPORT,
+      expect.any(AbortSignal)
+    );
+    expect(prefetchPoints).toHaveBeenLastCalledWith(FRIENDS, 15, VIEWPORT, expect.any(AbortSignal));
   });
 
   it('also preserves the newer preview when both requests come from live prefetch', async () => {
@@ -248,7 +263,7 @@ describe('useMapEngine publication and recovery', () => {
     expect(latest.region).toBe(detailed);
   });
 
-  it('retries an initial failure after 1s, 3s, and 10s without a gesture, then stops', async () => {
+  it('keeps retrying an uncovered initial region after the fast recovery attempts', async () => {
     await mount();
     await fail(0);
     for (const [index, delay] of [1000, 3000, 10_000].entries()) {
@@ -259,10 +274,35 @@ describe('useMapEngine publication and recovery', () => {
       expect(calls[index + 1].request.camera).toEqual(calls[0].request.camera);
       await fail(index + 1);
     }
-    await advance(60_000);
+    await advance(29_999);
     expect(calls).toHaveLength(4);
+    await advance(1);
+    expect(calls).toHaveLength(5);
+    await fail(4);
+    await advance(30_000);
+    expect(calls).toHaveLength(6);
     expect(latest.region).toBeNull();
-    expect(latest.pending).toBeNull();
+    expect(latest.pending).not.toBeNull();
+  });
+
+  it('keeps retrying when a distant jump can only retain the old region', async () => {
+    await mount();
+    const home = await finish(0);
+    const distantCamera = { center: [0.8, 0.5] as WorldPoint, zoom: 15 };
+
+    act(() => latest.commit(viewTransformFor(latest.anchor, VIEWPORT, distantCamera)));
+    expect(calls).toHaveLength(2);
+    expect(coversView(home.spec, distantCamera, VIEWPORT)).toBe(false);
+
+    await finish(1, home);
+    for (const [index, delay] of [1000, 3000, 10_000, 30_000, 30_000].entries()) {
+      await advance(delay - 1);
+      expect(calls).toHaveLength(index + 2);
+      await advance(1);
+      expect(calls).toHaveLength(index + 3);
+      expect(calls[index + 2].request.camera).toEqual(distantCamera);
+      await finish(index + 2, home);
+    }
   });
 
   it('keeps a coarse-tile preview visible while retrying detail on the same bounded schedule', async () => {

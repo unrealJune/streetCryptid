@@ -1,3 +1,5 @@
+import { fetch as expoFetch } from 'expo/fetch';
+
 import type { WorldPoint, WorldRect } from './core/types';
 import { latLonToWorld } from './core/mercator';
 import { FixtureGeometrySource } from './tiles/fixture-source';
@@ -9,7 +11,8 @@ import { MartinByteSource } from './tiles/martin-source';
 import { createNativeTileDecoder } from './tiles/native-tile-decoder';
 import { createTileByteStore } from './tiles/sqlite-tile-store';
 import { CachedGeometrySource } from './tiles/tile-cache';
-import { MartinTileBundleSource, TILE_BUNDLE_ANCHOR_ZOOM } from './tiles/tile-bundle';
+import { TILE_BUNDLE_ANCHOR_ZOOM } from './tiles/tile-bundle';
+import { StreamingBundleSource } from './tiles/streaming-bundle-source';
 import type { TileByteStore } from './tiles/tile-bytes';
 import { WORLD_RECT, type DataZoomRange } from './tiles/tile-math';
 
@@ -22,11 +25,8 @@ import { WORLD_RECT, type DataZoomRange } from './tiles/tile-math';
 export const CAMERA_MIN_ZOOM = 11;
 export const PLANET_CAMERA_MIN_ZOOM = 1;
 /**
- * Zoom-in ceiling. Four levels past the tileset's z14 bake: `dataZoomFor` clamps
- * the fetch at z13 either way, so this costs no extra tiles — it only lets the
- * camera magnify vectors it already has. Every LOD width scale (road/structure/
- * transit/river) saturates at 1 by z14–15 and `lodForZoom` clamps to 0 above
- * z14, so nothing downstream needs a new band.
+ * Zoom-in ceiling. The renderer requests full z14 detail at camera z16 and above,
+ * then magnifies those vectors up to z18 without requesting additional tile zooms.
  */
 export const CAMERA_MAX_ZOOM = 18;
 export const CAMERA_INITIAL_ZOOM = 15;
@@ -39,9 +39,11 @@ export const CAMERA_INITIAL_ZOOM = 15;
  * A FLOOR, not a target. Fly-to used to preserve whatever zoom the user was on, so pressing
  * Locate Me from a regional view re-centred on a dot in an unreadable field and looked like it
  * had done nothing. Someone already zoomed closer than this keeps their zoom — they chose it, and
- * yanking them back out is the same failure in the other direction.
+ * yanking them back out is the same failure in the other direction. The exception
+ * is an uncovered destination: `locateCamera` caps that cold jump at z15 so a
+ * friend across the country does not require a full z14 bundle before appearing.
  */
-export const LOCATE_MIN_ZOOM = 13;
+export { LOCATE_MIN_ZOOM } from './core/locate-camera';
 
 /** The planet bake's contiguous data zooms; the fixture carries only z12–14. */
 export const PLANET_DATA_ZOOMS: DataZoomRange = { min: 0, max: 14 };
@@ -137,7 +139,7 @@ export function createPlanetGeometrySource(
     new DecodingGeometrySource(
       new BundleFetchByteSource({
         coarseUpstream: new MartinByteSource(tileUrl),
-        bundleUpstream: new MartinTileBundleSource(tileUrl),
+        bundleUpstream: new StreamingBundleSource(tileUrl, undefined, undefined, expoFetch),
         store,
         sourceId: 'planet-z10-v1',
         anchorZoom: PRIVACY_ANCHOR_ZOOM,

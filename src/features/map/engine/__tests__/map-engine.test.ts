@@ -73,6 +73,39 @@ function makeEngine(source: GeometrySource) {
 describe('MapEngine.buildRegion', () => {
   afterEach(() => jest.restoreAllMocks());
 
+  it('paints a streamed remote coarse stage before the detailed tiles finish', async () => {
+    const source = new FakeSource();
+    source.auto = false;
+    let resolvePreview!: (geometry: PackedGeometry) => void;
+    const coarse = new Promise<PackedGeometry>((resolve) => {
+      resolvePreview = resolve;
+    });
+    const engine = makeEngine({
+      getTile: (tile) => source.getTile(tile),
+      getPreview: () => coarse,
+    });
+    const destination = { ...baseRequest, camera: { center: [0.6, 0.4] as WorldPoint, zoom: 18 } };
+    let publish!: (region: MapRegion) => void;
+    const published = new Promise<MapRegion>((resolve) => {
+      publish = resolve;
+    });
+    let complete = false;
+    const detail = engine.buildRegion(destination, undefined, publish).then((built) => {
+      complete = true;
+      return built;
+    });
+    resolvePreview(EMPTY_GEOMETRY);
+    const preview = await published;
+    expect(complete).toBe(false);
+    expect(preview.spec.tileZoom).toBe(13);
+    expect(preview.spec.zoom).toBe(18);
+    expect(engine.lastRegion).toBe(preview);
+    source.resolveAll();
+    const final = await detail;
+    expect(final!.spec.tileZoom).toBe(14);
+    expect(final!.publication).toBeGreaterThan(preview.publication);
+  });
+
   it('yields cached region work to a frame instead of chaining it through microtasks', async () => {
     let frame!: FrameRequestCallback;
     let scheduled!: () => void;

@@ -3,6 +3,7 @@ import {
   bundleRequestFor,
   validateTileBundleEntries,
   type TileBundleSource,
+  type TileBundleEntry,
 } from './tile-bundle';
 import type { StoredTile, TileByteSource, TileByteStore } from './tile-bytes';
 import { tileKeyOf, type TileCoord, type TileKey } from './tile-math';
@@ -42,6 +43,7 @@ export interface BundleFetchOptions {
 export class BundleFetchByteSource implements TileByteSource {
   private readonly inFlight = new Map<string, Promise<Map<TileKey, Uint8Array | null>>>();
   private readonly now: () => number;
+  private readonly previews = new Map<string, Promise<readonly TileBundleEntry[] | null>>();
 
   constructor(private readonly opts: BundleFetchOptions) {
     this.now = opts.now ?? Date.now;
@@ -76,6 +78,32 @@ export class BundleFetchByteSource implements TileByteSource {
 
   private isFresh(stored: StoredTile): boolean {
     return this.now() - stored.fetchedAt <= this.opts.ttlMs;
+  }
+
+  async getPreviewTiles(tiles: readonly TileCoord[]): Promise<readonly TileBundleEntry[] | null> {
+    if (!tiles.length || tiles.some((t) => t.z !== 14)) return null;
+    const stored = await Promise.all(
+      tiles.map((tile) => this.opts.store.get(this.opts.sourceId, tile))
+    );
+    if (stored.every((row) => row && this.isFresh(row))) return null;
+    const bundles = new Map(
+      tiles.map((tile) => [
+        `bundle:${bundleKeyOf(bundleRequestFor(tile, this.opts.anchorZoom))}`,
+        tile,
+      ])
+    );
+    const stages = await Promise.all(
+      [...bundles].map(([key, tile]) => {
+        // Shared detail requests continue even if only the preview is currently useful.
+        void this.fetchBundle(tile, captureMapPerfMetricScope()).catch(() => {});
+        return this.previews.get(key) ?? Promise.resolve(null);
+      })
+    );
+    if (stages.some((stage) => stage === null)) return null;
+    const wanted = new Set(tiles.map((tile) => tileKeyOf(13, tile.x >> 1, tile.y >> 1)));
+    return stages
+      .flatMap((stage) => stage ?? [])
+      .filter(({ tile }) => wanted.has(tileKeyOf(tile.z, tile.x, tile.y)));
   }
 
   private fetchCoarseTile(
@@ -114,8 +142,20 @@ export class BundleFetchByteSource implements TileByteSource {
     if (pending) return pending;
     addMapPerfMetric('bundleRequests', 1, metrics);
 
+    let resolvePreview!: (entries: readonly TileBundleEntry[] | null) => void;
+    this.previews.set(
+      key,
+      new Promise((resolve) => {
+        resolvePreview = resolve;
+      })
+    );
     const request = this.opts.bundleUpstream
-      .getBundle(bundleRequest)
+      .getBundle(bundleRequest, async (stage, entries) => {
+        if (stage.tileZoom !== 13 || bundleRequest.tileZoom !== 14) return;
+        validateTileBundleEntries({ ...bundleRequest, tileZoom: 13 }, entries);
+        await this.opts.store.putMany(this.opts.sourceId, entries, this.now());
+        resolvePreview(entries);
+      })
       .then(async (entries) => {
         validateTileBundleEntries(bundleRequest, entries);
         const storeStarted = metrics ? perfNow() : 0;
@@ -124,6 +164,8 @@ export class BundleFetchByteSource implements TileByteSource {
         return new Map(entries.map((e) => [tileKeyOf(e.tile.z, e.tile.x, e.tile.y), e.bytes]));
       })
       .finally(() => {
+        resolvePreview(null);
+        this.previews.delete(key);
         this.inFlight.delete(key);
       });
 
