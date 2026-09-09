@@ -1,4 +1,5 @@
 import type { TileCoord } from './tile-math';
+import { withRequestDeadline } from './request-deadline';
 import { addMapPerfMetric, captureMapPerfMetricScope, perfNow } from '../perf/map-perf';
 
 export const TILE_BUNDLE_MEDIA_TYPE = 'application/vnd.streetcryptid.tile-bundle';
@@ -164,13 +165,11 @@ export class MartinTileBundleSource implements TileBundleSource {
     validateRequest(request);
     const url =
       `${this.sourceUrl}/bundle/v1/${request.anchorX}/${request.anchorY}/` + request.tileZoom;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TILE_BUNDLE_TIMEOUT_MS);
-    try {
+    return withRequestDeadline(async (signal) => {
       const started = metrics ? perfNow() : 0;
       const response = await fetch(url, {
         headers: { Accept: TILE_BUNDLE_MEDIA_TYPE },
-        signal: controller.signal,
+        signal,
       });
       if (!response.ok) {
         throw new Error(`Tile bundle request failed: ${response.status} ${url}`);
@@ -195,9 +194,7 @@ export class MartinTileBundleSource implements TileBundleSource {
       const entries = decodeTileBundle(bytes, request);
       if (metrics) addMapPerfMetric('bundleParseMs', perfNow() - parseStarted, metrics);
       return entries;
-    } finally {
-      clearTimeout(timer);
-    }
+    }, TILE_BUNDLE_TIMEOUT_MS);
   }
 }
 

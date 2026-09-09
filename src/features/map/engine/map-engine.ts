@@ -8,7 +8,12 @@ import type { ExplorationIndex } from '../core/exploration-index';
 import { createExplorationRollup, type ExplorationRollup } from '../core/exploration-rollup';
 import type { H3Grid } from '../core/h3-grid';
 import { selectMapLabels, type MapLabel } from '../core/map-labels';
-import { computeRegionSpec, shouldPrefetchRegion, type RegionSpec } from '../core/region';
+import {
+  computeRegionSpec,
+  PREFETCH_ZOOM_DELTA,
+  shouldPrefetchRegion,
+  type RegionSpec,
+} from '../core/region';
 import type { CameraState, Place, Viewport, WorldPoint, WorldRect } from '../core/types';
 import type { GeometrySource } from '../tiles/geometry-source';
 import { mergeGeometry } from '../tiles/geometry-source';
@@ -33,6 +38,8 @@ export interface RegionRequest {
  * switches only swap the tiny LUT, never rebuild a region.
  */
 export interface MapRegion {
+  /** Monotonic within an engine, including previews; async callers can finish out of order. */
+  readonly publication: number;
   readonly spec: RegionSpec;
   /**
    * Raw geometry for the region. The feature mask is now rasterized on the GPU
@@ -65,6 +72,8 @@ export interface RegionTiming {
   readonly sourceMs: number;
   /** Struct-of-arrays concatenation after all tiles land. */
   readonly mergeMs: number;
+  /** Time yielded to the UI/event loop before assembling the next region. */
+  readonly yieldMs: number;
   /** H3 enumeration, immutable geometry lookup, and exploration annotation. */
   readonly cellFieldMs: number;
   readonly cellEnumerateMs: number;
@@ -132,10 +141,12 @@ export class MapEngine {
   private queued: {
     request: RegionRequest;
     onProgress?: BuildProgressListener;
+    onPreview?: (region: MapRegion) => void;
     resolve: (region: MapRegion | null) => void;
     reject: (error: unknown) => void;
   } | null = null;
   private last: MapRegion | null = null;
+  private publication = 0;
   private readonly cellFieldCache = new Map<string, RegionCellField>();
 
   constructor(options: MapEngineOptions) {
@@ -155,19 +166,22 @@ export class MapEngine {
    * the last good region on failure, or null if a newer request replaced this
    * one while it waited in the queue. `onProgress` (if given) fires only for the
    * build that actually runs — a superseded (queued-then-replaced) request never
-   * emits, so its skeleton/reveal is never raised.
+   * emits, so its skeleton/reveal is never raised. On cold zoom-ins, `onPreview`
+   * can publish a sharper raster of already-covered geometry before new tiles
+   * arrive; its spec retains the actual (possibly coarser) data zoom.
    */
   buildRegion(
     request: RegionRequest,
-    onProgress?: BuildProgressListener
+    onProgress?: BuildProgressListener,
+    onPreview?: (region: MapRegion) => void
   ): Promise<MapRegion | null> {
     if (this.busy) {
       this.queued?.resolve(null); // superseded while waiting
       return new Promise((resolve, reject) => {
-        this.queued = { request, onProgress, resolve, reject };
+        this.queued = { request, onProgress, onPreview, resolve, reject };
       });
     }
-    return this.runBuild(request, onProgress);
+    return this.runBuild(request, onProgress, onPreview);
   }
 
   /**
@@ -248,11 +262,12 @@ export class MapEngine {
 
   private async runBuild(
     request: RegionRequest,
-    onProgress?: BuildProgressListener
+    onProgress?: BuildProgressListener,
+    onPreview?: (region: MapRegion) => void
   ): Promise<MapRegion | null> {
     this.busy = true;
     try {
-      return await this.buildNow(request, onProgress);
+      return await this.buildNow(request, onProgress, onPreview);
     } finally {
       this.busy = false;
       const next = this.queued;
@@ -271,7 +286,10 @@ export class MapEngine {
         ) {
           next.resolve(built);
         } else {
-          this.runBuild(next.request, next.onProgress).then(next.resolve, next.reject);
+          this.runBuild(next.request, next.onProgress, next.onPreview).then(
+            next.resolve,
+            next.reject
+          );
         }
       }
     }
@@ -279,7 +297,8 @@ export class MapEngine {
 
   private async buildNow(
     request: RegionRequest,
-    onProgress?: BuildProgressListener
+    onProgress?: BuildProgressListener,
+    onPreview?: (region: MapRegion) => void
   ): Promise<MapRegion | null> {
     const spec = computeRegionSpec(request.camera, request.viewport, {
       dataZooms: this.dataZooms,
@@ -294,6 +313,29 @@ export class MapEngine {
     let loaded = 0;
     onProgress?.({ rect: spec.rect, loaded, total, coldStart });
 
+    const previous = this.last;
+    if (
+      coldStart &&
+      previous &&
+      spec.zoom - previous.spec.zoom >= PREFETCH_ZOOM_DELTA &&
+      spec.rect.minX >= previous.spec.rect.minX &&
+      spec.rect.minY >= previous.spec.rect.minY &&
+      spec.rect.maxX <= previous.spec.rect.maxX &&
+      spec.rect.maxY <= previous.spec.rect.maxY
+    ) {
+      // Re-rasterize known vectors at the NEW zoom while the larger detail
+      // bundle downloads. Never pretend these are finer tiles: retaining the
+      // actual data zoom lets queued requests/retries still request detail.
+      const preview = await this.buildFromGeometry(
+        request,
+        { ...spec, tileZoom: previous.spec.tileZoom },
+        previous.geometry,
+        { tiles: previous.timing.tiles, coldStart: false, sourceMs: 0, mergeMs: 0 }
+      );
+      this.last = preview;
+      onPreview?.(preview);
+    }
+
     const t0 = now();
     let parts: PackedGeometry[];
     try {
@@ -307,12 +349,39 @@ export class MapEngine {
         )
       );
     } catch (error) {
-      if (this.last) return this.last;
+      if (this.last) {
+        console.warn('[map] tile load failed; retaining available geometry:', error);
+        return this.last;
+      }
       throw error;
     }
     const t1 = now();
 
     const geometry = mergeGeometry(parts);
+    const t2 = now();
+    const region = await this.buildFromGeometry(request, spec, geometry, {
+      tiles: tiles.length,
+      coldStart,
+      sourceMs: t1 - t0,
+      mergeMs: t2 - t1,
+    });
+    this.last = region;
+    this.onTiming?.(region.timing);
+    return region;
+  }
+
+  private async buildFromGeometry(
+    request: RegionRequest,
+    spec: RegionSpec,
+    geometry: PackedGeometry,
+    sourceTiming: Pick<RegionTiming, 'tiles' | 'coldStart' | 'sourceMs' | 'mergeMs'>
+  ): Promise<MapRegion> {
+    const queuedAt = now();
+    // Cached tile promises otherwise chain region builds/renders through
+    // microtasks for seconds, starving JS input and animation-frame callbacks.
+    if (typeof requestAnimationFrame === 'function') {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
     const t2 = now();
     const cellKey = cellFieldKey(spec, request.explorationVersion);
     let cellField = this.cellFieldCache.get(cellKey);
@@ -338,7 +407,10 @@ export class MapEngine {
             this.rollup
           );
         } catch (error) {
-          if (this.last) return this.last;
+          if (this.last) {
+            console.warn('[map] cell field failed; retaining available region:', error);
+            return this.last;
+          }
           throw error;
         }
       }
@@ -353,21 +425,20 @@ export class MapEngine {
     const t3 = now();
 
     const timing: RegionTiming = {
-      tiles: tiles.length,
-      coldStart,
+      ...sourceTiming,
+      yieldMs: t2 - queuedAt,
       cellFieldCacheHit,
-      sourceMs: t1 - t0,
-      mergeMs: t2 - t1,
       cellFieldMs: t3 - t2,
       cellEnumerateMs: cellTiming.enumerateMs,
       cellCentersMs: cellTiming.centersMs,
       cellAnnotateMs: cellTiming.annotateMs,
-      totalMs: t3 - t0,
-      fetchMs: t2 - t0,
+      totalMs: sourceTiming.sourceMs + sourceTiming.mergeMs + t3 - queuedAt,
+      fetchMs: sourceTiming.sourceMs + sourceTiming.mergeMs,
       buildMs: t3 - t2,
     };
 
     const region: MapRegion = {
+      publication: ++this.publication,
       spec,
       geometry,
       cellField,
@@ -377,8 +448,6 @@ export class MapEngine {
       timing,
     };
 
-    this.last = region;
-    this.onTiming?.(timing);
     return region;
   }
 }

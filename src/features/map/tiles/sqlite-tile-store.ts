@@ -60,6 +60,7 @@ export function createTileByteStore(opts: TileStoreOptions = {}): TileByteStore 
 class DbTileByteStore implements TileByteStore {
   private readonly fallback = new InMemoryTileDb();
   private dbPromise: Promise<TileDb | null> | undefined;
+  private writes: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly openDb: () => Promise<TileDb | null>,
@@ -94,7 +95,19 @@ class DbTileByteStore implements TileByteStore {
     return { bytes: row.bytes, fetchedAt: row.fetchedAt };
   }
 
-  async putMany(
+  putMany(
+    sourceId: string,
+    entries: readonly { tile: TileCoord; bytes: Uint8Array | null }[],
+    fetchedAt: number
+  ): Promise<void> {
+    // Neighboring bundles can finish together. Expo's exclusive transactions
+    // use separate connections, so overlapping writers otherwise hit SQLITE_BUSY.
+    const write = this.writes.then(() => this.writeMany(sourceId, entries, fetchedAt));
+    this.writes = write.catch(() => {});
+    return write;
+  }
+
+  private async writeMany(
     sourceId: string,
     entries: readonly { tile: TileCoord; bytes: Uint8Array | null }[],
     fetchedAt: number
@@ -162,6 +175,8 @@ export class InMemoryTileDb implements TileDb {
 // ─── expo-sqlite TileDb ───────────────────────────────────────────────────────
 
 type SqlParam = string | number | null | Uint8Array;
+// Eight bound values per row; stay below SQLite's portable 999-variable limit.
+const UPSERT_ROWS_PER_STATEMENT = Math.floor(999 / 8);
 
 export interface SqliteDb {
   execAsync(sql: string): Promise<void>;
@@ -245,22 +260,30 @@ export class SqliteTileDb implements TileDb {
     entries: readonly { tile: TileCoord; bytes: Uint8Array | null }[],
     fetchedAt: number
   ): Promise<void> {
+    if (entries.length === 0) return;
     const writeEntries = async (db: Pick<SqliteDb, 'runAsync'>) => {
-      for (const { tile, bytes } of entries) {
+      for (let offset = 0; offset < entries.length; offset += UPSERT_ROWS_PER_STATEMENT) {
+        const batch = entries.slice(offset, offset + UPSERT_ROWS_PER_STATEMENT);
+        const params: SqlParam[] = [];
+        for (const { tile, bytes } of batch) {
+          params.push(
+            source,
+            tile.z,
+            tile.x,
+            tile.y,
+            bytes,
+            bytes?.byteLength ?? 0,
+            fetchedAt,
+            fetchedAt
+          );
+        }
         await db.runAsync(
           `INSERT INTO tiles (source, z, x, y, bytes, size, fetched_at, last_used)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}
            ON CONFLICT(source, z, x, y) DO UPDATE SET
              bytes = excluded.bytes, size = excluded.size,
              fetched_at = excluded.fetched_at, last_used = excluded.last_used`,
-          source,
-          tile.z,
-          tile.x,
-          tile.y,
-          bytes,
-          bytes?.byteLength ?? 0,
-          fetchedAt,
-          fetchedAt
+          ...params
         );
       }
     };

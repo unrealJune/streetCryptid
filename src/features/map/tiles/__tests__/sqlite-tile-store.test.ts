@@ -46,6 +46,44 @@ describe('createTileByteStore — roundtrip', () => {
 
     expect(await store.get('planet-v2', T1)).toBeNull();
   });
+
+  it('serializes concurrent bundle writes instead of losing one to an exclusive transaction lock', async () => {
+    const db = new InMemoryTileDb();
+    const originalUpsert = db.upsertMany.bind(db);
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let beganFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      beganFirst = resolve;
+    });
+    let writes = 0;
+    let locked = false;
+    db.upsertMany = async (...args) => {
+      writes++;
+      if (locked) throw new Error('database is locked');
+      locked = true;
+      if (writes === 1) {
+        beganFirst();
+        await firstGate;
+      }
+      await originalUpsert(...args);
+      locked = false;
+    };
+    const store = createTileByteStore({ openDb: async () => db });
+    const first = store.putMany('planet-v1', [{ tile: T1, bytes: bytesOf(3) }], 1);
+    await firstStarted;
+    const second = store.putMany('planet-v1', [{ tile: T2, bytes: bytesOf(4) }], 2);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(writes).toBe(1);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(writes).toBe(2);
+    expect((await db.get('planet-v1', T1))?.bytes).toEqual(bytesOf(3));
+    expect((await db.get('planet-v1', T2))?.bytes).toEqual(bytesOf(4));
+  });
 });
 
 describe('createTileByteStore — eviction', () => {
@@ -121,7 +159,67 @@ describe('createTileByteStore — degradation', () => {
       );
 
       expect(transactions).toBe(1);
-      expect(statements).toHaveLength(2);
+      expect(statements).toHaveLength(1);
+      expect(statements[0].slice(1)).toEqual([
+        'planet-v1',
+        T1.z,
+        T1.x,
+        T1.y,
+        bytesOf(3),
+        3,
+        1234,
+        1234,
+        'planet-v1',
+        T2.z,
+        T2.x,
+        T2.y,
+        null,
+        0,
+        1234,
+        1234,
+      ]);
+    });
+
+    it('persists all 256 z14 descendants in three statements within the portable bind limit', async () => {
+      const statements: unknown[][] = [];
+      const db = {
+        runAsync: async (...args: unknown[]) => {
+          statements.push(args);
+          return { changes: 1 };
+        },
+      } as SqliteDb;
+      const entries = Array.from({ length: 256 }, (_, i) => ({
+        tile: { z: 14, x: 2624 + (i % 16), y: 5712 + Math.floor(i / 16) },
+        bytes: i % 2 ? bytesOf(3, i) : null,
+      }));
+      await new SqliteTileDb(db).upsertMany('planet-v1', entries, 1234);
+      expect(statements).toHaveLength(3);
+      for (const [sql, ...params] of statements) {
+        expect(params.length).toBeLessThanOrEqual(999);
+        expect((sql as string).match(/\?/g)).toHaveLength(params.length);
+      }
+      expect(statements.flatMap((statement) => statement.slice(1))).toEqual(
+        entries.flatMap(({ tile, bytes }) => [
+          'planet-v1',
+          tile.z,
+          tile.x,
+          tile.y,
+          bytes,
+          bytes?.byteLength ?? 0,
+          1234,
+          1234,
+        ])
+      );
+    });
+
+    it('does not open a transaction or execute SQL for an empty batch', async () => {
+      const db = {
+        withExclusiveTransactionAsync: jest.fn(),
+        runAsync: jest.fn(),
+      } as unknown as SqliteDb;
+      await new SqliteTileDb(db).upsertMany('planet-v1', [], 1234);
+      expect(db.withExclusiveTransactionAsync).not.toHaveBeenCalled();
+      expect(db.runAsync).not.toHaveBeenCalled();
     });
   });
 
@@ -155,5 +253,21 @@ describe('createTileByteStore — degradation', () => {
     expect((await store.get('planet-v1', T1))?.bytes).toEqual(bytesOf(3));
     // Rows the fallback never saw are plain misses, not rejections.
     expect(await store.get('planet-v1', T2)).toBeNull();
+  });
+
+  it('a failed bundle write does not poison the queue for later writes', async () => {
+    const db = new InMemoryTileDb();
+    const upsert = jest
+      .spyOn(db, 'upsertMany')
+      .mockRejectedValueOnce(new Error('database is locked'));
+    const store = createTileByteStore({ openDb: async () => db });
+
+    await Promise.all([
+      store.putMany('planet-v1', [{ tile: T1, bytes: bytesOf(3) }], 1),
+      store.putMany('planet-v1', [{ tile: T2, bytes: bytesOf(4) }], 2),
+    ]);
+
+    expect(upsert).toHaveBeenCalledTimes(2);
+    expect((await db.get('planet-v1', T2))?.bytes).toEqual(bytesOf(4));
   });
 });

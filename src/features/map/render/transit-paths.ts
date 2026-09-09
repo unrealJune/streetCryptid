@@ -3,6 +3,7 @@ import type { RegionSpec } from '../core/region';
 import { transitWidthFor } from '../core/transit-lod';
 import { TRANSIT_MODES, type TransitMode, type WorldPoint } from '../core/types';
 import type { PackedGeometry } from '../tiles/packed-geometry';
+import { featureBounds, intersectsBounds, tileLocalRect } from './geometry-bounds';
 
 /**
  * Pure SVG-path builder for the transit layer (the `mask-paths.ts` /
@@ -30,15 +31,17 @@ export function buildTransitPaths(geometry: PackedGeometry, spec: RegionSpec): T
 
   for (const part of geometry.parts) {
     const { originX, originY } = part;
+    const rect = tileLocalRect(spec.rect, part, 3 / scale);
     const project = (x: number, y: number): WorldPoint => [
       (originX + x - minX) * scale,
       (originY + y - minY) * scale,
     ];
 
     const t = part.transit;
+    const bounds = featureBounds(t);
     for (let i = 0; i < t.count; i++) {
       const mode = t.mode[i];
-      if (!active[mode]) continue;
+      if (!active[mode] || !intersectsBounds(bounds, i, rect)) continue;
       const line = polyline(t.coords, t.pointOff[i], t.pointOff[i + 1], project);
       if (line) batches[mode].push(line);
     }

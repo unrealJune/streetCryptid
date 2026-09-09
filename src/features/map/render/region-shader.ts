@@ -14,6 +14,7 @@ import {
   type SkCanvas,
   type SkImage,
   type SkPaint,
+  type SkPath,
 } from '@shopify/react-native-skia';
 
 import { buildPaletteLut } from '../core/region';
@@ -323,10 +324,11 @@ function drawStructures(
 
   const buildingWidth = buildingStrokeWidthFor(region.spec.zoom);
   if (paths.buildings && buildingWidth !== null) {
-    drawWindingFill(canvas, paths.buildings, fillPaint(ink, BUILDING_FILL_ALPHA * reveal));
-    drawBuildingHatch(canvas, paths.buildings, region, ink, reveal);
     const path = Skia.Path.MakeFromSVGString(paths.buildings);
     if (path) {
+      path.setFillType(FillType.Winding);
+      canvas.drawPath(path, fillPaint(ink, BUILDING_FILL_ALPHA * reveal));
+      drawBuildingHatch(canvas, path, region, ink, reveal);
       canvas.drawPath(path, strokePaint(ink, buildingWidth, BUILDING_STROKE_ALPHA * reveal));
     }
   }
@@ -344,15 +346,12 @@ function drawStructures(
  */
 function drawBuildingHatch(
   canvas: SkCanvas,
-  buildingsSvg: string,
+  clip: SkPath,
   region: MapRegion,
   ink: Rgb,
   reveal: number
 ): void {
   if (!buildingHatchVisible(region.spec.zoom)) return;
-  const clip = Skia.Path.MakeFromSVGString(buildingsSvg);
-  if (!clip) return;
-  clip.setFillType(FillType.Winding);
   const hatch = Skia.Path.MakeFromSVGString(buildHatchPath(region.spec));
   if (!hatch) return;
 

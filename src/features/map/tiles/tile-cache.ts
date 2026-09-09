@@ -40,6 +40,7 @@ export class CachedGeometrySource implements GeometrySource {
   }
 
   getTile(tile: TileCoord, signal?: AbortSignal): Promise<PackedGeometry> {
+    if (signal?.aborted) return Promise.reject(abortError());
     const key = tileKeyOf(tile.z, tile.x, tile.y);
 
     const hit = this.cache.get(key);
@@ -54,7 +55,7 @@ export class CachedGeometrySource implements GeometrySource {
     const pending = this.inFlight.get(key);
     if (pending) {
       addMapPerfMetric('memoryInFlightHits');
-      return pending;
+      return signal ? abortable(pending, signal) : pending;
     }
     addMapPerfMetric('memoryCacheMisses');
 

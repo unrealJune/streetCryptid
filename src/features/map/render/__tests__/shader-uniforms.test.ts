@@ -32,6 +32,7 @@ const palette: MapPalette = {
 };
 
 const region: MapRegion = {
+  publication: 1,
   spec: {
     rect: { minX: 0.1, minY: 0.2, maxX: 0.3, maxY: 0.5 },
     maskWidth: 512,
@@ -51,6 +52,7 @@ const region: MapRegion = {
     cellFieldCacheHit: false,
     sourceMs: 0,
     mergeMs: 0,
+    yieldMs: 0,
     cellFieldMs: 0,
     cellEnumerateMs: 0,
     cellCentersMs: 0,

@@ -2,8 +2,9 @@ import { worldToScreen } from '../core/camera';
 import { regionMaskCamera, type RegionSpec } from '../core/region';
 import { roadClassVisible, roadWidthFor, type RoadLayerOptions } from '../core/road-lod';
 import { riverWidthFor } from '../core/water-lod';
-import type { ScreenPoint } from '../core/types';
+import type { ScreenPoint, WorldRect } from '../core/types';
 import type { PackedAreas, PackedGeometry } from '../tiles/packed-geometry';
+import { featureBounds, intersectsBounds, ringBounds, tileLocalRect } from './geometry-bounds';
 
 /**
  * SVG path strings for a region's feature mask, in mask-pixel coordinates.
@@ -63,25 +64,38 @@ export function buildMaskPaths(
   for (const part of geometry.parts) {
     const { originX, originY } = part;
     const project: Project = (x, y) => worldToScreen(camera, viewport, [originX + x, originY + y]);
+    // Widest mask stroke is 5px; leave its half-width plus AA at the edge.
+    const rect = tileLocalRect(
+      spec.rect,
+      part,
+      4 *
+        Math.max(
+          (spec.rect.maxX - spec.rect.minX) / spec.maskWidth,
+          (spec.rect.maxY - spec.rect.minY) / spec.maskHeight
+        )
+    );
 
     const s = part.streets;
+    const streetBounds = featureBounds(s);
     for (let i = 0; i < s.count; i++) {
       const rc = s.roadClass[i];
-      if (!classActive[rc]) continue;
+      if (!classActive[rc] || !intersectsBounds(streetBounds, i, rect)) continue;
       const line = polyline(s.coords, s.pointOff[i], s.pointOff[i + 1], project);
       if (line) streets[rc].push(line);
     }
 
     if (riversActive) {
       const r = part.rivers;
+      const riverBounds = featureBounds(r);
       for (let i = 0; i < r.count; i++) {
+        if (!intersectsBounds(riverBounds, i, rect)) continue;
         const line = polyline(r.coords, r.pointOff[i], r.pointOff[i + 1], project);
         if (line) riverLines.push(line);
       }
     }
 
-    pushFills(waterFills, part.water, project);
-    pushFills(parkFills, part.parks, project);
+    pushFills(waterFills, part.water, project, rect);
+    pushFills(parkFills, part.parks, project, rect);
   }
 
   return {
@@ -104,9 +118,13 @@ export function polyline(coords: Float32Array, from: number, to: number, project
 }
 
 /** Append one closed sub-path per ring of every area feature (filled non-zero). */
-function pushFills(dst: string[], areas: PackedAreas, project: Project): void {
+function pushFills(dst: string[], areas: PackedAreas, project: Project, rect: WorldRect): void {
+  const bounds = featureBounds(areas);
+  const rings = ringBounds(areas);
   for (let i = 0; i < areas.count; i++) {
+    if (!intersectsBounds(bounds, i, rect)) continue;
     for (let r = areas.ringOff[i]; r < areas.ringOff[i + 1]; r++) {
+      if (!intersectsBounds(rings, r, rect)) continue;
       const line = polyline(areas.coords, areas.pointOff[r], areas.pointOff[r + 1], project);
       if (line) dst.push(`${line}Z`);
     }
