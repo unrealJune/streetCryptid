@@ -1111,9 +1111,15 @@ describe('LocationSharingService — the read path does not need the node', () =
     const svc = makeService();
     await svc.init('@me', 'mothman');
     await svc.addFriend(friend);
-    const before = svc.snapshot().friends.map((f) => f.endpointId);
+    const snapshots: SharingSnapshot[] = [];
+    const unsubscribe = svc.onChange((snapshot) => snapshots.push(snapshot));
+    const before = snapshots.at(-1)!.friends.map((f) => f.endpointId);
+    expect(before).toEqual([friend.endpointId]);
     await svc.hydrateFromStore();
-    expect(svc.snapshot().friends.map((f) => f.endpointId)).toEqual(before);
+    unsubscribe();
+    const unsubscribeAfterHydration = svc.onChange((snapshot) => snapshots.push(snapshot));
+    expect(snapshots.at(-1)!.friends.map((f) => f.endpointId)).toEqual(before);
+    unsubscribeAfterHydration();
   });
 });
 
