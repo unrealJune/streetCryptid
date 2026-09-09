@@ -37,11 +37,14 @@ export function LoadingHexGrid({
     if (!compiled) console.warn('[map] loading hex shader unavailable');
     return compiled;
   }, []);
+  // Normalise on the JS thread: an arrow passed to .map() inside the worklet is
+  // captured as a remote function, and calling one on the UI runtime is fatal.
+  const uInk = useMemo(() => [ink[0] / 255, ink[1] / 255, ink[2] / 255], [ink]);
   const uniforms = useDerivedValue(() => ({
     uSize: [rect.width, rect.height],
     uScale: Math.max(0.001, scale.value),
     uPhase: phase.value,
-    uInk: ink.map((v) => v / 255),
+    uInk,
   }));
   return (
     <Group transform={[{ translateX: rect.x }, { translateY: rect.y }]}>
