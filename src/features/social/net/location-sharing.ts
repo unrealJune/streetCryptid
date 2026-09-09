@@ -50,7 +50,22 @@ import {
   secretFromPairingCode,
 } from '../core/pairing-code';
 import { isPairingFigureIndex } from '../core/pairing-figures';
+import type { PeerKind } from '../core/peer-reachability';
+import { buildFriendPresence, type PresenceState } from '../core/presence';
 import * as pool from '../core/pool';
+import {
+  type DialOutcome,
+  foldOutcomes,
+  inferStashPeer,
+  loadReachability,
+  loadStashPeer,
+  planDials,
+  type PlannedDial,
+  reachabilityKey,
+  type ReachabilityMap,
+  saveReachability,
+  saveStashPeer,
+} from './peer-reachability-store';
 import { mergeProfileIntoFriend } from '../core/profile';
 import type {
   ContactCard,
@@ -581,6 +596,18 @@ export class LocationSharingService {
   });
   /** Durable KV for the sharing pool. */
   private readonly kv: PersistentKV = createPersistentKV();
+  /**
+   * Last-known reachability estimates, cached so a push can log what the model BELIEVED without a
+   * second read. Only ever a mirror of what {@link learnFromPush} persisted — the store is the
+   * source of truth, because the pushes that matter happen in short-lived headless processes.
+   */
+  private lastReachability: ReachabilityMap = {};
+
+  /** Whether {@link hydrateFromStore} has already run for this service instance. */
+  private hydratedFromStore = false;
+
+  /** Cached answer from {@link nativeAdoptsNode}; `null` until first probed. */
+  private nodeAdoptionSupported: boolean | null = null;
   private lastSyncRecovered: number | null = null;
 
   // Background service runtime (native-only; lazily imported so web/Expo Go never load it).
@@ -853,11 +880,15 @@ export class LocationSharingService {
       // And if a session is already in flight, let it finish — including its own `shutdown` — so it
       // cannot nil our node out from under us a moment after we create it.
       //
-      // Bounded, and the wait is measured. This await used to be unbounded, and when a headless
-      // session hung in native teardown it never returned: the app sat on the splash screen until
-      // it was force-quit. Waiting is the safe default (a clobbered node is the alternative), but
-      // it is not safer than not launching at all — past the deadline we proceed and say so.
-      await this.awaitRuntimeIdleBounded();
+      // Skipped entirely on a binary that refcounts the node, because there is then nothing to wait
+      // FOR: `createNode` adopts the live node instead of rebuilding it, and the session's
+      // `shutdown` releases a hold rather than tearing it down. That is worth skipping rather than
+      // keeping as belt-and-braces — measured over 7 days this wait timed out on 11 of 11 launches
+      // that hit it, so on the launches where it engaged at all it was pure latency: five seconds
+      // of splash, and then the clobber it existed to prevent happened anyway.
+      if (!(await this.nativeAdoptsNode())) {
+        await this.awaitRuntimeIdleBounded();
+      }
     }
     this.keys = await this.mod.createNode(persisted.identitySecret, persisted.recvSecret);
     await saveKeys({
@@ -1948,6 +1979,139 @@ export class LocationSharingService {
    *
    * The stash goes first when enabled: it is always-on and usually answers immediately.
    */
+  /**
+   * Decide how long each durable peer is worth waiting for on the next push.
+   *
+   * Presence is computed here rather than in the native layer because this is the only place that
+   * has it — Rust sees tickets, not friends — and because
+   * `features/social/core/peer-reachability.ts` conditions on the presence state, which is what
+   * lets a parked Android phone (process alive behind the foreground service, answers instantly)
+   * and a parked iPhone (riding `BGProcessing` wakes, not there) diverge without the model ever
+   * naming a platform.
+   *
+   * Best-effort: any failure reading the trail or the stored estimates falls back to the priors,
+   * because a push with guessed budgets is enormously better than no push.
+   */
+  private async planPeerDials(stashEnabled: boolean): Promise<PlannedDial[]> {
+    const friends = pool.friendList(this.state);
+    let presenceByEndpoint = new Map<string, PresenceState>();
+    let reachability: ReachabilityMap = {};
+    let stashPeer: string | null = null;
+    try {
+      const [latest, stored, knownStash] = await Promise.all([
+        this.friendLatest(),
+        loadReachability(this.kv),
+        loadStashPeer(this.kv),
+      ]);
+      reachability = stored;
+      stashPeer = knownStash;
+      presenceByEndpoint = new Map(
+        buildFriendPresence({
+          friends,
+          latest,
+          selfFix: this.latestLocalFix ?? null,
+        }).map((presence) => [presence.friend.endpointId.toLowerCase(), presence.state])
+      );
+    } catch {
+      // Fall through on the priors.
+    }
+    const peers: {
+      ticket: string;
+      endpointHex: string | null;
+      kind: PeerKind;
+      presence: PresenceState;
+    }[] = [];
+    if (stashEnabled && this.stashTicket) {
+      peers.push({
+        ticket: this.stashTicket,
+        // `resolveStashEndpointId` decodes this from the ticket at start-up and is the direct
+        // answer. The learned fallback covers a binary without `endpointIdFromTicket`, where the
+        // stash is instead recognised as the reported peer that is not a friend.
+        endpointHex: this.stashEndpointId?.toLowerCase() ?? stashPeer,
+        kind: 'stash',
+        presence: 'unknown',
+      });
+    }
+    for (const friend of friends) {
+      if (!friend.ticket) continue;
+      const endpointHex = friend.endpointId.toLowerCase();
+      peers.push({
+        ticket: friend.ticket,
+        endpointHex,
+        kind: 'friend',
+        presence: presenceByEndpoint.get(endpointHex) ?? 'unknown',
+      });
+    }
+    return planDials(peers, reachability);
+  }
+
+  /**
+   * Fold a push's per-peer outcomes back into the stored estimate, and record the training rows.
+   *
+   * The span emitted per peer here is NOT redundant with the `trail.push.peer` span the native side
+   * emits. Rust knows what each peer did; only this side knows the presence state it was in and
+   * what the model believed about it beforehand — and those are exactly the columns needed to fit
+   * the priors. Without them the logs can say a peer went silent but not that parked iPhones go
+   * silent, which is the whole hypothesis.
+   */
+  private async learnFromPush(
+    plan: readonly PlannedDial[],
+    outcomes: readonly DialOutcome[],
+    parent?: SpanContext
+  ): Promise<void> {
+    const now = Date.now();
+    const byEndpoint = new Map(
+      plan.filter((dial) => dial.endpointHex).map((dial) => [dial.endpointHex as string, dial])
+    );
+    const telemetry = getTelemetry();
+    if (telemetry.enabled) {
+      for (const outcome of outcomes) {
+        const endpointHex = outcome.peer.toLowerCase();
+        const dial = byEndpoint.get(endpointHex);
+        const believed = dial?.endpointHex
+          ? this.lastReachability[reachabilityKey(dial.endpointHex, dial.presence)]
+          : undefined;
+        telemetry
+          .startSpan('trail.push.peer.app', {
+            parent,
+            attributes: {
+              'sc.peer': endpointHex.slice(0, 10),
+              'peer.kind': dial?.kind ?? 'stash',
+              // The conditioning variable. This is the column the native span cannot carry.
+              'peer.presence': dial?.presence ?? 'unknown',
+              'peer.outcome': outcome.outcome,
+              'peer.budget_ms': outcome.budgetMs,
+              'peer.latency_ms': typeof outcome.latencyMs === 'number' ? outcome.latencyMs : -1,
+              'peer.answered': outcome.outcome === 'finished',
+              entries_sent: outcome.entriesSent,
+              // What the model believed going in, so a prediction can be scored against the
+              // result rather than merely described.
+              'peer.predicted_answer_rate': believed?.answerRate ?? -1,
+              'peer.samples': believed?.samples ?? 0,
+            },
+          })
+          .end();
+      }
+    }
+    try {
+      const current = await loadReachability(this.kv);
+      const next = foldOutcomes(current, plan, outcomes, now);
+      await saveReachability(this.kv, next);
+      this.lastReachability = next;
+      if (!(await loadStashPeer(this.kv))) {
+        const inferred = inferStashPeer(
+          outcomes,
+          plan
+            .filter((dial) => dial.kind === 'friend' && dial.endpointHex)
+            .map((dial) => dial.endpointHex as string)
+        );
+        if (inferred) await saveStashPeer(this.kv, inferred);
+      }
+    } catch {
+      // Losing an update costs accuracy on the next push, never delivery on this one.
+    }
+  }
+
   private durablePeerTickets(): string[] {
     return [
       ...(this.stashEnabled() && this.stashTicket ? [this.stashTicket] : []),
@@ -2030,12 +2194,19 @@ export class LocationSharingService {
     if (!this.mod) return;
     const peerTickets = this.durablePeerTickets();
     const stashEnabled = this.stashEnabled();
+    const plan = await this.planPeerDials(stashEnabled);
+    const budgetMaxMs = plan.reduce((max, dial) => Math.max(max, dial.budgetMs), 0);
     const span = getTelemetry().startSpan('trail.push.app', {
       parent,
       attributes: {
         'sc.author': this.keys ? this.keys.endpointId.slice(0, 10) : undefined,
         stash: stashEnabled,
         'sync.peers': peerTickets.length,
+        // The deadline the model granted this push, and how many peers it declined to wait for.
+        // Both are on the parent span so a run can be read at a glance without joining the
+        // per-peer rows.
+        'push.budget_max_ms': budgetMaxMs,
+        'push.peers_skipped': plan.filter((dial) => dial.budgetMs === 0).length,
       },
     });
     try {
@@ -2053,10 +2224,24 @@ export class LocationSharingService {
       if (typeof this.mod.pushTrail !== 'function') {
         throw new Error('native module must be rebuilt: pushTrail is missing (just bindgen-ios)');
       }
-      await this.mod.pushTrail(
-        peerTickets,
-        getTelemetry().enabled ? traceparentFor(span.context) : null
-      );
+      const budgeted = this.mod.pushTrailBudgeted;
+      if (typeof budgeted === 'function') {
+        const outcomes = await budgeted.call(
+          this.mod,
+          plan.map((dial) => ({ ticket: dial.ticket, budgetMs: dial.budgetMs })),
+          getTelemetry().enabled ? traceparentFor(span.context) : null
+        );
+        await this.learnFromPush(plan, outcomes, span.context);
+      } else {
+        // A phone can be running an older binary than the JS bundle, so the flat-budget push stays
+        // the fallback rather than a hard failure. It costs the old 30s worst case; it does not
+        // strand anything.
+        span.setAttribute('push.budgeted', false);
+        await this.mod.pushTrail(
+          peerTickets,
+          getTelemetry().enabled ? traceparentFor(span.context) : null
+        );
+      }
       // Content upload is stash-only, and gated on the OPT-IN rather than on the stash merely
       // being configured. `stashConfig` is build-time env; `stashEnabled()` is the user's answer.
       // Testing the former would PUT sealed envelopes to the durable server for a user who
@@ -2637,6 +2822,29 @@ export class LocationSharingService {
    * seconds of splash is a slow launch, ninety is a bug report. Overrunning it is recorded rather
    * than swallowed, because proceeding means accepting the clobber risk this await exists to avoid.
    */
+  /**
+   * Whether the installed binary adopts the process-wide node rather than clobbering it.
+   *
+   * Cached after the first answer: it cannot change within a process, and this sits on the launch
+   * path. A phone can be running an older binary than the JS bundle, so absence of the export is
+   * the answer — those binaries still clobber and still need the wait.
+   */
+  private async nativeAdoptsNode(): Promise<boolean> {
+    if (this.nodeAdoptionSupported !== null) return this.nodeAdoptionSupported;
+    const probe = this.mod?.nativeRuntimeAdoptsNode;
+    if (typeof probe !== 'function') {
+      this.nodeAdoptionSupported = false;
+      return false;
+    }
+    try {
+      this.nodeAdoptionSupported = await probe.call(this.mod);
+    } catch {
+      // A probe that throws is not a binary to trust with an unguarded createNode.
+      this.nodeAdoptionSupported = false;
+    }
+    return this.nodeAdoptionSupported;
+  }
+
   private async awaitRuntimeIdleBounded(): Promise<void> {
     // A force-quit relaunch is the most likely thing to follow a teardown hang — the user kills the
     // frozen app and reopens it — so this launch is often the first context able to report it.
@@ -2736,6 +2944,37 @@ export class LocationSharingService {
       );
     }
     await Promise.allSettled(work);
+  }
+
+  /**
+   * Load just enough from local storage for the UI to draw, without touching the native node.
+   *
+   * The map's read path has no business waiting on the sending path, and it used to: friends came
+   * from {@link restorePool} and positions from the trail store, but both were only reached after
+   * `init()` had built the node, started it, and answered the local-network and Bluetooth
+   * permission prompts. So a launch showed an empty map until all of that finished — and if the
+   * node had been clobbered, until relaunch. Everything drawn here is already on disk; none of it
+   * needs a node, a network, or a permission.
+   *
+   * Deliberately does NOT set {@link poolRestored}. That flag means "native has been told about
+   * this pool", and hydration tells native nothing — claiming otherwise would let
+   * `pushSharingRecipients` run against a node that does not exist yet.
+   *
+   * Idempotent, and never overwrites a pool that is already populated: `init()` remains the source
+   * of truth, this only fills the gap before it.
+   */
+  async hydrateFromStore(): Promise<void> {
+    if (this.hydratedFromStore) return;
+    this.hydratedFromStore = true;
+    try {
+      const persisted = await loadPool(this.kv);
+      if (persisted && pool.friendList(this.state).length === 0) {
+        this.state = persisted;
+      }
+      this.emit();
+    } catch {
+      // A cold read that fails costs a blank map until `init()` lands — the status quo, not worse.
+    }
   }
 
   /** Restore the persisted pool and re-establish subscriptions so sharing resumes after a reload. */

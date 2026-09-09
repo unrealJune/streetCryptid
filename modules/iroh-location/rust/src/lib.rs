@@ -468,6 +468,39 @@ pub struct MeshPeer {
     pub recv_public: Vec<u8>,
 }
 
+/// One peer to push to, and how long it is worth waiting for.
+///
+/// Produced by `dialBudgetMs` in `src/features/social/core/peer-reachability.ts`. The budget lives
+/// on the JS side because that is where presence does, and because a pure function over
+/// `(presence, history)` can be tested without a node.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PeerDial {
+    /// The peer's endpoint ticket, as [`LocationNode::push_trail`] takes them.
+    pub ticket: String,
+    /// Deadline for this peer. **Zero means do not wait**: the data is still handed to the live
+    /// engine so the peer reconciles when it next wakes, but no background wake is held open for
+    /// it. See [`LocationNode::push_trail_budgeted`].
+    pub budget_ms: u64,
+}
+
+/// What one peer did during a push, handed back so JS can fold it into its estimate.
+///
+/// Mirrors `PeerObservation` in `src/features/social/core/peer-reachability.ts`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PeerPushReport {
+    /// Full lowercase hex endpoint id, directly comparable to `friend.endpointId`.
+    pub peer: String,
+    /// `finished` | `failed` | `silent` | `skipped`. See `docs::PeerOutcome` for why the last two
+    /// are not the same thing.
+    pub outcome: String,
+    /// Time from `start_sync` to this peer reporting. Absent when it never did.
+    pub latency_ms: Option<u64>,
+    /// Entries handed to THIS peer. Zero unless `outcome` is `finished`.
+    pub entries_sent: u64,
+    /// The deadline this peer was granted, so a truncated dial is distinguishable from a real one.
+    pub budget_ms: u64,
+}
+
 /// A mailbox address we expect traffic on, plus who/when it belongs to.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct MeshTag {
@@ -2528,21 +2561,71 @@ impl LocationNode {
         peer_tickets: Vec<String>,
         traceparent: Option<String>,
     ) -> Result<(), LocationError> {
-        use tracing::Instrument;
-        let requested = peer_tickets.len();
-        let peers: Vec<EndpointAddr> = peer_tickets
-            .iter()
-            .filter_map(|ticket| ticket.parse::<EndpointTicket>().ok())
-            .map(|ticket| ticket.endpoint_addr().clone())
+        // Every peer gets the legacy flat budget. Kept so a JS bundle newer than the installed
+        // binary still has a working push; `push_trail_budgeted` is the one the model drives.
+        let dials = peer_tickets
+            .into_iter()
+            .map(|ticket| PeerDial {
+                ticket,
+                budget_ms: docs::PUSH_TIMEOUT_SECS * 1_000,
+            })
             .collect();
+        self.push_trail_budgeted(dials, traceparent).await?;
+        Ok(())
+    }
+
+    /// Push our trail to each peer with **its own deadline**, and report what each one did.
+    ///
+    /// The send-side counterpart of the reachability model in
+    /// `src/features/social/core/peer-reachability.ts`. JS decides the budgets — it is where
+    /// presence lives and where the decision is testable — and this returns the per-peer outcomes
+    /// it learns from.
+    ///
+    /// A budget of zero means "do not wait for this peer". The data is still handed to the live
+    /// engine, so the peer reconciles on its own whenever it next wakes; we simply stop holding a
+    /// background wake open for a phone we expect to be asleep. That single change is where the
+    /// saving is: measured over 7 days, 74% of pushes burned the full 30s budget waiting on peers
+    /// that never reported at all, at a cost of 41.7 hours a week.
+    pub async fn push_trail_budgeted(
+        &self,
+        peers: Vec<PeerDial>,
+        traceparent: Option<String>,
+    ) -> Result<Vec<PeerPushReport>, LocationError> {
+        use tracing::Instrument;
+        let requested = peers.len();
+        let peers: Vec<(EndpointAddr, std::time::Duration)> = peers
+            .iter()
+            .filter_map(|dial| {
+                dial.ticket
+                    .parse::<EndpointTicket>()
+                    .ok()
+                    .map(|ticket| (ticket, dial.budget_ms))
+            })
+            .map(|(ticket, budget_ms)| {
+                (
+                    ticket.endpoint_addr().clone(),
+                    std::time::Duration::from_millis(budget_ms),
+                )
+            })
+            .collect();
+        let budget_max_ms = peers
+            .iter()
+            .map(|(_, budget)| budget.as_millis() as u64)
+            .max()
+            .unwrap_or_default();
         let span = tracing::info_span!(
             "trail.push",
             sc.author = %telemetry::short_hex(&self.author),
             sync.peers_requested = requested,
             sync.peers_dialed = peers.len(),
+            // The deadline the model actually granted this push, so a run can be read against what
+            // it was allowed rather than against a constant that no longer exists.
+            push.budget_max_ms = budget_max_ms,
             entries_sent = tracing::field::Empty,
             peers_finished = tracing::field::Empty,
             peers_failed = tracing::field::Empty,
+            peers_silent = tracing::field::Empty,
+            peers_skipped = tracing::field::Empty,
             finished = tracing::field::Empty,
         );
         telemetry::set_parent(&span, traceparent.as_deref());
@@ -2565,13 +2648,68 @@ impl LocationNode {
             })?;
             let current = tracing::Span::current();
             current.record("finished", sent.is_some());
-            if let Some(report) = sent {
-                // Summed across every peer that reported, not taken from whichever finished first.
-                current.record("entries_sent", report.entries_sent);
-                current.record("peers_finished", report.peers_finished);
-                current.record("peers_failed", report.peers_failed);
+            let Some(report) = sent else {
+                return Ok(Vec::new());
+            };
+            // Summed across every peer that reported, not taken from whichever finished first.
+            current.record("entries_sent", report.entries_sent);
+            current.record("peers_finished", report.peers_finished);
+            current.record("peers_failed", report.peers_failed);
+            current.record(
+                "peers_silent",
+                report
+                    .per_peer
+                    .iter()
+                    .filter(|p| p.outcome == docs::PeerOutcome::Silent)
+                    .count(),
+            );
+            current.record(
+                "peers_skipped",
+                report
+                    .per_peer
+                    .iter()
+                    .filter(|p| p.outcome == docs::PeerOutcome::Skipped)
+                    .count(),
+            );
+
+            // One child span per dialled peer. This is the row the budget model is fitted against,
+            // and it exists because no aggregate can answer the question that matters: an
+            // `peers_finished = 2` tells you two peers answered, not WHICH two or how long either
+            // took, so it cannot price a deadline. Queryable directly —
+            // `{ name = "trail.push.peer" && span.peer.outcome = "silent" }` — and see
+            // `infra/otel/README.md` for the cookbook.
+            //
+            // The span's own duration is meaningless (it is opened and closed here, after the
+            // fact); `peer.latency_ms` is the measurement. That is deliberate: a duration that
+            // looked plausible but meant something else would be worse than an obvious zero.
+            for peer in &report.per_peer {
+                let latency = peer.latency_ms;
+                tracing::info_span!(
+                    "trail.push.peer",
+                    sc.peer = %telemetry::short_hex(&peer.peer),
+                    peer.outcome = peer.outcome.as_str(),
+                    peer.budget_ms = peer.budget_ms,
+                    peer.latency_ms = latency.unwrap_or_default(),
+                    peer.answered = latency.is_some(),
+                    entries_sent = peer.entries_sent,
+                )
+                .in_scope(|| {});
             }
-            Ok(())
+
+            Ok(report
+                .per_peer
+                .iter()
+                .map(|peer| PeerPushReport {
+                    // FULL hex, not the `short_hex` used on the span. JS keys its reachability
+                    // store by `friend.endpointId`, so a truncated id here would silently fail to
+                    // match and the model would learn nothing.
+                    peer: encode_hex(&peer.peer),
+                    outcome: peer.outcome.as_str().to_string(),
+                    latency_ms: peer.latency_ms,
+                    entries_sent: peer.entries_sent,
+                    budget_ms: peer.budget_ms,
+                })
+                .collect())
         }
         .instrument(span)
         .await
