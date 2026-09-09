@@ -3,7 +3,13 @@ import { H3_DISPLAY_RES, H3_MIN_RENDER_ZOOM, resForZoom } from '../cell-ladder';
 import { createExplorationIndex } from '../exploration-index';
 import { createH3Grid, realH3 } from '../h3-grid';
 import { latLonToWorld } from '../mercator';
-import { coverageInView, coverageMeasurable, nearestPlaceName } from '../readout';
+import {
+  coverageInView,
+  coverageMeasurable,
+  friendPlaceName,
+  nearestPlaceName,
+  placeNameInRegion,
+} from '../readout';
 import type { CameraState, Place, Viewport, WorldPoint } from '../types';
 
 describe('nearestPlaceName', () => {
@@ -11,6 +17,46 @@ describe('nearestPlaceName', () => {
 
   it('returns null when there are no places', () => {
     expect(nearestPlaceName([], center)).toBeNull();
+  });
+
+  describe('friend locality', () => {
+    const self = { lat: 47.62, lon: -122.32 };
+    const friend = { lat: 40.71, lon: -74 };
+    const places: Place[] = [
+      { name: 'Your town', world: latLonToWorld(self), kind: 'city' },
+      { name: 'Their town', world: latLonToWorld(friend), kind: 'city' },
+    ];
+
+    it('uses the friend coordinates even while the camera is still near you', () => {
+      expect(placeNameInRegion(places, { minX: 0, minY: 0, maxX: 1, maxY: 1 }, friend)).toBe(
+        'Their town'
+      );
+    });
+
+    it('does not borrow your locality while their tiles load', () => {
+      const p = latLonToWorld(self);
+      expect(
+        placeNameInRegion(
+          [places[0]],
+          {
+            minX: p[0] - 0.01,
+            maxX: p[0] + 0.01,
+            minY: p[1] - 0.01,
+            maxY: p[1] + 0.01,
+          },
+          friend
+        )
+      ).toBeNull();
+    });
+
+    it('rejects readouts from the previous selection, old fix, or a friend without a fix', () => {
+      const readout = { id: 'friend-a', location: friend, name: 'Their town' };
+      expect(friendPlaceName(readout, 'friend-a', friend)).toBe('Their town');
+      expect(friendPlaceName(readout, 'friend-b', friend)).toBeNull();
+      expect(friendPlaceName(readout, 'friend-a', self)).toBeNull();
+      expect(friendPlaceName(readout, 'friend-a', null)).toBeNull();
+      expect(friendPlaceName(null, 'friend-a', friend)).toBeNull();
+    });
   });
 
   it('picks the nearest locality by squared world distance', () => {

@@ -10,8 +10,67 @@ import {
   BUILDING_STROKE_WIDTH,
   buildingStrokeWidthFor,
   structureWidthScale,
+  buildingGhostInk,
+  BUILDING_GHOST_ALPHA,
+  BUILDING_FILL_ALPHA,
+  buildingStyleFor,
 } from '../structure-lod';
+import { CryptidThemes } from '@/constants/cryptid-theme';
+import { luminance } from '../color';
 import { AERO_AREA_KINDS, AERO_LINE_KINDS } from '../types';
+import { dataZoomFor } from '../../tiles/tile-math';
+
+describe('buildingStyleFor', () => {
+  it.each([13, 14, 15, 15.5, 15.99])(
+    'keeps merged footprints as faint fill, without jagged outlines or hatch, at zoom %s',
+    (zoom) => {
+      expect(buildingStyleFor(zoom, dataZoomFor(zoom, { min: 0, max: 14 }))).toEqual({
+        fillAlpha: BUILDING_FILL_ALPHA,
+        strokeWidth: null,
+        hatch: false,
+      });
+    }
+  );
+
+  it.each([16, 17, 18])('preserves separated close-up footprints at zoom %s', (zoom) => {
+    expect(buildingStyleFor(zoom, dataZoomFor(zoom, { min: 0, max: 14 }))).toEqual({
+      fillAlpha: BUILDING_FILL_ALPHA,
+      strokeWidth: BUILDING_STROKE_WIDTH,
+      hatch: true,
+    });
+  });
+
+  it('does not mistake a magnified coarse preview for individual building data', () => {
+    expect(buildingStyleFor(18, 13)).toEqual({
+      fillAlpha: BUILDING_FILL_ALPHA,
+      strokeWidth: null,
+      hatch: false,
+    });
+  });
+
+  it('uses available fine geometry even when the camera is zoomed back out', () => {
+    expect(buildingStyleFor(15, 14)?.strokeWidth).toBe(BUILDING_STROKE_WIDTH);
+    expect(buildingStyleFor(15, 14)?.hatch).toBe(true);
+  });
+
+  it('still drops buildings below their display threshold', () => {
+    expect(buildingStyleFor(BUILDING_MIN_ZOOM - 0.01, 14)).toBeNull();
+  });
+});
+
+describe('unexplored building treatment', () => {
+  it.each(Object.values(CryptidThemes))(
+    'mutes footprints against both light and dark backgrounds',
+    (theme) => {
+      const { building, bg } = theme.canvas;
+      const ghost = buildingGhostInk(building, bg);
+      const chroma = (rgb: readonly number[]) => Math.max(...rgb) - Math.min(...rgb);
+      expect(chroma(ghost)).toBeLessThanOrEqual(chroma(building));
+      const contrast = (rgb: typeof building) => Math.abs(luminance(rgb) - luminance(bg));
+      expect(contrast(ghost) * BUILDING_GHOST_ALPHA).toBeLessThan(contrast(building) * 0.3);
+    }
+  );
+});
 
 describe('structureWidthScale', () => {
   it('is full weight at street zoom and floors at 0.7 when zoomed out', () => {

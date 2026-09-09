@@ -22,7 +22,7 @@ import type { RoadLayerOptions } from '../core/road-lod';
 import type { AeroAreaKind, AeroLineKind, MapPalette, Rgb, TransitMode } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
 import { buildCellStateImage } from './cell-state-image';
-import { cellLatticePath, cellRimPath } from './cell-overlay-paths';
+import { cellLatticePath, cellRimPath, exploredCellPath } from './cell-overlay-paths';
 import { getDotFieldEffect } from './dot-field-shader';
 import { buildMaskImage } from './mask-image';
 import { buildHatchPath, buildStructurePaths } from './structure-paths';
@@ -34,12 +34,12 @@ import {
   AERO_AREA_STYLE,
   AERO_LINE_ALPHA,
   aeroLineWidthFor,
-  BUILDING_FILL_ALPHA,
+  BUILDING_GHOST_ALPHA,
   BUILDING_HATCH_ALPHA,
   BUILDING_HATCH_WIDTH,
   BUILDING_STROKE_ALPHA,
-  buildingHatchVisible,
-  buildingStrokeWidthFor,
+  buildingGhostInk,
+  buildingStyleFor,
 } from '../core/structure-lod';
 import {
   DOT_FIELD_UNIFORM_FLOATS,
@@ -212,7 +212,7 @@ export function renderRegionImage({
   // the ghost lattice and the amber frontier rim are navigation, and must stay
   // legible over a building footprint.
   if (structuresEnabled) {
-    drawStructures(canvas, region, palette, pixelRatio, reveal);
+    drawStructures(canvas, region, palette, pixelRatio, reveal, explorationEnabled);
   }
   if (explorationEnabled) {
     drawCellOverlays(canvas, region, palette, pixelRatio, reveal);
@@ -279,7 +279,8 @@ function drawStructures(
   region: MapRegion,
   palette: MapPalette,
   pixelRatio: number,
-  reveal: number
+  reveal: number,
+  explorationEnabled: boolean
 ): void {
   if (reveal <= 0) return;
   const paths = buildStructurePaths(region.geometry, region.spec);
@@ -322,14 +323,48 @@ function drawStructures(
     canvas.drawPath(path, paint);
   }
 
-  const buildingWidth = buildingStrokeWidthFor(region.spec.zoom);
-  if (paths.buildings && buildingWidth !== null) {
+  const buildingStyle = buildingStyleFor(region.spec.zoom, region.spec.tileZoom);
+  if (paths.buildings && buildingStyle) {
     const path = Skia.Path.MakeFromSVGString(paths.buildings);
     if (path) {
       path.setFillType(FillType.Winding);
-      canvas.drawPath(path, fillPaint(ink, BUILDING_FILL_ALPHA * reveal));
-      drawBuildingHatch(canvas, path, region, ink, reveal);
-      canvas.drawPath(path, strokePaint(ink, buildingWidth, BUILDING_STROKE_ALPHA * reveal));
+      const explored = explorationEnabled
+        ? Skia.Path.MakeFromSVGString(exploredCellPath(region.cellField, region.spec))
+        : null;
+      if (explorationEnabled) {
+        canvas.save();
+        if (explored) canvas.clipPath(explored, ClipOp.Difference, true);
+        const ghost = buildingGhostInk(ink, palette.bg);
+        canvas.drawPath(
+          path,
+          fillPaint(ghost, buildingStyle.fillAlpha * BUILDING_GHOST_ALPHA * reveal)
+        );
+        if (buildingStyle.strokeWidth !== null) {
+          canvas.drawPath(
+            path,
+            strokePaint(
+              ghost,
+              buildingStyle.strokeWidth,
+              BUILDING_STROKE_ALPHA * BUILDING_GHOST_ALPHA * reveal
+            )
+          );
+        }
+        canvas.restore();
+      }
+      if (!explorationEnabled || explored) {
+        canvas.save();
+        if (explored) canvas.clipPath(explored, ClipOp.Intersect, true);
+        canvas.drawPath(path, fillPaint(ink, buildingStyle.fillAlpha * reveal));
+        if (buildingStyle.hatch) drawBuildingHatch(canvas, path, region, ink, reveal);
+        if (buildingStyle.strokeWidth !== null) {
+          canvas.drawPath(
+            path,
+            strokePaint(ink, buildingStyle.strokeWidth, BUILDING_STROKE_ALPHA * reveal)
+          );
+        }
+        canvas.restore();
+      }
+      explored?.dispose();
     }
   }
 
@@ -351,7 +386,6 @@ function drawBuildingHatch(
   ink: Rgb,
   reveal: number
 ): void {
-  if (!buildingHatchVisible(region.spec.zoom)) return;
   const hatch = Skia.Path.MakeFromSVGString(buildHatchPath(region.spec));
   if (!hatch) return;
 

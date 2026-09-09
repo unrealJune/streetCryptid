@@ -4,7 +4,12 @@ import { createH3Grid, realH3 } from '../../core/h3-grid';
 import { latLonToWorld } from '../../core/mercator';
 import { computeRegionSpec } from '../../core/region';
 import type { CameraState, Viewport } from '../../core/types';
-import { cellLatticePath, cellRimPath, cellStateFills } from '../cell-overlay-paths';
+import {
+  cellLatticePath,
+  cellRimPath,
+  cellStateFills,
+  exploredCellPath,
+} from '../cell-overlay-paths';
 
 const grid = createH3Grid(realH3());
 const HOME = latLonToWorld({ lat: 47.6205, lon: -122.3169 });
@@ -46,6 +51,20 @@ describe('cellStateFills', () => {
 });
 
 describe('cellLatticePath / cellRimPath', () => {
+  it('clips building detail to exactly the revealed cells', () => {
+    const path = exploredCellPath(field, spec);
+    expect((path.match(/M/g) ?? []).length).toBe(
+      field.cells.filter((cell) => cell.fraction >= 0.5).length
+    );
+    expect(
+      exploredCellPath(
+        { ...field, cells: field.cells.map((cell) => ({ ...cell, fraction: 0 })) },
+        spec
+      )
+    ).toBe('');
+    expect(path).not.toBe('');
+  });
+
   it('lattice covers exactly the not-fully-explored cells', () => {
     const path = cellLatticePath(field, spec);
     const hiddenCount = field.cells.filter((c) => c.fraction < 1).length;

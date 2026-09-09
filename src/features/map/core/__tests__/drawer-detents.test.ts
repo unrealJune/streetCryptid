@@ -82,7 +82,20 @@ describe('allowedDetents', () => {
 
 describe('pickDetent', () => {
   const DETENTS: readonly DrawerDetent[] = ['peek', 'mid', 'full'];
-  const HEIGHTS: Record<DrawerDetent, number> = { peek: 200, mid: 450, full: 780 };
+  const HEIGHTS: Record<DrawerDetent, number> = { collapsed: 78, peek: 200, mid: 450, full: 780 };
+
+  it('lets a single long drag reach the minimized stop from full screen', () => {
+    const detents = allowedDetents('full', 'collapsed');
+    expect(pickDetent(78, 0, 780, detents, HEIGHTS)).toBe('collapsed');
+    expect(pickDetent(78, 900, 780, detents, HEIGHTS)).toBe('collapsed');
+    expect(pickDetent(780, -900, 78, detents, HEIGHTS)).toBe('full');
+  });
+
+  it('keeps a collapsed drawer reopenable', () => {
+    const detents = allowedDetents('full', 'collapsed');
+    expect(pickDetent(90, -900, 78, detents, HEIGHTS)).toBe('peek');
+    expect(detentHeights({ ...SCREEN, peekBody: 900 }).collapsed).toBe(78);
+  });
 
   it('lets a flick outrank the distance travelled', () => {
     // Barely moved, but thrown upward: intent beats displacement.

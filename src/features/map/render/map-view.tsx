@@ -59,11 +59,12 @@ import type {
 } from '../core/types';
 import { LOCATE_MIN_ZOOM } from '../config';
 import { clusterMarkers } from '../core/marker-clusters';
-import { visibleOceanCryptids } from '../core/ocean-cryptids';
+import { PLACED_OCEAN_CRYPTIDS } from '../core/ocean-cryptids';
 import type { MapRegion } from '../engine/map-engine';
 import { useMapEngine } from '../hooks/use-map-engine';
 import { latLonToWorld } from '../core/mercator';
 import { HIGHWAY_CLASS } from '../core/road-lod';
+import { placeNameInRegion } from '../core/readout';
 import {
   emitMapPerfEvent,
   isMapPerfRunEnabled,
@@ -615,13 +616,6 @@ export function MapView({
     () => clusterMarkers(locatorAnchors, CLUSTER_OVERLAP_PX / committedScale),
     [locatorAnchors, committedScale]
   );
-  // Decorative sea cryptids for the far-out view, where the exploration ladder
-  // has run out of legible rungs and the world is a small rectangle in a lot of
-  // void. Chosen off the committed camera, so they don't churn mid-gesture.
-  const oceanCryptids = useMemo(
-    () => (viewport ? visibleOceanCryptids(camera, viewport) : []),
-    [camera, viewport]
-  );
   const selfTrailPoints = useMemo(
     () =>
       viewport
@@ -643,9 +637,21 @@ export function MapView({
     return () => path?.dispose();
   }, [selectedTrail]);
 
+  const friendPlace = useMemo(() => {
+    const friend = friends.find((candidate) => candidate.id === selectedFriendId);
+    if (!friend) return null;
+    return {
+      id: friend.id,
+      location: friend.location,
+      name:
+        region && region.spec.tileZoom >= 10
+          ? placeNameInRegion(region.places, region.spec.rect, friend.location)
+          : null,
+    };
+  }, [friends, region, selectedFriendId]);
   useEffect(() => {
-    onReadout?.({ coverage, sectorsVisible, placeName });
-  }, [coverage, sectorsVisible, placeName, onReadout]);
+    onReadout?.({ coverage, sectorsVisible, placeName, friendPlace });
+  }, [coverage, sectorsVisible, placeName, friendPlace, onReadout]);
 
   // Viewport resize (rotation, window resize): anchor-space px depend on the
   // viewport, so re-express the current camera in the new space. The only place
@@ -1062,14 +1068,13 @@ export function MapView({
           {viewport ? (
             <OceanCryptidLayer
               anchor={anchor}
-              cryptids={oceanCryptids}
+              cryptids={PLACED_OCEAN_CRYPTIDS}
               palette={theme.canvas}
               reducedMotion={reducedMotion}
               scale={k}
               translateX={tx}
               translateY={ty}
               viewport={viewport}
-              zoom={camera.zoom}
             />
           ) : null}
 

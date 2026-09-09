@@ -2,7 +2,47 @@ import { visibleWorldRect } from './camera';
 import { H3_DISPLAY_RES, resForZoom } from './cell-ladder';
 import type { ExplorationIndex } from './exploration-index';
 import type { H3Grid } from './h3-grid';
-import type { CameraState, Place, Viewport, WorldPoint } from './types';
+import { latLonToWorld } from './mercator';
+import type {
+  CameraState,
+  LatLon,
+  MapReadout,
+  Place,
+  Viewport,
+  WorldPoint,
+  WorldRect,
+} from './types';
+
+/** Withhold a locality while the selected location's own tiles are still loading. */
+export function placeNameInRegion(
+  places: readonly Place[],
+  bounds: WorldRect,
+  location: LatLon
+): string | null {
+  const point = latLonToWorld(location);
+  if (
+    point[0] < bounds.minX ||
+    point[0] > bounds.maxX ||
+    point[1] < bounds.minY ||
+    point[1] > bounds.maxY
+  )
+    return null;
+  return nearestPlaceName(places, point);
+}
+
+/** Selection and fix can change before the map's next readout effect runs. */
+export function friendPlaceName(
+  place: MapReadout['friendPlace'],
+  id: string,
+  location: LatLon | null
+): string | null {
+  return location &&
+    place?.id === id &&
+    place.location.lat === location.lat &&
+    place.location.lon === location.lon
+    ? place.name
+    : null;
+}
 
 /** Kinds that make sense as a "where you are" headline, most local first. */
 const PLACE_KINDS = new Set(['neighbourhood', 'suburb', 'quarter', 'village', 'town', 'city']);

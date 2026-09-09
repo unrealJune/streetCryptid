@@ -1,7 +1,7 @@
 /** How far up the drawer is: the island at rest, half the screen, or all of it. */
-export type DrawerDetent = 'peek' | 'mid' | 'full';
+export type DrawerDetent = 'collapsed' | 'peek' | 'mid' | 'full';
 
-export const DETENT_ORDER: readonly DrawerDetent[] = ['peek', 'mid', 'full'];
+export const DETENT_ORDER: readonly DrawerDetent[] = ['collapsed', 'peek', 'mid', 'full'];
 
 /** Fraction of the usable height the `mid` detent occupies. */
 const MID_FRACTION = 0.56;
@@ -34,8 +34,11 @@ export const GRIP_HEIGHT = 18;
  */
 
 /** Detents a body is allowed to reach, in ascending height order. */
-export function allowedDetents(max: DrawerDetent): readonly DrawerDetent[] {
-  return DETENT_ORDER.slice(0, DETENT_ORDER.indexOf(max) + 1);
+export function allowedDetents(
+  max: DrawerDetent,
+  min: DrawerDetent = 'peek'
+): readonly DrawerDetent[] {
+  return DETENT_ORDER.slice(DETENT_ORDER.indexOf(min), DETENT_ORDER.indexOf(max) + 1);
 }
 
 /**
@@ -70,7 +73,7 @@ export function detentHeights(input: {
     midCandidate > peek + MIN_DETENT_GAP && midCandidate < full - MIN_DETENT_GAP
       ? midCandidate
       : full;
-  return { peek, mid, full };
+  return { collapsed: Math.min(chrome, full), peek, mid, full };
 }
 
 /**
@@ -106,14 +109,19 @@ export function pickDetent(
     }
   }
 
-  if (velocityY < -FLING_SPEED) return detents[Math.min(fromIndex + 1, detents.length - 1)];
-  if (velocityY > FLING_SPEED) return detents[Math.max(fromIndex - 1, 0)];
-
   const travelled = height - heights[detents[fromIndex]];
-  const next = travelled > 0 ? fromIndex + 1 : fromIndex - 1;
-  if (next < 0 || next >= detents.length) return detents[fromIndex];
-
-  const span = Math.abs(heights[detents[next]] - heights[detents[fromIndex]]);
-  if (span > 0 && Math.abs(travelled) / span >= TRAVEL_COMMIT) return detents[next];
-  return detents[fromIndex];
+  const direction = travelled > 0 ? 1 : -1;
+  let destination = fromIndex;
+  for (let next = fromIndex + direction; next >= 0 && next < detents.length; next += direction) {
+    const previousHeight = heights[detents[next - direction]];
+    const span = Math.abs(heights[detents[next]] - previousHeight);
+    const progress = (height - previousHeight) * direction;
+    if (progress < span * TRAVEL_COMMIT) break;
+    destination = next;
+  }
+  // A long drag may cross several stops; a short flick still advances at least one.
+  if (velocityY < -FLING_SPEED)
+    destination = Math.max(destination, Math.min(fromIndex + 1, detents.length - 1));
+  if (velocityY > FLING_SPEED) destination = Math.min(destination, Math.max(fromIndex - 1, 0));
+  return detents[destination];
 }

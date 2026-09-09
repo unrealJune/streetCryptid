@@ -73,6 +73,24 @@ describe('FriendsIsland', () => {
     expect(findText(renderer, '1 NEARBY')).toHaveLength(1);
   });
 
+  it('has no duplicate collapse arrow when the drawer owns minimizing', () => {
+    act(() => {
+      renderer = create(
+        <FriendsIsland
+          friends={[mothman]}
+          minimized={false}
+          onOpenProfile={jest.fn()}
+          onSelect={jest.fn()}
+          theme={CryptidThemes.daybreak}
+        />
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ accessibilityLabel: 'Minimize friends roster' })
+    ).toHaveLength(0);
+    expect(findText(renderer, '@wanderer')).toHaveLength(1);
+  });
+
   it('shows distance for live friends and OFFLINE for dark ones', () => {
     render([mothman, jackalope]);
 

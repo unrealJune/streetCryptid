@@ -1,5 +1,5 @@
-import { clamp } from './color';
-import type { AeroAreaKind, AeroLineKind } from './types';
+import { applyFog, clamp } from './color';
+import type { AeroAreaKind, AeroLineKind, Rgb } from './types';
 
 /**
  * Building + aeroway stroke weights and their zoom/size cutoffs — the structure
@@ -54,6 +54,13 @@ export const BUILDING_STROKE_WIDTH = 0.85;
  */
 export const BUILDING_STROKE_ALPHA = 0.62;
 export const BUILDING_FILL_ALPHA = 0.05;
+
+export const BUILDING_GHOST_ALPHA = 0.24;
+
+/** Unrevealed footprints keep only a quiet silhouette, never the interior hatch. */
+export function buildingGhostInk(ink: Rgb, background: Rgb): Rgb {
+  return applyFog(ink, background, 1, false);
+}
 
 /**
  * Diagonal hatch inside each footprint: spacing between lines and their weight,
@@ -130,6 +137,28 @@ export function structureWidthScale(zoom: number): number {
 export function buildingStrokeWidthFor(zoom: number): number | null {
   if (zoom < BUILDING_MIN_ZOOM) return null;
   return BUILDING_STROKE_WIDTH * structureWidthScale(zoom);
+}
+
+/**
+ * z13 tiles merge nearby buildings into block-sized polygons. Only z14 carries
+ * separated footprints; magnifying a coarse preview does not restore that detail.
+ */
+export function buildingStyleFor(
+  zoom: number,
+  tileZoom: number
+): {
+  readonly fillAlpha: number;
+  readonly strokeWidth: number | null;
+  readonly hatch: boolean;
+} | null {
+  const width = buildingStrokeWidthFor(zoom);
+  if (width === null) return null;
+  const individualFootprints = tileZoom >= 14;
+  return {
+    fillAlpha: BUILDING_FILL_ALPHA,
+    strokeWidth: individualFootprints ? width : null,
+    hatch: individualFootprints && buildingHatchVisible(zoom),
+  };
 }
 
 /**
