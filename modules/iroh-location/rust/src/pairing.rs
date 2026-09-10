@@ -53,7 +53,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -1400,7 +1400,26 @@ impl PairCore {
     async fn our_endpoint_ticket(&self) -> String {
         match self.runtime_endpoint().await {
             Ok(ep) => {
-                let _ = tokio::time::timeout(ENDPOINT_ONLINE_TIMEOUT, ep.online()).await;
+                // Instrumented because this is the one cost in the handshake that is invisible
+                // from outside: `pairing.poll` samples the state machine every ~4s from JS, which
+                // cannot distinguish "waiting on a relay" from "waiting on the human at the SAS
+                // gate". `Endpoint::online()` resolves only once a relay handshake has completed
+                // and pends forever with no relay reachable, so with the relays unreachable this
+                // burns the full ENDPOINT_ONLINE_TIMEOUT -- and it is paid once per message built,
+                // not once per pairing.
+                let started = Instant::now();
+                let online = tokio::time::timeout(ENDPOINT_ONLINE_TIMEOUT, ep.online()).await;
+                let waited_ms = started.elapsed().as_millis() as u64;
+                let timed_out = online.is_err();
+                if timed_out || waited_ms >= 250 {
+                    tracing::info!(
+                        sc.author = %crate::telemetry::short_hex(&self.endpoint_id),
+                        waited_ms,
+                        timed_out,
+                        budget_ms = ENDPOINT_ONLINE_TIMEOUT.as_millis() as u64,
+                        "pair.endpoint_ticket: waited for the endpoint to reach a relay"
+                    );
+                }
                 EndpointTicket::new(ep.addr()).to_string()
             }
             Err(_) => String::new(),
@@ -1433,7 +1452,9 @@ impl PairCore {
         session_id: [u8; SESSION_ID_LEN],
         invite_secret: Vec<u8>,
     ) -> Result<PairMsg> {
+        let build_started = Instant::now();
         let endpoint_ticket = self.our_endpoint_ticket().await;
+        let ticket_ms = build_started.elapsed().as_millis() as u64;
         let (profile_ticket, trail_ticket) = match decision {
             Decision::Accept => (
                 self.our_profile_ticket().await,
@@ -1441,6 +1462,16 @@ impl PairCore {
             ),
             _ => (String::new(), String::new()),
         };
+        // `ticket_ms` vs the total separates "waiting for a relay" from "reading our own docs".
+        // Both sides build a message per round and the responder builds its reply INSIDE the
+        // initiator's dial, so these costs serialize across the two phones rather than overlap.
+        tracing::info!(
+            sc.session = %crate::telemetry::short_hex(&session_id),
+            decision = ?decision,
+            ticket_ms,
+            local_only = endpoint_ticket.is_empty(),
+            "pair.build_msg: assembled one handshake message"
+        );
         // The ratchet ephemeral rides every message, like `recv_pub`: it is the same disclosure on
         // each, the receiver binds the first one it sees, and a message that omitted it would fail
         // the length check in `verify_msg` rather than silently pairing without a ratchet root.
@@ -2408,15 +2439,26 @@ impl PairCore {
 
 /// Open a fresh bi-stream, send our framed message, and read the framed response.
 async fn dial_exchange(endpoint: &Endpoint, addr: EndpointAddr, msg: &PairMsg) -> Result<PairMsg> {
+    // Split into connect vs round-trip on purpose. `connect` is where hole punching and relay
+    // fallback live, and the round-trip is where the PEER's own build_msg runs -- so a slow
+    // round-trip here means the other phone is waiting on ITS relay, not that the link is slow.
+    let dial_started = Instant::now();
     let conn = endpoint
         .connect(addr, PAIR_ALPN)
         .await
         .map_err(|e| anyhow!("pair dial: {e}"))?;
+    let connect_ms = dial_started.elapsed().as_millis() as u64;
+    let exchange_started = Instant::now();
     let (mut send, mut recv) = conn.open_bi().await.map_err(|e| anyhow!("open_bi: {e}"))?;
     write_frame(&mut send, &encode_msg(msg)?).await?;
     let resp_bytes = read_frame(&mut recv).await?;
     let resp = decode_msg(&resp_bytes)?;
     conn.close(0u32.into(), b"pair-done");
+    tracing::info!(
+        connect_ms,
+        exchange_ms = exchange_started.elapsed().as_millis() as u64,
+        "pair.dial_exchange: one handshake round trip"
+    );
     Ok(resp)
 }
 

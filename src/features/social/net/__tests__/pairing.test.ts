@@ -1305,4 +1305,41 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       jest.useRealTimers();
     }
   });
+
+  it('surfaces a pairing session without waiting on a slow BLE read', async () => {
+    // The regression this guards: `listPairSessions()` used to share a Promise.all with the
+    // three BLE calls, and Promise.all resolves at its SLOWEST member -- so the SAS gate waited
+    // on a Bluetooth query unrelated to the handshake. `pollPairingOnce` also coalesces on
+    // `pollInFlight`, so the next tick returned the same stuck promise rather than re-reading,
+    // and one slow BLE call stalled every pairing update for its full duration. Observed in
+    // production as polls of 10-17s while the native handshake itself takes ~390ms.
+    const svc = newService();
+    await svc.init('@me', 'mothman');
+
+    const seen = watch(svc);
+    const mod = mockHolder.mod;
+    mod.sessions = [verifyingSession({ sessionId: 'sess-slow-ble' })];
+
+    let releaseBle: () => void = () => {};
+    const bleBlocked = new Promise<void>((resolve) => {
+      releaseBle = resolve;
+    });
+    const realCapabilities = mod.bleCapabilities.bind(mod);
+    mod.bleCapabilities = async () => {
+      await bleBlocked;
+      return realCapabilities();
+    };
+
+    // Drive exactly one poll. The BLE half cannot settle until `releaseBle`, so anything the
+    // snapshot knows before then arrived without waiting on Bluetooth.
+    const polling = (svc as unknown as { pollPairingOnce(): Promise<void> }).pollPairingOnce();
+    for (let i = 0; i < 25; i += 1) await Promise.resolve();
+
+    expect(seen.current?.pairing.sessions.map((session) => session.sessionId)).toContain(
+      'sess-slow-ble'
+    );
+
+    releaseBle();
+    await polling;
+  });
 });
