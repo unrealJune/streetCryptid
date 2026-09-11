@@ -181,6 +181,30 @@ sc_profile_sampler_start() {
   return 0
 }
 
+# Harvest `cargo build --timings`, which is cargo's own profiler and knows things sampling never
+# can: the cost of each crate, and the shape of the dependency graph that serializes them.
+#
+# The HTML itself is read and discarded, never copied anywhere that gets published: it is raw tool
+# output, and scripts/build-report.sh explains why only validated rows leave this machine. The
+# parser reduces it to one row per crate, which is the same information.
+sc_profile_collect_cargo_timings() {
+  local timings="${CARGO_TARGET_DIR:-}/cargo-timings/cargo-timing.html"
+  local dir
+  dir="$(sc_profile_dir)"
+
+  [[ -f "$timings" ]] || return 0
+  mkdir -p -- "$dir" 2> /dev/null || return 0
+
+  command -v node > /dev/null 2>&1 || return 0
+  node "$(sc_profile_repo_root)/scripts/parse-cargo-timings.mjs" "$timings" \
+    >> "$dir/crates.tsv" 2> /dev/null || true
+  return 0
+}
+
+sc_profile_repo_root() {
+  printf '%s' "${SC_PROFILE_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+}
+
 sc_profile_sampler_stop() {
   local pidfile pid
   pidfile="$(sc_profile_pid_file)"

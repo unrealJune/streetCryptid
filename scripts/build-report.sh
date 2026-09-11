@@ -164,9 +164,170 @@ else
   printf '_No samples were collected._\n\n'
 fi
 
+# --- What the tools said about themselves -------------------------------------
+#
+# The sampler above is a coarse map of the whole build. The three sections below are the build
+# tools' OWN instrumentation, which knows things sampling cannot: which crate cost what, whether a
+# Gradle task was reused from the cache or actually ran, and where Xcode spent its phases.
+
+crate_rows=''
+gradle_rows=''
+xcode_rows=''
+
+crate_file="$profile_dir/crates.tsv"
+if [[ -s "$crate_file" ]]; then
+  # `_`-prefixed rows are the totals the parser computes; the rest are crate names.
+  crate_rows="$(
+    awk -F'\t' '
+      $1 ~ /^_?[a-z0-9][a-z0-9._+-]{0,38}$/ && $2 ~ /^[0-9]{1,12}$/ { print $1 "\t" $2 }
+    ' "$crate_file"
+  )"
+  unit_ms="$(awk -F'\t' '$1 == "_unit_ms" { print $2 }' <<< "$crate_rows" | tail -n 1)"
+  wall_ms="$(awk -F'\t' '$1 == "_wall_ms" { print $2 }' <<< "$crate_rows" | tail -n 1)"
+
+  printf '### Rust: slowest crates (`cargo build --timings`)\n\n'
+  if [[ "$unit_ms" =~ ^[0-9]+$ && "$wall_ms" =~ ^[0-9]+$ ]] && ((wall_ms > 0)); then
+    printf 'Compile time %s across all crates, wall %s — **%s× cores busy**.\n\n' \
+      "$(human "$((unit_ms / 1000))")" \
+      "$(human "$((wall_ms / 1000))")" \
+      "$(awk -v u="$unit_ms" -v w="$wall_ms" 'BEGIN { printf "%.1f", u / w }')"
+  fi
+  printf '| Crate | Compile time |\n|---|--:|\n'
+  awk -F'\t' '$1 !~ /^_/ { print }' <<< "$crate_rows" |
+    sort -t$'\t' -k2,2nr |
+    head -n 15 |
+    while IFS=$'\t' read -r name ms; do
+      printf '| `%s` | %s |\n' "$name" "$(human "$((ms / 1000))")"
+    done
+  printf '\n_Every crate, not just these fifteen, is in `crates.tsv` in the `build-profile-%s` '
+  printf 'artifact on this run._\n\n' "$platform"
+fi
+
+gradle_file="$profile_dir/gradle-tasks.tsv"
+if [[ -s "$gradle_file" ]]; then
+  # Task paths and outcomes are Gradle's, so they are held to a shape before being printed. The
+  # path is checked SEGMENT BY SEGMENT rather than as one long character class: Gradle task names
+  # are camelCase identifiers, and the longest in an Expo build is around 24 characters
+  # (`bundleReleaseJsAndAssets`), so a 40-character cap per segment is generous for anything real
+  # and far too tight for anything that is secretly a base64 blob.
+  gradle_rows="$(
+    awk -F'\t' '
+      function ok_path(p,   n, parts, i) {
+        if (p !~ /^:/) return 0
+        n = split(substr(p, 2), parts, ":")
+        if (n < 1 || n > 8) return 0
+        for (i = 1; i <= n; i++) {
+          if (parts[i] !~ /^[A-Za-z][A-Za-z0-9_.-]{0,39}$/) return 0
+        }
+        return 1
+      }
+      ok_path($1) && $2 ~ /^[A-Z][A-Z-]{0,19}$/ && $3 ~ /^[0-9]{1,12}$/ {
+        print $1 "\t" $2 "\t" $3
+      }
+    ' "$gradle_file"
+  )"
+  if [[ -n "$gradle_rows" ]]; then
+    printf '### Gradle: task outcomes\n\n'
+    printf '| Outcome | Tasks | Time |\n|---|--:|--:|\n'
+    awk -F'\t' '
+      { n[$2]++; ms[$2] += $3 }
+      END { for (k in n) printf "%s\t%d\t%d\n", k, n[k], ms[k] }
+    ' <<< "$gradle_rows" |
+      sort -t$'\t' -k3,3nr |
+      while IFS=$'\t' read -r outcome count ms; do
+        printf '| `%s` | %s | %s |\n' "$outcome" "$count" "$(human "$((ms / 1000))")"
+      done
+    printf '\n'
+    printf '| Slowest task | Outcome | Time |\n|---|---|--:|\n'
+    sort -t$'\t' -k3,3nr <<< "$gradle_rows" |
+      head -n 10 |
+      while IFS=$'\t' read -r path outcome ms; do
+        printf '| `%s` | %s | %s |\n' "$path" "$outcome" "$(human "$((ms / 1000))")"
+      done
+    printf '\n'
+    printf '_`FROM-CACHE` is the build cache doing its job. A large `EXECUTED` total next to a hit '
+    printf 'on the Gradle cache means the tasks are not cacheable, not that the cache is cold._\n\n'
+  fi
+fi
+
+# Xcode's own per-phase timing, from `-showBuildTimingSummary` (injected through GYM_XCARGS,
+# because EAS runs fastlane gym and there is no other way to reach the xcodebuild command line).
+#
+# ONLY lines of the summary's fixed shape are read. The surrounding build log holds the CodeSign
+# invocations and is never parsed, printed, or uploaded -- it stays under RUNNER_TEMP and is
+# deleted with the rest of the build state.
+if [[ "$platform" == "ios" && -n "${SC_XCODE_BUILDLOG_DIR:-}" && -d "${SC_XCODE_BUILDLOG_DIR}" ]]; then
+  # awk, and awk without interval expressions: BSD sed writes a literal `t` for `\t` in a
+  # replacement, and macOS awk has historically not supported {n,m}. This is the one extractor that
+  # runs ONLY on macOS, so a GNU-ism here would never be caught anywhere else.
+  #
+  # Field-splitting is the validation. A real summary line is exactly six fields --
+  # `CompileSwiftSources (42 tasks) | 218.443 seconds` -- so a phase name containing a space, a
+  # shell metacharacter, or anything else that is not a bare identifier cannot produce a match.
+  xcode_rows="$(
+    find "$SC_XCODE_BUILDLOG_DIR" -type f -name '*.log' -exec cat {} + 2> /dev/null |
+      awk '
+        NF == 6 && $4 == "|" && $6 == "seconds" &&
+        $1 ~ /^[A-Za-z][A-Za-z0-9]*$/ && length($1) <= 40 &&
+        $2 ~ /^\([0-9]+$/ && ($3 == "tasks)" || $3 == "task)") &&
+        $5 ~ /^[0-9]+\.[0-9]+$/ {
+          split($5, seconds, ".")
+          printf "%s\t%s\t%s\n", $1, substr($2, 2), seconds[1]
+        }
+      '
+  )"
+  if [[ -n "$xcode_rows" ]]; then
+    printf '### Xcode: phase timings (`-showBuildTimingSummary`)\n\n'
+    printf '| Phase | Tasks | Time |\n|---|--:|--:|\n'
+    sort -t$'\t' -k3,3nr <<< "$xcode_rows" |
+      head -n 12 |
+      while IFS=$'\t' read -r phase tasks seconds; do
+        printf '| `%s` | %s | %s |\n' "$phase" "$tasks" "$(human "$seconds")"
+      done
+    printf '\n'
+  fi
+fi
+
 dropped="$(wc -l < "$drop_file" | tr -d ' ')"
 if [[ "$dropped" =~ ^[0-9]+$ ]] && ((dropped > 0)); then
   printf '> ⚠️ %d malformed profile record(s) were discarded before rendering.\n\n' "$dropped"
 fi
 
-rm -rf -- "$profile_dir" 2>/dev/null || true
+# --- The uploaded bundle ------------------------------------------------------
+#
+# What the workflow uploads is built HERE, from the rows that survived validation above -- never
+# the collection directory itself.
+#
+# That distinction was not in the first version of this change, and a dry run caught it: the
+# renderer was careful and the artifact upload walked straight past it, publishing the raw files.
+# gradle-tasks.tsv is the reason it matters. It is written by Gradle, and Gradle is a process that
+# signs the APK; its task paths are harmless but "raw output from a process that handles signing"
+# is exactly what this pipeline refuses to publish.
+#
+# Cargo's own cargo-timing.html is deliberately NOT among them, even though its interactive gantt
+# is the nicest thing in this whole change to look at. It is raw tool output, so it would be clean
+# by ARGUMENT -- cargo runs in the pre-install hook, long before any credential is fetched -- while
+# every other published byte here is clean by CONSTRUCTION, having been through a validator. A dry
+# run with a credential planted in that file made the difference concrete. crates.tsv carries the
+# same numbers for every crate in the graph, and it is generated from validated rows.
+if [[ -n "${SC_PROFILE_BUNDLE_DIR:-}" ]]; then
+  mkdir -p -- "$SC_PROFILE_BUNDLE_DIR" 2> /dev/null || true
+  if [[ -d "$SC_PROFILE_BUNDLE_DIR" ]]; then
+    # `if`, not `[[ ... ]] && printf`: under `set -e` a false guard on the LAST line makes this
+    # script exit 1 after having rendered a perfectly good report. An Android build always has an
+    # empty xcode_rows, so that form failed every Android run, and the workflow's `|| printf
+    # 'could not be rendered'` fallback appended a contradiction under the report it just wrote.
+    if [[ -n "$measured" ]]; then
+      printf '%s\n' "$measured" > "$SC_PROFILE_BUNDLE_DIR/phases.tsv"
+    fi
+    if [[ -n "$crate_rows" ]]; then
+      printf '%s\n' "$crate_rows" > "$SC_PROFILE_BUNDLE_DIR/crates.tsv"
+    fi
+    if [[ -n "$gradle_rows" ]]; then
+      printf '%s\n' "$gradle_rows" > "$SC_PROFILE_BUNDLE_DIR/gradle-tasks.tsv"
+    fi
+    if [[ -n "$xcode_rows" ]]; then
+      printf '%s\n' "$xcode_rows" > "$SC_PROFILE_BUNDLE_DIR/xcode-phases.tsv"
+    fi
+  fi
+fi

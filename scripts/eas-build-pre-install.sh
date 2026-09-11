@@ -134,8 +134,9 @@ if [[ "$platform" == "android" ]]; then
   (
     cd "$crate_dir"
     sc_profile_run 'cargo-build' \
-      cargo +stable ndk "${ndk_args[@]}" -o "$jni_libs" build --locked --release
+      cargo +stable ndk "${ndk_args[@]}" -o "$jni_libs" build --locked --release --timings
   )
+  sc_profile_collect_cargo_timings
 
   # Stage what was just built so the next run -- and, from the main-branch warm job, every open
   # pull request -- can skip all of the above.
@@ -179,7 +180,9 @@ sc_profile_run 'cargo-build' \
   --locked \
   --manifest-path "$crate_dir/Cargo.toml" \
   --release \
-  --target aarch64-apple-ios
+  --target aarch64-apple-ios \
+  --timings
+sc_profile_collect_cargo_timings
 
 rm -rf "$headers_dir" "$framework_path"
 mkdir -p "$headers_dir"

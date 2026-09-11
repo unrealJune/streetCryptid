@@ -42,6 +42,15 @@ jobs:
       EAS_BUILD_GIT_COMMIT_HASH: ${{ github.event.pull_request.head.sha }}
       EAS_LOCAL_BUILD_SKIP_CLEANUP: '0'
       EXPO_NO_KEYCHAIN: '1'
+      # EAS runs `fastlane gym`, which is the only reachable point in the iOS toolchain: there is no
+      # xcodebuild command line of ours to add flags to. gym reads every option from GYM_* as well
+      # as from its Gymfile, so this asks xcodebuild for its own per-phase timing summary and asks
+      # fastlane to keep the log where it can be read afterwards.
+      #
+      # The log holds the CodeSign invocations, so it is written inside RUNNER_TEMP, is never
+      # uploaded, and only lines matching the timing summary's fixed shape are ever read out of it
+      # (scripts/build-report.sh). "Remove local build state" deletes it with everything else.
+      GYM_XCARGS: -showBuildTimingSummary
     steps:
       - name: Require Expo token
         env:
@@ -60,6 +69,9 @@ jobs:
             echo "BUILD_ARTIFACT=$RUNNER_TEMP/streetcryptid-pr-$PR_NUMBER.ipa"
             echo "EAS_LOCAL_BUILD_ARTIFACTS_DIR=$RUNNER_TEMP/eas-artifacts-ios"
             echo "EAS_LOCAL_BUILD_WORKINGDIR=$RUNNER_TEMP/eas-local-build-ios"
+            # Read for its timing summary, then deleted with the rest of the build state.
+            echo "GYM_BUILDLOG_PATH=$RUNNER_TEMP/xcode-buildlog"
+            echo "SC_XCODE_BUILDLOG_DIR=$RUNNER_TEMP/xcode-buildlog"
           } >> "$GITHUB_ENV"
 
       - name: Check out PR revision
@@ -105,10 +117,23 @@ jobs:
           SC_CACHE_JS_HIT: ${{ steps.setup.outputs.js-cache-hit }}
           SC_CACHE_CARGO_HIT: ${{ steps.setup.outputs.cargo-cache-hit }}
           SC_CACHE_NATIVE_HIT: ${{ steps.setup.outputs.artifact-cache-hit }}
+          SC_PROFILE_BUNDLE_DIR: ${{ runner.temp }}/build-profile-bundle
           SC_CACHE_PODS_HIT: ${{ steps.setup.outputs.native-cache-hit }}
         run: |
           bash scripts/build-report.sh ios >> "$GITHUB_STEP_SUMMARY" ||
             printf '_The build profile could not be rendered._\n' >> "$GITHUB_STEP_SUMMARY"
+
+      # cargo's own interactive timing report is worth more to read than any table rendered above.
+      # Everything in this directory is produced by toolchain invocations WE make: no EAS output,
+      # no Xcode build log, and nothing derived from a credential is written here.
+      - name: Upload the build profile
+        if: '!cancelled()'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-profile-ios
+          path: ${{ runner.temp }}/build-profile-bundle
+          if-no-files-found: ignore
+          retention-days: 14
 
       # actions/cache's own post step is `post-if: success()`, so a 40-minute build that fails
       # would otherwise discard the pod downloads it just made and leave the retry cold.
@@ -165,7 +190,8 @@ jobs:
           set -euo pipefail
           for path in \
             "${EAS_LOCAL_BUILD_ARTIFACTS_DIR:-}" \
-            "${EAS_LOCAL_BUILD_WORKINGDIR:-}"; do
+            "${EAS_LOCAL_BUILD_WORKINGDIR:-}" \
+            "${GYM_BUILDLOG_PATH:-}"; do
             if [[ -z "$path" ]]; then
               continue
             fi
@@ -253,10 +279,20 @@ jobs:
           bash scripts/test-eas-ci-log-isolation.sh
           bash scripts/test-build-profile-isolation.sh
 
+      # `eas build --local` invokes Gradle itself, so there is no command line of ours to add
+      # --profile to. Gradle applies every *.gradle in ~/.gradle/init.d automatically, which is the
+      # one hook available. The script no-ops unless SC_GRADLE_PROFILE is set.
+      - name: Install the Gradle build profiler
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.gradle/init.d
+          cp scripts/gradle-build-profile.init.gradle ~/.gradle/init.d/
+
       - name: Build the standalone Release locally
         id: build
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          SC_GRADLE_PROFILE: '1'
         run: |
           set -euo pipefail
           mkdir -p "$EAS_LOCAL_BUILD_ARTIFACTS_DIR" "$EAS_LOCAL_BUILD_WORKINGDIR"
@@ -274,10 +310,23 @@ jobs:
           SC_CACHE_JS_HIT: ${{ steps.setup.outputs.js-cache-hit }}
           SC_CACHE_CARGO_HIT: ${{ steps.setup.outputs.cargo-cache-hit }}
           SC_CACHE_NATIVE_HIT: ${{ steps.setup.outputs.artifact-cache-hit }}
+          SC_PROFILE_BUNDLE_DIR: ${{ runner.temp }}/build-profile-bundle
           SC_CACHE_GRADLE_HIT: ${{ steps.setup.outputs.native-cache-hit }}
         run: |
           bash scripts/build-report.sh android >> "$GITHUB_STEP_SUMMARY" ||
             printf '_The build profile could not be rendered._\n' >> "$GITHUB_STEP_SUMMARY"
+
+      # cargo's own interactive timing report is worth more to read than any table rendered above.
+      # Everything in this directory is produced by toolchain invocations WE make: no EAS output,
+      # no Gradle log, and nothing derived from a credential is written here.
+      - name: Upload the build profile
+        if: '!cancelled()'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-profile-android
+          path: ${{ runner.temp }}/build-profile-bundle
+          if-no-files-found: ignore
+          retention-days: 14
 
       # actions/cache's own post step is `post-if: success()`, so a 40-minute build that fails
       # would otherwise discard the Gradle downloads it just made and leave the retry cold.

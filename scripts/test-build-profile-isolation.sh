@@ -172,6 +172,94 @@ printf 'c\t%s\n' "$sentinel" >> "$sample_file"
 printf 'w\t%s\n' "$sentinel" >> "$sample_file"
 printf 'native_artifacts\t%s\n' "$sentinel" >> "$meta_file"
 
+# --- 3b. The build tools' own instrumentation ---------------------------------
+#
+# The sampler is ours; these three are not. cargo, Gradle and Xcode each produce their own
+# performance data, which is far better than sampling for the phases they own -- and each is a new
+# path into a public job summary, so each gets the same treatment: legitimate rows must survive,
+# and anything carrying the sentinel must not.
+
+# cargo build --timings. The parser is handed a report whose crate names are hostile. Note the
+# report also carries a full command line, which is where cargo records how it was invoked.
+cat > "$test_root/cargo-timing.html" << EOF
+<html><script>
+const UNIT_DATA = [
+  {
+    "i": 0,
+    "name": "iroh",
+    "version": "1.0.2",
+    "mode": "todo",
+    "start": 0.0,
+    "duration": 61.5
+  },
+  {
+    "i": 1,
+    "name": "$sentinel",
+    "version": "1.0.0",
+    "mode": "todo",
+    "start": 1.0,
+    "duration": 9.0
+  },
+  {
+    "i": 2,
+    "name": "not a crate name; $sentinel",
+    "version": "1.0.0",
+    "mode": "todo",
+    "start": 2.0,
+    "duration": 8.0
+  }
+];
+const COMMAND = "cargo build --release --credentials $sentinel";
+</script></html>
+EOF
+
+crates_file="$SC_BUILD_PROFILE_DIR/crates.tsv"
+if command -v node > /dev/null 2>&1; then
+  node "$repo_root/scripts/parse-cargo-timings.mjs" "$test_root/cargo-timing.html" > "$crates_file"
+  [[ -s "$crates_file" ]] || fail "the cargo timings parser produced nothing for a valid report"
+  grep -q '^iroh	61500$' "$crates_file" || fail "the cargo timings parser dropped a real crate"
+  grep -Fq "$sentinel" "$crates_file" &&
+    fail "the cargo timings parser published a crate name carrying the sentinel"
+  # A report it cannot parse must yield silence, not a guess.
+  printf 'not html at all\n' > "$test_root/garbage.html"
+  [[ -z "$(node "$repo_root/scripts/parse-cargo-timings.mjs" "$test_root/garbage.html")" ]] ||
+    fail "the cargo timings parser invented output for an unparseable report"
+else
+  printf 'iroh\t61500\n_unit_ms\t61500\n_wall_ms\t61500\n' > "$crates_file"
+fi
+# ...and the renderer must not trust the parser either.
+printf '%s\t100\n' "$sentinel" >> "$crates_file"
+printf 'iroh-blobs\t%s\n' "$sentinel" >> "$crates_file"
+
+# Gradle task outcomes, written by scripts/gradle-build-profile.init.gradle.
+printf ':app:compileReleaseKotlin\tEXECUTED\t44000\n' > "$SC_BUILD_PROFILE_DIR/gradle-tasks.tsv"
+printf ':app:mergeReleaseResources\tFROM-CACHE\t1200\n' >> "$SC_BUILD_PROFILE_DIR/gradle-tasks.tsv"
+printf ':app:%s\tEXECUTED\t1\n' "$sentinel" >> "$SC_BUILD_PROFILE_DIR/gradle-tasks.tsv"
+printf ':app:x\t%s\t1\n' "$sentinel" >> "$SC_BUILD_PROFILE_DIR/gradle-tasks.tsv"
+printf ':app:y\tEXECUTED\t%s\n' "$sentinel" >> "$SC_BUILD_PROFILE_DIR/gradle-tasks.tsv"
+
+# Xcode's timing summary. This is the riskiest source by far: it is extracted from fastlane's raw
+# xcodebuild log, which really does contain the signing identity and provisioning profile. The log
+# below is shaped like the real thing -- a CodeSign block around the summary -- and only the
+# summary's fixed-shape lines may survive.
+mkdir -p "$test_root/xcode-buildlog"
+cat > "$test_root/xcode-buildlog/streetCryptid-streetCryptid.log" << EOF
+CodeSign /Users/runner/work/build/streetCryptid.app (in target 'streetCryptid')
+    cd /Users/runner/work/ios
+    export CODESIGN_ALLOCATE=/usr/bin/codesign_allocate
+/usr/bin/codesign --force --sign $sentinel --entitlements app.xcent --timestamp=none
+Provisioning profile: "streetCryptid AdHoc" ($sentinel)
+
+Build Timing Summary
+
+CompileSwiftSources (42 tasks) | 218.443 seconds
+PhaseScriptExecution (11 tasks) | 96.010 seconds
+CompileC (7 tasks) | 31.200 seconds
+Ld (3 tasks) | 12.750 seconds
+EvilPhase; echo $sentinel (1 task) | 1.000 seconds
+$sentinel (1 task) | 2.000 seconds
+EOF
+
 report="$test_root/report.md"
 SC_BUILD_SECONDS=1277 \
   SC_CACHE_JS_HIT=true \
@@ -199,5 +287,59 @@ grep -q 'unknown' "$report" || fail "a hostile cache value was not reported as u
 grep -q 'cargo-build' "$report" || fail "the report lost its measured phases"
 grep -q '1m 01s' "$report" || fail "the report did not format a measured duration"
 grep -q '21m 17s' "$report" || fail "the report did not format the build duration"
+
+# ...including everything the build tools reported about themselves.
+grep -q 'iroh' "$report" || fail "the report lost the cargo timings"
+grep -q 'FROM-CACHE' "$report" || fail "the report lost the Gradle task outcomes"
+grep -q 'compileReleaseKotlin' "$report" || fail "the report lost the slowest Gradle task"
+
+# --- 4. The iOS report, where Xcode's build log is read ----------------------
+
+ios_report="$test_root/report-ios.md"
+bundle="$test_root/bundle-ios"
+# Raw cargo output sitting in the collection directory, to prove the bundle step refuses it.
+cp "$test_root/cargo-timing.html" "$SC_BUILD_PROFILE_DIR/cargo-timing.html"
+SC_BUILD_SECONDS=985 \
+  SC_CACHE_JS_HIT=true \
+  SC_CACHE_CARGO_HIT=true \
+  SC_CACHE_NATIVE_HIT=true \
+  SC_CACHE_PODS_HIT=false \
+  SC_XCODE_BUILDLOG_DIR="$test_root/xcode-buildlog" \
+  SC_PROFILE_BUNDLE_DIR="$bundle" \
+  bash "$repo_root/scripts/build-report.sh" ios > "$ios_report"
+
+# The signing identity and the provisioning profile UUID sat three lines above the data that WAS
+# extracted. If the extractor were line-loose in any way, this is where it would show.
+grep -Fq "$sentinel" "$ios_report" &&
+  fail "the credential sentinel reached the rendered summary from the Xcode build log"
+grep -q 'codesign\|Provisioning' "$ios_report" &&
+  fail "the Xcode build log's signing lines reached the rendered summary"
+grep -q '^::' "$ios_report" && fail "the iOS summary could forge a workflow command"
+
+grep -q 'CompileSwiftSources' "$ios_report" ||
+  fail "the Xcode timing summary was not extracted — the assertions above proved nothing"
+grep -q '3m 38s' "$ios_report" || fail "the Xcode phase duration was not formatted"
+grep -q 'EvilPhase' "$ios_report" && fail "a malformed Xcode phase line was accepted"
+
+# --- 5. The uploaded artifact ------------------------------------------------
+#
+# The job summary is not the only thing published: the workflow uploads a bundle. The renderer
+# being careful is no help if the upload walks around it, which is what the first version of this
+# change did -- it uploaded the collection directory itself. So the bundle is asserted on its own
+# terms: built from validated rows, and containing no raw tool output.
+[[ -d "$bundle" ]] || fail "no upload bundle was produced"
+if grep -rFq "$sentinel" "$bundle" 2> /dev/null; then
+  fail "the credential sentinel reached the uploaded artifact bundle"
+fi
+[[ -f "$bundle/cargo-timing.html" ]] &&
+  fail "raw cargo output was copied into the uploaded bundle"
+for expected in phases.tsv crates.tsv gradle-tasks.tsv xcode-phases.tsv; do
+  [[ -s "$bundle/$expected" ]] ||
+    fail "the bundle is missing $expected — the assertions above proved nothing"
+done
+grep -q '^iroh	61500$' "$bundle/crates.tsv" || fail "the bundle lost the cargo timings"
+grep -q 'FROM-CACHE' "$bundle/gradle-tasks.tsv" || fail "the bundle lost the Gradle outcomes"
+grep -q '^CompileSwiftSources	42	218$' "$bundle/xcode-phases.tsv" ||
+  fail "the bundle lost the Xcode phases (a BSD/GNU split in the extractor would look like this)"
 
 echo "Build profiling published only its own vocabulary: the sampler wrote no byte of the process table, the writers rejected hostile records, and the renderer dropped and reported poisoned ones."

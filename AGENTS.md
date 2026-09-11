@@ -139,3 +139,22 @@ the cache hit/miss of all four caches, into the job summary.
   narrower pull-request request hits the entry the warm job staged with all three.
 - `~/.gradle/caches/build-cache-1` is the only cached Gradle entry that skips work rather than a
   download, and it only fills while `org.gradle.caching` is on — keep it and `GRADLE_OPTS` in step.
+- **The build tools' own instrumentation is preferred to sampling wherever it exists**, because it
+  knows things sampling cannot. `cargo build --timings` gives per-crate cost and achieved
+  parallelism; `scripts/gradle-build-profile.init.gradle` (auto-applied from `~/.gradle/init.d`,
+  the only hook available since EAS invokes Gradle itself) gives `FROM-CACHE` vs `EXECUTED` per
+  task; `-showBuildTimingSummary`, injected through `GYM_XCARGS` because EAS runs `fastlane gym`,
+  gives Xcode's per-phase breakdown. CocoaPods, Metro and hermesc expose nothing, and the sampler
+  is the answer for those. **Do not add a Gradle build scan** — `--scan` uploads the build
+  environment to `scans.gradle.com`, which is precisely the material this pipeline exists to
+  contain.
+- **Only validated rows are published, never raw tool output.** The workflows upload
+  `SC_PROFILE_BUNDLE_DIR`, which `build-report.sh` builds from the rows that passed validation —
+  NOT the collection directory. Cargo's `cargo-timing.html` is deliberately excluded despite being
+  the nicest artifact of the lot: it would be clean by argument (cargo runs before any credential
+  is fetched) where everything else is clean by construction. `gradle-tasks.tsv` is the reason the
+  rule is absolute — Gradle signs the APK, so its raw output is not publishable by default.
+- **The macOS runner's `/bin/bash` is 3.2 and its userland is BSD.** The iOS job has already been
+  broken once by `local -A`, once by BSD `wc -l` padding its output, and once by BSD `sed` writing
+  a literal `t` for `\t` in a replacement. `test-build-profile-isolation.sh` greps for bash 4
+  constructs; the rest is on review.
