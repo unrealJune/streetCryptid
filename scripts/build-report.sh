@@ -62,15 +62,19 @@ sanitize() {
   done < "$file"
 }
 
+# Reads to the END of the input and keeps the last match, rather than returning on the first one.
+# Returning early abandons the process substitution while sanitize is still writing to it, and
+# sanitize then dies of SIGPIPE -- "printf: write error: Broken pipe" on stderr, and a non-zero
+# status that `set -o pipefail` turns into a failed report. Whether that happened at all depended
+# on the pipe buffer swallowing the rest of the file, so it passed locally and failed in CI.
 meta_value() {
-  local wanted="$1" key value
+  local wanted="$1" key value found=''
   while IFS=$'\t' read -r key value; do
     if [[ "$key" == "$wanted" ]]; then
-      printf '%s' "$value"
-      return 0
+      found="$value"
     fi
   done < <(sanitize "$meta_file" "$SC_PROFILE_NOTE_VALUE_RE")
-  return 0
+  printf '%s' "$found"
 }
 
 human() {
@@ -195,7 +199,9 @@ if [[ -s "$crate_file" ]]; then
   printf '| Crate | Compile time |\n|---|--:|\n'
   awk -F'\t' '$1 !~ /^_/ { print }' <<< "$crate_rows" |
     sort -t$'\t' -k2,2nr |
-    head -n 15 |
+    # `awk`, not `head`: head exits as soon as it has its lines, the `sort` upstream dies of
+    # SIGPIPE, and `set -o pipefail` turns that into a failed report. awk drains its input.
+    awk -v n=15 'NR <= n' |
     while IFS=$'\t' read -r name ms; do
       printf '| `%s` | %s |\n' "$name" "$(human "$((ms / 1000))")"
     done
@@ -240,7 +246,9 @@ if [[ -s "$gradle_file" ]]; then
     printf '\n'
     printf '| Slowest task | Outcome | Time |\n|---|---|--:|\n'
     sort -t$'\t' -k3,3nr <<< "$gradle_rows" |
-      head -n 10 |
+      # `awk`, not `head`: head exits as soon as it has its lines, the `sort` upstream dies of
+      # SIGPIPE, and `set -o pipefail` turns that into a failed report. awk drains its input.
+      awk -v n=10 'NR <= n' |
       while IFS=$'\t' read -r path outcome ms; do
         printf '| `%s` | %s | %s |\n' "$path" "$outcome" "$(human "$((ms / 1000))")"
       done
@@ -280,7 +288,9 @@ if [[ "$platform" == "ios" && -n "${SC_XCODE_BUILDLOG_DIR:-}" && -d "${SC_XCODE_
     printf '### Xcode: phase timings (`-showBuildTimingSummary`)\n\n'
     printf '| Phase | Tasks | Time |\n|---|--:|--:|\n'
     sort -t$'\t' -k3,3nr <<< "$xcode_rows" |
-      head -n 12 |
+      # `awk`, not `head`: head exits as soon as it has its lines, the `sort` upstream dies of
+      # SIGPIPE, and `set -o pipefail` turns that into a failed report. awk drains its input.
+      awk -v n=12 'NR <= n' |
       while IFS=$'\t' read -r phase tasks seconds; do
         printf '| `%s` | %s | %s |\n' "$phase" "$tasks" "$(human "$seconds")"
       done
