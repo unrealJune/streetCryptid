@@ -1358,6 +1358,32 @@ export class LocationSharingService {
   }
 
   /**
+   * Cancel the invite this phone is currently offering, so the link it minted stops working.
+   *
+   * The token itself cannot be recalled once it has been sent to someone, so cancelling has to
+   * withdraw it at the issuer — this node is the only party that decides whether a redemption is
+   * honoured. Forgetting the link locally is therefore not enough on its own, and the local state
+   * is cleared only after the native call has agreed, so the UI never claims a cancellation that
+   * did not happen.
+   *
+   * Resolves true when an invite was actually withdrawn. On a binary older than the revocation
+   * export there is nothing that can withdraw it, so this reports false and leaves the link in
+   * place rather than pretending: the caller decides what to tell the user.
+   */
+  async cancelPairInvite(): Promise<boolean> {
+    return this.runPairingOperation(async () => {
+      const link = this.inviteLink;
+      if (!link) return false;
+      if (typeof this.mod?.revokePairInvite !== 'function') return false;
+      await this.mod.revokePairInvite(decodePairLink(link));
+      this.inviteLink = null;
+      this.inviteExpiresAt = null;
+      this.setPairingActivity('invite cancelled');
+      return true;
+    });
+  }
+
+  /**
    * Mint a one-shot invite, seal it entirely on-device, and drop the ciphertext at a mailbox
    * address derived from a fresh short human pairing code (see `core/pairing-code.ts` and
    * `net/pairing-mailbox.ts`). Returns the displayable code (`XXXX-XXXX-XXXX-XXXX`); the same

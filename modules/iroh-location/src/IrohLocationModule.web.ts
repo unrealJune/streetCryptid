@@ -346,6 +346,10 @@ export class IrohLocationNativeModule
     throw pairingUnsupported('createPairInvite');
   }
 
+  async revokePairInvite(_token: string): Promise<boolean> {
+    throw pairingUnsupported('revokePairInvite');
+  }
+
   async initiatePair(_invite: PairInvite): Promise<string> {
     throw pairingUnsupported('initiatePair');
   }

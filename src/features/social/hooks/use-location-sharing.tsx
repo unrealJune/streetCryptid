@@ -73,6 +73,12 @@ interface LocationSharingContextValue {
   commitBump(): Promise<void>;
   cancelBump(): Promise<void>;
   createPairInvite(ttlSecs?: number): Promise<string | undefined>;
+  /**
+   * Withdraw the invite this phone is offering. Resolves true when the link was actually
+   * cancelled, false when there was nothing to cancel or the installed binary predates the
+   * revocation export — callers must not claim a cancellation on a false.
+   */
+  cancelPairInvite(): Promise<boolean>;
   pairFromInput(input: string): Promise<void>;
   respondPair(sessionId: string, accept: boolean): Promise<void>;
   submitPairChoice(sessionId: string, chosenIndex: number): Promise<void>;
@@ -436,6 +442,19 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     }
   }, []);
 
+  const cancelPairInvite = useCallback(async () => {
+    const service = serviceRef.current;
+    if (!service) return false;
+    try {
+      const cancelled = await service.cancelPairInvite();
+      setServiceError(null);
+      return cancelled;
+    } catch (cancelError: unknown) {
+      setServiceError(errorMessage(cancelError));
+      return false;
+    }
+  }, []);
+
   const retryLocation = useCallback(async () => {
     const service = serviceRef.current;
     if (!service) return;
@@ -704,6 +723,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       commitBump,
       cancelBump,
       createPairInvite,
+      cancelPairInvite,
       pairFromInput,
       respondPair,
       submitPairChoice,
@@ -738,6 +758,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       commitBump,
       cancelBump,
       createPairInvite,
+      cancelPairInvite,
       pairFromInput,
       respondPair,
       submitPairChoice,

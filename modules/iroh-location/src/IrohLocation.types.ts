@@ -1025,6 +1025,16 @@ export interface IrohLocationApi {
    * invite fields plus the opaque `scpair2:<base64url>` {@link PairInviteWithToken.token} for QR / links.
    */
   createPairInvite(ttlSecs: number): Promise<PairInviteWithToken>;
+  /**
+   * Withdraw an invite this node minted, given the opaque `scpair2:` token it was shared as.
+   * Resolves true when the invite was still outstanding. A token already handed to someone cannot
+   * be recalled, so this is what makes cancelling a shared link mean anything: the issuer stops
+   * honouring it and redemption is refused as though the invite id were forged. Idempotent.
+   *
+   * OPTIONAL: absent on web and on binaries built before invite revocation existed, so callers
+   * must guard. A phone can be running an older binary than the JS bundle.
+   */
+  revokePairInvite?(token: string): Promise<boolean>;
   /** Begin an invite-based pair from a decoded {@link PairInvite}. Returns the session id (hex). */
   initiatePair(invite: PairInvite): Promise<string>;
   /** Begin an invite-based pair from an opaque `scpair2:` token. Returns the session id (hex). */

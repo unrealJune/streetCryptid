@@ -3381,6 +3381,17 @@ impl LocationNode {
         Ok(invite_to_uniffi(&inv))
     }
 
+    /// Withdraw an invite this node minted, given the opaque `scpair2:…` token it was shared as.
+    ///
+    /// Returns whether the invite was still outstanding, so a caller can tell "cancelled" from
+    /// "there was nothing left to cancel". Takes the token rather than a decoded [`PairInvite`]
+    /// because the token is the only form the app keeps once the link has been handed out.
+    pub async fn revoke_pair_invite(&self, token: String) -> Result<bool, LocationError> {
+        let inv =
+            pairing::decode_invite(&token).map_err(|e| LocationError::Decode(e.to_string()))?;
+        Ok(self.pair.revoke_invite(&inv.invite_id).await)
+    }
+
     /// Begin an invite-based pair from a decoded [`PairInvite`]. Returns the session id.
     pub async fn initiate_pair(&self, invite: PairInvite) -> Result<Vec<u8>, LocationError> {
         let inv = invite_from_uniffi(&invite)?;
