@@ -3304,15 +3304,25 @@ impl LocationNode {
     /// Import a friend's profile read-ticket and begin replicating + live-syncing their profile;
     /// accepted updates surface via [`poll_profile_events`](Self::poll_profile_events).
     pub async fn import_profile_ticket(&self, ticket: String) -> Result<(), LocationError> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
-        let ns = started
-            .profile
+        // Take a handle, then DROP the guard before the import. `inner` is the node-wide lock that
+        // `ble_capabilities`, `nearby_ble_peers`, `transport_diagnostics` and the publish path all
+        // take, so holding it across a docs import made one unreachable friend stall every
+        // unrelated native call — including the pairing poll that opens the SAS gate. Measured
+        // 2026-09-10: `pairing.poll` spans of 47-131s on a phone whose docs engine was busy.
+        let profile = {
+            let guard = self.inner.lock().await;
+            guard
+                .as_ref()
+                .ok_or(LocationError::NotStarted)?
+                .profile
+                .clone()
+        };
+        let ns = profile
             .import_ticket(&ticket)
             .await
             .map_err(|e| LocationError::Network(e.to_string()))?;
         let sink: Arc<dyn ProfileSink> = Arc::new(self.profile_events.clone());
-        started.profile.watch(ns, sink);
+        profile.watch(ns, sink);
         Ok(())
     }
 
@@ -3322,10 +3332,17 @@ impl LocationNode {
         &self,
         endpoint_id: Vec<u8>,
     ) -> Result<Option<ProfileView>, LocationError> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
-        let rec = started
-            .profile
+        // Same reason as `import_profile_ticket`: the replica read reaches the docs engine, and
+        // the node-wide `inner` lock must not be held while it waits its turn there.
+        let profile = {
+            let guard = self.inner.lock().await;
+            guard
+                .as_ref()
+                .ok_or(LocationError::NotStarted)?
+                .profile
+                .clone()
+        };
+        let rec = profile
             .read_for_endpoint(&endpoint_id)
             .await
             .map_err(|e| LocationError::Network(e.to_string()))?;

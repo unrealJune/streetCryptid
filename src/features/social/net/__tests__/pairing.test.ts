@@ -1172,6 +1172,67 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(friend?.profileEpoch).toBe(800);
   });
 
+  it('opens the SAS gate before the profile backfill, not behind it', async () => {
+    // Regression, 2026-09-10: "extremely slow (like 1 minute) to open the SAS screen", on link
+    // pairing and on bump. `backfillMissingProfiles` ran in the middle of the pairing poll, ahead
+    // of `reconcileVerifications` and the emit — so an unbounded walk that dials a namespace per
+    // friend sat between `verifying` landing in the native queue and the screen that renders it.
+    // `pollInFlight` meant the 4s timer could not slip past either: the next poll did not start
+    // until this one returned. Measured `pairing.poll` spans of 47-131s on the stuck side.
+    //
+    // The backfill is best-effort cosmetics — a handle and a sigil — so it now runs last.
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+
+    // A friend with a profile ticket and no epoch is what the sweep goes dialling for.
+    mockHolder.mod.pairResults.set(
+      'sess-slow',
+      pairResult({ sessionId: 'sess-slow', peerEndpointId: 'aabb1122', peerProfile: null })
+    );
+    mockHolder.mod.pairEvents = [
+      { kind: 'ready', sessionId: 'sess-slow', peerEndpointId: 'aabb1122', nearby: true },
+    ];
+    await svc.refreshPairing();
+    mockHolder.mod.pairEvents = [];
+
+    // Now wedge the sweep, exactly as a peer asleep in a pocket does.
+    let release = () => {};
+    const wedged = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const importTicket = mockHolder.mod.importProfileTicket.bind(mockHolder.mod);
+    mockHolder.mod.importProfileTicket = async (ticket: string) => {
+      await importTicket(ticket);
+      await wedged;
+    };
+
+    mockHolder.mod.sessions = [
+      verifyingSession({ sessionId: 'sess-sas', peerEndpointId: 'peerSAS', nearby: true }),
+    ];
+    mockHolder.mod.challenges.set(
+      'sess-sas',
+      sasChallenge({ role: 'picker', targetIndex: 1, optionIndices: [0, 1, 2] })
+    );
+
+    const realNow = Date.now();
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(realNow + 60_000);
+    try {
+      const polling = svc.refreshPairing();
+      // One macrotask is enough to drain every resolved await up to the wedge.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // The gate is on screen while the backfill is still hanging — the whole point.
+      expect(snap.current?.pairing.verifications.map((v) => v.sessionId)).toEqual(['sess-sas']);
+      expect(mockHolder.mod.calls.importProfileTicket).toContain('peer-profile');
+
+      release();
+      await polling;
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it('re-arms replication for a friend paired without a profile', async () => {
     const svc = newService();
     const snap = watch(svc);

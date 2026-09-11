@@ -585,6 +585,16 @@ export class LocationSharingService {
   private lastProfileBackfillAt = 0;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private pollInFlight: Promise<void> | null = null;
+  /**
+   * The in-flight native reconciliation, so a second caller JOINS it instead of starting a rival.
+   *
+   * `syncLatest` is a global, idempotent pass over every namespace, but `syncTrail` is triggered
+   * from a node restart, foreground resume, pair-ready and the init effect — none of which knew
+   * about the others. Measured 2026-09-10: five overlapping passes on one phone, each over 100s,
+   * all reconciling the same replicas and between them saturating the docs engine that the
+   * pairing poll's profile reads have to queue behind.
+   */
+  private trailSyncInFlight: Promise<void> | null = null;
   /** Last poll-error message surfaced, so we don't spam listeners with identical errors. */
   private lastPollErrorSig: string | null = null;
   /** JSON signature of the last emitted pairing snapshot, so polling only emits on real change. */
@@ -2146,10 +2156,8 @@ export class LocationSharingService {
       },
     });
     try {
-      await this.mod.syncLatest(
-        peerTickets,
-        getTelemetry().enabled ? traceparentFor(span.context) : null
-      );
+      span.setAttribute('coalesced', this.trailSyncInFlight !== null);
+      await this.reconcileTrailOnce(peerTickets, span);
       span.setStatus('ok');
     } catch (err) {
       // Best effort — the durable path may be unavailable (e.g. web without docs) — but when it
@@ -2168,6 +2176,26 @@ export class LocationSharingService {
     this.lastSyncRecovered = recovered;
     this.notifyTrailChanged();
     this.emit();
+  }
+
+  /**
+   * Run ONE native reconciliation at a time, joining the running one when there is one.
+   *
+   * Only the native pass is shared: it reconciles every namespace against the same peer set, so a
+   * concurrent caller wants exactly the work already underway. The replica read that follows it in
+   * {@link syncTrail} is per-caller (it is keyed by `sinceTs`) and stays outside this.
+   */
+  private reconcileTrailOnce(peerTickets: string[], span: Span): Promise<void> {
+    if (this.trailSyncInFlight) return this.trailSyncInFlight;
+    const mod = this.mod;
+    if (!mod) return Promise.resolve();
+    const run = mod
+      .syncLatest(peerTickets, getTelemetry().enabled ? traceparentFor(span.context) : null)
+      .finally(() => {
+        this.trailSyncInFlight = null;
+      });
+    this.trailSyncInFlight = run;
+    return run;
   }
 
   /**
@@ -3862,7 +3890,6 @@ export class LocationSharingService {
       // the completed friendship forever, so recover any unhandled Complete session snapshots too.
       await this.reconcileCompletedPairs(sessions);
       for (const profile of profileEvents) this.applyProfile(profile);
-      await this.backfillMissingProfiles();
       // Reconcile the SAS verification model AFTER handling events, from BOTH the polled session
       // list and this poll's events: `listPairSessions()` is fetched in parallel with the event
       // queue, so a just-emitted `verifying` transition may not appear in `sessions` yet. Merging
@@ -3885,6 +3912,13 @@ export class LocationSharingService {
         this.errorListeners.forEach((listener) => listener(''));
       }
       this.emitIfPairingChanged();
+      // LAST, and deliberately after the emit above. This sweep dials a namespace per friend and
+      // is pure best-effort cosmetics — a handle and a sigil — whereas everything above it is the
+      // SAS gate the user is staring at. Running it earlier put an unbounded network walk between
+      // `verifying` landing in the native queue and the screen that renders it, and `pollInFlight`
+      // meant the 4s timer could not slip past: the next poll did not start until this one
+      // returned. Measured 2026-09-10: SAS screens opening a minute late on both sides of a pair.
+      await this.backfillMissingProfiles();
       span.setStatus('ok');
     } catch (err) {
       span.recordError(err);
