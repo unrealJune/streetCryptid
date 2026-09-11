@@ -3,6 +3,9 @@ import { useEffect, useRef } from 'react';
 import { patternHaptic, transientHaptic } from '@/features/haptics/haptics';
 
 import {
+  CONTACT_STRIKE,
+  DISCOVERY_FLOURISH,
+  FAILURE_COLLAPSE,
   derivePairingExperienceStage,
   pairingPulse,
   type PairingExperienceStage,
@@ -12,7 +15,7 @@ import type { PairingSnapshot } from '../net/location-sharing';
 /**
  * The felt half of pairing.
  *
- * Two deliberate choices:
+ * Three deliberate choices:
  *
  * 1. **Self-scheduling, not `setInterval`.** The gap between beats is recomputed every beat from
  *    live RSSI, so there is no fixed interval to set — and `setInterval` would drift against the
@@ -20,27 +23,16 @@ import type { PairingSnapshot } from '../net/location-sharing';
  * 2. **Proximity is read from a ref.** RSSI updates constantly; keying the effect on it would tear
  *    down and restart the loop several times a second, so the loop reads the latest value instead
  *    of restarting. The effect restarts only when the *stage* changes.
+ * 3. **Driven by the whole snapshot, not by the Bump path.** This used to hang off the armed-bump
+ *    hook, which the pairing screen only arms for nearby pairing — so a link or QR pair, which is
+ *    most of them, ran completely silent: no pulse, no contact strike, not even the discovery
+ *    flourish. Nothing about how pairing feels is specific to how it started.
  */
-
-/** Discovery: the payoff. A rise into a hit, then a settling double-tick. Offsets in seconds. */
-const DISCOVERY_FLOURISH = [
-  { intensity: 0.35, sharpness: 0.3, atSeconds: 0 },
-  { intensity: 0.55, sharpness: 0.45, atSeconds: 0.055 },
-  { intensity: 0.78, sharpness: 0.6, atSeconds: 0.1 },
-  { intensity: 1, sharpness: 0.95, atSeconds: 0.155 },
-  { intensity: 0.5, sharpness: 0.8, atSeconds: 0.3 },
-  { intensity: 0.32, sharpness: 0.7, atSeconds: 0.37 },
-];
-
-/** Bump contact: a fast rise into a hard stop. Short, because crisp means short. */
-const CONTACT_STRIKE = [
-  { intensity: 0.5, sharpness: 0.7, atSeconds: 0 },
-  { intensity: 1, sharpness: 1, atSeconds: 0.045 },
-];
 
 export function usePairingHaptics(pairing: PairingSnapshot | null, enabled: boolean): void {
   const poppedDiscoveryRef = useRef<string | null>(null);
   const struckContactRef = useRef(false);
+  const collapsedFailureRef = useRef<string | null>(null);
   const rssiRef = useRef<number | null>(null);
 
   const stage: PairingExperienceStage = pairing
@@ -48,6 +40,7 @@ export function usePairingHaptics(pairing: PairingSnapshot | null, enabled: bool
         bumpStage: pairing.bump.stage,
         sessions: pairing.sessions,
         discoveredFriend: pairing.discoveredFriend,
+        failed: Boolean(pairing.failure),
       })
     : 'idle';
 
@@ -92,6 +85,16 @@ export function usePairingHaptics(pairing: PairingSnapshot | null, enabled: bool
     struckContactRef.current = true;
     void patternHaptic(CONTACT_STRIKE);
   }, [enabled, stage]);
+
+  // Failure, likewise one-shot — and keyed by session so two consecutive failures each land.
+  useEffect(() => {
+    const failure = pairing?.failure;
+    if (!enabled || !failure) return;
+    const failureId = `${failure.sessionId}:${failure.at}`;
+    if (collapsedFailureRef.current === failureId) return;
+    collapsedFailureRef.current = failureId;
+    void patternHaptic(FAILURE_COLLAPSE);
+  }, [enabled, pairing?.failure]);
 
   useEffect(() => {
     const friend = pairing?.discoveredFriend;

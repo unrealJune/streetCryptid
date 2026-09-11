@@ -38,6 +38,7 @@ use iroh_docs::{
     store::Query,
     AuthorId, NamespaceId,
 };
+use n0_future::join_all;
 use n0_future::time::{timeout, Duration, Instant};
 use n0_future::StreamExt;
 use tokio::sync::Mutex;
@@ -1266,9 +1267,21 @@ impl TrailDocs {
     /// couldn't be opened silently blocked the refresh for everyone after them in the map.
     pub async fn sync_all(&self, peers: Vec<EndpointAddr>) -> Result<()> {
         let namespaces = self.namespaces().await;
+        // CONCURRENTLY, not one after another. Every namespace that nobody answers for costs the
+        // full `SYNC_FIRST_EVENT_TIMEOUT_SECS`, and a serial loop multiplied that by the friend
+        // count: measured 2026-09-10, a phone with six namespaces spent 150s inside a single
+        // `sync_latest` and one with five spent 217s, all of it waiting on peers asleep in a
+        // pocket. The namespaces are independent replicas reconciled against the same peer set —
+        // there is no ordering between them — so the pass now costs ONE timeout, not N.
+        let results = join_all(namespaces.iter().map(|ns| {
+            let peers = peers.clone();
+            async move { (*ns, self.sync_ns(*ns, peers).await) }
+        }))
+        .await;
+
         let mut failed = 0usize;
-        for ns in &namespaces {
-            if let Err(err) = self.sync_ns(*ns, peers.clone()).await {
+        for (ns, result) in &results {
+            if let Err(err) = result {
                 failed += 1;
                 tracing::warn!(
                     sc.namespace = %crate::telemetry::short_hex(&ns.to_bytes()),

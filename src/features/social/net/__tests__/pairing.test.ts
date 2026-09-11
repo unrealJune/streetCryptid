@@ -38,6 +38,7 @@ class FakeNativeModule {
     submitPairChoice: [] as { sessionId: string; chosenIndex: number }[],
     confirmPairDisplay: [] as { sessionId: string; matched: boolean }[],
     cancelPair: [] as string[],
+    revokePairInvite: [] as string[],
     setPairingReady: [] as boolean[],
     importProfileTicket: [] as string[],
     subscribe: [] as { topic: string; bootstrap: string[] }[],
@@ -154,6 +155,10 @@ class FakeNativeModule {
       expiresAtMs: 0,
       token: 'scpair2:cafef00d',
     };
+  }
+  async revokePairInvite(token: string) {
+    this.calls.revokePairInvite.push(token);
+    return true;
   }
   async initiatePairByToken(token: string) {
     this.calls.initiatePairByToken.push(token);
@@ -397,12 +402,133 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
     const link = await svc.createPairInvite(300);
-    expect(link).toMatch(/^streetcryptid:\/\/\/social\?token=/);
+    expect(link).toMatch(/^https:\/\/streetcrypt\.id\/pair#token=/);
 
     await svc.pairFromInput(link);
     expect(mockHolder.mod.calls.initiatePairByToken).toEqual(['scpair2:cafef00d']);
     // SAS is mandatory: initiating must NOT auto-accept the local side.
     expect(mockHolder.mod.calls.respondPair).toHaveLength(0);
+  });
+
+  it('retires the link it minted once another phone has opened it', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await svc.createPairInvite(300);
+
+    // A redemption creates a session keyed by the INVITE id — that is how this side learns the
+    // link was used at all, and the whole reason the id is retained.
+    mockHolder.mod.sessions = [
+      verifyingSession({ sessionId: 'iid', state: 'handshaking', sasVerified: false }),
+    ];
+    await svc.refreshPairing();
+    expect(snap.current?.pairing.inviteRedeemed).toBe(true);
+
+    // Once that attempt is over the token is withdrawn outright: native would still honour a
+    // retry from the bound peer, but a link the user watched fail is not one to keep handing out.
+    mockHolder.mod.sessions = [
+      verifyingSession({ sessionId: 'iid', state: 'failed', sasVerified: false }),
+    ];
+    await svc.refreshPairing();
+    expect(mockHolder.mod.calls.revokePairInvite).toEqual(['scpair2:cafef00d']);
+    expect(snap.current?.pairing.inviteLink).toBeNull();
+    // The latch outlives the link, so the screen can still say WHY it went.
+    expect(snap.current?.pairing.inviteRedeemed).toBe(true);
+  });
+
+  it('leaves an untouched link alone', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await svc.createPairInvite(300);
+
+    mockHolder.mod.sessions = [verifyingSession({ sessionId: 'someone-elses-session' })];
+    await svc.refreshPairing();
+
+    expect(snap.current?.pairing.inviteRedeemed).toBe(false);
+    expect(snap.current?.pairing.inviteLink).toMatch(/token=/);
+    expect(mockHolder.mod.calls.revokePairInvite).toHaveLength(0);
+  });
+
+  it('does not let a spent latch follow this phone onto the next link', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await svc.createPairInvite(300);
+    mockHolder.mod.sessions = [verifyingSession({ sessionId: 'iid', state: 'failed' })];
+    await svc.refreshPairing();
+    expect(snap.current?.pairing.inviteRedeemed).toBe(true);
+
+    await svc.createPairInvite(300);
+    expect(snap.current?.pairing.inviteRedeemed).toBe(false);
+  });
+
+  it('records a pairing that broke, instead of quietly forgetting it', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+
+    mockHolder.mod.pairEvents = [
+      { kind: 'failed', sessionId: 'sess-dead', peerEndpointId: 'peerX', nearby: true },
+    ];
+    await svc.refreshPairing();
+
+    expect(snap.current?.pairing.failure).toMatchObject({
+      sessionId: 'sess-dead',
+      reason: 'lost',
+      nearby: true,
+      verified: false,
+    });
+  });
+
+  it('distinguishes a refused visual check from a session that never reached one', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+
+    mockHolder.mod.challenges.set('sess-sas', sasChallenge({ role: 'displayer' }));
+    mockHolder.mod.pairEvents = [
+      { kind: 'verifying', sessionId: 'sess-sas', peerEndpointId: 'peerY', nearby: false },
+    ];
+    await svc.refreshPairing();
+    expect(snap.current?.pairing.verifications).toHaveLength(1);
+
+    mockHolder.mod.pairEvents = [
+      { kind: 'rejected', sessionId: 'sess-sas', peerEndpointId: 'peerY', nearby: false },
+    ];
+    await svc.refreshPairing();
+
+    expect(snap.current?.pairing.failure).toMatchObject({ reason: 'declined', verified: true });
+    expect(snap.current?.pairing.verifications).toHaveLength(0);
+  });
+
+  it('retires the recorded failure as soon as anything starts again', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+
+    mockHolder.mod.pairEvents = [
+      { kind: 'failed', sessionId: 'sess-dead', peerEndpointId: 'peerX', nearby: true },
+    ];
+    await svc.refreshPairing();
+    expect(snap.current?.pairing.failure).not.toBeNull();
+
+    mockHolder.mod.pairEvents = [
+      { kind: 'pendingRequest', sessionId: 'sess-new', peerEndpointId: 'peerZ', nearby: true },
+    ];
+    await svc.refreshPairing();
+    expect(snap.current?.pairing.failure).toBeNull();
+  });
+
+  it('moves directly from an armed bump window into link redemption', async () => {
+    const svc = newService();
+    await svc.init('@me', 'mothman');
+    await svc.armBump();
+
+    await svc.pairFromInput('scpair2:cafef00d');
+
+    expect(mockHolder.mod.calls.setPairingReady).toEqual([true, false]);
+    expect(mockHolder.mod.calls.initiatePairByToken).toEqual(['scpair2:cafef00d']);
   });
 
   it('keeps an incoming pair request pending and rejects premature accept-via-respondPair', async () => {
@@ -1170,6 +1296,67 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(friend?.handle).toBe('@early');
     expect(friend?.sigil).toBe('chupacabra');
     expect(friend?.profileEpoch).toBe(800);
+  });
+
+  it('opens the SAS gate before the profile backfill, not behind it', async () => {
+    // Regression, 2026-09-10: "extremely slow (like 1 minute) to open the SAS screen", on link
+    // pairing and on bump. `backfillMissingProfiles` ran in the middle of the pairing poll, ahead
+    // of `reconcileVerifications` and the emit — so an unbounded walk that dials a namespace per
+    // friend sat between `verifying` landing in the native queue and the screen that renders it.
+    // `pollInFlight` meant the 4s timer could not slip past either: the next poll did not start
+    // until this one returned. Measured `pairing.poll` spans of 47-131s on the stuck side.
+    //
+    // The backfill is best-effort cosmetics — a handle and a sigil — so it now runs last.
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+
+    // A friend with a profile ticket and no epoch is what the sweep goes dialling for.
+    mockHolder.mod.pairResults.set(
+      'sess-slow',
+      pairResult({ sessionId: 'sess-slow', peerEndpointId: 'aabb1122', peerProfile: null })
+    );
+    mockHolder.mod.pairEvents = [
+      { kind: 'ready', sessionId: 'sess-slow', peerEndpointId: 'aabb1122', nearby: true },
+    ];
+    await svc.refreshPairing();
+    mockHolder.mod.pairEvents = [];
+
+    // Now wedge the sweep, exactly as a peer asleep in a pocket does.
+    let release = () => {};
+    const wedged = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const importTicket = mockHolder.mod.importProfileTicket.bind(mockHolder.mod);
+    mockHolder.mod.importProfileTicket = async (ticket: string) => {
+      await importTicket(ticket);
+      await wedged;
+    };
+
+    mockHolder.mod.sessions = [
+      verifyingSession({ sessionId: 'sess-sas', peerEndpointId: 'peerSAS', nearby: true }),
+    ];
+    mockHolder.mod.challenges.set(
+      'sess-sas',
+      sasChallenge({ role: 'picker', targetIndex: 1, optionIndices: [0, 1, 2] })
+    );
+
+    const realNow = Date.now();
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(realNow + 60_000);
+    try {
+      const polling = svc.refreshPairing();
+      // One macrotask is enough to drain every resolved await up to the wedge.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // The gate is on screen while the backfill is still hanging — the whole point.
+      expect(snap.current?.pairing.verifications.map((v) => v.sessionId)).toEqual(['sess-sas']);
+      expect(mockHolder.mod.calls.importProfileTicket).toContain('peer-profile');
+
+      release();
+      await polling;
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it('re-arms replication for a friend paired without a profile', async () => {

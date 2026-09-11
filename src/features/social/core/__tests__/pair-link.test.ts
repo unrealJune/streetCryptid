@@ -3,16 +3,40 @@ import {
   encodePairLink,
   isPairLink,
   isPairToken,
+  isWebPairLink,
   PAIR_TOKEN_PREFIX,
 } from '../pair-link';
 
 const TOKEN = `${PAIR_TOKEN_PREFIX}deadbeefcafe`;
 
 describe('pair-link codec', () => {
-  it('encodes a token directly onto the Friends route', () => {
+  it('encodes a token into the shareable https App Link', () => {
     const link = encodePairLink(TOKEN);
-    expect(link.startsWith('streetcryptid:///social?token=')).toBe(true);
+    // The https shape is the whole point: a messaging app will not linkify a custom
+    // scheme, so the old `streetcryptid://` invite arrived as untappable text.
+    expect(link.startsWith('https://streetcrypt.id/pair#token=')).toBe(true);
     expect(decodePairLink(link)).toBe(TOKEN);
+  });
+
+  it('keeps the token in the fragment, where it is never sent to a server', () => {
+    expect(encodePairLink(TOKEN)).not.toContain('?');
+  });
+
+  it('decodes the https link whether the token rides in the fragment or the query', () => {
+    const encoded = encodeURIComponent(TOKEN);
+    // A link-rewriting intermediary can drop a fragment; the query form is the way back.
+    expect(decodePairLink(`https://streetcrypt.id/pair?token=${encoded}`)).toBe(TOKEN);
+    expect(decodePairLink(`https://streetcrypt.id/pair/#token=${encoded}`)).toBe(TOKEN);
+  });
+
+  it('does not claim a host or path it was not verified for', () => {
+    const encoded = encodeURIComponent(TOKEN);
+    // The intent filter matches streetcrypt.id/pair exactly, so the codec must not be
+    // looser than the manifest — anything else has to fall through to the browser.
+    expect(isWebPairLink(`https://streetcrypt.id/pairing-guide#token=${encoded}`)).toBe(false);
+    expect(isWebPairLink(`https://www.streetcrypt.id/pair#token=${encoded}`)).toBe(false);
+    expect(isWebPairLink(`http://streetcrypt.id/pair#token=${encoded}`)).toBe(false);
+    expect(isWebPairLink(`https://streetcrypt.id/pair#token=${encoded}`)).toBe(true);
   });
 
   it('continues decoding legacy double-slash social links', () => {
@@ -34,7 +58,7 @@ describe('pair-link codec', () => {
 
   it('leaves a base64url payload untouched apart from the prefix colon', () => {
     const token = `${PAIR_TOKEN_PREFIX}Ab9-_xyZ`;
-    expect(encodePairLink(token)).toBe('streetcryptid:///social?token=scpair2%3AAb9-_xyZ');
+    expect(encodePairLink(token)).toBe('https://streetcrypt.id/pair#token=scpair2%3AAb9-_xyZ');
   });
 
   it('rejects the shipped-but-unsupported scpair1: prefix', () => {
@@ -69,6 +93,8 @@ describe('pair-link codec', () => {
   it('rejects a pair link without a valid token', () => {
     expect(() => decodePairLink('streetcryptid://pair?token=nope')).toThrow(/token/);
     expect(() => decodePairLink('streetcryptid://pair')).toThrow(/token/);
+    expect(() => decodePairLink('https://streetcrypt.id/pair')).toThrow(/token/);
+    expect(() => decodePairLink('https://streetcrypt.id/pair#token=nope')).toThrow(/token/);
   });
 
   it('rejects unrelated input', () => {

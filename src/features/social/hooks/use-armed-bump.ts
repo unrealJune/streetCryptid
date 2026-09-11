@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 
 import { useBumpToPair, type BumpSensorState } from './use-bump-to-pair';
 import { useLocationSharing } from './use-location-sharing';
-import { usePairingHaptics } from './use-pairing-haptics';
 import type { PairingSnapshot } from '../net/location-sharing';
 
 export interface ArmedBump {
@@ -20,25 +19,23 @@ export interface ArmedBump {
 }
 
 /**
- * Owns the Bump window for whichever surface is showing the roster.
+ * Owns the nearby-listening lifecycle for the active pairing screen.
  *
- * Arming is an explicit tap, not a side effect of opening the tab. Arming has to
- * ask for Bluetooth permission and can fail for half a dozen honest reasons
- * (no native module, radio off, another pairing already running), and the
- * service leaves the stage on `idle` when it does — so a silent auto-arm could
- * fail once and then sit there looking armed forever, with nothing to press.
- * A button makes the failure visible and recoverable, and puts the OS permission
- * prompt behind a deliberate gesture.
+ * Entering the screen is the deliberate user gesture that opens Bluetooth and motion
+ * permissions. A timed-out or transiently interrupted window re-arms itself while the
+ * screen remains visible; a physical miss stays parked for an explicit retry. Leaving
+ * or backgrounding the screen always closes the radio.
  *
- * Disarming stays automatic: leaving the tab, drilling into a friend's trace, or
- * backgrounding the app cancels the window, so the radio is never quietly left
- * listening.
+ * Strictly the RADIO's lifecycle. Haptics used to live here too, which quietly made them a
+ * Bump-only feature: this hook is armed only for nearby pairing, so every link and QR pair ran
+ * silent. They belong to the pairing screen, which is alive for all three.
  */
 export function useArmedBump(active: boolean): ArmedBump {
   const { pairing, armBump, commitBump, cancelBump, refreshPairing } = useLocationSharing();
   const [appState, setAppState] = useState<AppStateStatus>(AppState.currentState);
   const [error, setError] = useState<string | null>(null);
   const [arming, setArming] = useState(false);
+  const armingRef = useRef(false);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', setAppState);
@@ -47,15 +44,24 @@ export function useArmedBump(active: boolean): ArmedBump {
 
   const live = active && appState === 'active';
   const stage = pairing?.bump.stage ?? 'idle';
+  const canArm =
+    live &&
+    pairing?.available === true &&
+    pairing.radio !== 'poweredOff' &&
+    pairing.radio !== 'unsupported';
 
   const arm = useCallback(async () => {
+    if (armingRef.current) return;
+    armingRef.current = true;
     setArming(true);
     setError(null);
     try {
       await armBump();
     } catch (armError: unknown) {
       setError(armError instanceof Error ? armError.message : 'Bump could not start.');
+      throw armError;
     } finally {
+      armingRef.current = false;
       setArming(false);
     }
   }, [armBump]);
@@ -68,9 +74,23 @@ export function useArmedBump(active: boolean): ArmedBump {
     void refreshPairing();
   }, [live, refreshPairing]);
 
-  // Derived, not stored-and-cleared: a failure only describes the attempt that
-  // produced it, so it is simply not shown once the radio is open or you have
-  // walked away from the roster.
+  const hasActiveSession =
+    (pairing?.verifications.length ?? 0) > 0 ||
+    (pairing?.pendingRequests.length ?? 0) > 0 ||
+    (pairing?.sessions.some(
+      (session) => !['complete', 'rejected', 'failed'].includes(session.state)
+    ) ??
+      false) ||
+    Boolean(pairing?.discoveredFriend);
+
+  useEffect(() => {
+    if (!canArm || hasActiveSession || stage !== 'idle' || armingRef.current || error) return;
+    const timer = setTimeout(() => {
+      void arm().catch(() => {});
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [arm, canArm, error, hasActiveSession, stage]);
+
   const visibleError = stage === 'idle' && live ? error : null;
 
   useEffect(() => {
@@ -78,8 +98,7 @@ export function useArmedBump(active: boolean): ArmedBump {
     void cancelBump();
   }, [cancelBump, live, stage]);
 
-  const sensor = useBumpToPair(live && stage === 'armed' && !pairing?.discoveredFriend, commitBump);
-  usePairingHaptics(pairing, live);
+  const sensor = useBumpToPair(live && stage === 'armed' && !hasActiveSession, commitBump);
 
   return { pairing, sensor, live, error: visibleError, arming, arm, commit: commitBump };
 }

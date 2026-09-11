@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 import { View, StyleSheet, useColorScheme } from 'react-native';
-import { useFocusEffect } from 'expo-router';
+import { type Href, useFocusEffect } from 'expo-router';
 
 import { CryptidThemes } from '@/constants/theme';
 import { DEV_TELEMETRY_ENABLED } from '@/features/dev/telemetry';
@@ -65,9 +65,9 @@ export default function SettingsScreen() {
           accent={transportsOn > 0 ? chrome.green : chrome.amber}
         />
         <SettingsMenuRow
-          href="/settings/pairing"
-          label="Link pairing"
-          detail="Pair by invite link when two phones cannot physically meet."
+          href={'/pairing' as Href}
+          label="Pair with someone"
+          detail="Bump nearby or exchange a one-time pairing link."
         />
         <SettingsMenuRow
           href="/settings/delivery"

@@ -877,6 +877,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_respond_pair(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_resync_count(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_revoke_pair_invite(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_seed_seq(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_set_delivery_config(
@@ -1120,6 +1122,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_resolve_bump_peer(`ptr`
 external fun uniffi_iroh_location_fn_method_locationnode_respond_pair(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`accept`: Byte,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_resync_count(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_revoke_pair_invite(`ptr`: Long,`token`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_seed_seq(`ptr`: Long,`floor`: Long,
 ): Long
@@ -1600,6 +1604,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_resync_count() != 62719) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_revoke_pair_invite() != 25847) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_seed_seq() != 19292) {
@@ -3543,6 +3550,15 @@ public interface LocationNodeInterface {
     suspend fun `resyncCount`(`peerEndpointHex`: kotlin.String): kotlin.UInt
     
     /**
+     * Withdraw an invite this node minted, given the opaque `scpair2:…` token it was shared as.
+     *
+     * Returns whether the invite was still outstanding, so a caller can tell "cancelled" from
+     * "there was nothing left to cancel". Takes the token rather than a decoded [`PairInvite`]
+     * because the token is the only form the app keeps once the link has been handed out.
+     */
+    suspend fun `revokePairInvite`(`token`: kotlin.String): kotlin.Boolean
+    
+    /**
      * Raise the counter to at least `floor`, returning whether it moved.
      *
      * Monotone: a floor at or below the current value is a no-op. Two callers, one shape — the
@@ -5457,6 +5473,34 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_u32(future) },
         // lift function
         { FfiConverterUInt.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Withdraw an invite this node minted, given the opaque `scpair2:…` token it was shared as.
+     *
+     * Returns whether the invite was still outstanding, so a caller can tell "cancelled" from
+     * "there was nothing left to cancel". Takes the token rather than a decoded [`PairInvite`]
+     * because the token is the only form the app keeps once the link has been handed out.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `revokePairInvite`(`token`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_revoke_pair_invite(
+                uniffiHandle,
+                FfiConverterString.lower(`token`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )

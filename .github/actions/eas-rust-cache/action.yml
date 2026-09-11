@@ -34,6 +34,11 @@ inputs:
     required: false
     default: 'false'
 
+outputs:
+  cache-hit:
+    description: Whether the Cargo registry/target cache was an exact hit.
+    value: ${{ steps.cargo-cache.outputs.cache-hit }}
+
 runs:
   using: composite
   steps:
@@ -60,6 +65,7 @@ runs:
       run: rustup toolchain install stable --profile minimal --no-self-update
 
     - name: Restore the Cargo cache
+      id: cargo-cache
       uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       with:
         workspaces: modules/iroh-location/rust -> target

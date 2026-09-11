@@ -145,6 +145,17 @@ jobs:
       - name: Test EAS CI log isolation
         run: bash scripts/test-eas-ci-log-isolation.sh
 
+      # The build profiler samples the process table while `eas build --local` runs, and that
+      # build's children carry signing credentials in their argument vectors. This proves it can
+      # publish nothing but its own vocabulary.
+      - name: Test build profile isolation
+        run: bash scripts/test-build-profile-isolation.sh
+
+      # A wrong artifact cache ships a stale .so, which installs and runs and then misbehaves on
+      # device -- the one failure in this pipeline a green build would hide.
+      - name: Test the native artifact cache
+        run: bash scripts/test-native-cache.sh
+
       - name: Test release versioning
         run: bash scripts/test-next-version.sh
 

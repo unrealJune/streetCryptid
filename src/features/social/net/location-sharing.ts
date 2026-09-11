@@ -18,6 +18,7 @@ import {
   type PairEvent,
   type PairResult,
   type PairStateRecord,
+  type PairStateValue,
   type ProfileView,
   type SasChallenge,
   type SasRole,
@@ -163,6 +164,42 @@ export interface PairingVerification {
 
 export type BumpStage = 'idle' | 'armed' | 'searching' | 'contact' | 'failed';
 
+/**
+ * Why a pairing that had actually started did not finish.
+ *
+ * `declined` — the peer rejected, which past the SAS gate means a human said the figures differed.
+ * `lost`     — the session failed: the transport died, or the peer went away mid-handshake.
+ * `expired`  — the SAS window closed with nobody confirming.
+ *
+ * Only three, because three is all the wire can honestly support: {@link PairEvent} carries no
+ * reason field, so anything finer would be invented rather than reported.
+ */
+export type PairingFailureReason = 'declined' | 'lost' | 'expired';
+
+/** What {@link LocationSharingService.cancelPairInvite} was actually able to do. */
+export type InviteCancellation = 'cancelled' | 'unsupported' | 'absent';
+
+/** Session states past which nothing more will happen. */
+export const TERMINAL_PAIR_STATES: readonly PairStateValue[] = ['complete', 'rejected', 'failed'];
+
+/**
+ * The last pairing that broke after it had begun.
+ *
+ * Distinct from {@link BumpSnapshot.error}, which reports an attempt that never started. This is
+ * the record of a session that existed, reached some depth, and then died — the thing the screen
+ * had been showing the user right up until it vanished. Without it the UI silently reverts to
+ * whatever it was doing before, which reads as the app forgetting.
+ */
+export interface PairingFailure {
+  readonly sessionId: string;
+  readonly reason: PairingFailureReason;
+  /** Whether the dead session was an invite-less nearby (Bump) pair. */
+  readonly nearby: boolean;
+  /** Whether this phone reached the visual check before the session died. */
+  readonly verified: boolean;
+  readonly at: number;
+}
+
 export interface BumpSnapshot {
   stage: BumpStage;
   expiresAt: number | null;
@@ -201,6 +238,21 @@ export interface PairingSnapshot {
   discoveredFriend: Friend | null;
   /** The most recently minted invite link (`streetcryptid:///social?token=…`), if any. */
   inviteLink: string | null;
+  /** Absolute expiry of the current invite link, in milliseconds since epoch. */
+  inviteExpiresAt?: number | null;
+  /**
+   * Whether the link this phone minted has been redeemed by another phone.
+   *
+   * An invite is one-shot at the issuer — native binds it to the first peer that redeems it — but
+   * nothing used to tell this side that had happened, so a spent link went on being offered.
+   * Optional for the same reason as {@link inviteExpiresAt}.
+   */
+  inviteRedeemed?: boolean;
+  /**
+   * The last pairing that broke after it had started, until the screen clears it. Optional so
+   * snapshot literals written before failures were tracked stay valid.
+   */
+  failure?: PairingFailure | null;
   /**
    * The most recently minted short pairing code (`XXXX-XXXX-XXXX-XXXX`), if any. Optional so that
    * pre-existing snapshot literals (constructed before this field existed) remain valid; the
@@ -335,7 +387,7 @@ const PAIRING_ACTIVE_POLL_INTERVAL_MS = 300;
 
 const BUMP_POLL_INTERVAL_MS = 300;
 const BUMP_RESOLVE_TIMEOUT_MS = 12_000;
-export const BUMP_WINDOW_MS = 15_000;
+export const BUMP_WINDOW_MS = 120_000;
 
 /**
  * How often we re-arm profile replication for a friend still wearing the pairing placeholder.
@@ -553,7 +605,21 @@ export class LocationSharingService {
   private rebindInFlight = false;
   private discoveredFriend: Friend | null = null;
   private inviteLink: string | null = null;
+  private inviteExpiresAt: number | null = null;
+  /**
+   * The id of the invite behind {@link inviteLink}.
+   *
+   * Retained because it is also the SESSION id a redemption creates: native looks the invite up
+   * by the incoming session id (`pairing.rs`, `invites.get(&session_id)`), so a session bearing
+   * this id is proof that someone opened the link — and the only proof available on this side
+   * without a new native export.
+   */
+  private inviteId: string | null = null;
+  /** Whether a peer has opened {@link inviteLink}. A spent link must not be offered again. */
+  private inviteRedeemed = false;
   private inviteCode: string | null = null;
+  /** The last pairing that broke after it had started. Cleared by the screen, or by a fresh one. */
+  private pairingFailure: PairingFailure | null = null;
   private readonly mailbox: PairingMailbox;
   /**
    * Optional offline-delivery stash (https://github.com/unrealJune/trail-stash). No-op client when
@@ -596,6 +662,16 @@ export class LocationSharingService {
   private lastProfileBackfillAt = 0;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private pollInFlight: Promise<void> | null = null;
+  /**
+   * The in-flight native reconciliation, so a second caller JOINS it instead of starting a rival.
+   *
+   * `syncLatest` is a global, idempotent pass over every namespace, but `syncTrail` is triggered
+   * from a node restart, foreground resume, pair-ready and the init effect — none of which knew
+   * about the others. Measured 2026-09-10: five overlapping passes on one phone, each over 100s,
+   * all reconciling the same replicas and between them saturating the docs engine that the
+   * pairing poll's profile reads have to queue behind.
+   */
+  private trailSyncInFlight: Promise<void> | null = null;
   /** Last poll-error message surfaced, so we don't spam listeners with identical errors. */
   private lastPollErrorSig: string | null = null;
   /** JSON signature of the last emitted pairing snapshot, so polling only emits on real change. */
@@ -1245,9 +1321,7 @@ export class LocationSharingService {
     return (
       this.verifications.length > 0 ||
       this.pendingPairRequests.length > 0 ||
-      this.pairSessions.some(
-        (session) => !['complete', 'rejected', 'failed'].includes(session.state)
-      )
+      this.pairSessions.some((session) => !TERMINAL_PAIR_STATES.includes(session.state))
     );
   }
 
@@ -1286,6 +1360,11 @@ export class LocationSharingService {
     this.nearbyPeers = [];
     this.bleCaps = null;
     this.pairingReadyFlag = false;
+    // The invite map lives in the node we are about to replace, so the link this phone was
+    // offering is already unredeemable. Keeping it on screen would offer a token nothing honours.
+    this.forgetInvite();
+    this.inviteRedeemed = false;
+    this.pairingFailure = null;
 
     await mod.shutdown();
     this.keys = await mod.createNode(keys.identitySecret, keys.recvSecret);
@@ -1349,9 +1428,103 @@ export class LocationSharingService {
       if (!this.mod) throw new Error('createPairInvite: native module not bound');
       const invite = await this.mod.createPairInvite(ttlSecs);
       this.inviteLink = encodePairLink(invite.token);
+      this.inviteExpiresAt = invite.expiresAtMs;
+      this.inviteId = invite.inviteId;
+      this.inviteRedeemed = false;
       this.setPairingActivity('invite created');
       return this.inviteLink;
     });
+  }
+
+  /**
+   * Cancel the invite this phone is currently offering, so the link it minted stops working.
+   *
+   * The token itself cannot be recalled once it has been sent to someone, so cancelling has to
+   * withdraw it at the issuer — this node is the only party that decides whether a redemption is
+   * honoured. Forgetting the link locally is therefore not enough on its own, and the local state
+   * is cleared only after the native call has agreed, so the UI never claims a cancellation that
+   * did not happen.
+   *
+   * Reports which of three things happened, because they warrant different copy: `cancelled` (the
+   * token is now refused), `unsupported` (this binary predates the revocation export, so the link
+   * lives until its TTL runs out and saying otherwise would be a lie), and `absent` (there was no
+   * link to withdraw — not a failure, and not worth warning anyone about).
+   */
+  async cancelPairInvite(): Promise<InviteCancellation> {
+    return this.runPairingOperation(async () => {
+      const link = this.inviteLink;
+      if (!link) return 'absent';
+      if (typeof this.mod?.revokePairInvite !== 'function') return 'unsupported';
+      await this.mod.revokePairInvite(decodePairLink(link));
+      this.forgetInvite();
+      // Withdrawn, not used — the latch must not leave the screen claiming someone opened it.
+      this.inviteRedeemed = false;
+      this.setPairingActivity('invite cancelled');
+      return 'cancelled';
+    });
+  }
+
+  /**
+   * Stop offering the current invite. Always all three together — a link without its id cannot be
+   * recognised when it is redeemed, and an expiry without a link is a countdown over nothing.
+   *
+   * Deliberately does NOT touch {@link inviteRedeemed}: that is a latch about the link this phone
+   * last minted, and it has to outlive the offer itself. Retiring a spent link clears the offer
+   * while the screen still needs to say why it went. Minting the next invite is what resets it.
+   */
+  private forgetInvite(): void {
+    this.inviteLink = null;
+    this.inviteExpiresAt = null;
+    this.inviteId = null;
+  }
+
+  /**
+   * Notice that the link this phone minted has been opened, and retire it once that attempt ends.
+   *
+   * The session a redemption creates is keyed by the INVITE id (native looks the invite up by the
+   * incoming session id), so a session wearing `inviteId` is proof the link was used. Polled
+   * rather than driven by the `pendingRequest` event because polling survives a missed event and
+   * a return to the screen, and the whole point is that the issuer must not be able to miss this.
+   *
+   * Once that session is terminal the invite is withdrawn outright. Native would still honour a
+   * retry from the same bound peer within the TTL, but a link the user has watched fail is not a
+   * link they should still be handing out: it is spent, and the screen says so.
+   */
+  private trackInviteRedemption(sessions: PairStateRecord[]): void {
+    const inviteId = this.inviteId;
+    if (!inviteId) return;
+    const session = sessions.find((record) => record.sessionId === inviteId);
+    if (!session) return;
+    this.inviteRedeemed = true;
+    if (!TERMINAL_PAIR_STATES.includes(session.state)) return;
+    const link = this.inviteLink;
+    const mod = this.mod;
+    this.forgetInvite();
+    if (!link || typeof mod?.revokePairInvite !== 'function') return;
+    // Through `runPairingOperation` even though nothing awaits the result: that is what holds a
+    // node rebind off while the call is in flight, and what refuses it outright if one has already
+    // started. Swallowed because the link is already gone from the screen either way — and a
+    // rebind, which is the only thing that rejects here, replaces the invite map wholesale.
+    void this.runPairingOperation(() => mod.revokePairInvite!(decodePairLink(link))).catch(
+      () => undefined
+    );
+  }
+
+  /**
+   * Record a pairing that broke after it had started, for the screen to show.
+   *
+   * Deliberately last-wins: a newer failure describes what the user just watched happen, and a
+   * queue of dead sessions is not something anyone needs to read through.
+   */
+  private setPairingFailure(failure: PairingFailure): void {
+    this.pairingFailure = failure;
+  }
+
+  /** Dismiss the recorded failure. Called by the screen once the user has moved on from it. */
+  clearPairingFailure(): void {
+    if (!this.pairingFailure) return;
+    this.pairingFailure = null;
+    this.emit();
   }
 
   /**
@@ -1395,7 +1568,7 @@ export class LocationSharingService {
 
   private async pairFromInputUnlocked(input: string): Promise<string> {
     if (!this.mod) throw new Error('pairFromInput: native module not bound');
-    if (this.isBumpActive()) throw new Error('Cancel Bump before using a pairing link or code.');
+    if (this.isBumpActive()) await this.cancelBump();
     const trimmed = input.trim();
     if (isPairingCode(trimmed)) {
       return this.pairFromCode(trimmed);
@@ -2157,10 +2330,8 @@ export class LocationSharingService {
       },
     });
     try {
-      await this.mod.syncLatest(
-        peerTickets,
-        getTelemetry().enabled ? traceparentFor(span.context) : null
-      );
+      span.setAttribute('coalesced', this.trailSyncInFlight !== null);
+      await this.reconcileTrailOnce(peerTickets, span);
       span.setStatus('ok');
     } catch (err) {
       // Best effort — the durable path may be unavailable (e.g. web without docs) — but when it
@@ -2179,6 +2350,26 @@ export class LocationSharingService {
     this.lastSyncRecovered = recovered;
     this.notifyTrailChanged();
     this.emit();
+  }
+
+  /**
+   * Run ONE native reconciliation at a time, joining the running one when there is one.
+   *
+   * Only the native pass is shared: it reconciles every namespace against the same peer set, so a
+   * concurrent caller wants exactly the work already underway. The replica read that follows it in
+   * {@link syncTrail} is per-caller (it is keyed by `sinceTs`) and stays outside this.
+   */
+  private reconcileTrailOnce(peerTickets: string[], span: Span): Promise<void> {
+    if (this.trailSyncInFlight) return this.trailSyncInFlight;
+    const mod = this.mod;
+    if (!mod) return Promise.resolve();
+    const run = mod
+      .syncLatest(peerTickets, getTelemetry().enabled ? traceparentFor(span.context) : null)
+      .finally(() => {
+        this.trailSyncInFlight = null;
+      });
+    this.trailSyncInFlight = run;
+    return run;
   }
 
   /**
@@ -3652,7 +3843,10 @@ export class LocationSharingService {
       },
       discoveredFriend: this.discoveredFriend,
       inviteLink: this.inviteLink,
+      inviteExpiresAt: this.inviteExpiresAt,
+      inviteRedeemed: this.inviteRedeemed,
       inviteCode: this.inviteCode,
+      failure: this.pairingFailure,
       mailboxAvailable: this.mailbox.configured,
       activity: this.pairingActivity,
     };
@@ -3923,7 +4117,6 @@ export class LocationSharingService {
       // the completed friendship forever, so recover any unhandled Complete session snapshots too.
       await this.reconcileCompletedPairs(sessions);
       for (const profile of profileEvents) this.applyProfile(profile);
-      await this.backfillMissingProfiles();
       // Reconcile the SAS verification model AFTER handling events, from BOTH the polled session
       // list and this poll's events: `listPairSessions()` is fetched in parallel with the event
       // queue, so a just-emitted `verifying` transition may not appear in `sessions` yet. Merging
@@ -3938,6 +4131,7 @@ export class LocationSharingService {
       this.pendingPairRequests = this.pendingPairRequests.filter(
         (request) => liveSessions.has(request.sessionId) || justRequested.has(request.sessionId)
       );
+      this.trackInviteRedemption(sessions);
       if (this.lastPollErrorSig !== null) {
         // A prior poll surfaced an error (typically transient — e.g. the native node was still
         // coming up). Now that polling recovered, clear the surfaced error so the UI's sticky
@@ -3946,6 +4140,13 @@ export class LocationSharingService {
         this.errorListeners.forEach((listener) => listener(''));
       }
       this.emitIfPairingChanged();
+      // LAST, and deliberately after the emit above. This sweep dials a namespace per friend and
+      // is pure best-effort cosmetics — a handle and a sigil — whereas everything above it is the
+      // SAS gate the user is staring at. Running it earlier put an unbounded network walk between
+      // `verifying` landing in the native queue and the screen that renders it, and `pollInFlight`
+      // meant the 4s timer could not slip past: the next poll did not start until this one
+      // returned. Measured 2026-09-10: SAS screens opening a minute late on both sides of a pair.
+      await this.backfillMissingProfiles();
       span.setStatus('ok');
     } catch (err) {
       span.recordError(err);
@@ -4025,6 +4226,9 @@ export class LocationSharingService {
   }
 
   private async handlePairEvent(event: PairEvent): Promise<void> {
+    // Any sign of life retires the last failure: the screen should be describing what is happening
+    // now, not what broke before it. The terminal kinds below record the next one straight after.
+    if (event.kind !== 'rejected' && event.kind !== 'failed') this.pairingFailure = null;
     switch (event.kind) {
       case 'pendingRequest': {
         // Sessions we initiated (or nearby ones we've picked up) advance to the SAS gate on their
@@ -4059,18 +4263,31 @@ export class LocationSharingService {
         await this.onPairReady(event);
         return;
       case 'rejected':
-      case 'failed':
+      case 'failed': {
         this.pendingPairRequests = this.pendingPairRequests.filter(
           (e) => e.sessionId !== event.sessionId
         );
+        // Read BEFORE the filter below drops it: how deep this session got is the only thing that
+        // separates "they declined the figures" from "it died on the way there", and the event
+        // itself carries no reason.
+        const verification = this.verifications.find((v) => v.sessionId === event.sessionId);
+        const expired = verification !== undefined && verification.deadlineMs <= Date.now();
         this.verifications = this.verifications.filter((v) => v.sessionId !== event.sessionId);
         this.initiatedRoutes.delete(event.sessionId);
         if (event.nearby) {
           this.stopBumpPolling(false);
           if (this.pairingReadyFlag) void this.setPairingReady(false);
         }
+        this.setPairingFailure({
+          sessionId: event.sessionId,
+          reason: expired ? 'expired' : event.kind === 'rejected' ? 'declined' : 'lost',
+          nearby: event.nearby,
+          verified: verification !== undefined,
+          at: Date.now(),
+        });
         this.setPairingActivity(event.kind === 'rejected' ? 'pair rejected' : 'pair failed');
         return;
+      }
     }
   }
 
@@ -4117,10 +4334,9 @@ export class LocationSharingService {
     const mod = this.mod;
     if (!mod) return;
 
-    const terminalStates = ['complete', 'rejected', 'failed'];
     const activeSasStates = new Set(['verifying', 'localAccepted', 'peerAccepted']);
     const terminal = new Set<string>(
-      sessions.filter((s) => terminalStates.includes(s.state)).map((s) => s.sessionId)
+      sessions.filter((s) => TERMINAL_PAIR_STATES.includes(s.state)).map((s) => s.sessionId)
     );
     for (const e of events) {
       if (e.kind === 'ready' || e.kind === 'rejected' || e.kind === 'failed') {
@@ -4239,6 +4455,9 @@ export class LocationSharingService {
     );
     this.verifications = this.verifications.filter((v) => v.sessionId !== event.sessionId);
     this.initiatedRoutes.delete(event.sessionId);
+    // Reached here via `reconcileCompletedPairs` too, which does not pass through the event
+    // handler's clear — and a friend on screen must never sit under a stale failure.
+    this.pairingFailure = null;
     this.discoveredFriend = friend;
     this.stopBumpPolling(false);
     if (this.pairingReadyFlag) void this.setPairingReady(false);

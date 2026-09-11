@@ -20,6 +20,7 @@ import {
   BLUETOOTH_OFF_MESSAGE,
   BLUETOOTH_UNSUPPORTED_MESSAGE,
   LocationSharingService,
+  type InviteCancellation,
   type PairingSnapshot,
   type SharingSnapshot,
 } from '@/features/social/net/location-sharing';
@@ -73,6 +74,15 @@ interface LocationSharingContextValue {
   commitBump(): Promise<void>;
   cancelBump(): Promise<void>;
   createPairInvite(ttlSecs?: number): Promise<string | undefined>;
+  /**
+   * Withdraw the invite this phone is offering. Reports which of three things happened —
+   * `cancelled`, `unsupported` (this binary predates the revocation export, so the link lives out
+   * its TTL) or `absent` — because they warrant different copy. Callers must not claim a
+   * cancellation on anything but `cancelled`.
+   */
+  cancelPairInvite(): Promise<InviteCancellation>;
+  /** Dismiss the recorded pairing failure once the user has moved on from it. */
+  clearPairingFailure(): void;
   pairFromInput(input: string): Promise<void>;
   respondPair(sessionId: string, accept: boolean): Promise<void>;
   submitPairChoice(sessionId: string, chosenIndex: number): Promise<void>;
@@ -436,6 +446,23 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     }
   }, []);
 
+  const cancelPairInvite = useCallback(async (): Promise<InviteCancellation> => {
+    const service = serviceRef.current;
+    if (!service) return 'absent';
+    try {
+      const outcome = await service.cancelPairInvite();
+      setServiceError(null);
+      return outcome;
+    } catch (cancelError: unknown) {
+      setServiceError(errorMessage(cancelError));
+      return 'unsupported';
+    }
+  }, []);
+
+  const clearPairingFailure = useCallback(() => {
+    serviceRef.current?.clearPairingFailure();
+  }, []);
+
   const retryLocation = useCallback(async () => {
     const service = serviceRef.current;
     if (!service) return;
@@ -704,6 +731,8 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       commitBump,
       cancelBump,
       createPairInvite,
+      cancelPairInvite,
+      clearPairingFailure,
       pairFromInput,
       respondPair,
       submitPairChoice,
@@ -738,6 +767,8 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       commitBump,
       cancelBump,
       createPairInvite,
+      cancelPairInvite,
+      clearPairingFailure,
       pairFromInput,
       respondPair,
       submitPairChoice,

@@ -1706,6 +1706,15 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func resyncCount(peerEndpointHex: String) async throws  -> UInt32
     
     /**
+     * Withdraw an invite this node minted, given the opaque `scpair2:…` token it was shared as.
+     *
+     * Returns whether the invite was still outstanding, so a caller can tell "cancelled" from
+     * "there was nothing left to cancel". Takes the token rather than a decoded [`PairInvite`]
+     * because the token is the only form the app keeps once the link has been handed out.
+     */
+    func revokePairInvite(token: String) async throws  -> Bool
+    
+    /**
      * Raise the counter to at least `floor`, returning whether it moved.
      *
      * Monotone: a floor at or below the current value is a no-op. Two callers, one shape — the
@@ -3372,6 +3381,30 @@ open func resyncCount(peerEndpointHex: String)async throws  -> UInt32  {
             completeFunc: ffi_iroh_location_rust_future_complete_u32,
             freeFunc: ffi_iroh_location_rust_future_free_u32,
             liftFunc: FfiConverterUInt32.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Withdraw an invite this node minted, given the opaque `scpair2:…` token it was shared as.
+     *
+     * Returns whether the invite was still outstanding, so a caller can tell "cancelled" from
+     * "there was nothing left to cancel". Takes the token rather than a decoded [`PairInvite`]
+     * because the token is the only form the app keeps once the link has been handed out.
+     */
+open func revokePairInvite(token: String)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_revoke_pair_invite(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(token)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_i8,
+            completeFunc: ffi_iroh_location_rust_future_complete_i8,
+            freeFunc: ffi_iroh_location_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -8718,6 +8751,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_resync_count() != 62719) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_revoke_pair_invite() != 25847) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_seed_seq() != 19292) {

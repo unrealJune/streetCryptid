@@ -1671,6 +1671,18 @@ impl PairCore {
         })
     }
 
+    /// Withdraw a previously minted invite. Returns whether it was still outstanding.
+    ///
+    /// Revocation is what makes cancelling a shared link mean something. The token itself cannot
+    /// be recalled once it has been sent to someone, so redeemability has to be withdrawn at the
+    /// only place that enforces it: this map. With the entry gone [`check_invite`] answers
+    /// [`InviteCheck::Unknown`] and the `Hello` is refused, exactly as it would be for a forged
+    /// invite id. Deliberately idempotent — cancelling twice, or cancelling an invite that has
+    /// already expired or been redeemed, is not an error.
+    pub async fn revoke_invite(&self, invite_id: &[u8; SESSION_ID_LEN]) -> bool {
+        self.invites.lock().await.remove(invite_id).is_some()
+    }
+
     /// Begin an invite-based pair: dial the issuer, exchange `Hello` (SAS commit) then `Reveal`
     /// (SAS nonce), and land in the visual verification gate. Returns the session id.
     pub async fn initiate_by_invite(&self, inv: &InviteData) -> Result<[u8; SESSION_ID_LEN]> {
@@ -2825,6 +2837,34 @@ mod tests {
         assert_eq!(
             check_invite(Some(&bound), &secret, &peer, 1),
             InviteCheck::Ok
+        );
+    }
+
+    /// Cancelling a shared link has to make the token unredeemable, not merely forgotten by the
+    /// UI — a token already sent to someone is otherwise still good until its TTL runs out.
+    #[test]
+    fn revoked_invite_is_refused_like_an_unknown_one() {
+        let secret = [4u8; INVITE_SECRET_LEN];
+        let peer = [8u8; ENDPOINT_LEN];
+        let issued = IssuedInvite {
+            secret,
+            expires_at_ms: 10_000,
+            bound_peer: None,
+        };
+        // Well within its TTL, so expiry is not what refuses it.
+        assert_eq!(
+            check_invite(Some(&issued), &secret, &peer, 1),
+            InviteCheck::Ok
+        );
+        // Revocation removes the entry; the lookup a `Hello` performs then finds nothing.
+        let mut invites: HashMap<[u8; SESSION_ID_LEN], IssuedInvite> = HashMap::new();
+        let id = [7u8; SESSION_ID_LEN];
+        invites.insert(id, issued);
+        assert!(invites.remove(&id).is_some(), "first revoke withdraws it");
+        assert!(invites.remove(&id).is_none(), "revoking twice is not an error");
+        assert_eq!(
+            check_invite(invites.get(&id), &secret, &peer, 1),
+            InviteCheck::Unknown
         );
     }
 
