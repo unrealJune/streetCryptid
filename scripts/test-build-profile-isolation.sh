@@ -50,6 +50,7 @@ cat > "$test_root/bin/ps" << EOF
 # Everything a real \`ps\` could hand us, plus everything it could not.
 cat <<'NAMES'
 /usr/bin/cargo
+cargo
 rustc
 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild
 java
@@ -72,6 +73,21 @@ chmod 700 "$test_root/bin/ps"
 
 export PATH="$test_root/bin:$PATH"
 
+# --- 0. These scripts must run on the macOS build runner ---------------------
+
+# The iOS build job runs them with /bin/bash, which on macOS is 3.2 -- Apple never shipped a GPLv3
+# bash. A bash 4 construct there is a SYNTAX error, not a wrong answer, so it takes out the step
+# before any assertion in this file gets a chance to run. A grep is the only way to catch that from
+# a machine that has a modern bash, and it is worth catching: the alternative is finding out
+# fifteen minutes into a build job.
+for script in build-profile.sh build-report.sh; do
+  # Comment lines are stripped first, or the comment explaining this rule trips it.
+  if grep -v '^[[:space:]]*#' "$repo_root/scripts/$script" |
+    grep -nE '(declare|local)[[:space:]]+-A|mapfile|readarray|\$\{[A-Za-z_]+(,,|\^\^)\}'; then
+    fail "$script uses a bash 4 construct; the macOS runner's /bin/bash is 3.2"
+  fi
+done
+
 # shellcheck source=scripts/build-profile.sh
 source "$repo_root/scripts/build-profile.sh"
 
@@ -87,8 +103,9 @@ sample_file="$(sc_profile_sample_file)"
 # The strongest available invariant, and the one worth stating plainly: EVERY line the sampler
 # writes must be one of its own two record kinds followed by a word from its own vocabulary. If
 # this holds, no byte of the process table can be in the file, whatever the process table said.
+record_re=$'^[cw]\t[a-z][a-z0-9]{0,31}$'
 while IFS= read -r line; do
-  [[ "$line" =~ ^[cw]$'\t'[a-z][a-z0-9]{0,31}$ ]] ||
+  [[ "$line" =~ $record_re ]] ||
     fail "the sampler wrote a record outside its own vocabulary"
 done < "$sample_file"
 
@@ -110,10 +127,18 @@ for expected in cargo rustc xcodebuild gradle node; do
 done
 
 # A name that merely CONTAINS a known tool is not that tool, or the vocabulary would be a
-# substring match and the rest of the line could ride along with it.
-cargo_rows="$(grep -c '^c	cargo$' "$sample_file")"
-[[ "$cargo_rows" == '1' ]] ||
-  fail "expected exactly one cargo process, got $cargo_rows (matching is not anchored)"
+# substring match and the rest of the line could ride along with it. The fake process table has two
+# real cargo processes (one by path, one bare) and three impostors carrying the sentinel.
+#
+# The counts also pin the two record kinds apart: two `c` rows for the two processes, one `d`
+# deduplicated `w` row for the instant. That dedup is a `sort -u` rather than an associative array
+# because the macOS runner's bash is 3.2, so it is worth an assertion of its own.
+cargo_cpu="$(grep -c '^c	cargo$' "$sample_file" | tr -d '[:space:]')"
+cargo_wall="$(grep -c '^w	cargo$' "$sample_file" | tr -d '[:space:]')"
+[[ "$cargo_cpu" == '2' ]] ||
+  fail "expected two cargo processes, got $cargo_cpu (matching is not anchored)"
+[[ "$cargo_wall" == '1' ]] ||
+  fail "expected one deduplicated cargo wall record, got $cargo_wall"
 
 # --- 2. The phase and note writers reject hostile records --------------------
 

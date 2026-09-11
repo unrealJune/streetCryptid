@@ -174,8 +174,11 @@ if grep -rFq "$sentinel" "$build_profile_dir" 2>/dev/null; then
   echo "The signing credential sentinel reached the build profile." >&2
   exit 1
 fi
-if [[ "$(wc -l < "$build_output_file")" != "1" ]] ||
-  ! grep -qE '^build_seconds=[0-9]{1,9}$' "$build_output_file"; then
+# Phrased as "at least one line, and every line matches" rather than a line count on purpose: BSD
+# `wc -l` pads its output with leading spaces and GNU `wc` does not, so counting here passed on
+# Linux and failed on the macOS build job.
+if ! grep -qE '^build_seconds=[0-9]{1,9}$' "$build_output_file" ||
+  grep -qvE '^build_seconds=[0-9]{1,9}$' "$build_output_file"; then
   echo "The build wrapper must report exactly one output: an integer duration." >&2
   exit 1
 fi

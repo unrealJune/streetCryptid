@@ -104,25 +104,33 @@ sc_profile_run() {
   return "$status"
 }
 
-# The closed vocabulary. Every branch prints a literal written here; an unrecognized name returns
-# non-zero and is dropped. Nothing reaches the caller that did not come from this list.
+# The closed vocabulary. Every branch assigns a literal written here; an unrecognized name clears
+# the result and returns non-zero. Nothing reaches the caller that did not come from this list.
+#
+# It reports through a variable rather than stdout so the sampler does not need a command
+# substitution per process. That is not micro-optimization: a fork for each of several hundred
+# processes, every few seconds, for twenty minutes would measurably disturb the build this is
+# supposed to be measuring.
 #
 # Linux's `comm` is truncated to 15 characters, so nothing longer is matched there; the JVM-based
 # Android toolchain all reports as `java` anyway. macOS reports a full path, hence the ${1##*/}.
 sc_profile_bucket() {
   case "${1##*/}" in
-    xcodebuild | XCBBuildService | xcbuild) printf 'xcodebuild' ;;
-    swift-frontend | swiftc | swift-driver) printf 'swift' ;;
-    clang | clang++ | cc1 | cc1plus | gcc | cc) printf 'clang' ;;
-    ld | ld64 | ld64.lld | lld | ld.lld | libtool | ar) printf 'link' ;;
-    cargo) printf 'cargo' ;;
-    rustc) printf 'rustc' ;;
-    pod | ruby | xcodeproj) printf 'cocoapods' ;;
-    java | kotlin-compiler | kotlinc | gradle) printf 'gradle' ;;
-    node | bun) printf 'node' ;;
-    hermesc | hermes-compiler) printf 'hermes' ;;
-    aapt2 | d8 | r8 | zipalign | apksigner | dx) printf 'androidtools' ;;
-    *) return 1 ;;
+    xcodebuild | XCBBuildService | xcbuild) SC_PROFILE_BUCKET='xcodebuild' ;;
+    swift-frontend | swiftc | swift-driver) SC_PROFILE_BUCKET='swift' ;;
+    clang | clang++ | cc1 | cc1plus | gcc | cc) SC_PROFILE_BUCKET='clang' ;;
+    ld | ld64 | ld64.lld | lld | ld.lld | libtool | ar) SC_PROFILE_BUCKET='link' ;;
+    cargo) SC_PROFILE_BUCKET='cargo' ;;
+    rustc) SC_PROFILE_BUCKET='rustc' ;;
+    pod | ruby | xcodeproj) SC_PROFILE_BUCKET='cocoapods' ;;
+    java | kotlin-compiler | kotlinc | gradle) SC_PROFILE_BUCKET='gradle' ;;
+    node | bun) SC_PROFILE_BUCKET='node' ;;
+    hermesc | hermes-compiler) SC_PROFILE_BUCKET='hermes' ;;
+    aapt2 | d8 | r8 | zipalign | apksigner | dx) SC_PROFILE_BUCKET='androidtools' ;;
+    *)
+      SC_PROFILE_BUCKET=''
+      return 1
+      ;;
   esac
 }
 
@@ -133,18 +141,22 @@ sc_profile_bucket() {
 #
 # The ratio of the two is how many cores a phase actually kept busy, which is the number that
 # answers "would parallel compilation help here".
+# Deliberately no associative array for the present-this-instant set: the iOS build job runs these
+# scripts on a macOS runner, whose /bin/bash is 3.2 (Apple never shipped a GPLv3 bash), and
+# `local -A` is a bash 4 feature that fails there with a syntax error. `sort -u` over a plain
+# accumulated string does the same job everywhere.
 sc_profile_sample_once() {
-  local name bucket
-  local -A present=()
+  local name seen='' newline=$'\n'
 
   while IFS= read -r name; do
-    bucket="$(sc_profile_bucket "$name")" || continue
-    printf 'c\t%s\n' "$bucket"
-    present["$bucket"]=1
+    sc_profile_bucket "$name" || continue
+    printf 'c\t%s\n' "$SC_PROFILE_BUCKET"
+    seen="$seen$SC_PROFILE_BUCKET$newline"
   done < <(ps -Ao comm= 2>/dev/null || true)
 
-  for bucket in "${!present[@]}"; do
-    printf 'w\t%s\n' "$bucket"
+  [[ -n "$seen" ]] || return 0
+  printf '%s' "$seen" | sort -u | while IFS= read -r name; do
+    printf 'w\t%s\n' "$name"
   done
 }
 
