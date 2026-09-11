@@ -142,25 +142,30 @@ if [[ -n "$measured" ]]; then
 fi
 
 # Sampled tool time, for the phases inside EAS that we do not own.
+sample_rows=''
 if [[ -s "$sample_file" ]]; then
+  # Aggregated once into a variable rather than straight into the table: the same rows go into the
+  # uploaded bundle, and the first run without that left no way to review the sampled shape of a
+  # build after the fact.
+  # Only rows whose bucket is in the closed vocabulary survive; `kind` must be exactly c or w.
+  sample_rows="$(
+    awk -F'\t' -v interval="$interval" '
+      $1 == "c" && $2 ~ /^[a-z][a-z0-9]{0,31}$/ { cpu[$2]++ }
+      $1 == "w" && $2 ~ /^[a-z][a-z0-9]{0,31}$/ { wall[$2]++ }
+      END {
+        for (k in wall) {
+          w = wall[k] * interval
+          c = cpu[k] * interval
+          printf "%s\t%d\t%d\t%.1f\n", k, w, c, (w > 0 ? c / w : 0)
+        }
+      }
+    ' "$sample_file" | sort -t$'\t' -k2,2nr
+  )"
   printf '### Sampled tool time (%ss resolution)\n\n' "$interval"
   printf '| Tool | Wall | CPU | Cores busy |\n|---|--:|--:|--:|\n'
-  # Only rows whose bucket is in the closed vocabulary survive; `kind` must be exactly c or w.
-  awk -F'\t' -v interval="$interval" '
-    $1 == "c" && $2 ~ /^[a-z][a-z0-9]{0,31}$/ { cpu[$2]++ }
-    $1 == "w" && $2 ~ /^[a-z][a-z0-9]{0,31}$/ { wall[$2]++ }
-    END {
-      for (k in wall) {
-        w = wall[k] * interval
-        c = cpu[k] * interval
-        printf "%s\t%d\t%d\t%.1f\n", k, w, c, (w > 0 ? c / w : 0)
-      }
-    }
-  ' "$sample_file" |
-    sort -t$'\t' -k2,2nr |
-    while IFS=$'\t' read -r tool wall cpu cores; do
-      printf '| `%s` | %s | %s | %s× |\n' "$tool" "$(human "$wall")" "$(human "$cpu")" "$cores"
-    done
+  while IFS=$'\t' read -r tool wall cpu cores; do
+    printf '| `%s` | %s | %s | %s× |\n' "$tool" "$(human "$wall")" "$(human "$cpu")" "$cores"
+  done <<< "$sample_rows"
   printf '\n'
   printf '_Wall is time with at least one such process alive; CPU is the sum over processes. '
   printf 'Cores busy below ~1.5× on a long row is a phase that is not using the runner._\n\n'
@@ -284,7 +289,16 @@ if [[ "$platform" == "ios" && -n "${SC_XCODE_BUILDLOG_DIR:-}" && -d "${SC_XCODE_
         }
       '
   )"
-  if [[ -n "$xcode_rows" ]]; then
+  if [[ -z "$xcode_rows" ]]; then
+    # Say so rather than omitting the section. This route depends on fastlane honouring GYM_XCARGS
+    # and GYM_BUILDLOG_PATH over the Gymfile that EAS generates, which is not something this
+    # repository controls -- and on the first real run it silently produced nothing at all. An
+    # absent section looks identical to a section that was never wired up; this does not.
+    printf '### Xcode: phase timings\n\n'
+    printf '_No `-showBuildTimingSummary` output was found in `%s`. ' "$SC_XCODE_BUILDLOG_DIR"
+    printf 'EAS generates its own Gymfile, and a `buildlog_path` set there wins over the '
+    printf 'environment — so fastlane is most likely writing the log somewhere else._\n\n'
+  else
     printf '### Xcode: phase timings (`-showBuildTimingSummary`)\n\n'
     printf '| Phase | Tasks | Time |\n|---|--:|--:|\n'
     sort -t$'\t' -k3,3nr <<< "$xcode_rows" |
@@ -338,6 +352,9 @@ if [[ -n "${SC_PROFILE_BUNDLE_DIR:-}" ]]; then
     fi
     if [[ -n "$xcode_rows" ]]; then
       printf '%s\n' "$xcode_rows" > "$SC_PROFILE_BUNDLE_DIR/xcode-phases.tsv"
+    fi
+    if [[ -n "$sample_rows" ]]; then
+      printf '%s\n' "$sample_rows" > "$SC_PROFILE_BUNDLE_DIR/sampled-tools.tsv"
     fi
   fi
 fi
