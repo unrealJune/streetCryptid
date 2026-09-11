@@ -177,5 +177,14 @@ required-features = ["cli"]
 
 [profile.release]
 opt-level = "z"
-lto = true
+# Thin, not fat. `lto = true` is FAT LTO: one serial whole-program optimization pass over iroh,
+# iroh-docs, iroh-blobs, tokio and rustls, run on EVERY build no matter how warm the Cargo cache
+# is, and on Android once per ABI. It was the single largest recurring cost in CI. Thin LTO
+# parallelizes across codegen units and still optimizes across crates.
+#
+# The trade is binary size, which for a mobile app is a real cost rather than a rounding error --
+# so check it rather than assuming. `scripts/build-report.sh` reports the `cargo-build` phase in
+# the job summary, and `just bindgen-android-arm64` then `ls -l` on the .so gives the size delta
+# locally. If size regresses more than a percent or two, `lto = "fat"` restores the old behaviour.
+lto = "thin"
 strip = true

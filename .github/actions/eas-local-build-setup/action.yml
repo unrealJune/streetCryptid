@@ -38,6 +38,22 @@ outputs:
   native-cache-hit:
     description: Whether the CocoaPods/Gradle cache was an exact hit.
     value: ${{ steps.cocoapods-cache.outputs.cache-hit }}${{ steps.gradle-cache.outputs.cache-hit }}
+  # Reported in the build's job summary by scripts/build-report.sh. A build whose duration is
+  # surprising is almost always a build whose caches missed, and until these were surfaced that was
+  # invisible: all four restores happen inside this composite action, which the Actions UI collapses
+  # into a single "Prepare the runner" step.
+  js-cache-hit:
+    description: Whether the Bun/npm download cache was an exact hit.
+    value: ${{ steps.js-cache.outputs.cache-hit }}
+  cargo-cache-hit:
+    description: Whether the Cargo registry/target cache was an exact hit.
+    value: ${{ steps.cargo-cache.outputs.cache-hit }}
+  artifact-cache-hit:
+    description: Whether the prebuilt native artifact cache was an exact hit.
+    value: ${{ steps.artifact-cache.outputs.cache-hit }}
+  artifact-cache-key:
+    description: Primary key of the restored native artifact cache, for the caller's save step.
+    value: ${{ steps.artifact-cache.outputs.cache-primary-key }}
 
 runs:
   using: composite
@@ -67,6 +83,7 @@ runs:
         bun-version: 1.3.14
 
     - name: Restore the JavaScript package caches
+      id: js-cache
       uses: ./.github/actions/eas-js-cache
       with:
         eas-cli-version: ${{ inputs.eas-cli-version }}
@@ -95,7 +112,17 @@ runs:
         } >> "$GITHUB_ENV"
 
     - name: Restore the Cargo cache
+      id: cargo-cache
       uses: ./.github/actions/eas-rust-cache
+      with:
+        platform: ${{ inputs.platform }}
+        save: ${{ inputs.save-caches }}
+
+    # Restored for every job, including the warm job: warming is exactly the case where staging the
+    # finished artifacts is the point.
+    - name: Restore the prebuilt native artifacts
+      id: artifact-cache
+      uses: ./.github/actions/eas-native-cache
       with:
         platform: ${{ inputs.platform }}
         save: ${{ inputs.save-caches }}
@@ -110,7 +137,11 @@ runs:
         restore-keys: |
           eas-local-cocoapods-${{ runner.os }}-
 
-    - name: Restore the Gradle dependency cache
+    # build-cache-1 is the odd one out here: everything else in this list is a DOWNLOAD cache, and
+    # it is the only entry that lets a compile task be skipped rather than repeated. It was missing,
+    # which meant no Android build ever reused a task output from another run. It only fills when
+    # org.gradle.caching is on -- see GRADLE_OPTS in the workflows.
+    - name: Restore the Gradle dependency and build caches
       id: gradle-cache
       if: inputs.platform == 'android' && inputs.native-dependency-cache == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -119,6 +150,7 @@ runs:
           ~/.gradle/caches/modules-2
           ~/.gradle/caches/jars-*
           ~/.gradle/caches/transforms-*
+          ~/.gradle/caches/build-cache-1
           ~/.gradle/wrapper
         key: eas-local-gradle-${{ runner.os }}-${{ hashFiles('bun.lock', 'package.json', 'app.json', 'app.config.ts', 'modules/iroh-location/android/build.gradle') }}
         restore-keys: |

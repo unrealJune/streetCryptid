@@ -239,10 +239,14 @@ jobs:
           platform: ios
           eas-cli-version: ${{ env.EAS_CLI_VERSION }}
 
-      - name: Verify EAS log isolation
-        run: bash scripts/test-eas-ci-log-isolation.sh
+      - name: Verify CI output isolation
+        run: |
+          set -euo pipefail
+          bash scripts/test-eas-ci-log-isolation.sh
+          bash scripts/test-build-profile-isolation.sh
 
       - name: Build the store archive locally
+        id: build
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
@@ -253,6 +257,20 @@ jobs:
             production \
             "$BUILD_ARTIFACT" \
             production-release
+
+      # Profiled on the same terms as a pull-request build. This is the run whose numbers matter
+      # most for comparison: it is the only one that builds every ABI and a real store archive.
+      - name: Report the build profile
+        if: '!cancelled()'
+        env:
+          SC_BUILD_SECONDS: ${{ steps.build.outputs.build_seconds }}
+          SC_CACHE_JS_HIT: ${{ steps.setup.outputs.js-cache-hit }}
+          SC_CACHE_CARGO_HIT: ${{ steps.setup.outputs.cargo-cache-hit }}
+          SC_CACHE_NATIVE_HIT: ${{ steps.setup.outputs.artifact-cache-hit }}
+          SC_CACHE_PODS_HIT: ${{ steps.setup.outputs.native-cache-hit }}
+        run: |
+          bash scripts/build-report.sh ios >> "$GITHUB_STEP_SUMMARY" ||
+            printf '_The build profile could not be rendered._\n' >> "$GITHUB_STEP_SUMMARY"
 
       # Straight from this runner to App Store Connect -- the .ipa never goes to Expo.
       - name: Upload to TestFlight
@@ -270,6 +288,15 @@ jobs:
         with:
           path: ~/Library/Caches/CocoaPods
           key: ${{ steps.setup.outputs.native-cache-key }}
+
+      # This one runs on main, so unlike the pull-request copy of this step its entry is readable
+      # by every open pull request -- the same reason cache-warm.yml exists.
+      - name: Save the prebuilt native artifacts
+        if: "!cancelled() && steps.setup.outputs.artifact-cache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/streetcryptid/native/ios
+          key: ${{ steps.setup.outputs.artifact-cache-key }}
 
       - name: Remove local build state
         if: always()
@@ -314,6 +341,13 @@ jobs:
     env:
       EAS_BUILD_GIT_COMMIT_HASH: ${{ needs.version.outputs.sha }}
       EAS_LOCAL_BUILD_SKIP_CLEANUP: '0'
+      # No SC_ANDROID_ABIS and no reactNativeArchitectures override here: a store bundle ships every
+      # ABI. Only the Gradle settings are shared with the pull-request builds, and this job is where
+      # ~/.gradle/caches/build-cache-1 is filled for a ref every pull request can read.
+      GRADLE_OPTS: >-
+        -Dorg.gradle.parallel=true
+        -Dorg.gradle.caching=true
+        -Dorg.gradle.jvmargs=-Xmx5g
     steps:
       # Checked before a 40-minute build rather than after it: a release that builds and then
       # cannot be delivered has burned a tag for nothing.
@@ -360,10 +394,14 @@ jobs:
           platform: android
           eas-cli-version: ${{ env.EAS_CLI_VERSION }}
 
-      - name: Verify EAS log isolation
-        run: bash scripts/test-eas-ci-log-isolation.sh
+      - name: Verify CI output isolation
+        run: |
+          set -euo pipefail
+          bash scripts/test-eas-ci-log-isolation.sh
+          bash scripts/test-build-profile-isolation.sh
 
       - name: Build the store bundle locally
+        id: build
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
@@ -375,6 +413,20 @@ jobs:
             "$BUILD_ARTIFACT" \
             production-release
 
+      # Profiled on the same terms as a pull-request build. This is the run whose numbers matter
+      # most for comparison: it is the only one that builds every ABI and a real store bundle.
+      - name: Report the build profile
+        if: '!cancelled()'
+        env:
+          SC_BUILD_SECONDS: ${{ steps.build.outputs.build_seconds }}
+          SC_CACHE_JS_HIT: ${{ steps.setup.outputs.js-cache-hit }}
+          SC_CACHE_CARGO_HIT: ${{ steps.setup.outputs.cargo-cache-hit }}
+          SC_CACHE_NATIVE_HIT: ${{ steps.setup.outputs.artifact-cache-hit }}
+          SC_CACHE_GRADLE_HIT: ${{ steps.setup.outputs.native-cache-hit }}
+        run: |
+          bash scripts/build-report.sh android >> "$GITHUB_STEP_SUMMARY" ||
+            printf '_The build profile could not be rendered._\n' >> "$GITHUB_STEP_SUMMARY"
+
       # Straight from this runner to the Play Developer API -- the .aab never goes to Expo.
       - name: Upload to the Google Play internal track
         id: release
@@ -383,7 +435,7 @@ jobs:
           SC_WHAT_TO_TEST: ${{ needs.version.outputs.what_to_test }}
         run: bash scripts/submit-play.sh "$BUILD_ARTIFACT"
 
-      - name: Save Gradle dependency cache
+      - name: Save Gradle dependency and build caches
         if: "!cancelled() && steps.setup.outputs.native-cache-hit != 'true'"
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -391,8 +443,18 @@ jobs:
             ~/.gradle/caches/modules-2
             ~/.gradle/caches/jars-*
             ~/.gradle/caches/transforms-*
+            ~/.gradle/caches/build-cache-1
             ~/.gradle/wrapper
           key: ${{ steps.setup.outputs.native-cache-key }}
+
+      # This one runs on main, so unlike the pull-request copy of this step its entry is readable
+      # by every open pull request -- the same reason cache-warm.yml exists.
+      - name: Save the prebuilt native artifacts
+        if: "!cancelled() && steps.setup.outputs.artifact-cache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/streetcryptid/native/android
+          key: ${{ steps.setup.outputs.artifact-cache-key }}
 
       - name: Remove local build state
         if: always()

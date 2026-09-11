@@ -1,0 +1,75 @@
+// Record what every Gradle task did and how long it took, so the Android build's cache behaviour
+// is a measurement instead of a guess.
+//
+// Installed into ~/.gradle/init.d/ by the build workflows. That directory is the only hook we have:
+// `eas build --local` runs `fastlane gym`/Gradle itself, so there is nowhere to add `--profile` or
+// `--scan` to the command line -- and Gradle applies every *.gradle in init.d automatically.
+//
+// Deliberately NOT a build scan. Gradle's build-cache-performance guide recommends `--scan`, but
+// that uploads the build environment -- task inputs, system properties, environment -- to
+// scans.gradle.com. This pipeline exists to keep that material off the network, so the one metric
+// that matters is collected locally instead: FROM-CACHE versus EXECUTED, per task.
+//
+// Everything is wrapped in try/catch and gated on SC_GRADLE_PROFILE. A profiler that can fail a
+// release build is worse than no profiler, and an init script that throws fails the build before a
+// single task runs.
+
+import java.util.concurrent.ConcurrentHashMap
+
+if (System.getenv('SC_GRADLE_PROFILE') == '1') {
+  try {
+    def home = System.getProperty('user.home')
+    def dir = System.getenv('SC_BUILD_PROFILE_DIR') ?: "${home}/.cache/streetcryptid/build-profile"
+    def out = new File(dir as String, 'gradle-tasks.tsv')
+    out.parentFile.mkdirs()
+
+    def starts = new ConcurrentHashMap<String, Long>()
+
+    gradle.taskGraph.beforeTask { task ->
+      try {
+        starts.put(task.path, System.nanoTime())
+      } catch (Throwable ignored) {
+      }
+    }
+
+    gradle.taskGraph.afterTask { task ->
+      try {
+        def started = starts.remove(task.path)
+        if (started == null) {
+          return
+        }
+        def ms = (long) ((System.nanoTime() - started) / 1000000L)
+
+        // FROM-CACHE is the whole point, and it is only distinguishable through skipMessage:
+        // TaskState.getUpToDate() is true for a cache hit as well, so the boolean accessors alone
+        // cannot tell "reused someone else's output" from "nothing changed". getSkipMessage() is on
+        // TaskStateInternal rather than the public interface, hence the dynamic call and the
+        // fallback -- losing the distinction is acceptable, throwing is not.
+        def outcome = 'EXECUTED'
+        def state = task.state
+        if (state.skipped) {
+          outcome = 'SKIPPED'
+          try {
+            def message = state.skipMessage
+            if (message) {
+              outcome = message.toString().toUpperCase().replaceAll('[^A-Z-]', '')
+            }
+          } catch (Throwable ignored) {
+          }
+        } else if (!state.didWork) {
+          outcome = 'NO-WORK'
+        }
+        if (!outcome) {
+          outcome = 'UNKNOWN'
+        }
+
+        // Gradle runs tasks in parallel, so the appends have to be serialized.
+        synchronized (starts) {
+          out.append("${task.path}\t${outcome}\t${ms}\n")
+        }
+      } catch (Throwable ignored) {
+      }
+    }
+  } catch (Throwable ignored) {
+  }
+}

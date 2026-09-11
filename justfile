@@ -430,9 +430,12 @@ next-version:
 set-version version:
     bash scripts/apply-version.sh {{version}}
 
-# Run the release pipeline's CI guards: EAS output isolation and version resolution.
+# Run the release pipeline's CI guards: EAS output isolation, build-profile isolation, and version
+# resolution. All three run entirely offline -- no runner, no network, no EAS.
 test-release:
     bash scripts/test-eas-ci-log-isolation.sh
+    bash scripts/test-build-profile-isolation.sh
+    bash scripts/test-native-cache.sh
     bash scripts/test-next-version.sh
 
 # --- Housekeeping ------------------------------------------------------------

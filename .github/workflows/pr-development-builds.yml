@@ -37,10 +37,20 @@ jobs:
     # secret base URL, which GitHub scrubs from cross-job outputs.
     outputs:
       install_path: ${{ steps.upload.outputs.install_path }}
+      build_seconds: ${{ steps.build.outputs.build_seconds }}
     env:
       EAS_BUILD_GIT_COMMIT_HASH: ${{ github.event.pull_request.head.sha }}
       EAS_LOCAL_BUILD_SKIP_CLEANUP: '0'
       EXPO_NO_KEYCHAIN: '1'
+      # EAS runs `fastlane gym`, which is the only reachable point in the iOS toolchain: there is no
+      # xcodebuild command line of ours to add flags to. gym reads every option from GYM_* as well
+      # as from its Gymfile, so this asks xcodebuild for its own per-phase timing summary and asks
+      # fastlane to keep the log where it can be read afterwards.
+      #
+      # The log holds the CodeSign invocations, so it is written inside RUNNER_TEMP, is never
+      # uploaded, and only lines matching the timing summary's fixed shape are ever read out of it
+      # (scripts/build-report.sh). "Remove local build state" deletes it with everything else.
+      GYM_XCARGS: -showBuildTimingSummary
     steps:
       - name: Require Expo token
         env:
@@ -59,6 +69,9 @@ jobs:
             echo "BUILD_ARTIFACT=$RUNNER_TEMP/streetcryptid-pr-$PR_NUMBER.ipa"
             echo "EAS_LOCAL_BUILD_ARTIFACTS_DIR=$RUNNER_TEMP/eas-artifacts-ios"
             echo "EAS_LOCAL_BUILD_WORKINGDIR=$RUNNER_TEMP/eas-local-build-ios"
+            # Read for its timing summary, then deleted with the rest of the build state.
+            echo "GYM_BUILDLOG_PATH=$RUNNER_TEMP/xcode-buildlog"
+            echo "SC_XCODE_BUILDLOG_DIR=$RUNNER_TEMP/xcode-buildlog"
           } >> "$GITHUB_ENV"
 
       - name: Check out PR revision
@@ -77,10 +90,14 @@ jobs:
           platform: ios
           eas-cli-version: ${{ env.EAS_CLI_VERSION }}
 
-      - name: Verify EAS log isolation
-        run: bash scripts/test-eas-ci-log-isolation.sh
+      - name: Verify CI output isolation
+        run: |
+          set -euo pipefail
+          bash scripts/test-eas-ci-log-isolation.sh
+          bash scripts/test-build-profile-isolation.sh
 
       - name: Build the standalone Release locally
+        id: build
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
@@ -91,6 +108,33 @@ jobs:
             production-internal-ios \
             "$BUILD_ARTIFACT"
 
+      # The build above is ~90% of this job and prints nothing, by design. This is the only place
+      # its shape is visible. It never fails the job: a profile is a diagnostic, not a gate.
+      - name: Report the build profile
+        if: '!cancelled()'
+        env:
+          SC_BUILD_SECONDS: ${{ steps.build.outputs.build_seconds }}
+          SC_CACHE_JS_HIT: ${{ steps.setup.outputs.js-cache-hit }}
+          SC_CACHE_CARGO_HIT: ${{ steps.setup.outputs.cargo-cache-hit }}
+          SC_CACHE_NATIVE_HIT: ${{ steps.setup.outputs.artifact-cache-hit }}
+          SC_PROFILE_BUNDLE_DIR: ${{ runner.temp }}/build-profile-bundle
+          SC_CACHE_PODS_HIT: ${{ steps.setup.outputs.native-cache-hit }}
+        run: |
+          bash scripts/build-report.sh ios >> "$GITHUB_STEP_SUMMARY" ||
+            printf '_The build profile could not be rendered._\n' >> "$GITHUB_STEP_SUMMARY"
+
+      # cargo's own interactive timing report is worth more to read than any table rendered above.
+      # Everything in this directory is produced by toolchain invocations WE make: no EAS output,
+      # no Xcode build log, and nothing derived from a credential is written here.
+      - name: Upload the build profile
+        if: '!cancelled()'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-profile-ios
+          path: ${{ runner.temp }}/build-profile-bundle
+          if-no-files-found: ignore
+          retention-days: 14
+
       # actions/cache's own post step is `post-if: success()`, so a 40-minute build that fails
       # would otherwise discard the pod downloads it just made and leave the retry cold.
       - name: Save CocoaPods download cache
@@ -99,6 +143,15 @@ jobs:
         with:
           path: ~/Library/Caches/CocoaPods
           key: ${{ steps.setup.outputs.native-cache-key }}
+
+      # Same reasoning, and it matters more here: this is what a later run of THIS pull request
+      # reads to skip the Rust build entirely. Cross-PR reuse comes from cache-warm.yml on main.
+      - name: Save the prebuilt native artifacts
+        if: "!cancelled() && steps.setup.outputs.artifact-cache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/streetcryptid/native/ios
+          key: ${{ steps.setup.outputs.artifact-cache-key }}
 
       # Join the tailnet so the internal distribution host is reachable. The
       # ephemeral node is torn down at job end. Nothing prints the tailnet
@@ -137,7 +190,8 @@ jobs:
           set -euo pipefail
           for path in \
             "${EAS_LOCAL_BUILD_ARTIFACTS_DIR:-}" \
-            "${EAS_LOCAL_BUILD_WORKINGDIR:-}"; do
+            "${EAS_LOCAL_BUILD_WORKINGDIR:-}" \
+            "${GYM_BUILDLOG_PATH:-}"; do
             if [[ -z "$path" ]]; then
               continue
             fi
@@ -167,9 +221,22 @@ jobs:
     # secret base URL, which GitHub scrubs from cross-job outputs.
     outputs:
       install_path: ${{ steps.upload.outputs.install_path }}
+      build_seconds: ${{ steps.build.outputs.build_seconds }}
     env:
       EAS_BUILD_GIT_COMMIT_HASH: ${{ github.event.pull_request.head.sha }}
       EAS_LOCAL_BUILD_SKIP_CLEANUP: '0'
+      # A pull-request build only has to install on a test phone, and every phone this gets
+      # installed on is arm64. armeabi-v7a is dead hardware and x86_64 is emulator-only, so the
+      # other two ABIs tripled the Rust compile and widened the APK for nobody. release.yml leaves
+      # both of these unset and still ships all three.
+      SC_ANDROID_ABIS: arm64-v8a
+      ORG_GRADLE_PROJECT_reactNativeArchitectures: arm64-v8a
+      # org.gradle.caching is what makes ~/.gradle/caches/build-cache-1 -- newly cached in
+      # eas-local-build-setup -- actually fill: without it Gradle reuses nothing across runs.
+      GRADLE_OPTS: >-
+        -Dorg.gradle.parallel=true
+        -Dorg.gradle.caching=true
+        -Dorg.gradle.jvmargs=-Xmx5g
     steps:
       - name: Require Expo token
         env:
@@ -206,12 +273,26 @@ jobs:
           platform: android
           eas-cli-version: ${{ env.EAS_CLI_VERSION }}
 
-      - name: Verify EAS log isolation
-        run: bash scripts/test-eas-ci-log-isolation.sh
+      - name: Verify CI output isolation
+        run: |
+          set -euo pipefail
+          bash scripts/test-eas-ci-log-isolation.sh
+          bash scripts/test-build-profile-isolation.sh
+
+      # `eas build --local` invokes Gradle itself, so there is no command line of ours to add
+      # --profile to. Gradle applies every *.gradle in ~/.gradle/init.d automatically, which is the
+      # one hook available. The script no-ops unless SC_GRADLE_PROFILE is set.
+      - name: Install the Gradle build profiler
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.gradle/init.d
+          cp scripts/gradle-build-profile.init.gradle ~/.gradle/init.d/
 
       - name: Build the standalone Release locally
+        id: build
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          SC_GRADLE_PROFILE: '1'
         run: |
           set -euo pipefail
           mkdir -p "$EAS_LOCAL_BUILD_ARTIFACTS_DIR" "$EAS_LOCAL_BUILD_WORKINGDIR"
@@ -220,9 +301,36 @@ jobs:
             production-internal-android \
             "$BUILD_ARTIFACT"
 
+      # The build above is ~90% of this job and prints nothing, by design. This is the only place
+      # its shape is visible. It never fails the job: a profile is a diagnostic, not a gate.
+      - name: Report the build profile
+        if: '!cancelled()'
+        env:
+          SC_BUILD_SECONDS: ${{ steps.build.outputs.build_seconds }}
+          SC_CACHE_JS_HIT: ${{ steps.setup.outputs.js-cache-hit }}
+          SC_CACHE_CARGO_HIT: ${{ steps.setup.outputs.cargo-cache-hit }}
+          SC_CACHE_NATIVE_HIT: ${{ steps.setup.outputs.artifact-cache-hit }}
+          SC_PROFILE_BUNDLE_DIR: ${{ runner.temp }}/build-profile-bundle
+          SC_CACHE_GRADLE_HIT: ${{ steps.setup.outputs.native-cache-hit }}
+        run: |
+          bash scripts/build-report.sh android >> "$GITHUB_STEP_SUMMARY" ||
+            printf '_The build profile could not be rendered._\n' >> "$GITHUB_STEP_SUMMARY"
+
+      # cargo's own interactive timing report is worth more to read than any table rendered above.
+      # Everything in this directory is produced by toolchain invocations WE make: no EAS output,
+      # no Gradle log, and nothing derived from a credential is written here.
+      - name: Upload the build profile
+        if: '!cancelled()'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-profile-android
+          path: ${{ runner.temp }}/build-profile-bundle
+          if-no-files-found: ignore
+          retention-days: 14
+
       # actions/cache's own post step is `post-if: success()`, so a 40-minute build that fails
       # would otherwise discard the Gradle downloads it just made and leave the retry cold.
-      - name: Save Gradle dependency cache
+      - name: Save Gradle dependency and build caches
         if: "!cancelled() && steps.setup.outputs.native-cache-hit != 'true'"
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -230,8 +338,18 @@ jobs:
             ~/.gradle/caches/modules-2
             ~/.gradle/caches/jars-*
             ~/.gradle/caches/transforms-*
+            ~/.gradle/caches/build-cache-1
             ~/.gradle/wrapper
           key: ${{ steps.setup.outputs.native-cache-key }}
+
+      # Same reasoning, and it matters more here: this is what a later run of THIS pull request
+      # reads to skip the Rust build entirely. Cross-PR reuse comes from cache-warm.yml on main.
+      - name: Save the prebuilt native artifacts
+        if: "!cancelled() && steps.setup.outputs.artifact-cache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/streetcryptid/native/android
+          key: ${{ steps.setup.outputs.artifact-cache-key }}
 
       # Join the tailnet so the internal distribution host is reachable. The
       # ephemeral node is torn down at job end. Nothing prints the tailnet
@@ -312,6 +430,8 @@ jobs:
       ANDROID_RESULT: ${{ needs.build_android.result }}
       IOS_PATH: ${{ needs.build_ios.outputs.install_path }}
       ANDROID_PATH: ${{ needs.build_android.outputs.install_path }}
+      IOS_SECONDS: ${{ needs.build_ios.outputs.build_seconds }}
+      ANDROID_SECONDS: ${{ needs.build_android.outputs.build_seconds }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PR_TITLE: ${{ github.event.pull_request.title }}
       PR_URL: ${{ github.event.pull_request.html_url }}
@@ -373,18 +493,29 @@ jobs:
 
           # PR status comment: no links, no host — status plus the hidden thread
           # marker so the next commit reuses this thread.
+          # How long `eas build --local` took, when it reported one. The value is a plain integer
+          # by construction (scripts/eas-local-build-ci.sh emits nothing else) and is re-checked
+          # here rather than trusted across a job boundary.
+          duration() {
+            if [[ "${1:-}" =~ ^[0-9]{1,9}$ ]]; then
+              printf ' in %dm %02ds' "$(($1 / 60))" "$(($1 % 60))"
+            fi
+          }
           platform_line() {
+            local took
+            took="$(duration "${3:-}")"
             if [[ "$2" == "success" ]]; then
-              printf -- '- **%s:** ✅ ready — install link in the team channel thread\n' "$1"
+              printf -- '- **%s:** ✅ ready%s — install link in the team channel thread\n' "$1" "$took"
             else
-              printf -- '- **%s:** ❌ build failed — [logs](%s)\n' "$1" "$RUN_URL"
+              printf -- '- **%s:** ❌ build failed%s — [logs](%s)\n' "$1" "$took" "$RUN_URL"
             fi
           }
           body="$(
             printf '%s<!-- disc-thread:%s -->\n' "$marker" "$thread_id"
             printf '🏗️ **PR standalone Release builds**\n\n'
-            platform_line "iOS" "$IOS_RESULT"
-            platform_line "Android" "$ANDROID_RESULT"
+            platform_line "iOS" "$IOS_RESULT" "$IOS_SECONDS"
+            platform_line "Android" "$ANDROID_RESULT" "$ANDROID_SECONDS"
+            printf '\nCache hits and a phase-by-phase breakdown are in the [run summary](%s).\n' "$RUN_URL"
             printf '\nInstall links are posted to the private team channel thread for this PR and kept off this public repo.'
             if [[ "$discord_ok" -ne 1 ]]; then
               printf '\n\n_⚠️ Could not reach the Discord build thread this run._'

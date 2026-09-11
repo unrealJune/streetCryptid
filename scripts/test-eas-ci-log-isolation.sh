@@ -136,6 +136,13 @@ exit 2
 EOF
 chmod 700 "$test_root/bin/eas"
 
+# The build wrapper now profiles the build it wraps (scripts/build-profile.sh). Both of the places
+# that profiling could reach -- the collected records and the step output -- are checked below, and
+# the profile directory is redirected into the test tree so a run here cannot touch the real one.
+build_profile_dir="$test_root/profile"
+build_output_file="$test_root/build-github-output"
+: > "$build_output_file"
+
 success_transcript="$(
   PATH="$test_root/bin:$PATH" \
     DEBUG=1 \
@@ -144,6 +151,9 @@ success_transcript="$(
     EXPO_DEBUG=1 \
     FAKE_SIGNING_CREDENTIAL="$sentinel" \
     RUNNER_TEMP="$test_root" \
+    SC_BUILD_PROFILE_DIR="$build_profile_dir" \
+    SC_PROFILE_SAMPLE_INTERVAL=1 \
+    GITHUB_OUTPUT="$build_output_file" \
     bash "$repo_root/scripts/eas-local-build-ci.sh" \
     ios production-internal-ios "$test_root/app.ipa" \
     2>&1
@@ -158,6 +168,21 @@ if [[ ! -f "$test_root/app.ipa" ]]; then
   exit 1
 fi
 
+# Profiling ran alongside an EAS that printed the credential on both streams. Nothing it collected
+# may carry it, and the only thing it may hand forward is a duration.
+if grep -rFq "$sentinel" "$build_profile_dir" 2>/dev/null; then
+  echo "The signing credential sentinel reached the build profile." >&2
+  exit 1
+fi
+# Phrased as "at least one line, and every line matches" rather than a line count on purpose: BSD
+# `wc -l` pads its output with leading spaces and GNU `wc` does not, so counting here passed on
+# Linux and failed on the macOS build job.
+if ! grep -qE '^build_seconds=[0-9]{1,9}$' "$build_output_file" ||
+  grep -qvE '^build_seconds=[0-9]{1,9}$' "$build_output_file"; then
+  echo "The build wrapper must report exactly one output: an integer duration." >&2
+  exit 1
+fi
+
 run_build_failure() {
   local label="$1" expected="$2"
   shift 2
@@ -168,6 +193,8 @@ run_build_failure() {
       EXPO_TOKEN=fake-token \
       FAKE_SIGNING_CREDENTIAL="$sentinel" \
       RUNNER_TEMP="$test_root" \
+      SC_BUILD_PROFILE_DIR="$build_profile_dir" \
+      SC_PROFILE_SAMPLE_INTERVAL=1 \
       "$@" \
       bash "$repo_root/scripts/eas-local-build-ci.sh" \
       android production-internal-android "$test_root/$label.apk" \
@@ -186,6 +213,12 @@ run_build_failure() {
   fi
   if [[ "$transcript" != *"$expected"* ]]; then
     echo "The $label did not emit its fixed error." >&2
+    exit 1
+  fi
+  # A failed build is the one whose profile matters most, so it is also the one whose profile is
+  # most likely to be written by a path nobody thought about.
+  if grep -rFq "$sentinel" "$build_profile_dir" 2>/dev/null; then
+    echo "The signing credential sentinel reached the build profile during $label." >&2
     exit 1
   fi
 }

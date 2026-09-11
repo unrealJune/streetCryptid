@@ -15,8 +15,11 @@
 set -euo pipefail
 umask 077
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/eas-ci-common.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/eas-ci-common.sh"
+source "$script_dir/eas-ci-common.sh"
+# shellcheck source=scripts/build-profile.sh
+source "$script_dir/build-profile.sh"
 
 platform="${1:-}"
 profile="${2:-}"
@@ -35,14 +38,38 @@ eas_ci_require_runner_temp
 eas_ci_require_temp_artifact "$artifact"
 eas_ci_verify_access
 
-if ! run_eas_privately build \
+# Profile the build. None of this reads EAS's output -- it cannot, for the reason above -- it
+# samples the process table for tool names from a closed vocabulary and collects phase marks
+# written by scripts/eas-build-pre-install.sh. See scripts/build-profile.sh for why that is safe
+# and scripts/test-build-profile-isolation.sh for the proof.
+#
+# A failed build is the one you most want the profile for, so the sampler is stopped on every path.
+sc_profile_reset
+sc_profile_sampler_start
+trap 'sc_profile_sampler_stop' EXIT
+
+build_start="$(date +%s)"
+build_status=0
+run_eas_privately build \
   --local \
   --platform "$platform" \
   --profile "$profile" \
   --output "$artifact" \
   --non-interactive \
   --freeze-credentials \
-  >/dev/null 2>&1; then
+  >/dev/null 2>&1 || build_status=$?
+build_seconds="$(( $(date +%s) - build_start ))"
+
+sc_profile_sampler_stop
+trap - EXIT
+
+# A plain integer, and the only thing this script hands forward. The install path and every other
+# value in this pipeline stay in the scripts that own them.
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  printf 'build_seconds=%s\n' "$build_seconds" >> "$GITHUB_OUTPUT"
+fi
+
+if ((build_status != 0)); then
   echo "EAS local $platform build failed. Expo output was withheld because it can contain signing credentials." >&2
   exit 1
 fi
