@@ -33,7 +33,6 @@ export function useArmedBump(active: boolean): ArmedBump {
   const [error, setError] = useState<string | null>(null);
   const [arming, setArming] = useState(false);
   const armingRef = useRef(false);
-  const retryCountRef = useRef(0);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', setAppState);
@@ -42,6 +41,11 @@ export function useArmedBump(active: boolean): ArmedBump {
 
   const live = active && appState === 'active';
   const stage = pairing?.bump.stage ?? 'idle';
+  const canArm =
+    live &&
+    pairing?.available === true &&
+    pairing.radio !== 'poweredOff' &&
+    pairing.radio !== 'unsupported';
 
   const arm = useCallback(async () => {
     if (armingRef.current) return;
@@ -50,7 +54,6 @@ export function useArmedBump(active: boolean): ArmedBump {
     setError(null);
     try {
       await armBump();
-      retryCountRef.current = 0;
     } catch (armError: unknown) {
       setError(armError instanceof Error ? armError.message : 'Bump could not start.');
       throw armError;
@@ -78,20 +81,12 @@ export function useArmedBump(active: boolean): ArmedBump {
     Boolean(pairing?.discoveredFriend);
 
   useEffect(() => {
-    if (!live || hasActiveSession || stage !== 'idle' || armingRef.current) return;
-    let cancelled = false;
-    const delay =
-      retryCountRef.current === 0 ? 0 : Math.min(8000, 1000 * 2 ** retryCountRef.current);
+    if (!canArm || hasActiveSession || stage !== 'idle' || armingRef.current || error) return;
     const timer = setTimeout(() => {
-      void arm().catch(() => {
-        if (!cancelled) retryCountRef.current += 1;
-      });
-    }, delay);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [arm, hasActiveSession, live, stage]);
+      void arm().catch(() => {});
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [arm, canArm, error, hasActiveSession, stage]);
 
   const visibleError = stage === 'idle' && live ? error : null;
 
