@@ -20,6 +20,7 @@ import {
   BLUETOOTH_OFF_MESSAGE,
   BLUETOOTH_UNSUPPORTED_MESSAGE,
   LocationSharingService,
+  type InviteCancellation,
   type PairingSnapshot,
   type SharingSnapshot,
 } from '@/features/social/net/location-sharing';
@@ -74,11 +75,14 @@ interface LocationSharingContextValue {
   cancelBump(): Promise<void>;
   createPairInvite(ttlSecs?: number): Promise<string | undefined>;
   /**
-   * Withdraw the invite this phone is offering. Resolves true when the link was actually
-   * cancelled, false when there was nothing to cancel or the installed binary predates the
-   * revocation export — callers must not claim a cancellation on a false.
+   * Withdraw the invite this phone is offering. Reports which of three things happened —
+   * `cancelled`, `unsupported` (this binary predates the revocation export, so the link lives out
+   * its TTL) or `absent` — because they warrant different copy. Callers must not claim a
+   * cancellation on anything but `cancelled`.
    */
-  cancelPairInvite(): Promise<boolean>;
+  cancelPairInvite(): Promise<InviteCancellation>;
+  /** Dismiss the recorded pairing failure once the user has moved on from it. */
+  clearPairingFailure(): void;
   pairFromInput(input: string): Promise<void>;
   respondPair(sessionId: string, accept: boolean): Promise<void>;
   submitPairChoice(sessionId: string, chosenIndex: number): Promise<void>;
@@ -442,17 +446,21 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     }
   }, []);
 
-  const cancelPairInvite = useCallback(async () => {
+  const cancelPairInvite = useCallback(async (): Promise<InviteCancellation> => {
     const service = serviceRef.current;
-    if (!service) return false;
+    if (!service) return 'absent';
     try {
-      const cancelled = await service.cancelPairInvite();
+      const outcome = await service.cancelPairInvite();
       setServiceError(null);
-      return cancelled;
+      return outcome;
     } catch (cancelError: unknown) {
       setServiceError(errorMessage(cancelError));
-      return false;
+      return 'unsupported';
     }
+  }, []);
+
+  const clearPairingFailure = useCallback(() => {
+    serviceRef.current?.clearPairingFailure();
   }, []);
 
   const retryLocation = useCallback(async () => {
@@ -724,6 +732,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       cancelBump,
       createPairInvite,
       cancelPairInvite,
+      clearPairingFailure,
       pairFromInput,
       respondPair,
       submitPairChoice,
@@ -759,6 +768,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       cancelBump,
       createPairInvite,
       cancelPairInvite,
+      clearPairingFailure,
       pairFromInput,
       respondPair,
       submitPairChoice,
