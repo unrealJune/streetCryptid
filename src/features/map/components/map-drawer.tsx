@@ -26,6 +26,7 @@ import {
   detentHeights,
   GRIP_HEIGHT,
   pickDetent,
+  TAB_BAR_HEIGHT,
   type DrawerDetent,
 } from '../core/drawer-detents';
 import { IslandTabs, type IslandTab } from './island-tabs';
@@ -101,6 +102,11 @@ export function MapDrawer({
 }: MapDrawerProps) {
   const { chrome } = theme;
   const [peekBody, setPeekBody] = useState(0);
+  // The tab bar as laid out, not as estimated. `peek` is body + chrome and the bar is then laid
+  // out inside that total, so a chrome figure a hairline under the truth hands the body a
+  // ScrollView shorter than its own content — which is what made the ME panel, a body that has
+  // nothing to scroll, scroll.
+  const [tabBarHeight, setTabBarHeight] = useState(TAB_BAR_HEIGHT);
   // The list's own scroll, as a gesture the drawer's pan can be declared simultaneous with.
   // Without it RNGH treats the two as competitors and the pan wins, so the roster would refuse to
   // scroll at the very detent that exists to let it.
@@ -126,8 +132,9 @@ export function MapDrawer({
         insetBottom,
         margin: Spacing.three,
         gripHeight: hasGrip ? GRIP_HEIGHT : 0,
+        tabBarHeight,
       }),
-    [peekBody, screenHeight, insetTop, insetBottom, hasGrip]
+    [peekBody, screenHeight, insetTop, insetBottom, hasGrip, tabBarHeight]
   );
   const resolved = heights[detents.includes(detent) ? detent : topDetent];
 
@@ -222,6 +229,11 @@ export function MapDrawer({
     return { paddingBottom: insetBottom * dock };
   });
 
+  const measureTabs = useCallback((event: LayoutChangeEvent) => {
+    const measured = Math.ceil(event.nativeEvent.layout.height);
+    setTabBarHeight((current) => (current === measured ? current : measured));
+  }, []);
+
   const measureBody = useCallback(
     (event: LayoutChangeEvent) => {
       if (detent === 'collapsed') return;
@@ -281,6 +293,11 @@ export function MapDrawer({
               <ScrollView
                 accessibilityElementsHidden={detent === 'collapsed'}
                 importantForAccessibility={detent === 'collapsed' ? 'no-hide-descendants' : 'auto'}
+                // iOS bounces a ScrollView vertically even when its content fits, which made the
+                // ME panel — a body that always fits its own detent — feel like a list that had
+                // somewhere to go and then sprang back. Bounce only when there is genuinely more
+                // body than drawer, which is the case this ScrollView actually exists for.
+                alwaysBounceVertical={false}
                 scrollEnabled={detent === topDetent}
                 onScroll={onScroll}
                 scrollEventThrottle={16}
@@ -297,7 +314,9 @@ export function MapDrawer({
       </View>
 
       <Animated.View style={tabPadStyle}>
-        <IslandTabs active={activeTab} onSelect={onSelectTab} signal={signal} theme={theme} />
+        <View onLayout={measureTabs}>
+          <IslandTabs active={activeTab} onSelect={onSelectTab} signal={signal} theme={theme} />
+        </View>
       </Animated.View>
     </Animated.View>
   );
