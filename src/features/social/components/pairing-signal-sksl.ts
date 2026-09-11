@@ -67,9 +67,25 @@ float2 fieldFor(float mode, float2 grid, float2 delta, float distanceFromCenter)
       * max(0.0, 1.0 - abs(delta.y) / 220.0);
     return float2(hot, 0.0);
   }
-  // scatter — uncorrelated sparks: contact was lost or never made.
-  float noise = sin(grid.x * 0.07 + grid.y * 0.11 + uTime * 0.9);
-  return float2(noise > 0.86 ? (noise - 0.86) * 5.0 : 0.0, 0.0);
+  if (mode < 5.5) {
+    // scatter — uncorrelated sparks: contact was never made.
+    float noise = sin(grid.x * 0.07 + grid.y * 0.11 + uTime * 0.9);
+    return float2(noise > 0.86 ? (noise - 0.86) * 5.0 : 0.0, 0.0);
+  }
+  // fracture — a shock front leaving the centre, then silence: contact was made, and it broke.
+  //
+  // Deliberately not scatter. Scatter is a field that never found anything and keeps trying;
+  // fracture is a field that HAD something. So it starts from a single break at the centre, throws
+  // one hard ring outward, and then goes quiet for most of the cycle — the lattice left standing
+  // but dark. The long pause is the point: it is what makes this read as an ending.
+  float cycle = mod(uTime, 2.6);
+  float front = cycle * 340.0;
+  float shock = max(0.0, 1.0 - abs(distanceFromCenter - front) / 30.0)
+    * max(0.0, 1.0 - cycle / 1.0);
+  // Debris: dots near the front jitter off their lattice position as the wave passes them.
+  float passed = clamp((front - distanceFromCenter) / 60.0, 0.0, 1.0);
+  float jitter = sin(grid.x * 0.13 + grid.y * 0.09) * passed * max(0.0, 1.0 - cycle / 1.6);
+  return float2(shock + max(0.0, jitter) * 0.5, -0.03 * passed);
 }
 
 half4 main(float2 position) {

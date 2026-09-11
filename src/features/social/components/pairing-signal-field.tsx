@@ -13,7 +13,8 @@ import { hexToRgb } from '@/features/map/core/color';
 
 import { PAIRING_SIGNAL_SKSL } from './pairing-signal-sksl';
 
-export type PairingFieldMode = 'pulse' | 'sweep' | 'countdown' | 'inward' | 'converge' | 'scatter';
+export type PairingFieldMode =
+  'pulse' | 'sweep' | 'countdown' | 'inward' | 'converge' | 'scatter' | 'fracture';
 
 interface PairingSignalFieldProps {
   readonly accent: string;
@@ -40,6 +41,7 @@ const MODE_VALUE: Record<PairingFieldMode, number> = {
   inward: 3,
   converge: 4,
   scatter: 5,
+  fracture: 6,
 };
 
 const FALLBACK_DOTS = Array.from({ length: Math.floor(DESIGN_SIZE / STEP) ** 2 }, (_, index) => {
