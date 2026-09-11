@@ -1,0 +1,80 @@
+name: EAS local build native artifact cache
+description: >-
+  Restore (and, on main, save) the prebuilt iroh-location native artifacts that
+  scripts/eas-build-pre-install.sh would otherwise compile from scratch on every run.
+
+# The Cargo cache next door saves the COMPILER's inputs -- the registry, and whatever of the target
+# directory survives. This one saves the build's OUTPUTS: the .so per ABI, the iOS XCFramework, and
+# the UniFFI bindings generated alongside them. The difference matters because most pull requests
+# change no Rust at all, and for those the entire native phase becomes a copy.
+#
+# Two things make that sound:
+#
+#   1. scripts/eas-build-pre-install.sh recomputes its own digest over the crate sources, the exact
+#      rustc version, and the two scripts that decide how they are compiled. The cache key below is
+#      only a hint about WHICH tarball to download; the hook's digest is what decides whether the
+#      contents may be used. So a key collision -- or a Rust toolchain bump, which hashFiles cannot
+#      see -- produces a rebuild, never a wrong binary.
+#   2. The bindings are cached WITH the artifacts. UniFFI aborts at load time when generated
+#      bindings do not match the library's API checksums, so restoring one without the other would
+#      trade build time for a crash on device. Restoring both makes a hit exactly equivalent to
+#      having run the build.
+#
+# Contents are ordinary build outputs of source in this repository. No credential is involved:
+# signing happens later, inside Xcode and Gradle, long after this hook has finished.
+inputs:
+  platform:
+    description: Mobile platform whose artifacts are being cached (ios or android).
+    required: true
+  save:
+    description: >-
+      Whether to write the cache. Only the main-branch warm job should set this, for the same
+      reason as the Cargo and Bun caches: a pull_request run writes into its own
+      refs/pull/<n>/merge scope, where no other pull request can read it, while still counting
+      against the repository's 10 GB budget.
+    required: false
+    default: 'false'
+
+outputs:
+  cache-hit:
+    description: Whether the native artifact cache was an exact hit.
+    value: ${{ steps.restore.outputs.cache-hit }}${{ steps.restore-and-save.outputs.cache-hit }}
+  cache-primary-key:
+    description: Primary key of the restored entry, for the caller's save step.
+    value: ${{ steps.restore.outputs.cache-primary-key }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate the platform
+      shell: bash
+      env:
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -euo pipefail
+        case "$PLATFORM" in
+          ios | android) ;;
+          *)
+            echo "Unsupported platform: $PLATFORM" >&2
+            exit 1
+            ;;
+        esac
+
+    # Deliberately no restore-keys. A prefix match would download a tarball built from different
+    # sources, whose digest the hook is then guaranteed to reject -- pure transfer cost for a hit
+    # that cannot happen. An exact key or nothing.
+    - name: Restore the native artifacts
+      id: restore
+      if: inputs.save != 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/streetcryptid/native/${{ inputs.platform }}
+        key: eas-local-native-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('modules/iroh-location/rust/src/**', 'modules/iroh-location/rust/third_party/**', 'modules/iroh-location/rust/Cargo.toml', 'modules/iroh-location/rust/Cargo.lock', 'scripts/eas-build-pre-install.sh', 'scripts/generate-uniffi-bindings.sh') }}
+
+    - name: Restore and save the native artifacts
+      id: restore-and-save
+      if: inputs.save == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/streetcryptid/native/${{ inputs.platform }}
+        key: eas-local-native-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('modules/iroh-location/rust/src/**', 'modules/iroh-location/rust/third_party/**', 'modules/iroh-location/rust/Cargo.toml', 'modules/iroh-location/rust/Cargo.lock', 'scripts/eas-build-pre-install.sh', 'scripts/generate-uniffi-bindings.sh') }}

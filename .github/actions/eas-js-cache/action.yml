@@ -19,10 +19,19 @@ inputs:
     required: false
     default: 'false'
 
+# Exactly one of the two steps below runs, so concatenating their outputs yields that one's value.
+# Without this the build jobs cannot report whether the cache they depend on was actually used,
+# which is the first question to ask of a build that took longer than it should have.
+outputs:
+  cache-hit:
+    description: Whether the Bun/npm cache was an exact hit.
+    value: ${{ steps.restore.outputs.cache-hit }}${{ steps.restore-and-save.outputs.cache-hit }}
+
 runs:
   using: composite
   steps:
     - name: Restore the JavaScript package caches
+      id: restore
       if: inputs.save != 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
@@ -34,6 +43,7 @@ runs:
           eas-local-js-${{ runner.os }}-${{ runner.arch }}-${{ inputs.eas-cli-version }}-
 
     - name: Restore and save the JavaScript package caches
+      id: restore-and-save
       if: inputs.save == 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:

@@ -102,3 +102,40 @@ Conventions when changing that code:
   silence every parked phone.
 - Guard newly added native exports anyway (`typeof mod.configureTelemetry === 'function'`). Not
   because of bindgen now, but because a phone can be running an older binary than the JS bundle.
+
+## CI build profiling
+
+**`eas build --local` is profiled from the outside, never from its log.** `scripts/eas-local-build-ci.sh`
+discards EAS's stdout and stderr because EAS serializes signing credentials into a child-process
+argv, and `scripts/test-eas-ci-log-isolation.sh` enforces that — so the ~20-minute step that is 90%
+of every build job prints nothing. `scripts/build-profile.sh` recovers the shape of it from two
+sources that never touch EAS output: phase marks written by `scripts/eas-build-pre-install.sh`
+(which we own), and a sampler over the process table. `scripts/build-report.sh` renders both, plus
+the cache hit/miss of all four caches, into the job summary.
+
+- **The sampler reads `comm`, never `args`, and emits only words from a closed vocabulary**
+  (`sc_profile_bucket`) — a name matching nothing is dropped, with no default branch that echoes
+  what it saw. The renderer then re-validates every record against a strict shape, so a poisoned
+  file cannot reach the summary either. Do NOT add a bucket that interpolates an observed name, and
+  do NOT widen `SC_PROFILE_NOTE_VALUE_RE` to a general token rule: it was one, and
+  `test-build-profile-isolation.sh` immediately caught that a base64 credential IS a short
+  alphanumeric token. `scripts/test-build-profile-isolation.sh` proves all of this offline by
+  replacing `ps` with a fake that returns a credential sentinel; it runs in CI and in
+  `just test-release`.
+- **The native artifact cache is keyed by the hook's own digest, not by the Actions cache key.**
+  `eas-build-pre-install.sh` hashes the crate sources, `Cargo.lock`, the exact `rustc -V`, and the
+  two scripts that decide how they compile; `.github/actions/eas-native-cache` only decides which
+  tarball to download. So a key collision or a toolchain bump rebuilds rather than shipping a stale
+  `.so`. The paths in that digest are RELATIVE on purpose — the warm job runs from
+  `$GITHUB_WORKSPACE` and a real build from EAS's copy under `runner.temp`, and an absolute path
+  would make them never agree while looking like it worked. `scripts/test-native-cache.sh` checks
+  exactly that, offline, with a fake toolchain.
+- **Bindings are cached with the library, never separately.** UniFFI aborts at load when generated
+  bindings disagree with the library's API checksums, so restoring one without the other trades
+  build time for a crash on device.
+- **PR builds are arm64-only; releases are not.** `pr-development-builds.yml` sets
+  `SC_ANDROID_ABIS=arm64-v8a` and `ORG_GRADLE_PROJECT_reactNativeArchitectures=arm64-v8a`;
+  `release.yml` sets neither and still ships all three. The staged cache entry is per-ABI, so the
+  narrower pull-request request hits the entry the warm job staged with all three.
+- `~/.gradle/caches/build-cache-1` is the only cached Gradle entry that skips work rather than a
+  download, and it only fills while `org.gradle.caching` is on — keep it and `GRADLE_OPTS` in step.

@@ -9,6 +9,13 @@ name: Warm PR build caches
 #
 # It deliberately does not run `eas build --local`: only the inputs that populate the caches are
 # needed, and no EAS credentials are involved.
+#
+# Running scripts/eas-build-pre-install.sh here also stages the finished native artifacts (the .so
+# per ABI, the iOS XCFramework, and the UniFFI bindings generated with them) into the cache that
+# .github/actions/eas-native-cache manages. That is the entry that lets a pull request touching no
+# Rust skip the native build entirely -- which is most of them. Note that this job builds ALL three
+# Android ABIs while a pull-request build asks for arm64-v8a alone: the staged entry is per-ABI, so
+# the narrower request still hits it.
 
 on:
   push:
@@ -17,6 +24,7 @@ on:
     paths:
       - .github/actions/eas-js-cache/action.yml
       - .github/actions/eas-local-build-setup/action.yml
+      - .github/actions/eas-native-cache/action.yml
       - .github/actions/eas-rust-cache/action.yml
       - .github/workflows/cache-warm.yml
       - bun.lock
