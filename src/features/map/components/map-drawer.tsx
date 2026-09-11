@@ -116,6 +116,7 @@ export function MapDrawer({
   const scrollY = useSharedValue(0);
   const height = useSharedValue(0);
   const startHeight = useSharedValue(0);
+  const gestureActive = useSharedValue(false);
 
   const detents = useMemo(() => allowedDetents(maxDetent, minDetent), [maxDetent, minDetent]);
   const topDetent = detents[detents.length - 1];
@@ -170,6 +171,7 @@ export function MapDrawer({
       Gesture.Pan()
         .simultaneousWithExternalGesture(nativeScroll)
         .onStart(() => {
+          gestureActive.value = true;
           startHeight.value = height.value;
         })
         .onUpdate((event) => {
@@ -194,6 +196,9 @@ export function MapDrawer({
           );
           height.value = withSpring(heights[next], SETTLE);
           runOnJS(commitDetent)(next);
+        })
+        .onFinalize(() => {
+          gestureActive.value = false;
         });
     return { grip: makePan(true), body: makePan(false) };
     // Shared values (`height`, `startHeight`, `scrollY`) are stable refs and are deliberately not
@@ -236,11 +241,11 @@ export function MapDrawer({
 
   const measureBody = useCallback(
     (event: LayoutChangeEvent) => {
-      if (detent === 'collapsed') return;
+      if (detent === 'collapsed' || gestureActive.value) return;
       const measured = Math.ceil(event.nativeEvent.layout.height);
       setPeekBody((current) => (Math.abs(current - measured) > 1 ? measured : current));
     },
-    [detent]
+    [detent, gestureActive]
   );
 
   const onScroll = useCallback(
@@ -250,6 +255,12 @@ export function MapDrawer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     []
   );
+  const onScrollBeginDrag = useCallback(() => {
+    gestureActive.value = true;
+  }, [gestureActive]);
+  const onScrollEndDrag = useCallback(() => {
+    gestureActive.value = false;
+  }, [gestureActive]);
 
   // Dragging is not the only way to work a drawer: assistive tech gets the same three stops.
   const step = useCallback(
@@ -300,6 +311,8 @@ export function MapDrawer({
                 alwaysBounceVertical={false}
                 scrollEnabled={detent === topDetent}
                 onScroll={onScroll}
+                onScrollBeginDrag={onScrollBeginDrag}
+                onScrollEndDrag={onScrollEndDrag}
                 scrollEventThrottle={16}
                 showsVerticalScrollIndicator={false}
                 style={styles.body}

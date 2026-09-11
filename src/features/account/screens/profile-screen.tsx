@@ -12,9 +12,9 @@ import { useCryptidProfile } from '../hooks/use-cryptid-profile';
  * Editing your profile is not a different kind of act from choosing a color scheme, so it no
  * longer looks like one: this is a route under `settings/`, and it pushes and pops like the rest.
  *
- * The editor autosaves, so leaving by the back swipe is as safe as leaving by Done — which is why
- * it can keep its own Done button as the page's commit action rather than borrowing
- * `SettingsPage`'s ‹ SETTINGS chrome, whose ScrollView it would have had to nest inside.
+ * The editor autosaves, so leaving by the platform back gesture or the same ‹ SETTINGS affordance
+ * used by every other settings subpage preserves ordinary edits. An undecided persona roll remains
+ * intentionally unsaved until the user keeps it.
  */
 export default function ProfileScreen() {
   const router = useRouter();
