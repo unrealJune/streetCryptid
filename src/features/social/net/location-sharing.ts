@@ -201,6 +201,8 @@ export interface PairingSnapshot {
   discoveredFriend: Friend | null;
   /** The most recently minted invite link (`streetcryptid:///social?token=…`), if any. */
   inviteLink: string | null;
+  /** Absolute expiry of the current invite link, in milliseconds since epoch. */
+  inviteExpiresAt?: number | null;
   /**
    * The most recently minted short pairing code (`XXXX-XXXX-XXXX-XXXX`), if any. Optional so that
    * pre-existing snapshot literals (constructed before this field existed) remain valid; the
@@ -324,7 +326,7 @@ const PAIRING_POLL_INTERVAL_MS = 4000;
 
 const BUMP_POLL_INTERVAL_MS = 300;
 const BUMP_RESOLVE_TIMEOUT_MS = 12_000;
-export const BUMP_WINDOW_MS = 15_000;
+export const BUMP_WINDOW_MS = 120_000;
 
 /**
  * How often we re-arm profile replication for a friend still wearing the pairing placeholder.
@@ -542,6 +544,7 @@ export class LocationSharingService {
   private rebindInFlight = false;
   private discoveredFriend: Friend | null = null;
   private inviteLink: string | null = null;
+  private inviteExpiresAt: number | null = null;
   private inviteCode: string | null = null;
   private readonly mailbox: PairingMailbox;
   /**
@@ -1348,6 +1351,7 @@ export class LocationSharingService {
       if (!this.mod) throw new Error('createPairInvite: native module not bound');
       const invite = await this.mod.createPairInvite(ttlSecs);
       this.inviteLink = encodePairLink(invite.token);
+      this.inviteExpiresAt = invite.expiresAtMs;
       this.setPairingActivity('invite created');
       return this.inviteLink;
     });
@@ -1394,7 +1398,7 @@ export class LocationSharingService {
 
   private async pairFromInputUnlocked(input: string): Promise<string> {
     if (!this.mod) throw new Error('pairFromInput: native module not bound');
-    if (this.isBumpActive()) throw new Error('Cancel Bump before using a pairing link or code.');
+    if (this.isBumpActive()) await this.cancelBump();
     const trimmed = input.trim();
     if (isPairingCode(trimmed)) {
       return this.pairFromCode(trimmed);
@@ -3669,6 +3673,7 @@ export class LocationSharingService {
       },
       discoveredFriend: this.discoveredFriend,
       inviteLink: this.inviteLink,
+      inviteExpiresAt: this.inviteExpiresAt,
       inviteCode: this.inviteCode,
       mailboxAvailable: this.mailbox.configured,
       activity: this.pairingActivity,

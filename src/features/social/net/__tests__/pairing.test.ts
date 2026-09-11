@@ -405,6 +405,17 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(mockHolder.mod.calls.respondPair).toHaveLength(0);
   });
 
+  it('moves directly from an armed bump window into link redemption', async () => {
+    const svc = newService();
+    await svc.init('@me', 'mothman');
+    await svc.armBump();
+
+    await svc.pairFromInput('scpair2:cafef00d');
+
+    expect(mockHolder.mod.calls.setPairingReady).toEqual([true, false]);
+    expect(mockHolder.mod.calls.initiatePairByToken).toEqual(['scpair2:cafef00d']);
+  });
+
   it('keeps an incoming pair request pending and rejects premature accept-via-respondPair', async () => {
     const svc = newService();
     const snap = watch(svc);

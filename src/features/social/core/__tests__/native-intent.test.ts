@@ -3,13 +3,13 @@ import { redirectSystemPath } from '@/app/+native-intent';
 const TOKEN = 'scpair2:deadbeef';
 
 describe('native pair intent rewriting', () => {
-  it('routes the https App Link to the map, reading the token out of the fragment', () => {
+  it('routes the https App Link to active pairing, reading the token out of the fragment', () => {
     expect(
       redirectSystemPath({
         path: `https://streetcrypt.id/pair#token=${encodeURIComponent(TOKEN)}`,
         initial: true,
       })
-    ).toBe(`/?pair=${encodeURIComponent(TOKEN)}`);
+    ).toBe(`/pairing?token=${encodeURIComponent(TOKEN)}`);
   });
 
   it('accepts the https App Link with the token in the query too', () => {
@@ -18,7 +18,7 @@ describe('native pair intent rewriting', () => {
         path: `https://streetcrypt.id/pair?token=${encodeURIComponent(TOKEN)}`,
         initial: false,
       })
-    ).toBe(`/?pair=${encodeURIComponent(TOKEN)}`);
+    ).toBe(`/pairing?token=${encodeURIComponent(TOKEN)}`);
   });
 
   it('opens the map when a claimed URL carries no usable token', () => {
@@ -32,36 +32,35 @@ describe('native pair intent rewriting', () => {
     );
   });
 
-  it('routes Android-style host links to the map', () => {
+  it('routes Android-style host links to active pairing', () => {
     expect(
       redirectSystemPath({
         path: `streetcryptid://social?token=${encodeURIComponent(TOKEN)}`,
         initial: true,
       })
-    ).toBe(`/?pair=${encodeURIComponent(TOKEN)}`);
+    ).toBe(`/pairing?token=${encodeURIComponent(TOKEN)}`);
   });
 
-  it('routes triple-slash links to the map', () => {
+  it('routes triple-slash links to active pairing', () => {
     expect(
       redirectSystemPath({
         path: `streetcryptid:///social?token=${encodeURIComponent(TOKEN)}`,
         initial: true,
       })
-    ).toBe(`/?pair=${encodeURIComponent(TOKEN)}`);
+    ).toBe(`/pairing?token=${encodeURIComponent(TOKEN)}`);
   });
 
-  it('routes the pair alias to the map too', () => {
+  it('routes the pair alias to active pairing too', () => {
     expect(
       redirectSystemPath({
         path: `streetcryptid://pair?token=${encodeURIComponent(TOKEN)}`,
         initial: true,
       })
-    ).toBe(`/?pair=${encodeURIComponent(TOKEN)}`);
+    ).toBe(`/pairing?token=${encodeURIComponent(TOKEN)}`);
   });
 
-  // The Friends route is gone, so a tokenless invite has nowhere to go but home.
-  it('sends a tokenless invite to the map', () => {
-    expect(redirectSystemPath({ path: 'streetcryptid://social', initial: true })).toBe('/');
+  it('sends a tokenless invite to the active pairing screen', () => {
+    expect(redirectSystemPath({ path: 'streetcryptid://social', initial: true })).toBe('/pairing');
   });
 
   it('keeps unrelated native paths unchanged', () => {

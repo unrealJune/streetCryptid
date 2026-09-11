@@ -6,9 +6,8 @@ interface NativeIntentOptions {
 }
 
 /**
- * There is one screen now, so every pair link lands on the map. The map opens the
- * friends island and redeems the token; `/social` no longer exists, but old links
- * in the wild still use it and must keep working.
+ * Every pair link lands on the active pairing screen immediately, before the
+ * sharing service is ready or the SAS challenge has arrived.
  *
  * Invites now arrive as `https://streetcrypt.id/pair#token=…` — an App Link on
  * Android, a Universal Link on iOS — because a messaging app only linkifies a
@@ -31,7 +30,7 @@ export function redirectSystemPath({ path }: NativeIntentOptions): string {
   const trimmed = path.trim();
   if (isWebPairLink(trimmed)) {
     try {
-      return `/?pair=${encodeURIComponent(decodePairLink(trimmed))}`;
+      return `/pairing?token=${encodeURIComponent(decodePairLink(trimmed))}`;
     } catch {
       // A claimed URL with no usable token: the /pair page it would otherwise have
       // reached is not available to us, so open the map rather than nothing.
@@ -57,7 +56,7 @@ export function redirectSystemPath({ path }: NativeIntentOptions): string {
     if (route !== 'social' && route !== 'pair') return path;
 
     const token = url.searchParams.get('token');
-    return token ? `/?pair=${encodeURIComponent(token)}` : '/';
+    return token ? `/pairing?token=${encodeURIComponent(token)}` : '/pairing';
   } catch {
     return path;
   }

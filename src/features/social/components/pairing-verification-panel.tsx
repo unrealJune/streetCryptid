@@ -10,6 +10,7 @@ import type { PairingVerification } from '../net/location-sharing';
 
 interface PairingVerificationPanelProps {
   accent: string;
+  embedded?: boolean;
   verifications: readonly PairingVerification[];
   onChoose(sessionId: string, figureIndex: number): Promise<void>;
   onConfirm(sessionId: string, matched: boolean): Promise<void>;
@@ -44,6 +45,7 @@ async function selectionHaptic(): Promise<void> {
 
 export function PairingVerificationPanel({
   accent,
+  embedded = false,
   verifications,
   onChoose,
   onConfirm,
@@ -99,13 +101,14 @@ export function PairingVerificationPanel({
       accessibilityLabel="Pairing identity verification"
       style={[
         styles.container,
+        embedded && styles.embedded,
         {
-          backgroundColor: theme.backgroundElement,
-          borderColor: challengeValid ? accent : theme.textSecondary,
+          backgroundColor: embedded ? 'transparent' : theme.backgroundElement,
+          borderColor: embedded ? 'transparent' : challengeValid ? accent : theme.textSecondary,
         },
       ]}
     >
-      <View style={styles.headingRow}>
+      <View style={[styles.headingRow, embedded && styles.embeddedHeading]}>
         <View style={styles.headingCopy}>
           <ThemedText type="smallBold">
             {verification.localConfirmed
@@ -284,6 +287,14 @@ const styles = StyleSheet.create({
     minWidth: 0,
     padding: Spacing.three,
     width: '100%',
+  },
+  embedded: {
+    borderWidth: 0,
+    maxWidth: 520,
+    padding: 0,
+  },
+  embeddedHeading: {
+    display: 'none',
   },
   headingRow: {
     alignItems: 'flex-start',
