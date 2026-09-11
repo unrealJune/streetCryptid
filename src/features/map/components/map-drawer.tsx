@@ -26,6 +26,7 @@ import {
   detentHeights,
   GRIP_HEIGHT,
   pickDetent,
+  TAB_BAR_HEIGHT,
   type DrawerDetent,
 } from '../core/drawer-detents';
 import { IslandTabs, type IslandTab } from './island-tabs';
@@ -101,6 +102,11 @@ export function MapDrawer({
 }: MapDrawerProps) {
   const { chrome } = theme;
   const [peekBody, setPeekBody] = useState(0);
+  // The tab bar as laid out, not as estimated. `peek` is body + chrome and the bar is then laid
+  // out inside that total, so a chrome figure a hairline under the truth hands the body a
+  // ScrollView shorter than its own content — which is what made the ME panel, a body that has
+  // nothing to scroll, scroll.
+  const [tabBarHeight, setTabBarHeight] = useState(TAB_BAR_HEIGHT);
   // The list's own scroll, as a gesture the drawer's pan can be declared simultaneous with.
   // Without it RNGH treats the two as competitors and the pan wins, so the roster would refuse to
   // scroll at the very detent that exists to let it.
@@ -110,6 +116,7 @@ export function MapDrawer({
   const scrollY = useSharedValue(0);
   const height = useSharedValue(0);
   const startHeight = useSharedValue(0);
+  const gestureActive = useSharedValue(false);
 
   const detents = useMemo(() => allowedDetents(maxDetent, minDetent), [maxDetent, minDetent]);
   const topDetent = detents[detents.length - 1];
@@ -126,8 +133,9 @@ export function MapDrawer({
         insetBottom,
         margin: Spacing.three,
         gripHeight: hasGrip ? GRIP_HEIGHT : 0,
+        tabBarHeight,
       }),
-    [peekBody, screenHeight, insetTop, insetBottom, hasGrip]
+    [peekBody, screenHeight, insetTop, insetBottom, hasGrip, tabBarHeight]
   );
   const resolved = heights[detents.includes(detent) ? detent : topDetent];
 
@@ -163,6 +171,7 @@ export function MapDrawer({
       Gesture.Pan()
         .simultaneousWithExternalGesture(nativeScroll)
         .onStart(() => {
+          gestureActive.value = true;
           startHeight.value = height.value;
         })
         .onUpdate((event) => {
@@ -187,6 +196,9 @@ export function MapDrawer({
           );
           height.value = withSpring(heights[next], SETTLE);
           runOnJS(commitDetent)(next);
+        })
+        .onFinalize(() => {
+          gestureActive.value = false;
         });
     return { grip: makePan(true), body: makePan(false) };
     // Shared values (`height`, `startHeight`, `scrollY`) are stable refs and are deliberately not
@@ -222,13 +234,18 @@ export function MapDrawer({
     return { paddingBottom: insetBottom * dock };
   });
 
+  const measureTabs = useCallback((event: LayoutChangeEvent) => {
+    const measured = Math.ceil(event.nativeEvent.layout.height);
+    setTabBarHeight((current) => (current === measured ? current : measured));
+  }, []);
+
   const measureBody = useCallback(
     (event: LayoutChangeEvent) => {
-      if (detent === 'collapsed') return;
+      if (detent === 'collapsed' || gestureActive.value) return;
       const measured = Math.ceil(event.nativeEvent.layout.height);
       setPeekBody((current) => (Math.abs(current - measured) > 1 ? measured : current));
     },
-    [detent]
+    [detent, gestureActive]
   );
 
   const onScroll = useCallback(
@@ -238,6 +255,12 @@ export function MapDrawer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     []
   );
+  const onScrollBeginDrag = useCallback(() => {
+    gestureActive.value = true;
+  }, [gestureActive]);
+  const onScrollEndDrag = useCallback(() => {
+    gestureActive.value = false;
+  }, [gestureActive]);
 
   // Dragging is not the only way to work a drawer: assistive tech gets the same three stops.
   const step = useCallback(
@@ -281,8 +304,15 @@ export function MapDrawer({
               <ScrollView
                 accessibilityElementsHidden={detent === 'collapsed'}
                 importantForAccessibility={detent === 'collapsed' ? 'no-hide-descendants' : 'auto'}
+                // iOS bounces a ScrollView vertically even when its content fits, which made the
+                // ME panel — a body that always fits its own detent — feel like a list that had
+                // somewhere to go and then sprang back. Bounce only when there is genuinely more
+                // body than drawer, which is the case this ScrollView actually exists for.
+                alwaysBounceVertical={false}
                 scrollEnabled={detent === topDetent}
                 onScroll={onScroll}
+                onScrollBeginDrag={onScrollBeginDrag}
+                onScrollEndDrag={onScrollEndDrag}
                 scrollEventThrottle={16}
                 showsVerticalScrollIndicator={false}
                 style={styles.body}
@@ -297,7 +327,9 @@ export function MapDrawer({
       </View>
 
       <Animated.View style={tabPadStyle}>
-        <IslandTabs active={activeTab} onSelect={onSelectTab} signal={signal} theme={theme} />
+        <View onLayout={measureTabs}>
+          <IslandTabs active={activeTab} onSelect={onSelectTab} signal={signal} theme={theme} />
+        </View>
       </Animated.View>
     </Animated.View>
   );

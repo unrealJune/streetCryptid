@@ -9,6 +9,7 @@ type TestGesture = {
   start?: () => void;
   update?: (event: PanEvent) => void;
   end?: (event: PanEvent) => void;
+  finalize?: () => void;
 };
 const mockPans: TestGesture[] = [];
 
@@ -31,9 +32,14 @@ jest.mock('react-native-gesture-handler', () => ({
           gesture.end = fn;
           return gesture;
         },
+        onFinalize: (fn: TestGesture['finalize']) => {
+          gesture.finalize = fn;
+          return gesture;
+        },
         start: undefined as TestGesture['start'],
         update: undefined as TestGesture['update'],
         end: undefined as TestGesture['end'],
+        finalize: undefined as TestGesture['finalize'],
       };
       mockPans.push(gesture);
       return gesture;

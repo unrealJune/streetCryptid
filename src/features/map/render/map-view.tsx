@@ -56,6 +56,7 @@ import type {
   WorldPoint,
   WorldRect,
 } from '../core/types';
+import { projectHexLattice } from '../core/hex-lattice';
 import { locateCamera } from '../core/locate-camera';
 import { clusterMarkers } from '../core/marker-clusters';
 import { PLACED_OCEAN_CRYPTIDS } from '../core/ocean-cryptids';
@@ -142,6 +143,17 @@ const CLUSTER_ZOOM_MIN_FACTOR = 1.5;
 const CLUSTER_ZOOM_MAX_FACTOR = 8;
 /** Locate-me camera animation length. */
 const LOCATE_ME_MS = 360;
+/**
+ * Extra view-fractions per side for the loading skeleton's rect. 3.5 makes it 8× the committed
+ * view on each axis — three zoom levels of head-room, which is more than one pinch can cover
+ * before the gesture ends and the rect is recomputed.
+ */
+const LOADING_VIEW_PAD = 3.5;
+/**
+ * Default `onInteraction`. A module constant rather than an optional call, so the touch-down
+ * worklet always has a real function to hop to — `runOnJS(undefined)` is fatal on the UI runtime.
+ */
+const noInteraction = () => {};
 
 interface ScreenRect {
   x: number;
@@ -232,6 +244,7 @@ export function MapView({
   accessibilityLabel,
   onSelectSelf,
   onSelectFriend,
+  onInteraction = noInteraction,
   locateTarget = null,
 }: {
   /** Surfaces the coverage/place readout to the surrounding chrome. */
@@ -259,6 +272,15 @@ export function MapView({
   accessibilityLabel?: string;
   onSelectSelf?: () => void;
   onSelectFriend?: (friendId: string) => void;
+  /**
+   * A finger landed on the canvas — a tap, a pan, or a pinch. Fired once per gesture at touch
+   * down, before it is known whether the map will move, so floating chrome over the map can get
+   * out of the way without the map having to give up the gesture to say so.
+   *
+   * Keep it stable (a `useCallback`): it is a dependency of the composed gesture, so a fresh
+   * closure every render rebuilds the pan/pinch handlers.
+   */
+  onInteraction?: () => void;
   locateTarget?: { readonly requestId: number; readonly location: LatLon } | null;
 }) {
   const [viewport, setViewport] = useState<Viewport | null>(null);
@@ -294,6 +316,7 @@ export function MapView({
     coverage,
     sectorsVisible,
     placeName,
+    hexLattice,
     commit,
     prefetchAt,
   } = useMapEngine(viewport, initialCenter, selfFix, friendTargets);
@@ -551,16 +574,6 @@ export function MapView({
     [prevRectVec]
   );
 
-  // Analytic loading hexes need no H3 work or map bytes to appear.
-  const pendingRect = useMemo(
-    () => (pending && viewport ? anchorRect(pending.rect, anchor, viewport) : null),
-    [pending, anchor, viewport]
-  );
-  // The wipe must EXPOSE the region, not flash over it: while revealing we hide
-  // the retained prev layer and back the wipe with the loading tint at the
-  // region's own rect, so unrevealed hexes read as "still loading" and the flash
-  // brings the real tiles in over that backdrop instead of over visible tiles.
-  const loadingRect = pendingRect ?? (revealing ? curRect : null);
   const selfAnchor = useMemo(
     () =>
       viewport && selfLocation
@@ -595,6 +608,24 @@ export function MapView({
    * clusters resettle when the pinch does.
    */
   const committedScale = Math.pow(2, camera.zoom - anchor.zoom);
+  /**
+   * Where the loading skeleton is drawn: the committed view, padded by {@link LOADING_VIEW_PAD}
+   * per side. It is deliberately far larger than anything on screen — a pinch can outrun the
+   * committed camera by a couple of zoom levels before the gesture ends and a new rect is
+   * computed, and the whole point of the skeleton is to be ALREADY there when the view arrives.
+   * Skia clips it to the canvas, so the extra area costs nothing but the numbers.
+   */
+  const loadingRect = useMemo(() => {
+    if (!viewport) return null;
+    const [cx, cy] = worldToScreen(anchor, viewport, camera.center);
+    const width = (viewport.width / committedScale) * (1 + 2 * LOADING_VIEW_PAD);
+    const height = (viewport.height / committedScale) * (1 + 2 * LOADING_VIEW_PAD);
+    return { x: cx - width / 2, y: cy - height / 2, width, height };
+  }, [anchor, camera, viewport, committedScale]);
+  const loadingLattice = useMemo(
+    () => (hexLattice && viewport ? projectHexLattice(hexLattice, anchor, camera, viewport) : null),
+    [hexLattice, anchor, camera, viewport]
+  );
   const locatorClusters = useMemo(
     () => clusterMarkers(locatorAnchors, CLUSTER_OVERLAP_PX / committedScale),
     [locatorAnchors, committedScale]
@@ -830,6 +861,14 @@ export function MapView({
       decaysLeft.value = 0;
     };
 
+    // Touch down, before activation: the map has not claimed the gesture yet, so a tap that only
+    // dismisses a popover still reaches whatever it was meant for.
+    const beginTouch = () => {
+      'worklet';
+      stopFling();
+      runOnJS(onInteraction)();
+    };
+
     const commitNow = () => {
       'worklet';
       runOnJS(commit)({ k: k.value, tx: tx.value, ty: ty.value });
@@ -837,7 +876,7 @@ export function MapView({
 
     const pan = Gesture.Pan()
       .maxPointers(2)
-      .onBegin(stopFling)
+      .onBegin(beginTouch)
       .onChange((e) => {
         const t = applyPan(
           { k: k.value, tx: tx.value, ty: ty.value },
@@ -868,7 +907,7 @@ export function MapView({
       });
 
     const pinch = Gesture.Pinch()
-      .onBegin(stopFling)
+      .onBegin(beginTouch)
       .onChange((e) => {
         const t = applyPinch(
           { k: k.value, tx: tx.value, ty: ty.value },
@@ -903,7 +942,7 @@ export function MapView({
 
     return Gesture.Race(doubleTap, Gesture.Simultaneous(pan, pinch));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [limits, commit, prefetchAt]);
+  }, [limits, commit, prefetchAt, onInteraction]);
 
   // Desktop web: wheel / trackpad zoom at the cursor, like Google Maps. RN Web's
   // <View> doesn't forward an onWheel prop to the DOM node, so bind a non-passive
@@ -982,10 +1021,14 @@ export function MapView({
             {viewport && (
               <Canvas style={styles.fill}>
                 <Group transform={transform}>
-                  {loadingRect && (
+                  {/* Under the region layers, always: the bitmaps are opaque, so the grid only
+                      shows where the map has nothing yet — and the reveal wipe uncovers the real
+                      tiles over it rather than flashing them onto bare background. */}
+                  {explorationEnabled && loadingRect && loadingLattice && (
                     <LoadingHexGrid
                       rect={loadingRect}
-                      scale={k}
+                      lattice={loadingLattice}
+                      loading={Boolean(pending) || revealing}
                       reducedMotion={reducedMotion}
                       ink={theme.canvas.streetLabel}
                     />
