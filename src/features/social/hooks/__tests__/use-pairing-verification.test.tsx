@@ -23,9 +23,22 @@ jest.mock('react-native-reanimated', () => {
     withTiming: (value: number) => value,
   };
 });
-jest.mock('expo-haptics', () => ({
-  selectionAsync: jest.fn(async () => {}),
+jest.mock('@/features/haptics/haptics', () => ({
+  selectionHaptic: jest.fn(async () => {}),
+  successHaptic: jest.fn(async () => {}),
+  warningHaptic: jest.fn(async () => {}),
+  transientHaptic: jest.fn(async () => {}),
 }));
+const mockHaptics = jest.requireMock('@/features/haptics/haptics') as {
+  selectionHaptic: jest.Mock;
+  successHaptic: jest.Mock;
+  warningHaptic: jest.Mock;
+  transientHaptic: jest.Mock;
+};
+
+beforeEach(() => {
+  for (const fn of Object.values(mockHaptics)) fn.mockClear();
+});
 
 function verification(overrides: Partial<PairingVerification> = {}): PairingVerification {
   return {
@@ -202,6 +215,49 @@ describe('usePairingVerification', () => {
     });
     await act(async () => stop.props.onPress());
     expect(onCancel).toHaveBeenCalledWith('session-1');
+  });
+
+  /**
+   * The four acts of the visual check used to share one flat selection tick, which made the tap
+   * that GRANTS someone your location feel exactly like the tap that refuses it — on the one
+   * screen in the app where the two answers mean opposite things.
+   */
+  it('gives each act of the visual check its own feel', async () => {
+    act(() => {
+      renderer = create(<Harness verifications={[verification()]} />);
+    });
+    const option = renderer.root.findByProps({
+      accessibilityLabel: `Pairing figure: ${pairingFigure(42).name}`,
+    });
+    await act(async () => option.props.onPress());
+    expect(mockHaptics.selectionHaptic).toHaveBeenCalledTimes(1);
+    expect(mockHaptics.successHaptic).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+
+    act(() => {
+      renderer = create(
+        <Harness verifications={[verification({ role: 'displayer', optionIndices: [42] })]} />
+      );
+    });
+    const matched = renderer.root.findByProps({
+      accessibilityLabel: 'The other person picked this figure',
+    });
+    await act(async () => matched.props.onPress());
+    expect(mockHaptics.successHaptic).toHaveBeenCalledTimes(1);
+    expect(mockHaptics.warningHaptic).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+
+    act(() => {
+      renderer = create(
+        <Harness verifications={[verification({ role: 'displayer', optionIndices: [42] })]} />
+      );
+    });
+    const different = renderer.root.findByProps({
+      accessibilityLabel: 'The other person picked a different figure',
+    });
+    await act(async () => different.props.onPress());
+    expect(mockHaptics.warningHaptic).toHaveBeenCalledTimes(1);
+    expect(mockHaptics.successHaptic).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the exit live after the verification window closes', async () => {

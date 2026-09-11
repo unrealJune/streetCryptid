@@ -1,6 +1,9 @@
 import type { PairStateRecord } from 'iroh-location';
 
 import {
+  DISCOVERY_FLOURISH,
+  FAILURE_COLLAPSE,
+  PERSONA_RESOLVE,
   derivePairingExperienceStage,
   pairingHapticCadence,
   pairingPulse,
@@ -183,6 +186,20 @@ describe('pairing pulse (hybrid stage ladder + proximity)', () => {
     expect(pairingPulse('discovered', -40)).toBeNull();
   });
 
+  // The worst lie a haptic can tell: the one sense that cannot be ignored saying "still going"
+  // over a session that is already dead.
+  it('stops the heartbeat the moment a pairing breaks', () => {
+    expect(pairingPulse('failed', -40)).toBeNull();
+    expect(
+      derivePairingExperienceStage({
+        bumpStage: 'searching',
+        sessions: [session('verifying')],
+        discoveredFriend: null,
+        failed: true,
+      })
+    ).toBe('failed');
+  });
+
   it('never emits an out-of-range intensity or sharpness', () => {
     const stages = ['seeking', 'contact', 'handshaking', 'verifying', 'joining'] as const;
     for (const stage of stages) {
@@ -196,5 +213,48 @@ describe('pairing pulse (hybrid stage ladder + proximity)', () => {
         expect(pulse.delayMs).toBeGreaterThan(0);
       }
     }
+  });
+});
+
+describe('one-shot patterns', () => {
+  const patterns = { DISCOVERY_FLOURISH, FAILURE_COLLAPSE, PERSONA_RESOLVE };
+
+  it('keeps every beat in range and in order', () => {
+    for (const [name, beats] of Object.entries(patterns)) {
+      expect(beats.length).toBeGreaterThan(1);
+      let previous = -1;
+      for (const beat of beats) {
+        expect(beat.intensity).toBeGreaterThan(0);
+        expect(beat.intensity).toBeLessThanOrEqual(1);
+        expect(beat.sharpness).toBeGreaterThan(0);
+        expect(beat.sharpness).toBeLessThanOrEqual(1);
+        expect(beat.atSeconds).toBeGreaterThan(previous);
+        previous = beat.atSeconds;
+      }
+      // Long enough to read as an event, short enough not to outlive the moment it describes.
+      expect(beats[beats.length - 1].atSeconds).toBeLessThan(1);
+      expect(name).toBeTruthy();
+    }
+  });
+
+  // Failure must not be mistakeable for confirmation. Discovery rises into its hardest hit;
+  // failure opens on one and falls away, dull throughout.
+  it('makes failure the mirror of discovery, not a variation on it', () => {
+    const discoveryPeak = Math.max(...DISCOVERY_FLOURISH.map((beat) => beat.intensity));
+    expect(DISCOVERY_FLOURISH[0].intensity).toBeLessThan(discoveryPeak);
+    expect(FAILURE_COLLAPSE[0].intensity).toBe(
+      Math.max(...FAILURE_COLLAPSE.map((beat) => beat.intensity))
+    );
+    expect(FAILURE_COLLAPSE[FAILURE_COLLAPSE.length - 1].intensity).toBeLessThan(0.1);
+    expect(Math.max(...FAILURE_COLLAPSE.map((beat) => beat.sharpness))).toBeLessThan(
+      Math.max(...DISCOVERY_FLOURISH.map((beat) => beat.sharpness))
+    );
+  });
+
+  // The persona is the second, smaller beat of the discovery moment — not a second event.
+  it('keeps the persona resolve quieter than the discovery it follows', () => {
+    expect(Math.max(...PERSONA_RESOLVE.map((beat) => beat.intensity))).toBeLessThan(
+      Math.max(...DISCOVERY_FLOURISH.map((beat) => beat.intensity))
+    );
   });
 });

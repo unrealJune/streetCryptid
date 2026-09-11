@@ -1,7 +1,9 @@
 import * as Clipboard from 'expo-clipboard';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import type { PairStateValue } from 'iroh-location';
+import { useFocusEffect, useIsFocused, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AppState,
   BackHandler,
   Platform,
   Share,
@@ -29,19 +31,24 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ThemedText } from '@/components/themed-text';
 import { resolveSignalColor } from '@/constants/signal-colors';
 import { CryptidThemes, Spacing } from '@/constants/theme';
-import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import {
+  describePairingFailure,
   deriveActivePairingStage,
   inviteScreenState,
   type ActivePairingStage,
   type PairingRouteIntent,
 } from '@/features/social/core/active-pairing-state';
+import { patternHaptic, successHaptic, tapHaptic, warningHaptic } from '@/features/haptics/haptics';
+import { PERSONA_RESOLVE } from '@/features/social/core/pairing-experience';
 import { useArmedBump } from '@/features/social/hooks/use-armed-bump';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
+import { usePairingHaptics } from '@/features/social/hooks/use-pairing-haptics';
 import { usePairingVerification } from '@/features/social/hooks/use-pairing-verification';
 import { openBluetoothSettings } from '@/features/social/net/bluetooth-settings';
+import { TERMINAL_PAIR_STATES } from '@/features/social/net/location-sharing';
 
 import { PairingFigureChoices, PairingFigureView } from '../components/pairing-figure-view';
+import { PersonaReveal } from '../components/persona-reveal';
 import { PairingQr } from '../components/pairing-qr';
 import { PairingSignalField, type PairingFieldMode } from '../components/pairing-signal-field';
 import { PressableAction } from '../components/pressable-action';
@@ -61,8 +68,8 @@ function formatClock(seconds: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-function isActiveSession(state: string): boolean {
-  return !['complete', 'rejected', 'failed'].includes(state);
+function isActiveSession(state: PairStateValue): boolean {
+  return !TERMINAL_PAIR_STATES.includes(state);
 }
 
 interface PairingPresentation {
@@ -92,6 +99,7 @@ export default function ActivePairingScreen() {
     pairFromInput,
     cancelBump,
     cancelPairInvite,
+    clearPairingFailure,
     submitPairChoice,
     confirmPairDisplay,
     cancelPair,
@@ -110,14 +118,49 @@ export default function ActivePairingScreen() {
   const [linkNotice, setLinkNotice] = useState<string | null>(null);
   const [working, setWorking] = useState<'link' | 'redeem' | 'retry' | null>(null);
   const redeemedToken = useRef<string | null>(null);
+  const focused = useIsFocused();
+  const [foreground, setForeground] = useState(AppState.currentState === 'active');
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (next) =>
+      setForeground(next === 'active')
+    );
+    return () => subscription.remove();
+  }, []);
+
+  /**
+   * Sessions this phone would be walking out on, kept in a ref.
+   *
+   * The focus cleanup must not depend on them — it would tear down and re-run on every poll — but
+   * it does have to know them at the moment it fires, which is exactly what a ref is for.
+   */
+  const abandonableRef = useRef<readonly string[]>([]);
+
+  /**
+   * Leave the pairing, and TELL THE OTHER PHONE.
+   *
+   * Closing the radio was never enough. A half-finished session that is merely walked away from
+   * stays alive on the peer until its SAS window times out, so the phone that shared a link sat
+   * there watching a handshake that had already been abandoned — and, before the invite was
+   * tracked, went right back to offering the spent link. Cancelling is what turns "they left" into
+   * something the other side learns immediately.
+   */
+  const standDown = useCallback(async (): Promise<void> => {
+    const sessionIds = abandonableRef.current;
+    abandonableRef.current = [];
+    await Promise.allSettled([
+      cancelBump(),
+      ...sessionIds.map((sessionId) => cancelPair(sessionId)),
+    ]);
+  }, [cancelBump, cancelPair]);
 
   useFocusEffect(
     useCallback(() => {
       void refreshPairing();
       return () => {
-        void cancelBump();
+        void standDown();
       };
-    }, [cancelBump, refreshPairing])
+    }, [refreshPairing, standDown])
   );
 
   useEffect(() => {
@@ -147,6 +190,16 @@ export default function ActivePairingScreen() {
   }, [cancelBump, pairFromInput, router, snapshot?.ready, token]);
 
   const verifications = useMemo(() => pairing?.verifications ?? [], [pairing?.verifications]);
+  useEffect(() => {
+    const sessionIds = new Set<string>();
+    for (const entry of verifications) sessionIds.add(entry.sessionId);
+    for (const request of pairing?.pendingRequests ?? []) sessionIds.add(request.sessionId);
+    for (const session of pairing?.sessions ?? []) {
+      if (isActiveSession(session.state)) sessionIds.add(session.sessionId);
+    }
+    abandonableRef.current = [...sessionIds];
+  }, [pairing?.pendingRequests, pairing?.sessions, verifications]);
+
   const verifyHandlers = useMemo(
     () => ({ onChoose: submitPairChoice, onConfirm: confirmPairDisplay, onCancel: cancelPair }),
     [cancelPair, confirmPairDisplay, submitPairChoice]
@@ -158,13 +211,24 @@ export default function ActivePairingScreen() {
   const invite = inviteScreenState({
     inviteLink: pairing?.inviteLink,
     remainingSeconds: inviteRemaining,
+    redeemed: pairing?.inviteRedeemed ?? false,
     dismissedLink,
   });
   const inviteLive = invite === 'live';
+  const inviteSpent = invite === 'spent';
   const inviteExpired = invite === 'expired' && Boolean(pairing?.inviteExpiresAt);
+  const failure = pairing?.failure ?? null;
   const effectiveIntent: PairingRouteIntent =
     !token && intent === 'bump' && inviteLive ? 'link' : intent;
   const bump = useArmedBump(effectiveIntent === 'bump' && !token && !redeeming);
+  // Every pairing channel, not just Bump — this hook used to hang off `useArmedBump`, which is
+  // armed for nearby pairing only, so a link or QR pair had no haptics of any kind. Gated on
+  // focus AND foreground, not merely on being mounted: this screen survives backgrounding, and a
+  // pulse loop beating away in someone's pocket is worse than no haptics at all.
+  usePairingHaptics(pairing, focused && foreground);
+  const personaResolved = useCallback(() => {
+    void patternHaptic(PERSONA_RESOLVE);
+  }, []);
   const friend = pairing?.discoveredFriend ?? null;
   const signal = friend ? resolveSignalColor(friend.color, chrome.green) : chrome.green;
 
@@ -183,7 +247,9 @@ export default function ActivePairingScreen() {
     creatingLink: working === 'link',
     inputError,
     inviteLive,
+    inviteSpent,
     inviteExpired,
+    failure,
   });
 
   useEffect(() => {
@@ -209,6 +275,21 @@ export default function ActivePairingScreen() {
     return () => clearTimeout(timer);
   }, [copied]);
 
+  // A link going dead is the one moment here that happens WITHOUT anyone touching the phone, so
+  // it is the one that most needs to be felt: the user may well be looking at the other device.
+  // Failure and discovery have their own patterns in `usePairingHaptics`; this covers the link.
+  const lastDeadLinkStage = useRef<ActivePairingStage | null>(null);
+  useEffect(() => {
+    const dead = stage === 'link-expired' || stage === 'link-spent';
+    if (!dead) {
+      lastDeadLinkStage.current = null;
+      return;
+    }
+    if (lastDeadLinkStage.current === stage) return;
+    lastDeadLinkStage.current = stage;
+    void warningHaptic();
+  }, [stage]);
+
   const presentation: PairingPresentation = useMemo(() => {
     switch (stage) {
       case 'discovered':
@@ -230,6 +311,31 @@ export default function ActivePairingScreen() {
           readout: verify.clock,
           fieldMode: verify.mode === 'invalid' ? 'scatter' : 'converge',
           tone: verify.mode === 'invalid' ? 'amber' : 'signal',
+        };
+      case 'pair-failed': {
+        const copy = failure
+          ? describePairingFailure(failure)
+          : { status: 'PAIRING STOPPED', detail: 'Nothing was shared.' };
+        return {
+          mode: failure?.nearby ? 'BUMP FAILED' : 'PAIRING FAILED',
+          status: copy.status,
+          detail: copy.detail,
+          caption: 'NOTHING SHARED',
+          readout: '',
+          fieldMode: 'fracture',
+          tone: 'amber',
+        };
+      }
+      case 'link-spent':
+        return {
+          mode: 'LINK USED',
+          status: 'THIS LINK HAS BEEN USED',
+          detail:
+            'Someone already opened it, so it will not work again. Make a new one if you still need to pair.',
+          caption: 'SPENT',
+          readout: '',
+          fieldMode: 'scatter',
+          tone: 'steel',
         };
       case 'redeeming':
         return {
@@ -392,6 +498,7 @@ export default function ActivePairingScreen() {
   }, [
     bump.error,
     bump.sensor.status,
+    failure,
     inputError,
     inviteRemaining,
     pairing,
@@ -453,10 +560,12 @@ export default function ActivePairingScreen() {
     setScanning(false);
     setDismissedLink(null);
     setLinkNotice(null);
+    clearPairingFailure();
     try {
       await cancelBump();
       const link = await createPairInvite(INVITE_TTL_SECONDS);
       if (!link) throw new Error('A pairing link could not be created.');
+      void successHaptic();
       await shareLink(link);
     } catch (linkError: unknown) {
       setInputError(
@@ -504,6 +613,7 @@ export default function ActivePairingScreen() {
     setIntent('bump');
     setWorking('retry');
     setInputError(null);
+    clearPairingFailure();
     try {
       await bump.arm();
     } finally {
@@ -514,6 +624,7 @@ export default function ActivePairingScreen() {
   const returnToBump = (): void => {
     setInputError(null);
     setLinkNotice(null);
+    clearPairingFailure();
     setIntent('bump');
   };
 
@@ -530,14 +641,14 @@ export default function ActivePairingScreen() {
     const link = pairing?.inviteLink ?? null;
     setWorking('link');
     try {
-      const cancelled = await cancelPairInvite();
+      const outcome = await cancelPairInvite();
       setDismissedLink(link);
-      // An older binary has no way to withdraw the token, so say so rather than implying the
-      // link is dead. It still expires on its own within the TTL.
+      // Only an older binary warrants a warning. A `cancelled` link is genuinely dead, and an
+      // `absent` one was never there — neither is something to interrupt anyone about.
       setLinkNotice(
-        cancelled
-          ? null
-          : 'This build cannot withdraw a link. It stops working when its timer runs out.'
+        outcome === 'unsupported'
+          ? 'This build cannot withdraw a link. It stops working when its timer runs out.'
+          : null
       );
       // Not `returnToBump()` — that clears the notice this branch just set.
       setInputError(null);
@@ -548,7 +659,7 @@ export default function ActivePairingScreen() {
   };
 
   const close = (): void => {
-    void cancelBump();
+    void standDown();
     router.back();
   };
 
@@ -556,7 +667,7 @@ export default function ActivePairingScreen() {
     !friend &&
     !verification &&
     !activeSession &&
-    !['link-live', 'link-creating', 'redeeming'].includes(stage);
+    !['link-live', 'link-creating', 'redeeming', 'pair-failed'].includes(stage);
 
   // One key per distinct thing the stage can show. Changing it crossfades the stage; leaving it
   // alone (a countdown tick, a rising peer count) lets the existing content update in place.
@@ -599,25 +710,15 @@ export default function ActivePairingScreen() {
           style={styles.stageContent}
         >
           {friend ? (
-            <View style={styles.success}>
-              <ThemedText type="code" style={[styles.successKicker, { color: signal }]}>
-                FRIEND FOUND
-              </ThemedText>
-              <ThemedText accessibilityRole="header" style={styles.successTitle}>
-                CRYPTID{'\n'}DISCOVERED
-              </ThemedText>
-              <CryptidAvatar
-                art={friend.sigil}
-                color={signal}
-                name={friend.cryptidName ?? 'Unknown form'}
-                size="large"
-                style={styles.avatar}
-              />
-              <ThemedText style={[styles.handle, { color: signal }]}>{friend.handle}</ThemedText>
-              <ThemedText type="code" themeColor="textSecondary" style={styles.successCaption}>
-                {friend.cryptidName?.toUpperCase() ?? 'UNKNOWN FORM'} · LOCATION SHARING ACTIVE
-              </ThemedText>
-            </View>
+            <PersonaReveal
+              // Keyed by friend so a second pairing gets a fresh reveal rather than a component
+              // trying to unwind the last one's state.
+              key={friend.endpointId}
+              accent={signal}
+              friend={friend}
+              neutral={chrome.steel}
+              onResolved={personaResolved}
+            />
           ) : verify.mode === 'pick' ? (
             <PairingFigureChoices
               accent={signal}
@@ -726,6 +827,7 @@ export default function ActivePairingScreen() {
                   label={copied ? 'COPIED' : 'COPY'}
                   onPress={() => {
                     void Clipboard.setStringAsync(pairing.inviteLink!);
+                    void tapHaptic();
                     setCopied(true);
                   }}
                 />
@@ -797,6 +899,7 @@ export default function ActivePairingScreen() {
                 accessibilityLabel="The other person picked a different figure"
                 color={chrome.steel}
                 disabled={verify.disabled}
+                hapticOnPress={false}
                 label="DIFFERENT"
                 onPress={() => verify.confirm(false)}
                 outline
@@ -806,6 +909,7 @@ export default function ActivePairingScreen() {
                 accessibilityLabel="The other person picked this figure"
                 color={signal}
                 disabled={verify.disabled}
+                hapticOnPress={false}
                 label="THEY MATCHED"
                 onPress={() => verify.confirm(true)}
                 testID="pairing-confirm-matched"
@@ -817,6 +921,7 @@ export default function ActivePairingScreen() {
                 verify.mode === 'invalid' ? 'Stop invalid pairing attempt' : 'stop pairing'
               }
               color={chrome.steel}
+              hapticOnPress={false}
               label="STOP PAIRING"
               onPress={verify.cancel}
               outline
@@ -835,6 +940,20 @@ export default function ActivePairingScreen() {
               onPress={() => void cancelLinkAndReturn()}
               outline
             />
+          ) : stage === 'pair-failed' ? (
+            <>
+              <Action color={chrome.steel} label="NOT NOW" onPress={returnToBump} outline />
+              {failure?.nearby ? (
+                <Action color={signal} label="TRY AGAIN" onPress={() => void retryBump()} />
+              ) : (
+                <Action color={signal} label="NEW LINK" onPress={() => void createAndShareLink()} />
+              )}
+            </>
+          ) : stage === 'link-spent' ? (
+            <>
+              <Action color={chrome.steel} label="BACK TO BUMP" onPress={returnToBump} outline />
+              <Action color={signal} label="NEW LINK" onPress={() => void createAndShareLink()} />
+            </>
           ) : stage === 'bump-failed' ? (
             <>
               <Action
@@ -924,6 +1043,7 @@ function SmallAction({ color, label, onPress }: { color: string; label: string; 
             : 'Share pairing link'
       }
       accessibilityRole="button"
+      haptic="selection"
       onPress={onPress}
       style={[styles.smallAction, { borderColor: color }]}
     >
@@ -942,6 +1062,7 @@ function Action({
   accessibilityLabel,
   color,
   disabled = false,
+  hapticOnPress = true,
   label,
   onPress,
   outline = false,
@@ -950,6 +1071,7 @@ function Action({
   accessibilityLabel?: string;
   color: string;
   disabled?: boolean;
+  hapticOnPress?: boolean;
   label: string;
   onPress(): void;
   outline?: boolean;
@@ -960,6 +1082,9 @@ function Action({
       accessibilityLabel={accessibilityLabel ?? label.toLowerCase()}
       accessibilityRole="button"
       disabled={disabled}
+      // The SAS buttons deliberately do NOT opt in: `usePairingVerification` already gives each
+      // of those four acts its own distinct feel, and a press tick on top would blunt them.
+      haptic={hapticOnPress ? 'tap' : undefined}
       onPress={onPress}
       style={[
         styles.action,
@@ -1215,36 +1340,5 @@ const styles = StyleSheet.create({
     fontVariant: ['tabular-nums'],
     letterSpacing: 2,
     lineHeight: 30,
-  },
-  success: {
-    alignItems: 'center',
-    gap: Spacing.three,
-    width: '100%',
-  },
-  successKicker: {
-    fontWeight: '700',
-    letterSpacing: 2,
-  },
-  successTitle: {
-    fontFamily: 'Rajdhani_700Bold',
-    fontSize: 37,
-    fontWeight: '700',
-    letterSpacing: 3,
-    lineHeight: 42,
-    textAlign: 'center',
-  },
-  avatar: {
-    minHeight: 170,
-    minWidth: 220,
-  },
-  handle: {
-    fontFamily: 'Rajdhani_700Bold',
-    fontSize: 34,
-    fontWeight: '700',
-    lineHeight: 38,
-  },
-  successCaption: {
-    letterSpacing: 1.3,
-    textAlign: 'center',
   },
 });

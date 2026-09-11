@@ -1,5 +1,11 @@
-import * as Haptics from 'expo-haptics';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+
+import {
+  selectionHaptic,
+  successHaptic,
+  transientHaptic,
+  warningHaptic,
+} from '@/features/haptics/haptics';
 
 import { isPairingFigureIndex, pairingFigure, type PairingFigure } from '../core/pairing-figures';
 import type { PairingVerification } from '../net/location-sharing';
@@ -56,11 +62,24 @@ function isValidPickerChallenge(verification: PairingVerification): boolean {
   );
 }
 
-async function selectionHaptic(): Promise<void> {
-  try {
-    await Haptics.selectionAsync();
-  } catch {
-    // The visual verification remains authoritative when haptics are unavailable.
+/**
+ * How each act of the visual check feels.
+ *
+ * One flat selection tick used to cover all four, which made the tap that GRANTS someone your
+ * location feel exactly like the tap that refuses it — on the one screen in the app where the two
+ * answers mean opposite things. The visual check stays authoritative either way: these go through
+ * the app's palette, which swallows everything, so a device with no haptics changes nothing.
+ */
+function actHaptic(act: 'choose' | 'matched' | 'different' | 'cancel'): Promise<void> {
+  switch (act) {
+    case 'choose':
+      return selectionHaptic();
+    case 'matched':
+      return successHaptic();
+    case 'different':
+      return warningHaptic();
+    case 'cancel':
+      return transientHaptic(0.4, 0.3);
   }
 }
 
@@ -102,11 +121,15 @@ export function usePairingVerification(
   const working = sessionId !== null && workingSessionId === sessionId;
 
   const run = useCallback(
-    (action: (id: string) => Promise<void>, force = false): void => {
+    (
+      act: 'choose' | 'matched' | 'different' | 'cancel',
+      action: (id: string) => Promise<void>,
+      force = false
+    ): void => {
       if (!sessionId) return;
       if (!force && (working || expired || verification?.localConfirmed)) return;
       setWorkingSessionId(sessionId);
-      void selectionHaptic()
+      void actHaptic(act)
         .then(() => action(sessionId))
         .finally(() => {
           setWorkingSessionId((current) => (current === sessionId ? null : current));
@@ -116,16 +139,16 @@ export function usePairingVerification(
   );
 
   const choose = useCallback(
-    (figureIndex: number) => run((id) => onChoose(id, figureIndex)),
+    (figureIndex: number) => run('choose', (id) => onChoose(id, figureIndex)),
     [onChoose, run]
   );
   const confirm = useCallback(
-    (matched: boolean) => run((id) => onConfirm(id, matched)),
+    (matched: boolean) => run(matched ? 'matched' : 'different', (id) => onConfirm(id, matched)),
     [onConfirm, run]
   );
   // Stopping must stay available even once the window has closed or this phone has answered —
   // it is the only way out of a verification that will never complete.
-  const cancel = useCallback(() => run((id) => onCancel(id), true), [onCancel, run]);
+  const cancel = useCallback(() => run('cancel', (id) => onCancel(id), true), [onCancel, run]);
 
   return useMemo(() => {
     const idle: PairingVerificationState = {

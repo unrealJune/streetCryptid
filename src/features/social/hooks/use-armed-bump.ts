@@ -3,7 +3,6 @@ import { AppState, type AppStateStatus } from 'react-native';
 
 import { useBumpToPair, type BumpSensorState } from './use-bump-to-pair';
 import { useLocationSharing } from './use-location-sharing';
-import { usePairingHaptics } from './use-pairing-haptics';
 import type { PairingSnapshot } from '../net/location-sharing';
 
 export interface ArmedBump {
@@ -26,6 +25,10 @@ export interface ArmedBump {
  * permissions. A timed-out or transiently interrupted window re-arms itself while the
  * screen remains visible; a physical miss stays parked for an explicit retry. Leaving
  * or backgrounding the screen always closes the radio.
+ *
+ * Strictly the RADIO's lifecycle. Haptics used to live here too, which quietly made them a
+ * Bump-only feature: this hook is armed only for nearby pairing, so every link and QR pair ran
+ * silent. They belong to the pairing screen, which is alive for all three.
  */
 export function useArmedBump(active: boolean): ArmedBump {
   const { pairing, armBump, commitBump, cancelBump, refreshPairing } = useLocationSharing();
@@ -96,7 +99,6 @@ export function useArmedBump(active: boolean): ArmedBump {
   }, [cancelBump, live, stage]);
 
   const sensor = useBumpToPair(live && stage === 'armed' && !hasActiveSession, commitBump);
-  usePairingHaptics(pairing, live);
 
   return { pairing, sensor, live, error: visibleError, arming, arm, commit: commitBump };
 }
