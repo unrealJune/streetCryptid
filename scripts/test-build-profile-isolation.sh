@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 
-exec bash "$(dirname "${BASH_SOURCE[0]}")/test-eas-ci-log-isolation.sh"
+# Compatibility entry point expected by the base CI workflow.
+exec bash "$(dirname "${BASH_SOURCE[0]}")/test-eas-ci-log-isolation.sh" "$@"
