@@ -1,4 +1,4 @@
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { type Href, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -29,7 +29,7 @@ import {
 } from '@/features/map';
 import { sampleTrailForMap } from '@/features/map/core/trail-sampling';
 import { friendPlaceName } from '@/features/map/core/readout';
-import { BumpPairingStrip } from '@/features/social/components/bump-pairing-strip';
+import { OpenPairingStrip } from '@/features/social/components/open-pairing-strip';
 import { FriendDetailIsland } from '@/features/social/components/friend-detail-island';
 import {
   describePresence,
@@ -38,7 +38,6 @@ import {
   isPresenceStale,
 } from '@/features/social/core/presence';
 import type { LocationFix } from '@/features/social/core/types';
-import { useArmedBump } from '@/features/social/hooks/use-armed-bump';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 import { SELF_AUTHOR, type TrailPoint } from '@/features/social/net/background/trail-store';
 
@@ -61,12 +60,10 @@ export default function MapScreenBody() {
   const { profile } = useCryptidProfile();
   const params = useLocalSearchParams<{
     friend?: string | string[];
-    pair?: string | string[];
     dev?: string | string[];
     devId?: string | string[];
   }>();
   const requestedFriendId = Array.isArray(params.friend) ? params.friend[0] : params.friend;
-  const pairToken = Array.isArray(params.pair) ? params.pair[0] : params.pair;
   const devCommand = Array.isArray(params.dev) ? params.dev[0] : params.dev;
   const devCommandId = Array.isArray(params.devId) ? params.devId[0] : params.devId;
   const {
@@ -77,7 +74,6 @@ export default function MapScreenBody() {
     locationStatus,
     snapshot,
     locateNow,
-    pairFromInput,
     toggleShare,
     removeFriend,
     runDevCommand,
@@ -199,12 +195,8 @@ export default function MapScreenBody() {
   );
   // `trail` is our OWN retained trail — friends carry a current fix and nothing behind it.
   const selfHistory = useMemo(() => trailLocations(sampleTrailForMap(trail)), [trail]);
-  // Selecting a locator highlights it (and draws OUR trail when it is us). The roster is on
-  // screen whenever the FRIENDS tab is up; it is also what arms bump pairing.
+  // Selecting a locator highlights it (and draws OUR trail when it is us).
   const rosterOpen = islandTab === 'friends';
-  // Minimizing hides the bump strip, which is the same class of act as leaving the tab: the radio
-  // must not stay open behind a collapsed panel with no readout to say it is listening.
-  const bump = useArmedBump(rosterOpen && !minimized && detent !== 'collapsed');
 
   const closeHistory = useCallback(() => {
     setSelection((current) => ({ ...current, selectedId: null }));
@@ -341,23 +333,6 @@ export default function MapScreenBody() {
     closeHistory();
     setDetent('peek');
   }, [closeHistory]);
-  // A `streetcryptid://…?token=` invite lands here now that the Friends route is
-  // gone. Redeem it once, show the roster so the handshake has somewhere to land,
-  // then drop the token from the URL so a re-render cannot replay it.
-  const redeemedPairToken = useRef<string | null>(null);
-  useEffect(() => {
-    if (!snapshot?.ready || !pairToken || redeemedPairToken.current === pairToken) return;
-    redeemedPairToken.current = pairToken;
-    selectIslandTab('friends');
-    void pairFromInput(pairToken)
-      .catch(() => {
-        // The provider surfaces the actionable error; consume the rejection here.
-      })
-      .finally(() => {
-        router.setParams({ pair: undefined });
-      });
-  }, [pairFromInput, pairToken, router, selectIslandTab, snapshot?.ready]);
-
   // `streetcryptid://dev?cmd=…&id=…` — the e2e harness driving a RUNNING app (see
   // `features/dev/commands`). Dispatch keys off the `id` nonce rather than the command name, so
   // issuing the same command twice fires twice; clearing the params afterwards stops a re-render
@@ -520,14 +495,7 @@ export default function MapScreenBody() {
               onOpenProfile={(friendId) => focusRosterFriend(friendId, 'mid')}
               onSelect={focusRosterFriend}
               pairing={
-                <BumpPairingStrip
-                  error={bump.error}
-                  onArm={bump.arm}
-                  onCommit={bump.commit}
-                  pairing={bump.pairing}
-                  sensor={bump.sensor}
-                  theme={theme}
-                />
+                <OpenPairingStrip onOpen={() => router.push('/pairing' as Href)} theme={theme} />
               }
               theme={theme}
             />

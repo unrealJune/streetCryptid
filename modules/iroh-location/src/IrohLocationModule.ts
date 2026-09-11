@@ -367,6 +367,8 @@ export declare class IrohLocationNativeModule
   setPairingReady(ready: boolean): Promise<void>;
   pairingReady(): Promise<boolean>;
   createPairInvite(ttlSecs: number): Promise<PairInviteWithToken>;
+  /** Optional: absent on binaries built before invite revocation landed. Call behind a guard. */
+  revokePairInvite?(token: string): Promise<boolean>;
   initiatePair(invite: PairInvite): Promise<string>;
   initiatePairByToken(token: string): Promise<string>;
   initiatePairNearby(peerEndpointIdHex: string): Promise<string>;

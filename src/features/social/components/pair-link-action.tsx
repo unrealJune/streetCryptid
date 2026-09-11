@@ -123,7 +123,7 @@ export function PairLinkAction({
               if (pairingInputError) setPairingInputError(null);
             }}
             onSubmitEditing={() => void submitPairInput()}
-            placeholder="streetcryptid:///social?token=…"
+            placeholder="https://streetcrypt.id/pair#token=…"
             placeholderTextColor={theme.textSecondary}
             selectionColor={accent}
             style={[

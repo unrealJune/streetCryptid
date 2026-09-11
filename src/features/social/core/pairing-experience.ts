@@ -3,12 +3,21 @@ import type { PairStateRecord } from 'iroh-location';
 import type { Friend } from './types';
 
 export type PairingExperienceStage =
-  'idle' | 'seeking' | 'contact' | 'handshaking' | 'verifying' | 'joining' | 'discovered';
+  | 'idle'
+  | 'seeking'
+  | 'contact'
+  | 'handshaking'
+  | 'verifying'
+  | 'joining'
+  | 'discovered'
+  | 'failed';
 
 export interface PairingExperienceInput {
   bumpStage: 'idle' | 'armed' | 'searching' | 'contact' | 'failed';
   sessions: readonly PairStateRecord[];
   discoveredFriend: Friend | null;
+  /** Whether a pairing that had started has broken and not yet been dismissed. */
+  failed?: boolean;
 }
 
 export interface PairingHapticCadence {
@@ -20,6 +29,10 @@ export function derivePairingExperienceStage(
   input: PairingExperienceInput
 ): PairingExperienceStage {
   if (input.discoveredFriend) return 'discovered';
+  // Above the live stages for the same reason the screen ranks it there — and, more practically,
+  // because the pulse loop must STOP. A heartbeat still beating over a dead session is the worst
+  // possible lie for a haptic to tell: the one sense that cannot be ignored saying "still going".
+  if (input.failed) return 'failed';
   const verificationSessions = input.sessions.filter((session) =>
     ['verifying', 'localAccepted', 'peerAccepted'].includes(session.state)
   );
@@ -49,6 +62,7 @@ export function pairingHapticCadence(stage: PairingExperienceStage): PairingHapt
       return { delayMs: 240, strength: 'rigid' };
     case 'idle':
     case 'discovered':
+    case 'failed':
       return null;
   }
 }
@@ -130,7 +144,59 @@ const PULSE_BANDS: Record<PairingExperienceStage, PulseBand | null> = {
   },
   idle: null,
   discovered: null,
+  // Silent by construction. The one-shot collapse below is the whole of what a failure feels like.
+  failed: null,
 };
+
+// ── One-shot patterns ──────────────────────────────────────────────────────────────────────
+//
+// Events, not beats. Offsets in seconds from the start of the pattern.
+
+/** Bump contact: a fast rise into a hard stop. Short, because crisp means short. */
+export const CONTACT_STRIKE = [
+  { intensity: 0.5, sharpness: 0.7, atSeconds: 0 },
+  { intensity: 1, sharpness: 1, atSeconds: 0.045 },
+];
+
+/** Discovery: the payoff. A rise into a hit, then a settling double-tick. */
+export const DISCOVERY_FLOURISH = [
+  { intensity: 0.35, sharpness: 0.3, atSeconds: 0 },
+  { intensity: 0.55, sharpness: 0.45, atSeconds: 0.055 },
+  { intensity: 0.78, sharpness: 0.6, atSeconds: 0.1 },
+  { intensity: 1, sharpness: 0.95, atSeconds: 0.155 },
+  { intensity: 0.5, sharpness: 0.8, atSeconds: 0.3 },
+  { intensity: 0.32, sharpness: 0.7, atSeconds: 0.37 },
+];
+
+/**
+ * Failure: the mirror of the flourish. One hard, blunt hit, then a decay into nothing.
+ *
+ * Deliberately starts where the flourish ENDS — at full strength — and falls, where discovery
+ * rises. Low sharpness throughout, so it lands dull rather than crisp: a crisp failure reads as
+ * a confirmation, which is the one thing this must never be mistaken for. And it finishes at
+ * almost nothing rather than on a beat, because there is nothing after it.
+ */
+export const FAILURE_COLLAPSE = [
+  { intensity: 1, sharpness: 0.25, atSeconds: 0 },
+  { intensity: 0.6, sharpness: 0.2, atSeconds: 0.11 },
+  { intensity: 0.34, sharpness: 0.16, atSeconds: 0.21 },
+  { intensity: 0.16, sharpness: 0.12, atSeconds: 0.33 },
+  { intensity: 0.07, sharpness: 0.1, atSeconds: 0.47 },
+];
+
+/**
+ * The persona settling out of its ciphertext: a soft ripple that firms up.
+ *
+ * Quiet on purpose. Discovery already fired its flourish when the friend landed; this is the
+ * second, smaller beat of the same moment — the name arriving — and matching the flourish's
+ * strength would make the pair feel like two separate events.
+ */
+export const PERSONA_RESOLVE = [
+  { intensity: 0.18, sharpness: 0.2, atSeconds: 0 },
+  { intensity: 0.28, sharpness: 0.35, atSeconds: 0.07 },
+  { intensity: 0.42, sharpness: 0.55, atSeconds: 0.15 },
+  { intensity: 0.6, sharpness: 0.7, atSeconds: 0.24 },
+];
 
 /** Weakest and strongest BLE RSSI we map across, in dBm. Beyond either end we clamp. */
 const RSSI_FLOOR_DBM = -95;

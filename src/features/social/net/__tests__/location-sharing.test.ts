@@ -382,6 +382,42 @@ describe('LocationSharingService — durable trail wiring', () => {
     expect(mockHolder.mod.calls.syncLatest).toEqual([{ peerTickets: [] }]);
   });
 
+  it('coalesces overlapping trail syncs into one native pass', async () => {
+    // Regression, 2026-09-10. `syncTrail` is fired by a node restart, a foreground resume, a
+    // completed pair and the init effect, and none of them knew about the others. Measured on one
+    // phone: five passes in flight at once, each over 100s, all reconciling the same replicas —
+    // and between them they saturated the docs engine that the pairing poll's profile reads have
+    // to queue behind, which is what made the SAS screen open a minute late.
+    //
+    // `syncLatest` is a global, idempotent pass over every namespace, so a second caller wants
+    // exactly the work already underway. It joins instead of starting a rival.
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    mockHolder.mod.calls.syncLatest.length = 0;
+
+    let release = () => {};
+    const inFlight = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const record = mockHolder.mod.syncLatest.bind(mockHolder.mod);
+    mockHolder.mod.syncLatest = async (peerTickets: string[], traceparent?: string | null) => {
+      await record(peerTickets, traceparent);
+      await inFlight;
+    };
+
+    const first = svc.syncTrail(0);
+    const second = svc.syncTrail(0);
+    release();
+    await Promise.all([first, second]);
+
+    expect(mockHolder.mod.calls.syncLatest).toHaveLength(1);
+
+    // The join is per-pass, not a latch: once it settles the next caller starts a fresh one.
+    mockHolder.mod.syncLatest = record;
+    await svc.syncTrail(0);
+    expect(mockHolder.mod.calls.syncLatest).toHaveLength(2);
+  });
+
   it('moves our own dot from the replica, not only from a manual push', async () => {
     // Regression, 2026-08-30: "I cannot hit the location button (greyed out) after restarting the
     // app. It seems to only work when a push has happened."

@@ -56,6 +56,10 @@ export default function RootLayout() {
                     is a floating island or a sheet pushed over it. */}
                 <Stack screenOptions={{ headerShown: false }}>
                   <Stack.Screen name="index" />
+                  <Stack.Screen
+                    name="pairing"
+                    options={{ animation: 'fade', gestureEnabled: false }}
+                  />
                   <Stack.Screen name="settings" options={{ presentation: 'modal' }} />
                 </Stack>
                 {/* Pairing interrupts are global: a verification challenge or a

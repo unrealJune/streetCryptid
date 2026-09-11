@@ -52,7 +52,7 @@ describe('SettingsScreen', () => {
   it('lists every settings area as its own page', () => {
     expect(rows().map((row) => row.href)).toEqual([
       '/settings/transports',
-      '/settings/pairing',
+      '/pairing',
       '/settings/delivery',
       '/settings/appearance',
       '/settings/app-data',
