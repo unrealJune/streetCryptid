@@ -1,5 +1,4 @@
 import { SymbolView } from 'expo-symbols';
-import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { CryptidTheme } from '@/constants/cryptid-theme';
@@ -22,7 +21,15 @@ export type MapLayerId = keyof MapLayerToggles;
 interface MapLayersControlProps {
   readonly layers: MapLayerToggles;
   readonly theme: CryptidTheme;
+  /**
+   * Whether the panel is open. Owned by the screen rather than by this control: the panel is a
+   * popover over the map, and a popover has to close when the user's attention moves on — which
+   * only the screen can see, because the taps that move it (the map, the drawer, a roster row)
+   * land on components this one knows nothing about.
+   */
+  readonly expanded: boolean;
   onChange(layer: MapLayerId, enabled: boolean): void;
+  onExpandedChange(expanded: boolean): void;
 }
 
 const LAYERS: { readonly id: MapLayerId; readonly title: string }[] = [
@@ -33,8 +40,13 @@ const LAYERS: { readonly id: MapLayerId; readonly title: string }[] = [
 ];
 
 /** A compact map-layer control that expands in place instead of opening a modal. */
-export function MapLayersControl({ layers, theme, onChange }: MapLayersControlProps) {
-  const [expanded, setExpanded] = useState(false);
+export function MapLayersControl({
+  layers,
+  theme,
+  expanded,
+  onChange,
+  onExpandedChange,
+}: MapLayersControlProps) {
   const { chrome } = theme;
   // The FAB reads lit while anything the panel can switch off is still on.
   const anyEnabled = LAYERS.some((layer) => layers[layer.id]);
@@ -62,7 +74,7 @@ export function MapLayersControl({ layers, theme, onChange }: MapLayersControlPr
         accessibilityLabel="Map layers"
         accessibilityRole="button"
         accessibilityState={{ expanded }}
-        onPress={() => setExpanded((current) => !current)}
+        onPress={() => onExpandedChange(!expanded)}
         style={({ pressed }) => [
           styles.fab,
           {

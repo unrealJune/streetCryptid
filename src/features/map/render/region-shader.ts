@@ -23,6 +23,7 @@ import type { AeroAreaKind, AeroLineKind, MapPalette, Rgb, TransitMode } from '.
 import type { MapRegion } from '../engine/map-engine';
 import { buildCellStateImage } from './cell-state-image';
 import { cellLatticePath, cellRimPath, exploredCellPath } from './cell-overlay-paths';
+import { GHOST_LATTICE_WIDTH } from '../core/hex-lattice';
 import { getDotFieldEffect } from './dot-field-shader';
 import { buildMaskImage } from './mask-image';
 import { buildHatchPath, buildStructurePaths } from './structure-paths';
@@ -54,7 +55,6 @@ const MAX_IMAGE_DIM = 2400;
 const MAX_PIXEL_RATIO = 2;
 
 /** Ghost lattice / frontier rim styling (logical px + alphas from the old shader). */
-const LATTICE_WIDTH = 1.0;
 const LATTICE_ALPHA = 0.09;
 const RIM_WIDTH = 1.25;
 const RIM_ALPHA = 0.42;
@@ -250,7 +250,7 @@ function drawCellOverlays(
   if (latticeAlpha > 0) {
     const lattice = Skia.Path.MakeFromSVGString(cellLatticePath(region.cellField, region.spec));
     if (lattice)
-      canvas.drawPath(lattice, strokePaint(palette.streetLabel, LATTICE_WIDTH, latticeAlpha));
+      canvas.drawPath(lattice, strokePaint(palette.streetLabel, GHOST_LATTICE_WIDTH, latticeAlpha));
   }
   if (rimAlpha > 0) {
     const rim = Skia.Path.MakeFromSVGString(cellRimPath(region.cellField, region.spec));

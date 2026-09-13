@@ -102,6 +102,12 @@ export default function MapScreenBody() {
   const setLayer = useCallback((layer: MapLayerId, enabled: boolean) => {
     setLayers((current) => ({ ...current, [layer]: enabled }));
   }, []);
+  // The layers panel is a popover over the map, so the screen owns whether it is open: it closes
+  // on the next thing the user touches — the canvas, the drawer, Settings, locate — rather than
+  // only on a second press of its own button. `useState`'s bail-out makes the already-closed case
+  // free, which matters because the map reports every touch down through `closeLayers`.
+  const [layersOpen, setLayersOpen] = useState(false);
+  const closeLayers = useCallback(() => setLayersOpen(false), []);
   const [islandTab, setIslandTab] = useState<IslandTab>('me');
   const [detent, setDetent] = useState<DrawerDetent>('peek');
   // ME has a fixed summary and a chevron. FRIENDS minimizes via the collapsed detent.
@@ -261,6 +267,7 @@ export default function MapScreenBody() {
    * read is the whole of it, which is what the spinner is for.
    */
   const locateSelf = useCallback(() => {
+    closeLayers();
     if (selfFix) {
       setLocateTarget((current) => ({
         requestId: (current?.requestId ?? 0) + 1,
@@ -277,12 +284,13 @@ export default function MapScreenBody() {
         }));
       })
       .finally(() => setLocating(false));
-  }, [selfFix, locateNow]);
+  }, [closeLayers, selfFix, locateNow]);
   // The island's segmented bar is the app's only navigation. Either tab also
   // dismisses whatever trace was drilled into, so the bar can never look dead —
   // and so tapping the tab you are already "on" is a way back out of a trace.
   const selectIslandTab = useCallback(
     (tab: IslandTab) => {
+      closeLayers();
       closeHistory();
       setIslandTab(tab);
       setDetent('peek');
@@ -290,20 +298,22 @@ export default function MapScreenBody() {
       // with a one-line panel and no obvious way back.
       setMinimized(false);
     },
-    [closeHistory]
+    [closeHistory, closeLayers]
   );
   // Collapse to the header line. The drawer comes back to peek in the same gesture, because a
   // minimized body at mid or full would be the blank island the detents exist to avoid.
   const toggleMinimize = useCallback(() => {
+    closeLayers();
     setMinimized((current) => !current);
     setDetent('peek');
-  }, []);
+  }, [closeLayers]);
   // Tapping a roster row is the same gesture as tapping the locator: fly there
   // and open the trace. The roster steps aside so the map it just moved is
   // visible, but the FRIENDS tab stays lit — you drilled in from there, and
   // closing the trace should put you back on the roster, not on ME.
   const focusRosterFriend = useCallback(
     (friendId: string, openAt: DrawerDetent = 'peek') => {
+      closeLayers();
       setIslandTab('friends');
       setSelection((current) => ({ ...current, selectedId: friendId }));
       setDetent(openAt);
@@ -317,7 +327,7 @@ export default function MapScreenBody() {
         location: target.location,
       }));
     },
-    [mapFriends]
+    [closeLayers, mapFriends]
   );
 
   // The friend whose pane the drawer is showing. Selecting a locator on the map and tapping a
@@ -396,8 +406,11 @@ export default function MapScreenBody() {
   // segmented bar right on top of the gesture handle. `Spacing.three` matches the
   // island's own side inset, so it sits in a square margin rather than a slot.
   // ME has no extra content to drag open. FRIENDS keeps its grip even when collapsed.
+  // A friend's pane tops out at `mid`: it says everything it has by then, and `full` docked it
+  // edge-to-edge with a screen of empty island under the last row — the exact case `maxDetent`
+  // was added for. The roster is the body that genuinely grows with its content.
   const drawerMax: DrawerDetent = detailPresence
-    ? 'full'
+    ? 'mid'
     : minimized || !rosterOpen
       ? 'peek'
       : 'full';
@@ -423,6 +436,7 @@ export default function MapScreenBody() {
           locateTarget={locateTarget}
           onSelectFriend={selectFriend}
           onSelectSelf={selectSelf}
+          onInteraction={closeLayers}
           friends={mapFriends}
           selectedFriendId={selectedEndpoint === SELF_AUTHOR ? null : selectedEndpoint}
           selfHistory={selfHistory}
@@ -442,13 +456,25 @@ export default function MapScreenBody() {
         >
           © OPENSTREETMAP
         </Text>
-        <SettingsControl onPress={() => router.push('/settings')} theme={theme} />
+        <SettingsControl
+          onPress={() => {
+            closeLayers();
+            router.push('/settings');
+          }}
+          theme={theme}
+        />
       </View>
       {/* Only map affordances float: layers and locate. They ride above the drawer and are
           pushed off-screen as it docks, which is correct — a full sheet is not a map view. */}
       <View pointerEvents="box-none" style={styles.islandLayer}>
         <View pointerEvents="box-none" style={styles.controls}>
-          <MapLayersControl layers={layers} onChange={setLayer} theme={theme} />
+          <MapLayersControl
+            expanded={layersOpen}
+            layers={layers}
+            onChange={setLayer}
+            onExpandedChange={setLayersOpen}
+            theme={theme}
+          />
           <LocateMeControl busy={locating} onPress={locateSelf} theme={theme} />
         </View>
         <MapDrawer
@@ -458,7 +484,10 @@ export default function MapScreenBody() {
           insetTop={insets.top}
           maxDetent={drawerMax}
           minDetent={rosterOpen ? 'collapsed' : 'peek'}
-          onDetentChange={setDetent}
+          onDetentChange={(next) => {
+            closeLayers();
+            setDetent(next);
+          }}
           onSelectTab={selectIslandTab}
           screenHeight={screenHeight}
           signal={selfSignal}
@@ -531,6 +560,7 @@ function MapSession({
   onReadout,
   onSelectFriend,
   onSelectSelf,
+  onInteraction,
   selfHistory,
   selfSelected,
   selfColor,
@@ -549,6 +579,7 @@ function MapSession({
   onReadout(readout: MapReadout): void;
   onSelectFriend(friendId: string): void;
   onSelectSelf(): void;
+  onInteraction(): void;
   selfHistory: readonly MapTrailLocation[];
   selfSelected: boolean;
   selfColor: Rgb;
@@ -567,6 +598,7 @@ function MapSession({
       locateTarget={locateTarget}
       onSelectFriend={onSelectFriend}
       onSelectSelf={onSelectSelf}
+      onInteraction={onInteraction}
       friends={friends}
       selectedFriendId={selectedFriendId}
       selfHistory={selfHistory}

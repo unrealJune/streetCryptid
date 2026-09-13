@@ -9,6 +9,7 @@ import {
   useColorScheme,
   View,
 } from 'react-native';
+import { SymbolView } from 'expo-symbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
@@ -233,7 +234,7 @@ export function CryptidProfileEditor({
   useEffect(() => {
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
 
-    // An unconfirmed roll is held back until Keep (or Done) accepts it.
+    // An unconfirmed roll is held back until Keep accepts it.
     if (!validProfile || displacedPersona) {
       desiredSaveRef.current = null;
       return;
@@ -357,6 +358,24 @@ export function CryptidProfileEditor({
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.shell}>
+          {mode === 'edit' && onDone ? (
+            <Pressable
+              accessibilityLabel="Back to settings"
+              accessibilityRole="button"
+              hitSlop={8}
+              onPress={onDone}
+              style={({ pressed }) => [styles.backButton, { opacity: pressed ? 0.55 : 1 }]}
+            >
+              <SymbolView
+                name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
+                size={15}
+                tintColor={theme.textSecondary}
+              />
+              <ThemedText type="smallBold" themeColor="textSecondary" style={styles.backButtonText}>
+                SETTINGS
+              </ThemedText>
+            </Pressable>
+          ) : null}
           <View style={styles.headerRow}>
             <View style={styles.headerCopy}>
               <ThemedText style={styles.title}>
@@ -368,25 +387,6 @@ export function CryptidProfileEditor({
                   : 'This is how you appear to friends.'}
               </ThemedText>
             </View>
-            {mode === 'edit' && onDone ? (
-              <Pressable
-                accessibilityRole="button"
-                disabled={finishing}
-                onPress={() => void finish()}
-                style={({ pressed }) => [
-                  styles.doneButton,
-                  {
-                    backgroundColor: theme.backgroundElement,
-                    borderColor: theme.backgroundSelected,
-                    opacity: finishing ? 0.45 : pressed ? 0.65 : 1,
-                  },
-                ]}
-              >
-                <ThemedText style={styles.doneButtonText}>
-                  {finishing ? 'Saving...' : 'Done'}
-                </ThemedText>
-              </Pressable>
-            ) : null}
           </View>
 
           {statusLabel ? (
@@ -901,19 +901,16 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     maxWidth: 480,
   },
-  doneButton: {
+  backButton: {
     alignItems: 'center',
-    borderRadius: 999,
-    borderWidth: StyleSheet.hairlineWidth,
+    alignSelf: 'flex-start',
     justifyContent: 'center',
-    minHeight: 42,
-    minWidth: 68,
-    paddingHorizontal: Spacing.three,
+    flexDirection: 'row',
+    gap: Spacing.one,
+    minHeight: 32,
   },
-  doneButtonText: {
-    fontSize: 15,
-    fontWeight: '700',
-    lineHeight: 20,
+  backButtonText: {
+    letterSpacing: 1,
   },
   saveStatus: {
     alignSelf: 'flex-end',
