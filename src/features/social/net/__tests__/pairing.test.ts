@@ -251,7 +251,11 @@ jest.mock('expo-secure-store', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { LocationSharingService, type SharingSnapshot } from '../location-sharing';
+import {
+  LocationSharingService,
+  profileBackfillDelayMs,
+  type SharingSnapshot,
+} from '../location-sharing';
 
 /**
  * A service started here owns a 4s pairing poll (and, once sharing is on, a live-request poll).
@@ -1357,6 +1361,59 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     } finally {
       nowSpy.mockRestore();
     }
+  });
+
+  it('backs the profile retry off from one second, capped', () => {
+    // The first attempt is immediate; these are the gaps after it. The cap is what keeps ten
+    // attempts inside the few minutes the bounded retry is documented to cover.
+    expect(profileBackfillDelayMs(1)).toBe(1_000);
+    expect(profileBackfillDelayMs(2)).toBe(2_000);
+    expect(profileBackfillDelayMs(3)).toBe(4_000);
+    expect(profileBackfillDelayMs(10)).toBe(60_000);
+    expect(profileBackfillDelayMs(0)).toBe(1_000);
+  });
+
+  // Regression, 2026-09-13: a pair completed at 21:50:55 and the persona did not land until
+  // 21:51:20 — the reveal having given up at 21:51:07. Nothing was slow; the retry was simply not
+  // allowed to run. The sweep stamped ONE clock the instant its gate opened, before checking
+  // whether any friend needed work, so the pass that ran against an empty pool at launch spent
+  // the quota and the pair that completed seconds later served out the remainder.
+  it('retries a personaless pair at once, and paces each friend on their own clock', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    // An empty-pool sweep at launch must cost a later pair nothing.
+    await svc.refreshPairing();
+    mockHolder.mod.calls.importProfileTicket.length = 0;
+
+    mockHolder.mod.pairResults.set(
+      'sess-a',
+      pairResult({ sessionId: 'sess-a', peerEndpointId: 'aaaa0001', peerProfile: null })
+    );
+    mockHolder.mod.pairEvents = [
+      { kind: 'ready', sessionId: 'sess-a', peerEndpointId: 'aaaa0001', nearby: true },
+    ];
+    await svc.refreshPairing();
+
+    // The reveal is on screen now, so the first re-dial happens now — not on the next sweep.
+    expect(mockHolder.mod.calls.importProfileTicket).toContain('peer-profile');
+
+    // A second friend paired immediately after must not inherit the first one's backoff.
+    mockHolder.mod.calls.importProfileTicket.length = 0;
+    mockHolder.mod.profiles.set(
+      'bbbb0002',
+      profileView({ endpointId: 'bbbb0002', epoch: 5, handle: '@second', sigil: 'wendigo' })
+    );
+    mockHolder.mod.pairResults.set(
+      'sess-b',
+      pairResult({ sessionId: 'sess-b', peerEndpointId: 'bbbb0002', peerProfile: null })
+    );
+    mockHolder.mod.pairEvents = [
+      { kind: 'ready', sessionId: 'sess-b', peerEndpointId: 'bbbb0002', nearby: true },
+    ];
+    await svc.refreshPairing();
+
+    expect(snap.current?.friends.find((f) => f.endpointId === 'bbbb0002')?.handle).toBe('@second');
   });
 
   it('re-arms replication for a friend paired without a profile', async () => {

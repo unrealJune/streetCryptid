@@ -33,6 +33,7 @@ import {
   traceparentFor,
   type Span,
   type SpanContext,
+  reportOsDiagnostics,
 } from '@/features/dev/telemetry';
 import { encodeContactCard } from '../core/contact-card';
 import {
@@ -52,6 +53,7 @@ import {
 } from '../core/pairing-code';
 import { isPairingFigureIndex } from '../core/pairing-figures';
 import type { PeerKind } from '../core/peer-reachability';
+import { hasVerifiedProfile } from '../core/persona-reveal';
 import { buildFriendPresence, type PresenceState } from '../core/presence';
 import * as pool from '../core/pool';
 import {
@@ -134,6 +136,21 @@ import { loadSeq, saveSeq } from './state-store';
  * See {@link LocationSharingService.awaitRuntimeIdleBounded}.
  */
 const RUNTIME_IDLE_WAIT_TIMEOUT_MS = 5_000;
+
+/**
+ * How long a launch waits for the native node to start before giving up on it.
+ *
+ * Deliberately well above the native bounds it backstops (BLE attach 10 s + endpoint bind 30 s),
+ * because it is not a competing deadline — it is the guard for a binary that does not have them.
+ * A phone can be running an older `.so`/XCFramework than the JS bundle, and on 2026-09-13 exactly
+ * that combination (unbounded `ble::attach`, awaited under the node lock) left an iPhone dark for
+ * 13 h and then hung the splash screen on relaunch, with no span or log to say why.
+ *
+ * On expiry the launch FAILS rather than continuing: the native call is still running — JS cannot
+ * cancel it — so there is no node, and a service that pretends otherwise publishes nothing while
+ * reporting itself ready. An error the user can retry is the honest outcome.
+ */
+const NATIVE_START_TIMEOUT_MS = 60_000;
 
 /**
  * A single live SAS verification the UI must resolve before a pair can complete. One entry per
@@ -390,21 +407,37 @@ const BUMP_RESOLVE_TIMEOUT_MS = 12_000;
 export const BUMP_WINDOW_MS = 120_000;
 
 /**
- * How often we re-arm profile replication for a friend still wearing the pairing placeholder.
+ * The gap between the first re-arm of a friend's profile replication and the second.
  *
- * A friend's persona reaches us only if the single `import_ticket` dial made when the pair
- * completed actually reconciled; nothing behind it retries. A one-way network failure (the exact
- * shape of the Android 15+ local-network block) therefore used to strand one side of a Bump on
- * `@endpointprefix` / `unknown` forever while the other side paired cleanly.
+ * The FIRST attempt is not delayed at all — {@link LocationSharingService.onPairReady} makes it
+ * the moment the reveal appears. This paces what follows.
+ *
+ * Since the v4 pairing wire a persona normally arrives ON the Accept, so this path no longer
+ * covers the ordinary pair at all — it covers a peer who had published nothing when we bumped
+ * them, and an `import_ticket` dial that lost (the exact shape of the Android 15+ local-network
+ * block). Both of those want a retry in a second, not in half a minute: the retry the user
+ * actually sits through is the early one.
  */
-const PROFILE_BACKFILL_INTERVAL_MS = 30_000;
+const PROFILE_BACKFILL_FIRST_DELAY_MS = 1_000;
+
+/** Each attempt waits twice as long as the last, up to this. */
+const PROFILE_BACKFILL_MAX_DELAY_MS = 60_000;
 
 /**
- * Give up re-arming a friend's profile after this many tries (~5 min at the interval above).
+ * Give up re-arming a friend's profile after this many tries (~5 min at the backoff above).
  * Bounded because a friend who has genuinely published nothing must not be re-dialled for the
  * lifetime of the process; a relaunch re-imports every ticket anyway and resets the count.
  */
 const PROFILE_BACKFILL_MAX_ATTEMPTS = 10;
+
+/**
+ * How long to wait after `attempts` attempts: 1s, 2s, 4s … capped at
+ * {@link PROFILE_BACKFILL_MAX_DELAY_MS}. Ten attempts spans roughly four minutes.
+ */
+export function profileBackfillDelayMs(attempts: number): number {
+  const grown = PROFILE_BACKFILL_FIRST_DELAY_MS * 2 ** Math.max(0, attempts - 1);
+  return Math.min(grown, PROFILE_BACKFILL_MAX_DELAY_MS);
+}
 
 /**
  * How long trail-change notifications are gathered before the fan-out fires.
@@ -656,10 +689,19 @@ export class LocationSharingService {
    * cost the friend their persona until the next relaunch. Flushed by {@link onPairReady}.
    */
   private readonly pendingProfiles = new Map<string, ProfileView>();
-  /** Re-arm attempts per friend for {@link backfillMissingProfiles}, bounded and in-memory. */
-  private readonly profileBackfillAttempts = new Map<string, number>();
-  /** When the profile backfill sweep last ran, so it paces off the pairing poll. */
-  private lastProfileBackfillAt = 0;
+  /**
+   * Per-friend retry schedule for {@link backfillMissingProfiles}: attempts so far, and the
+   * earliest time the next one may run.
+   *
+   * Per friend, and not one clock for the sweep, because a shared clock is spent by whoever
+   * touches it first. The sweep used to stamp a single `lastProfileBackfillAt` the moment its
+   * gate opened — before checking whether any friend actually needed work — so the pass that ran
+   * against an empty pool at launch burned the quota, and a pair completing five seconds later
+   * waited out the remaining twenty-five. Measured on an iPhone on 2026-09-13: pair complete at
+   * 21:50:55, persona at 21:51:20, the reveal having given up at 21:51:07. Two friends paired in
+   * a row had the same problem for the same reason.
+   */
+  private readonly profileBackfill = new Map<string, { attempts: number; nextAt: number }>();
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private pollInFlight: Promise<void> | null = null;
   /**
@@ -882,6 +924,13 @@ export class LocationSharingService {
     if (!this.keys) return;
     const instanceId = this.keys.endpointId.slice(0, 10);
     getTelemetry().setResourceAttributes({ 'service.instance.id': instanceId });
+    // Hand over anything the OS recorded about how a PREVIOUS run ended. Here because it needs
+    // the native module, after the resource attributes above so a crash report is attributed to
+    // the phone that produced it — and BEFORE the returns below, which are about the NATIVE
+    // exporter. Those two capabilities ship independently: a binary can carry MetricKit and not
+    // the otel feature, and a build with no collector endpoint still wants the crash in its local
+    // journal, which is what the Settings event-log viewer reads.
+    void reportOsDiagnostics(this.mod);
     const config = getOtelConfig();
     if (!config || !this.mod || typeof this.mod.configureTelemetry !== 'function') return;
     try {
@@ -992,7 +1041,7 @@ export class LocationSharingService {
     // by older persisted diagnostics a few awaits later.
     this.ratchetActivity = await loadRatchetActivity(this.kv);
     this.transportPreferences = await loadTransportPreferences(this.kv);
-    await this.mod.start(this.transportPreferences);
+    await this.startNativeBounded(this.mod);
     // After `start`, which is where the native drain path's stores are opened.
     await this.adoptNativeSeq();
     await this.resolveStashEndpointId();
@@ -1138,7 +1187,7 @@ export class LocationSharingService {
 
     if (this.discoveredFriend?.endpointId === endpointId) this.discoveredFriend = null;
     this.pendingProfiles.delete(endpointId);
-    this.profileBackfillAttempts.delete(endpointId);
+    this.profileBackfill.delete(endpointId);
     this.droppedRecipients.delete(endpointId);
     this.sessionVerdicts.delete(endpointId);
     delete this.ratchetActivity[endpointId];
@@ -1368,7 +1417,7 @@ export class LocationSharingService {
 
     await mod.shutdown();
     this.keys = await mod.createNode(keys.identitySecret, keys.recvSecret);
-    await mod.start(this.transportPreferences);
+    await this.startNativeBounded(mod);
     this.ticketStr = await mod.ticket();
     this.docTicketStr = await this.safeDocTicket();
     this.profileEpoch = await this.safePublishProfile();
@@ -1405,7 +1454,7 @@ export class LocationSharingService {
     this.discoveredFriend = null;
     this.state = pool.removeFriend(this.state, friend.endpointId);
     this.pendingProfiles.delete(friend.endpointId);
-    this.profileBackfillAttempts.delete(friend.endpointId);
+    this.profileBackfill.delete(friend.endpointId);
     this.persistPool();
     this.setPairingActivity('cryptid rejected');
 
@@ -3047,6 +3096,44 @@ export class LocationSharingService {
     return this.nodeAdoptionSupported;
   }
 
+  /**
+   * `mod.start()`, bounded — see {@link NATIVE_START_TIMEOUT_MS}.
+   *
+   * Emits `node.start_timeout` on expiry. That span is the whole point of the bound: a native
+   * start that never returns is otherwise completely silent, because every span the launch would
+   * have emitted is downstream of the call that is stuck.
+   */
+  private async startNativeBounded(mod: IrohLocationNativeModule): Promise<void> {
+    const startedAt = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), NATIVE_START_TIMEOUT_MS);
+      (timer as unknown as { unref?: () => void }).unref?.();
+    });
+    try {
+      const outcome = await Promise.race([
+        mod.start(this.transportPreferences).then(() => 'started' as const),
+        deadline,
+      ]);
+      if (outcome === 'timeout') {
+        getTelemetry()
+          .startSpan('node.start_timeout', {
+            attributes: {
+              'node.start_wait_ms': Date.now() - startedAt,
+              'sc.drop_reason': 'native-start-timeout',
+            },
+          })
+          .end();
+        // Flush explicitly: on a headless wake the OS may freeze us the moment this rejects, and
+        // this span is the only record that the start is still stuck in native code.
+        await this.flushDevTelemetry().catch(() => undefined);
+        throw new Error(`native start did not return within ${NATIVE_START_TIMEOUT_MS}ms`);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async awaitRuntimeIdleBounded(): Promise<void> {
     // A force-quit relaunch is the most likely thing to follow a teardown hang — the user kills the
     // frozen app and reopens it — so this launch is often the first context able to report it.
@@ -3898,23 +3985,31 @@ export class LocationSharingService {
   /**
    * Re-arm replication for friends who still have no verified profile, then re-read.
    *
-   * Paced by {@link PROFILE_BACKFILL_INTERVAL_MS} and capped at
-   * {@link PROFILE_BACKFILL_MAX_ATTEMPTS} per friend, so a peer who published nothing costs a
-   * handful of dials rather than a permanent retry loop. `profileEpoch` is the honest "we merged a
-   * real profile" marker — {@link mergeProfileIntoFriend} sets it and nothing else does.
+   * Scheduled per friend on the backoff in {@link profileBackfillDelayMs} and capped at
+   * {@link PROFILE_BACKFILL_MAX_ATTEMPTS}, so a peer who published nothing costs a handful of
+   * dials rather than a permanent retry loop. `profileEpoch` is the honest "we merged a real
+   * profile" marker — {@link mergeProfileIntoFriend} sets it and nothing else does.
    */
   private async backfillMissingProfiles(): Promise<void> {
     const mod = this.mod;
     if (!mod) return;
     const now = Date.now();
-    if (now - this.lastProfileBackfillAt < PROFILE_BACKFILL_INTERVAL_MS) return;
-    this.lastProfileBackfillAt = now;
 
     for (const friend of pool.friendList(this.state)) {
-      if (!friend.profileTicket || friend.profileEpoch !== undefined) continue;
-      const attempts = this.profileBackfillAttempts.get(friend.endpointId) ?? 0;
-      if (attempts >= PROFILE_BACKFILL_MAX_ATTEMPTS) continue;
-      this.profileBackfillAttempts.set(friend.endpointId, attempts + 1);
+      if (friend.profileEpoch !== undefined) {
+        this.profileBackfill.delete(friend.endpointId);
+        continue;
+      }
+      if (!friend.profileTicket) continue;
+      const state = this.profileBackfill.get(friend.endpointId);
+      if (state && (state.nextAt > now || state.attempts >= PROFILE_BACKFILL_MAX_ATTEMPTS)) {
+        continue;
+      }
+      const attempts = (state?.attempts ?? 0) + 1;
+      this.profileBackfill.set(friend.endpointId, {
+        attempts,
+        nextAt: now + profileBackfillDelayMs(attempts),
+      });
       await mod.importProfileTicket(friend.profileTicket).catch(() => undefined);
       const profile = await mod.readProfile(friend.endpointId).catch(() => null);
       if (profile) this.applyProfile(profile);
@@ -4465,6 +4560,11 @@ export class LocationSharingService {
     void this.syncTrail(0);
     this.setPairingActivity('cryptid discovered');
     this.handledPairSessions.add(event.sessionId);
+    // Since the v4 wire the persona is normally already merged above, straight off the Accept.
+    // When it is not — the peer had published nothing when we bumped them — the reveal is on
+    // screen NOW, so the first retry belongs here rather than whenever the next sweep comes
+    // round. Not awaited: the discovery is complete either way and must not wait on a dial.
+    if (!hasVerifiedProfile(friend)) void this.backfillMissingProfiles();
   }
 
   /** Build a Friend from a pair result with a safe placeholder identity (no verified profile yet). */

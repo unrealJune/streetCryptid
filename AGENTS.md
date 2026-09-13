@@ -58,6 +58,28 @@ Conventions when changing that code:
   stopped waking emits nothing by construction: a gap between records is a thing that can be
   measured and shown, and no other span can be. The device-health dashboard's top row turns those
   gaps into counts; they are deliberately not wired to Alertmanager.
+- **A gap in the data has three causes and `sc.run_id` is what separates them.** Every span carries
+  a per-JS-context run id, so a process that restarted is visible as one; a suspension is not, since
+  the same context resumes. `app.previous_run`, emitted once at foreground launch, reports how the
+  LAST run ended — `prev.last_state` is the discriminator (`active` means it was killed out from
+  under someone: crash, watchdog or jetsam; `background` means iOS reclaimed it, which is routine)
+  and `prev.dark_ms` measures the hole against the journal's newest row. `ui.hang` covers the fourth
+  state, alive but frozen: a `requestAnimationFrame` probe reports past 3 s **while the hang is
+  still running** and flushes, because a hang that ends in death never recovers to report. None of
+  this separates a crash from a force-quit — nothing in-process can, and that lives in MetricKit or
+  the device's `.ips`. Both probes are foreground-only: the OS ends headless contexts without
+  ceremony every time, and they share one journal with the app.
+- **The OS's account of the ending is MetricKit's, and it is the only one there is.**
+  `MetricKitDiagnostics.swift` subscribes at module creation — not lazily — because a payload
+  arrives shortly after the launch that FOLLOWS the crash and is never redelivered, so a
+  subscriber registered when JS first asks would miss every launch that matters. Payloads spool to
+  a file for the same reason the telemetry journal exists: a headless wake that ends before
+  draining would lose them permanently. `takeCrashDiagnostics` drains it into `ios.diagnostic`
+  spans; `termination_reason` is where a jetsam and a watchdog kill name themselves, and a hang's
+  `duration_ms` needs no symbolication to be worth reading. Only a BOUNDED flattened stack is
+  forwarded (binary+offset, attributed thread first, 48 frames) — a full call-stack tree is
+  hundreds of kilobytes and would make telemetry the reason a phone stops shipping telemetry.
+  `diag.*` attributes describe the build that DIED, which is routinely not the build reporting it.
 - **Do not add a battery-optimisation prompt to "fix" Android background reliability without
   re-checking this first.** Android already restores sharing on its own: expo-task-manager's
   `TaskBroadcastReceiver` is registered for `BOOT_COMPLETED` (and `RECEIVE_BOOT_COMPLETED` is
@@ -100,8 +122,59 @@ Conventions when changing that code:
   separate frozen type (`StoredFix`) on purpose: the outbox and gate discard everything on a decode
   failure, so growing the type they persist would wipe `last_known_fix` fleet-wide on upgrade and
   silence every parked phone.
+- **The PAIRING wire is the opposite, and the rule above does not carry over to it.** `PairMsg` is
+  ed25519-signed, and `pair_signing_bytes` signs a re-encode of the DECODED struct — so a peer that
+  does not know a newly appended field drops it, reconstructs different bytes, and fails the
+  signature. Appending is a BREAKING change there however tolerant postcard is. Bump `PAIR_ALPN`
+  (not only `PAIR_WIRE_V`) so the mismatch fails at negotiation rather than as "your friend's phone
+  refused the pair". v4 carries the sender's signed `ProfileRecord` on the `Accept`, which is why a
+  persona now arrives WITH the pair instead of after a separate iroh-docs dial; the profile ticket
+  still rides along, and is now only how later edits arrive.
 - Guard newly added native exports anyway (`typeof mod.configureTelemetry === 'function'`). Not
   because of bindgen now, but because a phone can be running an older binary than the JS bundle.
+
+## Store screenshots
+
+**`just store-shots` photographs the REAL app, not a mockup** — there is no iOS simulator on the
+machine this was built on, so it drives the web target (react-native-web + CanvasKit + the
+`rust-wasm` build of the location core) in Chrome over a hand-rolled CDP client
+(`scripts/cdp.ts`), at the exact pixel sizes App Store Connect demands: iPhone 6.9" 1290×2796 and,
+while `ios.supportsTablet` is true, iPad 13" 2064×2752. It then frames each capture with a
+headline in the app's own typefaces. Same argument as `map-shot.ts` one level up: use the wasm
+path we already ship rather than a device we cannot run.
+
+- **The demo people and the demo walk are compiled out, not switched off.**
+  `@/features/dev/fixtures` resolves to `index.noop.ts` unless
+  `EXPO_PUBLIC_SCREENSHOT_FIXTURES=1`, by the same `metro.config.js` rule that strips
+  `@/features/dev/telemetry`. `scripts/check-release-telemetry.mjs` fails CI if a store profile
+  sets the variable — and unlike the telemetry keys there is NO `ACKNOWLEDGED` escape for it,
+  because there is no version of a shipping build where fabricated friends on a real user's map
+  is a trade-off worth recording.
+- **Fixtures are inputs, never outputs.** They go in as `Friend` records, `LocationFix` points and
+  a `TrailStorage` decorator, and everything shown is then derived by the shipping code — the
+  presence states ("here now", "parked here 2 hr", "out of contact 5 hr"), the distances and the
+  marker styling all come out of `buildFriendPresence`. Nothing fakes a rendering, and
+  `withFixtureTrailStorage` decorates `selfRange` only, so no invented point is ever persisted.
+  Exploration needs its own seam because `createLiveExplorationSource` scans persisted storage
+  rather than the trail the UI holds.
+- **The walk is tuned between two failure modes and both are easy to re-break.** Too spread out
+  and the reveal is a thread that lights nothing (900 points over 1.1 km left coverage at 3%);
+  too many points and the one-awaited-`recordFix`-per-point fold starves the JS thread badly
+  enough that no tile finishes and the capture comes out blank (3000 did). 400 points inside a
+  450 m radius is the middle.
+- **Scenes navigate by CLICKING, never by `Page.navigate`.** A navigation reloads the document,
+  which reboots CanvasKit, the wasm node and first-run onboarding. Getting back from the pairing
+  sheet or the settings modal uses each screen's own dismiss control, never `history.back()` —
+  neither pushes a history entry, so going back walks off the origin and kills the CDP target.
+- **Anything gated on a native capability photographs its unavailable state.** The pairing screen
+  on web renders "PAIRING UNAVAILABLE — installed build required", which is true of a browser and
+  nonsense in an iOS listing, so the pairing scene drives the one-time LINK instead — same
+  handshake, same crypto, and it works here. Check any new scene for this before trusting it.
+- Tiles need `scripts/tile-proxy.ts` in front of the tileset: `/bundle/v2` already sends CORS and
+  exposes its `ETag` (the stream decoder refuses a bundle without a strong one), but the coarse
+  `/{z}/{x}/{y}` path sends no CORS headers at all. The proxy is transparent on purpose — an
+  earlier allowlisting version broke the map twice, once by dropping the ETag and once by
+  re-declaring `content-encoding` on a body `fetch` had already decoded.
 
 ## CI build profiling
 

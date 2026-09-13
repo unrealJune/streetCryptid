@@ -131,6 +131,14 @@ pub extern "system" fn Java_com_unrealjune_irohlocation_IrohAndroidBootstrap_ini
 /// Domain-separation prefix for deriving a user's gossip topic from their EndpointId.
 const TOPIC_PREFIX: &[u8] = b"streetcryptid.loc";
 
+/// Upper bound on `Endpoint::bind` in [`LocationNode::start`].
+///
+/// Generous, because binding legitimately waits on relay DNS and a first network probe on a cold
+/// radio, and a `start` that fails is a `start` the caller has to retry. It exists only to make
+/// the wait finite: `start` is on the launch path, so anything unbounded there is a hung splash
+/// screen rather than a slow one.
+const ENDPOINT_BIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum LocationError {
     #[error("crypto error: {0}")]
@@ -1110,6 +1118,16 @@ pub struct LocationNode {
     /// `plugins/withBackupExclusion.js`. Never point this at `data_dir` on a device.
     state_dir: PathBuf,
     inner: Mutex<Option<Started>>,
+    /// Serializes `start`, so building the endpoint does not have to hold [`inner`].
+    ///
+    /// `start` awaits the BLE radio coming up and the endpoint binding, neither of which is fast
+    /// and neither of which the OS promises to finish. Holding `inner` across them made every
+    /// unrelated call — and therefore the whole UI — wait on the slowest thing in startup; on
+    /// 2026-09-13 a wedged CoreBluetooth turned that into a 13 h outage ending in a locked splash
+    /// screen. The two locks separate "is the node up?" (cheap, contended, answered constantly)
+    /// from "is someone bringing it up?" (slow, rare, and only ever contended by a second caller
+    /// who would have had to wait anyway).
+    starting: Mutex<()>,
     /// The most recently attached listener, reused to surface durable-trail (backfill / sync)
     /// events from the node-level `sync_trail` call.
     listener: Mutex<Option<Arc<dyn FixListener>>>,
@@ -1653,6 +1671,7 @@ fn new_location_node_at(
         data_dir,
         state_dir,
         inner: Mutex::new(None),
+        starting: Mutex::new(()),
         listener: Mutex::new(None),
         pair: PairCore::new(identity_seed, author, recv_public),
         profile_events: ProfileEventQueue::default(),
@@ -1757,8 +1776,16 @@ impl LocationNode {
         ip_enabled: bool,
         ble_enabled: bool,
     ) -> Result<(), LocationError> {
-        let mut guard = self.inner.lock().await;
-        if guard.is_some() {
+        // Cheap check first, so a started node costs one uncontended lock and nothing else.
+        if self.inner.lock().await.is_some() {
+            return Ok(());
+        }
+        // Then serialize the slow path on its own lock. A second caller waits here rather than on
+        // `inner`, so everything that only needs to ask whether the node is up stays responsive
+        // while this one builds it.
+        let _starting = self.starting.lock().await;
+        // Re-check: whoever we queued behind may have finished the job while we waited.
+        if self.inner.lock().await.is_some() {
             return Ok(());
         }
         let relay_mode = if relay_enabled {
@@ -1803,10 +1830,20 @@ impl LocationNode {
             ble::disabled()
         };
 
-        let endpoint = builder
-            .bind()
-            .await
-            .map_err(|e| LocationError::Network(e.to_string()))?;
+        // Bounded for the same reason `ble::attach` is: this runs on the launch path, and an
+        // endpoint that never finishes binding must surface as a failed `start` the caller can
+        // retry, never as a `start` that hangs. Unlike BLE there is no degraded mode to fall back
+        // to — without an endpoint there is no node — so this one is an error, not a warning.
+        let endpoint = match tokio::time::timeout(ENDPOINT_BIND_TIMEOUT, builder.bind()).await {
+            Ok(result) => result.map_err(|e| LocationError::Network(e.to_string()))?,
+            Err(_) => {
+                tracing::warn!(
+                    timeout_ms = ENDPOINT_BIND_TIMEOUT.as_millis() as u64,
+                    "endpoint bind timed out"
+                );
+                return Err(LocationError::Network("endpoint bind timed out".to_owned()));
+            }
+        };
 
         // Same-wifi/direct fast path: add mDNS (swarm-discovery) local-network address lookup
         // ALONGSIDE the N0 preset's relay + DNS discovery — never replacing it. Added
@@ -1960,7 +1997,8 @@ impl LocationNode {
             )
             .await;
 
-        *guard = Some(Started {
+        // Publish the built node last, under a lock held only for the assignment itself.
+        *self.inner.lock().await = Some(Started {
             endpoint,
             gossip,
             trail,

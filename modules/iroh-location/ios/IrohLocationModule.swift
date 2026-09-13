@@ -1097,5 +1097,21 @@ public final class IrohLocationModule: Module {
       guard let node = self.node else { return false }
       return await node.bleHasScanHint(endpointId: hexToData(endpointIdHex))
     }
+
+    // ── MetricKit: the OS's account of how the app last ended ────────────────────────────────
+    //
+    // Subscribed from module creation rather than lazily, because MetricKit delivers a payload
+    // shortly AFTER launch and never redelivers one. A subscriber registered when JavaScript
+    // first asks for diagnostics would miss the launch that followed the crash it is asking
+    // about — which is every launch that matters.
+    OnCreate {
+      MetricKitDiagnostics.shared.start()
+    }
+
+    /// Drain the diagnostics stored since the last call. Each string is a JSON object.
+    /// Absent on Android and on older iOS binaries, so callers must guard on its presence.
+    AsyncFunction("takeCrashDiagnostics") { () -> [String] in
+      MetricKitDiagnostics.shared.take()
+    }
   }
 }

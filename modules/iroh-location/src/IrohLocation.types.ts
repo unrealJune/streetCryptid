@@ -994,6 +994,15 @@ export interface IrohLocationApi {
   configureTelemetry?(endpoint: string, instanceId: string): Promise<boolean>;
   /** Flush buffered native telemetry. Headless contexts call this before the OS freezes them. */
   flushTelemetry?(): Promise<void>;
+  /**
+   * Drain the OS-reported crash / hang / CPU / disk diagnostics recorded since the last call,
+   * each a JSON object string (see `MetricKitDiagnostics.swift`).
+   *
+   * The only account of how a previous run ENDED — everything the app records itself stops at the
+   * moment it stops. OPTIONAL: iOS only, and absent on binaries built before this existed, so
+   * callers must guard on its presence.
+   */
+  takeCrashDiagnostics?(): Promise<string[]>;
 
   // ── Profiles — see docs/social/ARCHITECTURE.md §3 ──────────────────────────────────────────
   /**

@@ -117,6 +117,8 @@ export default function ActivePairingScreen() {
   const [dismissedLink, setDismissedLink] = useState<string | null>(null);
   const [linkNotice, setLinkNotice] = useState<string | null>(null);
   const [working, setWorking] = useState<'link' | 'redeem' | 'retry' | null>(null);
+  /** Set the moment a dismissal starts, so nothing re-arms the radio during teardown. */
+  const [leaving, setLeaving] = useState(false);
   const redeemedToken = useRef<string | null>(null);
   const focused = useIsFocused();
   const [foreground, setForeground] = useState(AppState.currentState === 'active');
@@ -156,6 +158,9 @@ export default function ActivePairingScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      // Strictly per-visit: a screen that stayed latched because `router.back()` had nothing to
+      // pop would never arm Bump again, and would look like Bluetooth was broken.
+      setLeaving(false);
       void refreshPairing();
       return () => {
         void standDown();
@@ -220,7 +225,7 @@ export default function ActivePairingScreen() {
   const failure = pairing?.failure ?? null;
   const effectiveIntent: PairingRouteIntent =
     !token && intent === 'bump' && inviteLive ? 'link' : intent;
-  const bump = useArmedBump(effectiveIntent === 'bump' && !token && !redeeming);
+  const bump = useArmedBump(effectiveIntent === 'bump' && !token && !redeeming && !leaving);
   // Every pairing channel, not just Bump — this hook used to hang off `useArmedBump`, which is
   // armed for nearby pairing only, so a link or QR pair had no haptics of any kind. Gated on
   // focus AND foreground, not merely on being mounted: this screen survives backgrounding, and a
@@ -658,7 +663,20 @@ export default function ActivePairingScreen() {
     }
   };
 
+  /**
+   * Leave the pairing surface: latch first, then tear down.
+   *
+   * The latch is not tidiness. Clearing the discovered friend is what tells `useArmedBump` there
+   * is no longer an active session, and its auto-arm effect fires on the very next render — so
+   * ACKNOWLEDGE used to re-open the Bluetooth pairing radio on its way out, milliseconds before
+   * `standDown` closed it again. Telemetry from an iPhone on 2026-09-13 caught exactly that:
+   * `pairing_ready` true at 21:51:43, false at 21:51:45, with bump polling at 300 ms in between,
+   * for a screen the user had just dismissed. REJECT was worse — it awaits a native round trip
+   * between clearing the friend and closing, so the radio stayed armed for the whole of it, and
+   * nothing guaranteed `cancelBump` won the race at all.
+   */
   const close = (): void => {
+    setLeaving(true);
     void standDown();
     router.back();
   };
@@ -881,7 +899,10 @@ export default function ActivePairingScreen() {
               <Action
                 color={chrome.steel}
                 label="REJECT"
-                onPress={() => void rejectDiscoveredFriend().then(close)}
+                onPress={() => {
+                  setLeaving(true);
+                  void rejectDiscoveredFriend().then(close);
+                }}
                 outline
               />
               <Action

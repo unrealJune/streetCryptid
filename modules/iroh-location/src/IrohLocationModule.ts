@@ -343,6 +343,15 @@ export declare class IrohLocationNativeModule
 
   // Optional for compatibility with installed iOS binaries built before the telemetry API.
   configureTelemetry?(endpoint: string, instanceId: string): Promise<boolean>;
+  /**
+   * Drain the OS-reported crash / hang / CPU / disk diagnostics recorded since the last call,
+   * each a JSON object string (see `MetricKitDiagnostics.swift`).
+   *
+   * The only account of how a previous run ENDED — everything the app records itself stops at the
+   * moment it stops. OPTIONAL: iOS only, and absent on binaries built before this existed, so
+   * callers must guard on its presence.
+   */
+  takeCrashDiagnostics?(): Promise<string[]>;
   flushTelemetry?(): Promise<void>;
 
   // Native MVT map-tile decoder (see modules/iroh-location/rust/src/mvt.rs). Runs
