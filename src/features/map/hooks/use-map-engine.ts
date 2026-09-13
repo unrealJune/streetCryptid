@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
 import type { CryptidTheme } from '@/constants/cryptid-theme';
+import { withFixtureTrailStorage } from '@/features/dev/fixtures';
 import type { LocationFix } from '@/features/social/core/types';
 import { createPersistentTrailStorage } from '@/features/social/net/persistence';
 
@@ -128,7 +129,11 @@ export function useMapEngine(
         ? createLiveExplorationSource(
             grid,
             sharedExplorationStore(),
-            createPersistentTrailStorage()
+            // Identity outside a screenshot run; see `@/features/dev/fixtures`.
+            // Exploration scans persisted storage rather than the trail the UI
+            // holds, so this is where a demo walk has to enter for the reveal
+            // layer to have anything to reveal.
+            withFixtureTrailStorage(createPersistentTrailStorage())
           )
         : createDemoExplorationSource(grid, dataset.home),
     [grid, dataset]

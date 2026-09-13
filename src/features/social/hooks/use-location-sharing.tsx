@@ -13,6 +13,7 @@ import { Platform } from 'react-native';
 import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
 import { runDevCommand as runDevCommandImpl } from '@/features/dev/commands/dev-commands';
 import type { DeliveryMode } from '@/features/social/core/delivery-mode';
+import { withFixtureFriends, withFixtureTrail } from '@/features/dev/fixtures';
 import { buildFriendPresence, type FriendPresence } from '@/features/social/core/presence';
 import type { IncomingFix, LocationFix } from '@/features/social/core/types';
 import { type TrailPoint } from '@/features/social/net/background/trail-store';
@@ -661,15 +662,28 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     return run((service) => service.rejectDiscoveredFriend());
   }, [run]);
 
+  // `withFixtureFriends` is the identity in every build but a screenshot run —
+  // `metro.config.js` resolves the barrel to a stripped one unless
+  // `EXPO_PUBLIC_SCREENSHOT_FIXTURES=1`, so the demo people are absent from the
+  // bundle rather than merely switched off. Fixtures go in as inputs so the
+  // presence states, ages and distances on a store screenshot are computed by
+  // this same shipping call, not staged.
   const friends = useMemo(
     () =>
-      buildFriendPresence({
-        friends: snapshot?.friends ?? [],
-        latest: friendFixes,
-        selfFix: hasLiveSelfFix ? selfFix : null,
-      }),
+      buildFriendPresence(
+        withFixtureFriends({
+          friends: snapshot?.friends ?? [],
+          latest: friendFixes,
+          selfFix: hasLiveSelfFix ? selfFix : null,
+        })
+      ),
     [snapshot?.friends, friendFixes, hasLiveSelfFix, selfFix]
   );
+  // Likewise the identity outside a screenshot run. The demo walk is what gives
+  // the exploration layer something to reveal: coverage is the residue of weeks
+  // of walking, and a fresh install has none.
+  const shownTrail = useMemo(() => withFixtureTrail(trail, selfFix), [trail, selfFix]);
+
   // `permission-denied` is a claim about the OS, and it is the one bit of location state that goes
   // stale in our hand. It is set once, from whatever `startBackground` read at start-up; the service
   // re-derives the real answer on every foreground and reports it on the snapshot. Derived rather
@@ -719,7 +733,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     () => ({
       snapshot,
       pairing: snapshot?.pairing ?? null,
-      trail,
+      trail: shownTrail,
       selfFix,
       hasLiveSelfFix,
       friends,
@@ -755,7 +769,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     }),
     [
       snapshot,
-      trail,
+      shownTrail,
       selfFix,
       hasLiveSelfFix,
       friends,
