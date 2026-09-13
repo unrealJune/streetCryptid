@@ -45,6 +45,13 @@ half4 main(float2 pos) {
   float edge = HALF_SQRT3 * uRadius - max(abs(q.x), dot(abs(q), float2(0.5, HALF_SQRT3)));
   float outline = 1.0 - smoothstep(uWidth * 0.5, uWidth * 1.5, edge);
 
+  // A settled lattice pays for none of the sweep. The test is on a uniform, so every pixel of a
+  // draw takes the same branch and it costs nothing but the pow and the cos it skips.
+  if (uSweep <= 0.0) {
+    float rest = outline * BASE_ALPHA;
+    return half4(uInk * rest, rest);
+  }
+
   float wave = (p.x * 0.94 + p.y * 0.34) / max(1.0, WAVE * uRadius);
   float band = pow(0.5 + 0.5 * cos(6.2831853 * (wave - uPhase)), 6.0) * uSweep;
   float alpha = outline * (BASE_ALPHA + CREST_ALPHA * band) + 0.02 * band;

@@ -41,6 +41,16 @@ export const GRIP_HEIGHT = 18;
  * (and tested) as the arithmetic it is. `MapDrawer` is the only caller.
  */
 
+/**
+ * What the drawer carries INSIDE itself at every detent, above and below the body. Exported
+ * because the drawer needs the same figure to answer a question the heights alone cannot: how
+ * tall the body's own frame is at a given detent, and therefore whether the list inside it has
+ * anywhere to scroll.
+ */
+export function drawerChrome(gripHeight: number, tabBarHeight: number = TAB_BAR_HEIGHT): number {
+  return tabBarHeight + gripHeight;
+}
+
 /** Detents a body is allowed to reach, in ascending height order. */
 export function allowedDetents(
   max: DrawerDetent,
@@ -81,7 +91,7 @@ export function detentHeights(input: {
   // Only what the drawer carries INSIDE itself. The bottom inset and the island margin are the
   // drawer's own `marginBottom` at peek — counting them here too added a band of empty island
   // under the body that no amount of minimizing could close, because it was never the body's.
-  const chrome = tabBarHeight + gripHeight;
+  const chrome = drawerChrome(gripHeight, tabBarHeight);
   // Before the body has measured, peek and full coincide: opening at zero height would flash an
   // empty island on the first frame.
   const peek =

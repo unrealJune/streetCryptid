@@ -1021,12 +1021,15 @@ export function MapView({
             {viewport && (
               <Canvas style={styles.fill}>
                 <Group transform={transform}>
-                  {/* Under the region layers, always: the bitmaps are opaque, so the grid only
-                      shows where the map has nothing yet — and the reveal wipe uncovers the real
-                      tiles over it rather than flashing them onto bare background. */}
+                  {/* Under the region layers, always: the grid only shows where the map has
+                      nothing yet — and the reveal wipe uncovers the real tiles over it rather
+                      than flashing them onto bare background. The bitmaps are opaque, so it is
+                      cut around the one that is currently covering, and draws no pixel that
+                      something else is about to paint over. */}
                   {explorationEnabled && loadingRect && loadingLattice && (
                     <LoadingHexGrid
                       rect={loadingRect}
+                      covered={revealing || !curImage ? null : curRect}
                       lattice={loadingLattice}
                       loading={Boolean(pending) || revealing}
                       reducedMotion={reducedMotion}
