@@ -69,7 +69,7 @@ use tokio::sync::Mutex;
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
 
 use crate::docs::TrailDocs;
-use crate::profile::{ProfileDocs, ProfileSink};
+use crate::profile::{ProfileDocs, ProfileSink, MAX_PROFILE_BYTES};
 use crate::sessions::SessionManager;
 
 /// The pairing ALPN. Bump the trailing version on any breaking wire change.
@@ -77,10 +77,17 @@ use crate::sessions::SessionManager;
 /// v3 adds the ratchet ephemeral to the handshake (FORWARD-SECRECY.md §4.2), which changes the
 /// `PairMsg` encoding. Bumping the ALPN rather than only the wire version means a peer on an
 /// older build fails to negotiate at all, instead of connecting and then failing to decode.
-pub const PAIR_ALPN: &[u8] = b"streetcryptid/pair/3";
+///
+/// v4 puts the sender's signed profile record on the `Accept` ([`PairMsg::profile_record`]), so a
+/// persona arrives WITH the pair instead of after it. Appending a field is not a compatible change
+/// here even though postcard tolerates trailing bytes: [`pair_signing_bytes`] re-encodes the
+/// DECODED struct, so an older peer drops the field it does not know, reconstructs different bytes
+/// and fails the ed25519 check. The failure would look like "your friend's phone refused the
+/// pair", which is why this bumps the ALPN and fails at negotiation instead.
+pub const PAIR_ALPN: &[u8] = b"streetcryptid/pair/4";
 
 /// Wire schema version carried in every [`PairMsg`].
-pub const PAIR_WIRE_V: u8 = 3;
+pub const PAIR_WIRE_V: u8 = 4;
 
 /// Invite schema version carried in every [`InviteData`].
 ///
@@ -347,6 +354,22 @@ struct PairMsg {
     endpoint_ticket: String,
     /// Profile read-ticket; populated only on `Accept`.
     profile_ticket: String,
+    /// The sender's own signed profile record; populated only on `Accept`, empty if this device
+    /// has not published one yet.
+    ///
+    /// The ticket above is how the peer follows our profile as it CHANGES; this is how they get
+    /// the current one now. Replicating it cost a fresh iroh-docs dial to addresses baked into
+    /// the ticket, a namespace reconciliation and a blob fetch — all of it rebuilding, from
+    /// scratch, a relationship with a peer we are at this instant authenticated to over an open
+    /// connection. When that dial lost (a one-way local-network block is enough) the friend wore
+    /// `@endpointprefix` and `unknown` until a retry happened to land.
+    ///
+    /// Sending the record inline is sound for the reason the profile module leads with: a record
+    /// is ed25519-signed over canonical bytes and bound to its `endpoint_id`, so docs replication
+    /// was never the trust boundary. The receiver runs the same `verify` against the endpoint id
+    /// the pairing connection pinned, and the same monotonic-epoch rule. Bounded by
+    /// `MAX_PROFILE_BYTES` (2 KiB) on both write and read.
+    profile_record: Vec<u8>,
     /// Trail read-ticket; populated only on `Accept`.
     trail_ticket: String,
     ts: u64,
@@ -401,6 +424,11 @@ fn verify_msg(m: &PairMsg) -> Result<()> {
         || m.trail_ticket.len() > MAX_FRAME
     {
         bail!("pair message ticket too large");
+    }
+    // Checked here, before the signature, so an oversized record is rejected on the cheap path
+    // rather than after an ed25519 verification over it.
+    if m.profile_record.len() > MAX_PROFILE_BYTES {
+        bail!("pair message profile record too large");
     }
     let ep: [u8; ENDPOINT_LEN] = m
         .from_endpoint
@@ -861,6 +889,8 @@ struct PairSession {
     peer_decision: Option<bool>,
     peer_endpoint_ticket: Option<String>,
     peer_profile_ticket: Option<String>,
+    /// The peer's signed profile record as it arrived on their `Accept`, still unverified.
+    peer_profile_record: Option<Vec<u8>>,
     peer_trail_ticket: Option<String>,
     pending_emitted: bool,
     result_emitted: bool,
@@ -934,6 +964,7 @@ impl PairSession {
             peer_decision: None,
             peer_endpoint_ticket: None,
             peer_profile_ticket: None,
+            peer_profile_record: None,
             peer_trail_ticket: None,
             pending_emitted: false,
             result_emitted: false,
@@ -1267,6 +1298,11 @@ impl PairSession {
                 if !msg.profile_ticket.is_empty() {
                     self.peer_profile_ticket = Some(msg.profile_ticket.clone());
                 }
+                // Kept as bytes and verified in `finalize`, not here: this is the pure half and
+                // the only key it could check against is already pinned on the connection.
+                if !msg.profile_record.is_empty() {
+                    self.peer_profile_record = Some(msg.profile_record.clone());
+                }
                 if !msg.trail_ticket.is_empty() {
                     self.peer_trail_ticket = Some(msg.trail_ticket.clone());
                 }
@@ -1433,6 +1469,18 @@ impl PairCore {
         }
     }
 
+    /// Our own signed profile record for the `Accept`, or empty if we have not published one.
+    ///
+    /// Empty is a real state, not a failure: a device that has never published (first run, or a
+    /// node still coming up) must still be able to complete a pair. The ticket still goes out,
+    /// and the peer's backfill is what closes the gap in that case.
+    async fn our_profile_record(&self) -> Vec<u8> {
+        match self.runtime_docs().await {
+            Ok((_, profile, _)) => profile.own_record_bytes().await.unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     async fn our_trail_ticket(&self) -> String {
         match self.runtime_docs().await {
             Ok((trail, _, _)) => {
@@ -1455,12 +1503,13 @@ impl PairCore {
         let build_started = Instant::now();
         let endpoint_ticket = self.our_endpoint_ticket().await;
         let ticket_ms = build_started.elapsed().as_millis() as u64;
-        let (profile_ticket, trail_ticket) = match decision {
+        let (profile_ticket, trail_ticket, profile_record) = match decision {
             Decision::Accept => (
                 self.our_profile_ticket().await,
                 self.our_trail_ticket().await,
+                self.our_profile_record().await,
             ),
-            _ => (String::new(), String::new()),
+            _ => (String::new(), String::new(), Vec::new()),
         };
         // `ticket_ms` vs the total separates "waiting for a relay" from "reading our own docs".
         // Both sides build a message per round and the responder builds its reply INSIDE the
@@ -1501,6 +1550,7 @@ impl PairCore {
             sas_nonce,
             endpoint_ticket,
             profile_ticket,
+            profile_record,
             trail_ticket,
             ts: now_ms(),
             sig: Vec::new(),
@@ -2074,7 +2124,7 @@ impl PairCore {
         session_id: &[u8; SESSION_ID_LEN],
         peer_endpoint: [u8; ENDPOINT_LEN],
     ) -> Result<()> {
-        let (profile_ticket, trail_ticket, nearby, boot) = {
+        let (profile_ticket, profile_record, trail_ticket, nearby, boot) = {
             let mut sessions = self.sessions.lock().await;
             let s = sessions
                 .get_mut(session_id)
@@ -2097,6 +2147,7 @@ impl PairCore {
                 .map(|peer_pub| (s.local_ratchet_secret.clone(), peer_pub));
             (
                 s.peer_profile_ticket.clone(),
+                s.peer_profile_record.clone(),
                 s.peer_trail_ticket.clone(),
                 s.nearby,
                 boot,
@@ -2130,6 +2181,21 @@ impl PairCore {
         }
 
         if let Ok((trail, profile, sink)) = self.runtime_docs().await {
+            // BEFORE the ticket import and before `Ready`, so the persona is already readable by
+            // the time the app asks for the pair result. This is the whole point of carrying it:
+            // the import below is now only how we follow LATER edits, and how a peer who had
+            // published nothing yet eventually catches up.
+            if let Some(bytes) = profile_record.as_deref() {
+                match profile.ingest_handed_record(bytes, &peer_endpoint).await {
+                    Ok(Some(rec)) => sink.on_profile_update(rec),
+                    Ok(None) => {}
+                    Err(err) => tracing::warn!(
+                        error = %err,
+                        sc.peer = %crate::telemetry::short_hex(&peer_endpoint),
+                        "pair Accept carried a profile record that did not verify; ignoring it"
+                    ),
+                }
+            }
             if let Some(pt) = profile_ticket.as_deref() {
                 if let Ok(ns) = profile.import_ticket(pt).await {
                     profile.watch(ns, sink);
@@ -2587,6 +2653,7 @@ mod tests {
             sas_nonce: Vec::new(),
             endpoint_ticket: "ticket".into(),
             profile_ticket: String::new(),
+            profile_record: Vec::new(),
             trail_ticket: String::new(),
             ts: 123,
             sig: Vec::new(),
@@ -2652,6 +2719,34 @@ mod tests {
     }
 
     #[test]
+    fn profile_record_is_covered_by_the_signature() {
+        let (seed, endpoint) = identity();
+        let mut msg = sample_msg(&seed, &endpoint, Decision::Accept);
+        msg.profile_record = b"swapped in after signing".to_vec();
+        assert!(
+            verify_msg(&msg).is_err(),
+            "a record substituted after signing must not verify"
+        );
+    }
+
+    #[test]
+    fn oversized_profile_record_is_refused() {
+        let (seed, endpoint) = identity();
+        let msg = sign_msg(
+            &seed,
+            PairMsg {
+                profile_record: vec![0u8; MAX_PROFILE_BYTES + 1],
+                sig: Vec::new(),
+                ..sample_msg(&seed, &endpoint, Decision::Accept)
+            },
+        )
+        .unwrap();
+        // Correctly signed, still refused: the bound is on the decode path, ahead of the
+        // signature check, so a hostile peer cannot make us verify over 64 KiB.
+        assert!(verify_msg(&msg).is_err());
+    }
+
+    #[test]
     fn msg_tamper_is_detected() {
         let (seed, endpoint) = identity();
         let mut msg = sample_msg(&seed, &endpoint, Decision::Hello);
@@ -2685,6 +2780,7 @@ mod tests {
             sas_nonce: Vec::new(),
             endpoint_ticket: String::new(),
             profile_ticket: String::new(),
+            profile_record: Vec::new(),
             trail_ticket: String::new(),
             ts: 0,
             sig: Vec::new(),
@@ -2940,6 +3036,7 @@ mod tests {
         // peer accepts
         let mut accept = PairMsg {
             profile_ticket: "p".into(),
+            profile_record: b"record".to_vec(),
             trail_ticket: "t".into(),
             ..sample_msg(&seed, &endpoint, Decision::Accept)
         };
@@ -2956,6 +3053,7 @@ mod tests {
         assert!(s.is_complete());
         assert_eq!(s.peer_profile_ticket.as_deref(), Some("p"));
         assert_eq!(s.peer_trail_ticket.as_deref(), Some("t"));
+        assert_eq!(s.peer_profile_record.as_deref(), Some(&b"record"[..]));
     }
 
     #[test]
@@ -3002,6 +3100,7 @@ mod tests {
             sas_nonce: peer_nonce.to_vec(),
             endpoint_ticket: String::new(),
             profile_ticket: String::new(),
+            profile_record: Vec::new(),
             trail_ticket: String::new(),
             ts: 0,
             sig: Vec::new(),
@@ -3368,6 +3467,7 @@ mod tests {
             sas_nonce: Vec::new(),
             endpoint_ticket: String::new(),
             profile_ticket: String::new(),
+            profile_record: Vec::new(),
             trail_ticket: String::new(),
             ts: now_ms(),
             sig: Vec::new(),
@@ -3600,6 +3700,7 @@ mod tests {
             sas_nonce: Vec::new(),
             endpoint_ticket: String::new(),
             profile_ticket: if tickets { "p".into() } else { String::new() },
+            profile_record: Vec::new(),
             trail_ticket: if tickets { "t".into() } else { String::new() },
             ts: 0,
             sig: Vec::new(),
