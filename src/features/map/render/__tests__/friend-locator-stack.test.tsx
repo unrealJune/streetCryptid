@@ -68,6 +68,49 @@ describe('FriendLocatorStack', () => {
     expect(onPress).toHaveBeenNthCalledWith(2, 'frog');
   });
 
+  it('lays the cryptid cards out side by side on one baseline', () => {
+    const sharedValue = { value: 0 } as SharedValue<number>;
+
+    act(() => {
+      renderer = create(
+        <FriendLocatorStack
+          friends={[
+            {
+              id: 'moth',
+              handle: '@moth',
+              sigil: `(**)
+(__)`,
+              color: '#45d6bd',
+              selected: false,
+            },
+            { id: 'frog', handle: '@frog', sigil: '(o)', color: '#f7b84b', selected: false },
+          ]}
+          onPress={jest.fn()}
+          panelColor="#00111f"
+          scale={sharedValue}
+          translateX={sharedValue}
+          translateY={sharedValue}
+          x={100}
+          y={200}
+        />
+      );
+    });
+
+    const cards = renderer.root
+      .findAllByProps({ accessibilityElementsHidden: true })
+      // Host views only: `findAllByProps` reports the composite element too.
+      .filter((node) => typeof node.type === 'string')
+      .map((node) => node.props.style?.[1])
+      .filter((style): style is Record<string, number> => typeof style?.left === 'number');
+    expect(cards).toHaveLength(2);
+
+    // No card starts before the previous one ends: the row is a row, not a pile.
+    const [first, second] = cards;
+    expect(second.left).toBeGreaterThanOrEqual(first.left + first.width);
+    // Different art, different heights — but both cards end on the same line.
+    expect(first.top + first.height).toBe(second.top + second.height);
+  });
+
   it('includes YOU as an independently selectable row in an overlapping stack', () => {
     const onPress = jest.fn();
     const onPressSelf = jest.fn();

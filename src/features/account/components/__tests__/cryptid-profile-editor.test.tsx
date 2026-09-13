@@ -130,7 +130,7 @@ describe('CryptidProfileEditor', () => {
     render({ mode: 'onboarding', initialProfile: null });
 
     // A name and a drawing are already in place; only the username is missing.
-    expect(heroName()).not.toBe('Profile icon: Custom icon');
+    expect(heroName()).not.toBe('Profile icon: Unnamed. Tap to change it.');
   });
 
   it('keeps every color it produces at full brightness', () => {

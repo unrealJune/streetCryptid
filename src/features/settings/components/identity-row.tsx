@@ -47,7 +47,7 @@ export function IdentityRow({ accent }: { readonly accent: string }) {
             {profile?.handle ?? '@you'}
           </ThemedText>
           <ThemedText type="small" themeColor="textSecondary">
-            This is the sigil and signal color your friends see.
+            Tap to change the cryptid, name and signal color your friends see.
           </ThemedText>
         </View>
         <ThemedText type="code" themeColor="textSecondary">

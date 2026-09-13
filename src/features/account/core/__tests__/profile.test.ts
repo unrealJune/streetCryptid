@@ -70,13 +70,22 @@ describe('cryptid profile', () => {
     });
 
     expect(issues.handle).toEqual([
-      'Use 2-20 lowercase letters, numbers, underscores, or dashes for the username.',
+      'Use up to 20 lowercase letters, numbers, underscores, or dashes.',
     ]);
-    expect(issues.cryptidName).toEqual([
-      'Give the profile icon a name between 1 and 24 characters.',
-    ]);
+    expect(issues.cryptidName).toEqual([]);
     expect(issues.sigil).toContain('Use ASCII characters, spaces, tabs, and line breaks only.');
     expect(issues.color).toEqual(['Choose a valid six-digit profile color.']);
+  });
+
+  it('accepts a one-character handle and an unnamed icon', () => {
+    expect(
+      validateCryptidProfile({
+        ...defaultCryptidProfileDraft(),
+        handle: '@j',
+        cryptidName: '',
+        presetId: null,
+      })
+    ).toEqual([]);
   });
 
   it('round-trips a versioned saved profile', () => {
