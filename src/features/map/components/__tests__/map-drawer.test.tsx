@@ -68,6 +68,14 @@ jest.mock('react-native-reanimated', () => {
 jest.mock('../island-tabs', () => ({ IslandTabs: () => null }));
 jest.mock('@/global.css', () => ({}));
 
+/** The wrapper whose natural height `peek` is derived from — the laid-out View inside the body. */
+function measuredBody(renderer: ReactTestRenderer) {
+  return renderer.root
+    .findByType(ScrollView)
+    .findAllByType(View)
+    .find((node) => typeof node.props.onLayout === 'function')!;
+}
+
 describe('MapDrawer grip', () => {
   let renderer: ReactTestRenderer;
   afterEach(() => {
@@ -75,7 +83,7 @@ describe('MapDrawer grip', () => {
     mockPans.length = 0;
   });
 
-  function render(detent: 'collapsed' | 'full') {
+  function render(detent: 'collapsed' | 'full', bodyHeight?: number) {
     const onDetentChange = jest.fn();
     act(() => {
       renderer = create(
@@ -96,15 +104,19 @@ describe('MapDrawer grip', () => {
         </MapDrawer>
       );
     });
+    if (bodyHeight !== undefined) {
+      act(() => {
+        measuredBody(renderer).props.onLayout({ nativeEvent: { layout: { height: bodyHeight } } });
+      });
+    }
     return onDetentChange;
   }
 
-  it('lets the grip collapse fully even when the list has scrolled', () => {
-    const onDetentChange = render('full');
+  // A roster taller than the screen owns every drag on its own rows, so the grip is the only way
+  // back down. It must therefore ignore the rule the body follows.
+  it('lets the grip collapse fully even from a list that owns its own drags', () => {
+    const onDetentChange = render('full', 900);
     act(() => {
-      renderer.root.findByType(ScrollView).props.onScroll({
-        nativeEvent: { contentOffset: { y: 200 } },
-      });
       const grip = mockPans[mockPans.length - 2];
       grip.start?.();
       grip.update?.({ translationY: 700, velocityY: 0 });
@@ -113,18 +125,25 @@ describe('MapDrawer grip', () => {
     expect(onDetentChange).toHaveBeenCalledWith('collapsed');
   });
 
-  it('leaves body drags to a scrolled list', () => {
-    const onDetentChange = render('full');
+  it('leaves body drags to a list with somewhere to scroll', () => {
+    const onDetentChange = render('full', 900);
     act(() => {
-      renderer.root.findByType(ScrollView).props.onScroll({
-        nativeEvent: { contentOffset: { y: 200 } },
-      });
       const body = mockPans[mockPans.length - 1];
       body.start?.();
       body.update?.({ translationY: 700, velocityY: 0 });
       body.end?.({ translationY: 700, velocityY: 0 });
     });
     expect(onDetentChange).not.toHaveBeenCalled();
+  });
+
+  it('will not scroll a body that fits the detent it is in', () => {
+    render('full', 100);
+    expect(renderer.root.findByType(ScrollView).props.scrollEnabled).toBe(false);
+  });
+
+  it('scrolls a body that does not fit', () => {
+    render('full', 900);
+    expect(renderer.root.findByType(ScrollView).props.scrollEnabled).toBe(true);
   });
 
   it('keeps the handle accessible while hiding the collapsed body from VoiceOver', () => {
@@ -171,17 +190,11 @@ describe('MapDrawer body drags', () => {
       );
     });
     act(() => {
-      measuredBody().props.onLayout({ nativeEvent: { layout: { height: options.bodyHeight } } });
+      measuredBody(renderer).props.onLayout({
+        nativeEvent: { layout: { height: options.bodyHeight } },
+      });
     });
     return onDetentChange;
-  }
-
-  /** The wrapper whose natural height `peek` is derived from — the first laid-out View in the body. */
-  function measuredBody() {
-    return renderer.root
-      .findByType(ScrollView)
-      .findAllByType(View)
-      .find((node) => typeof node.props.onLayout === 'function')!;
   }
 
   function dragBodyDown() {

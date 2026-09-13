@@ -1,14 +1,7 @@
-'use no memo'; // react-compiler: the drawer's height and scroll offset are Reanimated shared values
+'use no memo'; // react-compiler: the drawer's height is a Reanimated shared value
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import {
-  ScrollView,
-  StyleSheet,
-  View,
-  type LayoutChangeEvent,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
-} from 'react-native';
+import { ScrollView, StyleSheet, View, type LayoutChangeEvent } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
   interpolate,
@@ -114,9 +107,6 @@ export function MapDrawer({
   // Without it RNGH treats the two as competitors and the pan wins, so the roster would refuse to
   // scroll at the very detent that exists to let it.
   const nativeScroll = useMemo(() => Gesture.Native(), []);
-  // Scroll offset on the UI thread: the pan gesture has to know, mid-gesture, whether the list
-  // underneath it is already at the top.
-  const scrollY = useSharedValue(0);
   const height = useSharedValue(0);
   const startHeight = useSharedValue(0);
   const gestureActive = useSharedValue(false);
@@ -142,9 +132,18 @@ export function MapDrawer({
     [peekBody, screenHeight, insetTop, insetBottom, hasGrip, tabBarHeight]
   );
   const resolved = heights[detents.includes(detent) ? detent : topDetent];
-  // Does the body have anywhere to scroll where it is now? `peekBody` is the body's own measured
-  // height and `resolved - bodyChrome` is the frame it has been given, so this is the same
-  // comparison the ScrollView itself makes — decided on the JS thread, where both already live.
+  /**
+   * Whether the body is a list to be read rather than a summary to be glanced at, and whether that
+   * list has anywhere to scroll where the drawer is now.
+   *
+   * Both are asked of the RESTING geometry: `peekBody` is the body's own measured height and
+   * `resolved - bodyChrome` is the frame that detent gives it. Deliberately not the live layout —
+   * a height that is mid-spring is briefly shorter than its destination, and asking the ScrollView
+   * itself would hand a body with nothing to scroll a third of a point of slack on the way past.
+   * That is the whole of the ME panel's remaining bounce: content 118, frame 117.6666, iOS bounce
+   * turning a rounding error into a pull that springs back under your finger.
+   */
+  const bodyIsList = detent === topDetent;
   const listScrolls = peekBody > resolved - bodyChrome + 1;
 
   // Settle whenever the resolved height changes: a detent change, a rotation, a body that grew a
@@ -181,8 +180,12 @@ export function MapDrawer({
     // ScrollView out from under the finger reading it — the list overscrolled, its content reflowed
     // at the new height, and a friend's pane swapped to its shorter summary mid-drag. The grip is
     // the drawer's handle; a body with nothing left to scroll is the only one that doubles as one.
-    const bodyIsList = detent === topDetent;
-    const listOwnsDrag = bodyIsList && listScrolls;
+    //
+    // This used to consult the live scroll offset instead, so that a list dragged back to its top
+    // handed the rest of the drag to the drawer. Two things were wrong with that: the drawer took
+    // over carrying the WHOLE translation since touch-down, so it jumped by however far the list
+    // had already been scrolled, and the offset arrived from the JS thread a frame or two late. It
+    // is no longer consulted at all, which is why the list's offset is no longer tracked.
     const makePan = (fromGrip: boolean) =>
       Gesture.Pan()
         // A drawer with one detent, or one whose stops have collapsed onto each other, has nowhere
@@ -197,12 +200,7 @@ export function MapDrawer({
           startHeight.value = height.value;
         })
         .onUpdate((event) => {
-          if (
-            !fromGrip &&
-            bodyIsList &&
-            (listOwnsDrag || event.translationY <= 0 || scrollY.value > 1)
-          )
-            return;
+          if (!fromGrip && bodyIsList && (listScrolls || event.translationY <= 0)) return;
           const next = startHeight.value - event.translationY;
           // Rubber-band past both ends rather than hard-stopping: a drawer that simply refuses to
           // move reads as a frozen app, and the resistance says "this is as far as it goes".
@@ -210,12 +208,7 @@ export function MapDrawer({
             next < lo ? lo - (lo - next) * 0.35 : next > hi ? hi + (next - hi) * 0.18 : next;
         })
         .onEnd((event) => {
-          if (
-            !fromGrip &&
-            bodyIsList &&
-            (listOwnsDrag || event.translationY <= 0 || scrollY.value > 1)
-          )
-            return;
+          if (!fromGrip && bodyIsList && (listScrolls || event.translationY <= 0)) return;
           const next = pickDetent(
             height.value,
             event.velocityY,
@@ -230,10 +223,10 @@ export function MapDrawer({
           gestureActive.value = false;
         });
     return { grip: makePan(true), body: makePan(false) };
-    // Shared values (`height`, `startHeight`, `scrollY`) are stable refs and are deliberately not
-    // listed: the real inputs are the detents and the resolved heights.
+    // Shared values (`height`, `startHeight`) are stable refs and are deliberately not listed: the
+    // real inputs are the detents and the resolved heights.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [commitDetent, detent, detents, heights, listScrolls, nativeScroll, topDetent]);
+  }, [bodyIsList, commitDetent, detents, heights, listScrolls, nativeScroll, topDetent]);
 
   const dockStyle = useAnimatedStyle(() => {
     const dock =
@@ -277,13 +270,6 @@ export function MapDrawer({
     [detent, gestureActive]
   );
 
-  const onScroll = useCallback(
-    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      scrollY.value = event.nativeEvent.contentOffset.y;
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
-  );
   const onScrollBeginDrag = useCallback(() => {
     gestureActive.value = true;
   }, [gestureActive]);
@@ -338,11 +324,14 @@ export function MapDrawer({
                 // somewhere to go and then sprang back. Bounce only when there is genuinely more
                 // body than drawer, which is the case this ScrollView actually exists for.
                 alwaysBounceVertical={false}
-                scrollEnabled={detent === topDetent}
-                onScroll={onScroll}
+                // A body that fits the detent it is in cannot scroll, rather than scrolling by
+                // whatever the pixel grid happens to leave over. The heights are derived from the
+                // body's own measurement, so at rest that slack is a rounding error — but a
+                // ScrollView will still let you pull on a third of a point and bounce it back,
+                // which is a panel twitching for a reason nobody can see.
+                scrollEnabled={bodyIsList && listScrolls}
                 onScrollBeginDrag={onScrollBeginDrag}
                 onScrollEndDrag={onScrollEndDrag}
-                scrollEventThrottle={16}
                 showsVerticalScrollIndicator={false}
                 style={styles.body}
                 contentContainerStyle={styles.bodyContent}
