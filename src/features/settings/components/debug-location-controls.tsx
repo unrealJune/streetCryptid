@@ -78,10 +78,7 @@ export function DebugLocationControls({
     <View style={[styles.container, { borderColor: theme.backgroundSelected }]}>
       <View style={styles.heading}>
         <View style={styles.copy}>
-          <ThemedText type="smallBold">Forced location pushes</ThemedText>
-          <ThemedText type="small" themeColor="textSecondary">
-            Bypass motion sampling and publish a fresh GPS fix for trace and server debugging.
-          </ThemedText>
+          <ThemedText type="smallBold">Force Location Push</ThemedText>
         </View>
         <Pressable
           accessibilityRole="button"

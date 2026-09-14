@@ -18,6 +18,7 @@ import {
 } from '@shopify/react-native-skia';
 
 import { buildPaletteLut } from '../core/region';
+import { lineDotIntervals } from '../core/dot-style';
 import type { RoadLayerOptions } from '../core/road-lod';
 import type { AeroAreaKind, AeroLineKind, MapPalette, Rgb, TransitMode } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
@@ -28,7 +29,7 @@ import { getDotFieldEffect } from './dot-field-shader';
 import { buildMaskImage } from './mask-image';
 import { buildHatchPath, buildStructurePaths } from './structure-paths';
 import { buildTransitPaths } from './transit-paths';
-import { FERRY_DASH, transitWidthFor } from '../core/transit-lod';
+import { transitWidthFor } from '../core/transit-lod';
 import {
   AERODROME_DASH,
   AERODROME_STROKE_WIDTH,
@@ -120,7 +121,7 @@ export interface RegionImageInput {
   readonly reveal?: number;
   /** Show the explored/unexplored fog treatment (default true). */
   readonly explorationEnabled?: boolean;
-  /** Stroke the transit lines over the dot field (default false). */
+  /** Draw dotted transit routes over the dot field (default false). */
   readonly transitEnabled?: boolean;
   /** Draw building footprints and aeroway surfaces over the dot field (default false). */
   readonly structuresEnabled?: boolean;
@@ -261,8 +262,8 @@ function drawCellOverlays(
 
 /**
  * Building footprints and aeroway surfaces over the dot field, in region-logical
- * coords. Vectors for the same reason transit is: the dot lattice would scatter
- * an outline into unrelated dots.
+ * coords. Footprints keep their crisp outlines; runway dots follow their paths
+ * instead of snapping to the terrain lattice.
  *
  * Drawn back to front — apron fill, aerodrome boundary, taxiways, runways, then
  * buildings (see {@link AERO_AREA_DRAW_ORDER}) — so the ground reads first and
@@ -320,6 +321,11 @@ function drawStructures(
     if (!path) continue;
     const paint = strokePaint(ink, width, AERO_LINE_ALPHA[kind] * reveal);
     paint.setStrokeCap(StrokeCap.Round);
+    if (kind === 'runway') {
+      const dots = Skia.PathEffect.MakeDash(lineDotIntervals(width));
+      if (!dots) continue;
+      paint.setPathEffect(dots);
+    }
     canvas.drawPath(path, paint);
   }
 
@@ -414,9 +420,9 @@ function fillPaint(rgb: Rgb, alpha: number): SkPaint {
 
 /**
  * Transit lines over the dot field, in region-logical coords (the canvas scale
- * maps them to device px). Vectors rather than mask coverage on purpose: the
- * dot lattice would break a continuous rail line into an unreadable dotted
- * trail. Fades with `reveal` alongside the cell overlays.
+ * maps them to device px). Round dots follow the original batched route paths;
+ * no per-dot geometry or per-frame work. Fades with `reveal` alongside the
+ * cell overlays.
  */
 function drawTransitLines(
   canvas: SkCanvas,
@@ -436,12 +442,9 @@ function drawTransitLines(
     const path = Skia.Path.MakeFromSVGString(svg);
     if (!path) continue;
     const paint = strokePaint(palette.transit, width, TRANSIT_ALPHA[mode] * reveal);
-    // Ferries are a route over open water, not track — dash them so they read
-    // as a crossing rather than a rail line.
-    if (mode === 'ferry') {
-      const effect = Skia.PathEffect.MakeDash([FERRY_DASH[0], FERRY_DASH[1]]);
-      if (effect) paint.setPathEffect(effect);
-    }
+    const dots = Skia.PathEffect.MakeDash(lineDotIntervals(width));
+    if (!dots) continue;
+    paint.setPathEffect(dots);
     paint.setStrokeCap(StrokeCap.Round);
     canvas.drawPath(path, paint);
   }

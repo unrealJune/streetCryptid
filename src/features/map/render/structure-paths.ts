@@ -25,8 +25,9 @@ import { featureBounds, intersectsBounds, ringBounds, tileLocalRect } from './ge
  *
  * Like transit and unlike streets, none of this bakes into the feature mask: the
  * dot field quantizes everything it touches to the lattice, which would scatter
- * a building outline into unrelated dots. These are stroked and filled as vectors
- * over the finished region bitmap, in **region-logical px** (0 at rect.min,
+ * a building outline into unrelated dots. Buildings keep vector outlines/fills
+ * and runways get evenly spaced round dots along these unchanged paths,
+ * over the finished region bitmap in **region-logical px** (0 at rect.min,
  * `scaleFor(spec.zoom)` px per world unit) — the same space the ghost lattice,
  * frontier rim and transit lines use.
  *

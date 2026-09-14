@@ -2,6 +2,7 @@ import { Text } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import { CryptidThemes } from '@/constants/cryptid-theme';
+import type { DistanceUnit } from '@/features/settings/core/distance-units';
 
 import { FriendsIsland, compactDistance, type MapRosterFriend } from '../friends-island';
 
@@ -9,6 +10,14 @@ jest.mock('expo-symbols', () => ({
   SymbolView: () => null,
 }));
 jest.mock('@/global.css', () => ({}));
+let mockDistanceUnit: DistanceUnit = 'km';
+let mockDisplayPreferencesReady = true;
+jest.mock('@/features/settings/hooks/use-display-preferences', () => ({
+  useDisplayPreferences: () => ({
+    distanceUnit: mockDistanceUnit,
+    ready: mockDisplayPreferencesReady,
+  }),
+}));
 
 const mothman: MapRosterFriend = {
   id: 'endpoint-mothman',
@@ -38,6 +47,11 @@ const jackalope: MapRosterFriend = {
 
 describe('FriendsIsland', () => {
   let renderer: ReactTestRenderer;
+
+  beforeEach(() => {
+    mockDistanceUnit = 'km';
+    mockDisplayPreferencesReady = true;
+  });
 
   afterEach(() => {
     act(() => renderer?.unmount());
@@ -96,6 +110,78 @@ describe('FriendsIsland', () => {
 
     expect(findText(renderer, '320 M')).toHaveLength(1);
     expect(findText(renderer, 'OFFLINE')).toHaveLength(1);
+  });
+
+  it('updates distance text and accessibility when the persisted unit preference changes', () => {
+    const friends = [{ ...mothman, distanceM: 2000 }, jackalope];
+    render(friends);
+    expect(findText(renderer, '2.0 KM')).toHaveLength(1);
+
+    mockDistanceUnit = 'mi';
+    act(() => {
+      renderer.update(
+        <FriendsIsland
+          friends={friends}
+          minimized={false}
+          onOpenProfile={jest.fn()}
+          onSelect={jest.fn()}
+          theme={CryptidThemes.daybreak}
+        />
+      );
+    });
+
+    expect(findText(renderer, '2.0 KM')).toHaveLength(0);
+    expect(findText(renderer, '1.2 MI')).toHaveLength(1);
+    expect(findText(renderer, 'OFFLINE')).toHaveLength(1);
+    expect(
+      renderer.root.findByProps({
+        accessibilityLabel: '@wanderer. 1.2 mi. updated 4 min ago.',
+      })
+    ).toBeTruthy();
+  });
+
+  it('does not flash the default metric distance before the saved imperial preference hydrates', () => {
+    mockDisplayPreferencesReady = false;
+    const friends = [{ ...mothman, distanceM: 2000 }, jackalope];
+    render(friends);
+
+    expect(findText(renderer, '2.0 KM')).toHaveLength(0);
+    expect(findText(renderer, '1.2 MI')).toHaveLength(0);
+    expect(findText(renderer, 'NO FIX')).toHaveLength(0);
+    expect(findText(renderer, 'OFFLINE')).toHaveLength(1);
+    expect(
+      renderer.root.findByProps({ accessibilityLabel: '@wanderer. updated 4 min ago.' })
+    ).toBeTruthy();
+
+    mockDistanceUnit = 'mi';
+    mockDisplayPreferencesReady = true;
+    act(() => {
+      renderer.update(
+        <FriendsIsland
+          friends={friends}
+          minimized={false}
+          onOpenProfile={jest.fn()}
+          onSelect={jest.fn()}
+          theme={CryptidThemes.daybreak}
+        />
+      );
+    });
+
+    expect(findText(renderer, '2.0 KM')).toHaveLength(0);
+    expect(findText(renderer, '1.2 MI')).toHaveLength(1);
+    expect(
+      renderer.root.findByProps({
+        accessibilityLabel: '@wanderer. 1.2 mi. updated 4 min ago.',
+      })
+    ).toBeTruthy();
+  });
+
+  it('uses feet for nearby imperial distances without converting a missing fix', () => {
+    mockDistanceUnit = 'mi';
+    render([mothman, { ...jackalope, online: true }]);
+
+    expect(findText(renderer, '1050 FT')).toHaveLength(1);
+    expect(findText(renderer, 'NO FIX')).toHaveLength(1);
   });
 
   it('renders the pairing readout the island arms', () => {
@@ -203,15 +289,16 @@ describe('FriendsIsland', () => {
     ).toEqual({ expanded: false });
   });
 
-  it('points an empty atlas at pairing instead of showing a bare list', () => {
+  it('keeps the empty roster copy brief, without duplicate pairing instructions', () => {
     render([]);
 
     expect(findText(renderer, '0 NEARBY')).toHaveLength(1);
+    expect(findText(renderer, 'No cryptids yet!')).toHaveLength(1);
     expect(
       renderer.root
         .findAllByType(Text)
         .some((node) => String(node.props.children).includes('Touch two phones together'))
-    ).toBe(true);
+    ).toBe(false);
   });
 });
 
@@ -227,6 +314,13 @@ describe('compactDistance', () => {
   it('has nothing to say without a distance', () => {
     expect(compactDistance(null)).toBeNull();
     expect(compactDistance(Number.NaN)).toBeNull();
+  });
+
+  it('uses the shared imperial formatter while preserving uppercase roster styling', () => {
+    expect(compactDistance(110, 'mi')).toBe('360 FT');
+    expect(compactDistance(2000, 'mi')).toBe('1.2 MI');
+    expect(compactDistance(40_000, 'mi')).toBe('25 MI');
+    expect(compactDistance(null, 'mi')).toBeNull();
   });
 });
 

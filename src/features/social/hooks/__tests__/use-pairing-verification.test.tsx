@@ -77,6 +77,8 @@ function Harness({ verifications, onChoose, onConfirm, onCancel }: HarnessProps)
 
   return (
     <>
+      <Text>{verify.status}</Text>
+      <Text>{verify.detail}</Text>
       {verify.mode === 'pick' ? (
         <PairingFigureChoices
           accent="#2f9e6a"
@@ -158,6 +160,11 @@ describe('usePairingVerification', () => {
       .findAll((node) => node.props.accessibilityRole === 'radio')
       .map((node) => node.props.accessibilityLabel);
     expect(new Set(optionLabels).size).toBe(4);
+    expect(
+      renderer.root
+        .findAllByType(Text)
+        .some((node) => node.props.children === 'Tap the figure displayed on their phone')
+    ).toBe(true);
   });
 
   it('requires the displayer to confirm what the other person picked', async () => {
@@ -284,5 +291,99 @@ describe('usePairingVerification', () => {
     });
     await act(async () => matched.props.onPress());
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('rejects immediately even if the haptic never settles, and refuses a later match', async () => {
+    const onConfirm = jest.fn(async () => {});
+    mockHaptics.warningHaptic.mockImplementationOnce(() => new Promise(() => {}));
+    act(() => {
+      renderer = create(
+        <Harness
+          verifications={[verification({ role: 'displayer', optionIndices: [42] })]}
+          onConfirm={onConfirm}
+        />
+      );
+    });
+    const different = renderer.root.findByProps({
+      accessibilityLabel: 'The other person picked a different figure',
+    });
+    const matched = renderer.root.findByProps({
+      accessibilityLabel: 'The other person picked this figure',
+    });
+    await act(async () => {
+      different.props.onPress();
+      matched.props.onPress();
+    });
+    await act(async () => matched.props.onPress());
+    expect(onConfirm.mock.calls).toEqual([['session-1', false]]);
+  });
+
+  it('cancels only once and never submits a queued choice after cancellation', async () => {
+    const onCancel = jest.fn(async () => {});
+    const onChoose = jest.fn(async () => {});
+    mockHaptics.transientHaptic.mockImplementationOnce(() => new Promise(() => {}));
+    act(() => {
+      renderer = create(
+        <Harness verifications={[verification()]} onCancel={onCancel} onChoose={onChoose} />
+      );
+    });
+    const stop = renderer.root.findByProps({ accessibilityLabel: 'stop pairing' });
+    const option = renderer.root.findByProps({
+      accessibilityLabel: `Pairing figure: ${pairingFigure(42).name}`,
+    });
+    await act(async () => {
+      stop.props.onPress();
+      stop.props.onPress();
+      option.props.onPress();
+    });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onChoose).not.toHaveBeenCalled();
+  });
+
+  it('checks the absolute deadline at the tap, even before the next clock tick', async () => {
+    const onConfirm = jest.fn(async () => {});
+    act(() => {
+      renderer = create(
+        <Harness
+          verifications={[verification({ role: 'displayer', deadlineMs: Date.now() - 1 })]}
+          onConfirm={onConfirm}
+        />
+      );
+    });
+    await act(async () =>
+      renderer.root
+        .findByProps({ accessibilityLabel: 'The other person picked this figure' })
+        .props.onPress()
+    );
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('allows a fresh nearby attempt even when native reuses the session id', async () => {
+    const onCancel = jest.fn(async () => {});
+    const onChoose = jest.fn(async () => {});
+    const first = verification();
+    act(() => {
+      renderer = create(
+        <Harness verifications={[first]} onCancel={onCancel} onChoose={onChoose} />
+      );
+    });
+    await act(async () =>
+      renderer.root.findByProps({ accessibilityLabel: 'stop pairing' }).props.onPress()
+    );
+    act(() => {
+      renderer.update(
+        <Harness
+          verifications={[{ ...first, deadlineMs: first.deadlineMs + 60_000 }]}
+          onCancel={onCancel}
+          onChoose={onChoose}
+        />
+      );
+    });
+    await act(async () =>
+      renderer.root
+        .findByProps({ accessibilityLabel: `Pairing figure: ${pairingFigure(42).name}` })
+        .props.onPress()
+    );
+    expect(onChoose).toHaveBeenCalledWith(first.sessionId, 42);
   });
 });

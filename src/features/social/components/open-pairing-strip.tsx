@@ -27,9 +27,6 @@ export function OpenPairingStrip({ theme, onOpen }: OpenPairingStripProps) {
     >
       <View style={styles.copy}>
         <Text style={[styles.status, { color: chrome.green }]}>PAIR WITH SOMEONE</Text>
-        <Text style={[styles.detail, { color: chrome.steel }]}>
-          Bump nearby or exchange a one-time link.
-        </Text>
       </View>
       <View style={[styles.action, { borderColor: chrome.green }]}>
         <Text style={[styles.actionLabel, { color: chrome.green }]}>OPEN PAIRING</Text>
@@ -50,18 +47,12 @@ const styles = StyleSheet.create({
   },
   copy: {
     flex: 1,
-    gap: 3,
     minWidth: 0,
   },
   status: {
     fontFamily: 'IBMPlexMono_600SemiBold',
     fontSize: 10,
     letterSpacing: 1.2,
-  },
-  detail: {
-    fontFamily: 'IBMPlexMono_400Regular',
-    fontSize: 11,
-    lineHeight: 15,
   },
   action: {
     alignItems: 'center',

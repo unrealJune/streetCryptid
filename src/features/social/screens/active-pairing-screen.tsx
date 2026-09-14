@@ -15,16 +15,10 @@ import {
   View,
 } from 'react-native';
 import Animated, {
-  Easing,
   FadeIn,
   FadeOut,
   LinearTransition,
-  useAnimatedStyle,
   useReducedMotion,
-  useSharedValue,
-  withRepeat,
-  withSequence,
-  withTiming,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -40,6 +34,7 @@ import {
 } from '@/features/social/core/active-pairing-state';
 import { patternHaptic, successHaptic, tapHaptic, warningHaptic } from '@/features/haptics/haptics';
 import { PERSONA_RESOLVE } from '@/features/social/core/pairing-experience';
+import { pairingSearchProgress, secondsRemaining } from '@/features/social/core/pairing-countdown';
 import { useArmedBump } from '@/features/social/hooks/use-armed-bump';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 import { usePairingHaptics } from '@/features/social/hooks/use-pairing-haptics';
@@ -59,10 +54,6 @@ const QR_SIZE = 88;
 /** Content swaps are quick enough not to feel like a page load, slow enough to read as a move. */
 const SWAP_IN_MS = 260;
 const SWAP_OUT_MS = 160;
-
-function secondsRemaining(deadline: number | null | undefined, now: number): number {
-  return deadline ? Math.max(0, Math.ceil((deadline - now) / 1000)) : 0;
-}
 
 function formatClock(seconds: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
@@ -109,14 +100,20 @@ export default function ActivePairingScreen() {
   } = useLocationSharing();
   const [intent, setIntent] = useState<PairingRouteIntent>(token ? 'redeem' : 'bump');
   const [redeeming, setRedeeming] = useState(Boolean(token));
-  const [now, setNow] = useState(0);
+  const [now, setNow] = useState(Date.now);
   const [input, setInput] = useState('');
   const [inputError, setInputError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [dismissedLink, setDismissedLink] = useState<string | null>(null);
   const [linkNotice, setLinkNotice] = useState<string | null>(null);
-  const [working, setWorking] = useState<'link' | 'redeem' | 'retry' | null>(null);
+  const [working, setWorking] = useState<
+    'link' | 'cancel-link' | 'redeem' | 'retry' | 'accept-friend' | 'reject-friend' | null
+  >(null);
+  const workingRef = useRef<typeof working>(null);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [rejectedDiscovery, setRejectedDiscovery] = useState<string | null>(null);
+  const routeActive = useRef(true);
   const redeemedToken = useRef<string | null>(null);
   const focused = useIsFocused();
   const [foreground, setForeground] = useState(AppState.currentState === 'active');
@@ -150,14 +147,17 @@ export default function ActivePairingScreen() {
     abandonableRef.current = [];
     await Promise.allSettled([
       cancelBump(),
+      cancelPairInvite(),
       ...sessionIds.map((sessionId) => cancelPair(sessionId)),
     ]);
-  }, [cancelBump, cancelPair]);
+  }, [cancelBump, cancelPair, cancelPairInvite]);
 
   useFocusEffect(
     useCallback(() => {
+      routeActive.current = true;
       void refreshPairing();
       return () => {
+        routeActive.current = false;
         void standDown();
       };
     }, [refreshPairing, standDown])
@@ -171,11 +171,12 @@ export default function ActivePairingScreen() {
   useEffect(() => {
     if (!token || !snapshot?.ready || redeemedToken.current === token) return;
     redeemedToken.current = token;
+    workingRef.current = 'redeem';
     setIntent('redeem');
     setRedeeming(true);
     setWorking('redeem');
     void cancelBump()
-      .then(() => pairFromInput(token))
+      .then(() => (routeActive.current ? pairFromInput(token) : undefined))
       .then(() => setIntent('bump'))
       .catch((redeemError: unknown) => {
         setInputError(
@@ -183,22 +184,33 @@ export default function ActivePairingScreen() {
         );
       })
       .finally(() => {
+        workingRef.current = null;
         setWorking(null);
         setRedeeming(false);
-        router.setParams({ token: undefined });
+        if (routeActive.current) router.setParams({ token: undefined });
       });
   }, [cancelBump, pairFromInput, router, snapshot?.ready, token]);
 
   const verifications = useMemo(() => pairing?.verifications ?? [], [pairing?.verifications]);
   useEffect(() => {
     const sessionIds = new Set<string>();
+    const completed = new Set(pairing?.completedSessionIds ?? []);
+    if (pairing?.discoveredFriend?.pairingSessionId) {
+      completed.add(pairing.discoveredFriend.pairingSessionId);
+    }
     for (const entry of verifications) sessionIds.add(entry.sessionId);
     for (const request of pairing?.pendingRequests ?? []) sessionIds.add(request.sessionId);
     for (const session of pairing?.sessions ?? []) {
       if (isActiveSession(session.state)) sessionIds.add(session.sessionId);
     }
-    abandonableRef.current = [...sessionIds];
-  }, [pairing?.pendingRequests, pairing?.sessions, verifications]);
+    abandonableRef.current = [...sessionIds].filter((sessionId) => !completed.has(sessionId));
+  }, [
+    pairing?.completedSessionIds,
+    pairing?.discoveredFriend?.pairingSessionId,
+    pairing?.pendingRequests,
+    pairing?.sessions,
+    verifications,
+  ]);
 
   const verifyHandlers = useMemo(
     () => ({ onChoose: submitPairChoice, onConfirm: confirmPairDisplay, onCancel: cancelPair }),
@@ -207,7 +219,7 @@ export default function ActivePairingScreen() {
   const verify = usePairingVerification(verifications, verifyHandlers);
   const verification = verify.verification;
   const activeSession = pairing?.sessions.find((session) => isActiveSession(session.state)) ?? null;
-  const inviteRemaining = now ? secondsRemaining(pairing?.inviteExpiresAt, now) : 0;
+  const inviteRemaining = secondsRemaining(pairing?.inviteExpiresAt, now);
   const invite = inviteScreenState({
     inviteLink: pairing?.inviteLink,
     remainingSeconds: inviteRemaining,
@@ -251,23 +263,6 @@ export default function ActivePairingScreen() {
     inviteExpired,
     failure,
   });
-
-  useEffect(() => {
-    if (Platform.OS !== 'android') return;
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (scanning) {
-        setScanning(false);
-        return true;
-      }
-      if (verification) {
-        verify.cancel();
-        return true;
-      }
-      router.back();
-      return true;
-    });
-    return () => subscription.remove();
-  }, [router, scanning, verification, verify]);
 
   useEffect(() => {
     if (!copied) return;
@@ -320,7 +315,7 @@ export default function ActivePairingScreen() {
           mode: failure?.nearby ? 'BUMP FAILED' : 'PAIRING FAILED',
           status: copy.status,
           detail: copy.detail,
-          caption: 'NOTHING SHARED',
+          caption: failure?.withdrawn ? 'PAIRING STOPPED' : 'NOTHING SHARED',
           readout: '',
           fieldMode: 'fracture',
           tone: 'amber',
@@ -361,9 +356,9 @@ export default function ActivePairingScreen() {
       case 'bump-contact':
         return {
           mode: 'PAIRING',
-          status: 'SIGNAL FOUND',
-          detail: 'Starting the encrypted visual check. Keep both phones open.',
-          caption: 'EXCHANGING KEYS',
+          status: 'CONNECTING',
+          detail: 'Keep both phones open',
+          caption: 'CONNECTING',
           readout: '',
           fieldMode: 'converge',
           tone: 'signal',
@@ -381,8 +376,8 @@ export default function ActivePairingScreen() {
       case 'link-live':
         return {
           mode: 'PAIRING LINK',
-          status: 'LINK IS LIVE',
-          detail: 'Send it to one person. It works once, and only until this timer ends.',
+          status: 'LINK',
+          detail: 'This link works once and expires when the timer ends',
           caption: 'UNTIL THIS LINK EXPIRES',
           readout: formatClock(inviteRemaining),
           fieldMode: 'countdown',
@@ -454,8 +449,8 @@ export default function ActivePairingScreen() {
       case 'bump-failed':
         return {
           mode: 'BUMP MISSED',
-          status: 'BUMP MISSED',
-          detail: pairing?.bump.error ?? bump.error ?? 'Keep both phones here and try once more.',
+          status: 'NOTHING FOUND',
+          detail: 'No phone replied, make sure both phones are searching at the same time',
           caption: 'NO CONTACT',
           readout: '',
           fieldMode: 'scatter',
@@ -464,10 +459,10 @@ export default function ActivePairingScreen() {
       case 'bump-searching':
         return {
           mode: 'BUMP ARMED',
-          status: `READING ${pairing?.bump.peerCount || '—'} SIGNALS`,
-          detail: 'Ranking the nearest phone and preparing the encrypted visual check.',
-          caption: 'SIGNALS IN RANGE',
-          readout: pairing?.bump.peerCount ? String(pairing.bump.peerCount) : '',
+          status: 'SEARCHING',
+          detail: '',
+          caption: 'SEARCHING',
+          readout: '',
           fieldMode: 'sweep',
           tone: 'signal',
         };
@@ -484,24 +479,18 @@ export default function ActivePairingScreen() {
       case 'bump-armed':
         return {
           mode: 'BUMP ARMED',
-          status: 'READY FOR IMPACT',
-          detail:
-            bump.sensor.status === 'ready'
-              ? 'Touch the top edges of both phones together.'
-              : 'Touch the phones together, then tap Bump now on both screens.',
-          caption: 'LISTENING',
+          status: 'SHAKE TO ADD A NEARBY FRIEND',
+          detail: '',
+          caption: 'SHAKE TO START',
           readout: '',
           fieldMode: 'pulse',
           tone: 'signal',
         };
     }
   }, [
-    bump.error,
-    bump.sensor.status,
     failure,
     inputError,
     inviteRemaining,
-    pairing,
     stage,
     verify.clock,
     verify.detail,
@@ -527,33 +516,15 @@ export default function ActivePairingScreen() {
   // rather than latched: the moment the stage stops being `link-live`, there is nothing to show.
   const scanLink = scanning && stage === 'link-live' ? (pairing?.inviteLink ?? null) : null;
   const countdownProgress =
-    stage === 'link-live' ? Math.max(0, Math.min(1, inviteRemaining / INVITE_TTL_SECONDS)) : 1;
-
-  // The mode dot breathes while the radio is genuinely doing something, and holds still once
-  // the screen is waiting on a person rather than on hardware.
-  const dotPulse = useSharedValue(0);
-  const liveModes = stage === 'bump-armed' || stage === 'bump-searching' || stage === 'link-live';
-  useEffect(() => {
-    if (!liveModes || reducedMotion) {
-      dotPulse.value = withTiming(0, { duration: 200 });
-      return;
-    }
-    dotPulse.value = withRepeat(
-      withSequence(
-        withTiming(1, { duration: 900, easing: Easing.inOut(Easing.quad) }),
-        withTiming(0, { duration: 900, easing: Easing.inOut(Easing.quad) })
-      ),
-      -1,
-      false
-    );
-  }, [dotPulse, liveModes, reducedMotion]);
-  const dotStyle = useAnimatedStyle(() => ({
-    opacity: 1 - dotPulse.value * 0.55,
-    transform: [{ scale: 1 + dotPulse.value * 0.35 }],
-  }));
+    stage === 'bump-searching'
+      ? pairingSearchProgress(pairing?.bump.searchStartedAt, now)
+      : stage === 'link-live'
+        ? Math.max(0, Math.min(1, inviteRemaining / INVITE_TTL_SECONDS))
+        : 1;
 
   const createAndShareLink = async (): Promise<void> => {
-    if (working) return;
+    if (workingRef.current) return;
+    workingRef.current = 'link';
     setIntent('link');
     setWorking('link');
     setInputError(null);
@@ -563,7 +534,9 @@ export default function ActivePairingScreen() {
     clearPairingFailure();
     try {
       await cancelBump();
+      if (!routeActive.current) return;
       const link = await createPairInvite(INVITE_TTL_SECONDS);
+      if (!routeActive.current) return;
       if (!link) throw new Error('A pairing link could not be created.');
       void successHaptic();
       await shareLink(link);
@@ -572,6 +545,7 @@ export default function ActivePairingScreen() {
         linkError instanceof Error ? linkError.message : 'A pairing link could not be created.'
       );
     } finally {
+      workingRef.current = null;
       setWorking(null);
     }
   };
@@ -585,16 +559,18 @@ export default function ActivePairingScreen() {
 
   const submitInput = async (): Promise<void> => {
     const value = input.trim();
-    if (!value || working) {
+    if (!value || workingRef.current) {
       if (!value) setInputError('Paste a streetCryptid pairing link, token, or code.');
       return;
     }
+    workingRef.current = 'redeem';
     setWorking('redeem');
     setIntent('redeem');
     setRedeeming(true);
     setInputError(null);
     try {
       await cancelBump();
+      if (!routeActive.current) return;
       await pairFromInput(value);
       setIntent('bump');
       setInput('');
@@ -603,13 +579,15 @@ export default function ActivePairingScreen() {
         pairError instanceof Error ? pairError.message : 'That pairing link could not open.'
       );
     } finally {
+      workingRef.current = null;
       setRedeeming(false);
       setWorking(null);
     }
   };
 
   const retryBump = async (): Promise<void> => {
-    if (working) return;
+    if (workingRef.current) return;
+    workingRef.current = 'retry';
     setIntent('bump');
     setWorking('retry');
     setInputError(null);
@@ -617,6 +595,7 @@ export default function ActivePairingScreen() {
     try {
       await bump.arm();
     } finally {
+      workingRef.current = null;
       setWorking(null);
     }
   };
@@ -637,31 +616,85 @@ export default function ActivePairingScreen() {
    * token stop working; the dismissal is what makes the screen move.
    */
   const cancelLinkAndReturn = async (): Promise<void> => {
-    if (working) return;
+    if (workingRef.current) return;
+    workingRef.current = 'cancel-link';
     const link = pairing?.inviteLink ?? null;
-    setWorking('link');
+    setWorking('cancel-link');
+    setLinkNotice(null);
     try {
       const outcome = await cancelPairInvite();
+      if (outcome === 'unsupported') {
+        setLinkNotice(
+          'This build cannot withdraw a link. It stops working when its timer runs out.'
+        );
+        return;
+      }
+      setScanning(false);
       setDismissedLink(link);
-      // Only an older binary warrants a warning. A `cancelled` link is genuinely dead, and an
-      // `absent` one was never there — neither is something to interrupt anyone about.
-      setLinkNotice(
-        outcome === 'unsupported'
-          ? 'This build cannot withdraw a link. It stops working when its timer runs out.'
-          : null
-      );
-      // Not `returnToBump()` — that clears the notice this branch just set.
       setInputError(null);
       setIntent('bump');
+    } catch (cancelError: unknown) {
+      setLinkNotice(
+        cancelError instanceof Error
+          ? cancelError.message
+          : 'Could not cancel this link. Try again.'
+      );
     } finally {
+      workingRef.current = null;
       setWorking(null);
     }
   };
 
-  const close = (): void => {
+  const close = useCallback((): void => {
+    routeActive.current = false;
     void standDown();
     router.back();
-  };
+  }, [router, standDown]);
+
+  const decideFriend = useCallback(
+    async (accept: boolean): Promise<void> => {
+      if (workingRef.current || !friend) return;
+      const key = `${friend.endpointId}:${friend.pairedAt ?? 0}`;
+      if (accept && rejectedDiscovery === key) return;
+      workingRef.current = accept ? 'accept-friend' : 'reject-friend';
+      setWorking(workingRef.current);
+      setDiscoveryError(null);
+      if (!accept) setRejectedDiscovery(key);
+      try {
+        if (accept) await acknowledgeDiscoveredFriend();
+        else await rejectDiscoveredFriend();
+        close();
+      } catch (error: unknown) {
+        setDiscoveryError(
+          error instanceof Error ? error.message : 'The pairing decision could not finish.'
+        );
+      } finally {
+        workingRef.current = null;
+        setWorking(null);
+      }
+    },
+    [acknowledgeDiscoveredFriend, close, friend, rejectedDiscovery, rejectDiscoveredFriend]
+  );
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (workingRef.current === 'accept-friend' || workingRef.current === 'reject-friend') {
+        return true;
+      }
+      if (scanning) {
+        setScanning(false);
+      } else if (verification) {
+        verify.cancel();
+      } else if (friend) {
+        void decideFriend(false);
+      } else {
+        close();
+      }
+      return true;
+    });
+    return () => subscription.remove();
+  }, [close, decideFriend, friend, scanning, verification, verify]);
 
   const showPasteRow =
     !friend &&
@@ -683,23 +716,16 @@ export default function ActivePairingScreen() {
         <PressableAction
           accessibilityLabel="Close pairing"
           accessibilityRole="button"
-          onPress={close}
+          disabled={working === 'accept-friend' || working === 'reject-friend'}
+          onPress={() => {
+            if (friend) void decideFriend(false);
+            else close();
+          }}
           pressScale={0.9}
           style={[styles.back, { backgroundColor: chrome.seg }]}
         >
           <Text style={[styles.backLabel, { color: chrome.ink }]}>{'‹'}</Text>
         </PressableAction>
-        <View style={styles.mode}>
-          <Animated.View style={[styles.liveDot, { backgroundColor: toneColor }, dotStyle]} />
-          <Animated.Text
-            key={presentation.mode}
-            entering={reducedMotion ? undefined : FadeIn.duration(SWAP_IN_MS)}
-            style={[styles.modeLabel, { color: chrome.ink }]}
-          >
-            {presentation.mode}
-          </Animated.Text>
-        </View>
-        <View style={styles.headerSpacer} />
       </View>
 
       <View style={styles.stage}>
@@ -736,6 +762,7 @@ export default function ActivePairingScreen() {
                 base={chrome.dot}
                 mode={presentation.fieldMode}
                 progress={countdownProgress}
+                searchStartedAt={pairing?.bump.searchStartedAt}
                 size={fieldSize}
               />
               <View pointerEvents="none" style={styles.readout}>
@@ -779,7 +806,9 @@ export default function ActivePairingScreen() {
               >
                 {presentation.status}
               </Text>
-              <Text style={[styles.detail, { color: chrome.steel }]}>{presentation.detail}</Text>
+              {presentation.detail ? (
+                <Text style={[styles.detail, { color: chrome.steel }]}>{presentation.detail}</Text>
+              ) : null}
               {linkNotice ? (
                 <Text style={[styles.detail, { color: chrome.amber }]}>{linkNotice}</Text>
               ) : null}
@@ -818,7 +847,12 @@ export default function ActivePairingScreen() {
               />
             </PressableAction>
             <View style={styles.linkCopy}>
-              <Text numberOfLines={2} selectable style={[styles.linkText, { color: chrome.ink }]}>
+              <Text
+                numberOfLines={2}
+                selectable
+                testID="debug-invite-link"
+                style={[styles.linkText, { color: chrome.ink }]}
+              >
                 {pairing.inviteLink}
               </Text>
               <View style={styles.linkActions}>
@@ -875,22 +909,31 @@ export default function ActivePairingScreen() {
           </View>
         ) : null}
 
+        {discoveryError ? (
+          <Text accessibilityRole="alert" style={[styles.detail, { color: chrome.amber }]}>
+            {discoveryError}
+          </Text>
+        ) : null}
+
         <View style={styles.actions}>
           {friend ? (
             <>
               <Action
                 color={chrome.steel}
                 label="REJECT"
-                onPress={() => void rejectDiscoveredFriend().then(close)}
+                disabled={Boolean(working)}
+                onPress={() => void decideFriend(false)}
                 outline
               />
               <Action
                 color={signal}
                 label="ACKNOWLEDGE"
-                onPress={() => {
-                  acknowledgeDiscoveredFriend();
-                  close();
-                }}
+                testID="pairing-acknowledge-friend"
+                disabled={
+                  Boolean(working) ||
+                  rejectedDiscovery === `${friend.endpointId}:${friend.pairedAt ?? 0}`
+                }
+                onPress={() => void decideFriend(true)}
               />
             </>
           ) : verify.mode === 'show' ? (
@@ -983,7 +1026,12 @@ export default function ActivePairingScreen() {
             stage === 'bump-starting' ||
             stage === 'unavailable' ||
             stage === 'radio-unsupported' ? (
-            <Action color={signal} label="MAKE A LINK" onPress={() => void createAndShareLink()} />
+            <Action
+              color={chrome.steel}
+              label="MAKE A LINK"
+              onPress={() => void createAndShareLink()}
+              outline
+            />
           ) : null}
         </View>
 
@@ -1017,7 +1065,7 @@ export default function ActivePairingScreen() {
           >
             <PairingQr background={qrField} color={qrModule} size={scanSize} value={scanLink} />
             <Text style={[styles.scanCaption, { color: chrome.steel }]}>
-              POINT THE OTHER PHONE&apos;S CAMERA AT THIS
+              POINT THE OTHER PHONE&apos;S CAMERA AT THIS :)
             </Text>
             <Text style={[styles.scanClock, { color: signal }]}>
               {formatClock(inviteRemaining)} LEFT
@@ -1123,24 +1171,6 @@ const styles = StyleSheet.create({
     fontFamily: 'Rajdhani_700Bold',
     fontSize: 28,
     lineHeight: 31,
-  },
-  mode: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: Spacing.two,
-  },
-  liveDot: {
-    borderRadius: 4,
-    height: 8,
-    width: 8,
-  },
-  modeLabel: {
-    fontFamily: 'IBMPlexMono_600SemiBold',
-    fontSize: 10,
-    letterSpacing: 1.6,
-  },
-  headerSpacer: {
-    width: 34,
   },
   stage: {
     alignItems: 'center',

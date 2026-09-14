@@ -3,6 +3,7 @@ import {
   createCryptidProfile,
   defaultCryptidProfileDraft,
   parseCryptidProfile,
+  USERNAME_GUIDANCE,
   validateCryptidProfile,
   validateCryptidProfileFields,
 } from '../profile';
@@ -69,9 +70,7 @@ describe('cryptid profile', () => {
       color: 'green',
     });
 
-    expect(issues.handle).toEqual([
-      'Use 2-20 lowercase letters, numbers, underscores, or dashes for the username.',
-    ]);
+    expect(issues.handle).toEqual([USERNAME_GUIDANCE]);
     expect(issues.cryptidName).toEqual([
       'Give the profile icon a name between 1 and 24 characters.',
     ]);
@@ -84,6 +83,25 @@ describe('cryptid profile', () => {
       ...defaultCryptidProfileDraft(),
       handle: 'wanderer',
     });
+
     expect(parseCryptidProfile(JSON.parse(JSON.stringify(profile)))).toEqual(profile);
   });
+
+  it.each(['', 'a', 'a'.repeat(21), '_owl', '-owl', 'night owl', 'owl!'])(
+    'rejects invalid username %j with the same guidance shown in the editor',
+    (handle) => {
+      expect(
+        validateCryptidProfileFields({ ...defaultCryptidProfileDraft(), handle }).handle
+      ).toEqual([USERNAME_GUIDANCE]);
+    }
+  );
+
+  it.each(['ab', 'a'.repeat(20), '1owl', 'night_owl', 'night-owl'])(
+    'accepts username %j according to the guidance',
+    (handle) => {
+      expect(
+        validateCryptidProfileFields({ ...defaultCryptidProfileDraft(), handle }).handle
+      ).toEqual([]);
+    }
+  );
 });

@@ -4,13 +4,12 @@ appId: com.unrealjune.streetcryptid
 # on iOS, Maestro's launchApp appears to force a terminate+relaunch even with
 # clearState: false, which tears down and rebuilds the native LocationNode —
 # wiping any in-memory issued-invite record before it can be redeemed. Run this
-# immediately after create-invite.yaml in the same session, with no launchApp
-# in between.
+# only while Settings is open. This helper does not close the separate Pair route: closing Pair
+# would revoke its invitation, so the inviting phone must remain there until redemption.
 #
 # Settings is a menu with pages under it now, and "Close settings" only exists on the
-# menu itself — create-invite.yaml leaves us one page deep, on "Link pairing". Pop back
-# to the menu first if we are on a subpage; the step is conditional because this flow is
-# also run from the menu directly.
+# menu itself. Pop back to the menu first if we are on a subpage; the step is
+# conditional because this flow is also run from the menu directly.
 - runFlow:
     when:
       visible: 'Back to settings'

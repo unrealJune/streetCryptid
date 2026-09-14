@@ -12,9 +12,8 @@ import { useCryptidProfile } from '../hooks/use-cryptid-profile';
  * Editing your profile is not a different kind of act from choosing a color scheme, so it no
  * longer looks like one: this is a route under `settings/`, and it pushes and pops like the rest.
  *
- * The editor autosaves, so leaving by the platform back gesture or the same ‹ SETTINGS affordance
- * used by every other settings subpage preserves ordinary edits. An undecided persona roll remains
- * intentionally unsaved until the user keeps it.
+ * Every edit is a draft until Save is pressed. Leaving by the platform back gesture or the same
+ * ‹ SETTINGS affordance used by every other settings subpage discards unsaved profile changes.
  */
 export default function ProfileScreen() {
   const router = useRouter();

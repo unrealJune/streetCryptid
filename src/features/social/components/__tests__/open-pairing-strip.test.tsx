@@ -24,5 +24,9 @@ describe('OpenPairingStrip', () => {
 
     expect(onOpen).toHaveBeenCalledTimes(1);
     expect(renderer.root.findAllByProps({ accessibilityLabel: 'Arm bump' })).toHaveLength(0);
+    const rendered = JSON.stringify(renderer.toJSON());
+    expect(rendered).toContain('PAIR WITH SOMEONE');
+    expect(rendered).toContain('OPEN PAIRING');
+    expect(rendered).not.toContain('Bump nearby or exchange a one-time link.');
   });
 });

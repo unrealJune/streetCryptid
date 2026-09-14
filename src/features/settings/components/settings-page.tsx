@@ -10,12 +10,14 @@ import { useTheme } from '@/hooks/use-theme';
 
 interface SettingsPageProps {
   readonly title: string;
-  readonly subtitle: string;
+  readonly testID?: string;
+  readonly subtitle?: string;
   /**
    * `root` is the menu itself: it owns the sheet, so it closes it. `sub` is one
    * menu deep and pops back to the menu instead.
    */
-  readonly kind?: 'root' | 'sub';
+  readonly kind?: 'root' | 'sub' | 'onboarding';
+  readonly backLabel?: string;
   readonly children: ReactNode;
 }
 
@@ -30,13 +32,21 @@ interface SettingsPageProps {
  * level. Maestro keys on those two accessibility labels — see
  * `.maestro/pairing/close-settings.yaml`.
  */
-export function SettingsPage({ title, subtitle, kind = 'sub', children }: SettingsPageProps) {
+export function SettingsPage({
+  title,
+  testID,
+  subtitle,
+  kind = 'sub',
+  backLabel = 'Settings',
+  children,
+}: SettingsPageProps) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
 
   return (
     <ScrollView
+      testID={testID}
       style={{ backgroundColor: theme.background }}
       contentContainerStyle={[
         styles.content,
@@ -48,7 +58,7 @@ export function SettingsPage({ title, subtitle, kind = 'sub', children }: Settin
     >
       {kind === 'sub' ? (
         <Pressable
-          accessibilityLabel="Back to settings"
+          accessibilityLabel={`Back to ${backLabel.toLowerCase()}`}
           accessibilityRole="button"
           hitSlop={8}
           onPress={() => router.back()}
@@ -60,7 +70,7 @@ export function SettingsPage({ title, subtitle, kind = 'sub', children }: Settin
             tintColor={theme.textSecondary}
           />
           <ThemedText type="smallBold" themeColor="textSecondary" style={styles.backLabel}>
-            SETTINGS
+            {backLabel.toUpperCase()}
           </ThemedText>
         </Pressable>
       ) : null}
@@ -68,9 +78,11 @@ export function SettingsPage({ title, subtitle, kind = 'sub', children }: Settin
       <View style={styles.header}>
         <View style={styles.headerCopy}>
           <ThemedText type="subtitle">{title}</ThemedText>
-          <ThemedText type="small" themeColor="textSecondary">
-            {subtitle}
-          </ThemedText>
+          {subtitle ? (
+            <ThemedText type="small" themeColor="textSecondary">
+              {subtitle}
+            </ThemedText>
+          ) : null}
         </View>
         {kind === 'root' ? (
           <Pressable

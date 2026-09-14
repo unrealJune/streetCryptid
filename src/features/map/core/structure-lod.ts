@@ -6,11 +6,11 @@ import type { AeroAreaKind, AeroLineKind, Rgb } from './types';
  * twin of `road-lod.ts`, `water-lod.ts` and `transit-lod.ts`.
  *
  * Like transit and unlike streets, these are **region-logical px**: buildings and
- * runways are stroked as vectors over the finished region bitmap
+ * runways are drawn as paths over the finished region bitmap
  * (`render/structure-paths.ts`), not stamped as coverage into the feature mask,
- * so mask resolution never enters the arithmetic. The reason is the same one
- * `transit-lod.ts` gives: the dot lattice quantizes anything it touches, which
- * would turn a building outline into a scatter of unrelated dots.
+ * so mask resolution never enters the arithmetic. Buildings keep their crisp
+ * outlines; runways use the shared round-dot treatment (`core/dot-style.ts`)
+ * with the stroke width as their diameter. Taxiways remain quiet hairlines.
  *
  * The load-bearing lever here is NOT a zoom cutoff but {@link BUILDING_MIN_PX}.
  * Filtering on **projected** size means large structures appear the moment the

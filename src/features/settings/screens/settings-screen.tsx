@@ -3,7 +3,6 @@ import { View, StyleSheet, useColorScheme } from 'react-native';
 import { type Href, useFocusEffect } from 'expo-router';
 
 import { CryptidThemes } from '@/constants/theme';
-import { DEV_TELEMETRY_ENABLED } from '@/features/dev/telemetry';
 import { DELIVERY_MODE_COPY } from '@/features/social/core/delivery-mode';
 import { useMapColorScheme } from '@/features/map/hooks/use-map-color-scheme';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
@@ -18,7 +17,7 @@ import { SettingsPage } from '../components/settings-page';
  *
  * This used to be one scroll containing every control in the app, which had grown
  * past the point where anything could be found in it. It is now a menu: your own
- * identity first (unchanged — it was already a row that opens a page), then one
+ * profile first, then one
  * entry per area, each with the state it currently holds so the menu still answers
  * "what is switched on" without opening anything.
  *
@@ -42,58 +41,27 @@ export default function SettingsScreen() {
     }, [refreshPairing])
   );
 
-  const transports = snapshot?.transports ?? { relay: true, ip: true, ble: true };
-  const transportValues = Object.values(transports);
-  const transportsOn = transportValues.filter(Boolean).length;
   // The EFFECTIVE route, not the stored one: the menu is a summary of what is happening, and a
-  // build with no stash deployed is travelling direct whatever the preference still says.
+  // build with no stash deployed uses mutual friends whatever the preference still says.
   const delivery = snapshot?.delivery.effectiveMode ?? 'mutual';
 
   return (
-    <SettingsPage
-      kind="root"
-      title="Settings"
-      subtitle="Identity, transports, and offline delivery"
-    >
+    <SettingsPage kind="root" title="Settings">
       <View style={styles.menu}>
         <IdentityRow accent={chrome.amber} />
-        <SettingsMenuRow
-          href="/settings/transports"
-          label="Transports"
-          detail="Which paths the node may use, and what each one is doing right now."
-          value={`${transportsOn}/${transportValues.length} on`}
-          accent={transportsOn > 0 ? chrome.green : chrome.amber}
-        />
-        <SettingsMenuRow
-          href={'/pairing' as Href}
-          label="Pair with someone"
-          detail="Bump nearby or exchange a one-time pairing link."
-        />
+        <SettingsMenuRow href="/settings/appearance" label="Appearance" value={mapScheme.name} />
         <SettingsMenuRow
           href="/settings/delivery"
-          label="Delivery options"
-          detail="How your location travels, background access, and how often you publish."
+          label="Delivery"
           value={DELIVERY_MODE_COPY[delivery].title}
           accent={chrome.green}
         />
-        <SettingsMenuRow
-          href="/settings/appearance"
-          label="Appearance"
-          detail="The map's color scheme, in light and dark."
-          value={mapScheme.name}
-        />
+        <SettingsMenuRow href={'/pairing' as Href} label="Pair" />
+        <SettingsMenuRow href={'/settings/advanced' as Href} label="Advanced" />
         <SettingsMenuRow
           href="/settings/app-data"
-          label="App & data"
-          detail="Exploration backup, your author ID, and which build this is."
+          label="App & Data"
           value={getAppProvenance().appVersion}
-        />
-        <SettingsMenuRow
-          href="/settings/debug"
-          label="Debug"
-          detail="Forced pushes, the onboarding preview, and the event journal."
-          value={DEV_TELEMETRY_ENABLED ? 'Telemetry on' : null}
-          accent={DEV_TELEMETRY_ENABLED ? chrome.amber : undefined}
         />
       </View>
     </SettingsPage>

@@ -5,6 +5,8 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import type { CryptidTheme } from '@/constants/cryptid-theme';
 import { Spacing } from '@/constants/theme';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
+import { formatDistanceValue, type DistanceUnit } from '@/features/settings/core/distance-units';
+import { useDisplayPreferences } from '@/features/settings/hooks/use-display-preferences';
 
 import { islandBody, IslandMinimizeToggle } from './island-minimize';
 
@@ -72,6 +74,7 @@ export function FriendsIsland({
   onOpenProfile,
 }: FriendsIslandProps) {
   const { chrome } = theme;
+  const { distanceUnit, ready: displayPreferencesReady } = useDisplayPreferences();
   const nearby = friends.filter((friend) => friend.nearby).length;
 
   return (
@@ -82,7 +85,7 @@ export function FriendsIsland({
           accessibilityRole="summary"
           accessibilityLabel={
             friends.length === 0
-              ? 'No friends in your atlas yet.'
+              ? 'No cryptids yet!'
               : `${friends.length} friend${friends.length === 1 ? '' : 's'}, ${nearby} nearby.`
           }
           style={islandBody.summary}
@@ -104,13 +107,12 @@ export function FriendsIsland({
         <>
           {pairing}
           {friends.length === 0 ? (
-            <Text style={[styles.empty, { color: chrome.steel }]}>
-              No cryptids in your atlas yet. Touch two phones together while both are on this tab.
-            </Text>
+            <Text style={[styles.empty, { color: chrome.steel }]}>No cryptids yet!</Text>
           ) : (
             <View style={styles.list}>
               {friends.map((friend, index) => (
                 <FriendRow
+                  distanceUnit={displayPreferencesReady ? distanceUnit : null}
                   divider={index > 0}
                   friend={friend}
                   key={friend.id}
@@ -128,12 +130,14 @@ export function FriendsIsland({
 }
 
 function FriendRow({
+  distanceUnit,
   divider,
   friend,
   onOpenProfile,
   onSelect,
   theme,
 }: {
+  readonly distanceUnit: DistanceUnit | null;
   readonly divider: boolean;
   readonly friend: MapRosterFriend;
   readonly theme: CryptidTheme;
@@ -141,8 +145,12 @@ function FriendRow({
   onSelect(friendId: string): void;
 }) {
   const { chrome } = theme;
-  const distance = compactDistance(friend.distanceM);
-  const trailing = friend.online ? (distance ?? 'NO FIX') : 'OFFLINE';
+  const distance = distanceUnit === null ? null : compactDistance(friend.distanceM, distanceUnit);
+  const trailing = !friend.online
+    ? 'OFFLINE'
+    : distanceUnit === null
+      ? null
+      : (distance ?? 'NO FIX');
 
   return (
     <View
@@ -158,7 +166,7 @@ function FriendRow({
         accessibilityHint={
           friend.locatable ? 'Centers the map on them and shows their trail' : undefined
         }
-        accessibilityLabel={`${friend.handle}. ${trailing.toLowerCase()}. ${friend.status.toLowerCase()}.`}
+        accessibilityLabel={`${friend.handle}. ${trailing ? `${trailing.toLowerCase()}. ` : ''}${friend.status.toLowerCase()}.`}
         accessibilityRole="button"
         accessibilityState={{ disabled: !friend.locatable }}
         disabled={!friend.locatable}
@@ -183,9 +191,11 @@ function FriendRow({
             {friend.status}
           </Text>
         </View>
-        <Text style={[styles.trailing, { color: friend.online ? chrome.ink : chrome.steel }]}>
-          {trailing}
-        </Text>
+        {trailing ? (
+          <Text style={[styles.trailing, { color: friend.online ? chrome.ink : chrome.steel }]}>
+            {trailing}
+          </Text>
+        ) : null}
       </Pressable>
       {/* Two targets, two questions: the row asks "where are they", this one
           asks "who are they, and what do I want to do about it".
@@ -220,11 +230,11 @@ function FriendRow({
  * Distance for a roster row: short, uppercase, and rounded to a precision the
  * fix actually supports — never a false-precision metre count.
  */
-export function compactDistance(distanceM: number | null): string | null {
-  if (distanceM === null || !Number.isFinite(distanceM)) return null;
-  if (distanceM < 950) return `${Math.max(0, Math.round(distanceM / 10) * 10)} M`;
-  const km = distanceM / 1000;
-  return `${km.toFixed(km < 10 ? 1 : 0)} KM`;
+export function compactDistance(
+  distanceM: number | null,
+  unit: DistanceUnit = 'km'
+): string | null {
+  return formatDistanceValue(distanceM, unit)?.toUpperCase() ?? null;
 }
 
 const styles = StyleSheet.create({

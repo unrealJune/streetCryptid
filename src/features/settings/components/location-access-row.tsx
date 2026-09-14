@@ -1,4 +1,5 @@
 import { Linking, Pressable, StyleSheet, View } from 'react-native';
+import { SymbolView } from 'expo-symbols';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
@@ -26,19 +27,28 @@ export function LocationAccessRow({ accent, status, onTurnOn }: LocationAccessRo
       <View style={styles.copy}>
         <ThemedText type="smallBold">Background location</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">
-          {declined
-            ? "Off — territory exploration and friend sharing won't update while the app is closed."
-            : 'Used for territory exploration and friend location sharing.'}
+          Review Permissions in settings
         </ThemedText>
       </View>
       <Pressable
         accessibilityRole="button"
+        accessibilityLabel={
+          declined ? 'Turn on background location' : 'Review location permissions'
+        }
         onPress={declined ? onTurnOn : () => void Linking.openSettings()}
-        style={({ pressed }) => ({ opacity: pressed ? 0.58 : 1 })}
+        style={({ pressed }) => [styles.action, { opacity: pressed ? 0.58 : 1 }]}
       >
-        <ThemedText type="code" style={{ color: accent }}>
-          {declined ? 'TURN ON' : 'REVIEW'}
-        </ThemedText>
+        {declined ? (
+          <ThemedText type="code" style={{ color: accent }}>
+            TURN ON
+          </ThemedText>
+        ) : (
+          <SymbolView
+            name={{ ios: 'arrow.up.right.square', android: 'open_in_new', web: 'open_in_new' }}
+            size={22}
+            tintColor={accent}
+          />
+        )}
       </Pressable>
     </View>
   );
@@ -56,5 +66,11 @@ const styles = StyleSheet.create({
   copy: {
     flex: 1,
     gap: Spacing.one,
+  },
+  action: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 44,
+    minWidth: 44,
   },
 });

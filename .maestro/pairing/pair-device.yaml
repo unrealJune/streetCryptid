@@ -44,14 +44,10 @@ appId: com.unrealjune.streetcryptid
       true: ${ROLE === 'invite'}
     commands:
       - tapOn: 'Settings'
-      # Settings is a menu now; the invite-link controls live on its "Link pairing" page.
-      - tapOn: 'Link pairing'
-      - scrollUntilVisible:
-          element: 'Share a one-time pairing link'
-          direction: DOWN
-      - tapOn: 'Share a one-time pairing link'
+      - tapOn: 'Pair'
+      - tapOn: 'Make a link'
       - tapOn: 'Copy'
-      # Read the token off the DEBUG on-screen mirror, not the clipboard: the iOS Simulator's
+      # Read the displayed token, not the clipboard: the iOS Simulator's
       # pasteboard does not reliably reflect what the Share Sheet's Copy action writes.
       - scrollUntilVisible:
           element:
@@ -61,7 +57,7 @@ appId: com.unrealjune.streetcryptid
           id: 'debug-invite-link'
       - runScript: |
           if (!maestro.copiedText) {
-            throw new Error('could not read the invite link off the DEBUG mirror');
+            throw new Error('could not read the displayed invite link');
           }
           http.post(RENDEZVOUS + '/kv/' + SESSION + '.invite', { body: maestro.copiedText });
       # Deliberately NO "close settings" step here. Two reasons, both of which made an earlier
@@ -128,7 +124,7 @@ appId: com.unrealjune.streetcryptid
 # showed the SAS challenge" — a message about the handshake, for what was really impatience.
 # Waiting longer cannot mask a real failure: an expired session never renders a challenge at all.
 - extendedWaitUntil:
-    visible: 'Which figure is on their phone|Show them this figure'
+    visible: 'Tap the figure displayed on their phone|Show them this figure'
     timeout: 120000
 
 # ROLE DETECTION IS KEYED ON THE HEADING TEXT, NOT ON testIDs.
@@ -168,10 +164,10 @@ appId: com.unrealjune.streetcryptid
       - tapOn:
           id: 'pairing-confirm-matched'
 
-# Picker — "Which figure is on their phone?".
+# Picker — "Tap the figure displayed on their phone".
 - runFlow:
     when:
-      visible: 'Which figure is on their phone'
+      visible: 'Tap the figure displayed on their phone'
       timeout: 10000
     commands:
       - runScript: |
@@ -185,7 +181,7 @@ appId: com.unrealjune.streetcryptid
       - runScript: |
           http.post(RENDEZVOUS + '/kv/' + SESSION + '.picked', { body: 'yes' });
 
-# The actual proof pairing succeeded: both sides mint a friend record and fire this celebration.
+# The handshake is verified; acknowledgement now creates the local friend and sharing grant.
 - extendedWaitUntil:
     visible: 'CRYPTID DISCOVERED'
     timeout: 60000

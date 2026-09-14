@@ -5,6 +5,7 @@ import {
   deliveryModeOptions,
   effectiveDeliveryMode,
   isDeliveryModeDowngraded,
+  mutualFriendRelayExplanation,
   parseDeliveryMode,
   type DeliveryAvailability,
 } from '../delivery-mode';
@@ -89,8 +90,9 @@ describe('copy', () => {
     for (const mode of DELIVERY_MODES) expect(DELIVERY_MODE_COPY[mode].id).toBe(mode);
   });
 
-  it('states the metadata cost of mutual relay rather than leaving it implied', () => {
-    expect(DELIVERY_MODE_COPY.mutual.note).toMatch(/can tell that you are all friends/i);
+  it('removes the secondary shared-pool and retention notes', () => {
+    expect(DELIVERY_MODE_COPY.mutual.note).toBeNull();
+    expect(DELIVERY_MODE_COPY.stash.note).toBeNull();
   });
 
   it('offers no route that would understate where a location goes', () => {
@@ -102,7 +104,22 @@ describe('copy', () => {
   it('never claims a carrier can read what it carries', () => {
     // The one promise the whole screen rests on. If a rewrite ever softens this, the test is
     // the place that should complain.
-    expect(DELIVERY_MODE_COPY.mutual.body).toMatch(/cannot read/i);
-    expect(DELIVERY_MODE_COPY.stash.body).toMatch(/never can|only the friend/i);
+    expect(DELIVERY_MODE_COPY.stash.body).toMatch(/can only be read by your friends/i);
+    expect(DELIVERY_MODE_COPY.stash.body).toMatch(/auto deleted after a short period/i);
   });
+
+  it.each([
+    ['ios', 'iOS'],
+    ['android', 'Android'],
+    ['web', 'the web'],
+  ])(
+    'names the current %s platform in the mutual-friend reliability warning',
+    (platform, label) => {
+      expect(mutualFriendRelayExplanation(platform)).toContain(`background processing on ${label}`);
+      expect(mutualFriendRelayExplanation(platform)).toContain(
+        'unreliable or missed location updates'
+      );
+      expect(mutualFriendRelayExplanation(platform)).not.toContain('They cannot read');
+    }
+  );
 });

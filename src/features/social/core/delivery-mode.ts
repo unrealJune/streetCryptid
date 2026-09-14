@@ -23,7 +23,7 @@
  * `mutual`, not `relay`. "Relay" is already taken in this codebase and means something else
  * entirely — the authenticated iroh relay servers in `transports.relay` / `relay-config.ts`,
  * which both modes here use. Naming this one `relay` too would put two unrelated meanings on
- * the same word in the same feature. The label a person reads is still "Mutual relay".
+ * the same word in the same feature. The label a person reads is "Mutual Friends".
  */
 export const DELIVERY_MODES = ['mutual', 'stash'] as const;
 
@@ -39,6 +39,8 @@ export type DeliveryMode = (typeof DELIVERY_MODES)[number];
  * plus `scripts/e2e/relay-e2e.sh` on three devices. See `scripts/e2e/PEER-RELAY-STATUS.md`.
  */
 export const DEFAULT_DELIVERY_MODE: DeliveryMode = 'mutual';
+/** Only first-run onboarding uses this default; upgrades retain their existing route. */
+export const NEW_USER_DELIVERY_MODE: DeliveryMode = 'stash';
 
 /**
  * How long the stash holds a sealed envelope before dropping it.
@@ -67,20 +69,32 @@ export interface DeliveryModeCopy {
   readonly note: string | null;
 }
 
+export function mutualFriendRelayExplanation(platform: string): string {
+  const name =
+    platform === 'ios'
+      ? 'iOS'
+      : platform === 'android'
+        ? 'Android'
+        : platform === 'web'
+          ? 'the web'
+          : 'your device';
+  return `Because of restrictions on background processing on ${name}, this method is not reliable for daily usage unless you’re working with a very large pool of mutual friends. Enabling this setting may cause you to have unreliable or missed location updates.`;
+}
+
 export const DELIVERY_MODE_COPY: Readonly<Record<DeliveryMode, DeliveryModeCopy>> = {
   mutual: {
     id: 'mutual',
-    title: 'Mutual relay',
-    segment: 'RELAY',
-    body: 'Friends you have in common carry sealed updates for you. If your phone drops off and comes back, you can catch up from any of them. They cannot read what they carry — they hold a read ticket, not a key.',
-    note: 'Friends in a shared pool can tell that you are all friends. Nobody outside it can.',
+    title: 'Mutual Friends',
+    segment: 'MUTUAL FRIENDS',
+    body: mutualFriendRelayExplanation('unknown'),
+    note: null,
   },
   stash: {
     id: 'stash',
-    title: 'Stash server',
+    title: 'Mutuals + Stash Server',
     segment: 'STASH',
-    body: 'Drop a sealed copy for each friend on the stash server. Only the friend it was sealed for can open it — the server never can. The most reliable of the three.',
-    note: `Sealed copies are dropped after ${Math.round(STASH_RETENTION_MS / 60_000)} minutes.`,
+    body: 'If your friends are offline and can’t receive your location updates, using stash will allow friends to catch up with your location updates when they come back online. Stash entries are encrypted and can only be read by your friends, and are auto deleted after a short period of time.',
+    note: null,
   },
 };
 

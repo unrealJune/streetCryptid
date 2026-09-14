@@ -118,7 +118,7 @@ interface LocationSharingContextValue {
   runDevCommand(name: string, id: string): Promise<void>;
   /** Honest, live diagnostic of every transport (for the Settings tab). */
   transportReport: TransportReport;
-  acknowledgeDiscoveredFriend(): void;
+  acknowledgeDiscoveredFriend(): Promise<void>;
   rejectDiscoveredFriend(): Promise<void>;
 }
 
@@ -455,7 +455,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       return outcome;
     } catch (cancelError: unknown) {
       setServiceError(errorMessage(cancelError));
-      return 'unsupported';
+      throw cancelError;
     }
   }, []);
 
@@ -528,13 +528,17 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     () => run((service) => service.refreshTransportDiagnostics()),
     [run]
   );
-  const setDeliveryMode = useCallback(
-    (mode: DeliveryMode) => {
-      setServiceError(null);
-      return run((service) => service.setDeliveryMode(mode));
-    },
-    [run]
-  );
+  const setDeliveryMode = useCallback(async (mode: DeliveryMode) => {
+    const service = serviceRef.current;
+    if (!service) throw new Error('Delivery settings are not ready. Try again.');
+    setServiceError(null);
+    try {
+      await service.setDeliveryMode(mode);
+    } catch (error: unknown) {
+      setServiceError(errorMessage(error));
+      throw error;
+    }
+  }, []);
   const setTransportEnabled = useCallback(
     (transport: keyof TransportPreferences, enabled: boolean) => {
       setServiceError(null);
@@ -653,13 +657,26 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       throw removeError;
     }
   }, []);
-  const acknowledgeDiscoveredFriend = useCallback(() => {
-    serviceRef.current?.acknowledgeDiscoveredFriend();
-  }, []);
-  const rejectDiscoveredFriend = useCallback(() => {
+  const decideDiscoveredFriend = useCallback(async (accept: boolean) => {
+    const service = serviceRef.current;
+    if (!service) throw new Error('Pairing is not ready. Try again.');
     setServiceError(null);
-    return run((service) => service.rejectDiscoveredFriend());
-  }, [run]);
+    try {
+      if (accept) await service.acknowledgeDiscoveredFriend();
+      else await service.rejectDiscoveredFriend();
+    } catch (error: unknown) {
+      setServiceError(errorMessage(error));
+      throw error;
+    }
+  }, []);
+  const acknowledgeDiscoveredFriend = useCallback(
+    () => decideDiscoveredFriend(true),
+    [decideDiscoveredFriend]
+  );
+  const rejectDiscoveredFriend = useCallback(
+    () => decideDiscoveredFriend(false),
+    [decideDiscoveredFriend]
+  );
 
   const friends = useMemo(
     () =>

@@ -12,6 +12,7 @@ interface CryptidAvatarProps {
   color: string;
   size?: AvatarSize;
   muted?: boolean;
+  showLabel?: boolean;
   style?: StyleProp<ViewStyle>;
 }
 
@@ -38,6 +39,7 @@ export function CryptidAvatar({
   color,
   size = 'compact',
   muted = false,
+  showLabel = true,
   style,
 }: CryptidAvatarProps) {
   const dimensions = sizes[size];
@@ -87,12 +89,14 @@ export function CryptidAvatar({
       >
         {normalizedArt}
       </Text>
-      <Text
-        allowFontScaling={false}
-        style={[styles.label, { color: signalColor, fontSize: dimensions.labelSize }]}
-      >
-        {name.toUpperCase()}
-      </Text>
+      {showLabel ? (
+        <Text
+          allowFontScaling={false}
+          style={[styles.label, { color: signalColor, fontSize: dimensions.labelSize }]}
+        >
+          {name.toUpperCase()}
+        </Text>
+      ) : null}
     </View>
   );
 }

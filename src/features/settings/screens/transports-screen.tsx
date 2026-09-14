@@ -38,20 +38,19 @@ export default function TransportsScreen() {
   const transports = snapshot?.transports ?? { relay: true, ip: true, ble: true };
 
   return (
-    <SettingsPage title="Transports" subtitle="How this phone reaches your friends">
-      <SettingsSection label="LIVE PATHS">
-        <TransportDiagnostic
-          report={transportReport}
-          activeColor={chrome.green}
-          availableColor={chrome.amber}
-        />
-      </SettingsSection>
-
-      <SettingsSection label="PERMITTED">
+    <SettingsPage title="Transports" backLabel="Advanced">
+      <SettingsSection label="ENABLED TRANSPORTS">
         <TransportControls
           accent={chrome.green}
           preferences={transports}
           onToggle={(transport, enabled) => void setTransportEnabled(transport, enabled)}
+        />
+      </SettingsSection>
+      <SettingsSection label="DETAILED STATUS">
+        <TransportDiagnostic
+          report={transportReport}
+          activeColor={chrome.green}
+          availableColor={chrome.amber}
         />
       </SettingsSection>
     </SettingsPage>

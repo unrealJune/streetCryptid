@@ -86,9 +86,8 @@ export function ExplorationBackupRow({
       <View style={styles.copy}>
         <ThemedText type="smallBold">Explored hexes</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">
-          Save the hexes you have uncovered to a file, and load them back on a new phone. The file
-          holds hex IDs only — no times, no route, nothing about anyone else. Restoring adds to what
-          you have; it never erases it.
+          Back up your explored hexes to a file. Export is unencrypted. Be careful with the file!
+          Restoring adds to existing exploration areas
         </ThemedText>
       </View>
 

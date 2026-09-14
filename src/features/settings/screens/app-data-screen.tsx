@@ -23,8 +23,8 @@ export default function AppDataScreen() {
   const { busy: backupBusy, exportBackup, restoreBackup } = useExplorationBackup();
 
   return (
-    <SettingsPage title="App & data" subtitle="Your history, your ID, and this build">
-      <SettingsSection label="LOCATION HISTORY">
+    <SettingsPage title="App & Data">
+      <SettingsSection label="BACKUPS">
         <ExplorationBackupRow
           accent={chrome.green}
           warningColor={chrome.amber}

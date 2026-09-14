@@ -14,12 +14,11 @@ interface DeliveryModePickerProps {
 }
 
 /**
- * The three routes, as one segmented control.
+ * The two routes, as one segmented control.
  *
  * Selection is carried by contrast — a filled track and a brighter label — not by colour alone,
  * the same rule the map's island tabs follow. An unavailable route is still shown and still
- * readable: "this build has no stash" is information, and hiding the segment would leave the
- * screen quietly describing two options while the person was told there are three.
+ * readable: "this build has no stash" is information, not a reason to hide the choice.
  */
 export function DeliveryModePicker({
   options,

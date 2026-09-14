@@ -12,6 +12,18 @@ jest.mock('expo-symbols', () => ({
   SymbolView: () => null,
 }));
 jest.mock('@/global.css', () => ({}));
+const mockPreferences: {
+  distanceUnit: 'km' | 'mi';
+  showFriendConnectionDetails: boolean;
+  ready: boolean;
+} = {
+  distanceUnit: 'km',
+  showFriendConnectionDetails: false,
+  ready: true,
+};
+jest.mock('@/features/settings/hooks/use-display-preferences', () => ({
+  useDisplayPreferences: () => mockPreferences,
+}));
 
 const NOW = 1_000_000;
 
@@ -62,6 +74,9 @@ describe('FriendDetailIsland', () => {
 
   afterEach(() => {
     act(() => renderer?.unmount());
+    mockPreferences.distanceUnit = 'km';
+    mockPreferences.showFriendConnectionDetails = false;
+    mockPreferences.ready = true;
   });
 
   function render(detent: DrawerDetent, overrides: { sharing?: boolean } = {}) {
@@ -116,6 +131,7 @@ describe('FriendDetailIsland', () => {
     expect(control.props.accessibilityState).toMatchObject({ checked: true });
     expect(findText(renderer, 'ON')).toHaveLength(1);
     expect(findText(renderer, 'PAUSE SHARING')).toHaveLength(0);
+    expect(findText(renderer, 'LOCATION SHARING')).toHaveLength(1);
   });
 
   it('toggles sharing to the opposite of what it currently is', async () => {
@@ -171,6 +187,7 @@ describe('FriendDetailIsland', () => {
   // Three stages meant the pane answered in three different shapes, and the tallest of them was
   // mostly empty island. Expanding it now discloses rows under an unchanged hero, once.
   it('shows one expanded pane rather than a second, larger set of facts', () => {
+    mockPreferences.showFriendConnectionDetails = true;
     render('mid');
     const atMid = findText(renderer, 'LAST FIX ACK').length;
     const heroAtMid = renderer.root.findByProps({ accessibilityRole: 'summary' }).props.style;
@@ -183,6 +200,44 @@ describe('FriendDetailIsland', () => {
     expect(renderer.root.findByProps({ accessibilityRole: 'summary' }).props.style).toEqual(
       heroAtMid
     );
+  });
+
+  it('hides acknowledgements unless connection details are enabled', () => {
+    render('mid');
+    expect(findText(renderer, 'LAST FIX ACK')).toHaveLength(0);
+    expect(findText(renderer, 'LAST NULL ACK')).toHaveLength(0);
+    act(() => renderer.unmount());
+    mockPreferences.showFriendConnectionDetails = true;
+    render('mid');
+    expect(findText(renderer, 'LAST FIX ACK')).toHaveLength(1);
+    expect(findText(renderer, 'LAST NULL ACK')).toHaveLength(1);
+  });
+
+  it('uses miles in the friend summary when selected', () => {
+    mockPreferences.distanceUnit = 'mi';
+    render('peek');
+    expect(findText(renderer, 'PARKED HERE 12 MIN · 1.2 KM')).toHaveLength(0);
+    expect(
+      renderer.root.findByProps({ accessibilityRole: 'summary' }).props.accessibilityLabel
+    ).toContain('ft');
+  });
+
+  it('withholds distance and diagnostic defaults until preferences are hydrated', () => {
+    mockPreferences.ready = false;
+    render('mid');
+    const props = renderer.root.findByType(FriendDetailIsland).props as Parameters<
+      typeof FriendDetailIsland
+    >[0];
+    expect(findText(renderer, 'PARKED HERE 12 MIN')).toHaveLength(1);
+    expect(findText(renderer, 'LAST FIX ACK')).toHaveLength(0);
+    mockPreferences.ready = true;
+    mockPreferences.distanceUnit = 'mi';
+    mockPreferences.showFriendConnectionDetails = true;
+    act(() => renderer.update(<FriendDetailIsland {...props} />));
+    expect(
+      renderer.root.findByProps({ accessibilityRole: 'summary' }).props.accessibilityLabel
+    ).toContain('ft');
+    expect(findText(renderer, 'LAST FIX ACK')).toHaveLength(1);
   });
 
   it('survives a friend whose place has no name yet', () => {

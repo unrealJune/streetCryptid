@@ -80,13 +80,6 @@ export function MapColorSchemeRow() {
 
   return (
     <View style={[styles.container, { borderColor: theme.backgroundSelected }]}>
-      <View style={styles.copy}>
-        <ThemedText type="smallBold">Map colors</ThemedText>
-        <ThemedText type="small" themeColor="textSecondary">
-          Each scheme includes a light and dark palette and follows your device appearance.
-        </ThemedText>
-      </View>
-
       <View accessibilityRole="radiogroup" style={styles.options}>
         {schemes.map((scheme) => {
           const selected = scheme.id === selectedId;
@@ -194,9 +187,6 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     gap: Spacing.three,
     padding: Spacing.three,
-  },
-  copy: {
-    gap: Spacing.one,
   },
   options: {
     flexDirection: 'row',

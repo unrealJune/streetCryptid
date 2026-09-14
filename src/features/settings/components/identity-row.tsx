@@ -29,7 +29,8 @@ export function IdentityRow({ accent }: { readonly accent: string }) {
   return (
     <Pressable
       accessibilityHint="Change your sigil, handle, or signal color"
-      accessibilityLabel={`Edit ${profile?.handle ?? 'your'} cryptid profile`}
+      accessibilityLabel="Profile"
+      accessibilityValue={{ text: profile?.handle ?? '@you' }}
       accessibilityRole="button"
       onPress={() => router.push('/settings/profile')}
       style={({ pressed }) => [
@@ -37,19 +38,20 @@ export function IdentityRow({ accent }: { readonly accent: string }) {
         { borderColor: theme.backgroundSelected, opacity: pressed ? 0.58 : 1 },
       ]}
     >
-      <CryptidAvatar
-        art={profile?.sigil ?? 'unknown'}
-        color={signalColor}
-        muted={false}
-        name={profile?.cryptidName ?? 'Your cryptid'}
-        style={styles.avatar}
-      />
       <View style={styles.copy}>
-        <ThemedText type="smallBold" style={{ color: signalColor }}>
+        <ThemedText type="smallBold">Profile</ThemedText>
+      </View>
+      <View style={styles.value}>
+        <CryptidAvatar
+          art={profile?.sigil ?? 'unknown'}
+          color={signalColor}
+          muted={false}
+          name={profile?.cryptidName ?? 'Your cryptid'}
+          showLabel={false}
+          style={styles.avatar}
+        />
+        <ThemedText type="code" numberOfLines={1} style={[styles.handle, { color: signalColor }]}>
           {profile?.handle ?? '@you'}
-        </ThemedText>
-        <ThemedText type="small" themeColor="textSecondary">
-          This is the sigil and signal color your friends see.
         </ThemedText>
       </View>
       <ThemedText type="code" themeColor="textSecondary">
@@ -70,7 +72,18 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.two,
   },
   avatar: {
-    width: 88,
+    width: 44,
+    flexShrink: 0,
+  },
+  value: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexShrink: 1,
+    gap: Spacing.two,
+    maxWidth: '65%',
+  },
+  handle: {
+    flexShrink: 1,
   },
   copy: {
     flex: 1,

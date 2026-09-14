@@ -1,10 +1,10 @@
 import { scaleFor } from '../core/camera';
 import { clamp } from '../core/color';
+import { DOT_STEP } from '../core/dot-style';
 import type { MapPalette } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
 
-/** Dot lattice step in logical px — the mock's S (was `scene.DOT_STEP`). */
-export const DOT_STEP = 2.0;
+export { DOT_STEP } from '../core/dot-style';
 
 /** Total float count of the shader's numeric uniform block, in declaration order. */
 export const DOT_FIELD_UNIFORM_FLOATS = 15;

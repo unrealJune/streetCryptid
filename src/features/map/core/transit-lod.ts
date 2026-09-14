@@ -3,10 +3,10 @@ import { TRANSIT_MODES, type TransitMode } from './types';
 
 /**
  * Transit-line stroke widths and zoom cutoffs — the transit twin of
- * `road-lod.ts`. Transit is drawn as vector paths over the finished region
+ * `road-lod.ts`. Transit is drawn as dotted paths over the finished region
  * bitmap (`render/transit-paths.ts`), so these are region-**logical** px, not
- * mask px: a transit line is line work, not a coverage stamp, and stays a
- * consistent hairline weight regardless of the mask resolution.
+ * mask px. The stroke width becomes the dot diameter (`core/dot-style.ts`),
+ * independent of mask resolution.
  */
 
 /** Base stroke width per mode, region-logical px. Keyed by {@link TransitMode}. */
@@ -34,9 +34,6 @@ export const TRANSIT_MIN_ZOOM: Record<TransitMode, number> = {
   funicular: 13,
   ferry: 7,
 };
-
-/** Ferries are a route over water, not track: dashed, so they read as such. */
-export const FERRY_DASH: readonly [number, number] = [5, 4];
 
 /** Global stroke-width multiplier: full weight at z>=14, tapering to 0.7 by z<=11. */
 export function transitWidthScale(zoom: number): number {

@@ -11,6 +11,7 @@ import type {
 } from 'iroh-location';
 
 import type { ContactCard } from '../../core/types';
+import { BUMP_SEARCH_DURATION_MS } from '../../core/pairing-countdown';
 
 /**
  * Wiring tests for the bilateral-pairing / profile client state in {@link LocationSharingService},
@@ -38,6 +39,7 @@ class FakeNativeModule {
     submitPairChoice: [] as { sessionId: string; chosenIndex: number }[],
     confirmPairDisplay: [] as { sessionId: string; matched: boolean }[],
     cancelPair: [] as string[],
+    forgetSession: [] as string[],
     revokePairInvite: [] as string[],
     setPairingReady: [] as boolean[],
     importProfileTicket: [] as string[],
@@ -69,6 +71,7 @@ class FakeNativeModule {
     pairingReady: false,
   };
   pairResults = new Map<string, PairResult>();
+  ratchets = new Map<string, string>();
   profiles = new Map<string, ProfileView>();
   bumpResolution: BumpResolution = {
     status: 'noPeers',
@@ -81,6 +84,10 @@ class FakeNativeModule {
   bumpResolutionPromise: Promise<BumpResolution> | null = null;
   initiateNearbyPromise: Promise<string> | null = null;
   initiateNearbyError: Error | null = null;
+  cancelPairError: Error | null = null;
+  forgetSessionError: Error | null = null;
+  onCancelPair: ((sessionId: string) => void) | null = null;
+  endpointId = 'aa11';
   initiateByTokenPromise: Promise<string> | null = null;
   bleAvailableAfterRestart = false;
 
@@ -91,7 +98,12 @@ class FakeNativeModule {
     if (this.calls.createNode > 1 && this.bleAvailableAfterRestart) {
       this.caps = { ...this.caps, available: true };
     }
-    return { endpointId: 'aa11', identitySecret: 'ii', recvSecret: 'rr', recvPublic: 'rp' };
+    return {
+      endpointId: this.endpointId,
+      identitySecret: 'ii',
+      recvSecret: 'rr',
+      recvPublic: 'rp',
+    };
   }
   async start() {
     this.calls.start += 1;
@@ -184,9 +196,21 @@ class FakeNativeModule {
   }
   async cancelPair(sessionId: string) {
     this.calls.cancelPair.push(sessionId);
+    if (this.cancelPairError) throw this.cancelPairError;
+    const result = this.pairResults.get(sessionId);
+    if (result && this.ratchets.get(result.peerEndpointId) === sessionId) {
+      this.ratchets.delete(result.peerEndpointId);
+    }
     // Native cancel tears the session down: drop it and its challenge.
     this.sessions = this.sessions.filter((s) => s.sessionId !== sessionId);
     this.challenges.delete(sessionId);
+    this.pairResults.delete(sessionId);
+    this.onCancelPair?.(sessionId);
+  }
+  async forgetSession(endpointId: string) {
+    this.calls.forgetSession.push(endpointId);
+    if (this.forgetSessionError) throw this.forgetSessionError;
+    this.ratchets.delete(endpointId);
   }
   async pollPairEvents() {
     this.calls.pollPairEvents += 1;
@@ -252,6 +276,8 @@ jest.mock('expo-secure-store', () => ({
 
 // eslint-disable-next-line import/first
 import { LocationSharingService, type SharingSnapshot } from '../location-sharing';
+// eslint-disable-next-line import/first
+import * as persistence from '../persistence';
 
 /**
  * A service started here owns a 4s pairing poll (and, once sharing is on, a live-request poll).
@@ -338,6 +364,35 @@ function watch(svc: LocationSharingService): { current: SharingSnapshot | null }
     holder.current = s;
   });
   return holder;
+}
+
+async function discover(
+  service: LocationSharingService,
+  mod: FakeNativeModule,
+  endpointId: string,
+  sessionId = 'discovery'
+): Promise<void> {
+  mod.pairResults.set(
+    sessionId,
+    pairResult({
+      sessionId,
+      peerEndpointId: endpointId,
+      peerProfile: profileView({ endpointId }),
+    })
+  );
+  mod.ratchets.set(endpointId, sessionId);
+  mod.sessions.push(
+    verifyingSession({
+      sessionId,
+      peerEndpointId: endpointId,
+      state: 'complete',
+      localAccepted: true,
+      peerAccepted: true,
+      localSasConfirmed: true,
+    })
+  );
+  mod.pairEvents.push({ kind: 'ready', sessionId, peerEndpointId: endpointId, nearby: false });
+  await service.refreshPairing();
 }
 
 describe('LocationSharingService — pairing / profile wiring', () => {
@@ -434,6 +489,103 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(snap.current?.pairing.inviteLink).toBeNull();
     // The latch outlives the link, so the screen can still say WHY it went.
     expect(snap.current?.pairing.inviteRedeemed).toBe(true);
+  });
+
+  it('revokes a cancelled link at its issuer and clears the offer', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await svc.createPairInvite(120);
+
+    await expect(svc.cancelPairInvite()).resolves.toBe('cancelled');
+    expect(mockHolder.mod.calls.revokePairInvite).toEqual(['scpair2:cafef00d']);
+    expect(snap.current?.pairing).toMatchObject({
+      inviteLink: null,
+      inviteExpiresAt: null,
+      inviteRedeemed: false,
+    });
+    await expect(svc.cancelPairInvite()).resolves.toBe('absent');
+  });
+
+  it('cancels a redemption that raced the link cancellation', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await svc.createPairInvite(120);
+    mockHolder.mod.sessions = [verifyingSession({ sessionId: 'iid', peerEndpointId: 'peer-race' })];
+    mockHolder.mod.challenges.set('iid', sasChallenge());
+
+    await svc.cancelPairInvite();
+
+    expect(mockHolder.mod.calls.cancelPair).toEqual(['iid']);
+    expect(snap.current?.friends).toEqual([]);
+    expect(snap.current?.sharingWith).toEqual([]);
+    expect(snap.current?.pairing.verifications).toEqual([]);
+  });
+
+  it('does not claim a link was cancelled when revocation is unavailable or failed', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    const link = await svc.createPairInvite(120);
+    const revoke = mockHolder.mod.revokePairInvite;
+    Object.assign(mockHolder.mod, { revokePairInvite: undefined });
+
+    await expect(svc.cancelPairInvite()).resolves.toBe('unsupported');
+    expect(snap.current?.pairing.inviteLink).toBe(link);
+    mockHolder.mod.revokePairInvite = revoke;
+    jest.spyOn(mockHolder.mod, 'revokePairInvite').mockRejectedValueOnce(new Error('native busy'));
+    await expect(svc.cancelPairInvite()).rejects.toThrow('native busy');
+    expect(snap.current?.pairing.inviteLink).toBe(link);
+    await expect(svc.cancelPairInvite()).resolves.toBe('cancelled');
+  });
+
+  it('waits for an in-flight mint before cancelling so a late link cannot escape revocation', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    const invite = await mockHolder.mod.createPairInvite(120);
+    let finishMint!: (invite: PairInviteWithToken) => void;
+    jest.spyOn(mockHolder.mod, 'createPairInvite').mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishMint = resolve;
+      })
+    );
+    const mint = svc.createPairInvite(120);
+    const cancel = svc.cancelPairInvite();
+    finishMint(invite);
+
+    await mint;
+    await expect(cancel).resolves.toBe('cancelled');
+    expect(mockHolder.mod.calls.revokePairInvite).toEqual([invite.token]);
+    expect(snap.current?.pairing.inviteLink).toBeNull();
+  });
+
+  it('does not clear a replacement invite when an earlier cancellation finishes', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await svc.createPairInvite(120);
+    let finishRevoke!: (revoked: boolean) => void;
+    jest.spyOn(mockHolder.mod, 'revokePairInvite').mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishRevoke = resolve;
+      })
+    );
+    const nextInvite = {
+      ...(await mockHolder.mod.createPairInvite(120)),
+      inviteId: 'replacement',
+      token: 'scpair2:decafbad',
+    };
+    jest.spyOn(mockHolder.mod, 'createPairInvite').mockResolvedValueOnce(nextInvite);
+    const cancel = svc.cancelPairInvite();
+    const mint = svc.createPairInvite(120);
+    finishRevoke(true);
+
+    await cancel;
+    const nextLink = await mint;
+    expect(snap.current?.pairing.inviteLink).toBe(nextLink);
+    expect(snap.current?.pairing.inviteRedeemed).toBe(false);
   });
 
   it('leaves an untouched link alone', async () => {
@@ -842,6 +994,28 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(mockHolder.mod.calls.respondPair).toHaveLength(0);
   });
 
+  it('exposes the exact native search start, separate from the armed window', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await svc.armBump();
+    let finishSearch!: (resolution: BumpResolution) => void;
+    mockHolder.mod.bumpResolutionPromise = new Promise((resolve) => {
+      finishSearch = resolve;
+    });
+    const resolvePeer = jest.spyOn(mockHolder.mod, 'resolveBumpPeer');
+    const before = Date.now();
+    const search = svc.commitBump();
+    const after = Date.now();
+    expect(snap.current?.pairing.bump.searchStartedAt).toBeGreaterThanOrEqual(before);
+    expect(snap.current?.pairing.bump.searchStartedAt).toBeLessThanOrEqual(after);
+    expect(snap.current?.pairing.bump.expiresAt).toBeGreaterThan(after + BUMP_SEARCH_DURATION_MS);
+    expect(resolvePeer).toHaveBeenCalledWith(BUMP_SEARCH_DURATION_MS);
+    finishSearch(mockHolder.mod.bumpResolution);
+    await search;
+    expect(snap.current?.pairing.bump.searchStartedAt).toBeNull();
+  });
+
   it('fails closed when multiple Bump signals are equally close', async () => {
     const svc = newService();
     const snap = watch(svc);
@@ -1036,7 +1210,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(snap.current?.pairing.pendingRequests).toHaveLength(0);
   });
 
-  it('adds a paired friend and starts reciprocal location sharing on ready', async () => {
+  it('keeps a ready friend private until the discovery is explicitly acknowledged', async () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
@@ -1054,12 +1228,22 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     ];
     await svc.refreshPairing();
 
+    expect(snap.current?.friends).toEqual([]);
+    expect(snap.current?.sharingWith).toEqual([]);
+    expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('peer-ready');
+    expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-peer-ready')).toBe(false);
+
+    await svc.armBump();
+    expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('peer-ready');
+    expect(snap.current?.pairing.bump.stage).toBe('idle');
+
+    await svc.acknowledgeDiscoveredFriend();
     const friend = snap.current?.friends.find((f) => f.endpointId === 'peer-ready');
     expect(friend).toBeDefined();
     expect(friend?.handle).toBe('@fresh'); // verified profile applied
     expect(friend?.profileEpoch).toBe(300);
     expect(snap.current?.sharingWith).toEqual(['peer-ready']);
-    expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('peer-ready');
+    expect(friend?.pairingSessionId).toBe('sess-ready');
     // Subscribed + profile-imported via the normal friend path.
     expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-peer-ready')).toBe(true);
     expect(
@@ -1069,11 +1253,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     ).toBe(true);
     expect(mockHolder.mod.calls.importProfileTicket).toContain('peer-profile');
 
-    await svc.armBump();
-    expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('peer-ready');
-    expect(snap.current?.pairing.bump.stage).toBe('idle');
-
-    svc.acknowledgeDiscoveredFriend();
     expect(snap.current?.pairing.discoveredFriend).toBeNull();
     expect(snap.current?.friends.some((f) => f.endpointId === 'peer-ready')).toBe(true);
     expect(snap.current?.sharingWith).toEqual(['peer-ready']);
@@ -1113,6 +1292,8 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       pairResult({ sessionId: 'sess-recover', peerEndpointId: 'peer-recover' })
     );
     await svc.refreshPairing();
+    expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('peer-recover');
+    await svc.acknowledgeDiscoveredFriend();
     expect(snap.current?.friends.some((friend) => friend.endpointId === 'peer-recover')).toBe(true);
 
     const callsAfterRecovery = mockHolder.mod.calls.pairResult.length;
@@ -1120,7 +1301,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(mockHolder.mod.calls.pairResult).toHaveLength(callsAfterRecovery);
   });
 
-  it('creates the friend and grant on ready after the SAS verification clears', async () => {
+  it('requires both the SAS gate and discovery acknowledgement before creating the grant', async () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
@@ -1140,7 +1321,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       { sessionId: 'sess-v2r', chosenIndex: 1 },
     ]);
 
-    // 3) Only a native Ready creates the friend + reciprocal grant.
+    // 3) Native Ready permits the discovery; it does not yet grant location access.
     mockHolder.mod.pairResults.set(
       'sess-v2r',
       pairResult({ sessionId: 'sess-v2r', peerEndpointId: 'peer-v2r' })
@@ -1152,12 +1333,15 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     ];
     await svc.refreshPairing();
 
+    expect(snap.current?.friends).toEqual([]);
+    expect(snap.current?.sharingWith).toEqual([]);
+    await svc.acknowledgeDiscoveredFriend();
     expect(snap.current?.friends.some((f) => f.endpointId === 'peer-v2r')).toBe(true);
     expect(snap.current?.sharingWith).toEqual(['peer-v2r']);
     expect(snap.current?.pairing.verifications).toHaveLength(0);
   });
 
-  it('removes a discovered friend and revokes sharing when rejected', async () => {
+  it('rejects a discovery without ever adding, subscribing to, or sharing with that friend', async () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
@@ -1179,20 +1363,271 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       },
     ];
     await svc.refreshPairing();
+    expect(snap.current?.friends).toEqual([]);
+    expect(snap.current?.sharingWith).toEqual([]);
 
     await svc.rejectDiscoveredFriend();
 
     expect(snap.current?.pairing.discoveredFriend).toBeNull();
     expect(snap.current?.friends.some((f) => f.endpointId === 'peer-rejected')).toBe(false);
     expect(snap.current?.sharingWith).toEqual([]);
-    expect(mockHolder.mod.calls.unsubscribe).toContain('sub-topic-peer-rejected');
-    expect(mockHolder.mod.calls.subscribe).toContainEqual({
-      topic: 'topic-aa11',
-      bootstrap: [],
-    });
+    expect(mockHolder.mod.calls.cancelPair).toContain('sess-rejected');
+    expect(mockHolder.mod.calls.forgetSession).not.toContain('peer-rejected');
+    expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-peer-rejected')).toBe(
+      false
+    );
   });
 
-  it('adds a placeholder friend when the pair has no verified profile yet', async () => {
+  it('does not resurrect a rejected discovery from a stale completion or late profile', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await discover(svc, mockHolder.mod, 'peer-replay');
+    await svc.rejectDiscoveredFriend();
+    mockHolder.mod.profileEvents.push(profileView({ endpointId: 'peer-replay', epoch: 900 }));
+    await discover(svc, mockHolder.mod, 'peer-replay');
+    expect(snap.current?.friends).toEqual([]);
+    expect(snap.current?.sharingWith).toEqual([]);
+    expect(snap.current?.pairing.discoveredFriend).toBeNull();
+  });
+
+  it('withdraws on both phones when one acknowledges before the other rejects', async () => {
+    const aliceMod = mockHolder.mod;
+    const alice = newService();
+    const aliceSnap = watch(alice);
+    await alice.init('@alice', 'mothman');
+
+    const bobMod = new FakeNativeModule();
+    bobMod.endpointId = 'bb22';
+    mockHolder.mod = bobMod;
+    const bob = newService();
+    const bobSnap = watch(bob);
+    await bob.init('@bob', 'mothman');
+    bobMod.onCancelPair = (sessionId) => {
+      if (aliceMod.ratchets.get('bb22') === sessionId) aliceMod.ratchets.delete('bb22');
+      aliceMod.pairEvents.push({
+        kind: 'rejected',
+        sessionId,
+        peerEndpointId: 'bb22',
+        nearby: false,
+      });
+    };
+    await discover(alice, aliceMod, 'bb22');
+    await discover(bob, bobMod, 'aa11');
+    await alice.acknowledgeDiscoveredFriend();
+    expect(aliceSnap.current?.sharingWith).toEqual(['bb22']);
+    await bob.rejectDiscoveredFriend();
+    await alice.refreshPairing();
+    expect(aliceSnap.current?.friends).toEqual([]);
+    expect(bobSnap.current?.friends).toEqual([]);
+    expect(aliceSnap.current?.sharingWith).toEqual([]);
+    expect(bobSnap.current?.sharingWith).toEqual([]);
+    expect(aliceSnap.current?.pairing.failure?.withdrawn).toBe(true);
+    expect(aliceMod.ratchets.has('bb22')).toBe(false);
+    expect(bobMod.ratchets.has('aa11')).toBe(false);
+    expect(aliceMod.calls.forgetSession).toEqual([]);
+    expect(bobMod.calls.forgetSession).toEqual([]);
+  });
+
+  it('keeps other pending discoveries and accepted friends when one discovery is rejected', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await discover(svc, mockHolder.mod, 'first', 'first-session');
+    await discover(svc, mockHolder.mod, 'second', 'second-session');
+    expect(snap.current?.friends).toEqual([]);
+    expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('first');
+    await svc.acknowledgeDiscoveredFriend();
+    expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('second');
+    await svc.rejectDiscoveredFriend();
+    expect(snap.current?.friends.map((friend) => friend.endpointId)).toEqual(['first']);
+    expect(snap.current?.sharingWith).toEqual(['first']);
+  });
+
+  it('does not remove a newer pairing when an older pairing is withdrawn', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await discover(svc, mockHolder.mod, 'same-peer', 'old-session');
+    await svc.acknowledgeDiscoveredFriend();
+    await discover(svc, mockHolder.mod, 'same-peer', 'new-session');
+    await svc.acknowledgeDiscoveredFriend();
+    mockHolder.mod.pairEvents.push({
+      kind: 'rejected',
+      sessionId: 'old-session',
+      peerEndpointId: 'same-peer',
+      nearby: false,
+    });
+    await svc.refreshPairing();
+    expect(snap.current?.friends[0]?.pairingSessionId).toBe('new-session');
+    expect(snap.current?.sharingWith).toEqual(['same-peer']);
+    expect(mockHolder.mod.calls.forgetSession).not.toContain('same-peer');
+  });
+
+  it('keeps a failed rejection visible and retryable without permitting acknowledgement', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await discover(svc, mockHolder.mod, 'peer-retry');
+    mockHolder.mod.cancelPairError = new Error('could not cancel');
+    await expect(svc.rejectDiscoveredFriend()).rejects.toThrow('could not cancel');
+    expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('peer-retry');
+    expect(snap.current?.friends).toEqual([]);
+    await expect(svc.acknowledgeDiscoveredFriend()).rejects.toThrow('was rejected');
+    mockHolder.mod.cancelPairError = null;
+    await svc.rejectDiscoveredFriend();
+    expect(snap.current?.pairing.discoveredFriend).toBeNull();
+    expect(snap.current?.friends).toEqual([]);
+  });
+
+  it('does not turn generic route teardown into completed-pair withdrawal', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await discover(svc, mockHolder.mod, 'kept-peer');
+    await svc.acknowledgeDiscoveredFriend();
+    await svc.cancelPair('discovery');
+    expect(mockHolder.mod.calls.cancelPair).toEqual([]);
+    expect(snap.current?.friends[0]?.endpointId).toBe('kept-peer');
+    expect(snap.current?.pairing.completedSessionIds).toContain('discovery');
+  });
+
+  it.each([true, false])(
+    'keeps an existing friend when a fresh reused-ID SAS attempt is rejected (event=%s)',
+    async (withVerifyingEvent) => {
+      const svc = newService();
+      const snap = watch(svc);
+      await svc.init('@me', 'mothman');
+      await discover(svc, mockHolder.mod, 'known-peer', 'nearby-id');
+      await svc.acknowledgeDiscoveredFriend();
+      mockHolder.mod.sessions = [
+        verifyingSession({ sessionId: 'nearby-id', peerEndpointId: 'known-peer', nearby: true }),
+      ];
+      mockHolder.mod.challenges.set('nearby-id', sasChallenge());
+      if (withVerifyingEvent) {
+        mockHolder.mod.pairEvents.push({
+          kind: 'verifying',
+          sessionId: 'nearby-id',
+          peerEndpointId: 'known-peer',
+          nearby: true,
+        });
+      }
+      await svc.refreshPairing();
+      expect(snap.current?.pairing.completedSessionIds).not.toContain('nearby-id');
+      mockHolder.mod.sessions = [{ ...mockHolder.mod.sessions[0], state: 'rejected' }];
+      mockHolder.mod.challenges.clear();
+      mockHolder.mod.pairEvents.push({
+        kind: 'rejected',
+        sessionId: 'nearby-id',
+        peerEndpointId: 'known-peer',
+        nearby: true,
+      });
+      await svc.refreshPairing();
+      expect(snap.current?.friends[0]?.endpointId).toBe('known-peer');
+      expect(snap.current?.sharingWith).toEqual(['known-peer']);
+      expect(mockHolder.mod.calls.forgetSession).toEqual([]);
+      expect(mockHolder.mod.ratchets.has('known-peer')).toBe(true);
+    }
+  );
+
+  it('does not erase a newer ratchet when rejecting an older queued discovery', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await discover(svc, mockHolder.mod, 'same-peer', 'old-discovery');
+    await discover(svc, mockHolder.mod, 'same-peer', 'new-discovery');
+    await svc.rejectDiscoveredFriend();
+    expect(mockHolder.mod.calls.cancelPair).toEqual(['old-discovery']);
+    expect(mockHolder.mod.calls.forgetSession).toEqual([]);
+    expect(mockHolder.mod.ratchets.get('same-peer')).toBe('new-discovery');
+    expect(snap.current?.pairing.discoveredFriend?.pairingSessionId).toBe('new-discovery');
+    await svc.acknowledgeDiscoveredFriend();
+    expect(snap.current?.friends[0]?.pairingSessionId).toBe('new-discovery');
+  });
+
+  it('preserves a newer discovery when the peer withdraws an older acknowledged pairing', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await discover(svc, mockHolder.mod, 'same-peer', 'old-accepted');
+    await svc.acknowledgeDiscoveredFriend();
+    await discover(svc, mockHolder.mod, 'same-peer', 'new-pending');
+    mockHolder.mod.pairEvents.push({
+      kind: 'rejected',
+      sessionId: 'old-accepted',
+      peerEndpointId: 'same-peer',
+      nearby: false,
+    });
+    await svc.refreshPairing();
+    expect(snap.current?.friends).toEqual([]);
+    expect(snap.current?.pairing.discoveredFriend?.pairingSessionId).toBe('new-pending');
+    expect(mockHolder.mod.ratchets.get('same-peer')).toBe('new-pending');
+    expect(mockHolder.mod.calls.forgetSession).toEqual([]);
+    await svc.acknowledgeDiscoveredFriend();
+    expect(snap.current?.friends[0]?.pairingSessionId).toBe('new-pending');
+  });
+
+  it('does not share or dismiss the discovery when saving acknowledgement fails', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await discover(svc, mockHolder.mod, 'peer-save');
+    const save = jest.spyOn(persistence, 'savePool').mockRejectedValueOnce(new Error('disk full'));
+    try {
+      await expect(svc.acknowledgeDiscoveredFriend()).rejects.toThrow('disk full');
+      expect(snap.current?.friends).toEqual([]);
+      expect(snap.current?.sharingWith).toEqual([]);
+      expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('peer-save');
+      expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-peer-save')).toBe(false);
+      await svc.acknowledgeDiscoveredFriend();
+      expect(snap.current?.friends[0]?.endpointId).toBe('peer-save');
+    } finally {
+      save.mockRestore();
+    }
+  });
+
+  it('serializes an in-flight acknowledgement write ahead of its newer rejection', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    await discover(svc, mockHolder.mod, 'peer-write-race');
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const originalSave = persistence.savePool;
+    const save = jest.spyOn(persistence, 'savePool').mockImplementationOnce(async (kv, state) => {
+      await gate;
+      await originalSave(kv, state);
+    });
+    try {
+      const accepting = svc.acknowledgeDiscoveredFriend();
+      const accepted = expect(accepting).rejects.toThrow('other phone rejected');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      mockHolder.mod.pairEvents.push({
+        kind: 'rejected',
+        sessionId: 'discovery',
+        peerEndpointId: 'peer-write-race',
+        nearby: false,
+      });
+      const rejecting = svc.refreshPairing();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(save).toHaveBeenCalledTimes(1);
+      release();
+      await Promise.all([accepted, rejecting]);
+      expect(snap.current?.friends).toEqual([]);
+      expect(snap.current?.sharingWith).toEqual([]);
+      expect((await persistence.loadPool(save.mock.calls[0][0]))?.friends).toEqual({});
+      expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-peer-write-race')).toBe(
+        false
+      );
+    } finally {
+      release();
+      save.mockRestore();
+    }
+  });
+
+  it('shows a placeholder discovery when the pair has no verified profile yet', async () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
@@ -1206,7 +1641,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     ];
     await svc.refreshPairing();
 
-    const friend = snap.current?.friends.find((f) => f.endpointId === 'aabbccddee');
+    const friend = snap.current?.pairing.discoveredFriend;
     expect(friend).toBeDefined();
     expect(friend?.handle).toBe('@aabbccdd'); // safe placeholder from endpoint id
     expect(friend?.profileEpoch).toBeUndefined();
@@ -1264,7 +1699,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     ];
     await svc.refreshPairing();
 
-    const friend = snap.current?.friends.find((f) => f.endpointId === 'ccddeeff');
+    const friend = snap.current?.pairing.discoveredFriend;
     expect(friend?.handle).toBe('@bumped');
     expect(friend?.sigil).toBe('wendigo');
     expect(friend?.profileEpoch).toBe(700);
@@ -1292,7 +1727,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     ];
     await svc.refreshPairing();
 
-    const friend = snap.current?.friends.find((f) => f.endpointId === 'ddeeff00');
+    const friend = snap.current?.pairing.discoveredFriend;
     expect(friend?.handle).toBe('@early');
     expect(friend?.sigil).toBe('chupacabra');
     expect(friend?.profileEpoch).toBe(800);
@@ -1375,9 +1810,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       { kind: 'ready', sessionId: 'sess-dry', peerEndpointId: 'eeff0011', nearby: true },
     ];
     await svc.refreshPairing();
-    expect(snap.current?.friends.find((f) => f.endpointId === 'eeff0011')?.handle).toBe(
-      '@eeff0011'
-    );
+    expect(snap.current?.pairing.discoveredFriend?.handle).toBe('@eeff0011');
 
     // A later sweep re-imports the ticket, which re-dials the addresses in it. This time the
     // replica has the record.
@@ -1395,7 +1828,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     }
 
     expect(mockHolder.mod.calls.importProfileTicket).toContain('peer-profile');
-    const friend = snap.current?.friends.find((f) => f.endpointId === 'eeff0011');
+    const friend = snap.current?.pairing.discoveredFriend;
     expect(friend?.handle).toBe('@late');
     expect(friend?.profileEpoch).toBe(900);
   });

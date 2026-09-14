@@ -291,6 +291,24 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Withdraw only the ratchet installed by this pairing, never a later re-pair or resync.
+    pub(crate) fn remove_if_session(
+        &self,
+        peer: &[u8],
+        session_id: [u8; SESSION_ID_LEN],
+    ) -> Result<bool, SessionError> {
+        let _guard = self.critical.lock().map_err(|_| SessionError::Poisoned)?;
+        if !self
+            .store
+            .load(peer)?
+            .is_some_and(|state| state.session_id() == session_id)
+        {
+            return Ok(false);
+        }
+        self.store.remove(peer)?;
+        Ok(true)
+    }
+
     /// Derive one wrap per recipient, persisting each advanced session **before returning**.
     ///
     /// Persist-before-publish is the whole point of doing this in one call: by the time the
@@ -599,5 +617,74 @@ impl SessionManager {
         self.store.save(peer, &state)?;
         drop(guard);
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct TestStore(PathBuf);
+
+    impl TestStore {
+        fn new() -> Self {
+            Self(PathBuf::from("target").join(format!(
+                "pair-withdrawal-store-{}-{}",
+                std::process::id(),
+                rand::random::<u64>()
+            )))
+        }
+    }
+
+    impl Drop for TestStore {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn withdrawal_cleanup_cannot_remove_a_newer_ratchet() {
+        let scratch = TestStore::new();
+        let identity = [0xAA; 32];
+        let peer = [0xBB; 32];
+        let manager = SessionManager::new(SessionStore::open(&scratch.0, &identity).unwrap());
+        let install = |id: u8| {
+            manager
+                .bootstrap_responder(
+                    &peer,
+                    [id; SESSION_ID_LEN],
+                    [id; KEY_LEN],
+                    x25519_dalek::StaticSecret::from([id; KEY_LEN]),
+                    1,
+                )
+                .unwrap();
+        };
+        assert!(!manager
+            .remove_if_session(&peer, [1; SESSION_ID_LEN])
+            .unwrap());
+        install(1);
+        assert!(!manager
+            .remove_if_session(&peer, [2; SESSION_ID_LEN])
+            .unwrap());
+        assert!(manager.has_session(&peer));
+        assert!(manager
+            .remove_if_session(&peer, [1; SESSION_ID_LEN])
+            .unwrap());
+        assert!(!manager.has_session(&peer));
+        assert!(!manager
+            .remove_if_session(&peer, [1; SESSION_ID_LEN])
+            .unwrap());
+
+        install(2);
+        assert!(!manager
+            .remove_if_session(&peer, [1; SESSION_ID_LEN])
+            .unwrap());
+        drop(manager);
+        let reopened = SessionStore::open(&scratch.0, &identity).unwrap();
+        assert_eq!(
+            reopened.load(&peer).unwrap().unwrap().session_id(),
+            [2; SESSION_ID_LEN]
+        );
     }
 }

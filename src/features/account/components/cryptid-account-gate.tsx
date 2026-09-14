@@ -16,7 +16,7 @@ export function CryptidAccountGate({ children }: PropsWithChildren) {
   if (onboardingActive || !profile) {
     return (
       <AccountOnboardingScreen
-        onAutosaveStart={() => setOnboardingActive(true)}
+        onSaveStart={() => setOnboardingActive(true)}
         onComplete={() => setOnboardingActive(false)}
       />
     );

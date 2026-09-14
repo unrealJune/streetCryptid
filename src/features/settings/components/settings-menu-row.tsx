@@ -8,7 +8,7 @@ import { useTheme } from '@/hooks/use-theme';
 interface SettingsMenuRowProps {
   readonly href: Href;
   readonly label: string;
-  readonly detail: string;
+  readonly detail?: string;
   /**
    * A short right-aligned status ("3 of 3 on", "On", "Unavailable"). It exists so the
    * menu still answers the question the old long scroll answered at a glance — what
@@ -20,8 +20,7 @@ interface SettingsMenuRowProps {
 }
 
 /**
- * One entry in the Settings menu: a label, a one-line description of what lives
- * behind it, its current state, and a chevron.
+ * One entry in the Settings menu: a label, its current state, and a chevron.
  *
  * Shaped to match {@link IdentityRow}, which was the first row in the app to behave
  * this way and is the reason the rest of Settings now does too.
@@ -44,9 +43,6 @@ export function SettingsMenuRow({ href, label, detail, value, accent }: Settings
     >
       <View style={styles.copy}>
         <ThemedText type="smallBold">{label}</ThemedText>
-        <ThemedText type="small" themeColor="textSecondary">
-          {detail}
-        </ThemedText>
       </View>
       {value ? (
         <ThemedText

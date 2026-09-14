@@ -1,4 +1,5 @@
 import { MapColorSchemeRow } from '../components/map-color-scheme-row';
+import { DistanceUnitsRow } from '../components/distance-units-row';
 import { SettingsPage, SettingsSection } from '../components/settings-page';
 
 /**
@@ -7,10 +8,11 @@ import { SettingsPage, SettingsSection } from '../components/settings-page';
  */
 export default function AppearanceScreen() {
   return (
-    <SettingsPage title="Appearance" subtitle="How the map is colored">
-      <SettingsSection label="MAP COLOR SCHEME">
-        <MapColorSchemeRow />
+    <SettingsPage title="Appearance">
+      <SettingsSection label="DISTANCE UNITS">
+        <DistanceUnitsRow />
       </SettingsSection>
+      <MapColorSchemeRow />
     </SettingsPage>
   );
 }

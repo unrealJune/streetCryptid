@@ -9,8 +9,8 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 
-import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
+import { ThemedText } from '@/components/themed-text';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import type { Friend } from '@/features/social/core/types';
 import {
@@ -121,17 +121,10 @@ export function PersonaReveal({ friend, accent, neutral, onResolved }: PersonaRe
         ? handle
         : scrambleFrame(handle, 0, frame);
 
-  const caption = resolved
-    ? `${friend.cryptidName?.toUpperCase() ?? 'UNKNOWN FORM'} · LOCATION SHARING ACTIVE`
-    : patienceSpent
-      ? 'PERSONA UNAVAILABLE · LOCATION SHARING ACTIVE'
-      : 'DECRYPTING PERSONA';
+  const caption = resolved ? null : patienceSpent ? 'PERSONA UNAVAILABLE' : 'DECRYPTING PERSONA';
 
   return (
     <View style={styles.wrap}>
-      <ThemedText type="code" style={[styles.kicker, { color: resolved ? accent : neutral }]}>
-        FRIEND FOUND
-      </ThemedText>
       <ThemedText accessibilityRole="header" style={styles.title}>
         CRYPTID{'\n'}DISCOVERED
       </ThemedText>
@@ -160,13 +153,15 @@ export function PersonaReveal({ friend, accent, neutral, onResolved }: PersonaRe
       >
         {display}
       </Text>
-      <Animated.Text
-        key={caption}
-        entering={reducedMotion ? undefined : FadeIn.duration(260)}
-        style={[styles.caption, { color: neutral }]}
-      >
-        {caption}
-      </Animated.Text>
+      {caption ? (
+        <Animated.Text
+          key={caption}
+          entering={reducedMotion ? undefined : FadeIn.duration(260)}
+          style={[styles.caption, { color: neutral }]}
+        >
+          {caption}
+        </Animated.Text>
+      ) : null}
     </View>
   );
 }
@@ -176,10 +171,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: Spacing.three,
     width: '100%',
-  },
-  kicker: {
-    fontWeight: '700',
-    letterSpacing: 2,
   },
   title: {
     fontFamily: 'Rajdhani_700Bold',

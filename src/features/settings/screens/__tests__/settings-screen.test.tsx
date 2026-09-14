@@ -51,33 +51,39 @@ describe('SettingsScreen', () => {
 
   it('lists every settings area as its own page', () => {
     expect(rows().map((row) => row.href)).toEqual([
-      '/settings/transports',
-      '/pairing',
-      '/settings/delivery',
       '/settings/appearance',
+      '/settings/delivery',
+      '/pairing',
+      '/settings/advanced',
       '/settings/app-data',
-      '/settings/debug',
     ]);
   });
 
   it('summarises the state behind each page so the menu still answers "what is on"', () => {
     const byHref = new Map(rows().map((row) => [row.href, row.value]));
 
-    expect(byHref.get('/settings/transports')).toBe('3/3 on');
-    expect(byHref.get('/settings/delivery')).toBe('Stash server');
+    expect(byHref.has('/settings/transports')).toBe(false);
+    expect(byHref.get('/settings/delivery')).toBe('Mutuals + Stash Server');
     expect(byHref.get('/settings/appearance')).toBe('Graphite');
   });
 
   it('names the route that is actually in use, not the one that was asked for', () => {
-    // A build with no stash deployed is travelling direct whatever the stored preference says,
+    // A build with no stash deployed uses mutual friends whatever the stored preference says,
     // and the menu is a summary of what is happening.
     snapshot.delivery = { mode: 'stash', effectiveMode: 'mutual' };
-    expect(rows().find((row) => row.href === '/settings/delivery')?.value).toBe('Mutual relay');
+    expect(rows().find((row) => row.href === '/settings/delivery')?.value).toBe('Mutual Friends');
 
     act(() => renderer.unmount());
     snapshot.delivery = { mode: 'stash', effectiveMode: 'stash' };
-    expect(rows().find((row) => row.href === '/settings/delivery')?.value).toBe('Stash server');
+    expect(rows().find((row) => row.href === '/settings/delivery')?.value).toBe(
+      'Mutuals + Stash Server'
+    );
 
     snapshot.delivery = { mode: 'stash', effectiveMode: 'stash' };
+  });
+
+  it('keeps menu entries free of subtitles', () => {
+    expect(rows().every((row) => row.detail === undefined)).toBe(true);
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('Identity, transports');
   });
 });

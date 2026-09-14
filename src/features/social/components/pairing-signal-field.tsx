@@ -10,6 +10,7 @@ import {
 } from 'react-native-reanimated';
 
 import { hexToRgb } from '@/features/map/core/color';
+import { BUMP_SEARCH_DURATION_MS, pairingSearchProgress } from '../core/pairing-countdown';
 
 import { PAIRING_SIGNAL_SKSL } from './pairing-signal-sksl';
 
@@ -21,6 +22,7 @@ interface PairingSignalFieldProps {
   readonly base: string;
   readonly mode: PairingFieldMode;
   readonly progress?: number;
+  readonly searchStartedAt?: number | null;
   readonly size: number;
 }
 
@@ -56,6 +58,7 @@ export function PairingSignalField({
   base,
   mode,
   progress = 1,
+  searchStartedAt,
   size,
 }: PairingSignalFieldProps) {
   const reducedMotion = useReducedMotion();
@@ -104,13 +107,22 @@ export function PairingSignalField({
   }, [accentFrom, accentRgb, accentTo]);
 
   useEffect(() => {
+    if (mode === 'sweep' && searchStartedAt != null && !reducedMotion) {
+      const now = Date.now();
+      smoothProgress.value = pairingSearchProgress(searchStartedAt, now);
+      smoothProgress.value = withTiming(1, {
+        duration: Math.max(0, searchStartedAt + BUMP_SEARCH_DURATION_MS - now),
+        easing: Easing.linear,
+      });
+      return;
+    }
     // A jump (a new link, a reset) should land immediately; a tick should glide.
     const isTick = Math.abs(smoothProgress.value - clampedProgress) < 0.05;
     smoothProgress.value =
       isTick && !reducedMotion
         ? withTiming(clampedProgress, { duration: PROGRESS_STEP_MS, easing: Easing.linear })
         : clampedProgress;
-  }, [clampedProgress, reducedMotion, smoothProgress]);
+  }, [clampedProgress, mode, reducedMotion, searchStartedAt, smoothProgress]);
 
   const uniforms = useDerivedValue(() => {
     const mix = modeMix.value;

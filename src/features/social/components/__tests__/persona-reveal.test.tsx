@@ -108,7 +108,9 @@ describe('PersonaReveal', () => {
 
     const rendered = textOf(renderer);
     expect(rendered).toContain('@mothwing');
-    expect(rendered).toContain('MOTHWING');
+    expect(rendered).not.toContain('FRIEND FOUND');
+    expect(rendered).toContain('DISCOVERED');
+    expect(rendered).not.toContain('LOCATION SHARING ACTIVE');
     expect(rendered).not.toContain('DECRYPTING');
   });
 

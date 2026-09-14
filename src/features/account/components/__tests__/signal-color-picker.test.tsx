@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import { TextInput } from 'react-native';
+import { Text, TextInput } from 'react-native';
 
 import { SignalColorPicker } from '../signal-color-picker';
 
@@ -62,5 +62,32 @@ describe('SignalColorPicker', () => {
 
     act(() => renderer.root.findByType(TextInput).props.onBlur());
     expect(renderer.root.findByType(TextInput).props.value).toBe('#2F9E6A');
+  });
+
+  it('omits the brightness subtitle', () => {
+    act(() => {
+      renderer = create(<PickerHarness />);
+    });
+    expect(
+      renderer.root
+        .findAllByType(Text)
+        .some((node) => String(node.props.children).includes('Brightness'))
+    ).toBe(false);
+  });
+
+  it('locks wheel and hex changes while the profile is saving', () => {
+    const onChange = jest.fn();
+    act(() => {
+      renderer = create(<SignalColorPicker color="#FF0000" disabled onChange={onChange} />);
+    });
+    const wheel = renderer.root.findByProps({ accessibilityLabel: 'Signal color wheel' });
+    expect(wheel.props.accessibilityState.disabled).toBe(true);
+    expect(renderer.root.findByType(TextInput).props.editable).toBe(false);
+    act(() => {
+      wheel.props.onAccessibilityAction({ nativeEvent: { actionName: 'increment' } });
+      wheel.props.onResponderGrant({ nativeEvent: { locationX: 0, locationY: 0 } });
+      renderer.root.findByType(TextInput).props.onChangeText('#00FF00');
+    });
+    expect(onChange).not.toHaveBeenCalled();
   });
 });

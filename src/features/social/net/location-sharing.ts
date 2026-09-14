@@ -51,6 +51,7 @@ import {
   secretFromPairingCode,
 } from '../core/pairing-code';
 import { isPairingFigureIndex } from '../core/pairing-figures';
+import { BUMP_SEARCH_DURATION_MS } from '../core/pairing-countdown';
 import type { PeerKind } from '../core/peer-reachability';
 import { buildFriendPresence, type PresenceState } from '../core/presence';
 import * as pool from '../core/pool';
@@ -197,12 +198,16 @@ export interface PairingFailure {
   readonly nearby: boolean;
   /** Whether this phone reached the visual check before the session died. */
   readonly verified: boolean;
+  /** A completed pairing was withdrawn; earlier location deliveries cannot be recalled. */
+  readonly withdrawn?: boolean;
   readonly at: number;
 }
 
 export interface BumpSnapshot {
   stage: BumpStage;
   expiresAt: number | null;
+  /** Start of the native peer search, distinct from the longer armed window. */
+  searchStartedAt?: number | null;
   rssi: number | null;
   peerCount: number;
   error: string | null;
@@ -225,6 +230,8 @@ export interface PairingSnapshot {
   nearbyPeers: BlePeer[];
   /** All known pairing sessions and their coarse state. */
   sessions: PairStateRecord[];
+  /** Handled completions must never be cancelled by generic navigation teardown. */
+  completedSessionIds?: readonly string[];
   /** Incoming pair requests awaiting the user's accept/reject. */
   pendingRequests: PairEvent[];
   /**
@@ -386,7 +393,6 @@ const PAIRING_POLL_INTERVAL_MS = 4000;
 const PAIRING_ACTIVE_POLL_INTERVAL_MS = 300;
 
 const BUMP_POLL_INTERVAL_MS = 300;
-const BUMP_RESOLVE_TIMEOUT_MS = 12_000;
 export const BUMP_WINDOW_MS = 120_000;
 
 /**
@@ -594,6 +600,7 @@ export class LocationSharingService {
   private pendingPairRequests: PairEvent[] = [];
   private verifications: PairingVerification[] = [];
   private bumpUntil = 0;
+  private bumpSearchStartedAt: number | null = null;
   private bumpTimer: ReturnType<typeof setInterval> | null = null;
   private bumpStage: BumpStage = 'idle';
   private bumpRssi: number | null = null;
@@ -603,8 +610,16 @@ export class LocationSharingService {
   private bumpGeneration = 0;
   private pairingOperations = 0;
   private rebindInFlight = false;
-  private discoveredFriend: Friend | null = null;
+  private readonly discoveries = new Map<string, Friend>();
+  private discoveryDecision: { sessionId: string; accept: boolean } | null = null;
+  private readonly rejectedPairSessions = new Set<string>();
+  private poolPersistChain: Promise<void> = Promise.resolve();
+
+  private get discoveredFriend(): Friend | null {
+    return this.discoveries.values().next().value ?? null;
+  }
   private inviteLink: string | null = null;
+  private inviteMutation: Promise<void> = Promise.resolve();
   private inviteExpiresAt: number | null = null;
   /**
    * The id of the invite behind {@link inviteLink}.
@@ -1097,26 +1112,33 @@ export class LocationSharingService {
     if (this.removingFriends.has(card.endpointId)) return;
     this.state = pool.addFriend(this.state, card);
     await this.subscribeToFriend(card);
-    this.persistPool();
+    await this.persistPool();
     this.emit();
   }
 
   async shareWith(endpointId: string): Promise<void> {
     this.state = pool.shareWith(this.state, endpointId);
     await this.ensureMySubscription();
-    this.persistPool();
+    await this.persistPool();
     this.emit();
   }
 
   async revoke(endpointId: string): Promise<void> {
     this.state = pool.revoke(this.state, endpointId);
     // No re-subscribe needed: future fixes simply omit their wrap.
-    this.persistPool();
+    await this.persistPool();
     this.emit();
   }
 
   /** Remove a friend locally, revoke future fixes, and tear down their live subscription. */
   async removeFriend(endpointId: string): Promise<void> {
+    await this.removeFriendLocally(endpointId, { forgetRatchet: true });
+  }
+
+  private async removeFriendLocally(
+    endpointId: string,
+    { forgetRatchet, discoverySessionId }: { forgetRatchet: boolean; discoverySessionId?: string }
+  ): Promise<void> {
     if (!this.state.friends[endpointId] || this.removingFriends.has(endpointId)) return;
 
     const wasSharing = pool.isSharingWith(this.state, endpointId);
@@ -1128,7 +1150,7 @@ export class LocationSharingService {
     this.friendSubs.delete(endpointId);
     this.state = pool.removeFriend(this.state, endpointId);
     try {
-      await savePool(this.kv, this.state);
+      await this.persistPool();
     } catch (error) {
       this.state = previousState;
       if (friendSubId) this.friendSubs.set(endpointId, friendSubId);
@@ -1136,9 +1158,18 @@ export class LocationSharingService {
       throw error;
     }
 
-    if (this.discoveredFriend?.endpointId === endpointId) this.discoveredFriend = null;
-    this.pendingProfiles.delete(endpointId);
-    this.profileBackfillAttempts.delete(endpointId);
+    for (const [sessionId, friend] of this.discoveries) {
+      if (
+        friend.endpointId === endpointId &&
+        (discoverySessionId === undefined || sessionId === discoverySessionId)
+      ) {
+        this.discoveries.delete(sessionId);
+      }
+    }
+    if (![...this.discoveries.values()].some((friend) => friend.endpointId === endpointId)) {
+      this.pendingProfiles.delete(endpointId);
+      this.profileBackfillAttempts.delete(endpointId);
+    }
     this.droppedRecipients.delete(endpointId);
     this.sessionVerdicts.delete(endpointId);
     delete this.ratchetActivity[endpointId];
@@ -1153,7 +1184,7 @@ export class LocationSharingService {
     // for a relationship that no longer exists, and §5.4 makes erasure an explicit design surface
     // — keeping it would leave material on disk whose only remaining use is to a seized device.
     // Best-effort: the friendship is already gone from the pool either way.
-    if (mod && typeof mod.forgetSession === 'function') {
+    if (forgetRatchet && mod && typeof mod.forgetSession === 'function') {
       cleanup.push(
         mod.forgetSession(endpointId).catch((err: unknown) => {
           getTelemetry().log(
@@ -1256,11 +1287,13 @@ export class LocationSharingService {
     if (!this.mod || !this.isBumpActive() || this.bumpResolveInFlight) return;
     const generation = this.bumpGeneration;
     this.bumpStage = 'searching';
+    this.bumpSearchStartedAt = Date.now();
+    this.bumpUntil = Math.max(this.bumpUntil, this.bumpSearchStartedAt + BUMP_SEARCH_DURATION_MS);
     this.bumpError = null;
     this.setPairingActivity('finding the bumped phone');
 
     const run = this.runPairingOperation(async () => {
-      const result = await this.mod!.resolveBumpPeer(BUMP_RESOLVE_TIMEOUT_MS);
+      const result = await this.mod!.resolveBumpPeer(BUMP_SEARCH_DURATION_MS);
       if (generation !== this.bumpGeneration || !this.isBumpActive()) return;
       this.bumpPeerCount = result.peerCount;
       this.bumpRssi = result.rssi;
@@ -1390,33 +1423,90 @@ export class LocationSharingService {
     void this.syncTrail(0);
   }
 
-  /** Acknowledge the one-shot "cryptid discovered" reveal and keep the new friend. */
-  acknowledgeDiscoveredFriend(): void {
-    if (!this.discoveredFriend) return;
-    this.discoveredFriend = null;
-    this.emit();
+  /** Only the final confirmation adds a friend or enables location sharing. */
+  acknowledgeDiscoveredFriend(): Promise<void> {
+    return this.decideDiscovery(true);
   }
 
-  /** Reject the discovered friend, revoke sharing, and leave their live location topic. */
-  async rejectDiscoveredFriend(): Promise<void> {
-    const friend = this.discoveredFriend;
-    if (!friend) return;
+  /** Withdraw the completed handshake; the unconfirmed friend was never added or shared with. */
+  rejectDiscoveredFriend(): Promise<void> {
+    return this.decideDiscovery(false);
+  }
 
-    this.discoveredFriend = null;
-    this.state = pool.removeFriend(this.state, friend.endpointId);
-    this.pendingProfiles.delete(friend.endpointId);
-    this.profileBackfillAttempts.delete(friend.endpointId);
-    this.persistPool();
-    this.setPairingActivity('cryptid rejected');
-
+  private async decideDiscovery(accept: boolean): Promise<void> {
+    const discovery = this.discoveries.entries().next().value;
+    if (!discovery) return;
+    if (this.discoveryDecision) throw new Error('A pairing decision is already being saved.');
+    const [sessionId, friend] = discovery;
     const mod = this.mod;
-    const friendSubId = this.friendSubs.get(friend.endpointId);
-    const unsubscribeFromFriend = async (): Promise<void> => {
-      if (!mod || !friendSubId) return;
-      await mod.unsubscribe(friendSubId);
-      this.friendSubs.delete(friend.endpointId);
-    };
-    await Promise.all([unsubscribeFromFriend(), this.ensureMySubscription()]);
+    if (!mod) throw new Error('Pairing is not ready. Try again.');
+    if (accept && this.rejectedPairSessions.has(sessionId)) {
+      throw new Error('This pairing was rejected. Start a new pairing to add this friend.');
+    }
+    this.discoveryDecision = { sessionId, accept };
+    try {
+      if (!accept) {
+        this.rejectedPairSessions.add(sessionId);
+        await mod.cancelPair(sessionId);
+        await this.withdrawDiscoveredFriend(sessionId, friend.endpointId);
+        this.setPairingActivity('pair rejected');
+        return;
+      }
+
+      const previous = this.state.friends[friend.endpointId];
+      const wasSharing = pool.isSharingWith(this.state, friend.endpointId);
+      this.state = pool.shareWith(pool.addFriend(this.state, friend), friend.endpointId);
+      try {
+        await this.persistPool();
+      } catch (error) {
+        if (this.state.friends[friend.endpointId]?.pairingSessionId === sessionId) {
+          this.state = pool.removeFriend(this.state, friend.endpointId);
+          if (previous) this.state = pool.addFriend(this.state, previous);
+          if (previous && wasSharing) this.state = pool.shareWith(this.state, friend.endpointId);
+        }
+        this.emit();
+        throw error;
+      }
+      if (this.rejectedPairSessions.has(sessionId)) {
+        throw new Error('The other phone rejected this pairing. Nothing was added.');
+      }
+      const connections = await Promise.allSettled([
+        this.subscribeToFriend(friend),
+        this.ensureMySubscription(),
+      ]);
+      for (const result of connections) {
+        if (result.status === 'rejected') this.reportError(result.reason);
+      }
+      if (this.rejectedPairSessions.has(sessionId)) {
+        throw new Error('The other phone rejected this pairing. Nothing was added.');
+      }
+      this.discoveries.delete(sessionId);
+      this.pairingFailure = null;
+      this.emit();
+      void this.syncTrail(0);
+    } finally {
+      this.discoveryDecision = null;
+    }
+  }
+
+  private async withdrawDiscoveredFriend(sessionId: string, endpointId: string): Promise<void> {
+    this.rejectedPairSessions.add(sessionId);
+    this.handledPairSessions.add(sessionId);
+    const friend = this.state.friends[endpointId];
+    if (friend?.pairingSessionId === sessionId) {
+      // Native withdrawal erases only this round's ratchet. Endpoint-wide unfriend erasure
+      // here could destroy a newer successful pairing with the same phone.
+      await this.removeFriendLocally(endpointId, {
+        forgetRatchet: false,
+        discoverySessionId: sessionId,
+      });
+    }
+    this.discoveries.delete(sessionId);
+    if (![...this.discoveries.values()].some((friend) => friend.endpointId === endpointId)) {
+      this.pendingProfiles.delete(endpointId);
+      this.profileBackfillAttempts.delete(endpointId);
+    }
+    this.emit();
   }
 
   /**
@@ -1424,7 +1514,7 @@ export class LocationSharingService {
    * The link is also retained in the pairing snapshot as the current invite.
    */
   async createPairInvite(ttlSecs: number): Promise<string> {
-    return this.runPairingOperation(async () => {
+    return this.mutatePairInvite(async () => {
       if (!this.mod) throw new Error('createPairInvite: native module not bound');
       const invite = await this.mod.createPairInvite(ttlSecs);
       this.inviteLink = encodePairLink(invite.token);
@@ -1451,17 +1541,44 @@ export class LocationSharingService {
    * link to withdraw — not a failure, and not worth warning anyone about).
    */
   async cancelPairInvite(): Promise<InviteCancellation> {
-    return this.runPairingOperation(async () => {
+    return this.mutatePairInvite(async () => {
       const link = this.inviteLink;
       if (!link) return 'absent';
+      const inviteId = this.inviteId;
       if (typeof this.mod?.revokePairInvite !== 'function') return 'unsupported';
       await this.mod.revokePairInvite(decodePairLink(link));
-      this.forgetInvite();
-      // Withdrawn, not used — the latch must not leave the screen claiming someone opened it.
-      this.inviteRedeemed = false;
+      // A redemption can arrive after the button was drawn. Revocation blocks new Hellos;
+      // cancel the session that got in before it as well, rather than just hiding its link.
+      if (inviteId) {
+        const sessions = await this.mod.listPairSessions();
+        if (
+          sessions.some(
+            (session) =>
+              session.sessionId === inviteId && !TERMINAL_PAIR_STATES.includes(session.state)
+          )
+        ) {
+          await this.cancelPair(inviteId);
+        }
+      }
+      if (this.inviteLink === link) {
+        this.forgetInvite();
+        // Withdrawn, not used — the latch must not claim someone opened it.
+        this.inviteRedeemed = false;
+      }
       this.setPairingActivity('invite cancelled');
       return 'cancelled';
     });
+  }
+
+  private mutatePairInvite<T>(action: () => Promise<T>): Promise<T> {
+    // Cancelling during minting must revoke the invite that is about to arrive. A later mint
+    // must never be cleared by an older cancellation finishing out of order.
+    const operation = this.inviteMutation.then(() => this.runPairingOperation(action));
+    this.inviteMutation = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
   }
 
   /**
@@ -1681,6 +1798,9 @@ export class LocationSharingService {
   /** Cancel a pairing under SAS verification — terminal (a fresh attempt is required). */
   async cancelPair(sessionId: string): Promise<void> {
     if (!this.mod) throw new Error('cancelPair: native module not bound');
+    // The session snapshot can lag a Ready event. Only explicit discovery rejection may
+    // withdraw a completed handshake; closing an acknowledged reveal must keep its friend.
+    if (this.handledPairSessions.has(sessionId)) return;
     await this.mod.cancelPair(sessionId);
     this.verifications = this.verifications.filter((v) => v.sessionId !== sessionId);
     this.pendingPairRequests = this.pendingPairRequests.filter((e) => e.sessionId !== sessionId);
@@ -3242,13 +3362,16 @@ export class LocationSharingService {
     span.end();
   }
 
-  /** Persist the current pool (fire-and-forget; best-effort). */
-  private persistPool(): void {
-    void savePool(this.kv, this.state);
-    this.pushSharingRecipients();
-    // The peer tickets come out of the same pool, so the two mirrors move together or the native
-    // drain seals for a friend it cannot then send to.
-    this.pushDeliveryConfig();
+  /** Keep a slow older write from restoring a friend after a newer rejection was saved. */
+  private persistPool(): Promise<void> {
+    const state = this.state;
+    const write = this.poolPersistChain.then(() => savePool(this.kv, state));
+    const persisted = write.then(() => {
+      this.pushSharingRecipients();
+      this.pushDeliveryConfig();
+    });
+    this.poolPersistChain = persisted.catch((error: unknown) => this.reportError(error));
+    return persisted;
   }
 
   /**
@@ -3494,6 +3617,11 @@ export class LocationSharingService {
 
   private async subscribeToFriend(card: Friend): Promise<void> {
     if (!this.mod || this.friendSubs.has(card.endpointId)) return;
+    const stillCurrent = () =>
+      !this.removingFriends.has(card.endpointId) &&
+      this.state.friends[card.endpointId]?.pairingSessionId === card.pairingSessionId &&
+      this.state.friends[card.endpointId]?.ticket === card.ticket;
+    if (!stillCurrent()) return;
     const topic = await this.mod.deriveTopic(card.endpointId);
     // Bootstrap a friend's topic from the WHOLE pool, not just that friend.
     //
@@ -3540,6 +3668,10 @@ export class LocationSharingService {
       ...poolBootstrap,
       ...this.stashBootstrap(),
     ]);
+    if (!stillCurrent()) {
+      await this.mod.unsubscribe(subId);
+      return;
+    }
     this.friendSubs.set(card.endpointId, subId);
     // Replicate + live-sync their profile namespace so identity updates land automatically (§3).
     if (card.profileTicket) {
@@ -3832,11 +3964,13 @@ export class LocationSharingService {
       radio: this.bluetoothRadio,
       nearbyPeers: [...this.nearbyPeers],
       sessions: [...this.pairSessions],
+      completedSessionIds: [...this.handledPairSessions],
       pendingRequests: [...this.pendingPairRequests],
       verifications: [...this.verifications],
       bump: {
         stage: this.isBumpActive() ? this.bumpStage : 'idle',
         expiresAt: this.isBumpActive() ? this.bumpUntil : null,
+        searchStartedAt: this.bumpStage === 'searching' ? this.bumpSearchStartedAt : null,
         rssi: this.bumpRssi,
         peerCount: this.bumpPeerCount,
         error: this.bumpError,
@@ -3910,7 +4044,13 @@ export class LocationSharingService {
     if (now - this.lastProfileBackfillAt < PROFILE_BACKFILL_INTERVAL_MS) return;
     this.lastProfileBackfillAt = now;
 
-    for (const friend of pool.friendList(this.state)) {
+    const candidates = new Map(
+      [...pool.friendList(this.state), ...this.discoveries.values()].map((friend) => [
+        friend.endpointId,
+        friend,
+      ])
+    );
+    for (const friend of candidates.values()) {
       if (!friend.profileTicket || friend.profileEpoch !== undefined) continue;
       const attempts = this.profileBackfillAttempts.get(friend.endpointId) ?? 0;
       if (attempts >= PROFILE_BACKFILL_MAX_ATTEMPTS) continue;
@@ -3923,6 +4063,15 @@ export class LocationSharingService {
 
   /** Merge a verified profile into a known friend (monotonic by epoch); persist + emit if changed. */
   private applyProfile(profile: ProfileView): void {
+    let discoveryChanged = false;
+    for (const [sessionId, friend] of this.discoveries) {
+      if (friend.endpointId !== profile.endpointId) continue;
+      const next = mergeProfileIntoFriend(friend, profile);
+      if (next !== friend) {
+        this.discoveries.set(sessionId, next);
+        discoveryChanged = true;
+      }
+    }
     const next = pool.applyProfile(this.state, profile);
     if (next === this.state) {
       // Hold a profile whose friend hasn't landed yet — the pair `ready` event can trail the
@@ -3933,13 +4082,11 @@ export class LocationSharingService {
           this.pendingProfiles.set(profile.endpointId, profile);
         }
       }
+      if (discoveryChanged) this.emit();
       return;
     }
     this.pendingProfiles.delete(profile.endpointId);
     this.state = next;
-    if (this.discoveredFriend?.endpointId === profile.endpointId) {
-      this.discoveredFriend = mergeProfileIntoFriend(this.discoveredFriend, profile);
-    }
     this.persistPool();
     this.emit();
   }
@@ -4006,6 +4153,7 @@ export class LocationSharingService {
       this.bumpTimer = null;
     }
     this.bumpUntil = 0;
+    this.bumpSearchStartedAt = null;
     this.bumpStage = 'idle';
     this.bumpRssi = null;
     this.bumpPeerCount = 0;
@@ -4231,6 +4379,7 @@ export class LocationSharingService {
     if (event.kind !== 'rejected' && event.kind !== 'failed') this.pairingFailure = null;
     switch (event.kind) {
       case 'pendingRequest': {
+        this.beginPairRound(event.sessionId);
         // Sessions we initiated (or nearby ones we've picked up) advance to the SAS gate on their
         // own; only surface unsolicited peer-initiated requests as a pending prompt.
         if (this.initiatedRoutes.has(event.sessionId)) return;
@@ -4245,6 +4394,7 @@ export class LocationSharingService {
         return;
       }
       case 'verifying':
+        this.beginPairRound(event.sessionId);
         // The SAS visual gate is live. It's no longer a plain pending request — reconciliation
         // (run after this loop) fetches the challenge and upserts it into `verifications`.
         this.pendingPairRequests = this.pendingPairRequests.filter(
@@ -4264,6 +4414,17 @@ export class LocationSharingService {
         return;
       case 'rejected':
       case 'failed': {
+        const withdrawn =
+          event.kind === 'rejected' &&
+          (this.discoveries.get(event.sessionId)?.endpointId === event.peerEndpointId ||
+            (this.handledPairSessions.has(event.sessionId) &&
+              this.state.friends[event.peerEndpointId]?.pairingSessionId === event.sessionId));
+        if (
+          withdrawn &&
+          !(this.discoveryDecision?.sessionId === event.sessionId && !this.discoveryDecision.accept)
+        ) {
+          await this.withdrawDiscoveredFriend(event.sessionId, event.peerEndpointId);
+        }
         this.pendingPairRequests = this.pendingPairRequests.filter(
           (e) => e.sessionId !== event.sessionId
         );
@@ -4283,6 +4444,7 @@ export class LocationSharingService {
           reason: expired ? 'expired' : event.kind === 'rejected' ? 'declined' : 'lost',
           nearby: event.nearby,
           verified: verification !== undefined,
+          withdrawn,
           at: Date.now(),
         });
         this.setPairingActivity(event.kind === 'rejected' ? 'pair rejected' : 'pair failed');
@@ -4309,6 +4471,7 @@ export class LocationSharingService {
    * advances to the SAS `verifying` gate, which the user then clears.
    */
   private trackNearbyRequest(event: PairEvent): void {
+    this.beginPairRound(event.sessionId);
     this.initiatedRoutes.set(event.sessionId, 'nearby');
     this.pendingPairRequests = this.pendingPairRequests.filter(
       (request) => request.sessionId !== event.sessionId
@@ -4375,6 +4538,7 @@ export class LocationSharingService {
       // A live `verifying` session with no challenge means the gate expired or was decided — drop
       // it rather than silently falling back to a challenge-less pairing.
       if (!challenge) continue;
+      this.beginPairRound(session.sessionId);
       next.set(session.sessionId, {
         sessionId: session.sessionId,
         peerEndpointId: session.peerEndpointId,
@@ -4399,22 +4563,27 @@ export class LocationSharingService {
   private async initiateNearbyPair(endpointId: string): Promise<string> {
     if (!this.mod) throw new Error('pairNearby: native module not bound');
     const sessionId = await this.mod.initiatePairNearby(endpointId);
+    this.beginPairRound(sessionId);
     this.initiatedRoutes.set(sessionId, 'nearby');
     this.setPairingActivity('signal found');
     return sessionId;
   }
 
+  private beginPairRound(sessionId: string): void {
+    this.handledPairSessions.delete(sessionId);
+    this.rejectedPairSessions.delete(sessionId);
+    this.discoveries.delete(sessionId);
+  }
+
   /**
-   * A bilateral pair completed: fetch the result, create/upsert a Friend keyed by the peer endpoint
-   * id, begin reciprocal location sharing, subscribe + import via the normal
-   * friend path, persist, and emit. Uses the verified profile when present;
-   * otherwise a safe placeholder that a later profile event replaces.
+   * A bilateral handshake completed. Show its verified profile, but keep it outside the friend
+   * pool and sharing grants until the person confirms the discovery.
    */
   private async onPairReady(event: PairEvent): Promise<void> {
     if (!this.mod || this.handledPairSessions.has(event.sessionId)) return;
     const result = await this.mod.pairResult(event.sessionId);
     if (!result) return;
-    if (result.peerEndpointId !== event.peerEndpointId) {
+    if (result.peerEndpointId !== event.peerEndpointId || result.sessionId !== event.sessionId) {
       throw new Error('Completed pairing result does not match the authenticated peer.');
     }
     if (this.removingFriends.has(result.peerEndpointId)) {
@@ -4438,18 +4607,6 @@ export class LocationSharingService {
       friend = mergeProfileIntoFriend(friend, held);
     }
 
-    this.state = pool.shareWith(pool.addFriend(this.state, friend), friend.endpointId);
-    try {
-      await this.subscribeToFriend(friend);
-    } catch {
-      // A failed subscribe shouldn't drop the newly paired friend from the pool.
-    }
-    try {
-      await this.ensureMySubscription();
-    } catch {
-      // The persisted sharing grant will retry when the service restarts.
-    }
-
     this.pendingPairRequests = this.pendingPairRequests.filter(
       (e) => e.sessionId !== event.sessionId
     );
@@ -4458,13 +4615,11 @@ export class LocationSharingService {
     // Reached here via `reconcileCompletedPairs` too, which does not pass through the event
     // handler's clear — and a friend on screen must never sit under a stale failure.
     this.pairingFailure = null;
-    this.discoveredFriend = friend;
+    this.discoveries.set(event.sessionId, friend);
     this.stopBumpPolling(false);
     if (this.pairingReadyFlag) void this.setPairingReady(false);
-    this.persistPool();
-    void this.syncTrail(0);
-    this.setPairingActivity('cryptid discovered');
     this.handledPairSessions.add(event.sessionId);
+    this.setPairingActivity('cryptid discovered');
   }
 
   /** Build a Friend from a pair result with a safe placeholder identity (no verified profile yet). */
@@ -4482,6 +4637,7 @@ export class LocationSharingService {
       ...(result.peerProfileTicket ? { profileTicket: result.peerProfileTicket } : {}),
       ...(existing?.profileEpoch !== undefined ? { profileEpoch: existing.profileEpoch } : {}),
       pairedAt: Date.now(),
+      pairingSessionId: result.sessionId,
       ...(method ? { pairingMethod: method } : {}),
     };
   }

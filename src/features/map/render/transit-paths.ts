@@ -10,10 +10,10 @@ import { featureBounds, intersectsBounds, tileLocalRect } from './geometry-bound
  * `cell-overlay-paths.ts` pattern: no Skia, unit-testable, one parse per batch
  * on the render side).
  *
- * Unlike streets, transit does NOT bake into the feature mask: the dot field
- * quantizes everything it touches to the lattice, which turns a single rail
- * line into a broken dotted trail. Transit lines are stroked as vectors over
- * the finished region bitmap instead, in **region-logical px** (0 at rect.min,
+ * Unlike streets, transit does NOT bake into the feature mask: evenly spaced
+ * round dots follow the route itself rather than snapping to the terrain
+ * lattice. The renderer applies a dot path effect to each batch over the
+ * finished region bitmap, in **region-logical px** (0 at rect.min,
  * `scaleFor(spec.zoom)` px per world unit) — the same space the ghost lattice
  * and frontier rim use.
  */

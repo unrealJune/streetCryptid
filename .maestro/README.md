@@ -6,7 +6,8 @@ the app already built and installed (`just run-ios`, or `bunx expo run:ios` /
 
 - `onboarding/ensure-onboarded.yaml` — idempotent: brings the app the rest of the
   way to the live map from whatever state it's in (fresh install, mid-onboarding,
-  or already done), without wiping existing data.
+  or already done), without wiping existing data. The delivery step confirms the
+  currently selected route without changing saved choices; new users start with stash selected.
 - `onboarding/fresh-onboard.yaml` — always wipes local state first
   (`clearState: true`). Use this to test onboarding itself, not as a pairing
   prerequisite.

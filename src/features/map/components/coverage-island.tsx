@@ -100,7 +100,7 @@ export function CoverageIsland({
       {showSectors ? (
         <View accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
           <Text style={[styles.sub, { color: chrome.steel }]} numberOfLines={1}>
-            SECTORS IN VIEW
+            PERCENT EXPLORED
           </Text>
           <View style={styles.barRow}>
             <View style={styles.bar}>

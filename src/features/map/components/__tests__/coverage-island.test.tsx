@@ -44,7 +44,7 @@ describe('CoverageIsland', () => {
       renderer = create(<Harness coverage={0.42} sectorsVisible />);
     });
 
-    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(1);
+    expect(findText(renderer, 'PERCENT EXPLORED')).toHaveLength(1);
 
     const minimizeButton = renderer.root.findByProps({
       accessibilityLabel: 'Minimize location summary',
@@ -53,7 +53,7 @@ describe('CoverageIsland', () => {
 
     act(() => minimizeButton.props.onPress());
 
-    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(0);
+    expect(findText(renderer, 'PERCENT EXPLORED')).toHaveLength(0);
     expect(findText(renderer, '42%')).toHaveLength(1);
 
     const expandButton = renderer.root.findByProps({
@@ -63,7 +63,7 @@ describe('CoverageIsland', () => {
 
     act(() => expandButton.props.onPress());
 
-    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(1);
+    expect(findText(renderer, 'PERCENT EXPLORED')).toHaveLength(1);
   });
 
   it('hides the sector readout below the exploration render cutoff', () => {
@@ -82,7 +82,7 @@ describe('CoverageIsland', () => {
     });
 
     // No readout, no misleading 0%, and no chevron to expand into nothing.
-    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(0);
+    expect(findText(renderer, 'PERCENT EXPLORED')).toHaveLength(0);
     expect(findText(renderer, '0%')).toHaveLength(0);
     expect(
       renderer.root.findAllByProps({ accessibilityLabel: 'Minimize location summary' })
@@ -99,7 +99,7 @@ describe('CoverageIsland', () => {
     act(() =>
       renderer.root.findByProps({ accessibilityLabel: 'Minimize location summary' }).props.onPress()
     );
-    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(0);
+    expect(findText(renderer, 'PERCENT EXPLORED')).toHaveLength(0);
 
     // Zoom out past the cutoff and back in: still minimized, not re-expanded.
     act(() => {
@@ -109,7 +109,7 @@ describe('CoverageIsland', () => {
       renderer.update(<Harness coverage={0.42} sectorsVisible />);
     });
 
-    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(0);
+    expect(findText(renderer, 'PERCENT EXPLORED')).toHaveLength(0);
     expect(findText(renderer, '42%')).toHaveLength(1);
   });
 });

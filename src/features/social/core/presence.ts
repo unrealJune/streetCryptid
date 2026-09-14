@@ -1,3 +1,5 @@
+import { formatDistanceValue, type DistanceUnit } from '@/features/settings/core/distance-units';
+
 import {
   FIX_STATE_NO_FIX,
   FIX_STATE_PARKED,
@@ -286,14 +288,9 @@ export function buildFriendPresence(input: FriendPresenceInput): FriendPresence[
     });
 }
 
-export function formatDistance(distanceM: number | null): string | null {
-  if (distanceM === null || !Number.isFinite(distanceM)) return null;
-  if (distanceM < 1000) {
-    const rounded = Math.round(distanceM / 10) * 10;
-    return `${Math.max(0, rounded)} m away`;
-  }
-  const precision = distanceM < 10_000 ? 1 : 0;
-  return `${(distanceM / 1000).toFixed(precision)} km away`;
+export function formatDistance(distanceM: number | null, unit: DistanceUnit = 'km'): string | null {
+  const distance = formatDistanceValue(distanceM, unit);
+  return distance === null ? null : `${distance} away`;
 }
 
 /** "3 min", "2 hr", "4 days" — a bare duration, for composing into a sentence. */

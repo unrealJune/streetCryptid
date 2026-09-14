@@ -67,6 +67,6 @@ describe('DeliveryModePicker', () => {
 
   it('labels each segment for a screen reader with words, not initials', () => {
     const { segment } = render(ALL, 'mutual');
-    expect(segment('mutual').props.accessibilityLabel).toBe('Mutual relay delivery');
+    expect(segment('mutual').props.accessibilityLabel).toBe('Mutual Friends delivery');
   });
 });
