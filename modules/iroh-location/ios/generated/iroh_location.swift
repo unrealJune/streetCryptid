@@ -1401,6 +1401,19 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func endpointId()  -> Data
     
     /**
+     * Drop every FINISHED pairing session with this peer. Returns how many were removed.
+     *
+     * The companion to [`forget_session`](Self::forget_session): that one erases the ratchet
+     * state for a relationship that has ended, this one erases the pairing record of how it
+     * began. Needs no live node — the sessions live on `PairCore`, which is built at
+     * construction — so an unfriend still cleans up on a phone whose endpoint never came up.
+     *
+     * Live sessions are deliberately spared; see
+     * [`PairCore::forget_finished_sessions_with`](crate::pairing::PairCore::forget_finished_sessions_with).
+     */
+    func forgetPairSessions(peerEndpointHex: String) async throws  -> UInt32
+    
+    /**
      * Forget the session with this peer (un-friending, or a §4.6 restart).
      */
     func forgetSession(peerEndpointHex: String) async throws 
@@ -2538,6 +2551,34 @@ open func endpointId() -> Data  {
             self.uniffiCloneHandle(),$0
     )
 })
+}
+    
+    /**
+     * Drop every FINISHED pairing session with this peer. Returns how many were removed.
+     *
+     * The companion to [`forget_session`](Self::forget_session): that one erases the ratchet
+     * state for a relationship that has ended, this one erases the pairing record of how it
+     * began. Needs no live node — the sessions live on `PairCore`, which is built at
+     * construction — so an unfriend still cleans up on a phone whose endpoint never came up.
+     *
+     * Live sessions are deliberately spared; see
+     * [`PairCore::forget_finished_sessions_with`](crate::pairing::PairCore::forget_finished_sessions_with).
+     */
+open func forgetPairSessions(peerEndpointHex: String)async throws  -> UInt32  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_forget_pair_sessions(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerEndpointHex)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_u32,
+            completeFunc: ffi_iroh_location_rust_future_complete_u32,
+            freeFunc: ffi_iroh_location_rust_future_free_u32,
+            liftFunc: FfiConverterUInt32.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
 }
     
     /**
@@ -4121,6 +4162,17 @@ public protocol SubscriptionProtocol: AnyObject, Sendable {
     func publishInner(seq: UInt64, fix: LocationFix?, ts: UInt64, recipientEndpoints: [String], traceparent: String?) async throws  -> [String]
     
     /**
+     * Seal the last known position once, for a recipient set that has just grown.
+     *
+     * Called when a pairing is accepted. A sealed envelope is readable only by the recipients it
+     * was sealed for, so a new friend cannot open anything published before they existed and
+     * their first sight of you is otherwise your next scheduled publish — p90 92 minutes on a
+     * parked iPhone. See [`publish::DrainEngine::publish_introduction`] for what it deliberately
+     * does NOT touch (the slot cursor, the parked/live stamp, the battery suspension).
+     */
+    func publishIntroduction(subscriptionId: String, nowMs: UInt64) async throws  -> IngestOutcome
+    
+    /**
      * Broadcast a **null fix** — an envelope with an empty padded payload (FORWARD-SECRECY §4.1).
      *
      * The live half of the watcher lane: identical in shape, length, and signing discipline to
@@ -4280,6 +4332,32 @@ open func publishInner(seq: UInt64, fix: LocationFix?, ts: UInt64, recipientEndp
             completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
             freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Seal the last known position once, for a recipient set that has just grown.
+     *
+     * Called when a pairing is accepted. A sealed envelope is readable only by the recipients it
+     * was sealed for, so a new friend cannot open anything published before they existed and
+     * their first sight of you is otherwise your next scheduled publish — p90 92 minutes on a
+     * parked iPhone. See [`publish::DrainEngine::publish_introduction`] for what it deliberately
+     * does NOT touch (the slot cursor, the parked/live stamp, the battery suspension).
+     */
+open func publishIntroduction(subscriptionId: String, nowMs: UInt64)async throws  -> IngestOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_subscription_publish_introduction(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(nowMs)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeIngestOutcome_lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -8639,6 +8717,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_endpoint_id() != 34847) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_forget_pair_sessions() != 29011) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_forget_session() != 58135) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8832,6 +8913,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_subscription_publish_inner() != 62762) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_subscription_publish_introduction() != 61008) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_subscription_publish_null() != 2917) {

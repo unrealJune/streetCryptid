@@ -801,6 +801,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_traced
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_endpoint_id(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_forget_pair_sessions(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_forget_session(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_has_session(
@@ -931,6 +933,8 @@ external fun uniffi_iroh_location_checksum_method_subscription_publish(
 ): Int
 external fun uniffi_iroh_location_checksum_method_subscription_publish_inner(
 ): Int
+external fun uniffi_iroh_location_checksum_method_subscription_publish_introduction(
+): Int
 external fun uniffi_iroh_location_checksum_method_subscription_publish_null(
 ): Int
 external fun uniffi_iroh_location_checksum_method_subscription_publish_null_traced(
@@ -1047,6 +1051,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_docs_write_traced(`ptr`
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_endpoint_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_locationnode_forget_pair_sessions(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_forget_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_has_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
@@ -1186,6 +1192,8 @@ external fun uniffi_iroh_location_fn_method_subscription_ingest_fix(`ptr`: Long,
 external fun uniffi_iroh_location_fn_method_subscription_publish(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`recipientEndpoints`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_subscription_publish_inner(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`ts`: Long,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_subscription_publish_introduction(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`nowMs`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_subscription_publish_null(`ptr`: Long,`seq`: Long,`ts`: Long,`recipientEndpoints`: RustBuffer.ByValue,
 ): Long
@@ -1492,6 +1500,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_endpoint_id() != 34847) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_forget_pair_sessions() != 29011) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_forget_session() != 58135) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1685,6 +1696,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_subscription_publish_inner() != 62762) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_subscription_publish_introduction() != 61008) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_subscription_publish_null() != 2917) {
@@ -3245,6 +3259,19 @@ public interface LocationNodeInterface {
     fun `endpointId`(): kotlin.ByteArray
     
     /**
+     * Drop every FINISHED pairing session with this peer. Returns how many were removed.
+     *
+     * The companion to [`forget_session`](Self::forget_session): that one erases the ratchet
+     * state for a relationship that has ended, this one erases the pairing record of how it
+     * began. Needs no live node — the sessions live on `PairCore`, which is built at
+     * construction — so an unfriend still cleans up on a phone whose endpoint never came up.
+     *
+     * Live sessions are deliberately spared; see
+     * [`PairCore::forget_finished_sessions_with`](crate::pairing::PairCore::forget_finished_sessions_with).
+     */
+    suspend fun `forgetPairSessions`(`peerEndpointHex`: kotlin.String): kotlin.UInt
+    
+    /**
      * Forget the session with this peer (un-friending, or a §4.6 restart).
      */
     suspend fun `forgetSession`(`peerEndpointHex`: kotlin.String)
@@ -4481,6 +4508,38 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     )
     }
     
+
+    
+    /**
+     * Drop every FINISHED pairing session with this peer. Returns how many were removed.
+     *
+     * The companion to [`forget_session`](Self::forget_session): that one erases the ratchet
+     * state for a relationship that has ended, this one erases the pairing record of how it
+     * began. Needs no live node — the sessions live on `PairCore`, which is built at
+     * construction — so an unfriend still cleans up on a phone whose endpoint never came up.
+     *
+     * Live sessions are deliberately spared; see
+     * [`PairCore::forget_finished_sessions_with`](crate::pairing::PairCore::forget_finished_sessions_with).
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `forgetPairSessions`(`peerEndpointHex`: kotlin.String) : kotlin.UInt {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_forget_pair_sessions(
+                uniffiHandle,
+                FfiConverterString.lower(`peerEndpointHex`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_u32(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_u32(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_u32(future) },
+        // lift function
+        { FfiConverterUInt.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
 
     
     /**
@@ -6576,6 +6635,17 @@ public interface SubscriptionInterface {
     suspend fun `publishInner`(`seq`: kotlin.ULong, `fix`: LocationFix?, `ts`: kotlin.ULong, `recipientEndpoints`: List<kotlin.String>, `traceparent`: kotlin.String?): List<kotlin.String>
     
     /**
+     * Seal the last known position once, for a recipient set that has just grown.
+     *
+     * Called when a pairing is accepted. A sealed envelope is readable only by the recipients it
+     * was sealed for, so a new friend cannot open anything published before they existed and
+     * their first sight of you is otherwise your next scheduled publish — p90 92 minutes on a
+     * parked iPhone. See [`publish::DrainEngine::publish_introduction`] for what it deliberately
+     * does NOT touch (the slot cursor, the parked/live stamp, the battery suspension).
+     */
+    suspend fun `publishIntroduction`(`subscriptionId`: kotlin.String, `nowMs`: kotlin.ULong): IngestOutcome
+    
+    /**
      * Broadcast a **null fix** — an envelope with an empty padded payload (FORWARD-SECRECY §4.1).
      *
      * The live half of the watcher lane: identical in shape, length, and signing discipline to
@@ -6795,6 +6865,36 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceString.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Seal the last known position once, for a recipient set that has just grown.
+     *
+     * Called when a pairing is accepted. A sealed envelope is readable only by the recipients it
+     * was sealed for, so a new friend cannot open anything published before they existed and
+     * their first sight of you is otherwise your next scheduled publish — p90 92 minutes on a
+     * parked iPhone. See [`publish::DrainEngine::publish_introduction`] for what it deliberately
+     * does NOT touch (the slot cursor, the parked/live stamp, the battery suspension).
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishIntroduction`(`subscriptionId`: kotlin.String, `nowMs`: kotlin.ULong) : IngestOutcome {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_subscription_publish_introduction(
+                uniffiHandle,
+                FfiConverterString.lower(`subscriptionId`),FfiConverterULong.lower(`nowMs`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeIngestOutcome.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
