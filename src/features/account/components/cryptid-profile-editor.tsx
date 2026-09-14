@@ -312,13 +312,6 @@ export function CryptidProfileEditor({
                   size="large"
                   style={styles.previewAvatar}
                 />
-                {/* The ASCII cryptid is the thing people assume is fixed — it
-                    arrives already rolled, and nothing about a block of art says
-                    "editable". So the hero says so in words, at the one place
-                    everybody looks. */}
-                <ThemedText type="small" themeColor="textSecondary" style={styles.changeHint}>
-                  TAP THE CRYPTID TO CHANGE IT
-                </ThemedText>
               </Pressable>
               <Pressable
                 accessibilityHint="Focuses the username field"
@@ -788,13 +781,6 @@ const styles = StyleSheet.create({
   },
   previewAvatar: {
     minHeight: 126,
-  },
-  changeHint: {
-    fontFamily: Fonts.mono,
-    fontSize: 10,
-    letterSpacing: 1.6,
-    marginTop: Spacing.one,
-    textAlign: 'center',
   },
   handlePreview: {
     fontFamily: 'Rajdhani_700Bold',
