@@ -8,11 +8,11 @@ import {
   ScrollView,
   StyleSheet,
   TextInput,
-  useColorScheme,
   View,
 } from 'react-native';
 import { useReducedMotion } from 'react-native-reanimated';
 
+import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
 import { signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Spacing } from '@/constants/theme';

@@ -41,9 +41,11 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     flexDirection: 'row',
     gap: Spacing.three,
-    minHeight: 68,
-    paddingBottom: Spacing.three,
-    paddingTop: Spacing.two,
+    // The button is the tallest thing in here at 36; the strip lost its second
+    // line of copy and kept 68px of room for it, which read as a gap in the
+    // roster rather than as a row.
+    minHeight: 52,
+    paddingVertical: Spacing.two,
   },
   copy: {
     flex: 1,

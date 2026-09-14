@@ -1,5 +1,6 @@
 import type { PersistentKV } from '@/features/social/net/background/persistent-kv';
 
+import { isColorThemePreference, type ColorThemePreference } from './color-theme';
 import type { DistanceUnit } from './distance-units';
 
 const STORAGE_KEY = 'sc.settings.display.v1';
@@ -7,7 +8,14 @@ const STORAGE_KEY = 'sc.settings.display.v1';
 interface DisplayPreferences {
   readonly distanceUnit: DistanceUnit;
   readonly showFriendConnectionDetails: boolean;
+  readonly colorTheme: ColorThemePreference;
 }
+
+const DEFAULTS: DisplayPreferences = {
+  distanceUnit: 'km',
+  showFriendConnectionDetails: false,
+  colorTheme: 'system',
+};
 
 export interface DisplayPreferencesSnapshot extends DisplayPreferences {
   readonly ready: boolean;
@@ -15,30 +23,31 @@ export interface DisplayPreferencesSnapshot extends DisplayPreferences {
 }
 
 function readPreferences(raw: string | null): DisplayPreferences {
-  if (raw === null) return { distanceUnit: 'km', showFriendConnectionDetails: false };
+  if (raw === null) return DEFAULTS;
   const value: unknown = JSON.parse(raw);
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('Invalid display preferences');
   }
-  const distanceUnit = 'distanceUnit' in value ? value.distanceUnit : 'km';
+  const distanceUnit = 'distanceUnit' in value ? value.distanceUnit : DEFAULTS.distanceUnit;
   const showFriendConnectionDetails =
-    'showFriendConnectionDetails' in value ? value.showFriendConnectionDetails : false;
+    'showFriendConnectionDetails' in value
+      ? value.showFriendConnectionDetails
+      : DEFAULTS.showFriendConnectionDetails;
+  // Absent is the norm, not a fault: every profile written before the theme picker existed has
+  // no such key, and those phones are on `system` — which is exactly what they were doing.
+  const colorTheme = 'colorTheme' in value ? value.colorTheme : DEFAULTS.colorTheme;
   if (
     (distanceUnit !== 'km' && distanceUnit !== 'mi') ||
-    typeof showFriendConnectionDetails !== 'boolean'
+    typeof showFriendConnectionDetails !== 'boolean' ||
+    !isColorThemePreference(colorTheme)
   ) {
     throw new Error('Invalid display preferences');
   }
-  return { distanceUnit, showFriendConnectionDetails };
+  return { distanceUnit, showFriendConnectionDetails, colorTheme };
 }
 
 export function createDisplayPreferencesStore(kv: PersistentKV) {
-  let snapshot: DisplayPreferencesSnapshot = {
-    distanceUnit: 'km',
-    showFriendConnectionDetails: false,
-    ready: false,
-    error: null,
-  };
+  let snapshot: DisplayPreferencesSnapshot = { ...DEFAULTS, ready: false, error: null };
   let loadPromise: Promise<void> | null = null;
   let loaded = false;
   let writes = Promise.resolve();
@@ -80,6 +89,7 @@ export function createDisplayPreferencesStore(kv: PersistentKV) {
           JSON.stringify({
             distanceUnit: next.distanceUnit,
             showFriendConnectionDetails: next.showFriendConnectionDetails,
+            colorTheme: next.colorTheme,
           })
         );
         emit(next);
@@ -100,5 +110,6 @@ export function createDisplayPreferencesStore(kv: PersistentKV) {
     setDistanceUnit: (distanceUnit: DistanceUnit) => update({ distanceUnit }),
     setShowFriendConnectionDetails: (showFriendConnectionDetails: boolean) =>
       update({ showFriendConnectionDetails }),
+    setColorTheme: (colorTheme: ColorThemePreference) => update({ colorTheme }),
   };
 }

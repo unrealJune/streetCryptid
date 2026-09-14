@@ -1,5 +1,4 @@
-import { useColorScheme } from 'react-native';
-
+import { useColorScheme } from '@/hooks/use-color-scheme';
 import { CryptidThemes } from '@/constants/theme';
 import { useExplorationBackup } from '@/features/map/hooks/use-exploration-backup';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';

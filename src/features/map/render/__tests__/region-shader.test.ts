@@ -157,41 +157,44 @@ function draw(transitEnabled = true, structuresEnabled = true): Draw[] {
 beforeEach(() => jest.clearAllMocks());
 
 describe('dotted region overlays', () => {
-  it('renders every transit mode, including ferries, as round dots in one draw per mode', () => {
+  it('renders every transit mode, including ferries, as a casing plus round dots', () => {
     const paths = buildTransitPaths(geometry, spec);
     const draws = draw(true, false);
-    expect(draws).toHaveLength(TRANSIT_MODES.length);
+    expect(draws).toHaveLength(TRANSIT_MODES.length * 2);
     for (const mode of TRANSIT_MODES) {
       const width = transitWidthFor(mode, spec.zoom)!;
-      expect(draws.filter((entry) => entry.svg === paths[mode])).toEqual([
-        expect.objectContaining({
-          style: 'stroke',
-          width,
-          cap: 'round',
-          intervals: lineDotIntervals(width),
-        }),
-      ]);
+      // Casing first, dots over it: the continuous stroke is what makes the
+      // chain read as one route rather than a row of unrelated marks.
+      const [casing, dots] = draws.filter((entry) => entry.svg === paths[mode]);
+      expect(casing).toMatchObject({ style: 'stroke', width, cap: 'round' });
+      expect(casing.intervals).toBeUndefined();
+      expect(dots).toMatchObject({
+        style: 'stroke',
+        width,
+        cap: 'round',
+        intervals: lineDotIntervals(width),
+      });
       expect(paths[mode]!.match(/M/g)).toHaveLength(2);
     }
   });
 
-  it('dots only runways, leaving taxiways, area boundaries and building hatching unchanged', () => {
+  // A runway is a road that happens to be very straight. Drawn as a chain of
+  // 4px beads it was the loudest mark on any region containing an airport.
+  it('strokes runways and taxiways solid, dashing only the aerodrome boundary', () => {
     const paths = buildStructurePaths(geometry, spec);
     const draws = draw(false, true);
     const runway = draws.find((entry) => entry.svg === paths.aeroLines.runway)!;
-    const width = aeroLineWidthFor('runway', spec.zoom)!;
     expect(runway).toMatchObject({
       style: 'stroke',
       cap: 'round',
-      width,
-      intervals: lineDotIntervals(width),
+      width: aeroLineWidthFor('runway', spec.zoom),
     });
+    expect(runway.intervals).toBeUndefined();
     const taxiway = draws.find((entry) => entry.svg === paths.aeroLines.taxiway)!;
     expect(taxiway.width).toBe(aeroLineWidthFor('taxiway', spec.zoom));
     expect(taxiway.intervals).toBeUndefined();
     expect(draws.filter((entry) => entry.intervals)).toEqual([
       expect.objectContaining({ intervals: [...AERODROME_DASH] }),
-      runway,
     ]);
     expect(draws.find((entry) => entry.svg === buildHatchPath(spec))).toMatchObject({
       style: 'stroke',
@@ -204,17 +207,13 @@ describe('dotted region overlays', () => {
     expect(Skia.PathEffect.MakeDash).not.toHaveBeenCalled();
   });
 
-  it('never falls back to solid transit or runway strokes when a dot effect fails', () => {
+  // A solid route is a worse transit line than a dotted one; an ABSENT one is
+  // worse still, so a failed dot effect costs the mode its texture, not its line.
+  it('keeps the casing when a mode cannot build its dot effect', () => {
     jest.mocked(Skia.PathEffect.MakeDash).mockReturnValueOnce(null as never);
-    expect(draw(true, false)).toHaveLength(TRANSIT_MODES.length - 1);
-    jest.clearAllMocks();
-    // Aerodrome dash succeeds; runway dots fail.
-    jest
-      .mocked(Skia.PathEffect.MakeDash)
-      .mockReturnValueOnce({} as never)
-      .mockReturnValueOnce(null as never);
-    const paths = buildStructurePaths(geometry, spec);
-    expect(draw(false, true).some((entry) => entry.svg === paths.aeroLines.runway)).toBe(false);
+    const draws = draw(true, false);
+    expect(draws).toHaveLength(TRANSIT_MODES.length * 2 - 1);
+    expect(draws.filter((entry) => entry.intervals)).toHaveLength(TRANSIT_MODES.length - 1);
   });
 
   it('keeps transit and runways out of the street, park and water feature masks', () => {

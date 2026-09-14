@@ -10,7 +10,6 @@ import {
   StyleSheet,
   Text,
   TextInput,
-  useColorScheme,
   useWindowDimensions,
   View,
 } from 'react-native';
@@ -22,6 +21,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
 import { resolveSignalColor } from '@/constants/signal-colors';
 import { CryptidThemes, Spacing } from '@/constants/theme';

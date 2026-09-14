@@ -68,7 +68,9 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
     flexDirection: 'row',
     gap: Spacing.three,
-    minHeight: 92,
+    // Tall enough for the 44px sigil beside it and nothing more; it lost its
+    // subtitle at the same time the rows below did.
+    minHeight: 64,
     paddingVertical: Spacing.two,
   },
   avatar: {
@@ -87,7 +89,6 @@ const styles = StyleSheet.create({
   },
   copy: {
     flex: 1,
-    gap: Spacing.one,
     minWidth: 0,
   },
 });

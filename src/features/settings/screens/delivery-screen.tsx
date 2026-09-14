@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
-import { useColorScheme } from 'react-native';
-
+import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes } from '@/constants/theme';
 import type { DeliveryAvailability, DeliveryMode } from '@/features/social/core/delivery-mode';

@@ -9,6 +9,7 @@ describe('display preferences', () => {
     expect(store.getSnapshot()).toEqual({
       distanceUnit: 'km',
       showFriendConnectionDetails: false,
+      colorTheme: 'system',
       ready: true,
       error: null,
     });

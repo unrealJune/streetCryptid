@@ -1,7 +1,8 @@
 import { useCallback } from 'react';
-import { View, StyleSheet, useColorScheme } from 'react-native';
+import { View, StyleSheet } from 'react-native';
 import { type Href, useFocusEffect } from 'expo-router';
 
+import { useColorScheme } from '@/hooks/use-color-scheme';
 import { CryptidThemes } from '@/constants/theme';
 import { DELIVERY_MODE_COPY } from '@/features/social/core/delivery-mode';
 import { useMapColorScheme } from '@/features/map/hooks/use-map-color-scheme';

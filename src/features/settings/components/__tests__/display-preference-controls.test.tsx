@@ -1,16 +1,19 @@
 import { Switch } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
+import { ColorThemeRow } from '../color-theme-row';
 import { DistanceUnitsRow } from '../distance-units-row';
 import { FriendConnectionDetailsRow } from '../friend-connection-details-row';
 
 jest.mock('@/global.css', () => ({}));
 const mockSelectUnit = jest.fn();
+const mockSelectTheme = jest.fn();
 const mockShowDetails = jest.fn();
 const mockReload = jest.fn().mockResolvedValue(undefined);
 const mockPreferences = {
   distanceUnit: 'km',
   showFriendConnectionDetails: false,
+  colorTheme: 'system',
   ready: true,
   error: null as string | null,
 };
@@ -19,6 +22,7 @@ jest.mock('../../hooks/use-display-preferences', () => ({
     ...mockPreferences,
     setDistanceUnit: mockSelectUnit,
     setShowFriendConnectionDetails: mockShowDetails,
+    setColorTheme: mockSelectTheme,
     reload: mockReload,
   }),
 }));
@@ -32,6 +36,29 @@ describe('display preference controls', () => {
     mockPreferences.distanceUnit = 'km';
     mockPreferences.showFriendConnectionDetails = false;
     mockPreferences.error = null;
+    mockPreferences.colorTheme = 'system';
+  });
+
+  it('starts on System and saves an explicit dark choice', () => {
+    act(() => {
+      renderer = create(<ColorThemeRow />);
+    });
+    expect(
+      renderer.root.findByProps({ accessibilityLabel: 'System theme' }).props.accessibilityState
+        .selected
+    ).toBe(true);
+    act(() => renderer.root.findByProps({ accessibilityLabel: 'Dark theme' }).props.onPress());
+    expect(mockSelectTheme).toHaveBeenCalledWith('dark');
+  });
+
+  // The picker is what decides the palette it is drawn in, so a half-loaded store
+  // must not show a selection it might be about to contradict.
+  it('offers no theme selection until preferences have loaded', () => {
+    mockPreferences.ready = false;
+    act(() => {
+      renderer = create(<ColorThemeRow />);
+    });
+    expect(renderer.root.findAllByProps({ accessibilityRole: 'radio' })).toHaveLength(0);
   });
 
   it('shows the metric default and saves an imperial selection', () => {

@@ -16,5 +16,6 @@ export function useDisplayPreferences() {
     reload: store.load,
     setDistanceUnit: store.setDistanceUnit,
     setShowFriendConnectionDetails: store.setShowFriendConnectionDetails,
+    setColorTheme: store.setColorTheme,
   };
 }

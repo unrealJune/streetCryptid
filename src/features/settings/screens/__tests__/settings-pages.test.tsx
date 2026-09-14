@@ -66,14 +66,17 @@ describe('settings pages', () => {
     ]);
   });
 
-  it('does not repeat appearance headings or subtitles', () => {
+  // Each group is labelled because there are now three of them, and two are both
+  // about colour: without headings the map palette grid and the light/dark picker
+  // read as one control with two rows of choices.
+  it('labels every appearance group and repeats nothing from the title', () => {
     act(() => {
       renderer = create(<AppearanceScreen />);
     });
     expect(renderer.root.findByType(SettingsPage).props.subtitle).toBeUndefined();
     expect(
       renderer.root.findAllByType(SettingsSection).map((section) => section.props.label)
-    ).toEqual(['DISTANCE UNITS']);
+    ).toEqual(['LIGHT & DARK', 'COLOR THEME', 'DISTANCE UNITS']);
   });
 
   it('groups backups separately from app provenance', () => {

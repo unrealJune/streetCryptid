@@ -6,12 +6,12 @@ import {
   ScrollView,
   StyleSheet,
   TextInput,
-  useColorScheme,
   View,
 } from 'react-native';
 import { SymbolView } from 'expo-symbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
 import { SIGNAL_COLOR_OPTIONS, signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Fonts, Spacing } from '@/constants/theme';

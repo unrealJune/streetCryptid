@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
-import { Platform, StyleSheet, View, useColorScheme } from 'react-native';
+import { Platform, StyleSheet, View } from 'react-native';
 
+import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes, Spacing } from '@/constants/theme';
 import {

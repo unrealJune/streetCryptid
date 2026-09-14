@@ -67,7 +67,9 @@ export function IslandMinimizeToggle({
 export const islandBody = StyleSheet.create({
   expanded: {
     paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.two,
+    // The header below already carries a 48px floor for the chevron, so a full
+    // step of padding on top of it put the body's first row a long way down.
+    paddingVertical: Spacing.one,
   },
   minimized: {
     paddingLeft: Spacing.four,

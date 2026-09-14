@@ -1,7 +1,7 @@
 import { useCallback } from 'react';
-import { useColorScheme } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 
+import { useColorScheme } from '@/hooks/use-color-scheme';
 import { CryptidThemes } from '@/constants/theme';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 

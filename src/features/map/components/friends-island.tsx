@@ -254,7 +254,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
     paddingBottom: Spacing.two,
-    paddingTop: Spacing.two,
+    paddingTop: Spacing.one,
   },
   list: {
     paddingBottom: Spacing.one,
@@ -268,9 +268,12 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: 'row',
     gap: Spacing.three,
-    minHeight: 64,
+    // The sigil is what sets a row's height — four lines of art plus its caption
+    // clears 56 on its own — so the padding here is a separator, not a floor.
+    // At Spacing.two the roster read as a list of cards with air between them.
+    minHeight: 56,
     minWidth: 0,
-    paddingVertical: Spacing.two,
+    paddingVertical: Spacing.one,
   },
   manage: {
     alignItems: 'center',
@@ -281,6 +284,10 @@ const styles = StyleSheet.create({
     width: 34,
   },
   avatar: {
+    // Do NOT narrow this to shorten rows. `CryptidAvatar` only scales the art
+    // down once `onTextLayout` has measured it, and where that never fires —
+    // react-native-web, which is what the screenshot harness renders — the art
+    // WRAPS instead, which mangles it and makes the row taller, not shorter.
     width: 72,
   },
   copy: {

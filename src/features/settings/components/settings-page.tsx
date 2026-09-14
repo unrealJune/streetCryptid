@@ -130,7 +130,10 @@ export function SettingsSection({
 const styles = StyleSheet.create({
   content: {
     alignSelf: 'center',
-    gap: Spacing.five,
+    // Spacing.five was calibrated when the title and every menu row carried a
+    // subtitle under it. With those gone the page was mostly air between four
+    // short lines, so the section rhythm comes in one step to match.
+    gap: Spacing.four,
     maxWidth: MaxContentWidth,
     paddingHorizontal: Spacing.four,
     width: '100%',
@@ -140,7 +143,9 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     flexDirection: 'row',
     gap: Spacing.one,
-    marginBottom: -Spacing.four,
+    // Pulls the back link up against the title rather than a full section step
+    // away from it; the negative tracks `content.gap` and must move with it.
+    marginBottom: -Spacing.three,
     minHeight: 32,
   },
   backLabel: {

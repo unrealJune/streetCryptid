@@ -1136,6 +1136,14 @@ class IrohLocationModule : Module() {
         pairInviteMap(inv) + ("token" to encodePairInvite(inv))
       }
 
+    // The token, not a decoded invite: it is the only form the app still holds once the link has
+    // been handed out, and `CANCEL LINK` is the one caller.
+    AsyncFunction("revokePairInvite") Coroutine
+      { token: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.revokePairInvite(token)
+      }
+
     AsyncFunction("initiatePair") Coroutine
       { invite: Map<String, Any> ->
         val n = node ?: throw IllegalStateException("call createNode first")

@@ -66,12 +66,13 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     flexDirection: 'row',
     gap: Spacing.three,
-    minHeight: 64,
+    // 64 was two lines of copy plus padding. One line does not need it, and six
+    // rows of it turned the menu into a column of widely spaced labels.
+    minHeight: 48,
     paddingVertical: Spacing.two,
   },
   copy: {
     flex: 1,
-    gap: Spacing.one,
     minWidth: 0,
   },
 });

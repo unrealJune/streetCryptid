@@ -1,7 +1,8 @@
 import { getStashConfig } from 'iroh-location';
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, View, useColorScheme } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 
+import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes, Spacing } from '@/constants/theme';
 import { DeliveryOptions } from '@/features/settings/components/delivery-options';

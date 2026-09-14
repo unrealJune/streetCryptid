@@ -88,7 +88,11 @@ import { DOT_FIELD_SKSL } from '../src/features/map/render/dot-field-sksl';
 import { buildMaskPaths } from '../src/features/map/render/mask-paths';
 import { buildHatchPath, buildStructurePaths } from '../src/features/map/render/structure-paths';
 import { buildTransitPaths } from '../src/features/map/render/transit-paths';
-import { transitWidthFor } from '../src/features/map/core/transit-lod';
+import {
+  TRANSIT_ALPHA,
+  TRANSIT_CASING_ALPHA,
+  transitWidthFor,
+} from '../src/features/map/core/transit-lod';
 import {
   AERODROME_DASH,
   AERODROME_STROKE_WIDTH,
@@ -530,12 +534,8 @@ function drawStructures(
     const svg = paths.aeroLines[kind];
     const width = aeroLineWidthFor(kind, spec.zoom);
     if (svg && width !== null) {
-      draw(
-        svg,
-        AERO_LINE_ALPHA[kind],
-        width,
-        kind === 'runway' ? lineDotIntervals(width) : undefined
-      );
+      // Both solid: a runway is a road that happens to be very straight.
+      draw(svg, AERO_LINE_ALPHA[kind], width);
     }
   }
   const buildingStyle = buildingStyleFor(spec.zoom);
@@ -598,15 +598,6 @@ function drawTransitLines(
   spec: RegionSpec,
   palette: MapPalette
 ): void {
-  const alphas: Record<TransitMode, number> = {
-    rail: 0.5,
-    subway: 0.82,
-    light_rail: 0.82,
-    tram: 0.58,
-    monorail: 0.72,
-    funicular: 0.58,
-    ferry: 0.5,
-  };
   const paths = buildTransitPaths(geometry, spec);
 
   canvas.save();
@@ -617,16 +608,20 @@ function drawTransitLines(
     const path = CanvasKit.Path.MakeFromSVGString(svg);
     if (!path) continue;
     const ink = palette.transit;
-    const paint = new CanvasKit.Paint();
-    paint.setColor(CanvasKit.Color(ink[0], ink[1], ink[2], alphas[mode]));
-    paint.setStyle(CanvasKit.PaintStyle.Stroke);
-    paint.setStrokeWidth(width);
-    paint.setStrokeJoin(CanvasKit.StrokeJoin.Round);
-    paint.setStrokeCap(CanvasKit.StrokeCap.Round);
-    paint.setAntiAlias(true);
-    paint.setPathEffect(CanvasKit.PathEffect.MakeDash(lineDotIntervals(width)));
-    canvas.drawPath(path, paint);
-    paint.delete();
+    // Casing, then dots over it — the same two passes `drawTransitLines` makes.
+    for (const dotted of [false, true]) {
+      const paint = new CanvasKit.Paint();
+      const alpha = TRANSIT_ALPHA[mode] * (dotted ? 1 : TRANSIT_CASING_ALPHA);
+      paint.setColor(CanvasKit.Color(ink[0], ink[1], ink[2], alpha));
+      paint.setStyle(CanvasKit.PaintStyle.Stroke);
+      paint.setStrokeWidth(width);
+      paint.setStrokeJoin(CanvasKit.StrokeJoin.Round);
+      paint.setStrokeCap(CanvasKit.StrokeCap.Round);
+      paint.setAntiAlias(true);
+      if (dotted) paint.setPathEffect(CanvasKit.PathEffect.MakeDash(lineDotIntervals(width)));
+      canvas.drawPath(path, paint);
+      paint.delete();
+    }
     path.delete();
   }
   canvas.restore();
