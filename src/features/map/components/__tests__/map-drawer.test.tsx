@@ -146,11 +146,13 @@ describe('MapDrawer grip', () => {
     expect(renderer.root.findByType(ScrollView).props.scrollEnabled).toBe(true);
   });
 
-  it('keeps the handle accessible while hiding the collapsed body from VoiceOver', () => {
+  it('keeps the handle — and the collapsed summary — readable by VoiceOver', () => {
     const onDetentChange = render('collapsed');
     const grip = renderer.root.findByProps({ accessibilityLabel: 'Panel size' });
     expect(grip.props.accessibilityValue.text).toBe('Minimized');
-    expect(renderer.root.findByType(ScrollView).props.accessibilityElementsHidden).toBe(true);
+    // The collapsed body is a one-line summary now rather than a clipped nothing, so hiding it
+    // would take the one fact the panel is still showing away from a screen reader.
+    expect(renderer.root.findByType(ScrollView).props.accessibilityElementsHidden).toBeUndefined();
     act(() => grip.props.onAccessibilityAction({ nativeEvent: { actionName: 'increment' } }));
     expect(onDetentChange).toHaveBeenCalledWith('peek');
   });

@@ -29,7 +29,6 @@ import {
 } from '@/features/map';
 import { sampleTrailForMap } from '@/features/map/core/trail-sampling';
 import { friendPlaceName } from '@/features/map/core/readout';
-import { OpenPairingStrip } from '@/features/social/components/open-pairing-strip';
 import { FriendDetailIsland } from '@/features/social/components/friend-detail-island';
 import {
   describePresence,
@@ -110,8 +109,10 @@ export default function MapScreenBody() {
   const closeLayers = useCallback(() => setLayersOpen(false), []);
   const [islandTab, setIslandTab] = useState<IslandTab>('me');
   const [detent, setDetent] = useState<DrawerDetent>('peek');
-  // ME has a fixed summary and a chevron. FRIENDS minimizes via the collapsed detent.
-  const [minimized, setMinimized] = useState(false);
+  // Both tabs minimize the same way: the drawer's grip, down to `collapsed`. There is no separate
+  // chevron and no separate piece of state — "minimized" IS the detent, which is what stops the
+  // panel from having two ideas about how big it is.
+  const minimized = detent === 'collapsed';
   const [screenHeight, setScreenHeight] = useState(0);
   const [locateTarget, setLocateTarget] = useState<{
     requestId: number;
@@ -222,7 +223,6 @@ export default function MapScreenBody() {
         if (id !== SELF_AUTHOR) {
           setIslandTab('friends');
           setDetent('peek');
-          setMinimized(false);
           const friend = mapFriends.find((candidate) => candidate.id === id);
           if (friend) {
             setLocateTarget((current) => ({
@@ -293,20 +293,12 @@ export default function MapScreenBody() {
       closeLayers();
       closeHistory();
       setIslandTab(tab);
+      // Asking for a tab is asking to see it. Landing on `peek` rather than carrying the current
+      // detent across is what keeps a tap from answering with the one-line collapsed panel.
       setDetent('peek');
-      // Asking for a tab is asking to see it. Carrying the collapse across would answer the tap
-      // with a one-line panel and no obvious way back.
-      setMinimized(false);
     },
     [closeHistory, closeLayers]
   );
-  // Collapse to the header line. The drawer comes back to peek in the same gesture, because a
-  // minimized body at mid or full would be the blank island the detents exist to avoid.
-  const toggleMinimize = useCallback(() => {
-    closeLayers();
-    setMinimized((current) => !current);
-    setDetent('peek');
-  }, [closeLayers]);
   // Tapping a roster row is the same gesture as tapping the locator: fly there
   // and open the trace. The roster steps aside so the map it just moved is
   // visible, but the FRIENDS tab stays lit — you drilled in from there, and
@@ -317,7 +309,6 @@ export default function MapScreenBody() {
       setIslandTab('friends');
       setSelection((current) => ({ ...current, selectedId: friendId }));
       setDetent(openAt);
-      setMinimized(false);
       // A friend with no fix still opens their pane — that is where sharing and remove live, and
       // both have to work for someone whose phone has gone quiet. Only the fly-to needs a fix.
       const target = mapFriends.find((friend) => friend.id === friendId);
@@ -400,20 +391,20 @@ export default function MapScreenBody() {
     : selfCenterSeen
       ? 'self-anchored'
       : 'fallback-anchored';
-  // The island floats clear of the system gesture bar on BOTH platforms. Android
-  // used to be special-cased to ignore the bottom inset because the native tab
-  // bar consumed it — there is no tab bar any more, so ignoring it parks the
-  // segmented bar right on top of the gesture handle. `Spacing.three` matches the
-  // island's own side inset, so it sits in a square margin rather than a slot.
-  // ME has no extra content to drag open. FRIENDS keeps its grip even when collapsed.
-  // A friend's pane tops out at `mid`: it says everything it has by then, and `full` docked it
-  // edge-to-edge with a screen of empty island under the last row — the exact case `maxDetent`
-  // was added for. The roster is the body that genuinely grows with its content.
-  const drawerMax: DrawerDetent = detailPresence
-    ? 'mid'
-    : minimized || !rosterOpen
-      ? 'peek'
-      : 'full';
+  // What each body may be dragged to. ME has nothing below its own summary to reveal, so it stops
+  // at `peek`; the roster is the one body that genuinely grows with its content and may go to
+  // `full`. A friend's pane tops out at `mid`: it says everything it has by then, and `full`
+  // docked it edge-to-edge with a screen of empty island under the last row.
+  const drawerMax: DrawerDetent = detailPresence ? 'mid' : rosterOpen ? 'full' : 'peek';
+  // ...and how far down. ME and FRIENDS both collapse to their one-line summary; a friend's pane
+  // does not, because its top line is a header for the rest of the pane rather than a summary that
+  // stands on its own. Neither does ME past the exploration cutoff, where the expanded body IS the
+  // one line already — offering a grip that moves nothing is worse than offering none.
+  const drawerMin: DrawerDetent = detailPresence
+    ? 'peek'
+    : rosterOpen || readout.sectorsVisible
+      ? 'collapsed'
+      : 'peek';
   const detailSharing = detailPresence
     ? (snapshot?.sharingWith ?? []).includes(detailPresence.friend.endpointId)
     : false;
@@ -483,7 +474,7 @@ export default function MapScreenBody() {
           insetBottom={insets.bottom}
           insetTop={insets.top}
           maxDetent={drawerMax}
-          minDetent={rosterOpen ? 'collapsed' : 'peek'}
+          minDetent={drawerMin}
           onDetentChange={(next) => {
             closeLayers();
             setDetent(next);
@@ -520,19 +511,19 @@ export default function MapScreenBody() {
           ) : rosterOpen ? (
             <FriendsIsland
               friends={rosterFriends}
-              minimized={detent === 'collapsed'}
+              minimized={minimized}
+              onOpenPairing={() => {
+                closeLayers();
+                router.push('/pairing' as Href);
+              }}
               onOpenProfile={(friendId) => focusRosterFriend(friendId, 'mid')}
               onSelect={focusRosterFriend}
-              pairing={
-                <OpenPairingStrip onOpen={() => router.push('/pairing' as Href)} theme={theme} />
-              }
               theme={theme}
             />
           ) : (
             <CoverageIsland
               coverage={readout.coverage}
               minimized={minimized}
-              onToggleMinimize={toggleMinimize}
               placeName={readout.placeName}
               sectorsVisible={readout.sectorsVisible}
               signal={selfSignal}

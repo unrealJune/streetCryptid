@@ -1,4 +1,4 @@
-import { Text } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import { CryptidThemes } from '@/constants/cryptid-theme';
@@ -61,21 +61,21 @@ describe('FriendsIsland', () => {
     friends: readonly MapRosterFriend[],
     onSelect = jest.fn(),
     onOpenProfile = jest.fn(),
-    onToggleMinimize = jest.fn()
+    onOpenPairing = jest.fn()
   ) {
     act(() => {
       renderer = create(
         <FriendsIsland
           friends={friends}
           minimized={false}
+          onOpenPairing={onOpenPairing}
           onOpenProfile={onOpenProfile}
           onSelect={onSelect}
-          onToggleMinimize={onToggleMinimize}
           theme={CryptidThemes.daybreak}
         />
       );
     });
-    return { onSelect, onOpenProfile, onToggleMinimize };
+    return { onSelect, onOpenProfile, onOpenPairing };
   }
 
   it('lists every friend and counts only the near ones as nearby', () => {
@@ -87,22 +87,25 @@ describe('FriendsIsland', () => {
     expect(findText(renderer, '1 NEARBY')).toHaveLength(1);
   });
 
-  it('has no duplicate collapse arrow when the drawer owns minimizing', () => {
-    act(() => {
-      renderer = create(
-        <FriendsIsland
-          friends={[mothman]}
-          minimized={false}
-          onOpenProfile={jest.fn()}
-          onSelect={jest.fn()}
-          theme={CryptidThemes.daybreak}
-        />
-      );
-    });
+  it('has no collapse control of its own — the drawer owns minimizing', () => {
+    render([mothman]);
+
     expect(
       renderer.root.findAllByProps({ accessibilityLabel: 'Minimize friends roster' })
     ).toHaveLength(0);
     expect(findText(renderer, '@wanderer')).toHaveLength(1);
+  });
+
+  it('carries no status pip beside the count', () => {
+    render([mothman, jackalope]);
+
+    // The count is the whole signal. A pip beside it was a third place saying the same thing.
+    expect(findText(renderer, '1 NEARBY')).toHaveLength(1);
+    expect(
+      renderer.root
+        .findAllByType(View)
+        .filter((node) => StyleSheet.flatten(node.props.style)?.width === 10)
+    ).toHaveLength(0);
   });
 
   it('shows distance for live friends and OFFLINE for dark ones', () => {
@@ -123,6 +126,7 @@ describe('FriendsIsland', () => {
         <FriendsIsland
           friends={friends}
           minimized={false}
+          onOpenPairing={jest.fn()}
           onOpenProfile={jest.fn()}
           onSelect={jest.fn()}
           theme={CryptidThemes.daybreak}
@@ -160,6 +164,7 @@ describe('FriendsIsland', () => {
         <FriendsIsland
           friends={friends}
           minimized={false}
+          onOpenPairing={jest.fn()}
           onOpenProfile={jest.fn()}
           onSelect={jest.fn()}
           theme={CryptidThemes.daybreak}
@@ -184,22 +189,16 @@ describe('FriendsIsland', () => {
     expect(findText(renderer, 'NO FIX')).toHaveLength(1);
   });
 
-  it('renders the pairing readout the island arms', () => {
-    act(() => {
-      renderer = create(
-        <FriendsIsland
-          friends={[]}
-          minimized={false}
-          onOpenProfile={jest.fn()}
-          onSelect={jest.fn()}
-          onToggleMinimize={jest.fn()}
-          pairing={<Text>SEARCHING FOR A BUMP</Text>}
-          theme={CryptidThemes.daybreak}
-        />
-      );
-    });
+  it('opens pairing from the one glyph on the header line, with no strip in the list', () => {
+    const { onOpenPairing } = render([]);
 
-    expect(findText(renderer, 'SEARCHING FOR A BUMP')).toHaveLength(1);
+    // The strip this replaced said the same thing twice and cost a row of roster to do it.
+    expect(findText(renderer, 'PAIR WITH SOMEONE')).toHaveLength(0);
+    expect(findText(renderer, 'OPEN PAIRING')).toHaveLength(0);
+
+    const add = renderer.root.findByProps({ accessibilityLabel: 'Open pairing' });
+    act(() => add.props.onPress());
+    expect(onOpenPairing).toHaveBeenCalledTimes(1);
   });
 
   it('flies to a friend when their row is tapped', () => {
@@ -256,37 +255,29 @@ describe('FriendsIsland', () => {
     expect(findText(renderer, '40 KM')).toHaveLength(1);
   });
 
-  it('collapses to the header line, on the same chevron ME uses', () => {
-    const { onToggleMinimize } = render([mothman, jackalope]);
+  it('collapses to the count alone, the way ME collapses to place and percent', () => {
+    render([mothman, jackalope]);
 
-    const minimize = renderer.root.findByProps({ accessibilityLabel: 'Minimize friends roster' });
-    expect(minimize.props.accessibilityState).toEqual({ expanded: true });
-    act(() => minimize.props.onPress());
-    expect(onToggleMinimize).toHaveBeenCalledTimes(1);
-
-    // The screen owns the state, so re-render with it applied.
+    // `minimized` is the drawer's `collapsed` detent, so the screen supplies it.
     act(() => {
       renderer.update(
         <FriendsIsland
           friends={[mothman, jackalope]}
           minimized
+          onOpenPairing={jest.fn()}
           onOpenProfile={jest.fn()}
           onSelect={jest.fn()}
-          onToggleMinimize={onToggleMinimize}
-          pairing={<Text>SEARCHING FOR A BUMP</Text>}
           theme={CryptidThemes.daybreak}
         />
       );
     });
 
-    // Header line only: the count survives, the roster and the pairing strip do not.
+    // One line: the count survives, the roster does not.
     expect(findText(renderer, '1 NEARBY')).toHaveLength(1);
     expect(findText(renderer, '@wanderer')).toHaveLength(0);
-    expect(findText(renderer, 'SEARCHING FOR A BUMP')).toHaveLength(0);
-    expect(
-      renderer.root.findByProps({ accessibilityLabel: 'Expand friends roster' }).props
-        .accessibilityState
-    ).toEqual({ expanded: false });
+    // Adding someone stays reachable at the smallest size — an empty roster is at its emptiest
+    // exactly when the panel is smallest.
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Open pairing' })).toBeTruthy();
   });
 
   it('keeps the empty roster copy brief, without duplicate pairing instructions', () => {

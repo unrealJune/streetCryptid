@@ -1,11 +1,13 @@
 import {
   allowedDetents,
+  COLLAPSED_BODY_HEIGHT,
   detentHeights,
   pickDetent,
+  TAB_BAR_HEIGHT,
   type DrawerDetent,
 } from '../../core/drawer-detents';
 
-const SCREEN = { screenHeight: 844, insetTop: 59, insetBottom: 34, margin: 16, gripHeight: 18 };
+const SCREEN = { screenHeight: 844, insetTop: 59, insetBottom: 34, margin: 16, gripHeight: 16 };
 
 describe('detentHeights', () => {
   it('caps peek so a long roster does not open at full length', () => {
@@ -22,11 +24,11 @@ describe('detentHeights', () => {
     // The bottom inset and the island margin are the drawer's own marginBottom at peek. Counting
     // them here too left a band of empty island under the body that minimizing could not close.
     const withGrip = detentHeights({ ...SCREEN, peekBody: 160 });
-    expect(withGrip.peek).toBe(160 + 60 + 18);
+    expect(withGrip.peek).toBe(160 + TAB_BAR_HEIGHT + 16);
 
     // A single-detent body renders no grip, so peek must not reserve its strip either.
     const noGrip = detentHeights({ ...SCREEN, peekBody: 160, gripHeight: 0 });
-    expect(noGrip.peek).toBe(160 + 60);
+    expect(noGrip.peek).toBe(160 + TAB_BAR_HEIGHT);
   });
 
   it('opens at full height before the body has measured', () => {
@@ -94,7 +96,13 @@ describe('pickDetent', () => {
   it('keeps a collapsed drawer reopenable', () => {
     const detents = allowedDetents('full', 'collapsed');
     expect(pickDetent(90, -900, 78, detents, HEIGHTS)).toBe('peek');
-    expect(detentHeights({ ...SCREEN, peekBody: 900 }).collapsed).toBe(78);
+  });
+
+  it('leaves a one-line summary showing at collapsed rather than chrome alone', () => {
+    // Collapsed used to be the grip and tab bar with the body clipped to nothing, so minimizing
+    // the roster left a bar that said nothing about what was in it.
+    const heights = detentHeights({ ...SCREEN, peekBody: 900 });
+    expect(heights.collapsed).toBe(TAB_BAR_HEIGHT + 16 + COLLAPSED_BODY_HEIGHT);
   });
 
   it('lets a flick outrank the distance travelled', () => {

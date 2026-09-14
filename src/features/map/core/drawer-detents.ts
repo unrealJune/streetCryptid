@@ -28,13 +28,35 @@ const FLING_SPEED = 550;
  * ScrollView one pixel short of its content is a panel that scrolls and rubber-bands under your
  * finger for no reason a user can see.
  */
-export const TAB_BAR_HEIGHT = 60;
+export const TAB_BAR_HEIGHT = 52;
 /**
  * Grip strip height — the drawer's own affordance, above whatever body it carries. Only counted
  * when the drawer actually has somewhere to go: a body with one detent renders no grip, because a
- * handle on a surface that cannot move is 18px of furniture claiming to be a control.
+ * handle on a surface that cannot move is furniture claiming to be a control.
  */
-export const GRIP_HEIGHT = 18;
+export const GRIP_HEIGHT = 16;
+
+/**
+ * The collapsed row itself, sized off the TALLEST thing it can carry — the roster's 30pt add
+ * button, not the 26pt type beside it. Bodies floor their header on it so ME and FRIENDS collapse
+ * to one shape rather than to each body's idea of a line.
+ */
+export const COLLAPSED_ROW_HEIGHT = 30;
+
+/**
+ * The one-line summary every body shows at `collapsed`, and therefore the body height that detent
+ * resolves to.
+ *
+ * `collapsed` used to be chrome alone — grip plus tab bar, with the body clipped to nothing — so
+ * minimizing the roster left a bare bar that said nothing about what was in it. Both bodies now
+ * collapse to the same single line (the place name and its percentage; the nearby count), which is
+ * what makes minimizing one panel rather than two.
+ *
+ * A constant rather than a measurement: the line is one row of known type at a known size, and
+ * measuring it would mean laying the compact body out at a detent it is not in yet. Bodies pin
+ * themselves to it (`islandBody.minimized`) so the two can never disagree.
+ */
+export const COLLAPSED_BODY_HEIGHT = COLLAPSED_ROW_HEIGHT + GRIP_HEIGHT;
 
 /**
  * Detent geometry, kept clear of Reanimated and the component tree so it can be reasoned about
@@ -101,7 +123,7 @@ export function detentHeights(input: {
     midCandidate > peek + MIN_DETENT_GAP && midCandidate < full - MIN_DETENT_GAP
       ? midCandidate
       : full;
-  return { collapsed: Math.min(chrome, full), peek, mid, full };
+  return { collapsed: Math.min(chrome + COLLAPSED_BODY_HEIGHT, full), peek, mid, full };
 }
 
 /**

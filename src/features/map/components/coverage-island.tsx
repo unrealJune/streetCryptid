@@ -3,7 +3,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import type { CryptidTheme } from '@/constants/cryptid-theme';
 import { Spacing } from '@/constants/theme';
 
-import { islandBody, IslandMinimizeToggle } from './island-minimize';
+import { islandBody } from './island-body';
 
 const SEGMENTS = 26;
 
@@ -27,12 +27,11 @@ interface CoverageIslandProps {
    */
   readonly signal: string;
   /**
-   * Collapsed to the header line. Owned by the screen rather than by this body:
-   * minimizing is a statement about the DRAWER, which has to stop offering
-   * detents at the same moment, and a body cannot make that call from in here.
+   * Collapsed to the one-line summary. Owned by the drawer rather than by this
+   * body: minimizing is the `collapsed` detent, reached by the grip, and a body
+   * cannot resize the surface it is sitting in from in here.
    */
   readonly minimized: boolean;
-  onToggleMinimize(): void;
 }
 
 /**
@@ -54,15 +53,14 @@ export function CoverageIsland({
   sectorsVisible,
   signal,
   minimized,
-  onToggleMinimize,
 }: CoverageIslandProps) {
   const { chrome } = theme;
   const pct = Math.round(coverage * 100);
   const lit = Math.round(coverage * SEGMENTS);
   const hero = placeName ?? '—';
-  // Zooming past the exploration cutoff collapses the island like the chevron
-  // would, WITHOUT writing `minimized` — zooming back in restores the user's
-  // own choice rather than whatever the zoom left behind.
+  // Zooming past the exploration cutoff shows the same one line the collapsed
+  // detent does, WITHOUT the drawer changing detent — zooming back in restores
+  // whatever height the user left it at rather than a height the zoom picked.
   const showSectors = sectorsVisible && !minimized;
   const summary = sectorsVisible
     ? `${hero}. ${pct} percent of visible sectors explored.`
@@ -87,14 +85,6 @@ export function CoverageIsland({
             <Text style={[styles.compactPct, { color: chrome.ink }]}>{pct}%</Text>
           ) : null}
         </View>
-        {sectorsVisible ? (
-          <IslandMinimizeToggle
-            minimized={minimized}
-            onToggle={onToggleMinimize}
-            subject="location summary"
-            theme={theme}
-          />
-        ) : null}
       </View>
 
       {showSectors ? (
@@ -123,12 +113,12 @@ const styles = StyleSheet.create({
   hero: {
     flex: 1,
     fontFamily: 'Rajdhani_700Bold',
-    fontSize: 34,
-    lineHeight: 38,
+    fontSize: 28,
+    lineHeight: 32,
   },
   heroMinimized: {
-    fontSize: 24,
-    lineHeight: 28,
+    fontSize: 22,
+    lineHeight: 26,
   },
   compactPct: {
     fontFamily: 'Rajdhani_600SemiBold',
@@ -145,7 +135,8 @@ const styles = StyleSheet.create({
   barRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: Spacing.three,
+    marginBottom: Spacing.one,
+    marginTop: Spacing.two,
     gap: Spacing.two,
   },
   bar: {
@@ -160,8 +151,8 @@ const styles = StyleSheet.create({
   },
   pct: {
     fontFamily: 'Rajdhani_600SemiBold',
-    fontSize: 18,
-    minWidth: 44,
+    fontSize: 16,
+    minWidth: 40,
     textAlign: 'right',
   },
 });

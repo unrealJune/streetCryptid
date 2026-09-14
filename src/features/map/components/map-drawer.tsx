@@ -37,7 +37,26 @@ const DOCK_SPAN = 72;
 const SETTLE = { damping: 26, stiffness: 240, mass: 0.9 } as const;
 
 /** Corner radius at peek/mid, matching the island this drawer grew out of. */
-const ISLAND_RADIUS = 26;
+const ISLAND_RADIUS = 24;
+
+/**
+ * Gap under the island at rest.
+ *
+ * The drawer used to float `insetBottom + Spacing.three` above the screen's edge — 46pt of empty
+ * canvas on an iPhone, none of it map and none of it island. Find My hugs the bottom and keeps the
+ * home indicator clear from INSIDE the sheet instead, which is what the two constants here do: the
+ * surface comes down to `EDGE_GAP`, and the tab row holds `REST_BOTTOM_CLEARANCE` of total
+ * clearance above the screen edge so no target lands under the gesture handle. On a device with no
+ * bottom inset at all the padding falls out and only the gap remains.
+ *
+ * The tab row then sits at that same distance from the screen's edge at EVERY detent: as the sheet
+ * docks it gives up `EDGE_GAP` of margin and the row takes exactly that much padding back. The bar
+ * is the app's only navigation and it is present at every height — having it drift upward as the
+ * drawer opened made the one fixed thing on screen the thing that moved.
+ */
+const EDGE_GAP = Spacing.two;
+/** Total distance kept between the screen's bottom edge and the tab row, at rest. */
+const REST_BOTTOM_CLEARANCE = 20;
 
 interface MapDrawerProps {
   readonly children: ReactNode;
@@ -117,7 +136,14 @@ export function MapDrawer({
   // be a handle on a surface that cannot move. Minimized, that is also what turns the drawer back
   // into the bare bubble the island used to collapse to.
   const hasGrip = detents.length > 1;
-  const bodyChrome = drawerChrome(hasGrip ? GRIP_HEIGHT : 0, tabBarHeight);
+  // What the tab row costs the drawer at rest: the bar as laid out, PLUS the home-indicator
+  // padding wrapped around it. The padding lives on an ancestor of the measured view, so it is
+  // invisible to `onLayout` — and leaving it out of the chrome makes every detent that much
+  // shorter than the body it was sized for, which crushes the ME readout against the divider and
+  // clips the collapsed summary outright.
+  const restTabPad = Math.max(0, Math.min(insetBottom, REST_BOTTOM_CLEARANCE) - EDGE_GAP);
+  const tabChrome = tabBarHeight + restTabPad;
+  const bodyChrome = drawerChrome(hasGrip ? GRIP_HEIGHT : 0, tabChrome);
   const heights = useMemo(
     () =>
       detentHeights({
@@ -127,9 +153,9 @@ export function MapDrawer({
         insetBottom,
         margin: Spacing.three,
         gripHeight: hasGrip ? GRIP_HEIGHT : 0,
-        tabBarHeight,
+        tabBarHeight: tabChrome,
       }),
-    [peekBody, screenHeight, insetTop, insetBottom, hasGrip, tabBarHeight]
+    [peekBody, screenHeight, insetTop, insetBottom, hasGrip, tabChrome]
   );
   const resolved = heights[detents.includes(detent) ? detent : topDetent];
   /**
@@ -238,7 +264,7 @@ export function MapDrawer({
       // The island becomes a sheet across the last stretch of travel: side inset, bottom radius
       // and side borders fall away together, so it reads as one surface docking.
       marginHorizontal: Spacing.three * (1 - dock),
-      marginBottom: (insetBottom + Spacing.three) * (1 - dock),
+      marginBottom: EDGE_GAP * (1 - dock),
       borderBottomLeftRadius: ISLAND_RADIUS * (1 - dock),
       borderBottomRightRadius: ISLAND_RADIUS * (1 - dock),
       borderBottomWidth: StyleSheet.hairlineWidth * (1 - dock),
@@ -246,14 +272,16 @@ export function MapDrawer({
       borderRightWidth: StyleSheet.hairlineWidth * (1 - dock),
     };
   });
-  // The tab bar clears the home indicator only once the drawer has docked; before that the
-  // drawer's own bottom margin is already doing it.
+  // The tab row clears the home indicator itself now, at every detent: at rest it makes up
+  // whatever `EDGE_GAP` leaves short of `REST_BOTTOM_CLEARANCE`, and it takes on exactly the
+  // `EDGE_GAP` the margin gives up as the sheet docks — so the row's distance from the screen's
+  // bottom edge is the same at peek and at full, and the bar does not travel.
   const tabPadStyle = useAnimatedStyle(() => {
     const dock =
       heights[topDetent] > heights[detents[0]]
         ? interpolate(height.value, [heights.full - DOCK_SPAN, heights.full], [0, 1], 'clamp')
         : 0;
-    return { paddingBottom: insetBottom * dock };
+    return { paddingBottom: restTabPad + EDGE_GAP * dock };
   });
 
   const measureTabs = useCallback((event: LayoutChangeEvent) => {
@@ -317,8 +345,6 @@ export function MapDrawer({
           <View style={styles.body}>
             <GestureDetector gesture={nativeScroll}>
               <ScrollView
-                accessibilityElementsHidden={detent === 'collapsed'}
-                importantForAccessibility={detent === 'collapsed' ? 'no-hide-descendants' : 'auto'}
                 // iOS bounces a ScrollView vertically even when its content fits, which made the
                 // ME panel — a body that always fits its own detent — feel like a list that had
                 // somewhere to go and then sprang back. Bounce only when there is genuinely more

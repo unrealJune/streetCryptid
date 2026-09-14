@@ -106,7 +106,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: Spacing.one,
     paddingHorizontal: Spacing.two,
-    paddingVertical: Spacing.two,
+    // Half a step, not a full one: the tabs already carry a 44pt touch target, so the padding is
+    // only there to keep them off the island's edge. A full step was 16pt of island doing nothing,
+    // on the one piece of chrome that is present at every detent.
+    paddingVertical: Spacing.one,
   },
   tab: {
     alignItems: 'center',
