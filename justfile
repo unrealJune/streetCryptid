@@ -247,6 +247,27 @@ store-shots *args:
     echo "==> capturing"
     bun scripts/store-shots.ts --web-build "$out" {{args}}
 
+# Photograph the bottom island at every detent, on the REAL app — the same web
+# build + CanvasKit + wasm path `store-shots` drives, aimed at the drawer rather
+# than at a marketing plate. Safe-area insets are injected, because a browser
+# reports none and the island's bottom clearance is the point.
+#   just island-shots
+#   just island-shots "--insets 59,34 --out /tmp/island --headed"
+island-shots *args:
+    #!/usr/bin/env sh
+    set -eu
+    out="${SC_SHOTS_BUILD_DIR:-.expo/web-island-shots}"
+    echo "==> tile CORS proxy"
+    bun scripts/tile-proxy.ts &
+    proxy=$!
+    trap 'kill "$proxy" 2>/dev/null || true' EXIT INT TERM
+    echo "==> exporting the web build to $out"
+    # Fixtures ON: an island photographed with an empty roster says nothing about
+    # the roster. Telemetry OFF, for the same reason `store-shots` turns it off.
+    EXPO_PUBLIC_TILE_URL="${SC_TILE_PROXY_URL:-http://localhost:8099/planet}"       EXPO_PUBLIC_SCREENSHOT_FIXTURES=1       EXPO_PUBLIC_DEV_TELEMETRY=0       EXPO_PUBLIC_OTEL_ENDPOINT=       bunx expo export --platform web --output-dir "$out" >/dev/null
+    echo "==> capturing"
+    bun scripts/island-preview.ts --web-build "$out" {{args}}
+
 # Run the full local gate: types, lint, formatting, and tests (JS/TS only).
 check: typecheck lint format-check release-telemetry-check test
 
