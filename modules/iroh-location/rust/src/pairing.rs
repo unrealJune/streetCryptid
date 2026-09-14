@@ -1050,6 +1050,23 @@ impl PairSession {
             || self.peer_decision == Some(false)
     }
 
+    /// Whether this session is finished, for either reason.
+    ///
+    /// [`is_complete`](Self::is_complete) and [`is_terminal_failure`](Self::is_terminal_failure)
+    /// are disjoint, so testing only the failure half silently excludes the success half — and a
+    /// nearby session id is DERIVED from the two endpoint ids (`derive_nearby_id`), so the pair
+    /// that succeeded and the pair being attempted now are the same map key. A finished session
+    /// left in place is therefore not inert: the next Bump with that person finds it, declines to
+    /// replace it, and attaches to a session that has already emitted its result and can never
+    /// run a handshake again. The screen sits on EXCHANGING KEYS until it times out.
+    ///
+    /// That is what "pair, unfriend, pair again" did on 2026-09-14. Live sessions are still
+    /// reused — only a FINISHED one may be replaced, which keeps automated same-session retries
+    /// from resurrecting a terminal session while letting a human start over.
+    fn is_terminal(&self) -> bool {
+        self.is_complete() || self.is_terminal_failure()
+    }
+
     fn is_untouched_handshake(&self) -> bool {
         self.peer_recv_pub.is_none()
             && self.peer_sas_commit.is_none()
@@ -1850,7 +1867,7 @@ impl PairCore {
             let mut sessions = self.sessions.lock().await;
             let terminal = sessions
                 .get(&session_id)
-                .map(PairSession::is_terminal_failure)
+                .map(PairSession::is_terminal)
                 .unwrap_or(false);
             if terminal {
                 sessions.remove(&session_id);
@@ -2471,7 +2488,7 @@ impl PairCore {
                     if nearby
                         && sessions
                             .get(&session_id)
-                            .map(PairSession::is_terminal_failure)
+                            .map(PairSession::is_terminal)
                             .unwrap_or(false)
                     {
                         sessions.remove(&session_id);
@@ -3662,6 +3679,134 @@ mod tests {
         let s = sessions.get(&sid).unwrap();
         assert!(!s.failed, "fresh session is not terminal");
         assert_ne!(s.sas_nonce, nonce1, "fresh session uses a fresh SAS nonce");
+    }
+
+    /// Pair, unfriend, pair again — the 2026-09-14 report.
+    ///
+    /// A nearby session id is DERIVED from the two endpoint ids, so the second Bump with the same
+    /// person lands on the same map key as the pair that just succeeded. While only
+    /// `is_terminal_failure` was replaced, a COMPLETE session survived and was reused: the new
+    /// attempt attached to a session that had already emitted its result, no handshake ever ran,
+    /// and the screen sat on EXCHANGING KEYS until it timed out.
+    #[tokio::test]
+    async fn a_completed_nearby_session_does_not_block_pairing_again() {
+        let (core, our_ep, _our_recv) = test_core();
+        core.set_pairing_ready(true);
+        let peer_sk = SigningKey::generate(&mut OsRng);
+        let peer_ep = peer_sk.verifying_key().to_bytes();
+        let peer_recv = [7u8; RECV_PUB_LEN];
+        let sid = derive_nearby_id(&our_ep, &peer_ep);
+
+        let commit1 = sas_commitment(
+            &sid,
+            &peer_ep,
+            &peer_recv,
+            &test_ratchet_for(peer_ep),
+            &[1u8; SAS_NONCE_LEN],
+        );
+        core.handle_incoming(
+            peer_ep,
+            signed_hello_nearby(&peer_sk.to_bytes(), &peer_ep, &peer_recv, sid, commit1),
+        )
+        .await
+        .unwrap();
+
+        // Drive it to COMPLETE (both decisions true), the state a successful pair leaves behind —
+        // and the state `removeFriend` does not clear today.
+        let nonce1 = {
+            let mut sessions = core.sessions.lock().await;
+            let s = sessions.get_mut(&sid).unwrap();
+            s.local_decision = Some(true);
+            s.peer_decision = Some(true);
+            s.result_emitted = true;
+            assert!(s.is_complete(), "precondition: the pair succeeded");
+            assert!(
+                !s.is_terminal_failure(),
+                "precondition: success is NOT a terminal failure - the bug's whole basis"
+            );
+            s.sas_nonce
+        };
+
+        let commit2 = sas_commitment(
+            &sid,
+            &peer_ep,
+            &peer_recv,
+            &test_ratchet_for(peer_ep),
+            &[2u8; SAS_NONCE_LEN],
+        );
+        core.handle_incoming(
+            peer_ep,
+            signed_hello_nearby(&peer_sk.to_bytes(), &peer_ep, &peer_recv, sid, commit2),
+        )
+        .await
+        .unwrap();
+
+        let sessions = core.sessions.lock().await;
+        let s = sessions.get(&sid).unwrap();
+        assert!(!s.is_complete(), "the finished session must not be reused");
+        assert!(
+            !s.result_emitted,
+            "a reused result would re-announce an old pair"
+        );
+        assert_eq!(s.local_decision, None, "the new attempt starts undecided");
+        assert_eq!(s.peer_decision, None, "the new attempt starts undecided");
+        assert_ne!(s.sas_nonce, nonce1, "fresh session uses a fresh SAS nonce");
+    }
+
+    /// The reuse rule that must survive the fix: a LIVE session is still reused, so an automated
+    /// same-session retry cannot silently restart a handshake a human is in the middle of.
+    ///
+    /// Driven through `handle_incoming` rather than `initiate_nearby`, which needs an attached
+    /// pair runtime (`initiate_nearby_requires_a_runtime` pins that) and so cannot run on a bare
+    /// `test_core`. Both callers consult the same `is_terminal` predicate.
+    #[tokio::test]
+    async fn a_live_nearby_session_is_still_reused() {
+        let (core, our_ep, _our_recv) = test_core();
+        core.set_pairing_ready(true);
+        let peer_sk = SigningKey::generate(&mut OsRng);
+        let peer_ep = peer_sk.verifying_key().to_bytes();
+        let peer_recv = [7u8; RECV_PUB_LEN];
+        let sid = derive_nearby_id(&our_ep, &peer_ep);
+
+        let commit1 = sas_commitment(
+            &sid,
+            &peer_ep,
+            &peer_recv,
+            &test_ratchet_for(peer_ep),
+            &[1u8; SAS_NONCE_LEN],
+        );
+        core.handle_incoming(
+            peer_ep,
+            signed_hello_nearby(&peer_sk.to_bytes(), &peer_ep, &peer_recv, sid, commit1),
+        )
+        .await
+        .unwrap();
+        let nonce1 = {
+            let sessions = core.sessions.lock().await;
+            sessions.get(&sid).unwrap().sas_nonce
+        };
+
+        // Same session, still live (no decision latched): the Hello must NOT reset it.
+        let commit2 = sas_commitment(
+            &sid,
+            &peer_ep,
+            &peer_recv,
+            &test_ratchet_for(peer_ep),
+            &[2u8; SAS_NONCE_LEN],
+        );
+        core.handle_incoming(
+            peer_ep,
+            signed_hello_nearby(&peer_sk.to_bytes(), &peer_ep, &peer_recv, sid, commit2),
+        )
+        .await
+        .unwrap();
+
+        let sessions = core.sessions.lock().await;
+        assert_eq!(
+            sessions.get(&sid).unwrap().sas_nonce,
+            nonce1,
+            "an unfinished session keeps its SAS material"
+        );
     }
 
     // ── Concurrency / monotonicity of the SAS decision state machine ────────────────────────
