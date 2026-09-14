@@ -23,6 +23,7 @@ import {
   TAB_BAR_HEIGHT,
   type DrawerDetent,
 } from '../core/drawer-detents';
+import { GlassFill, useGlassAvailable } from './glass-surface';
 import { IslandTabs, type IslandTab } from './island-tabs';
 
 export type { DrawerDetent };
@@ -116,6 +117,7 @@ export function MapDrawer({
   onSelectTab,
 }: MapDrawerProps) {
   const { chrome } = theme;
+  const glass = useGlassAvailable();
   const [peekBody, setPeekBody] = useState(0);
   // The tab bar as laid out, not as estimated. `peek` is body + chrome and the bar is then laid
   // out inside that total, so a chrome figure a hairline under the truth hands the body a
@@ -318,10 +320,24 @@ export function MapDrawer({
     <Animated.View
       style={[
         styles.drawer,
-        { backgroundColor: chrome.island, borderColor: chrome.islandBorder },
+        {
+          backgroundColor: glass ? 'transparent' : chrome.island,
+          borderColor: chrome.islandBorder,
+        },
         dockStyle,
       ]}
     >
+      {/* A flat fill under everything, clipped to the drawer's animated shape by the
+          `overflow: hidden` above. The glass deliberately does NOT own the radii: Reanimated
+          drives the dock interpolation on the UI thread and cannot push per-frame values into a
+          native custom prop, so letting the material carry `borderBottomLeftRadius` would mean
+          crossing to JS every frame of a drag. Its own corner configuration is the island's, which
+          is the shape it actually has at peek and mid; at full the bottom corners are square and
+          the parent's clip is what says so. */}
+      {glass ? (
+        <GlassFill pointerEvents="none" radius={ISLAND_RADIUS} scheme={theme.scheme} />
+      ) : null}
+
       <View style={styles.sheet}>
         {hasGrip ? (
           <GestureDetector gesture={pans.grip}>

@@ -87,7 +87,8 @@
     "//testTimeout": "Jest charges a suite's module evaluation to its FIRST test, and on CI the babel transform cache is always cold — so the first test of a heavy suite pays for transforming its entire graph. cryptid-profile-editor sat at 4.7s of the 5s default with a cold cache and failed the moment anything was added to its imports. This budget is for a genuinely hung test, not for a cold transform.",
     "testTimeout": 20000,
     "setupFiles": [
-      "@shopify/react-native-skia/jestSetup.js"
+      "@shopify/react-native-skia/jestSetup.js",
+      "<rootDir>/jest.setup.js"
     ],
     "testPathIgnorePatterns": [
       "/node_modules/",

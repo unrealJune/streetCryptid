@@ -1,7 +1,9 @@
 import { SymbolView } from 'expo-symbols';
-import { ActivityIndicator, Pressable, StyleSheet } from 'react-native';
+import { ActivityIndicator } from 'react-native';
 
 import type { CryptidTheme } from '@/constants/cryptid-theme';
+
+import { FAB_RADIUS, IslandPressable, islandStyles } from './glass-surface';
 
 interface LocateMeControlProps {
   /** A position read is in flight. The control stays pressable-looking but does not re-fire. */
@@ -23,20 +25,15 @@ export function LocateMeControl({ busy, theme, onPress }: LocateMeControlProps) 
   const { chrome } = theme;
 
   return (
-    <Pressable
+    <IslandPressable
       accessibilityLabel="Locate me"
       accessibilityRole="button"
       accessibilityState={{ busy }}
       disabled={busy}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.fab,
-        {
-          backgroundColor: chrome.island,
-          borderColor: chrome.islandBorder,
-          opacity: pressed ? 0.68 : 1,
-        },
-      ]}
+      radius={FAB_RADIUS}
+      style={islandStyles.fab}
+      theme={theme}
     >
       {busy ? (
         <ActivityIndicator color={chrome.amber} size="small" />
@@ -47,17 +44,6 @@ export function LocateMeControl({ busy, theme, onPress }: LocateMeControlProps) 
           tintColor={chrome.amber}
         />
       )}
-    </Pressable>
+    </IslandPressable>
   );
 }
-
-const styles = StyleSheet.create({
-  fab: {
-    alignItems: 'center',
-    borderRadius: 24,
-    borderWidth: StyleSheet.hairlineWidth,
-    height: 48,
-    justifyContent: 'center',
-    width: 48,
-  },
-});
