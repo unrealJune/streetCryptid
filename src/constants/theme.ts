@@ -8,30 +8,41 @@ import '@/global.css';
 
 import { Platform } from 'react-native';
 
-import { CryptidThemes } from '@/constants/cryptid-theme';
+import { CryptidThemes, type CryptidChrome } from '@/constants/cryptid-theme';
 
 export { CryptidThemes } from '@/constants/cryptid-theme';
 export type { CryptidChrome, CryptidTheme, CryptidThemeName } from '@/constants/cryptid-theme';
 
 /**
- * Template color tokens, derived from the cryptid themes so the existing themed
- * components (tabs, text, views) pick up the brand: light = daybreak, dark = deepsea.
+ * The five template tokens the themed components (text, views, inputs) paint from, projected out
+ * of a chrome palette.
+ *
+ * A function rather than a constant because chrome is no longer fixed: it is retinted from the
+ * selected map scheme (`features/map/theme/derive-chrome.ts`), so these have to be computed per
+ * render from whatever palette is live. `useTheme()` is the only caller — every component reads
+ * it through that hook, which is why widening this cost no call sites.
+ *
+ * `backgroundSelected` is the one token that is not the same chrome key in both schemes:
+ * `hairline` is a visible edge on daybreak's near-white panels and disappears on deepsea's, where
+ * `seg` is the token that reads as a selected row.
+ */
+export function chromeToColors(chrome: CryptidChrome, scheme: 'light' | 'dark') {
+  return {
+    text: chrome.ink,
+    background: chrome.bg,
+    backgroundElement: chrome.panel,
+    backgroundSelected: scheme === 'dark' ? chrome.seg : chrome.hairline,
+    textSecondary: chrome.steel,
+  } as const;
+}
+
+/**
+ * The unthemed fallback, still light = daybreak / dark = deepsea. Nothing paints from this in the
+ * app — it is what a test or a screen outside the map scheme's provider would see.
  */
 export const Colors = {
-  light: {
-    text: CryptidThemes.daybreak.chrome.ink,
-    background: CryptidThemes.daybreak.chrome.bg,
-    backgroundElement: CryptidThemes.daybreak.chrome.panel,
-    backgroundSelected: CryptidThemes.daybreak.chrome.hairline,
-    textSecondary: CryptidThemes.daybreak.chrome.steel,
-  },
-  dark: {
-    text: CryptidThemes.deepsea.chrome.ink,
-    background: CryptidThemes.deepsea.chrome.bg,
-    backgroundElement: CryptidThemes.deepsea.chrome.panel,
-    backgroundSelected: CryptidThemes.deepsea.chrome.seg,
-    textSecondary: CryptidThemes.deepsea.chrome.steel,
-  },
+  light: chromeToColors(CryptidThemes.daybreak.chrome, 'light'),
+  dark: chromeToColors(CryptidThemes.deepsea.chrome, 'dark'),
 } as const;
 
 export type ThemeColor = keyof typeof Colors.light & keyof typeof Colors.dark;

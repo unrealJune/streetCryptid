@@ -33,8 +33,13 @@ jest.mock('@/features/social/hooks/use-location-sharing', () => ({
   useLocationSharing: () => ({ snapshot, refreshPairing: jest.fn() }),
 }));
 
+// A real scheme: `useTheme()` now retints every chrome token from the selected palette, so the
+// menu cannot render against a name-only stub.
 jest.mock('@/features/map/hooks/use-map-color-scheme', () => ({
-  useMapColorScheme: () => ({ selected: { id: 'graphite', name: 'Graphite' } }),
+  useMapColorScheme: () => ({
+    selected: jest.requireActual('@/features/map/theme/map-color-schemes')
+      .BUILT_IN_MAP_COLOR_SCHEMES[0],
+  }),
 }));
 
 describe('SettingsScreen', () => {
@@ -68,7 +73,7 @@ describe('SettingsScreen', () => {
 
     expect(byHref.has('/settings/transports')).toBe(false);
     expect(byHref.get('/settings/delivery')).toBe('Mutuals + Stash Server');
-    expect(byHref.get('/settings/appearance')).toBe('Graphite · Light');
+    expect(byHref.get('/settings/appearance')).toBe('Seattle · Light');
     // Transports moved behind Advanced, so Advanced is where their state has to surface:
     // a row that reports nothing is what made this menu look unfinished.
     expect(byHref.get('/settings/advanced')).toBe('Relay · Direct · BLE');
