@@ -1261,7 +1261,7 @@ export class LocationSharingService {
     this.removingFriends.delete(endpointId);
   }
 
-  // ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ─────────────────────────
+  // ── Bilateral pairing (`streetcryptid/pair/4`) — ARCHITECTURE.md §4 ─────────────────────────
 
   /** Toggle whether we accept invite-less nearby (BLE) pairing Hellos. */
   async setPairingReady(ready: boolean): Promise<void> {

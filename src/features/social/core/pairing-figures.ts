@@ -50,7 +50,7 @@ const BODIES: readonly FigurePart[] = [
 ] as const;
 
 if (HEADS.length * BODIES.length !== PAIRING_FIGURE_COUNT) {
-  throw new Error('pairing figure catalog must stay aligned with streetcryptid/pair/2');
+  throw new Error('pairing figure catalog must stay aligned with streetcryptid/pair/4');
 }
 
 export function isPairingFigureIndex(index: number): boolean {

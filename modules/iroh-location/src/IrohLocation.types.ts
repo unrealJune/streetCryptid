@@ -228,7 +228,7 @@ export interface ProfileView {
   ts: number;
 }
 
-// ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ──────────────────────────
+// ── Bilateral pairing (`streetcryptid/pair/4`) — ARCHITECTURE.md §4 ──────────────────────────
 
 /**
  * An out-of-band pairing invite carrying only immutable bootstrap material. Byte fields are
@@ -1034,7 +1034,7 @@ export interface IrohLocationApi {
   /** Drain profile-update events surfaced by docs live-sync since the last poll. */
   pollProfileEvents(): Promise<ProfileView[]>;
 
-  // ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ─────────────────────────
+  // ── Bilateral pairing (`streetcryptid/pair/4`) — ARCHITECTURE.md §4 ─────────────────────────
   /** Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. */
   setPairingReady(ready: boolean): Promise<void>;
   /** Whether invite-less nearby pairing is currently accepted. */

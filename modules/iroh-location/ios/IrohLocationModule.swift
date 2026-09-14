@@ -953,7 +953,7 @@ public final class IrohLocationModule: Module {
       return (await node.pollProfileEvents()).map { profileViewDict($0) }
     }
 
-    // ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ─────────────────────
+    // ── Bilateral pairing (`streetcryptid/pair/4`) — ARCHITECTURE.md §4 ─────────────────────
 
     AsyncFunction("setPairingReady") { (ready: Bool) throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }

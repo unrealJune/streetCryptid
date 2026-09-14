@@ -2070,6 +2070,17 @@ impl LocationNode {
     /// *that* teardown hung. These markers tell you **where**: the last one logged is the await
     /// that did not return.
     pub async fn shutdown(&self) -> Result<(), LocationError> {
+        // Exclude an in-flight `start` before touching anything. `start` publishes to `inner` only
+        // at the very end, so without this a teardown landing mid-build takes `None`, tears down
+        // nothing, and then watches the build install a live node it believed it had killed —
+        // which is precisely the headless-vs-foreground clobber `native-runtime-owner.ts` exists
+        // to prevent, reintroduced one layer down.
+        //
+        // This is not a new wait: holding `inner` across the build used to serialize these two for
+        // free. Splitting the locks is what made it explicit, and the build is now bounded
+        // (`ATTACH_TIMEOUT` + `ENDPOINT_BIND_TIMEOUT`), so the wait is finite where it was not.
+        tracing::info!("shutdown: taking starting lock");
+        let _starting = self.starting.lock().await;
         tracing::info!("shutdown: taking inner lock");
         let started = self.inner.lock().await.take();
         if let Some(started) = started {

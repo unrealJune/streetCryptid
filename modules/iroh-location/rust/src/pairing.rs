@@ -1,4 +1,4 @@
-//! Bilateral **pairing** over the iroh Endpoint — the `streetcryptid/pair/2` ALPN.
+//! Bilateral **pairing** over the iroh Endpoint — the `streetcryptid/pair/4` ALPN.
 //!
 //! ## Mandatory visual SAS gate (v2)
 //! A pair NEVER reaches `Complete`/`PairResult` on transport success alone. After the signed
@@ -1724,11 +1724,12 @@ impl PairCore {
 
     /// The completed friendship material, or `None` until [`PairCore::finalize`] has run.
     ///
-    /// Gated on `result_emitted`, NOT on `is_complete()`, and the difference is a real one: the
-    /// decision bits go bilateral the instant a local accept latches, while `finalize` — which
-    /// installs the ratchet session, ingests the handed profile record and raises `Ready` — runs
-    /// afterwards and can still decline (a racing peer `Reject` folded in between makes
-    /// `is_complete()` false again, and finalize then no-ops by design).
+    /// Gated on `result_emitted`, which `is_complete()` alone does NOT imply, and the difference
+    /// is a real one: the decision bits go bilateral the instant a local accept latches, while
+    /// `finalize` — which installs the ratchet session, ingests the handed profile record and
+    /// raises `Ready` — runs afterwards and can still decline. Both are required here: a racing
+    /// peer `Reject` folded in after finalize makes `is_complete()` false again, so re-checking it
+    /// is what stops a result being reported for a pair that has since come apart.
     ///
     /// Reporting a result in that window handed the app a friend with no ratchet behind it: every
     /// ratcheted publish to them would drop with `no_session`, and the pair the human watched
@@ -2643,7 +2644,7 @@ async fn dial_exchange(endpoint: &Endpoint, addr: EndpointAddr, msg: &PairMsg) -
     Ok(resp)
 }
 
-/// The inbound `streetcryptid/pair/2` protocol handler.
+/// The inbound `streetcryptid/pair/4` protocol handler.
 #[derive(Clone)]
 pub struct PairProtocol {
     core: Arc<PairCore>,

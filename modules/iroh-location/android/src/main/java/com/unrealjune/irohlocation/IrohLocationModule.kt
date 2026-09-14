@@ -1106,7 +1106,7 @@ class IrohLocationModule : Module() {
         n.pollProfileEvents().map { profileViewMap(it) }
       }
 
-    // ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ─────────────────────
+    // ── Bilateral pairing (`streetcryptid/pair/4`) — ARCHITECTURE.md §4 ─────────────────────
 
     AsyncFunction("setPairingReady") Coroutine
       { ready: Boolean ->
