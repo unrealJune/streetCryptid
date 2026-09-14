@@ -130,7 +130,7 @@ import { reportStrandedTeardown } from './background/teardown-watermark';
 import { stampWatermark } from './background/watermarks';
 import { createDefaultStashClient, type StashClient } from './stash-client';
 import { loadKeys, saveKeys } from './secure-keys';
-import { loadSeq, saveSeq } from './state-store';
+import { loadSeq, saveSeq, SEQ_RESERVATION_BLOCK, SEQ_RESERVATION_LOW_WATER } from './state-store';
 
 /**
  * How long a mounted launch waits for an in-flight headless session before building its node anyway.
@@ -3783,12 +3783,46 @@ export class LocationSharingService {
    * below where native already is, and raising can only ever skip values. Best-effort — a phone
    * whose binary predates the API keeps the JS path, which is exactly what the guard is for.
    */
+  /**
+   * Claim the next block of `seq` values in the keychain, ahead of native issuing them.
+   *
+   * Runs after `seedSeq` so it reserves from where the counter ACTUALLY is, and the write lands
+   * before any of the values it covers reach the wire — which is the ordering that makes a wipe
+   * cost an unused block instead of a reused value. Best-effort by design: failing to extend a
+   * reservation is not a reason to refuse to publish, because the reservation already in the
+   * keychain still covers this launch. What must never be best-effort is the write ITSELF being
+   * silently skipped while values past it are issued, and that cannot happen here — the only way
+   * past this point without a durable reservation is an exception, and the block is sized so the
+   * standing one covers weeks.
+   */
+  private async reserveSeqAhead(mod: IrohLocationNativeModule): Promise<void> {
+    if (typeof mod.currentSeq !== 'function') return;
+    const current = await mod.currentSeq();
+    const target = current + SEQ_RESERVATION_BLOCK;
+    if (this.seq >= target) return;
+    try {
+      await saveSeq(target);
+      this.seq = target;
+    } catch (err) {
+      getTelemetry().log('warn', 'seq: could not extend the reservation', {
+        reason: err instanceof Error ? err.message : String(err),
+        'seq.current': current,
+        'seq.reserved': this.seq,
+      });
+    }
+  }
+
   private async adoptNativeSeq(): Promise<void> {
     const mod = this.mod;
     if (!mod || typeof mod.seedSeq !== 'function' || typeof mod.nextSeq !== 'function') return;
     try {
+      // `this.seq` is the keychain RESERVATION, not a mirror of the native counter — see
+      // `state-store.ts`. Seeding from it is the wipe-recovery: on iOS the keychain survives app
+      // deletion and `state_dir` does not, so a reinstall meets a native counter of 0 and this
+      // lifts it back above everything this identity ever published.
       await mod.seedSeq(this.seq);
       this.nativeSeq = true;
+      await this.reserveSeqAhead(mod);
     } catch (err) {
       // Staying on the JS path is correct here rather than fatal: it is the scheme this device
       // was already using, and it is monotonic on its own. What we must not do is start using
@@ -3810,12 +3844,18 @@ export class LocationSharingService {
       // `saveSeq` throwing is preserved: a counter that cannot be written throws here and the
       // publish aborts rather than risking reuse.
       const seq = await mod.nextSeq();
-      this.seq = seq;
-      // Mirror, best-effort and deliberately AFTER the authoritative write. This is downgrade
-      // insurance: an OTA that rolls the JS bundle back onto this same binary would resume using
-      // `state-store.ts`, and a stale mirror there would re-issue. It cannot fail the publish —
-      // the value is already durable — so unlike the old path this one swallows.
-      void saveSeq(seq).catch(() => undefined);
+      // Top up the RESERVATION rather than mirroring the value just issued. Mirroring would lower
+      // the persisted number below values already on the wire, which is the rewind `state-store.ts`
+      // describes; the reservation must stay at or above everything issued. It still serves the
+      // downgrade case it was written for — an OTA that rolls this bundle back onto the same binary
+      // resumes from a number ABOVE the counter, so it skips rather than re-issues — and it now
+      // also survives the reinstall case, which a mirror never could.
+      //
+      // Best-effort and deliberately AFTER the authoritative write: the standing reservation
+      // already covers this publish, so a failed top-up is not a reason to abort it.
+      if (seq + SEQ_RESERVATION_LOW_WATER >= this.seq) {
+        void this.reserveSeqAhead(mod).catch(() => undefined);
+      }
       return seq;
     }
     this.seq += 1;

@@ -107,6 +107,9 @@ class NativeSeqModule extends FakeNativeModule {
     this.counter += 1;
     return this.counter;
   }
+  async currentSeq() {
+    return this.counter;
+  }
 }
 
 const mockHolder: { mod: FakeNativeModule } = { mod: new FakeNativeModule() };
@@ -120,7 +123,7 @@ jest.mock('iroh-location', () => ({
 // eslint-disable-next-line import/first
 import { saveKeys, SECURE_STORE_OPTIONS } from '../secure-keys';
 // eslint-disable-next-line import/first
-import { loadSeq, saveSeq } from '../state-store';
+import { loadSeq, saveSeq, SEQ_RESERVATION_BLOCK } from '../state-store';
 // eslint-disable-next-line import/first
 import { LocationSharingService } from '../location-sharing';
 
@@ -279,9 +282,12 @@ describe('native seq counter', () => {
     }
   });
 
-  it('mirrors each native value back to SecureStore as downgrade insurance', async () => {
-    // An OTA that rolls the JS bundle back onto this binary resumes using state-store.ts; a
-    // mirror left behind at the pre-migration value would re-issue everything published since.
+  it('keeps SecureStore AHEAD of the native counter, not level with it', async () => {
+    // Two failures, one number. An OTA that rolls the JS bundle back onto this binary resumes
+    // using state-store.ts, and a REINSTALL meets a native counter of 0 with only the keychain
+    // left — on iOS the keychain survives app deletion and `state_dir` does not. A mirror serves
+    // neither: it can only ever lag, and the native drain path issues `seq` on background wakes
+    // with no JS alive to update it. On 2026-09-12 that lag was 75 values, every one re-issued.
     const mod = new NativeSeqModule();
     mod.counter = 500;
     mockHolder.mod = mod;
@@ -289,7 +295,64 @@ describe('native seq counter', () => {
     await svc.init('@me', 'mothman');
     try {
       await svc.publishFix({ lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 100 });
-      await expect(loadSeq()).resolves.toBe(501);
+      const reserved = await loadSeq();
+      expect(reserved).toBe(500 + SEQ_RESERVATION_BLOCK);
+      expect(reserved).toBeGreaterThan(mod.counter);
+    } finally {
+      await svc.shutdownAsync();
+    }
+  });
+
+  /** The rewind itself: the reinstall case, where the keychain is all that is left. */
+  it('recovers above everything published when the native counter is wiped', async () => {
+    const first = new NativeSeqModule();
+    first.counter = 6_776;
+    mockHolder.mod = first;
+    const before = new LocationSharingService();
+    await before.init('@me', 'mothman');
+    // The background drain path issues values with no JS context alive to see them.
+    first.counter = 6_851;
+    await before.shutdownAsync();
+
+    // Reinstall: `state_dir` is gone, so the native counter is 0. The keychain is not.
+    const after = new NativeSeqModule();
+    mockHolder.mod = after;
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    try {
+      const next = await svc.publishFix({ lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 100 });
+      expect(next).toBeGreaterThan(6_851);
+    } finally {
+      await svc.shutdownAsync();
+    }
+  });
+
+  it('still publishes on a binary with no currentSeq export', async () => {
+    const mod = new NativeSeqModule();
+    mod.counter = 42;
+    (mod as { currentSeq?: unknown }).currentSeq = undefined;
+    mockHolder.mod = mod;
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    try {
+      await expect(
+        svc.publishFix({ lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 100 })
+      ).resolves.toBe(43);
+    } finally {
+      await svc.shutdownAsync();
+    }
+  });
+
+  it('does not let a failed reservation write stop the publish', async () => {
+    const mod = new NativeSeqModule();
+    mockHolder.mod = mod;
+    mockSecureStore.failKeys.add(SEQ_KEY);
+    const svc = new LocationSharingService();
+    await svc.init('@me', 'mothman');
+    try {
+      await expect(
+        svc.publishFix({ lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 100 })
+      ).resolves.toBe(1);
     } finally {
       await svc.shutdownAsync();
     }
