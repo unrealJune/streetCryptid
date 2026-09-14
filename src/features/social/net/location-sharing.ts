@@ -31,8 +31,10 @@ import {
   getTelemetry,
   recordEventLog,
   traceparentFor,
+  type Attributes,
   type Span,
   type SpanContext,
+  reportOsDiagnostics,
 } from '@/features/dev/telemetry';
 import { encodeContactCard } from '../core/contact-card';
 import {
@@ -53,6 +55,7 @@ import {
 import { isPairingFigureIndex } from '../core/pairing-figures';
 import { BUMP_SEARCH_DURATION_MS } from '../core/pairing-countdown';
 import type { PeerKind } from '../core/peer-reachability';
+import { hasVerifiedProfile } from '../core/persona-reveal';
 import { buildFriendPresence, type PresenceState } from '../core/presence';
 import * as pool from '../core/pool';
 import {
@@ -128,13 +131,28 @@ import { reportStrandedTeardown } from './background/teardown-watermark';
 import { stampWatermark } from './background/watermarks';
 import { createDefaultStashClient, type StashClient } from './stash-client';
 import { loadKeys, saveKeys } from './secure-keys';
-import { loadSeq, saveSeq } from './state-store';
+import { loadSeq, saveSeq, SEQ_RESERVATION_BLOCK, SEQ_RESERVATION_LOW_WATER } from './state-store';
 
 /**
  * How long a mounted launch waits for an in-flight headless session before building its node anyway.
  * See {@link LocationSharingService.awaitRuntimeIdleBounded}.
  */
 const RUNTIME_IDLE_WAIT_TIMEOUT_MS = 5_000;
+
+/**
+ * How long a launch waits for the native node to start before giving up on it.
+ *
+ * Deliberately well above the native bounds it backstops (BLE attach 10 s + endpoint bind 30 s),
+ * because it is not a competing deadline — it is the guard for a binary that does not have them.
+ * A phone can be running an older `.so`/XCFramework than the JS bundle, and on 2026-09-13 exactly
+ * that combination (unbounded `ble::attach`, awaited under the node lock) left an iPhone dark for
+ * 13 h and then hung the splash screen on relaunch, with no span or log to say why.
+ *
+ * On expiry the launch FAILS rather than continuing: the native call is still running — JS cannot
+ * cancel it — so there is no node, and a service that pretends otherwise publishes nothing while
+ * reporting itself ready. An error the user can retry is the honest outcome.
+ */
+const NATIVE_START_TIMEOUT_MS = 60_000;
 
 /**
  * A single live SAS verification the UI must resolve before a pair can complete. One entry per
@@ -396,21 +414,37 @@ const BUMP_POLL_INTERVAL_MS = 300;
 export const BUMP_WINDOW_MS = 120_000;
 
 /**
- * How often we re-arm profile replication for a friend still wearing the pairing placeholder.
+ * The gap between the first re-arm of a friend's profile replication and the second.
  *
- * A friend's persona reaches us only if the single `import_ticket` dial made when the pair
- * completed actually reconciled; nothing behind it retries. A one-way network failure (the exact
- * shape of the Android 15+ local-network block) therefore used to strand one side of a Bump on
- * `@endpointprefix` / `unknown` forever while the other side paired cleanly.
+ * The FIRST attempt is not delayed at all — {@link LocationSharingService.onPairReady} makes it
+ * the moment the reveal appears. This paces what follows.
+ *
+ * Since the v4 pairing wire a persona normally arrives ON the Accept, so this path no longer
+ * covers the ordinary pair at all — it covers a peer who had published nothing when we bumped
+ * them, and an `import_ticket` dial that lost (the exact shape of the Android 15+ local-network
+ * block). Both of those want a retry in a second, not in half a minute: the retry the user
+ * actually sits through is the early one.
  */
-const PROFILE_BACKFILL_INTERVAL_MS = 30_000;
+const PROFILE_BACKFILL_FIRST_DELAY_MS = 1_000;
+
+/** Each attempt waits twice as long as the last, up to this. */
+const PROFILE_BACKFILL_MAX_DELAY_MS = 60_000;
 
 /**
- * Give up re-arming a friend's profile after this many tries (~5 min at the interval above).
+ * Give up re-arming a friend's profile after this many tries (~5 min at the backoff above).
  * Bounded because a friend who has genuinely published nothing must not be re-dialled for the
  * lifetime of the process; a relaunch re-imports every ticket anyway and resets the count.
  */
 const PROFILE_BACKFILL_MAX_ATTEMPTS = 10;
+
+/**
+ * How long to wait after `attempts` attempts: 1s, 2s, 4s … capped at
+ * {@link PROFILE_BACKFILL_MAX_DELAY_MS}. Ten attempts spans roughly four minutes.
+ */
+export function profileBackfillDelayMs(attempts: number): number {
+  const grown = PROFILE_BACKFILL_FIRST_DELAY_MS * 2 ** Math.max(0, attempts - 1);
+  return Math.min(grown, PROFILE_BACKFILL_MAX_DELAY_MS);
+}
 
 /**
  * How long trail-change notifications are gathered before the fan-out fires.
@@ -671,10 +705,19 @@ export class LocationSharingService {
    * cost the friend their persona until the next relaunch. Flushed by {@link onPairReady}.
    */
   private readonly pendingProfiles = new Map<string, ProfileView>();
-  /** Re-arm attempts per friend for {@link backfillMissingProfiles}, bounded and in-memory. */
-  private readonly profileBackfillAttempts = new Map<string, number>();
-  /** When the profile backfill sweep last ran, so it paces off the pairing poll. */
-  private lastProfileBackfillAt = 0;
+  /**
+   * Per-friend retry schedule for {@link backfillMissingProfiles}: attempts so far, and the
+   * earliest time the next one may run.
+   *
+   * Per friend, and not one clock for the sweep, because a shared clock is spent by whoever
+   * touches it first. The sweep used to stamp a single `lastProfileBackfillAt` the moment its
+   * gate opened — before checking whether any friend actually needed work — so the pass that ran
+   * against an empty pool at launch burned the quota, and a pair completing five seconds later
+   * waited out the remaining twenty-five. Measured on an iPhone on 2026-09-13: pair complete at
+   * 21:50:55, persona at 21:51:20, the reveal having given up at 21:51:07. Two friends paired in
+   * a row had the same problem for the same reason.
+   */
+  private readonly profileBackfill = new Map<string, { attempts: number; nextAt: number }>();
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private pollInFlight: Promise<void> | null = null;
   /**
@@ -851,12 +894,12 @@ export class LocationSharingService {
     this.transportPreferences = next;
     this.rebindInFlight = true;
     try {
-      await this.rebindNode();
+      await this.rebindNode('transport-preferences');
       await saveTransportPreferences(this.kv, next);
       this.emit();
     } catch (error) {
       this.transportPreferences = previous;
-      await this.rebindNode().catch(() => undefined);
+      await this.rebindNode('transport-preferences-rollback').catch(() => undefined);
       throw error;
     } finally {
       this.rebindInFlight = false;
@@ -897,6 +940,13 @@ export class LocationSharingService {
     if (!this.keys) return;
     const instanceId = this.keys.endpointId.slice(0, 10);
     getTelemetry().setResourceAttributes({ 'service.instance.id': instanceId });
+    // Hand over anything the OS recorded about how a PREVIOUS run ended. Here because it needs
+    // the native module, after the resource attributes above so a crash report is attributed to
+    // the phone that produced it — and BEFORE the returns below, which are about the NATIVE
+    // exporter. Those two capabilities ship independently: a binary can carry MetricKit and not
+    // the otel feature, and a build with no collector endpoint still wants the crash in its local
+    // journal, which is what the Settings event-log viewer reads.
+    void reportOsDiagnostics(this.mod);
     const config = getOtelConfig();
     if (!config || !this.mod || typeof this.mod.configureTelemetry !== 'function') return;
     try {
@@ -992,7 +1042,33 @@ export class LocationSharingService {
         await this.awaitRuntimeIdleBounded();
       }
     }
-    this.keys = await this.mod.createNode(persisted.identitySecret, persisted.recvSecret);
+    // WHICH context built a node, paired with the native `node.construct` ordinal that says how
+    // many this PROCESS has built. Either alone is ambiguous — a JS context only knows what it
+    // asked for, and the native counter only knows that someone asked. Together they separate the
+    // three ways a node can appear out of nowhere: a rebuild (same context, shutdown logged), a
+    // clobber (second context, ordinal climbs, node count stays one), and a duplicate (second
+    // context, ordinal climbs, both nodes live and answering for one identity).
+    //
+    // On 2026-09-13 a process logged three `iroh endpoint bound` lines and ZERO shutdowns, and
+    // nothing could say which of the three it was — while pairings failed on top of it.
+    const createSpan = getTelemetry().startSpan('node.create', {
+      attributes: {
+        mode: interactive ? 'interactive' : 'headless',
+        claimed_runtime: this.ownsNativeRuntime,
+        // Cached, and it answers `false` rather than rejecting, so this costs nothing here.
+        adopts: await this.nativeAdoptsNode(),
+      },
+    });
+    try {
+      this.keys = await this.mod.createNode(persisted.identitySecret, persisted.recvSecret);
+      createSpan.setAttribute('endpoint', this.keys.endpointId.slice(0, 12));
+      createSpan.setStatus('ok');
+    } catch (err) {
+      createSpan.recordError(err);
+      throw err;
+    } finally {
+      createSpan.end();
+    }
     await saveKeys({
       identitySecret: this.keys.identitySecret,
       recvSecret: this.keys.recvSecret,
@@ -1007,7 +1083,7 @@ export class LocationSharingService {
     // by older persisted diagnostics a few awaits later.
     this.ratchetActivity = await loadRatchetActivity(this.kv);
     this.transportPreferences = await loadTransportPreferences(this.kv);
-    await this.mod.start(this.transportPreferences);
+    await this.startNativeBounded(this.mod);
     // After `start`, which is where the native drain path's stores are opened.
     await this.adoptNativeSeq();
     await this.resolveStashEndpointId();
@@ -1111,6 +1187,7 @@ export class LocationSharingService {
   async addFriend(card: ContactCard): Promise<void> {
     if (this.removingFriends.has(card.endpointId)) return;
     this.state = pool.addFriend(this.state, card);
+    this.recordPoolChange('added', card.endpointId, 'contact-card');
     await this.subscribeToFriend(card);
     await this.persistPool();
     this.emit();
@@ -1137,7 +1214,11 @@ export class LocationSharingService {
 
   private async removeFriendLocally(
     endpointId: string,
-    { forgetRatchet, discoverySessionId }: { forgetRatchet: boolean; discoverySessionId?: string }
+    {
+      forgetRatchet,
+      discoverySessionId,
+      reason = 'manual',
+    }: { forgetRatchet: boolean; discoverySessionId?: string; reason?: string }
   ): Promise<void> {
     if (!this.state.friends[endpointId] || this.removingFriends.has(endpointId)) return;
 
@@ -1158,6 +1239,7 @@ export class LocationSharingService {
       throw error;
     }
 
+    this.recordPoolChange('removed', endpointId, reason, { was_sharing: wasSharing });
     for (const [sessionId, friend] of this.discoveries) {
       if (
         friend.endpointId === endpointId &&
@@ -1168,7 +1250,7 @@ export class LocationSharingService {
     }
     if (![...this.discoveries.values()].some((friend) => friend.endpointId === endpointId)) {
       this.pendingProfiles.delete(endpointId);
-      this.profileBackfillAttempts.delete(endpointId);
+      this.profileBackfill.delete(endpointId);
     }
     this.droppedRecipients.delete(endpointId);
     this.sessionVerdicts.delete(endpointId);
@@ -1196,6 +1278,36 @@ export class LocationSharingService {
         })
       );
     }
+    // And the pairing record of how the friendship began, which the ratchet teardown above does
+    // not touch: the session holds their recv key, their SAS material and their tickets, so §5.4's
+    // argument covers it too. Guarded because a phone can be running an older binary than this
+    // bundle. Finished sessions only — a pair in progress is the user's to cancel, not ours.
+    if (mod && typeof mod.forgetPairSessions === 'function') {
+      cleanup.push(
+        mod
+          .forgetPairSessions(endpointId)
+          .then((dropped: number) => {
+            if (dropped === 0) return;
+            // Keep the cached list in step with native. `pairSessions` is only refreshed by the
+            // pairing poll loop, which is not running after an unfriend, so without this the
+            // screen would keep listing a session native has already dropped.
+            this.pairSessions = this.pairSessions.filter(
+              (session) =>
+                session.peerEndpointId !== endpointId ||
+                !TERMINAL_PAIR_STATES.includes(session.state)
+            );
+            this.emitIfPairingChanged();
+          })
+          .catch((err: unknown) => {
+            getTelemetry().log(
+              'warn',
+              `could not forget the pairing sessions for a removed friend: ${
+                err instanceof Error ? err.message : String(err)
+              }`
+            );
+          })
+      );
+    }
     if (wasSharing) cleanup.push(this.ensureMySubscription());
     cleanup.push(
       this.trail.removeFriend(endpointId).then(() => {
@@ -1214,7 +1326,7 @@ export class LocationSharingService {
     this.removingFriends.delete(endpointId);
   }
 
-  // ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ─────────────────────────
+  // ── Bilateral pairing (`streetcryptid/pair/4`) — ARCHITECTURE.md §4 ─────────────────────────
 
   /** Toggle whether we accept invite-less nearby (BLE) pairing Hellos. */
   async setPairingReady(ready: boolean): Promise<void> {
@@ -1235,8 +1347,19 @@ export class LocationSharingService {
     }
     this.rebindInFlight = true;
     try {
-      if (await this.mod.bleAvailable()) return;
-      await this.rebindNode();
+      const available = await this.mod.bleAvailable();
+      if (available) return;
+      // The only reason this rebuilds the node: BLE attaches at CONSTRUCTION, so a permission
+      // granted afterwards leaves the transport detached with no way to attach it in place.
+      //
+      // It is also the most frequently REACHED rebind in the app, because it sits on the Bump
+      // button: every arm asks, and every `false` answer costs a full node teardown in the middle
+      // of what the user is, by definition, in the middle of doing. Whether that actually happens
+      // in the field is an open question — it was assumed to be behind the 2026-09-13 pairing
+      // failures and was not — so if `node.rebind{trigger="ble-arm"}` does turn out to be common
+      // on a phone whose Bluetooth is fine, the thing to chase is why `bleAvailable()` says no:
+      // attach is asynchronous, and "not yet" is indistinguishable from "not going to" here.
+      await this.rebindNode('ble-arm');
       if (!(await this.mod.bleAvailable())) {
         throw new Error(
           'Bluetooth could not start. Confirm Bluetooth is on, then close and reopen streetCryptid.'
@@ -1368,11 +1491,56 @@ export class LocationSharingService {
     }
   }
 
-  private async rebindNode(): Promise<void> {
+  private async rebindNode(trigger = 'unknown'): Promise<void> {
     const mod = this.mod;
     const keys = this.keys;
     if (!mod || !keys) throw new Error('Friend sync is not ready yet.');
 
+    // A rebind is the largest thing this app does to itself and it used to emit nothing at all.
+    //
+    // It destroys the iroh endpoint and builds a new one: every pairing session goes, every
+    // subscription is torn down and remade, the invite on screen stops being redeemable, and the
+    // fresh endpoint starts with NO paths to anyone — roughly 2 s to get relays back and longer
+    // for a direct path to a specific peer. A handshake begun in that window talks to a node that
+    // cannot yet reach the other phone.
+    //
+    // It used to be invisible from JS entirely: on 2026-09-13 a run of failed pairings had to be
+    // reconstructed from the native core's `iroh endpoint bound` lines in Loki, and those turned
+    // out NOT to be rebinds at all — which is the whole reason `trigger` exists here, and the
+    // reason the native side counts nodes separately (`node.construct`'s `node.ordinal`). A
+    // rebind must be able to say "that one was me"; otherwise every node that appears looks alike.
+    const span = getTelemetry().startSpan('node.rebind', {
+      attributes: {
+        trigger,
+        // The blast radius, recorded BEFORE it is destroyed.
+        sessions_destroyed: this.pairSessions.length,
+        session_states: this.pairSessions.map((session) => session.state).join(','),
+        verifications: this.verifications.length,
+        friends: pool.friendList(this.state).length,
+        had_invite: this.inviteLink !== null,
+        pairing_ready: this.pairingReadyFlag,
+      },
+    });
+
+    try {
+      await this.rebindNodeInner(mod, keys, span);
+      span.setStatus('ok');
+    } catch (err) {
+      // A rebind that THREW is the reading that matters most — it leaves the app with no usable
+      // node — and it is exactly the one the old code dropped, because the span was ended only on
+      // the way out of the happy path.
+      span.recordError(err);
+      throw err;
+    } finally {
+      span.end();
+    }
+  }
+
+  private async rebindNodeInner(
+    mod: NonNullable<LocationSharingService['mod']>,
+    keys: NonNullable<LocationSharingService['keys']>,
+    span: Span
+  ): Promise<void> {
     const restorePairingReady = this.pairingReadyFlag;
     this.stopPairingPolling();
     this.fixSub?.remove();
@@ -1401,7 +1569,7 @@ export class LocationSharingService {
 
     await mod.shutdown();
     this.keys = await mod.createNode(keys.identitySecret, keys.recvSecret);
-    await mod.start(this.transportPreferences);
+    await this.startNativeBounded(mod);
     this.ticketStr = await mod.ticket();
     this.docTicketStr = await this.safeDocTicket();
     this.profileEpoch = await this.safePublishProfile();
@@ -1421,6 +1589,9 @@ export class LocationSharingService {
     this.startPairingPolling();
     await this.pollPairingOnce();
     void this.syncTrail(0);
+    // Friends are carried across in memory rather than reloaded, so this asserts the pool survived
+    // — the one thing a rebind must never take with it.
+    span.setAttribute('friends_after', pool.friendList(this.state).length);
   }
 
   /** Only the final confirmation adds a friend or enables location sharing. */
@@ -1431,6 +1602,38 @@ export class LocationSharingService {
   /** Withdraw the completed handshake; the unconfirmed friend was never added or shared with. */
   rejectDiscoveredFriend(): Promise<void> {
     return this.decideDiscovery(false);
+  }
+
+  /**
+   * Seal the last known position once, so a friend who has just paired sees a dot now.
+   *
+   * A sealed envelope is readable only by the recipients it was sealed FOR, so nothing already
+   * published can be opened by someone who did not exist when it went out. Their first sight of
+   * you is otherwise the next scheduled publish — on a parked iPhone that rides on `BGProcessing`
+   * wakes measured at p50 5 min, p90 92 min, with a 17-hour tail. A pairing that ends in a blank
+   * dot for an hour and a half reads as a pairing that did not work.
+   *
+   * Driven from ACKNOWLEDGE, and that is the whole of the consent argument. A completed handshake
+   * adds nothing to the pool and grants nothing on its own — {@link decideDiscovery} is what does
+   * both — and the reveal screen still offers REJECT until then. Acknowledging is the moment the
+   * human says "keep this friend", which is the first moment sealing anything for them is honest.
+   *
+   * Best-effort in every direction: guarded because a phone can be running an older binary than
+   * the JS bundle, swallowed because a friend who has to wait for the next slot is the behaviour
+   * we had before this existed.
+   */
+  private async publishIntroduction(): Promise<void> {
+    const mod = this.mod;
+    if (!mod || typeof mod.publishIntroduction !== 'function') return;
+    try {
+      // The recipient set has to be on the wire before anything is sealed for it, and the pair
+      // added a friend: without this the envelope goes out sealed for yesterday's set.
+      await this.ensureMySubscription();
+      if (!this.mySubId) return;
+      await mod.publishIntroduction(this.mySubId);
+    } catch {
+      // The next slot will carry it.
+    }
   }
 
   private async decideDiscovery(accept: boolean): Promise<void> {
@@ -1448,7 +1651,7 @@ export class LocationSharingService {
       if (!accept) {
         this.rejectedPairSessions.add(sessionId);
         await mod.cancelPair(sessionId);
-        await this.withdrawDiscoveredFriend(sessionId, friend.endpointId);
+        await this.withdrawDiscoveredFriend(sessionId, friend.endpointId, 'reveal-reject');
         this.setPairingActivity('pair rejected');
         return;
       }
@@ -1481,30 +1684,44 @@ export class LocationSharingService {
         throw new Error('The other phone rejected this pairing. Nothing was added.');
       }
       this.discoveries.delete(sessionId);
+      this.recordPoolChange('added', friend.endpointId, 'pair-acknowledged', {
+        method: friend.pairingMethod ?? 'unknown',
+        // Whether the persona rode in on the v4 Accept or still had to be backfilled.
+        persona: hasVerifiedProfile(friend),
+      });
       this.pairingFailure = null;
       this.emit();
+      void this.publishIntroduction();
       void this.syncTrail(0);
     } finally {
       this.discoveryDecision = null;
     }
   }
 
-  private async withdrawDiscoveredFriend(sessionId: string, endpointId: string): Promise<void> {
+  private async withdrawDiscoveredFriend(
+    sessionId: string,
+    endpointId: string,
+    reason: string
+  ): Promise<void> {
     this.rejectedPairSessions.add(sessionId);
     this.handledPairSessions.add(sessionId);
     const friend = this.state.friends[endpointId];
     if (friend?.pairingSessionId === sessionId) {
       // Native withdrawal erases only this round's ratchet. Endpoint-wide unfriend erasure
       // here could destroy a newer successful pairing with the same phone.
+      // The reason is named by the caller precisely so the reveal screen's REJECT — one
+      // thumb-width from ACKNOWLEDGE — and the peer's late withdrawal can be told apart from the
+      // map's remove-friend when a friend goes missing seconds after a successful pairing.
       await this.removeFriendLocally(endpointId, {
         forgetRatchet: false,
         discoverySessionId: sessionId,
+        reason,
       });
     }
     this.discoveries.delete(sessionId);
     if (![...this.discoveries.values()].some((friend) => friend.endpointId === endpointId)) {
       this.pendingProfiles.delete(endpointId);
-      this.profileBackfillAttempts.delete(endpointId);
+      this.profileBackfill.delete(endpointId);
     }
     this.emit();
   }
@@ -1807,6 +2024,68 @@ export class LocationSharingService {
     this.initiatedRoutes.delete(sessionId);
     this.setPairingActivity('pair canceled');
     await this.refreshPairing();
+  }
+
+  /**
+   * Walking away from the pairing screen: tell the peer about the sessions we are abandoning, and
+   * ONLY about those.
+   *
+   * ## Why this cannot take the caller's list at face value
+   * The screen decides what is abandonable from a pairing snapshot, and a snapshot is by
+   * construction one poll old — while a pair completes in well under one poll. On 2026-09-13 an
+   * iPhone reached `complete` at 16:10:35 and the screen it was dismissing still held the session
+   * as `peerAccepted` from :34, so the stand-down cancelled the pair that had just succeeded. The
+   * peer, still waiting on its own half, received the Reject and ended up with no friend at all
+   * while this phone kept one. "Only one of us got it" is what that looks like from the outside.
+   *
+   * So the caller's list is a list of CANDIDATES. Native is asked what those sessions actually are
+   * at the moment of leaving, and anything terminal — `complete` above all — is left alone. There
+   * is no version of walking away from a screen that should undo a friendship; tearing one down is
+   * `removeFriend`, which is a different, deliberate act with a different button.
+   *
+   * Failures are swallowed per session: this runs while a screen is unmounting, and a peer that
+   * cannot be reached is exactly the case where the local decision still has to stand.
+   */
+  async standDownPairing(candidateSessionIds: readonly string[]): Promise<void> {
+    if (!this.mod || candidateSessionIds.length === 0) return;
+    const span = getTelemetry().startSpan('pair.stand_down');
+    try {
+      const live = await this.mod.listPairSessions();
+      const byId = new Map(live.map((session) => [session.sessionId, session]));
+      // A session native no longer knows is already gone: nothing to cancel and nothing to tell.
+      const candidates = candidateSessionIds.map((sessionId) => ({
+        sessionId,
+        session: byId.get(sessionId),
+      }));
+      const cancellable = candidates.filter(
+        ({ session }) => session !== undefined && !TERMINAL_PAIR_STATES.includes(session.state)
+      );
+      span.setAttributes({
+        candidates: candidates.length,
+        cancelled: cancellable.length,
+        // The whole point of the span: which states the screen was about to walk out on. A
+        // `complete` in here is the bug this method exists to prevent, and it is one query away.
+        candidate_states: candidates.map(({ session }) => session?.state ?? 'unknown').join(','),
+        spared: candidates.length - cancellable.length,
+      });
+      for (const { sessionId, session } of cancellable) {
+        try {
+          await this.cancelPair(sessionId);
+        } catch (err) {
+          // Native refuses a contradictory decision (a session that accepted between our read and
+          // this call) — which is the same invariant as the filter above, enforced one layer down.
+          span.addEvent('cancel.refused', {
+            state: session?.state ?? 'unknown',
+            reason: errorMessage(err),
+          });
+        }
+      }
+      span.setStatus('ok');
+    } catch (err) {
+      span.recordError(err);
+    } finally {
+      span.end();
+    }
   }
 
   /** Drain the pairing/discovery queues once, on demand (also runs on a bounded timer). */
@@ -3167,6 +3446,44 @@ export class LocationSharingService {
     return this.nodeAdoptionSupported;
   }
 
+  /**
+   * `mod.start()`, bounded — see {@link NATIVE_START_TIMEOUT_MS}.
+   *
+   * Emits `node.start_timeout` on expiry. That span is the whole point of the bound: a native
+   * start that never returns is otherwise completely silent, because every span the launch would
+   * have emitted is downstream of the call that is stuck.
+   */
+  private async startNativeBounded(mod: IrohLocationNativeModule): Promise<void> {
+    const startedAt = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), NATIVE_START_TIMEOUT_MS);
+      (timer as unknown as { unref?: () => void }).unref?.();
+    });
+    try {
+      const outcome = await Promise.race([
+        mod.start(this.transportPreferences).then(() => 'started' as const),
+        deadline,
+      ]);
+      if (outcome === 'timeout') {
+        getTelemetry()
+          .startSpan('node.start_timeout', {
+            attributes: {
+              'node.start_wait_ms': Date.now() - startedAt,
+              'sc.drop_reason': 'native-start-timeout',
+            },
+          })
+          .end();
+        // Flush explicitly: on a headless wake the OS may freeze us the moment this rejects, and
+        // this span is the only record that the start is still stuck in native code.
+        await this.flushDevTelemetry().catch(() => undefined);
+        throw new Error(`native start did not return within ${NATIVE_START_TIMEOUT_MS}ms`);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async awaitRuntimeIdleBounded(): Promise<void> {
     // A force-quit relaunch is the most likely thing to follow a teardown hang — the user kills the
     // frozen app and reopens it — so this launch is often the first context able to report it.
@@ -3362,12 +3679,49 @@ export class LocationSharingService {
     span.end();
   }
 
+  /**
+   * Record one deliberate change to the friend pool, with the reason it happened.
+   *
+   * ## Why this exists
+   * The pool going from one friend to none is the single most consequential thing this app can do
+   * to a user, and until now it left no trace at all. On 2026-09-13 an iPhone completed a pair at
+   * 16:10:53 and had no friend by 16:11:01, and the telemetry could not say whether a human had
+   * pressed REJECT on the reveal, whether the map's remove-friend had been used, or whether
+   * something had dropped it — the count was only visible at all as a side effect of
+   * `trail.sync.app`'s `sync.peers`, which counts durable tickets and is a proxy, not a record.
+   *
+   * `reason` is the whole value here: every path that adds or drops a friend names itself, so
+   * "who removed her" is a query rather than an afternoon of reading call sites.
+   */
+  private recordPoolChange(
+    change: 'added' | 'removed',
+    endpointId: string,
+    reason: string,
+    extra: Attributes = {}
+  ): void {
+    getTelemetry()
+      .startSpan(`pool.friend_${change}`, {
+        attributes: {
+          'sc.peer': endpointId.slice(0, 12),
+          reason,
+          friends: pool.friendList(this.state).length,
+          sharing_with: pool
+            .friendList(this.state)
+            .filter((f) => pool.isSharingWith(this.state, f.endpointId)).length,
+          ...extra,
+        },
+      })
+      .end();
+  }
+
   /** Keep a slow older write from restoring a friend after a newer rejection was saved. */
   private persistPool(): Promise<void> {
     const state = this.state;
     const write = this.poolPersistChain.then(() => savePool(this.kv, state));
     const persisted = write.then(() => {
       this.pushSharingRecipients();
+      // The peer tickets come out of the same pool, so the two mirrors move together or the
+      // native drain seals for a friend it cannot then send to.
       this.pushDeliveryConfig();
     });
     this.poolPersistChain = persisted.catch((error: unknown) => this.reportError(error));
@@ -3564,12 +3918,46 @@ export class LocationSharingService {
    * below where native already is, and raising can only ever skip values. Best-effort — a phone
    * whose binary predates the API keeps the JS path, which is exactly what the guard is for.
    */
+  /**
+   * Claim the next block of `seq` values in the keychain, ahead of native issuing them.
+   *
+   * Runs after `seedSeq` so it reserves from where the counter ACTUALLY is, and the write lands
+   * before any of the values it covers reach the wire — which is the ordering that makes a wipe
+   * cost an unused block instead of a reused value. Best-effort by design: failing to extend a
+   * reservation is not a reason to refuse to publish, because the reservation already in the
+   * keychain still covers this launch. What must never be best-effort is the write ITSELF being
+   * silently skipped while values past it are issued, and that cannot happen here — the only way
+   * past this point without a durable reservation is an exception, and the block is sized so the
+   * standing one covers weeks.
+   */
+  private async reserveSeqAhead(mod: IrohLocationNativeModule): Promise<void> {
+    if (typeof mod.currentSeq !== 'function') return;
+    const current = await mod.currentSeq();
+    const target = current + SEQ_RESERVATION_BLOCK;
+    if (this.seq >= target) return;
+    try {
+      await saveSeq(target);
+      this.seq = target;
+    } catch (err) {
+      getTelemetry().log('warn', 'seq: could not extend the reservation', {
+        reason: err instanceof Error ? err.message : String(err),
+        'seq.current': current,
+        'seq.reserved': this.seq,
+      });
+    }
+  }
+
   private async adoptNativeSeq(): Promise<void> {
     const mod = this.mod;
     if (!mod || typeof mod.seedSeq !== 'function' || typeof mod.nextSeq !== 'function') return;
     try {
+      // `this.seq` is the keychain RESERVATION, not a mirror of the native counter — see
+      // `state-store.ts`. Seeding from it is the wipe-recovery: on iOS the keychain survives app
+      // deletion and `state_dir` does not, so a reinstall meets a native counter of 0 and this
+      // lifts it back above everything this identity ever published.
       await mod.seedSeq(this.seq);
       this.nativeSeq = true;
+      await this.reserveSeqAhead(mod);
     } catch (err) {
       // Staying on the JS path is correct here rather than fatal: it is the scheme this device
       // was already using, and it is monotonic on its own. What we must not do is start using
@@ -3591,12 +3979,18 @@ export class LocationSharingService {
       // `saveSeq` throwing is preserved: a counter that cannot be written throws here and the
       // publish aborts rather than risking reuse.
       const seq = await mod.nextSeq();
-      this.seq = seq;
-      // Mirror, best-effort and deliberately AFTER the authoritative write. This is downgrade
-      // insurance: an OTA that rolls the JS bundle back onto this same binary would resume using
-      // `state-store.ts`, and a stale mirror there would re-issue. It cannot fail the publish —
-      // the value is already durable — so unlike the old path this one swallows.
-      void saveSeq(seq).catch(() => undefined);
+      // Top up the RESERVATION rather than mirroring the value just issued. Mirroring would lower
+      // the persisted number below values already on the wire, which is the rewind `state-store.ts`
+      // describes; the reservation must stay at or above everything issued. It still serves the
+      // downgrade case it was written for — an OTA that rolls this bundle back onto the same binary
+      // resumes from a number ABOVE the counter, so it skips rather than re-issues — and it now
+      // also survives the reinstall case, which a mirror never could.
+      //
+      // Best-effort and deliberately AFTER the authoritative write: the standing reservation
+      // already covers this publish, so a failed top-up is not a reason to abort it.
+      if (seq + SEQ_RESERVATION_LOW_WATER >= this.seq) {
+        void this.reserveSeqAhead(mod).catch(() => undefined);
+      }
       return seq;
     }
     this.seq += 1;
@@ -4032,18 +4426,18 @@ export class LocationSharingService {
   /**
    * Re-arm replication for friends who still have no verified profile, then re-read.
    *
-   * Paced by {@link PROFILE_BACKFILL_INTERVAL_MS} and capped at
-   * {@link PROFILE_BACKFILL_MAX_ATTEMPTS} per friend, so a peer who published nothing costs a
-   * handful of dials rather than a permanent retry loop. `profileEpoch` is the honest "we merged a
-   * real profile" marker — {@link mergeProfileIntoFriend} sets it and nothing else does.
+   * Scheduled per friend on the backoff in {@link profileBackfillDelayMs} and capped at
+   * {@link PROFILE_BACKFILL_MAX_ATTEMPTS}, so a peer who published nothing costs a handful of
+   * dials rather than a permanent retry loop. `profileEpoch` is the honest "we merged a real
+   * profile" marker — {@link mergeProfileIntoFriend} sets it and nothing else does.
    */
   private async backfillMissingProfiles(): Promise<void> {
     const mod = this.mod;
     if (!mod) return;
     const now = Date.now();
-    if (now - this.lastProfileBackfillAt < PROFILE_BACKFILL_INTERVAL_MS) return;
-    this.lastProfileBackfillAt = now;
 
+    // Discoveries are awaiting acknowledgement and so are not in the pool yet, but the reveal is
+    // on screen for exactly those — they are the friends a missing persona is most visible on.
     const candidates = new Map(
       [...pool.friendList(this.state), ...this.discoveries.values()].map((friend) => [
         friend.endpointId,
@@ -4051,10 +4445,20 @@ export class LocationSharingService {
       ])
     );
     for (const friend of candidates.values()) {
-      if (!friend.profileTicket || friend.profileEpoch !== undefined) continue;
-      const attempts = this.profileBackfillAttempts.get(friend.endpointId) ?? 0;
-      if (attempts >= PROFILE_BACKFILL_MAX_ATTEMPTS) continue;
-      this.profileBackfillAttempts.set(friend.endpointId, attempts + 1);
+      if (friend.profileEpoch !== undefined) {
+        this.profileBackfill.delete(friend.endpointId);
+        continue;
+      }
+      if (!friend.profileTicket) continue;
+      const state = this.profileBackfill.get(friend.endpointId);
+      if (state && (state.nextAt > now || state.attempts >= PROFILE_BACKFILL_MAX_ATTEMPTS)) {
+        continue;
+      }
+      const attempts = (state?.attempts ?? 0) + 1;
+      this.profileBackfill.set(friend.endpointId, {
+        attempts,
+        nextAt: now + profileBackfillDelayMs(attempts),
+      });
       await mod.importProfileTicket(friend.profileTicket).catch(() => undefined);
       const profile = await mod.readProfile(friend.endpointId).catch(() => null);
       if (profile) this.applyProfile(profile);
@@ -4423,7 +4827,7 @@ export class LocationSharingService {
           withdrawn &&
           !(this.discoveryDecision?.sessionId === event.sessionId && !this.discoveryDecision.accept)
         ) {
-          await this.withdrawDiscoveredFriend(event.sessionId, event.peerEndpointId);
+          await this.withdrawDiscoveredFriend(event.sessionId, event.peerEndpointId, 'peer-reject');
         }
         this.pendingPairRequests = this.pendingPairRequests.filter(
           (e) => e.sessionId !== event.sessionId
@@ -4453,6 +4857,15 @@ export class LocationSharingService {
     }
   }
 
+  /**
+   * Adopt any pair that reached `complete` without its `ready` event being seen.
+   *
+   * `complete` here is a state, not a promise: it means both decision bits are set, which happens
+   * a moment before native installs the ratchet. `pairResult` withholds the friendship until that
+   * has actually happened (see `result_data` in `pairing.rs`), so a session caught mid-finalize
+   * returns null, this leaves `handledPairSessions` alone, and the next poll picks it up. The
+   * alternative — trusting the state — adopted friends that had no ratchet session behind them.
+   */
   private async reconcileCompletedPairs(sessions: PairStateRecord[]): Promise<void> {
     for (const session of sessions) {
       if (session.state !== 'complete' || this.handledPairSessions.has(session.sessionId)) continue;
@@ -4620,6 +5033,11 @@ export class LocationSharingService {
     if (this.pairingReadyFlag) void this.setPairingReady(false);
     this.handledPairSessions.add(event.sessionId);
     this.setPairingActivity('cryptid discovered');
+    // Since the v4 wire the persona is normally already merged above, straight off the Accept.
+    // When it is not — the peer had published nothing when we bumped them — the reveal is on
+    // screen NOW, so the first retry belongs here rather than whenever the next sweep comes
+    // round. Not awaited: the discovery is complete either way and must not wait on a dial.
+    if (!hasVerifiedProfile(friend)) void this.backfillMissingProfiles();
   }
 
   /** Build a Friend from a pair result with a safe placeholder identity (no verified profile yet). */

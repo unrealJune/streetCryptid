@@ -1063,3 +1063,129 @@ async fn a_parked_tick_that_fills_no_slot_still_records_that_the_phone_parked() 
         "the parked declaration is persisted by the tick that had nothing to send"
     );
 }
+
+// ── Introducing yourself to a friend who has only just started existing ──────────────────────
+//
+// A sealed envelope is readable only by the recipients it was sealed FOR, so someone who pairs at
+// 14:00 cannot open anything published at 13:59. Without this call their first sight of you is the
+// next scheduled publish, which on a parked iPhone is p50 5 min / p90 92 min / 17 h tail.
+
+#[tokio::test]
+async fn an_introduction_seals_the_last_known_position_for_the_new_recipient_set() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    h.sink.sent.lock().unwrap().clear();
+    h.sink.stamps.lock().unwrap().clear();
+
+    // Someone pairs a few seconds later, well inside the slot the fix above already filled.
+    let paired_at = base + 3_000;
+    let out = h.engine().publish_introduction(paired_at).await.unwrap();
+
+    assert_eq!(
+        out.enqueued, 1,
+        "the slot being covered must not suppress it"
+    );
+    assert_eq!(out.published, 1);
+    let sent = h.sink.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].1, base,
+        "the ORIGINAL measurement time rides along; this is a repeat, not a new capture"
+    );
+    assert_eq!(
+        h.sink.stamps.lock().unwrap()[0].1,
+        Some(3),
+        "sealed now, which is the only proof this process is alive"
+    );
+}
+
+// The cadence is the one property of a sealed envelope the stash can read, so an introduction has
+// to be EXTRA rather than EARLY: it fills no slot, and must not persuade the next heartbeat that
+// the current one is covered.
+#[tokio::test]
+async fn an_introduction_does_not_consume_a_slot() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    let slot_before = h.gate.get().last_published_slot;
+
+    h.engine().publish_introduction(base + 1_000).await.unwrap();
+    assert_eq!(
+        h.gate.get().last_published_slot,
+        slot_before,
+        "the slot cursor belongs to the cadence, not to this"
+    );
+
+    // The next slot still comes due exactly when it would have.
+    let next = base + INTERVAL;
+    let out = h
+        .engine()
+        .heartbeat(healthy_battery(), INTERVAL, next)
+        .await
+        .unwrap();
+    assert_eq!(out.enqueued, 1, "the heartbeat's own slot is untouched");
+}
+
+// Pairing says nothing about whether the phone has settled, so the parked/live stamp is left
+// exactly as the pipeline last found it. Stamping `parked` here would make a friend paired
+// mid-walk render as stationary.
+#[tokio::test]
+async fn an_introduction_does_not_claim_the_phone_has_parked() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    let state_before = h.gate.get().last_state;
+    h.sink.sent.lock().unwrap().clear();
+    h.sink.stamps.lock().unwrap().clear();
+
+    h.engine().publish_introduction(base + 1_000).await.unwrap();
+
+    assert_eq!(h.gate.get().last_state, state_before);
+    assert_eq!(h.sink.stamps.lock().unwrap()[0].0, state_before);
+}
+
+// A fresh install has nothing to introduce. The first capture will do it.
+#[tokio::test]
+async fn an_introduction_from_a_device_that_has_never_captured_is_a_no_op() {
+    let h = Harness::new();
+    let out = h
+        .engine()
+        .publish_introduction(INTERVAL * 10)
+        .await
+        .unwrap();
+
+    assert_eq!(out.enqueued, 0);
+    assert_eq!(out.published, 0);
+    assert!(h.sink.sent.lock().unwrap().is_empty());
+}
+
+// `critically_low` exists to stop PERIODIC work. This is one envelope, at a moment the user chose,
+// and a dying phone is when someone most wants to know where you are.
+#[tokio::test]
+async fn an_introduction_is_not_suspended_by_a_critical_battery() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    h.sink.sent.lock().unwrap().clear();
+
+    let out = h.engine().publish_introduction(base + 1_000).await.unwrap();
+    assert!(!out.suspended);
+    assert_eq!(out.published, 1);
+}

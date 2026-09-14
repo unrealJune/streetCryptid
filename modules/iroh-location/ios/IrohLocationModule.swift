@@ -847,6 +847,14 @@ public final class IrohLocationModule: Module {
       try await node.forgetSession(peerEndpointHex: peerEndpoint)
     }
 
+    // Companion to forgetSession: erase the pairing record of how the friendship began, not just
+    // the ratchet state of what it became. Finished sessions only — a live pair is the user's to
+    // cancel. Returns how many were dropped.
+    AsyncFunction("forgetPairSessions") { (peerEndpoint: String) async throws -> Int in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Int(try await node.forgetPairSessions(peerEndpointHex: peerEndpoint))
+    }
+
     AsyncFunction("syncLatest") { (peerTickets: [String], traceparent: String?) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       try await node.syncLatest(peerTickets: peerTickets, traceparent: traceparent)
@@ -953,7 +961,7 @@ public final class IrohLocationModule: Module {
       return (await node.pollProfileEvents()).map { profileViewDict($0) }
     }
 
-    // ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ─────────────────────
+    // ── Bilateral pairing (`streetcryptid/pair/4`) — ARCHITECTURE.md §4 ─────────────────────
 
     AsyncFunction("setPairingReady") { (ready: Bool) throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
@@ -1096,6 +1104,22 @@ public final class IrohLocationModule: Module {
     AsyncFunction("bleHasScanHint") { (endpointIdHex: String) async -> Bool in
       guard let node = self.node else { return false }
       return await node.bleHasScanHint(endpointId: hexToData(endpointIdHex))
+    }
+
+    // ── MetricKit: the OS's account of how the app last ended ────────────────────────────────
+    //
+    // Subscribed from module creation rather than lazily, because MetricKit delivers a payload
+    // shortly AFTER launch and never redelivers one. A subscriber registered when JavaScript
+    // first asks for diagnostics would miss the launch that followed the crash it is asking
+    // about — which is every launch that matters.
+    OnCreate {
+      MetricKitDiagnostics.shared.start()
+    }
+
+    /// Drain the diagnostics stored since the last call. Each string is a JSON object.
+    /// Absent on Android and on older iOS binaries, so callers must guard on its presence.
+    AsyncFunction("takeCrashDiagnostics") { () -> [String] in
+      MetricKitDiagnostics.shared.take()
     }
   }
 }

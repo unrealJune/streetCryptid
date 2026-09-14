@@ -16,7 +16,16 @@ export {
 } from './telemetry';
 export type { StartSpanOptions, Telemetry } from './telemetry';
 export { attachSystemSnapshot, getSystemSnapshot } from './snapshot';
-export { getDeviceResource } from './resource';
+export { diagnosticAttributes, reportOsDiagnostics } from './crash-diagnostics';
+export type { OsDiagnostic } from './crash-diagnostics';
+export { getDeviceResource, getRunId } from './resource';
+export {
+  beginTelemetryRun,
+  noteTelemetryRunState,
+  resetTelemetryRunForTesting,
+} from './run-lifecycle';
+export { HANG_THRESHOLD_MS, resetUiLivenessForTesting, startUiLivenessProbe } from './ui-liveness';
+export type { UiLivenessOptions } from './ui-liveness';
 export { installConsoleTelemetryBridge, uninstallConsoleTelemetryBridge } from './console-bridge';
 export {
   clearEventLog,
@@ -29,6 +38,7 @@ export {
   recordEventLog,
   resetEventLogForTesting,
   subscribeEventLog,
+  lastEntryTimestamp,
   takeUnshipped,
   unshippedCount,
   withEventLogLaunchContext,

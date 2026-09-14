@@ -49,7 +49,7 @@ function formatRemaining(seconds: number): string {
 }
 
 /**
- * A picker challenge is only usable if it is exactly the shape `streetcryptid/pair/2` promises:
+ * A picker challenge is only usable if it is exactly the shape `streetcryptid/pair/4` promises:
  * four distinct catalog figures, one of which is the target. Anything else is a malformed or
  * hostile challenge and must not be answerable.
  */

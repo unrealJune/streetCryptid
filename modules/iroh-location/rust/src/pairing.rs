@@ -1,4 +1,4 @@
-//! Bilateral **pairing** over the iroh Endpoint — the `streetcryptid/pair/2` ALPN.
+//! Bilateral **pairing** over the iroh Endpoint — the `streetcryptid/pair/4` ALPN.
 //!
 //! ## Mandatory visual SAS gate (v2)
 //! A pair NEVER reaches `Complete`/`PairResult` on transport success alone. After the signed
@@ -72,7 +72,7 @@ use tokio::sync::Mutex;
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
 
 use crate::docs::TrailDocs;
-use crate::profile::{ProfileDocs, ProfileSink};
+use crate::profile::{ProfileDocs, ProfileSink, MAX_PROFILE_BYTES};
 use crate::sessions::SessionManager;
 
 /// The pairing ALPN. Bump the trailing version on any breaking wire change.
@@ -80,10 +80,17 @@ use crate::sessions::SessionManager;
 /// v3 adds the ratchet ephemeral to the handshake (FORWARD-SECRECY.md §4.2), which changes the
 /// `PairMsg` encoding. Bumping the ALPN rather than only the wire version means a peer on an
 /// older build fails to negotiate at all, instead of connecting and then failing to decode.
-pub const PAIR_ALPN: &[u8] = b"streetcryptid/pair/3";
+///
+/// v4 puts the sender's signed profile record on the `Accept` ([`PairMsg::profile_record`]), so a
+/// persona arrives WITH the pair instead of after it. Appending a field is not a compatible change
+/// here even though postcard tolerates trailing bytes: [`pair_signing_bytes`] re-encodes the
+/// DECODED struct, so an older peer drops the field it does not know, reconstructs different bytes
+/// and fails the ed25519 check. The failure would look like "your friend's phone refused the
+/// pair", which is why this bumps the ALPN and fails at negotiation instead.
+pub const PAIR_ALPN: &[u8] = b"streetcryptid/pair/4";
 
 /// Wire schema version carried in every [`PairMsg`].
-pub const PAIR_WIRE_V: u8 = 3;
+pub const PAIR_WIRE_V: u8 = 4;
 
 /// Invite schema version carried in every [`InviteData`].
 ///
@@ -350,6 +357,22 @@ struct PairMsg {
     endpoint_ticket: String,
     /// Profile read-ticket; populated only on `Accept`.
     profile_ticket: String,
+    /// The sender's own signed profile record; populated only on `Accept`, empty if this device
+    /// has not published one yet.
+    ///
+    /// The ticket above is how the peer follows our profile as it CHANGES; this is how they get
+    /// the current one now. Replicating it cost a fresh iroh-docs dial to addresses baked into
+    /// the ticket, a namespace reconciliation and a blob fetch — all of it rebuilding, from
+    /// scratch, a relationship with a peer we are at this instant authenticated to over an open
+    /// connection. When that dial lost (a one-way local-network block is enough) the friend wore
+    /// `@endpointprefix` and `unknown` until a retry happened to land.
+    ///
+    /// Sending the record inline is sound for the reason the profile module leads with: a record
+    /// is ed25519-signed over canonical bytes and bound to its `endpoint_id`, so docs replication
+    /// was never the trust boundary. The receiver runs the same `verify` against the endpoint id
+    /// the pairing connection pinned, and the same monotonic-epoch rule. Bounded by
+    /// `MAX_PROFILE_BYTES` (2 KiB) on both write and read.
+    profile_record: Vec<u8>,
     /// Trail read-ticket; populated only on `Accept`.
     trail_ticket: String,
     ts: u64,
@@ -404,6 +427,11 @@ fn verify_msg(m: &PairMsg) -> Result<()> {
         || m.trail_ticket.len() > MAX_FRAME
     {
         bail!("pair message ticket too large");
+    }
+    // Checked here, before the signature, so an oversized record is rejected on the cheap path
+    // rather than after an ed25519 verification over it.
+    if m.profile_record.len() > MAX_PROFILE_BYTES {
+        bail!("pair message profile record too large");
     }
     let ep: [u8; ENDPOINT_LEN] = m
         .from_endpoint
@@ -623,6 +651,18 @@ enum LocalDecision {
     NoopOk,
     /// A conflicting decision already won; refuse without changing state or sending anything.
     Contradiction(&'static str),
+}
+
+/// One stable word per [`LocalDecision`], for logs and queries. Deliberately not `Debug`: the
+/// `Contradiction` payload is an internal message that would make every query brittle.
+fn local_decision_label(decision: &LocalDecision) -> &'static str {
+    match decision {
+        LocalDecision::Accept => "accept",
+        LocalDecision::Reject => "reject",
+        LocalDecision::Fail => "fail",
+        LocalDecision::NoopOk => "noop",
+        LocalDecision::Contradiction(_) => "contradiction",
+    }
 }
 
 /// A committer's 96-byte transcript record: `endpoint id || recv pub || nonce`.
@@ -864,6 +904,8 @@ struct PairSession {
     peer_decision: Option<bool>,
     peer_endpoint_ticket: Option<String>,
     peer_profile_ticket: Option<String>,
+    /// The peer's signed profile record as it arrived on their `Accept`, still unverified.
+    peer_profile_record: Option<Vec<u8>>,
     peer_trail_ticket: Option<String>,
     pending_emitted: bool,
     result_emitted: bool,
@@ -942,6 +984,7 @@ impl PairSession {
             peer_decision: None,
             peer_endpoint_ticket: None,
             peer_profile_ticket: None,
+            peer_profile_record: None,
             peer_trail_ticket: None,
             pending_emitted: false,
             result_emitted: false,
@@ -1018,6 +1061,23 @@ impl PairSession {
             || self.withdrawn
             || self.local_decision == Some(false)
             || self.peer_decision == Some(false)
+    }
+
+    /// Whether this session is finished, for either reason.
+    ///
+    /// [`is_complete`](Self::is_complete) and [`is_terminal_failure`](Self::is_terminal_failure)
+    /// are disjoint, so testing only the failure half silently excludes the success half — and a
+    /// nearby session id is DERIVED from the two endpoint ids (`derive_nearby_id`), so the pair
+    /// that succeeded and the pair being attempted now are the same map key. A finished session
+    /// left in place is therefore not inert: the next Bump with that person finds it, declines to
+    /// replace it, and attaches to a session that has already emitted its result and can never
+    /// run a handshake again. The screen sits on EXCHANGING KEYS until it times out.
+    ///
+    /// That is what "pair, unfriend, pair again" did on 2026-09-14. Live sessions are still
+    /// reused — only a FINISHED one may be replaced, which keeps automated same-session retries
+    /// from resurrecting a terminal session while letting a human start over.
+    fn is_terminal(&self) -> bool {
+        self.is_complete() || self.is_terminal_failure()
     }
 
     fn is_untouched_handshake(&self) -> bool {
@@ -1298,26 +1358,70 @@ impl PairSession {
     /// Fold a peer decision (`Accept` tickets / `Reject`). Disclosure-only messages are ignored.
     /// Monotonic and fail-closed: a peer `Reject` is sticky and always wins, so a contradictory
     /// Accept-vs-Reject (in either arrival order, or duplicated) can never leave us completable.
+    /// Apply the peer's decision message to this session.
+    ///
+    /// Every wire decision the session ever accepts passes through here, which is why the record
+    /// of it lives here too. A pair that dies as "rejected" on both phones says nothing about who
+    /// rejected it or when — and both sides showing `Rejected` is a genuinely reachable state that
+    /// took a log-free afternoon to reconstruct on 2026-09-13, because a stance response to our own
+    /// dial is a Reject that no human anywhere pressed.
     fn ingest_decision(&mut self, msg: &PairMsg) {
         self.absorb_disclosure(msg);
+        let before = self.peer_decision;
         match msg.decision {
             Decision::Accept => {
                 // Fail closed: never let a (later or racing) Accept override a peer Reject.
                 if self.peer_decision == Some(false) {
+                    self.note_peer_decision(msg, before, "ignored-after-reject");
                     return;
                 }
                 if !msg.profile_ticket.is_empty() {
                     self.peer_profile_ticket = Some(msg.profile_ticket.clone());
                 }
+                // Kept as bytes and verified in `finalize`, not here: this is the pure half and
+                // the only key it could check against is already pinned on the connection.
+                if !msg.profile_record.is_empty() {
+                    self.peer_profile_record = Some(msg.profile_record.clone());
+                }
                 if !msg.trail_ticket.is_empty() {
                     self.peer_trail_ticket = Some(msg.trail_ticket.clone());
                 }
                 self.peer_decision = Some(true);
+                self.note_peer_decision(msg, before, "applied");
             }
             // Reject is monotonic and authoritative: it overrides any earlier accept and sticks.
-            Decision::Reject => self.peer_decision = Some(false),
+            Decision::Reject => {
+                self.peer_decision = Some(false);
+                self.note_peer_decision(
+                    msg,
+                    before,
+                    if before == Some(true) {
+                        // The case worth seeing from orbit: a pair that had gone bilateral being
+                        // taken back apart by the wire.
+                        "overrode-accept"
+                    } else {
+                        "applied"
+                    },
+                );
+            }
             Decision::Hello | Decision::Reveal => {}
         }
+    }
+
+    /// Record one applied peer decision: what it was, what it replaced, and what the session
+    /// became. `effect` names the interesting cases in a word so a query can filter on them.
+    fn note_peer_decision(&self, msg: &PairMsg, before: Option<bool>, effect: &'static str) {
+        tracing::info!(
+            sc.session = %crate::telemetry::short_hex(&self.session_id),
+            sc.peer = %crate::telemetry::short_hex(&self.peer_endpoint),
+            decision = ?msg.decision,
+            effect,
+            peer_before = ?before,
+            peer_after = ?self.peer_decision,
+            local = ?self.local_decision,
+            phase = ?self.phase(),
+            "pair.peer_decision: folded a decision from the wire"
+        );
     }
 }
 
@@ -1497,6 +1601,18 @@ impl PairCore {
         }
     }
 
+    /// Our own signed profile record for the `Accept`, or empty if we have not published one.
+    ///
+    /// Empty is a real state, not a failure: a device that has never published (first run, or a
+    /// node still coming up) must still be able to complete a pair. The ticket still goes out,
+    /// and the peer's backfill is what closes the gap in that case.
+    async fn our_profile_record(&self) -> Vec<u8> {
+        match self.runtime_docs().await {
+            Ok((_, profile, _)) => profile.own_record_bytes().await.unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     async fn our_trail_ticket(&self) -> String {
         match self.runtime_docs().await {
             Ok((trail, _, _)) => {
@@ -1537,12 +1653,13 @@ impl PairCore {
         let build_started = Instant::now();
         let endpoint_ticket = self.our_endpoint_ticket().await;
         let ticket_ms = build_started.elapsed().as_millis() as u64;
-        let (mut profile_ticket, mut trail_ticket) = match decision {
+        let (mut profile_ticket, mut trail_ticket, mut profile_record) = match decision {
             Decision::Accept => (
                 self.our_profile_ticket().await,
                 self.our_trail_ticket().await,
+                self.our_profile_record().await,
             ),
-            _ => (String::new(), String::new()),
+            _ => (String::new(), String::new(), Vec::new()),
         };
         // The ratchet ephemeral rides every message, like `recv_pub`: it is the same disclosure on
         // each, the receiver binds the first one it sees, and a message that omitted it would fail
@@ -1568,6 +1685,7 @@ impl PairCore {
             if decision != Decision::Accept {
                 profile_ticket.clear();
                 trail_ticket.clear();
+                profile_record.clear();
             }
             (decision, commit, nonce, s.local_ratchet_pub().to_vec())
         };
@@ -1593,6 +1711,7 @@ impl PairCore {
             sas_nonce,
             endpoint_ticket,
             profile_ticket,
+            profile_record,
             trail_ticket,
             ts: now_ms(),
             sig: Vec::new(),
@@ -1713,12 +1832,26 @@ impl PairCore {
             .collect()
     }
 
-    /// The completed friendship material, or `None` if the session isn't complete.
+    /// The completed friendship material, or `None` until [`PairCore::finalize`] has run.
+    ///
+    /// Gated on `result_emitted`, which `is_complete()` alone does NOT imply, and the difference
+    /// is a real one: the decision bits go bilateral the instant a local accept latches, while
+    /// `finalize` — which installs the ratchet session, ingests the handed profile record and
+    /// raises `Ready` — runs afterwards and can still decline. Both are required here: a racing
+    /// peer `Reject` folded in after finalize makes `is_complete()` false again, so re-checking it
+    /// is what stops a result being reported for a pair that has since come apart.
+    ///
+    /// Reporting a result in that window handed the app a friend with no ratchet behind it: every
+    /// ratcheted publish to them would drop with `no_session`, and the pair the human watched
+    /// succeed was never actually completed by either side. Observed on 2026-09-13 16:10:35, where
+    /// a phone adopted a friend 2.5 s before its own finalize declined — the peer's `Reject`
+    /// arrived on the response to our own Accept dial, because the peer was unreachable for long
+    /// enough that its SAS window lapsed first.
     pub async fn result_data(&self, session_id: &[u8; SESSION_ID_LEN]) -> Option<PairResultData> {
         self.expire_pair_sessions().await;
         let sessions = self.sessions.lock().await;
         let s = sessions.get(session_id)?;
-        if !s.is_complete() {
+        if !s.result_emitted || !s.is_complete() {
             return None;
         }
         let peer_recv_pub = s.peer_recv_pub?;
@@ -1827,7 +1960,7 @@ impl PairCore {
             let mut sessions = self.sessions.lock().await;
             let terminal = sessions
                 .get(&session_id)
-                .map(PairSession::is_terminal_failure)
+                .map(PairSession::is_terminal)
                 .unwrap_or(false);
             if terminal {
                 sessions.remove(&session_id);
@@ -1885,6 +2018,47 @@ impl PairCore {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Drop every FINISHED pairing session with `peer`, and any notices still referring to them.
+    /// Returns how many were removed.
+    ///
+    /// Called by `removeFriend`. Tearing the ratchet session down already had a reason beyond
+    /// tidiness (FORWARD-SECRECY §5.4: chain keys for a relationship that no longer exists are
+    /// material whose only remaining use is to a seized device) and the pairing session is the
+    /// same argument one record over — it holds the peer's recv key, their SAS material and their
+    /// tickets. AGENTS.md already states the intent: "a completed pair is torn down by
+    /// `removeFriend`, deliberately, never as a side effect of navigation." Only the first half
+    /// of that was implemented; a Pixel was observed still holding `sessions=1 states=[complete]`
+    /// half an hour after the unfriend.
+    ///
+    /// **Finished sessions only.** A LIVE session with this peer is a pair the human is in the
+    /// middle of, and unfriending must not become a second, silent way to kill one — the pairing
+    /// screen has its own cancel for that. This is the same line `standDownPairing` draws from
+    /// the other side, and the same one [`is_terminal`](PairSession::is_terminal) draws for reuse.
+    ///
+    /// This removes a local record and sends NOTHING on the wire: a wire `Reject` is a decision
+    /// about a pair in progress, and there is no pair in progress here.
+    pub async fn forget_finished_sessions_with(&self, peer: &[u8; ENDPOINT_LEN]) -> usize {
+        let dropped: Vec<[u8; SESSION_ID_LEN]> = {
+            let mut sessions = self.sessions.lock().await;
+            let doomed: Vec<_> = sessions
+                .iter()
+                .filter(|(_, s)| s.peer_endpoint == *peer && s.is_terminal())
+                .map(|(id, _)| *id)
+                .collect();
+            for id in &doomed {
+                sessions.remove(id);
+            }
+            doomed
+        };
+        if !dropped.is_empty() {
+            self.notices
+                .lock()
+                .await
+                .retain(|notice| !dropped.contains(&notice.session_id));
+        }
+        dropped.len()
     }
 
     async fn discard_untouched_handshake(&self, session_id: &[u8; SESSION_ID_LEN]) -> bool {
@@ -1959,6 +2133,15 @@ impl PairCore {
         session_id: &[u8; SESSION_ID_LEN],
         decision: LocalDecision,
     ) -> Result<()> {
+        // The outbound half of the provenance `ingest_decision` records for the inbound one. A
+        // `Contradiction` is logged too and is the most informative of the five: it is the app
+        // asking for something the session has already ruled out, which is nearly always a UI
+        // holding a snapshot older than the handshake it is describing.
+        tracing::info!(
+            sc.session = %crate::telemetry::short_hex(session_id),
+            decision = local_decision_label(&decision),
+            "pair.local_decision: this phone decided"
+        );
         match decision {
             LocalDecision::Accept => self.send_accept_and_finalize(session_id).await,
             LocalDecision::Reject => self.send_negative(session_id, PairSignal::Rejected).await,
@@ -1969,6 +2152,28 @@ impl PairCore {
     }
 
     /// Deliver our (already-latched) `Accept` to the peer and finalize if the pair is bilateral.
+    ///
+    /// ## Finalize first, tell the peer second
+    /// When the peer has ALREADY accepted, this call is the moment the pair becomes bilateral and
+    /// nothing on the network can make it more true. Finalizing before the dial closes a window
+    /// that used to be as long as a dial to an unreachable phone:
+    ///
+    /// `best_effort_notify` does not merely send — it folds the peer's stance *response* back into
+    /// the session (that is how a peer who accepted in the same breath is noticed). So a peer whose
+    /// own SAS window lapsed while we were dialling answers `Reject`, `ingest_decision` applies it
+    /// (a wire Reject is authoritative and overrides an earlier accept), and the `is_complete()`
+    /// re-check below then reads false — finalize silently declines, no ratchet is installed, and
+    /// no `Ready` is ever raised. Meanwhile every reader saw `Complete` for the whole dial.
+    ///
+    /// That is the 2026-09-13 16:10:30 failure exactly: an iPhone latched its accept at :35, its
+    /// dial to a Pixel with no active paths took until :37.883, the stance that came back was a
+    /// Reject, and the pair both humans had just verified evaporated — after the app had already
+    /// adopted the friend. Ordering it this way means the ratchet exists before anything the peer
+    /// says can be folded in, and a late peer Reject leaves a completed pair to be torn down
+    /// explicitly rather than a half-finished one to be silently abandoned.
+    ///
+    /// The post-notify check stays for the case it was written for: a session that was NOT yet
+    /// bilateral when we accepted, completed by the peer's Accept riding the dial response.
     async fn send_accept_and_finalize(&self, session_id: &[u8; SESSION_ID_LEN]) -> Result<()> {
         let s = {
             let sessions = self.sessions.lock().await;
@@ -1980,6 +2185,10 @@ impl PairCore {
         let msg = self
             .build_session_msg(Decision::Accept, &s, Vec::new())
             .await?;
+        // Bilateral already? Then the friendship is real now, not once the dial returns.
+        if self.session_is_complete(session_id).await {
+            self.finalize(session_id, s.peer_endpoint).await?;
+        }
         self.best_effort_notify(
             s.peer_endpoint,
             s.peer_endpoint_ticket,
@@ -1988,17 +2197,21 @@ impl PairCore {
             s.nearby,
         )
         .await;
-        let complete = self
-            .sessions
+        // Idempotent via `result_emitted`, so this is a no-op when the branch above already ran.
+        if self.session_is_complete(session_id).await {
+            self.finalize(session_id, s.peer_endpoint).await?;
+        }
+        Ok(())
+    }
+
+    /// Whether `session_id` currently reads as a bilateral, non-terminal pair.
+    async fn session_is_complete(&self, session_id: &[u8; SESSION_ID_LEN]) -> bool {
+        self.sessions
             .lock()
             .await
             .get(session_id)
             .map(PairSession::is_complete)
-            .unwrap_or(false);
-        if complete {
-            self.finalize(session_id, s.peer_endpoint).await?;
-        }
-        Ok(())
+            .unwrap_or(false)
     }
 
     /// Best-effort deliver our (already-latched) negative decision (`Reject`) to the peer and
@@ -2187,7 +2400,7 @@ impl PairCore {
         peer_endpoint: [u8; ENDPOINT_LEN],
     ) -> Result<()> {
         let ratchets = self.runtime_sessions().await;
-        let (profile_ticket, trail_ticket, nonce) = {
+        let (profile_ticket, profile_record, trail_ticket, nonce) = {
             let mut sessions = self.sessions.lock().await;
             let s = sessions
                 .get_mut(session_id)
@@ -2230,12 +2443,28 @@ impl PairCore {
             }
             (
                 s.peer_profile_ticket.clone(),
+                s.peer_profile_record.clone(),
                 s.peer_trail_ticket.clone(),
                 s.sas_nonce,
             )
         };
 
         if let Ok((trail, profile, sink)) = self.runtime_docs().await {
+            // BEFORE the ticket import and before `Ready`, so the persona is already readable by
+            // the time the app asks for the pair result. This is the whole point of carrying it:
+            // the import below is now only how we follow LATER edits, and how a peer who had
+            // published nothing yet eventually catches up.
+            if let Some(bytes) = profile_record.as_deref() {
+                match profile.ingest_handed_record(bytes, &peer_endpoint).await {
+                    Ok(Some(rec)) => sink.on_profile_update(rec),
+                    Ok(None) => {}
+                    Err(err) => tracing::warn!(
+                        error = %err,
+                        sc.peer = %crate::telemetry::short_hex(&peer_endpoint),
+                        "pair Accept carried a profile record that did not verify; ignoring it"
+                    ),
+                }
+            }
             if let Some(pt) = profile_ticket.as_deref() {
                 if let Ok(ns) = profile.import_ticket(pt).await {
                     profile.watch(ns, sink);
@@ -2452,7 +2681,7 @@ impl PairCore {
                     if nearby
                         && sessions
                             .get(&session_id)
-                            .map(PairSession::is_terminal_failure)
+                            .map(PairSession::is_terminal)
                             .unwrap_or(false)
                     {
                         sessions.remove(&session_id);
@@ -2625,7 +2854,7 @@ async fn dial_exchange(endpoint: &Endpoint, addr: EndpointAddr, msg: &PairMsg) -
     Ok(resp)
 }
 
-/// The inbound `streetcryptid/pair/2` protocol handler.
+/// The inbound `streetcryptid/pair/4` protocol handler.
 #[derive(Clone)]
 pub struct PairProtocol {
     core: Arc<PairCore>,
@@ -2738,6 +2967,7 @@ mod tests {
             sas_nonce: Vec::new(),
             endpoint_ticket: "ticket".into(),
             profile_ticket: String::new(),
+            profile_record: Vec::new(),
             trail_ticket: String::new(),
             ts: 123,
             sig: Vec::new(),
@@ -2803,6 +3033,34 @@ mod tests {
     }
 
     #[test]
+    fn profile_record_is_covered_by_the_signature() {
+        let (seed, endpoint) = identity();
+        let mut msg = sample_msg(&seed, &endpoint, Decision::Accept);
+        msg.profile_record = b"swapped in after signing".to_vec();
+        assert!(
+            verify_msg(&msg).is_err(),
+            "a record substituted after signing must not verify"
+        );
+    }
+
+    #[test]
+    fn oversized_profile_record_is_refused() {
+        let (seed, endpoint) = identity();
+        let msg = sign_msg(
+            &seed,
+            PairMsg {
+                profile_record: vec![0u8; MAX_PROFILE_BYTES + 1],
+                sig: Vec::new(),
+                ..sample_msg(&seed, &endpoint, Decision::Accept)
+            },
+        )
+        .unwrap();
+        // Correctly signed, still refused: the bound is on the decode path, ahead of the
+        // signature check, so a hostile peer cannot make us verify over 64 KiB.
+        assert!(verify_msg(&msg).is_err());
+    }
+
+    #[test]
     fn msg_tamper_is_detected() {
         let (seed, endpoint) = identity();
         let mut msg = sample_msg(&seed, &endpoint, Decision::Hello);
@@ -2836,6 +3094,7 @@ mod tests {
             sas_nonce: Vec::new(),
             endpoint_ticket: String::new(),
             profile_ticket: String::new(),
+            profile_record: Vec::new(),
             trail_ticket: String::new(),
             ts: 0,
             sig: Vec::new(),
@@ -3094,6 +3353,7 @@ mod tests {
         // peer accepts
         let mut accept = PairMsg {
             profile_ticket: "p".into(),
+            profile_record: b"record".to_vec(),
             trail_ticket: "t".into(),
             ..sample_msg(&seed, &endpoint, Decision::Accept)
         };
@@ -3110,6 +3370,7 @@ mod tests {
         assert!(s.is_complete());
         assert_eq!(s.peer_profile_ticket.as_deref(), Some("p"));
         assert_eq!(s.peer_trail_ticket.as_deref(), Some("t"));
+        assert_eq!(s.peer_profile_record.as_deref(), Some(&b"record"[..]));
     }
 
     #[test]
@@ -3156,6 +3417,7 @@ mod tests {
             sas_nonce: peer_nonce.to_vec(),
             endpoint_ticket: String::new(),
             profile_ticket: String::new(),
+            profile_record: Vec::new(),
             trail_ticket: String::new(),
             ts: 0,
             sig: Vec::new(),
@@ -3554,6 +3816,7 @@ mod tests {
             sas_nonce: Vec::new(),
             endpoint_ticket: String::new(),
             profile_ticket: String::new(),
+            profile_record: Vec::new(),
             trail_ticket: String::new(),
             ts: now_ms(),
             sig: Vec::new(),
@@ -3641,6 +3904,196 @@ mod tests {
         let s = sessions.get(&sid).unwrap();
         assert!(!s.failed, "fresh session is not terminal");
         assert_ne!(s.sas_nonce, nonce1, "fresh session uses a fresh SAS nonce");
+    }
+
+    /// Pair, unfriend, pair again — the 2026-09-14 report.
+    ///
+    /// A nearby session id is DERIVED from the two endpoint ids, so the second Bump with the same
+    /// person lands on the same map key as the pair that just succeeded. While only
+    /// `is_terminal_failure` was replaced, a COMPLETE session survived and was reused: the new
+    /// attempt attached to a session that had already emitted its result, no handshake ever ran,
+    /// and the screen sat on EXCHANGING KEYS until it timed out.
+    #[tokio::test]
+    async fn a_completed_nearby_session_does_not_block_pairing_again() {
+        let (core, our_ep, _our_recv) = test_core();
+        core.set_pairing_ready(true);
+        let peer_sk = SigningKey::generate(&mut OsRng);
+        let peer_ep = peer_sk.verifying_key().to_bytes();
+        let peer_recv = [7u8; RECV_PUB_LEN];
+        let sid = derive_nearby_id(&our_ep, &peer_ep);
+
+        let commit1 = sas_commitment(
+            &sid,
+            &peer_ep,
+            &peer_recv,
+            &test_ratchet_for(peer_ep),
+            &[1u8; SAS_NONCE_LEN],
+        );
+        core.handle_incoming(
+            peer_ep,
+            signed_hello_nearby(&peer_sk.to_bytes(), &peer_ep, &peer_recv, sid, commit1),
+        )
+        .await
+        .unwrap();
+
+        // Drive it to COMPLETE (both decisions true), the state a successful pair leaves behind —
+        // and the state `removeFriend` does not clear today.
+        let nonce1 = {
+            let mut sessions = core.sessions.lock().await;
+            let s = sessions.get_mut(&sid).unwrap();
+            s.local_decision = Some(true);
+            s.peer_decision = Some(true);
+            s.result_emitted = true;
+            assert!(s.is_complete(), "precondition: the pair succeeded");
+            assert!(
+                !s.is_terminal_failure(),
+                "precondition: success is NOT a terminal failure - the bug's whole basis"
+            );
+            s.sas_nonce
+        };
+
+        let commit2 = sas_commitment(
+            &sid,
+            &peer_ep,
+            &peer_recv,
+            &test_ratchet_for(peer_ep),
+            &[2u8; SAS_NONCE_LEN],
+        );
+        core.handle_incoming(
+            peer_ep,
+            signed_hello_nearby(&peer_sk.to_bytes(), &peer_ep, &peer_recv, sid, commit2),
+        )
+        .await
+        .unwrap();
+
+        let sessions = core.sessions.lock().await;
+        let s = sessions.get(&sid).unwrap();
+        assert!(!s.is_complete(), "the finished session must not be reused");
+        assert!(
+            !s.result_emitted,
+            "a reused result would re-announce an old pair"
+        );
+        assert_eq!(s.local_decision, None, "the new attempt starts undecided");
+        assert_eq!(s.peer_decision, None, "the new attempt starts undecided");
+        assert_ne!(s.sas_nonce, nonce1, "fresh session uses a fresh SAS nonce");
+    }
+
+    /// The reuse rule that must survive the fix: a LIVE session is still reused, so an automated
+    /// same-session retry cannot silently restart a handshake a human is in the middle of.
+    ///
+    /// Driven through `handle_incoming` rather than `initiate_nearby`, which needs an attached
+    /// pair runtime (`initiate_nearby_requires_a_runtime` pins that) and so cannot run on a bare
+    /// `test_core`. Both callers consult the same `is_terminal` predicate.
+    #[tokio::test]
+    async fn a_live_nearby_session_is_still_reused() {
+        let (core, our_ep, _our_recv) = test_core();
+        core.set_pairing_ready(true);
+        let peer_sk = SigningKey::generate(&mut OsRng);
+        let peer_ep = peer_sk.verifying_key().to_bytes();
+        let peer_recv = [7u8; RECV_PUB_LEN];
+        let sid = derive_nearby_id(&our_ep, &peer_ep);
+
+        let commit1 = sas_commitment(
+            &sid,
+            &peer_ep,
+            &peer_recv,
+            &test_ratchet_for(peer_ep),
+            &[1u8; SAS_NONCE_LEN],
+        );
+        core.handle_incoming(
+            peer_ep,
+            signed_hello_nearby(&peer_sk.to_bytes(), &peer_ep, &peer_recv, sid, commit1),
+        )
+        .await
+        .unwrap();
+        let nonce1 = {
+            let sessions = core.sessions.lock().await;
+            sessions.get(&sid).unwrap().sas_nonce
+        };
+
+        // Same session, still live (no decision latched): the Hello must NOT reset it.
+        let commit2 = sas_commitment(
+            &sid,
+            &peer_ep,
+            &peer_recv,
+            &test_ratchet_for(peer_ep),
+            &[2u8; SAS_NONCE_LEN],
+        );
+        core.handle_incoming(
+            peer_ep,
+            signed_hello_nearby(&peer_sk.to_bytes(), &peer_ep, &peer_recv, sid, commit2),
+        )
+        .await
+        .unwrap();
+
+        let sessions = core.sessions.lock().await;
+        assert_eq!(
+            sessions.get(&sid).unwrap().sas_nonce,
+            nonce1,
+            "an unfinished session keeps its SAS material"
+        );
+    }
+
+    /// `removeFriend` must erase the pairing record, not only the ratchet session. A Pixel was
+    /// seen still holding `sessions=1 states=[complete]` half an hour after an unfriend.
+    #[tokio::test]
+    async fn forgetting_a_peer_drops_their_finished_sessions() {
+        let (core, our_ep, _our_recv) = test_core();
+        let peer = [9u8; ENDPOINT_LEN];
+        let other = [8u8; ENDPOINT_LEN];
+        let sid_done = derive_nearby_id(&our_ep, &peer);
+        let sid_failed = [3u8; SESSION_ID_LEN];
+        let sid_other = [4u8; SESSION_ID_LEN];
+
+        {
+            let mut sessions = core.sessions.lock().await;
+            let mut done = test_session(sid_done, true, true, peer);
+            done.local_decision = Some(true);
+            done.peer_decision = Some(true);
+            done.result_emitted = true;
+            sessions.insert(sid_done, done);
+
+            let mut failed = test_session(sid_failed, true, true, peer);
+            failed.failed = true;
+            sessions.insert(sid_failed, failed);
+
+            // A finished session with SOMEONE ELSE must survive: this unfriends one person.
+            let mut unrelated = test_session(sid_other, true, true, other);
+            unrelated.local_decision = Some(true);
+            unrelated.peer_decision = Some(true);
+            sessions.insert(sid_other, unrelated);
+        }
+
+        assert_eq!(core.forget_finished_sessions_with(&peer).await, 2);
+        let sessions = core.sessions.lock().await;
+        assert!(
+            !sessions.contains_key(&sid_done),
+            "the completed pair is gone"
+        );
+        assert!(
+            !sessions.contains_key(&sid_failed),
+            "the failed pair is gone"
+        );
+        assert!(
+            sessions.contains_key(&sid_other),
+            "another peer's pair is untouched"
+        );
+    }
+
+    /// A pair the human is in the middle of is theirs to cancel; unfriending must not become a
+    /// second, silent way to kill one.
+    #[tokio::test]
+    async fn forgetting_a_peer_spares_a_live_session() {
+        let (core, our_ep, _our_recv) = test_core();
+        let peer = [9u8; ENDPOINT_LEN];
+        let sid = derive_nearby_id(&our_ep, &peer);
+        {
+            let mut sessions = core.sessions.lock().await;
+            sessions.insert(sid, test_session(sid, true, true, peer));
+        }
+
+        assert_eq!(core.forget_finished_sessions_with(&peer).await, 0);
+        assert!(core.sessions.lock().await.contains_key(&sid));
     }
 
     // ── Concurrency / monotonicity of the SAS decision state machine ────────────────────────
@@ -4140,6 +4593,7 @@ mod tests {
             sas_nonce: Vec::new(),
             endpoint_ticket: String::new(),
             profile_ticket: if tickets { "p".into() } else { String::new() },
+            profile_record: Vec::new(),
             trail_ticket: if tickets { "t".into() } else { String::new() },
             ts: 0,
             sig: Vec::new(),
@@ -4245,6 +4699,86 @@ mod tests {
                 "exactly one terminal decision was reached"
             );
         }
+    }
+
+    /// A bilateral session is NOT a completed friendship until `finalize` has run.
+    ///
+    /// The two used to be the same test (`is_complete()`), and the gap between them is real time:
+    /// `send_accept_and_finalize` can spend a whole dial in it. An app that reads a result there
+    /// adopts a friend with no ratchet session behind it — see the doc comment on `result_data`.
+    #[tokio::test]
+    async fn result_is_withheld_until_finalize_has_run() {
+        let (core, _our_ep, _recv) = test_core();
+        let peer_ep = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
+        let (sid, _challenge) = insert_verifying(&core, peer_ep).await;
+
+        {
+            let mut sessions = core.sessions.lock().await;
+            let s = sessions.get_mut(&sid).unwrap();
+            s.local_decision = Some(true);
+            s.peer_decision = Some(true);
+            assert!(s.is_complete(), "the session is bilateral");
+        }
+
+        assert!(
+            core.result_data(&sid).await.is_none(),
+            "a bilateral session must not report a result before finalize installs the ratchet"
+        );
+
+        core.finalize(&sid, peer_ep).await.unwrap();
+
+        assert!(
+            core.result_data(&sid).await.is_some(),
+            "finalize is what makes the friendship readable"
+        );
+    }
+
+    /// A peer `Reject` that lands after the pair went bilateral cannot un-complete a pair that has
+    /// already been finalized — which is the point of finalizing before the dial that carries it.
+    ///
+    /// Before the reorder, the reject arrived on the response to our OWN accept dial, `finalize`
+    /// then read `is_complete() == false` and declined, and the pair both humans had verified was
+    /// lost with nothing but two `rejected` rows to show for it.
+    #[tokio::test]
+    async fn a_late_peer_reject_cannot_unmake_a_finalized_pair() {
+        let (core, _our_ep, _recv) = test_core();
+        let peer_sk = SigningKey::generate(&mut OsRng);
+        let peer_ep = peer_sk.verifying_key().to_bytes();
+        let (sid, _challenge) = insert_verifying(&core, peer_ep).await;
+
+        {
+            let mut sessions = core.sessions.lock().await;
+            let s = sessions.get_mut(&sid).unwrap();
+            s.local_decision = Some(true);
+            s.peer_decision = Some(true);
+        }
+        core.finalize(&sid, peer_ep).await.unwrap();
+        assert!(core.result_data(&sid).await.is_some(), "finalized");
+
+        // The stance response to our own dial, arriving late: authoritative, and it does move the
+        // session out of `Complete`.
+        {
+            let mut sessions = core.sessions.lock().await;
+            let s = sessions.get_mut(&sid).unwrap();
+            let peer_recv = s.peer_recv_pub.unwrap();
+            s.ingest_decision(&decision_msg(
+                Decision::Reject,
+                peer_ep,
+                peer_recv,
+                sid,
+                false,
+            ));
+            assert_eq!(s.phase(), PairPhase::Rejected);
+        }
+
+        // What must NOT happen is the pair silently evaporating: the ratchet was installed and the
+        // result was emitted before the reject could be folded in, so the friendship is a thing
+        // that exists and can be torn down deliberately, not one that was never made.
+        let sessions = core.sessions.lock().await;
+        assert!(
+            sessions.get(&sid).unwrap().result_emitted,
+            "the completed pair stays completed; a late reject is a teardown, not an undo"
+        );
     }
 
     /// Peer decision ingestion is monotonic and fails closed: a `Reject` always wins over an

@@ -13,7 +13,46 @@ import { SECURE_STORE_OPTIONS } from './secure-keys';
  * already-published counter value. `saveSeq` therefore propagates failure — the caller
  * (`nextSeq` in location-sharing.ts) persists before the value goes on the wire, so a persist
  * failure aborts the publish instead of risking reuse.
+ *
+ * # What this value MEANS, since `seq_store.rs` took over issuing
+ *
+ * The live counter is now the native one under `state_dir`, and this is no longer a mirror of it —
+ * it is a **reservation**: a number at or above every `seq` this device will issue before the next
+ * launch tops it up. That distinction is the whole point, because the two stores do not die
+ * together. On iOS the keychain SURVIVES app deletion while `state_dir` (Application Support) does
+ * not, so a reinstall meets a live native counter of 0 and whatever this held.
+ *
+ * As a mirror that was a rewind. On 2026-09-12 a phone reinstalled onto a different build, the
+ * native counter died at 6851, this still read 6776, and the fresh install re-issued 75 values
+ * that were already on the wire — the key-reuse hazard FORWARD-SECRECY.md exists to prevent. (It
+ * was harmless only because the ratchet state was wiped in the same breath.) A mirror can only
+ * ever lag, and the native drain path issues `seq` on background wakes with no JS context alive to
+ * update it, so no amount of write-back closes the gap.
+ *
+ * As a reservation it cannot rewind: {@link SEQ_RESERVATION_BLOCK} values are claimed here BEFORE
+ * native issues them, so a wipe costs at most one unused block and never a reused value. Skipping
+ * is explicitly safe — `SeqStore::seed` is monotone, and its own docs note a floor above the
+ * current value "can only ever skip values, never re-issue them".
  */
+
+/**
+ * How far ahead of the live counter each launch reserves.
+ *
+ * Sized against how much the BACKGROUND path can publish while no JS context exists to reserve
+ * more: measured at ~94 envelopes in 12 h on a phone that was working throughout, so this is
+ * roughly fifty days of continuous background publishing. `seq` is a `u64` on the wire and gaps in
+ * it mean nothing to a receiver — the only cost of being generous is numbers nobody ever uses, and
+ * the only cost of being stingy is the rewind this exists to prevent.
+ */
+export const SEQ_RESERVATION_BLOCK = 10_000;
+
+/**
+ * How close the live counter may get to the reservation before a new block is claimed.
+ *
+ * Only the foreground path can notice and top up, so this exists to keep the cheap local check in
+ * `nextSeq` from turning into a native round-trip on every single publish.
+ */
+export const SEQ_RESERVATION_LOW_WATER = 1_000;
 
 const SEQ_KEY = 'sc.social.seq.v2';
 const LEGACY_SEQ_KEY = 'sc.social.seq';

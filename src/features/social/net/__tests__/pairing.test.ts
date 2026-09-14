@@ -10,6 +10,13 @@ import type {
   SasChallenge,
 } from 'iroh-location';
 
+import {
+  createTelemetry,
+  getEventLog,
+  resetEventLogForTesting,
+  setTelemetryForTesting,
+} from '@/features/dev/telemetry';
+
 import type { ContactCard } from '../../core/types';
 import { BUMP_SEARCH_DURATION_MS } from '../../core/pairing-countdown';
 
@@ -43,6 +50,7 @@ class FakeNativeModule {
     revokePairInvite: [] as string[],
     setPairingReady: [] as boolean[],
     importProfileTicket: [] as string[],
+    publishIntroduction: [] as string[],
     subscribe: [] as { topic: string; bootstrap: string[] }[],
     unsubscribe: [] as string[],
     shutdown: 0,
@@ -140,6 +148,19 @@ class FakeNativeModule {
   }
   async unsubscribe(subscriptionId: string) {
     this.calls.unsubscribe.push(subscriptionId);
+  }
+  async publishIntroduction(subscriptionId: string) {
+    this.calls.publishIntroduction.push(subscriptionId);
+    return {
+      accepted: true,
+      rejection: null,
+      enqueued: 1,
+      published: 1,
+      pending: 0,
+      slotsSkipped: 0,
+      overflowDropped: 0,
+      suspended: false,
+    };
   }
   async publish() {}
   async docsWrite() {}
@@ -275,7 +296,11 @@ jest.mock('expo-secure-store', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { LocationSharingService, type SharingSnapshot } from '../location-sharing';
+import {
+  LocationSharingService,
+  profileBackfillDelayMs,
+  type SharingSnapshot,
+} from '../location-sharing';
 // eslint-disable-next-line import/first
 import * as persistence from '../persistence';
 
@@ -322,6 +347,11 @@ function pairResult(overrides: Partial<PairResult> & { sessionId: string }): Pai
     peerProfile: null,
     ...overrides,
   };
+}
+
+/** Spans this service emitted, newest first. */
+function poolSpans(action: string): ReturnType<typeof getEventLog> {
+  return getEventLog().filter((entry) => entry.action === action);
 }
 
 function verifyingSession(
@@ -398,10 +428,15 @@ async function discover(
 describe('LocationSharingService — pairing / profile wiring', () => {
   beforeEach(() => {
     mockHolder.mod = new FakeNativeModule();
+    // A real telemetry instance so the spans this file asserts on are the ones the service emits,
+    // rather than a mock's idea of them. It writes to the in-memory event log only.
+    resetEventLogForTesting();
+    setTelemetryForTesting(createTelemetry({}));
   });
 
   afterEach(() => {
     while (services.length) services.pop()?.shutdown();
+    setTelemetryForTesting(undefined);
   });
 
   it('ignores pairing-ready changes until node initialization is complete', async () => {
@@ -942,6 +977,34 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(snap.current?.pairing.verifications).toHaveLength(0);
     expect(snap.current?.friends.some((f) => f.endpointId === 'peer-cancel')).toBe(false);
     expect(snap.current?.sharingWith).toEqual([]);
+  });
+
+  it('standing down cancels a live session but spares one that has completed', async () => {
+    const svc = newService();
+    await svc.init('@me', 'mothman');
+
+    // What the screen holds: two sessions it believed were in flight when it last rendered.
+    mockHolder.mod.sessions = [
+      verifyingSession({ sessionId: 'sess-live', peerEndpointId: 'peer-live' }),
+      verifyingSession({ sessionId: 'sess-done', peerEndpointId: 'peer-done', state: 'complete' }),
+    ];
+
+    await svc.standDownPairing(['sess-live', 'sess-done']);
+
+    // The regression: the screen's list is a poll old, so a pair that completed inside that poll
+    // used to be cancelled on the way out — sending the peer a Reject for a pairing that had
+    // already succeeded, and leaving exactly one of the two phones with a friend.
+    expect(mockHolder.mod.calls.cancelPair).toEqual(['sess-live']);
+  });
+
+  it('standing down ignores sessions native no longer knows about', async () => {
+    const svc = newService();
+    await svc.init('@me', 'mothman');
+    mockHolder.mod.sessions = [];
+
+    await svc.standDownPairing(['sess-vanished']);
+
+    expect(mockHolder.mod.calls.cancelPair).toEqual([]);
   });
 
   it('a failed pair after verification creates no friend or sharing grant', async () => {
@@ -1792,6 +1855,142 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     } finally {
       nowSpy.mockRestore();
     }
+  });
+
+  it('backs the profile retry off from one second, capped', () => {
+    // The first attempt is immediate; these are the gaps after it. The cap is what keeps ten
+    // attempts inside the few minutes the bounded retry is documented to cover.
+    expect(profileBackfillDelayMs(1)).toBe(1_000);
+    expect(profileBackfillDelayMs(2)).toBe(2_000);
+    expect(profileBackfillDelayMs(3)).toBe(4_000);
+    expect(profileBackfillDelayMs(10)).toBe(60_000);
+    expect(profileBackfillDelayMs(0)).toBe(1_000);
+  });
+
+  // Regression, 2026-09-13: a pair completed at 21:50:55 and the persona did not land until
+  // 21:51:20 — the reveal having given up at 21:51:07. Nothing was slow; the retry was simply not
+  // allowed to run. The sweep stamped ONE clock the instant its gate opened, before checking
+  // whether any friend needed work, so the pass that ran against an empty pool at launch spent
+  // the quota and the pair that completed seconds later served out the remainder.
+  it('retries a personaless pair at once, and paces each friend on their own clock', async () => {
+    const svc = newService();
+    const snap = watch(svc);
+    await svc.init('@me', 'mothman');
+    // An empty-pool sweep at launch must cost a later pair nothing.
+    await svc.refreshPairing();
+    mockHolder.mod.calls.importProfileTicket.length = 0;
+
+    mockHolder.mod.pairResults.set(
+      'sess-a',
+      pairResult({ sessionId: 'sess-a', peerEndpointId: 'aaaa0001', peerProfile: null })
+    );
+    mockHolder.mod.pairEvents = [
+      { kind: 'ready', sessionId: 'sess-a', peerEndpointId: 'aaaa0001', nearby: true },
+    ];
+    await svc.refreshPairing();
+
+    // The reveal is on screen now, so the first re-dial happens now — not on the next sweep.
+    expect(mockHolder.mod.calls.importProfileTicket).toContain('peer-profile');
+
+    // A second friend paired immediately after must not inherit the first one's backoff. The
+    // first is acknowledged so the second becomes the discovery on screen.
+    await svc.acknowledgeDiscoveredFriend();
+    mockHolder.mod.calls.importProfileTicket.length = 0;
+    mockHolder.mod.profiles.set(
+      'bbbb0002',
+      profileView({ endpointId: 'bbbb0002', epoch: 5, handle: '@second', sigil: 'wendigo' })
+    );
+    mockHolder.mod.pairResults.set(
+      'sess-b',
+      pairResult({ sessionId: 'sess-b', peerEndpointId: 'bbbb0002', peerProfile: null })
+    );
+    mockHolder.mod.pairEvents = [
+      { kind: 'ready', sessionId: 'sess-b', peerEndpointId: 'bbbb0002', nearby: true },
+    ];
+    await svc.refreshPairing();
+
+    expect(snap.current?.pairing.discoveredFriend?.handle).toBe('@second');
+  });
+
+  // A sealed envelope is readable only by the recipients it was sealed FOR, so a new friend can
+  // open nothing published before they existed. Without an introduction their first sight of you
+  // is the next scheduled publish — p50 5 min / p90 92 min / 17 h tail on a parked iPhone.
+  describe('introducing yourself to a new friend', () => {
+    async function pairAndWatch() {
+      const svc = newService();
+      const snap = watch(svc);
+      await svc.init('@me', 'mothman');
+      mockHolder.mod.pairResults.set(
+        'sess-hello',
+        pairResult({ sessionId: 'sess-hello', peerEndpointId: 'cc330099', peerProfile: null })
+      );
+      mockHolder.mod.pairEvents = [
+        { kind: 'ready', sessionId: 'sess-hello', peerEndpointId: 'cc330099', nearby: true },
+      ];
+      await svc.refreshPairing();
+      mockHolder.mod.pairEvents = [];
+      return { svc, snap };
+    }
+
+    // The consent argument, and the reason this does not hang off `onPairReady`. Pairing ARMS
+    // sharing, but the reveal screen still offers REJECT and `rejectDiscoveredFriend` revokes —
+    // so nothing may go out until the human says keep.
+    it('sends nothing while the reveal is still on screen', async () => {
+      const { snap } = await pairAndWatch();
+      expect(snap.current?.pairing?.discoveredFriend?.endpointId).toBe('cc330099');
+      expect(mockHolder.mod.calls.publishIntroduction).toHaveLength(0);
+    });
+
+    it('seals the last known position once the friend is acknowledged', async () => {
+      const { svc } = await pairAndWatch();
+      await svc.acknowledgeDiscoveredFriend();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mockHolder.mod.calls.publishIntroduction).toHaveLength(1);
+    });
+
+    it('sends nothing when the friend is rejected instead', async () => {
+      const { svc } = await pairAndWatch();
+      await svc.rejectDiscoveredFriend();
+
+      expect(mockHolder.mod.calls.publishIntroduction).toHaveLength(0);
+    });
+
+    // A friend vanishing seconds after a successful pair is indistinguishable, in the data, from
+    // a pair that silently failed — unless the removal says who asked for it. It did not, and on
+    // 2026-09-13 that cost an afternoon deciding whether REJECT had been pressed at all.
+    it('records why the friend was dropped, distinctly from a manual removal', async () => {
+      const { svc } = await pairAndWatch();
+      // Nothing joins the pool on `ready` — the acknowledgement is the add, and says so.
+      expect(poolSpans('pool.friend_added')).toHaveLength(0);
+
+      await svc.acknowledgeDiscoveredFriend();
+      expect(poolSpans('pool.friend_added')[0]?.details).toMatchObject({
+        attributes: expect.objectContaining({
+          reason: 'pair-acknowledged',
+          'sc.peer': 'cc330099',
+        }),
+      });
+
+      // The peer's late `rejected` for that same session is the one path that withdraws a friend
+      // who was already in the pool, and it must not read as someone using remove-friend.
+      mockHolder.mod.pairEvents = [
+        { kind: 'rejected', sessionId: 'sess-hello', peerEndpointId: 'cc330099', nearby: true },
+      ];
+      await svc.refreshPairing();
+
+      expect(poolSpans('pool.friend_removed')[0]?.details).toMatchObject({
+        attributes: expect.objectContaining({ reason: 'peer-reject', friends: 0 }),
+      });
+    });
+
+    // A phone can be running an older binary than the JS bundle — the export simply is not there.
+    it('is silent on a binary that predates the native half', async () => {
+      const { svc } = await pairAndWatch();
+      delete (mockHolder.mod as { publishIntroduction?: unknown }).publishIntroduction;
+      expect(() => svc.acknowledgeDiscoveredFriend()).not.toThrow();
+    });
   });
 
   it('re-arms replication for a friend paired without a profile', async () => {

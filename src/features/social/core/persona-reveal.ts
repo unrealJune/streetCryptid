@@ -24,8 +24,28 @@ export const CIPHER_GLYPHS = '0123456789abcdef';
  * Not the same as giving up on the profile — `backfillMissingProfiles` keeps retrying for minutes
  * — only on the animation. A scramble still going after this long has stopped reading as "working"
  * and started reading as broken.
+ *
+ * This is now the rare path. Since the v4 pairing wire the persona arrives ON the Accept, so a
+ * reveal that reaches this timeout means the peer had genuinely published nothing when we bumped
+ * them — which is what the copy says.
  */
 export const PERSONA_PATIENCE_MS = 12_000;
+
+/**
+ * How long the churn runs when the persona was there all along.
+ *
+ * The decrypt started life as a way to spend a wait honestly, and carried a rule that it must not
+ * play over data we already had — a decrypt over nothing being decrypted is theatre. Putting the
+ * profile record on the pairing Accept removed the wait entirely, which would have retired the
+ * animation with it: every pair would resolve at mount and nobody would ever see the thing.
+ *
+ * So it is now a scripted beat rather than a progress indicator, and it is honest in a different
+ * way: something WAS just decrypted — the record arrived sealed under the SAS-verified handshake
+ * and was signature-checked and epoch-checked before this screen drew anything. Short, because it
+ * is the last moment of the bump and not an event of its own, and fixed, because an animation
+ * whose length varies with the network is the thing we were trying to stop showing people.
+ */
+export const PERSONA_SCRIPTED_CHURN_MS = 620;
 
 /** How long the settle takes per character once the profile lands. */
 export const PERSONA_SETTLE_PER_CHAR_MS = 42;

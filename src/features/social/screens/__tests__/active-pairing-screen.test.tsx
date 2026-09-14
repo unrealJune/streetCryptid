@@ -92,6 +92,7 @@ const mockSharing = {
   submitPairChoice: jest.fn(async () => {}),
   confirmPairDisplay: jest.fn(async () => {}),
   cancelPair: jest.fn(async () => {}),
+  standDownPairing: jest.fn(async () => {}),
   refreshPairing: jest.fn(async () => {}),
   acknowledgeDiscoveredFriend: jest.fn(async () => {}),
   rejectDiscoveredFriend: jest.fn(async () => {}),
@@ -212,7 +213,10 @@ describe('ActivePairingScreen', () => {
     await renderDiscovery();
     await act(async () => action('acknowledge').props.onPress());
     expect(mockSharing.acknowledgeDiscoveredFriend).toHaveBeenCalledTimes(1);
+    // Nothing that merely LEAVES the screen may cancel a pair that completed: the snapshot's
+    // completed ids are held back here, and `standDownPairing` re-reads whatever does go through.
     expect(mockSharing.cancelPair).not.toHaveBeenCalled();
+    expect(mockSharing.standDownPairing).toHaveBeenCalledWith([]);
     expect(mockRouter.back).toHaveBeenCalledTimes(1);
   });
 

@@ -344,6 +344,15 @@ pub struct ProfileDocs {
     /// Namespaces that already have a live watcher task, so re-importing a friend's ticket (the
     /// retry path for a profile that never arrived) doesn't pile up duplicate subscribers.
     watched: Mutex<HashSet<[u8; 32]>>,
+    /// Verified records handed to us OUT OF BAND — today, on a pairing `Accept`.
+    ///
+    /// These belong to no replica we hold: the peer's namespace may not be imported yet, and even
+    /// once it is we cannot write their single-writer doc. They are nonetheless first-class, for
+    /// the reason the module header gives — a record carries its own signature and endpoint
+    /// binding, so docs replication was never what made it trustworthy. Keyed by endpoint id and
+    /// read by [`read_for_endpoint`](Self::read_for_endpoint) alongside the replicas, so the
+    /// namespace winning later with a newer epoch simply outranks the handed copy.
+    handed: Mutex<HashMap<[u8; 32], ProfileRecord>>,
 }
 
 impl ProfileDocs {
@@ -384,6 +393,7 @@ impl ProfileDocs {
             handles: Mutex::new(handles),
             epochs: Mutex::new(HashMap::new()),
             watched: Mutex::new(HashSet::new()),
+            handed: Mutex::new(HashMap::new()),
         })
     }
 
@@ -473,13 +483,10 @@ impl ProfileDocs {
         Ok(ns)
     }
 
-    /// Read + verify the newest profile in `ns`. `expected_endpoint` binds it to a known peer.
-    /// Returns `Ok(None)` if no (content-available) record is present yet.
-    pub async fn read_latest(
-        &self,
-        ns: NamespaceId,
-        expected_endpoint: Option<&[u8]>,
-    ) -> Result<Option<ProfileRecord>> {
+    /// The raw signed bytes of the newest record in `ns`, or `None` if there is no entry yet or
+    /// its content has not replicated locally. These bytes are exactly what was signed, which is
+    /// what makes them forwardable verbatim — see [`own_record_bytes`](Self::own_record_bytes).
+    async fn latest_bytes(&self, ns: NamespaceId) -> Result<Option<Vec<u8>>> {
         let doc = self.doc_for(ns).await?;
         let query = Query::single_latest_per_key()
             .key_exact(PROFILE_KEY)
@@ -488,14 +495,56 @@ impl ProfileDocs {
             Some(e) => e,
             None => return Ok(None),
         };
-        let bytes = match self.blobs.blobs().get_bytes(entry.content_hash()).await {
-            Ok(b) => b,
-            Err(_) => return Ok(None), // content not replicated locally yet
+        match self.blobs.blobs().get_bytes(entry.content_hash()).await {
+            Ok(b) => Ok(Some(b.to_vec())),
+            Err(_) => Ok(None), // content not replicated locally yet
+        }
+    }
+
+    /// Read + verify the newest profile in `ns`. `expected_endpoint` binds it to a known peer.
+    /// Returns `Ok(None)` if no (content-available) record is present yet.
+    pub async fn read_latest(
+        &self,
+        ns: NamespaceId,
+        expected_endpoint: Option<&[u8]>,
+    ) -> Result<Option<ProfileRecord>> {
+        let bytes = match self.latest_bytes(ns).await? {
+            Some(b) => b,
+            None => return Ok(None),
         };
         match verify(&bytes, expected_endpoint) {
             Ok(rec) => Ok(Some(rec)),
             Err(_) => Ok(None),
         }
+    }
+
+    /// Our own newest published record, as the signed bytes to put on a pairing `Accept`.
+    ///
+    /// `None` before this device has published a profile at all — a state the caller must treat
+    /// as "send nothing and let replication catch up", never as a reason to fail the pair.
+    pub async fn own_record_bytes(&self) -> Option<Vec<u8>> {
+        self.latest_bytes(self.own_ns).await.ok().flatten()
+    }
+
+    /// Verify a record handed to us out of band and, if it is strictly newer than anything we
+    /// have accepted for `expected_endpoint`, remember it and hand it back for the sink.
+    ///
+    /// `Ok(None)` means "valid but not new" — the ordinary outcome when the namespace already
+    /// replicated this epoch — and is deliberately not an error. An `Err` means the bytes failed
+    /// verification against the endpoint we authenticated, which is a peer lying about who they
+    /// are and must not be silently absorbed.
+    pub async fn ingest_handed_record(
+        &self,
+        bytes: &[u8],
+        expected_endpoint: &[u8],
+    ) -> Result<Option<ProfileRecord>, ProfileError> {
+        let rec = verify(bytes, Some(expected_endpoint))?;
+        let arr = rec.endpoint_arr().ok_or(ProfileError::Decode)?;
+        if !self.accept_if_newer(&rec).await {
+            return Ok(None);
+        }
+        self.handed.lock().await.insert(arr, rec.clone());
+        Ok(Some(rec))
     }
 
     /// Read the newest verified profile for `endpoint_id` across every known namespace.
@@ -507,7 +556,13 @@ impl ProfileDocs {
             .keys()
             .map(|b| NamespaceId::from(*b))
             .collect();
-        let mut best: Option<ProfileRecord> = None;
+        // The handed copy seeds `best` rather than being checked last, so a namespace only
+        // displaces it by being strictly newer — the same rule that orders the namespaces
+        // against each other.
+        let mut best: Option<ProfileRecord> = match <[u8; ENDPOINT_LEN]>::try_from(endpoint_id) {
+            Ok(arr) => self.handed.lock().await.get(&arr).cloned(),
+            Err(_) => None,
+        };
         for ns in namespaces {
             if let Ok(Some(rec)) = self.read_latest(ns, Some(endpoint_id)).await {
                 if best.as_ref().map(|b| rec.epoch > b.epoch).unwrap_or(true) {
@@ -746,6 +801,153 @@ mod tests {
         // A wrong-length file is treated as absent.
         std::fs::write(&path, [1u8; 8]).unwrap();
         assert_eq!(read_ns_file(&path), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Records handed over on a pairing Accept ──────────────────────────────────────────────
+    //
+    // The persona used to arrive only by replication: one iroh-docs dial made when the pair
+    // completed, with nothing behind it but a retry sweep minutes later. These cover the path
+    // that carries the record on the handshake itself, and in particular that doing so gives up
+    // NONE of what replication was checking — the signature, the endpoint binding to the peer the
+    // connection authenticated, and the monotonic epoch.
+
+    async fn live_profile(tag: &str) -> (ProfileDocs, PathBuf) {
+        let dir = crate::docs::tests::scratch_dir(tag);
+        let fx = crate::docs::tests::spawn_docs(&dir).await;
+        let docs = ProfileDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone())
+            .await
+            .unwrap();
+        // The fixture's endpoint/gossip must outlive the replica; leaking is the cheapest way to
+        // say so in a test and the process is about to exit anyway.
+        std::mem::forget(fx);
+        (docs, dir)
+    }
+
+    fn signed_record(seed: &[u8; 32], endpoint: &[u8; 32], epoch: u64) -> Vec<u8> {
+        let (_sk, recv_pub) = crate::crypto::generate_recv_keypair();
+        build_signed(
+            seed,
+            endpoint,
+            &recv_pub,
+            epoch,
+            1_000 + epoch,
+            &good_fields(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn handed_record_is_readable_without_ever_replicating() {
+        let (docs, dir) = live_profile("handed").await;
+        let (seed, endpoint) = identity();
+
+        assert!(docs.read_for_endpoint(&endpoint).await.unwrap().is_none());
+        let rec = docs
+            .ingest_handed_record(&signed_record(&seed, &endpoint, 4), &endpoint)
+            .await
+            .unwrap()
+            .expect("a first record is new");
+        assert_eq!(rec.epoch, 4);
+        assert_eq!(
+            docs.read_for_endpoint(&endpoint)
+                .await
+                .unwrap()
+                .map(|r| r.epoch),
+            Some(4),
+            "the pair result reads through read_for_endpoint; the handed copy must satisfy it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn handed_record_must_belong_to_the_authenticated_peer() {
+        let (docs, dir) = live_profile("handed-wrong-peer").await;
+        let (seed, endpoint) = identity();
+        let (_other_seed, other_endpoint) = identity();
+
+        // A peer we authenticated as `other_endpoint` handing us a valid record belonging to
+        // someone else: the signature is genuine, the binding is not.
+        let err = docs
+            .ingest_handed_record(&signed_record(&seed, &endpoint, 1), &other_endpoint)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ProfileError::WrongEndpoint));
+        assert!(docs
+            .read_for_endpoint(&other_endpoint)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            docs.read_for_endpoint(&endpoint).await.unwrap().is_none(),
+            "a rejected record must not be cached under its own endpoint either"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn handed_record_obeys_the_monotonic_epoch_rule() {
+        let (docs, dir) = live_profile("handed-epoch").await;
+        let (seed, endpoint) = identity();
+
+        docs.ingest_handed_record(&signed_record(&seed, &endpoint, 7), &endpoint)
+            .await
+            .unwrap()
+            .expect("first accepted");
+        // Replay of an older epoch: valid bytes, refused as an update, and — the part that
+        // matters — it must not displace the newer persona already on screen.
+        assert!(docs
+            .ingest_handed_record(&signed_record(&seed, &endpoint, 3), &endpoint)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            docs.read_for_endpoint(&endpoint)
+                .await
+                .unwrap()
+                .map(|r| r.epoch),
+            Some(7)
+        );
+        // A genuine edit still lands.
+        assert!(docs
+            .ingest_handed_record(&signed_record(&seed, &endpoint, 8), &endpoint)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            docs.read_for_endpoint(&endpoint)
+                .await
+                .unwrap()
+                .map(|r| r.epoch),
+            Some(8)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn tampered_handed_record_is_refused() {
+        let (docs, dir) = live_profile("handed-tamper").await;
+        let (seed, endpoint) = identity();
+        let mut bytes = signed_record(&seed, &endpoint, 1);
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        assert!(docs.ingest_handed_record(&bytes, &endpoint).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn own_record_bytes_round_trips_what_we_published() {
+        let (docs, dir) = live_profile("own-bytes").await;
+        let (seed, endpoint) = identity();
+
+        assert!(
+            docs.own_record_bytes().await.is_none(),
+            "a device that has never published sends no record"
+        );
+        let bytes = signed_record(&seed, &endpoint, 2);
+        docs.publish(&endpoint, 2, bytes.clone()).await.unwrap();
+        // Byte-identical, because what goes on the Accept has to be exactly what was signed.
+        assert_eq!(docs.own_record_bytes().await.as_deref(), Some(&bytes[..]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -71,11 +71,20 @@ describe('cryptid profile', () => {
     });
 
     expect(issues.handle).toEqual([USERNAME_GUIDANCE]);
-    expect(issues.cryptidName).toEqual([
-      'Give the profile icon a name between 1 and 24 characters.',
-    ]);
+    expect(issues.cryptidName).toEqual([]);
     expect(issues.sigil).toContain('Use ASCII characters, spaces, tabs, and line breaks only.');
     expect(issues.color).toEqual(['Choose a valid six-digit profile color.']);
+  });
+
+  it('accepts a one-character handle and an unnamed icon', () => {
+    expect(
+      validateCryptidProfile({
+        ...defaultCryptidProfileDraft(),
+        handle: '@j',
+        cryptidName: '',
+        presetId: null,
+      })
+    ).toEqual([]);
   });
 
   it('round-trips a versioned saved profile', () => {
@@ -87,7 +96,7 @@ describe('cryptid profile', () => {
     expect(parseCryptidProfile(JSON.parse(JSON.stringify(profile)))).toEqual(profile);
   });
 
-  it.each(['', 'a', 'a'.repeat(21), '_owl', '-owl', 'night owl', 'owl!'])(
+  it.each(['', 'a'.repeat(21), '_owl', '-owl', 'night owl', 'owl!'])(
     'rejects invalid username %j with the same guidance shown in the editor',
     (handle) => {
       expect(
@@ -96,7 +105,7 @@ describe('cryptid profile', () => {
     }
   );
 
-  it.each(['ab', 'a'.repeat(20), '1owl', 'night_owl', 'night-owl'])(
+  it.each(['a', 'ab', 'a'.repeat(20), '1owl', 'night_owl', 'night-owl'])(
     'accepts username %j according to the guidance',
     (handle) => {
       expect(

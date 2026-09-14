@@ -46,8 +46,7 @@ export const CRYPTID_PROFILE_VERSION = 1 as const;
 export const MAX_SIGIL_LINES = 12;
 export const MAX_SIGIL_COLUMNS = 32;
 export const MAX_SIGIL_CHARS = 512;
-export const USERNAME_GUIDANCE =
-  'Use 2-20 lowercase letters, numbers, underscores, or dashes. Start with a letter or number.';
+export const USERNAME_GUIDANCE = 'Use up to 20 lowercase letters, numbers, underscores, or dashes.';
 
 export interface CryptidProfileDraft {
   handle: string;
@@ -148,11 +147,15 @@ export function validateCryptidProfileFields(
   const color = draft.color.trim();
   const measurements = sigilMeasurements(sigil);
 
-  if (!/^[a-z0-9][a-z0-9_-]{1,19}$/.test(handle)) {
+  // No lower bound beyond "there is one": a single-character handle is a legal
+  // identity, and the icon name is optional entirely (`CryptidAvatar` simply
+  // drops the caption). Only the upper bounds are real constraints — they are
+  // what the wire, the roster row and the marker chip have room for.
+  if (!/^[a-z0-9][a-z0-9_-]{0,19}$/.test(handle)) {
     handleIssues.push(USERNAME_GUIDANCE);
   }
-  if (cryptidName.length < 1 || cryptidName.length > 24) {
-    cryptidNameIssues.push('Give the profile icon a name between 1 and 24 characters.');
+  if (cryptidName.length > 24) {
+    cryptidNameIssues.push('Keep the profile icon name to 24 characters or fewer.');
   }
   if (sigil.trim().length === 0) {
     sigilIssues.push('Choose a profile icon or enter custom ASCII art.');

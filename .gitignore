@@ -74,6 +74,11 @@ modules/iroh-location/android/src/main/jniLibs/
 modules/iroh-location/ios/headers/
 modules/iroh-location/ios/IrohLocationFFI.xcframework/
 
+# Store screenshots (`just store-shots`): ignore only `raw/`, the bare captures that exist purely
+# to be framed. The framed plates under ios-6.9/ and ipad-13/ stay tracked — they are what gets
+# uploaded, and a listing asset is worth being able to diff.
+store/screenshots/raw/
+
 # Run artifacts from the e2e harness: maestro-runner writes HTML/JUnit/Allure reports per test
 # run (pointed at .e2e-reports/ by lib/devices.sh), and run-matrix.sh/soak.sh write their own
 # summaries under scripts/e2e/reports/. Both are per-run output, never source.

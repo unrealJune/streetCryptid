@@ -30,8 +30,8 @@ interface FriendLocatorStackProps {
   onPressSelf?(): void;
 }
 
-const ART_OFFSET_X = 7;
-const ART_OFFSET_Y = 4;
+/** Gap between two cryptid cards in the row above the pin. */
+const ART_GAP_X = 3;
 const LABEL_ROW_HEIGHT = 24;
 
 /** A shared pin with collated ASCII avatars and individually selectable name rows. */
@@ -49,20 +49,25 @@ export function FriendLocatorStack({
   const ordered = [...friends].sort((a, b) => Number(a.selected) - Number(b.selected));
   const includesSelf = ordered.some((item) => item.self);
   const nonSelfCount = ordered.length - Number(includesSelf);
+  // Cryptid cards are laid out ONE PER FRIEND, side by side, in the same order the
+  // name rows below read top-to-bottom. They used to be dealt as a 7x4px cascade,
+  // which hid ~85% of every card but the front one and — because each card is
+  // sized to its own art — left their edges at ragged heights. The names stacked
+  // cleanly and the icons did not, so a stack of three friends showed one cryptid
+  // and two slivers. A row costs width, which a marker has to spare, rather than
+  // legibility, which is the entire point of the drawing.
+  let artCursorX = 0;
   const art = ordered
     .filter((friend) => !friend.self)
     .map((friend) => {
       const sigil = normalizeAsciiArt(friend.sigil || '?');
-      return { friend, sigil, metrics: sigilMetrics(sigil) };
+      const metrics = sigilMetrics(sigil);
+      const left = artCursorX;
+      artCursorX += metrics.width + ART_GAP_X;
+      return { friend, sigil, metrics, left };
     });
-  const artWidth = Math.max(
-    0,
-    ...art.map(({ metrics }, index) => metrics.width + index * ART_OFFSET_X)
-  );
-  const artHeight = Math.max(
-    0,
-    ...art.map(({ metrics }, index) => metrics.height + (art.length - index - 1) * ART_OFFSET_Y)
-  );
+  const artWidth = Math.max(0, artCursorX - ART_GAP_X);
+  const artHeight = Math.max(0, ...art.map(({ metrics }) => metrics.height));
   const handleWidth = Math.max(
     ...ordered.map((friend) => Math.min(126, Math.max(58, friend.handle.length * 7.2 + 18)))
   );
@@ -94,7 +99,7 @@ export function FriendLocatorStack({
       pointerEvents="box-none"
       style={[styles.anchor, { height: markerHeight, width: markerWidth }, positionStyle]}
     >
-      {art.map(({ friend, sigil, metrics }, index) => (
+      {art.map(({ friend, sigil, metrics, left }) => (
         <View
           accessibilityElementsHidden
           importantForAccessibility="no-hide-descendants"
@@ -104,13 +109,17 @@ export function FriendLocatorStack({
             {
               backgroundColor: panelColor,
               borderColor: friend.color,
+              // Selection reads the same way it does on a lone locator: a heavier
+              // edge, not a position in a pile.
+              borderWidth: friend.selected ? 1.4 : StyleSheet.hairlineWidth,
               borderStyle: friend.parked ? 'dashed' : 'solid',
               height: metrics.height,
-              left: index * ART_OFFSET_X,
+              left,
               opacity: friend.stale ? 0.58 : 1,
-              top: (art.length - index - 1) * ART_OFFSET_Y,
+              // Cards sit on one baseline just above the pin, whatever their own
+              // height, so the row reads as a row.
+              top: artHeight - metrics.height,
               width: metrics.width,
-              zIndex: index,
             },
           ]}
         >

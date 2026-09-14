@@ -47,6 +47,27 @@ describe('SignalColorPicker', () => {
     });
   });
 
+  it('keeps the touch instead of handing it to the scroll view it sits in', () => {
+    const onChange = jest.fn();
+
+    act(() => {
+      renderer = create(<SignalColorPicker color="#2F9E6A" onChange={onChange} />);
+    });
+
+    const wheel = renderer.root.findByProps({ accessibilityLabel: 'Signal color wheel' });
+    // Blocks the native responder on Android, and denies the hand-off on iOS. Without both, a
+    // drag across the wheel turns into a page scroll partway through.
+    const granted = wheel.props.onResponderGrant({
+      nativeEvent: { locationX: 200, locationY: 116 },
+    });
+    expect(granted).toBe(true);
+    expect(wheel.props.onResponderTerminationRequest()).toBe(false);
+
+    // A drag keeps following the finger.
+    act(() => wheel.props.onResponderMove({ nativeEvent: { locationX: 116, locationY: 232 } }));
+    expect(onChange).toHaveBeenLastCalledWith('#80FF00');
+  });
+
   it('keeps partial values editable without changing the selected color', () => {
     const onChange = jest.fn();
 

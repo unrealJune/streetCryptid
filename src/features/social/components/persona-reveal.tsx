@@ -15,6 +15,7 @@ import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import type { Friend } from '@/features/social/core/types';
 import {
   PERSONA_PATIENCE_MS,
+  PERSONA_SCRIPTED_CHURN_MS,
   hasVerifiedProfile,
   scrambleFrame,
   settleDurationMs,
@@ -51,22 +52,31 @@ export function PersonaReveal({ friend, accent, neutral, onResolved }: PersonaRe
   /**
    * Whether this persona was ALREADY decrypted the first time it was drawn.
    *
-   * A profile that arrived with the pair result was never ciphertext as far as the user is
-   * concerned, so there is nothing to reveal and nothing to celebrate — showing a decrypt
-   * animation over data we already had would be theatre. Captured once, at mount, which is why
-   * the caller keys this component by friend: a new pairing gets a new component, and no state
-   * here ever has to be reset backwards.
+   * Since the v4 pairing wire this is the NORMAL case — the record rides the Accept — so it no
+   * longer means "skip the animation", it means "run the scripted one". Captured once, at mount,
+   * which is why the caller keys this component by friend: a new pairing gets a new component,
+   * and no state here ever has to be reset backwards.
    */
   const [borneResolved] = useState(resolved);
-  const instant = borneResolved || reducedMotion;
+  const instant = reducedMotion;
 
   const [frame, setFrame] = useState(0);
   const [settleProgress, setSettleProgress] = useState(instant ? 1 : 0);
   const [patienceSpent, setPatienceSpent] = useState(false);
+  /** The scripted beat, held only for a persona that needed no waiting for. */
+  const [holding, setHolding] = useState(borneResolved && !instant);
   const announced = useRef(instant);
 
-  const settling = resolved && !instant && settleProgress < 1;
-  const churning = !resolved && !instant && !patienceSpent;
+  /**
+   * Whether the reveal is allowed to complete.
+   *
+   * Split from `resolved` so the scripted beat drives the churn, the caption and the colour warm
+   * from one place. Without the split the name would appear under a still-scrambling handle.
+   */
+  const decrypted = resolved && !holding;
+
+  const settling = decrypted && !instant && settleProgress < 1;
+  const churning = !decrypted && !instant && !patienceSpent;
 
   // One interval covers both halves: the churn before the profile lands and the settle after it.
   // They are the same animation — only the target string and whether `settled` advances differ.
@@ -85,8 +95,15 @@ export function PersonaReveal({ friend, accent, neutral, onResolved }: PersonaRe
     return () => clearTimeout(timer);
   }, [instant, resolved]);
 
+  // The scripted beat. Runs once, from mount, for a persona that was there when we drew it.
   useEffect(() => {
-    if (instant || !resolved) return;
+    if (!holding) return;
+    const timer = setTimeout(() => setHolding(false), PERSONA_SCRIPTED_CHURN_MS);
+    return () => clearTimeout(timer);
+  }, [holding]);
+
+  useEffect(() => {
+    if (instant || !decrypted) return;
     const started = Date.now();
     const duration = settleDurationMs(handle);
     const timer = setInterval(() => {
@@ -95,7 +112,7 @@ export function PersonaReveal({ friend, accent, neutral, onResolved }: PersonaRe
       if (elapsed >= 1) clearInterval(timer);
     }, CHURN_TICK_MS);
     return () => clearInterval(timer);
-  }, [handle, instant, resolved]);
+  }, [decrypted, handle, instant]);
 
   useEffect(() => {
     if (settleProgress < 1 || announced.current) return;
@@ -105,23 +122,25 @@ export function PersonaReveal({ friend, accent, neutral, onResolved }: PersonaRe
 
   // Colour and opacity ride the UI thread: the persona's own colour arrives WITH the persona, so
   // the ciphertext is drawn in the neutral it deserves and warms into the friend's signal.
-  const warmth = useSharedValue(resolved ? 1 : 0);
+  const warmth = useSharedValue(decrypted ? 1 : 0);
   useEffect(() => {
-    warmth.value = withTiming(resolved ? 1 : 0, {
+    warmth.value = withTiming(decrypted ? 1 : 0, {
       duration: instant ? 0 : settleDurationMs(handle),
     });
-  }, [handle, instant, resolved, warmth]);
+  }, [decrypted, handle, instant, warmth]);
   const sigilStyle = useAnimatedStyle(() => ({ opacity: 0.22 + warmth.value * 0.78 }));
 
   const display = instant
     ? handle
-    : resolved
+    : decrypted
       ? scrambleFrame(handle, settledCount(handle, settleProgress), frame)
       : patienceSpent
         ? handle
         : scrambleFrame(handle, 0, frame);
 
-  const caption = resolved ? null : patienceSpent ? 'PERSONA UNAVAILABLE' : 'DECRYPTING PERSONA';
+  // Keyed off `decrypted`, not `resolved`: during the scripted beat the handle is still
+  // churning, and a caption that had already gone quiet would leave that looking broken.
+  const caption = decrypted ? null : patienceSpent ? 'PERSONA UNAVAILABLE' : 'DECRYPTING PERSONA';
 
   return (
     <View style={styles.wrap}>
@@ -134,8 +153,8 @@ export function PersonaReveal({ friend, accent, neutral, onResolved }: PersonaRe
       >
         <CryptidAvatar
           art={friend.sigil}
-          color={resolved ? accent : neutral}
-          muted={!resolved}
+          color={decrypted ? accent : neutral}
+          muted={!decrypted}
           name={friend.cryptidName ?? 'Unknown form'}
           size="large"
           style={styles.avatar}
@@ -144,11 +163,11 @@ export function PersonaReveal({ friend, accent, neutral, onResolved }: PersonaRe
       <Text
         // The churning value is decoration; a screen reader should hear the friend, or that we are
         // still working on them — never a string of hex that changes sixteen times a second.
-        accessibilityLabel={resolved ? handle : 'Decrypting this cryptid’s persona'}
+        accessibilityLabel={decrypted ? handle : 'Decrypting this cryptid’s persona'}
         allowFontScaling={false}
         style={[
           settleProgress >= 1 ? styles.handle : styles.cipher,
-          { color: resolved ? accent : neutral },
+          { color: decrypted ? accent : neutral },
         ]}
       >
         {display}

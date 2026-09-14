@@ -33,7 +33,9 @@ Pod::Spec.new do |s|
   # Propagate the Rust static library's Apple framework dependencies to the app target, plus the
   # two the Swift sources need directly: CoreLocation for the background runtime's
   # `CLLocationManager`, and Security for the Keychain the device-secret store reads.
-  s.frameworks = 'Network', 'CoreBluetooth', 'SystemConfiguration', 'CoreLocation', 'Security'
+  # MetricKit is the OS's own crash/hang diagnostics, read by `MetricKitDiagnostics.swift`.
+  s.frameworks = 'Network', 'CoreBluetooth', 'SystemConfiguration', 'CoreLocation', 'Security',
+                 'MetricKit'
 
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',

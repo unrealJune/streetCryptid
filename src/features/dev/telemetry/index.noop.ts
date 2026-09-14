@@ -9,6 +9,8 @@ import type {
 } from './event-log';
 import type { Shipper, ShipperOptions } from './shipper';
 import type { StartSpanOptions, Telemetry } from './telemetry';
+import type { UiLivenessOptions } from './ui-liveness';
+import type { OsDiagnostic } from './crash-diagnostics';
 
 /**
  * The stripped build's telemetry: every export of `index.ts`, doing nothing.
@@ -34,6 +36,8 @@ import type { StartSpanOptions, Telemetry } from './telemetry';
 export type { OtelConfig };
 export type { StartSpanOptions, Telemetry };
 export type { Shipper, ShipperOptions };
+export type { UiLivenessOptions };
+export type { OsDiagnostic };
 export type {
   EventLogEntry,
   EventLogLaunchContext,
@@ -110,6 +114,33 @@ export function attachSystemSnapshot(): void {}
 export function getDeviceResource(): Attributes {
   return {};
 }
+
+export function getRunId(): string {
+  return '';
+}
+
+export function diagnosticAttributes(): Record<string, string | number> {
+  return {};
+}
+
+export async function reportOsDiagnostics(): Promise<number> {
+  return 0;
+}
+
+export async function beginTelemetryRun(): Promise<void> {}
+
+export async function noteTelemetryRunState(): Promise<void> {}
+
+export function resetTelemetryRunForTesting(): void {}
+
+/** Mirrors the live threshold so a consumer importing it still type-checks in a stripped build. */
+export const HANG_THRESHOLD_MS = 3_000;
+
+export function startUiLivenessProbe(_options: UiLivenessOptions = {}): () => void {
+  return () => {};
+}
+
+export function resetUiLivenessForTesting(): void {}
 
 export function getBuildResource(): Attributes {
   return {};
@@ -193,6 +224,10 @@ export async function markShipped(): Promise<void> {}
 
 export async function unshippedCount(): Promise<number> {
   return 0;
+}
+
+export async function lastEntryTimestamp(): Promise<number | null> {
+  return null;
 }
 
 /** See the note on the real barrel's export: this is the stripped build. */

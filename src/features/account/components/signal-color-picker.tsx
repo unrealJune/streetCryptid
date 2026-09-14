@@ -55,6 +55,24 @@ export function SignalColorPicker({ color, disabled = false, onChange }: SignalC
     onChange(hsvToHex(colorAtWheelPosition(locationX, locationY, WHEEL_SIZE)));
   };
 
+  /**
+   * Claim the touch outright, on both platforms, for as long as the finger is down.
+   *
+   * The wheel lives inside the profile editor's `ScrollView`, and a JS responder loses to a
+   * scroll view by default the moment the finger moves: the scroll view asks for the responder,
+   * the default answer is yes, and the drag turns into a page scroll partway through — the gesture
+   * reads as the wheel "dragging the page" when you meant to pick a color, and the color stops
+   * following your finger. Two different mechanisms have to be refused for that not to happen.
+   *
+   * `onResponderGrant` returning true is what blocks the NATIVE responder on Android
+   * (`requestDisallowInterceptTouchEvent` up the tree — the same thing `PanResponder` returns by
+   * default); `onResponderTerminationRequest` returning false is what denies the hand-off on iOS.
+   */
+  const grantWheel = (event: GestureResponderEvent): boolean => {
+    changeWheel(event);
+    return true;
+  };
+
   const changeWheelWithAccessibility = (event: AccessibilityActionEvent): void => {
     if (disabled) return;
     switch (event.nativeEvent.actionName) {
@@ -94,8 +112,9 @@ export function SignalColorPicker({ color, disabled = false, onChange }: SignalC
         }}
         onAccessibilityAction={changeWheelWithAccessibility}
         onMoveShouldSetResponder={() => !disabled}
-        onResponderGrant={changeWheel}
+        onResponderGrant={grantWheel}
         onResponderMove={changeWheel}
+        onResponderTerminationRequest={() => false}
         onStartShouldSetResponder={() => !disabled}
         style={styles.wheel}
       >

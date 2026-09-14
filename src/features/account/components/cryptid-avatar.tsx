@@ -45,6 +45,9 @@ export function CryptidAvatar({
   const dimensions = sizes[size];
   const signalColor = muted ? `${color}70` : color;
   const normalizedArt = normalizeAsciiArt(art);
+  // The caption is optional: naming the icon is not required any more, and an
+  // empty label row would leave a gap under the art rather than nothing.
+  const label = name.trim();
   const [availableWidth, setAvailableWidth] = useState(0);
   const [naturalWidth, setNaturalWidth] = useState(0);
   const scale =
@@ -52,7 +55,7 @@ export function CryptidAvatar({
 
   return (
     <View
-      accessibilityLabel={`${name} ASCII cryptid`}
+      accessibilityLabel={label ? `${label} ASCII cryptid` : 'ASCII cryptid'}
       onLayout={(event) => setAvailableWidth(event.nativeEvent.layout.width)}
       style={[styles.container, { gap: dimensions.gap }, style]}
     >
@@ -89,12 +92,12 @@ export function CryptidAvatar({
       >
         {normalizedArt}
       </Text>
-      {showLabel ? (
+      {showLabel && label ? (
         <Text
           allowFontScaling={false}
           style={[styles.label, { color: signalColor, fontSize: dimensions.labelSize }]}
         >
-          {name.toUpperCase()}
+          {label.toUpperCase()}
         </Text>
       ) : null}
     </View>

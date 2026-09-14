@@ -94,6 +94,7 @@ export default function ActivePairingScreen() {
     submitPairChoice,
     confirmPairDisplay,
     cancelPair,
+    standDownPairing,
     refreshPairing,
     acknowledgeDiscoveredFriend,
     rejectDiscoveredFriend,
@@ -114,6 +115,8 @@ export default function ActivePairingScreen() {
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [rejectedDiscovery, setRejectedDiscovery] = useState<string | null>(null);
   const routeActive = useRef(true);
+  /** Set the moment a dismissal starts, so nothing re-arms the radio during teardown. */
+  const [leaving, setLeaving] = useState(false);
   const redeemedToken = useRef<string | null>(null);
   const focused = useIsFocused();
   const [foreground, setForeground] = useState(AppState.currentState === 'active');
@@ -141,20 +144,24 @@ export default function ActivePairingScreen() {
    * there watching a handshake that had already been abandoned — and, before the invite was
    * tracked, went right back to offering the spent link. Cancelling is what turns "they left" into
    * something the other side learns immediately.
+   *
+   * The ref is a list of CANDIDATES, not a list of orders. It is filled from a pairing snapshot
+   * and is therefore always at least one poll behind the handshake — long enough for a pair to
+   * complete inside it — so `standDownPairing` re-reads each session from native and spares the
+   * ones that finished. See its doc comment for the pairing this cost.
    */
   const standDown = useCallback(async (): Promise<void> => {
     const sessionIds = abandonableRef.current;
     abandonableRef.current = [];
-    await Promise.allSettled([
-      cancelBump(),
-      cancelPairInvite(),
-      ...sessionIds.map((sessionId) => cancelPair(sessionId)),
-    ]);
-  }, [cancelBump, cancelPair, cancelPairInvite]);
+    await Promise.allSettled([cancelBump(), cancelPairInvite(), standDownPairing(sessionIds)]);
+  }, [cancelBump, cancelPairInvite, standDownPairing]);
 
   useFocusEffect(
     useCallback(() => {
+      // Strictly per-visit: a screen that stayed latched because `router.back()` had nothing to
+      // pop would never arm Bump again, and would look like Bluetooth was broken.
       routeActive.current = true;
+      setLeaving(false);
       void refreshPairing();
       return () => {
         routeActive.current = false;
@@ -232,7 +239,7 @@ export default function ActivePairingScreen() {
   const failure = pairing?.failure ?? null;
   const effectiveIntent: PairingRouteIntent =
     !token && intent === 'bump' && inviteLive ? 'link' : intent;
-  const bump = useArmedBump(effectiveIntent === 'bump' && !token && !redeeming);
+  const bump = useArmedBump(effectiveIntent === 'bump' && !token && !redeeming && !leaving);
   // Every pairing channel, not just Bump — this hook used to hang off `useArmedBump`, which is
   // armed for nearby pairing only, so a link or QR pair had no haptics of any kind. Gated on
   // focus AND foreground, not merely on being mounted: this screen survives backgrounding, and a
@@ -645,8 +652,21 @@ export default function ActivePairingScreen() {
     }
   };
 
+  /**
+   * Leave the pairing surface: latch first, then tear down.
+   *
+   * The latch is not tidiness. Clearing the discovered friend is what tells `useArmedBump` there
+   * is no longer an active session, and its auto-arm effect fires on the very next render — so
+   * ACKNOWLEDGE used to re-open the Bluetooth pairing radio on its way out, milliseconds before
+   * `standDown` closed it again. Telemetry from an iPhone on 2026-09-13 caught exactly that:
+   * `pairing_ready` true at 21:51:43, false at 21:51:45, with bump polling at 300 ms in between,
+   * for a screen the user had just dismissed. REJECT was worse — it awaits a native round trip
+   * between clearing the friend and closing, so the radio stayed armed for the whole of it, and
+   * nothing guaranteed `cancelBump` won the race at all.
+   */
   const close = useCallback((): void => {
     routeActive.current = false;
+    setLeaving(true);
     void standDown();
     router.back();
   }, [router, standDown]);

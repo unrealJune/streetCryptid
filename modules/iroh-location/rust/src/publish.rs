@@ -354,6 +354,43 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         ))
     }
 
+    /// Seal the last known position once, because the recipient set has just grown.
+    ///
+    /// A sealed envelope is readable only by the recipients it was sealed FOR, so a friend who
+    /// pairs at 14:00 cannot open anything published at 13:59. Their first sight of you is
+    /// therefore your next scheduled publish — and on a parked iPhone that rides on `BGProcessing`
+    /// wakes measured at p50 5 min, p90 92 min, with a 17-hour tail. A pairing that ends in a
+    /// blank dot for an hour and a half reads as a pairing that did not work.
+    ///
+    /// Three deliberate differences from [`heartbeat`](Self::heartbeat), which otherwise does the
+    /// same job:
+    ///
+    /// * **`last_published_slot` is not advanced.** The cadence is the one property of a sealed
+    ///   envelope the stash can read, and it has to stay uniform. This envelope is extra, not
+    ///   early: it fills no slot and must not persuade the next heartbeat that one is covered.
+    /// * **`last_state` is not written.** Pairing says nothing about whether the phone has
+    ///   settled. `drain` stamps whatever is currently true, which is the honest answer.
+    /// * **No battery suspension.** `critically_low` exists to stop periodic work; this is one
+    ///   envelope, at a moment the user chose, and a dying phone is when someone most wants to
+    ///   know where you are.
+    ///
+    /// No quality gate, for the same reason as `heartbeat`: there is no new fix to judge, and the
+    /// position being republished already passed the gate when it arrived. Its ORIGINAL timestamp
+    /// rides along, so a new friend sees an honest "here, as of twenty minutes ago" rather than a
+    /// fresh-looking lie.
+    ///
+    /// `enqueued: 0` means this device has never had a position to share — a fresh install that
+    /// has not captured yet. There is nothing to introduce and the first capture will do it.
+    pub async fn publish_introduction(&self, now_ms: u64) -> Result<IngestOutcome, PublishError> {
+        let state = self.gate.get();
+        let Some(known) = state.last_known_fix.as_ref().map(LocationFix::from) else {
+            return Ok(self.outcome(None, 0, 0, 0, 0, false));
+        };
+        let overflow_dropped = self.queue.enqueue(known)?.overflow_dropped;
+        let published = self.drain(now_ms).await?;
+        Ok(self.outcome(None, 1, published, 0, overflow_dropped, false))
+    }
+
     /// Publish queued fixes in capture order, stopping at the first failure.
     ///
     /// Order matters because `seq` is assigned here, at publish time: draining out of order would

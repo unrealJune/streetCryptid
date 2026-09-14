@@ -463,6 +463,23 @@ async fn two_node_pair_and_profile_sync() {
         "B got A's profile ticket"
     );
 
+    // The persona is HERE, in the first result, with no replication having had to happen. This is
+    // the whole of the v4 wire change: the record rides the Accept, so a pair that has completed
+    // is a pair that already knows who it paired with. The ticket above still exists — it is how
+    // later edits arrive — but nothing about the first render waits on it any more.
+    let a_got = a_res
+        .peer_profile
+        .as_ref()
+        .expect("A has B's persona in the pair result itself");
+    assert_eq!(a_got.handle, "bob");
+    assert_eq!(a_got.endpoint_id, b_id);
+    let b_got = b_res
+        .peer_profile
+        .as_ref()
+        .expect("B has A's persona in the pair result itself");
+    assert_eq!(b_got.handle, "alice");
+    assert_eq!(b_got.endpoint_id, a_id);
+
     // Initial profile sync: each side eventually reads the other's verified profile over the
     // profile namespace imported during pair completion.
     let a_sees_b = poll_until!(30, {

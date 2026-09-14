@@ -235,7 +235,7 @@ describe('CryptidProfileEditor', () => {
   });
 
   it.each([
-    ['Custom profile icon name', ''],
+    ['Custom profile icon name', 'a'.repeat(25)],
     ['Custom ASCII profile icon', '👁'],
   ])('prevents saving invalid %s and permits discarding it', async (label, value) => {
     const onSave = render();
@@ -304,7 +304,8 @@ describe('CryptidProfileEditor', () => {
   it('starts onboarding with a rolled persona but saves only when Continue is pressed', async () => {
     const onDone = jest.fn();
     const onSave = render({ mode: 'onboarding', initialProfile: null, onDone });
-    expect(hero().props.accessibilityLabel).not.toBe('Profile icon: Custom icon');
+    // A name and a drawing are already in place; only the username is missing.
+    expect(hero().props.accessibilityLabel).not.toBe('Profile icon: Unnamed. Tap to change it.');
     expect(find('onboarding-continue').props.disabled).toBe(true);
     press('randomize-persona');
     change('Username', 'first_profile');
