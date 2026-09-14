@@ -20,9 +20,11 @@ jest.mock('expo-router', () => ({
 }));
 
 const snapshot: {
+  friends: { id: string }[];
   transports: { relay: boolean; ip: boolean; ble: boolean };
   delivery: { mode: DeliveryMode; effectiveMode: DeliveryMode };
 } = {
+  friends: [],
   transports: { relay: true, ip: true, ble: true },
   delivery: { mode: 'stash', effectiveMode: 'stash' },
 };
@@ -49,11 +51,13 @@ describe('SettingsScreen', () => {
     return renderer.root.findAllByType(SettingsMenuRow).map((row) => row.props);
   }
 
-  it('lists every settings area as its own page', () => {
+  it('lists every settings area as its own page, sharing before this phone', () => {
+    // The order is the menu's argument: everything above the line changes what your
+    // friends receive, everything below it changes nothing outside this install.
     expect(rows().map((row) => row.href)).toEqual([
-      '/settings/appearance',
       '/settings/delivery',
       '/pairing',
+      '/settings/appearance',
       '/settings/advanced',
       '/settings/app-data',
     ]);
@@ -64,7 +68,35 @@ describe('SettingsScreen', () => {
 
     expect(byHref.has('/settings/transports')).toBe(false);
     expect(byHref.get('/settings/delivery')).toBe('Mutuals + Stash Server');
-    expect(byHref.get('/settings/appearance')).toBe('Graphite');
+    expect(byHref.get('/settings/appearance')).toBe('Graphite · Light');
+    // Transports moved behind Advanced, so Advanced is where their state has to surface:
+    // a row that reports nothing is what made this menu look unfinished.
+    expect(byHref.get('/settings/advanced')).toBe('Relay · Direct · BLE');
+    expect(byHref.get('/pairing')).toBe('Nobody paired yet');
+  });
+
+  it('names only the transports that are permitted, and says so when none are', () => {
+    snapshot.transports = { relay: true, ip: false, ble: true };
+    expect(rows().find((row) => row.href === '/settings/advanced')?.value).toBe('Relay · BLE');
+
+    act(() => renderer.unmount());
+    snapshot.transports = { relay: false, ip: false, ble: false };
+    expect(rows().find((row) => row.href === '/settings/advanced')?.value).toBe(
+      'No transports enabled'
+    );
+
+    snapshot.transports = { relay: true, ip: true, ble: true };
+  });
+
+  it('counts the friends behind the pairing entry', () => {
+    snapshot.friends = [{ id: 'a' }];
+    expect(rows().find((row) => row.href === '/pairing')?.value).toBe('1 friend');
+
+    act(() => renderer.unmount());
+    snapshot.friends = [{ id: 'a' }, { id: 'b' }];
+    expect(rows().find((row) => row.href === '/pairing')?.value).toBe('2 friends');
+
+    snapshot.friends = [];
   });
 
   it('names the route that is actually in use, not the one that was asked for', () => {

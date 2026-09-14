@@ -12,22 +12,29 @@ jest.mock('@/features/account/hooks/use-cryptid-profile', () => ({
   }),
 }));
 
-describe('Profile settings row', () => {
+describe('Profile settings plate', () => {
   let renderer: ReactTestRenderer;
   afterEach(() => {
     act(() => renderer?.unmount());
     mockPush.mockClear();
   });
 
-  it('names the page first and the username second, without a cryptid title or subtitle', () => {
+  it('shows you rather than the word for you', () => {
     act(() => {
       renderer = create(<IdentityRow accent="#0f0" />);
     });
     const text = renderer.root.findAllByType(Text).map((node) => node.props.children);
-    expect(text.indexOf('Profile')).toBeLessThan(text.indexOf('(oo)'));
-    expect(text.indexOf('Profile')).toBeLessThan(text.indexOf('@tallgrass'));
-    expect(text).not.toContain('JACKALOPE');
+
+    // The plate is your cryptid, so it renders your cryptid: sigil, handle, name. The
+    // literal word "Profile" is the accessibility label and nothing else — a settings
+    // menu whose first entry reads "Profile ›" in the same weight as "App & Data ›" has
+    // no focal point, which is the whole reason this stopped being a row.
+    expect(text).toContain('@tallgrass');
+    expect(text).toContain('(oo)');
+    expect(text).toContain('JACKALOPE');
+    expect(text).not.toContain('Profile');
     expect(text).not.toContain('This is the sigil and signal color your friends see.');
+
     const row = renderer.root.findByProps({ accessibilityLabel: 'Profile' });
     expect(row.props.accessibilityValue).toEqual({ text: '@tallgrass' });
     act(() => row.props.onPress());

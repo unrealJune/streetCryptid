@@ -5,7 +5,7 @@ import { SymbolView } from 'expo-symbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
-import { MaxContentWidth, Spacing } from '@/constants/theme';
+import { BrandFonts, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
 interface SettingsPageProps {
@@ -69,7 +69,7 @@ export function SettingsPage({
             size={15}
             tintColor={theme.textSecondary}
           />
-          <ThemedText type="smallBold" themeColor="textSecondary" style={styles.backLabel}>
+          <ThemedText themeColor="textSecondary" style={styles.backLabel}>
             {backLabel.toUpperCase()}
           </ThemedText>
         </Pressable>
@@ -77,7 +77,7 @@ export function SettingsPage({
 
       <View style={styles.header}>
         <View style={styles.headerCopy}>
-          <ThemedText type="subtitle">{title}</ThemedText>
+          <ThemedText style={styles.title}>{title.toUpperCase()}</ThemedText>
           {subtitle ? (
             <ThemedText type="small" themeColor="textSecondary">
               {subtitle}
@@ -117,11 +117,18 @@ export function SettingsSection({
   readonly label: string;
   readonly children: ReactNode;
 }) {
+  const theme = useTheme();
+
   return (
     <View style={styles.section}>
-      <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
-        {label}
-      </ThemedText>
+      {/* The rule is the section, not the word above it. It is what separates one group
+          of rows from the next on a page whose rows are already hairline-separated, and
+          it is the device the design reference uses under IDENTITY / LOCATION. */}
+      <View style={[styles.sectionRule, { borderColor: theme.backgroundSelected }]}>
+        <ThemedText themeColor="textSecondary" style={styles.sectionLabel}>
+          {label.toUpperCase()}
+        </ThemedText>
+      </View>
       {children}
     </View>
   );
@@ -149,7 +156,19 @@ const styles = StyleSheet.create({
     minHeight: 32,
   },
   backLabel: {
-    letterSpacing: 1,
+    fontFamily: BrandFonts.data,
+    fontSize: 10.5,
+    fontWeight: '500',
+    letterSpacing: 1.6,
+    lineHeight: 14,
+  },
+  title: {
+    fontFamily: BrandFonts.display,
+    fontSize: 34,
+    // Stated as well as named — see the note in `settings-menu-row.tsx`.
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    lineHeight: 38,
   },
   header: {
     alignItems: 'flex-start',
@@ -172,7 +191,15 @@ const styles = StyleSheet.create({
   section: {
     gap: Spacing.two,
   },
+  sectionRule: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingBottom: Spacing.one,
+  },
   sectionLabel: {
-    letterSpacing: 1,
+    fontFamily: BrandFonts.data,
+    fontSize: 10.5,
+    fontWeight: '500',
+    letterSpacing: 1.6,
+    lineHeight: 14,
   },
 });

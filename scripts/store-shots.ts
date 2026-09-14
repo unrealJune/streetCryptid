@@ -337,7 +337,7 @@ const SCENES: readonly Scene[] = [
       // One level in, to the screen the headline is actually about. The settings
       // menu itself is a list of rows ending in DEBUG — honest, since that
       // section does ship, but not what this plate is claiming.
-      await mustClick(page, 'Delivery options');
+      await mustClick(page, 'Delivery');
       await sleep(1400);
     },
     async reset(page) {

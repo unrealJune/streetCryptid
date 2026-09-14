@@ -61,6 +61,25 @@ export const Fonts = Platform.select({
   },
 });
 
+/**
+ * The two brand faces, loaded once in `src/app/_layout.tsx`.
+ *
+ * Rajdhani is the condensed display voice every island, tab and locator on the map is
+ * set in; IBM Plex Mono is the tracked data voice that sits under them. They are named
+ * here because fourteen files had the family strings inline and Settings — the one
+ * surface in the app that used NEITHER — rendered in the platform system font and read
+ * as a different product.
+ *
+ * `Fonts.mono` is not the same thing: it is the platform's monospace (SF Mono on iOS),
+ * which is what `ThemedText type="code"` still uses. Where a readout should match the
+ * islands, use `BrandFonts.data`.
+ */
+export const BrandFonts = {
+  display: 'Rajdhani_700Bold',
+  displayMedium: 'Rajdhani_600SemiBold',
+  data: 'IBMPlexMono_500Medium',
+} as const;
+
 export const Spacing = {
   half: 2,
   one: 4,
