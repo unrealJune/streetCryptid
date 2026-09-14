@@ -128,12 +128,12 @@ describe('FriendDetailIsland', () => {
     expect(onToggleShare).toHaveBeenCalledWith(false);
   });
 
-  it('holds removal back until the drawer is fully open, behind a confirm', () => {
-    render('mid');
+  it('holds removal back until the pane is expanded, behind a confirm', () => {
+    render('peek');
     expect(findText(renderer, 'REMOVE FRIEND')).toHaveLength(0);
 
     act(() => renderer?.unmount());
-    const { onRemove } = render('full');
+    const { onRemove } = render('mid');
     const remove = renderer.root.findByProps({
       accessibilityHint: 'Stops sharing and removes this friend from your atlas',
     });
@@ -157,7 +157,7 @@ describe('FriendDetailIsland', () => {
   });
 
   it('has no centre-map button, because opening the pane already moved the map', () => {
-    render('full');
+    render('mid');
 
     const labels = renderer.root
       .findAllByType(Text)
@@ -166,6 +166,23 @@ describe('FriendDetailIsland', () => {
       .toUpperCase();
     expect(labels).not.toContain('CENTRE MAP');
     expect(labels).not.toContain('VIEW ON MAP');
+  });
+
+  // Three stages meant the pane answered in three different shapes, and the tallest of them was
+  // mostly empty island. Expanding it now discloses rows under an unchanged hero, once.
+  it('shows one expanded pane rather than a second, larger set of facts', () => {
+    render('mid');
+    const atMid = findText(renderer, 'LAST FIX ACK').length;
+    const heroAtMid = renderer.root.findByProps({ accessibilityRole: 'summary' }).props.style;
+
+    act(() => renderer?.unmount());
+    render('full');
+
+    expect(findText(renderer, 'LAST FIX ACK')).toHaveLength(atMid);
+    expect(atMid).toBe(1);
+    expect(renderer.root.findByProps({ accessibilityRole: 'summary' }).props.style).toEqual(
+      heroAtMid
+    );
   });
 
   it('survives a friend whose place has no name yet', () => {

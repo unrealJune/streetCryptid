@@ -10,6 +10,8 @@ import { CAMERA_INITIAL_ZOOM, createMapDataset, type MapDataset } from '../confi
 import { applyViewTransform, clampCamera, scaleFor, type ViewTransform } from '../core/camera';
 import { makeViewLimits, type ViewLimits } from '../core/gesture';
 import { createH3Grid, realH3 } from '../core/h3-grid';
+import { resForZoom } from '../core/cell-ladder';
+import { measureHexLattice, type HexLattice } from '../core/hex-lattice';
 import { createNativeH3Enumerator } from '../core/native-h3-enumerator';
 import { coverageInView, coverageMeasurable, nearestPlaceName } from '../core/readout';
 import {
@@ -79,6 +81,13 @@ export interface MapEngineState {
   readonly sectorsVisible: boolean;
   /** Nearest prominent place name to the camera center, for the island. */
   readonly placeName: string | null;
+  /**
+   * The exploration grid as the layer is currently drawing it — one real H3 cell's size and
+   * orientation, measured at the committed camera. The loading skeleton tiles the plane with it so
+   * unloaded ground carries the same grid the tiles will land on. Null below the ladder, where the
+   * layer draws no cells and so neither should its stand-in.
+   */
+  readonly hexLattice: HexLattice | null;
   /**
    * Commit the view's current ABSOLUTE transform (anchor → now) as the data
    * camera. Called at gesture/fling end. Absolute, so repeated or reordered
@@ -417,6 +426,14 @@ export function useMapEngine(
     [region, camera]
   );
 
+  // Keyed on the COMMITTED camera, exactly like the region it has to match: the ladder rung only
+  // changes when a build does, so re-measuring mid-gesture would resize the skeleton at a moment
+  // nothing else on the map moves.
+  const hexLattice = useMemo(() => {
+    const res = resForZoom(camera.zoom);
+    return res === null ? null : measureHexLattice(grid, camera.center, res);
+  }, [grid, camera]);
+
   return {
     theme,
     dataZooms: dataset.dataZooms,
@@ -428,6 +445,7 @@ export function useMapEngine(
     coverage,
     sectorsVisible,
     placeName,
+    hexLattice,
     commit,
     prefetchAt,
   };

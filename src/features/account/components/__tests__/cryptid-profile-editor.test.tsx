@@ -116,6 +116,18 @@ describe('CryptidProfileEditor', () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
+  it('uses the settings back affordance when editing', () => {
+    const onDone = jest.fn();
+    render({ onDone });
+
+    expect(renderer.root.findAllByProps({ accessibilityLabel: 'Done' })).toHaveLength(0);
+    act(() =>
+      renderer.root.findByProps({ accessibilityLabel: 'Back to settings' }).props.onPress()
+    );
+
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
   it('applies a roll immediately during onboarding — there is nothing to overwrite', async () => {
     const onSave = render({ mode: 'onboarding' });
 

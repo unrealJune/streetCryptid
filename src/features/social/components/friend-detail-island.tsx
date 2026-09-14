@@ -69,6 +69,13 @@ function pairingLabel(method: FriendPresence['friend']['pairingMethod']): string
  * PEEK is one question — where are they — answered by a hero. Distance and last-signal ride the
  * sub line under it, which is why there is no LOCATION row and no LAST SIGNAL row further down;
  * they would be the same facts a second time.
+ *
+ * There are exactly TWO stages, and pulling the drawer past the first reveals everything at once.
+ * It used to have three, with the acks and Remove held back for `full` and the hero re-laying
+ * itself out from a row into a centred column on the way — so the same pane answered with three
+ * different shapes, and the last of them was a screen-tall sheet with a few rows at the top and
+ * nothing under them. A friend has a bounded amount to say; the drawer's `maxDetent` exists to
+ * stop a bounded body climbing to full, and this pane is the reason it was written.
  */
 export function FriendDetailIsland({
   presence,
@@ -94,7 +101,6 @@ export function FriendDetailIsland({
   const endpointId = presence.friend.endpointId;
   const distance = formatDistance(presence.distanceM);
   const expanded = detent === 'mid' || detent === 'full';
-  const full = detent === 'full';
   // Lower-cased keys: endpoint ids reach us from native hex, storage and tickets, and a case
   // difference between two spellings of the same device would read as two devices.
   const friendHandles = new Map(
@@ -156,55 +162,32 @@ export function FriendDetailIsland({
         <Text style={[styles.backLabel, { color: chrome.steel }]}>FRIENDS</Text>
       </Pressable>
 
-      {full ? (
-        <View
-          accessible
-          accessibilityRole="summary"
-          accessibilityLabel={`${presence.friend.handle}. ${placeName ?? 'Location unnamed'}. ${subLine.toLowerCase()}.`}
-          style={styles.heroFull}
-        >
-          <CryptidAvatar
-            art={presence.friend.sigil || 'unknown'}
-            color={signalColor}
-            name={presence.friend.cryptidName ?? 'Unknown form'}
-            size="large"
-          />
-          <Text style={[styles.handleFull, { color: signalColor }]} numberOfLines={1}>
+      {/* One hero at every height. The pane grows by disclosing rows under it, not by becoming a
+          different composition of the same four facts. */}
+      <View
+        accessible
+        accessibilityRole="summary"
+        accessibilityLabel={`${presence.friend.handle}. ${placeName ?? 'Location unnamed'}. ${subLine.toLowerCase()}.`}
+        style={styles.hero}
+      >
+        <CryptidAvatar
+          art={presence.friend.sigil || 'unknown'}
+          color={signalColor}
+          name={presence.friend.cryptidName ?? 'Unknown form'}
+          style={styles.avatar}
+        />
+        <View style={styles.heroCopy}>
+          <Text style={[styles.handle, { color: signalColor }]} numberOfLines={1}>
             {presence.friend.handle}
           </Text>
-          <Text style={[styles.placeFull, { color: chrome.ink }]} numberOfLines={1}>
+          <Text style={[styles.place, { color: chrome.ink }]} numberOfLines={1}>
             {placeName ?? '—'}
           </Text>
           <Text style={[styles.sub, { color: chrome.steel }]} numberOfLines={1}>
             {subLine}
           </Text>
         </View>
-      ) : (
-        <View
-          accessible
-          accessibilityRole="summary"
-          accessibilityLabel={`${presence.friend.handle}. ${placeName ?? 'Location unnamed'}. ${subLine.toLowerCase()}.`}
-          style={styles.hero}
-        >
-          <CryptidAvatar
-            art={presence.friend.sigil || 'unknown'}
-            color={signalColor}
-            name={presence.friend.cryptidName ?? 'Unknown form'}
-            style={styles.avatar}
-          />
-          <View style={styles.heroCopy}>
-            <Text style={[styles.handle, { color: signalColor }]} numberOfLines={1}>
-              {presence.friend.handle}
-            </Text>
-            <Text style={[styles.place, { color: chrome.ink }]} numberOfLines={1}>
-              {placeName ?? '—'}
-            </Text>
-            <Text style={[styles.sub, { color: chrome.steel }]} numberOfLines={1}>
-              {subLine}
-            </Text>
-          </View>
-        </View>
-      )}
+      </View>
 
       {expanded ? (
         <View style={styles.details}>
@@ -238,20 +221,16 @@ export function FriendDetailIsland({
             value={pairingLabel(presence.friend.pairingMethod)}
             theme={theme}
           />
-          {full ? (
-            <>
-              <DetailRow
-                label="LAST FIX ACK"
-                value={formatAckAge(ratchetActivity?.fix)}
-                theme={theme}
-              />
-              <DetailRow
-                label="LAST NULL ACK"
-                value={formatAckAge(ratchetActivity?.null)}
-                theme={theme}
-              />
-            </>
-          ) : null}
+          <DetailRow
+            label="LAST FIX ACK"
+            value={formatAckAge(ratchetActivity?.fix)}
+            theme={theme}
+          />
+          <DetailRow
+            label="LAST NULL ACK"
+            value={formatAckAge(ratchetActivity?.null)}
+            theme={theme}
+          />
 
           {/* States what it is rather than what pressing it would do: "PAUSE SHARING" made you
               read an action backwards to learn whether you were sharing at all. */}
@@ -288,73 +267,71 @@ export function FriendDetailIsland({
             </View>
           </Pressable>
 
-          {full ? (
-            <View style={[styles.removeSection, { borderTopColor: chrome.islandBorder }]}>
-              {confirmingRemove ? (
-                <View accessibilityLiveRegion="polite" style={styles.removeConfirm}>
-                  <Text style={[styles.confirmTitle, { color: chrome.ink }]}>
-                    Remove {presence.friend.handle}?
+          <View style={[styles.removeSection, { borderTopColor: chrome.islandBorder }]}>
+            {confirmingRemove ? (
+              <View accessibilityLiveRegion="polite" style={styles.removeConfirm}>
+                <Text style={[styles.confirmTitle, { color: chrome.ink }]}>
+                  Remove {presence.friend.handle}?
+                </Text>
+                <Text style={[styles.confirmCopy, { color: chrome.steel }]}>
+                  This removes them from this device and stops sharing your location with them. You
+                  can pair again later.
+                </Text>
+                {removeError ? (
+                  <Text
+                    accessibilityRole="alert"
+                    style={[styles.confirmCopy, { color: chrome.ink }]}
+                  >
+                    {removeError}
                   </Text>
-                  <Text style={[styles.confirmCopy, { color: chrome.steel }]}>
-                    This removes them from this device and stops sharing your location with them.
-                    You can pair again later.
-                  </Text>
-                  {removeError ? (
-                    <Text
-                      accessibilityRole="alert"
-                      style={[styles.confirmCopy, { color: chrome.ink }]}
-                    >
-                      {removeError}
+                ) : null}
+                <View style={styles.removeActions}>
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={removing}
+                    onPress={() => {
+                      setConfirmingRemove(false);
+                      setRemoveError(null);
+                    }}
+                    style={({ pressed }) => [
+                      styles.removeChoice,
+                      {
+                        borderColor: chrome.islandBorder,
+                        opacity: removing ? 0.45 : pressed ? 0.58 : 1,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.removeChoiceLabel, { color: chrome.ink }]}>
+                      KEEP FRIEND
                     </Text>
-                  ) : null}
-                  <View style={styles.removeActions}>
-                    <Pressable
-                      accessibilityRole="button"
-                      disabled={removing}
-                      onPress={() => {
-                        setConfirmingRemove(false);
-                        setRemoveError(null);
-                      }}
-                      style={({ pressed }) => [
-                        styles.removeChoice,
-                        {
-                          borderColor: chrome.islandBorder,
-                          opacity: removing ? 0.45 : pressed ? 0.58 : 1,
-                        },
-                      ]}
-                    >
-                      <Text style={[styles.removeChoiceLabel, { color: chrome.ink }]}>
-                        KEEP FRIEND
-                      </Text>
-                    </Pressable>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityState={{ busy: removing, disabled: removing }}
-                      disabled={removing}
-                      onPress={() => void handleRemove()}
-                      style={({ pressed }) => [
-                        styles.removeChoice,
-                        { borderColor: chrome.ink, opacity: removing ? 0.45 : pressed ? 0.58 : 1 },
-                      ]}
-                    >
-                      <Text style={[styles.removeChoiceLabel, { color: chrome.ink }]}>
-                        {removing ? 'REMOVING…' : 'REMOVE'}
-                      </Text>
-                    </Pressable>
-                  </View>
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityState={{ busy: removing, disabled: removing }}
+                    disabled={removing}
+                    onPress={() => void handleRemove()}
+                    style={({ pressed }) => [
+                      styles.removeChoice,
+                      { borderColor: chrome.ink, opacity: removing ? 0.45 : pressed ? 0.58 : 1 },
+                    ]}
+                  >
+                    <Text style={[styles.removeChoiceLabel, { color: chrome.ink }]}>
+                      {removing ? 'REMOVING…' : 'REMOVE'}
+                    </Text>
+                  </Pressable>
                 </View>
-              ) : (
-                <Pressable
-                  accessibilityHint="Stops sharing and removes this friend from your atlas"
-                  accessibilityRole="button"
-                  onPress={() => setConfirmingRemove(true)}
-                  style={({ pressed }) => [styles.remove, { opacity: pressed ? 0.58 : 1 }]}
-                >
-                  <Text style={[styles.removeLabel, { color: chrome.steel }]}>REMOVE FRIEND</Text>
-                </Pressable>
-              )}
-            </View>
-          ) : null}
+              </View>
+            ) : (
+              <Pressable
+                accessibilityHint="Stops sharing and removes this friend from your atlas"
+                accessibilityRole="button"
+                onPress={() => setConfirmingRemove(true)}
+                style={({ pressed }) => [styles.remove, { opacity: pressed ? 0.58 : 1 }]}
+              >
+                <Text style={[styles.removeLabel, { color: chrome.steel }]}>REMOVE FRIEND</Text>
+              </Pressable>
+            )}
+          </View>
         </View>
       ) : null}
     </View>
@@ -486,12 +463,6 @@ const styles = StyleSheet.create({
     paddingBottom: Spacing.two,
     paddingTop: Spacing.one,
   },
-  heroFull: {
-    alignItems: 'center',
-    gap: Spacing.one,
-    paddingBottom: Spacing.three,
-    paddingTop: Spacing.two,
-  },
   avatar: {
     width: 72,
   },
@@ -504,20 +475,10 @@ const styles = StyleSheet.create({
     fontSize: 22,
     lineHeight: 25,
   },
-  handleFull: {
-    fontFamily: 'Rajdhani_700Bold',
-    fontSize: 26,
-    lineHeight: 29,
-  },
   place: {
     fontFamily: 'Rajdhani_700Bold',
     fontSize: 30,
     lineHeight: 34,
-  },
-  placeFull: {
-    fontFamily: 'Rajdhani_700Bold',
-    fontSize: 34,
-    lineHeight: 38,
   },
   sub: {
     fontFamily: 'IBMPlexMono_500Medium',

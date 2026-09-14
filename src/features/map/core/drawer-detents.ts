@@ -19,7 +19,15 @@ const TRAVEL_COMMIT = 0.32;
 /** A flick faster than this (px/s) picks the next detent regardless of how far it travelled. */
 const FLING_SPEED = 550;
 
-/** `IslandTabs`: 44pt targets plus its own 8pt padding, top and bottom. */
+/**
+ * `IslandTabs`: 44pt targets plus its own 8pt padding, top and bottom.
+ *
+ * Only the opening guess — the drawer measures the real bar and passes it in. It has to, because
+ * peek is derived as body + chrome and then the bar is laid out INSIDE that: understating the bar
+ * by even the hairline border leaves the body a pixel taller than the space it was given, and a
+ * ScrollView one pixel short of its content is a panel that scrolls and rubber-bands under your
+ * finger for no reason a user can see.
+ */
 export const TAB_BAR_HEIGHT = 60;
 /**
  * Grip strip height — the drawer's own affordance, above whatever body it carries. Only counted
@@ -32,6 +40,16 @@ export const GRIP_HEIGHT = 18;
  * Detent geometry, kept clear of Reanimated and the component tree so it can be reasoned about
  * (and tested) as the arithmetic it is. `MapDrawer` is the only caller.
  */
+
+/**
+ * What the drawer carries INSIDE itself at every detent, above and below the body. Exported
+ * because the drawer needs the same figure to answer a question the heights alone cannot: how
+ * tall the body's own frame is at a given detent, and therefore whether the list inside it has
+ * anywhere to scroll.
+ */
+export function drawerChrome(gripHeight: number, tabBarHeight: number = TAB_BAR_HEIGHT): number {
+  return tabBarHeight + gripHeight;
+}
 
 /** Detents a body is allowed to reach, in ascending height order. */
 export function allowedDetents(
@@ -57,13 +75,23 @@ export function detentHeights(input: {
   margin: number;
   /** `GRIP_HEIGHT` when the drawer renders a grip, 0 when it has a single detent and does not. */
   gripHeight: number;
+  /** The tab bar as actually laid out. Defaults to {@link TAB_BAR_HEIGHT} until it is measured. */
+  tabBarHeight?: number;
 }): Record<DrawerDetent, number> {
-  const { peekBody, screenHeight, insetTop, insetBottom, margin, gripHeight } = input;
+  const {
+    peekBody,
+    screenHeight,
+    insetTop,
+    insetBottom,
+    margin,
+    gripHeight,
+    tabBarHeight = TAB_BAR_HEIGHT,
+  } = input;
   const full = Math.max(0, screenHeight - insetTop - margin);
   // Only what the drawer carries INSIDE itself. The bottom inset and the island margin are the
   // drawer's own `marginBottom` at peek — counting them here too added a band of empty island
   // under the body that no amount of minimizing could close, because it was never the body's.
-  const chrome = TAB_BAR_HEIGHT + gripHeight;
+  const chrome = drawerChrome(gripHeight, tabBarHeight);
   // Before the body has measured, peek and full coincide: opening at zero height would flash an
   // empty island on the first frame.
   const peek =

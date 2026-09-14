@@ -32,10 +32,27 @@ jest.mock('../../config', () => ({
 }));
 jest.mock('../../engine/map-engine', () => ({ MapEngine: jest.fn() }));
 jest.mock('../use-map-theme', () => ({ useMapTheme: jest.fn() }));
-jest.mock('../../core/h3-grid', () => ({
-  createH3Grid: jest.fn(() => ({})),
-  realH3: jest.fn(() => ({})),
-}));
+// Enough grid for the loading skeleton to measure a lattice off: one regular hexagon per cell,
+// on a coarse snap. The engine asks for this on every commit, so a bare {} now throws.
+jest.mock('../../core/h3-grid', () => {
+  const SNAP = 1e4;
+  const RADIUS = 1e-4;
+  return {
+    createH3Grid: jest.fn(() => ({
+      cellAt: ([x, y]: [number, number]) =>
+        `${Math.round(x * SNAP) / SNAP}:${Math.round(y * SNAP) / SNAP}`,
+      centerWorld: (cell: string) => cell.split(':').map(Number) as [number, number],
+      boundaryWorld: (cell: string) => {
+        const [cx, cy] = cell.split(':').map(Number);
+        return Array.from({ length: 6 }, (_, i) => {
+          const angle = (Math.PI / 3) * i + Math.PI / 6;
+          return [cx + RADIUS * Math.cos(angle), cy + RADIUS * Math.sin(angle)] as [number, number];
+        });
+      },
+    })),
+    realH3: jest.fn(() => ({})),
+  };
+});
 jest.mock('../../core/native-h3-enumerator', () => ({
   createNativeH3Enumerator: () => null,
 }));

@@ -21,20 +21,55 @@ describe('MapLayersControl', () => {
   const expand = (onChange: (layer: MapLayerId, enabled: boolean) => void) => {
     act(() => {
       renderer = create(
-        <MapLayersControl layers={layers} onChange={onChange} theme={CryptidThemes.daybreak} />
+        <MapLayersControl
+          expanded
+          layers={layers}
+          onChange={onChange}
+          onExpandedChange={jest.fn()}
+          theme={CryptidThemes.daybreak}
+        />
       );
     });
-    act(() => renderer.root.findByProps({ accessibilityLabel: 'Map layers' }).props.onPress());
   };
 
   it('keeps the panel collapsed until the layers button is pressed', () => {
+    const onExpandedChange = jest.fn();
     act(() => {
       renderer = create(
-        <MapLayersControl layers={layers} onChange={jest.fn()} theme={CryptidThemes.daybreak} />
+        <MapLayersControl
+          expanded={false}
+          layers={layers}
+          onChange={jest.fn()}
+          onExpandedChange={onExpandedChange}
+          theme={CryptidThemes.daybreak}
+        />
       );
     });
 
     expect(renderer.root.findAllByProps({ accessibilityLabel: 'Highways layer' })).toHaveLength(0);
+
+    act(() => renderer.root.findByProps({ accessibilityLabel: 'Map layers' }).props.onPress());
+    expect(onExpandedChange).toHaveBeenCalledWith(true);
+  });
+
+  // The panel is a popover, and its open state belongs to the screen: only the screen can see the
+  // tap on the map (or the drawer, or Settings) that should put it away.
+  it('asks to close when its own button is pressed again', () => {
+    const onExpandedChange = jest.fn();
+    act(() => {
+      renderer = create(
+        <MapLayersControl
+          expanded
+          layers={layers}
+          onChange={jest.fn()}
+          onExpandedChange={onExpandedChange}
+          theme={CryptidThemes.daybreak}
+        />
+      );
+    });
+
+    act(() => renderer.root.findByProps({ accessibilityLabel: 'Map layers' }).props.onPress());
+    expect(onExpandedChange).toHaveBeenCalledWith(false);
   });
 
   it('toggles the highways layer off', () => {
