@@ -331,6 +331,8 @@ export declare class IrohLocationNativeModule
   pollResync?(peerEndpointHex: string, peerRecvPubHex: string): Promise<boolean>;
   clearResync?(): Promise<void>;
   forgetSession?(peerEndpointHex: string): Promise<void>;
+  /** Optional; absent on binaries built before the pairing-session forget existed. */
+  forgetPairSessions?(peerEndpointHex: string): Promise<number>;
   syncLatest(peerTickets: string[], traceparent?: string | null): Promise<void>;
   /** Optional for compatibility with installed iOS binaries built before the push API. */
   /** Optional; absence means this binary clobbers the node on a second createNode. */

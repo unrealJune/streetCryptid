@@ -979,6 +979,16 @@ export interface IrohLocationApi {
   clearResync?(): Promise<void>;
   /** Forget a peer's ratchet session entirely — unfriend, or revoke. */
   forgetSession?(peerEndpointHex: string): Promise<void>;
+  /**
+   * Forget the FINISHED pairing sessions with a peer, returning how many were dropped.
+   *
+   * The companion to {@link forgetSession}: that erases the ratchet state of what the friendship
+   * became, this erases the pairing record of how it began (their recv key, SAS material and
+   * tickets). Live sessions are spared — a pair in progress is the user's to cancel.
+   *
+   * Optional: absent on binaries built before the export existed.
+   */
+  forgetPairSessions?(peerEndpointHex: string): Promise<number>;
 
   /** Explicitly drop durable entries older than `olderThanTs`. */
   pruneTrail(olderThanTs: number): Promise<void>;

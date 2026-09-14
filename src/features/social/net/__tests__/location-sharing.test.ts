@@ -27,6 +27,7 @@ class FakeNativeModule {
     docsWriteControl: [] as unknown[][],
     pollResync: [] as { peer: string; recvPub: string }[],
     forgetSession: [] as string[],
+    forgetPairSessions: [] as string[],
     clearResync: 0,
     setDeliveryConfig: [] as {
       peerTickets: string[];
@@ -122,6 +123,12 @@ class FakeNativeModule {
   }
   async forgetSession(peerEndpointHex: string) {
     this.calls.forgetSession.push(peerEndpointHex);
+  }
+  /** How many finished pairing sessions the fake native side claims to have dropped. */
+  forgetPairSessionsResult = 1;
+  async forgetPairSessions(peerEndpointHex: string) {
+    this.calls.forgetPairSessions.push(peerEndpointHex);
+    return this.forgetPairSessionsResult;
   }
   async docsWriteControl(...args: unknown[]) {
     this.calls.docsWriteControl.push(args);
@@ -1115,6 +1122,31 @@ describe('LocationSharingService — session health and resync', () => {
     await svc.removeFriend(friend.endpointId);
 
     expect(mockHolder.mod.calls.forgetSession).toEqual([friend.endpointId]);
+  });
+
+  /**
+   * The pairing session is the same §5.4 argument one record over — it holds their recv key, SAS
+   * material and tickets — and AGENTS.md already said a completed pair is torn down by
+   * `removeFriend`. Only the ratchet half was implemented, so a Pixel was still holding
+   * `sessions=1 states=[complete]` half an hour after the unfriend.
+   */
+  it('forgets the pairing sessions when a friend is removed', async () => {
+    const svc = await shared();
+
+    await svc.removeFriend(friend.endpointId);
+
+    expect(mockHolder.mod.calls.forgetPairSessions).toEqual([friend.endpointId]);
+  });
+
+  /** A phone can be running an older binary than this bundle; the export may simply be absent. */
+  it('removes a friend fine on a binary with no pairing-session forget', async () => {
+    const svc = await shared();
+    (mockHolder.mod as { forgetPairSessions?: unknown }).forgetPairSessions = undefined;
+
+    await expect(svc.removeFriend(friend.endpointId)).resolves.toBeUndefined();
+
+    expect(mockHolder.mod.calls.forgetSession).toEqual([friend.endpointId]);
+    expect(mockHolder.mod.calls.forgetPairSessions).toEqual([]);
   });
 });
 

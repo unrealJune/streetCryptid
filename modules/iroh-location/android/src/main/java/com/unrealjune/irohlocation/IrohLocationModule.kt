@@ -996,6 +996,15 @@ class IrohLocationModule : Module() {
         n.forgetSession(peerEndpoint)
       }
 
+    /// Companion to forgetSession: erase the pairing record of how the friendship began, not just
+    /// the ratchet state of what it became. Finished sessions only — a live pair is the user's to
+    /// cancel. Returns how many were dropped.
+    AsyncFunction("forgetPairSessions") Coroutine
+      { peerEndpoint: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.forgetPairSessions(peerEndpoint).toInt()
+      }
+
     AsyncFunction("syncLatest") Coroutine
       { peerTickets: List<String>, traceparent: String? ->
         val n = node ?: throw IllegalStateException("call createNode first")

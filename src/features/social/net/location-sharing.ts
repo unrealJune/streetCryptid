@@ -1243,6 +1243,36 @@ export class LocationSharingService {
         })
       );
     }
+    // And the pairing record of how the friendship began, which the ratchet teardown above does
+    // not touch: the session holds their recv key, their SAS material and their tickets, so §5.4's
+    // argument covers it too. Guarded because a phone can be running an older binary than this
+    // bundle. Finished sessions only — a pair in progress is the user's to cancel, not ours.
+    if (mod && typeof mod.forgetPairSessions === 'function') {
+      cleanup.push(
+        mod
+          .forgetPairSessions(endpointId)
+          .then((dropped: number) => {
+            if (dropped === 0) return;
+            // Keep the cached list in step with native. `pairSessions` is only refreshed by the
+            // pairing poll loop, which is not running after an unfriend, so without this the
+            // screen would keep listing a session native has already dropped.
+            this.pairSessions = this.pairSessions.filter(
+              (session) =>
+                session.peerEndpointId !== endpointId ||
+                !TERMINAL_PAIR_STATES.includes(session.state)
+            );
+            this.emitIfPairingChanged();
+          })
+          .catch((err: unknown) => {
+            getTelemetry().log(
+              'warn',
+              `could not forget the pairing sessions for a removed friend: ${
+                err instanceof Error ? err.message : String(err)
+              }`
+            );
+          })
+      );
+    }
     if (wasSharing) cleanup.push(this.ensureMySubscription());
     cleanup.push(
       this.trail.removeFriend(endpointId).then(() => {

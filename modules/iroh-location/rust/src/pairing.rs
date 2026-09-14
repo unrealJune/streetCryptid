@@ -1927,6 +1927,47 @@ impl PairCore {
         Ok(())
     }
 
+    /// Drop every FINISHED pairing session with `peer`, and any notices still referring to them.
+    /// Returns how many were removed.
+    ///
+    /// Called by `removeFriend`. Tearing the ratchet session down already had a reason beyond
+    /// tidiness (FORWARD-SECRECY §5.4: chain keys for a relationship that no longer exists are
+    /// material whose only remaining use is to a seized device) and the pairing session is the
+    /// same argument one record over — it holds the peer's recv key, their SAS material and their
+    /// tickets. AGENTS.md already states the intent: "a completed pair is torn down by
+    /// `removeFriend`, deliberately, never as a side effect of navigation." Only the first half
+    /// of that was implemented; a Pixel was observed still holding `sessions=1 states=[complete]`
+    /// half an hour after the unfriend.
+    ///
+    /// **Finished sessions only.** A LIVE session with this peer is a pair the human is in the
+    /// middle of, and unfriending must not become a second, silent way to kill one — the pairing
+    /// screen has its own cancel for that. This is the same line `standDownPairing` draws from
+    /// the other side, and the same one [`is_terminal`](PairSession::is_terminal) draws for reuse.
+    ///
+    /// This removes a local record and sends NOTHING on the wire: a wire `Reject` is a decision
+    /// about a pair in progress, and there is no pair in progress here.
+    pub async fn forget_finished_sessions_with(&self, peer: &[u8; ENDPOINT_LEN]) -> usize {
+        let dropped: Vec<[u8; SESSION_ID_LEN]> = {
+            let mut sessions = self.sessions.lock().await;
+            let doomed: Vec<_> = sessions
+                .iter()
+                .filter(|(_, s)| s.peer_endpoint == *peer && s.is_terminal())
+                .map(|(id, _)| *id)
+                .collect();
+            for id in &doomed {
+                sessions.remove(id);
+            }
+            doomed
+        };
+        if !dropped.is_empty() {
+            self.notices
+                .lock()
+                .await
+                .retain(|notice| !dropped.contains(&notice.session_id));
+        }
+        dropped.len()
+    }
+
     async fn discard_untouched_handshake(&self, session_id: &[u8; SESSION_ID_LEN]) -> bool {
         let mut sessions = self.sessions.lock().await;
         let removed = if sessions
@@ -3807,6 +3848,68 @@ mod tests {
             nonce1,
             "an unfinished session keeps its SAS material"
         );
+    }
+
+    /// `removeFriend` must erase the pairing record, not only the ratchet session. A Pixel was
+    /// seen still holding `sessions=1 states=[complete]` half an hour after an unfriend.
+    #[tokio::test]
+    async fn forgetting_a_peer_drops_their_finished_sessions() {
+        let (core, our_ep, _our_recv) = test_core();
+        let peer = [9u8; ENDPOINT_LEN];
+        let other = [8u8; ENDPOINT_LEN];
+        let sid_done = derive_nearby_id(&our_ep, &peer);
+        let sid_failed = [3u8; SESSION_ID_LEN];
+        let sid_other = [4u8; SESSION_ID_LEN];
+
+        {
+            let mut sessions = core.sessions.lock().await;
+            let mut done = test_session(sid_done, true, true, peer);
+            done.local_decision = Some(true);
+            done.peer_decision = Some(true);
+            done.result_emitted = true;
+            sessions.insert(sid_done, done);
+
+            let mut failed = test_session(sid_failed, true, true, peer);
+            failed.failed = true;
+            sessions.insert(sid_failed, failed);
+
+            // A finished session with SOMEONE ELSE must survive: this unfriends one person.
+            let mut unrelated = test_session(sid_other, true, true, other);
+            unrelated.local_decision = Some(true);
+            unrelated.peer_decision = Some(true);
+            sessions.insert(sid_other, unrelated);
+        }
+
+        assert_eq!(core.forget_finished_sessions_with(&peer).await, 2);
+        let sessions = core.sessions.lock().await;
+        assert!(
+            !sessions.contains_key(&sid_done),
+            "the completed pair is gone"
+        );
+        assert!(
+            !sessions.contains_key(&sid_failed),
+            "the failed pair is gone"
+        );
+        assert!(
+            sessions.contains_key(&sid_other),
+            "another peer's pair is untouched"
+        );
+    }
+
+    /// A pair the human is in the middle of is theirs to cancel; unfriending must not become a
+    /// second, silent way to kill one.
+    #[tokio::test]
+    async fn forgetting_a_peer_spares_a_live_session() {
+        let (core, our_ep, _our_recv) = test_core();
+        let peer = [9u8; ENDPOINT_LEN];
+        let sid = derive_nearby_id(&our_ep, &peer);
+        {
+            let mut sessions = core.sessions.lock().await;
+            sessions.insert(sid, test_session(sid, true, true, peer));
+        }
+
+        assert_eq!(core.forget_finished_sessions_with(&peer).await, 0);
+        assert!(core.sessions.lock().await.contains_key(&sid));
     }
 
     // ── Concurrency / monotonicity of the SAS decision state machine ────────────────────────

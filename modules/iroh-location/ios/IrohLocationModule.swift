@@ -847,6 +847,14 @@ public final class IrohLocationModule: Module {
       try await node.forgetSession(peerEndpointHex: peerEndpoint)
     }
 
+    // Companion to forgetSession: erase the pairing record of how the friendship began, not just
+    // the ratchet state of what it became. Finished sessions only — a live pair is the user's to
+    // cancel. Returns how many were dropped.
+    AsyncFunction("forgetPairSessions") { (peerEndpoint: String) async throws -> Int in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Int(try await node.forgetPairSessions(peerEndpointHex: peerEndpoint))
+    }
+
     AsyncFunction("syncLatest") { (peerTickets: [String], traceparent: String?) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       try await node.syncLatest(peerTickets: peerTickets, traceparent: traceparent)

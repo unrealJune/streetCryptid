@@ -3119,6 +3119,23 @@ impl LocationNode {
             .map_err(|e| LocationError::Network(e.to_string()))
     }
 
+    /// Drop every FINISHED pairing session with this peer. Returns how many were removed.
+    ///
+    /// The companion to [`forget_session`](Self::forget_session): that one erases the ratchet
+    /// state for a relationship that has ended, this one erases the pairing record of how it
+    /// began. Needs no live node — the sessions live on `PairCore`, which is built at
+    /// construction — so an unfriend still cleans up on a phone whose endpoint never came up.
+    ///
+    /// Live sessions are deliberately spared; see
+    /// [`PairCore::forget_finished_sessions_with`](crate::pairing::PairCore::forget_finished_sessions_with).
+    pub async fn forget_pair_sessions(
+        &self,
+        peer_endpoint_hex: String,
+    ) -> Result<u32, LocationError> {
+        let peer = decode_endpoint(&peer_endpoint_hex)?;
+        Ok(self.pair.forget_finished_sessions_with(&peer).await as u32)
+    }
+
     /// Seal `fix` under **envelope v3** for each recipient's ratchet session and write it to our
     /// durable namespace (FORWARD-SECRECY §4.7).
     ///
