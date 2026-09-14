@@ -19,13 +19,25 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import { CryptidAccountGate } from '@/features/account/components/cryptid-account-gate';
 import { CryptidProfileProvider } from '@/features/account/hooks/use-cryptid-profile';
-import { installConsoleTelemetryBridge } from '@/features/dev/telemetry';
+import {
+  beginTelemetryRun,
+  installConsoleTelemetryBridge,
+  startUiLivenessProbe,
+} from '@/features/dev/telemetry';
 import { LocationDisclosureGate } from '@/features/social/components/location-disclosure-gate';
 import { PairingOverlays } from '@/features/social/components/pairing-overlays';
 import { LocationSharingProvider } from '@/features/social/hooks/use-location-sharing';
 
 // Keep warnings/errors in the local event journal and optionally ship them to the OTLP collector.
 installConsoleTelemetryBridge();
+// Claim this process as the foreground run and report how the previous one ended. Both are
+// foreground-only on purpose: a headless background context is ended without ceremony by the OS
+// every time, and it shares one journal with this one. Fire-and-forget — nothing downstream may
+// wait on telemetry, and a failure here must not keep the splash up.
+void beginTelemetryRun();
+// Watch whether frames are still reaching the screen, so a frozen app is distinguishable from a
+// dead one rather than both being a hole in the data.
+startUiLivenessProbe();
 
 SplashScreen.preventAutoHideAsync();
 

@@ -40,6 +40,19 @@ const STORE_PROFILES = ['production'];
 const TELEMETRY_KEYS = ['EXPO_PUBLIC_OTEL_ENDPOINT', 'EXPO_PUBLIC_DEV_TELEMETRY'];
 
 /**
+ * Env vars a store profile may NEVER set, with no acknowledgement available.
+ *
+ * `EXPO_PUBLIC_SCREENSHOT_FIXTURES=1` compiles `@/features/dev/fixtures` in, which appends
+ * invented friends and an invented walk to whatever the user really has (see that module, and the
+ * resolver rule in `metro.config.js`). It exists so `just store-shots` can photograph a map with
+ * people on it; there is no version of a shipping build where putting strangers on a real user's
+ * map is a trade-off worth recording, so unlike {@link TELEMETRY_KEYS} this has no entry in
+ * {@link ACKNOWLEDGED} to reach for. If you find yourself wanting one, the answer is a separate
+ * profile that is not in {@link STORE_PROFILES}.
+ */
+const FORBIDDEN_KEYS = ['EXPO_PUBLIC_SCREENSHOT_FIXTURES'];
+
+/**
  * Deliberate, temporary exceptions.
  *
  * Remove an entry and the check fails again on the next run — that is the intended way to turn
@@ -72,6 +85,16 @@ const warnings = [];
 
 for (const name of STORE_PROFILES) {
   const env = resolveEnv(name);
+
+  const forbidden = FORBIDDEN_KEYS.filter((key) => env[key] !== undefined);
+  if (forbidden.length > 0) {
+    const settings = forbidden.map((key) => `${key}=${JSON.stringify(env[key])}`).join(', ');
+    failures.push(
+      `  build profile "${name}" sets ${settings}\n` +
+        `    → that is never permitted on a store profile, and there is no acknowledgement for it.`
+    );
+  }
+
   const enabled = TELEMETRY_KEYS.filter((key) => env[key] !== undefined);
   if (enabled.length === 0) continue;
 
@@ -92,12 +115,13 @@ for (const name of STORE_PROFILES) {
 }
 
 if (failures.length > 0) {
-  console.error('Developer telemetry would ship to an app store, unacknowledged:\n');
+  console.error('A store-bound build profile would ship something it must not:\n');
   console.error(failures.join('\n'));
   console.error(
-    '\nEither remove the variable from that profile, or — if this is deliberate — add an entry to\n' +
-      'ACKNOWLEDGED in this script recording why and what ends it. Internal-distribution profiles\n' +
-      '(production-internal-*) never need one: they cannot reach a store.\n'
+    '\nRemove the variable from that profile. For developer telemetry only, the alternative is an\n' +
+      'entry in ACKNOWLEDGED in this script recording why and what ends it; the keys in\n' +
+      'FORBIDDEN_KEYS have no such escape. Internal-distribution profiles (production-internal-*)\n' +
+      'never need either: they cannot reach a store.\n'
   );
   process.exit(1);
 }

@@ -221,6 +221,32 @@ profile-map source="":
 map-shot *args:
     bun scripts/map-shot.ts {{args}}
 
+# App Store / Play screenshots — drives the REAL app (the web build, Rust core as
+# wasm) in Chrome at exact device metrics, then frames each shot with a headline.
+# Exports the web bundle first, so nothing depends on a dev server staying up.
+#
+# Needs `just build-wasm` to have run at least once, plus Chrome. Tiles go through
+# a local CORS proxy because the tileset sends no Access-Control-Allow-Origin.
+#   just store-shots
+#   just store-shots "--devices ios-6.9 --scenes map,pairing"
+store-shots *args:
+    #!/usr/bin/env sh
+    set -eu
+    out="${SC_SHOTS_BUILD_DIR:-.expo/web-store-shots}"
+    echo "==> tile CORS proxy"
+    bun scripts/tile-proxy.ts &
+    proxy=$!
+    trap 'kill "$proxy" 2>/dev/null || true' EXIT INT TERM
+    echo "==> exporting the web build to $out"
+    # Telemetry is compiled OUT of this bundle: a screenshot run is not a device
+    # under diagnosis, and it would otherwise ship spans to the real collector.
+    EXPO_PUBLIC_TILE_URL="${SC_TILE_PROXY_URL:-http://localhost:8099/planet}" \
+      EXPO_PUBLIC_DEV_TELEMETRY=0 \
+      EXPO_PUBLIC_OTEL_ENDPOINT= \
+      bunx expo export --platform web --output-dir "$out" >/dev/null
+    echo "==> capturing"
+    bun scripts/store-shots.ts --web-build "$out" {{args}}
+
 # Run the full local gate: types, lint, formatting, and tests (JS/TS only).
 check: typecheck lint format-check release-telemetry-check test
 

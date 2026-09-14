@@ -847,9 +847,12 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                     continue;
                 };
                 let name_ref = geo.strings.intern(name);
-                let kind_ref = geo
-                    .strings
-                    .intern(layer.prop(f, "class").and_then(|v| v.as_str()).unwrap_or(""));
+                let kind_ref = geo.strings.intern(
+                    layer
+                        .prop(f, "class")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                );
                 let subclass_ref = geo.strings.intern(
                     layer
                         .prop(f, "subclass")

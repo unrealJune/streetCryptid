@@ -156,6 +156,55 @@ them describe a ping; all of them describe why there wasn't one.
 | `bg.session` (`precheck-empty`)                        | a headless wake found an empty outbox — distinct from no wake at all                                                                                  |
 | `revive.arm` (`outcome`)                               | whether the iOS tripwire is actually armed, rather than only believed to be — `armed` \| `throttled` \| `task-undefined` \| `unavailable` \| `failed` |
 
+### Spans that say what the phone and its human were doing
+
+A pairing is the one pipeline driven end to end by two people and two thumbs, and for a long time
+none of what they did was recorded. On 2026-09-13 three pairings failed in ninety seconds and the
+reconstruction needed: a burst of unrelated Skia deprecation warnings (to infer that a phone had
+been sent to the home screen), the native core's `iroh endpoint bound` line in Loki (to infer that
+the node had been rebuilt), and a friend count that was only observable as a side effect of
+`trail.sync.app`'s `sync.peers`. All three are first-class spans now.
+
+| Span                  | Says                                                                                                                                            |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `app.lifecycle`       | the app changed foreground state — `app.from` / `app.to` / `app.state_ms`, and `app.left_foreground` for the one that ends everything in flight |
+| `node.rebind`         | the iroh endpoint was destroyed and rebuilt: `trigger`, plus the `sessions_destroyed` / `session_states` / `friends` it took with it            |
+| `pair.stand_down`     | the pairing screen was left — `candidate_states` is what it was about to walk out on, `spared` is what it declined to cancel                    |
+| `pool.friend_added`   | a friend entered the pool, and `reason` says by which route (`pair`, `contact-card`)                                                            |
+| `node.create`         | a JS context asked for a node — `mode` (interactive/headless), `claimed_runtime`, `adopts`; pair with the native `node.construct` ordinal below |
+| `pool.friend_removed` | a friend left it — `manual` (the map's remove) vs `reveal-reject` (the button beside ACKNOWLEDGE), which is the distinction that cost a day     |
+
+The native core's own two, in Loki rather than Tempo (`{service_name="streetcryptid-core"} |~ "pair\."`):
+
+| Log                   | Says                                                                                                                                                                           |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pair.local_decision` | what this phone decided and whether the core accepted it — `accept` \| `reject` \| `fail` \| `noop` \| `contradiction`                                                         |
+| `pair.peer_decision`  | a decision folded in off the wire, what it replaced, and the resulting phase. `effect=overrode-accept` is a pair being taken back apart by the network, which no human pressed |
+| `node.construct`      | a `LocationNode` was built, with `node.ordinal` — how many this PROCESS has built. **Above 1 is the alarm**                                                                    |
+| `node.start`          | the endpoint came up, stamped with the same `node.ordinal`, plus `ble_attached` (fixed at construction and never changeable after)                                             |
+
+### Telling a rebuild from a clobber from a duplicate
+
+Three different bugs look identical in the log — a node appearing with nothing explaining it. Read
+them together:
+
+| shutdown logged? | `node.ordinal` | `node.create` contexts | what it is                                                   |
+| ---------------- | -------------- | ---------------------- | ------------------------------------------------------------ |
+| yes              | climbs         | one                    | a deliberate `rebindNode` — check `node.rebind{trigger}`     |
+| no               | climbs         | two                    | a second context built a node: clobber or duplicate          |
+| no               | stays 1        | one                    | nothing was rebuilt; `start()` early-returned on a live node |
+
+A **duplicate** is the bad one: two live endpoints answering for one identity, so a dial lands on
+whichever the relay or BLE picked and a pairing session that exists on one node is unknown to the
+other. `node.start`'s `ble_attached` is the companion fact — BLE attaches at construction and can
+never be attached afterwards, which is why `ensureBleReady` responds to `bleAvailable()===false`
+with a full rebuild, and why that is worth knowing before changing it.
+
+**Both phones showing `rejected` is reachable without anyone rejecting anything.** A stance response
+to our own dial carries the peer's decision, so an unreachable peer whose SAS window lapsed answers
+`Reject` to the very Accept that was trying to complete the pair. `pair.peer_decision` is how that
+is now told apart from a person declining.
+
 ## Follow-one-ping cookbook (TraceQL, in Grafana → Explore → Tempo)
 
 Every hop of one envelope, on any device or the stash:

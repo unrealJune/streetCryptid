@@ -431,6 +431,27 @@ export async function readMeta(key: string): Promise<string | null> {
   }
 }
 
+/**
+ * The newest timestamp in the journal, or `null` if it is empty or unreadable.
+ *
+ * This is how a run that ended without warning reports WHEN it stopped: every span is mirrored
+ * here as it finishes, so the last row is the last moment the previous process is known to have
+ * executed. Nothing else survives the process to say it — which is the whole difficulty with a
+ * phone that simply goes quiet.
+ */
+export async function lastEntryTimestamp(): Promise<number | null> {
+  const db = await getDb();
+  if (!db) return null;
+  try {
+    const row = await db.getFirstAsync<{ ts: number | null }>(
+      'SELECT MAX(timestamp) AS ts FROM event_log'
+    );
+    return typeof row?.ts === 'number' ? row.ts : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Write a small durable value to the journal database. Best-effort; never throws. */
 export async function writeMeta(key: string, value: string): Promise<void> {
   const db = await getDb();

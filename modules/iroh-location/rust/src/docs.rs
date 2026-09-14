@@ -1300,7 +1300,7 @@ impl TrailDocs {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // ── key encoding round-trip ──────────────────────────────────────────────────────────
@@ -1605,14 +1605,17 @@ mod tests {
 
     /// A live docs node over `data_dir`. Holds the endpoint/gossip alive so the persistent docs
     /// store stays open for the duration of a test (init is local-only — no network sync).
-    struct DocsFixture {
-        docs: Docs,
-        blobs: BlobsStore,
+    ///
+    /// `pub(crate)` so `profile`'s tests can stand a replica up the same way rather than keeping
+    /// a second copy of this in step with it.
+    pub(crate) struct DocsFixture {
+        pub(crate) docs: Docs,
+        pub(crate) blobs: BlobsStore,
         _endpoint: Endpoint,
         _gossip: Gossip,
     }
 
-    async fn spawn_docs(data_dir: &std::path::Path) -> DocsFixture {
+    pub(crate) async fn spawn_docs(data_dir: &std::path::Path) -> DocsFixture {
         let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
             .secret_key(SecretKey::generate())
             .relay_mode(RelayMode::Disabled)
@@ -1635,7 +1638,7 @@ mod tests {
         }
     }
 
-    fn scratch_dir(tag: &str) -> PathBuf {
+    pub(crate) fn scratch_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("sc-trail-ns-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

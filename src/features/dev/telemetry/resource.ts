@@ -1,6 +1,26 @@
 import { Platform } from 'react-native';
 
+import { newSpanId } from './ids';
 import type { Attributes } from './types';
+
+/**
+ * A fresh id for THIS JavaScript context, minted once when this module is first evaluated.
+ *
+ * The gap it fills: `service.instance.id` is the short iroh endpoint id and `device.id` is the
+ * install, so both survive a restart — which left telemetry unable to answer the first question
+ * you ask about a phone that went quiet, namely whether the process that came back is the one
+ * that went away. On 2026-09-13 an iPhone stopped recording for 82 s and there was no way to tell
+ * a crash from a suspension, because every attribute on both sides of the hole was identical.
+ *
+ * It also separates the headless background context from the foreground app, which are two
+ * independent runtimes over one journal and have always been indistinguishable in the data.
+ */
+const RUN_ID = newSpanId();
+
+/** The id of this JS context. Constant for the life of the runtime; new on every restart. */
+export function getRunId(): string {
+  return RUN_ID;
+}
 
 /**
  * Static device/OS resource attributes stamped on EVERY span and log. They are constant for the
@@ -54,7 +74,7 @@ function osName(): string {
  * (missing native module, web) is simply omitted. `os.name` is always present (from `Platform.OS`).
  */
 export function getDeviceResource(): Attributes {
-  const attrs: Attributes = { 'os.name': osName() };
+  const attrs: Attributes = { 'os.name': osName(), 'sc.run_id': RUN_ID };
 
   // Platform.Version: iOS "16.4" (string), Android 34 (number). A native module gives a nicer value.
   if (Platform.Version !== undefined && Platform.Version !== null) {

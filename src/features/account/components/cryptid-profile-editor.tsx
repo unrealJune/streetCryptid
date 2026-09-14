@@ -141,7 +141,10 @@ export function CryptidProfileEditor({
     ? SIGNAL_COLOR_OPTIONS
     : [{ name: 'Current', value: initialColor }, ...SIGNAL_COLOR_OPTIONS];
   const bareHandle = handle.trim().replace(/^@+/, '');
-  const iconName = cryptidName.trim() || 'Custom icon';
+  // Naming the icon is optional, so the caption under the art is simply absent
+  // when it is blank; only the places that need a noun fall back to a word.
+  const iconName = cryptidName.trim();
+  const iconLabel = iconName || 'Unnamed';
   const colorName =
     colorOptions.find((option) => option.value.toLowerCase() === color.toLowerCase())?.name ??
     'Custom';
@@ -383,8 +386,8 @@ export function CryptidProfileEditor({
               </ThemedText>
               <ThemedText type="small" themeColor="textSecondary" style={styles.intro}>
                 {mode === 'onboarding'
-                  ? 'Choose how you appear to friends. You can change this later.'
-                  : 'This is how you appear to friends.'}
+                  ? 'Choose how you appear to friends. The cryptid, the name and the color are all yours to change, now or later.'
+                  : 'This is how you appear to friends. Tap anything here to change it.'}
               </ThemedText>
             </View>
           </View>
@@ -424,7 +427,7 @@ export function CryptidProfileEditor({
             <View style={styles.preview}>
               <Pressable
                 accessibilityHint="Opens the profile icon picker"
-                accessibilityLabel={`Profile icon: ${iconName}`}
+                accessibilityLabel={`Profile icon: ${iconLabel}. Tap to change it.`}
                 accessibilityRole="button"
                 onPress={openIconFromHero}
                 style={({ pressed }) => [styles.previewTarget, { opacity: pressed ? 0.62 : 1 }]}
@@ -436,6 +439,13 @@ export function CryptidProfileEditor({
                   size="large"
                   style={styles.previewAvatar}
                 />
+                {/* The ASCII cryptid is the thing people assume is fixed — it
+                    arrives already rolled, and nothing about a block of art says
+                    "editable". So the hero says so in words, at the one place
+                    everybody looks. */}
+                <ThemedText type="small" themeColor="textSecondary" style={styles.changeHint}>
+                  TAP THE CRYPTID TO CHANGE IT
+                </ThemedText>
               </Pressable>
               <Pressable
                 accessibilityHint="Focuses the username field"
@@ -568,7 +578,7 @@ export function CryptidProfileEditor({
               <FieldNote
                 errorColor={chrome.amberDark}
                 issues={handleErrors}
-                hint="Use 2-20 lowercase letters, numbers, underscores, or dashes."
+                hint="Lowercase letters, numbers, underscores, or dashes. Up to 20."
               />
             </View>
 
@@ -577,13 +587,17 @@ export function CryptidProfileEditor({
             <SettingRow
               active={activeEditor === 'icon'}
               label="Profile icon"
-              value={iconName}
+              value={iconLabel}
               onPress={() => setActiveEditor((current) => (current === 'icon' ? null : 'icon'))}
             />
 
             {activeEditor === 'icon' ? (
               <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
                 <ThemedText style={styles.fieldLabel}>Make an icon</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary">
+                  Roll a random one, describe one and let the phone draw it, or type your own ASCII
+                  art below. Change it as often as you like.
+                </ThemedText>
                 <View style={styles.iconActions}>
                   <Pressable
                     accessibilityHint="Rolls a new cryptid, title, and signal color"
@@ -658,7 +672,7 @@ export function CryptidProfileEditor({
                   <FieldNote
                     errorColor={chrome.amberDark}
                     issues={customNameErrors}
-                    hint="Use 1-24 characters."
+                    hint="Optional. Up to 24 characters."
                   />
 
                   <View style={styles.asciiLabelRow}>
@@ -942,6 +956,13 @@ const styles = StyleSheet.create({
   },
   previewAvatar: {
     minHeight: 126,
+  },
+  changeHint: {
+    fontFamily: Fonts.mono,
+    fontSize: 10,
+    letterSpacing: 1.6,
+    marginTop: Spacing.one,
+    textAlign: 'center',
   },
   handlePreview: {
     fontFamily: 'Rajdhani_700Bold',

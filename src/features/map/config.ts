@@ -17,6 +17,19 @@ import type { TileByteStore } from './tiles/tile-bytes';
 import { WORLD_RECT, type DataZoomRange } from './tiles/tile-math';
 
 /**
+ * `expo/fetch`, safe to call as a bare function reference.
+ *
+ * On native this is Expo's own streaming implementation — an ordinary function,
+ * and binding it changes nothing. On web the module is literally
+ * `export const fetch = globalThis.fetch`, so passing it around detaches it from
+ * `window` and every call throws `TypeError: Failed to execute 'fetch' on
+ * 'Window': Illegal invocation`. The tile pipeline swallows that as a tile
+ * failure, so the symptom is a map that draws its grid and nothing else, with
+ * only a `[map] region build failed` warning to go on.
+ */
+const streamingFetch = expoFetch.bind(globalThis) as typeof expoFetch;
+
+/**
  * Camera zoom limits. The fixture dataset keeps a city floor (it only has
  * Capitol Hill data); the live planet dataset opens to a whole-globe view
  * (z1: the world is 512 logical px wide — camera clamps center-lock smaller
@@ -139,7 +152,7 @@ export function createPlanetGeometrySource(
     new DecodingGeometrySource(
       new BundleFetchByteSource({
         coarseUpstream: new MartinByteSource(tileUrl),
-        bundleUpstream: new StreamingBundleSource(tileUrl, undefined, undefined, expoFetch),
+        bundleUpstream: new StreamingBundleSource(tileUrl, undefined, undefined, streamingFetch),
         store,
         sourceId: 'planet-z10-v1',
         anchorZoom: PRIVACY_ANCHOR_ZOOM,

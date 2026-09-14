@@ -53,6 +53,7 @@ mod telemetry;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 #[cfg(target_os = "android")]
@@ -130,6 +131,14 @@ pub extern "system" fn Java_com_unrealjune_irohlocation_IrohAndroidBootstrap_ini
 
 /// Domain-separation prefix for deriving a user's gossip topic from their EndpointId.
 const TOPIC_PREFIX: &[u8] = b"streetcryptid.loc";
+
+/// Upper bound on `Endpoint::bind` in [`LocationNode::start`].
+///
+/// Generous, because binding legitimately waits on relay DNS and a first network probe on a cold
+/// radio, and a `start` that fails is a `start` the caller has to retry. It exists only to make
+/// the wait finite: `start` is on the launch path, so anything unbounded there is a hung splash
+/// screen rather than a slow one.
+const ENDPOINT_BIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum LocationError {
@@ -1085,6 +1094,9 @@ pub struct LocationNode {
     author: [u8; 32],
     recv_secret: Vec<u8>,
     recv_public: Vec<u8>,
+    /// Which node this is within this process. See [`NODE_ORDINAL`]; carried here so later spans
+    /// can say WHICH node they came from, not only that a node existed.
+    ordinal: u64,
     /// On-disk root for the persistent docs replica + blobs store (durable trail). Derived from
     /// the identity so it stays stable across restarts.
     ///
@@ -1110,6 +1122,16 @@ pub struct LocationNode {
     /// `plugins/withBackupExclusion.js`. Never point this at `data_dir` on a device.
     state_dir: PathBuf,
     inner: Mutex<Option<Started>>,
+    /// Serializes `start`, so building the endpoint does not have to hold [`inner`].
+    ///
+    /// `start` awaits the BLE radio coming up and the endpoint binding, neither of which is fast
+    /// and neither of which the OS promises to finish. Holding `inner` across them made every
+    /// unrelated call — and therefore the whole UI — wait on the slowest thing in startup; on
+    /// 2026-09-13 a wedged CoreBluetooth turned that into a 13 h outage ending in a locked splash
+    /// screen. The two locks separate "is the node up?" (cheap, contended, answered constantly)
+    /// from "is someone bringing it up?" (slow, rare, and only ever contended by a second caller
+    /// who would have had to wait anyway).
+    starting: Mutex<()>,
     /// The most recently attached listener, reused to surface durable-trail (backfill / sync)
     /// events from the node-level `sync_trail` call.
     listener: Mutex<Option<Arc<dyn FixListener>>>,
@@ -1600,12 +1622,30 @@ enum NodeDirs {
     Roots { data: PathBuf, state: PathBuf },
 }
 
+/// How many `LocationNode`s this PROCESS has built, ever.
+///
+/// The node is meant to be process-wide and singular — the host bridges refcount it so a mounted
+/// app and a headless session adopt one node rather than clobbering each other. This counter is
+/// what proves whether that actually held, and it is the only place that can: it sits below every
+/// constructor and below every JS context, so it counts nodes in a process rather than nodes a
+/// context believes it has.
+///
+/// **An ordinal above 1 with no intervening `shutdown` means two live nodes on one identity.** That
+/// is not a degraded mode, it is two endpoints publishing the same endpoint id: a dial to that
+/// identity lands on whichever one the relay or BLE picked, so a pairing handshake can reach
+/// `verifying` on one node and have its `Accept` delivered to the other, which has never heard of
+/// the session. It was reachable-but-unproven on 2026-09-13 — the evidence was three
+/// `iroh endpoint bound` lines in a process that logged no shutdowns at all, which says a node was
+/// built but not which context built it, and there was no way to tell a rebuild from a duplicate.
+static NODE_ORDINAL: AtomicU64 = AtomicU64::new(0);
+
 fn new_location_node_at(
     identity_secret: Option<Vec<u8>>,
     recv_secret: Option<Vec<u8>>,
     dirs: NodeDirs,
 ) -> Result<Arc<LocationNode>, LocationError> {
     telemetry::init_tracing();
+    let ordinal = NODE_ORDINAL.fetch_add(1, Ordering::Relaxed) + 1;
     let secret = match identity_secret {
         Some(bytes) => SecretKey::from_bytes(
             &bytes
@@ -1645,7 +1685,7 @@ fn new_location_node_at(
         }
     };
 
-    Ok(Arc::new(LocationNode {
+    let node = Arc::new(LocationNode {
         identity_seed,
         author,
         recv_secret,
@@ -1653,6 +1693,7 @@ fn new_location_node_at(
         data_dir,
         state_dir,
         inner: Mutex::new(None),
+        starting: Mutex::new(()),
         listener: Mutex::new(None),
         pair: PairCore::new(identity_seed, author, recv_public),
         profile_events: ProfileEventQueue::default(),
@@ -1665,7 +1706,24 @@ fn new_location_node_at(
         delivery: Mutex::new(None),
         pending_bootstrap: Mutex::new(HashMap::new()),
         pending_resync: Mutex::new(None),
-    }))
+        ordinal,
+    });
+    tracing::info!(
+        node.ordinal = ordinal,
+        sc.author = %telemetry::short_hex(&author),
+        "node.construct: built a LocationNode in this process"
+    );
+    if ordinal > 1 {
+        // Loud on purpose. The bridges refcount precisely so this does not happen, and every way
+        // it still can (a second host module instance, an identity mismatch adopting nothing, a
+        // clobber) ends with two endpoints answering for one identity.
+        tracing::warn!(
+            node.ordinal = ordinal,
+            sc.author = %telemetry::short_hex(&author),
+            "node.construct: this process has now built more than one node for this identity"
+        );
+    }
+    Ok(node)
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -1757,8 +1815,16 @@ impl LocationNode {
         ip_enabled: bool,
         ble_enabled: bool,
     ) -> Result<(), LocationError> {
-        let mut guard = self.inner.lock().await;
-        if guard.is_some() {
+        // Cheap check first, so a started node costs one uncontended lock and nothing else.
+        if self.inner.lock().await.is_some() {
+            return Ok(());
+        }
+        // Then serialize the slow path on its own lock. A second caller waits here rather than on
+        // `inner`, so everything that only needs to ask whether the node is up stays responsive
+        // while this one builds it.
+        let _starting = self.starting.lock().await;
+        // Re-check: whoever we queued behind may have finished the job while we waited.
+        if self.inner.lock().await.is_some() {
             return Ok(());
         }
         let relay_mode = if relay_enabled {
@@ -1803,10 +1869,20 @@ impl LocationNode {
             ble::disabled()
         };
 
-        let endpoint = builder
-            .bind()
-            .await
-            .map_err(|e| LocationError::Network(e.to_string()))?;
+        // Bounded for the same reason `ble::attach` is: this runs on the launch path, and an
+        // endpoint that never finishes binding must surface as a failed `start` the caller can
+        // retry, never as a `start` that hangs. Unlike BLE there is no degraded mode to fall back
+        // to — without an endpoint there is no node — so this one is an error, not a warning.
+        let endpoint = match tokio::time::timeout(ENDPOINT_BIND_TIMEOUT, builder.bind()).await {
+            Ok(result) => result.map_err(|e| LocationError::Network(e.to_string()))?,
+            Err(_) => {
+                tracing::warn!(
+                    timeout_ms = ENDPOINT_BIND_TIMEOUT.as_millis() as u64,
+                    "endpoint bind timed out"
+                );
+                return Err(LocationError::Network("endpoint bind timed out".to_owned()));
+            }
+        };
 
         // Same-wifi/direct fast path: add mDNS (swarm-discovery) local-network address lookup
         // ALONGSIDE the N0 preset's relay + DNS discovery — never replacing it. Added
@@ -1960,7 +2036,18 @@ impl LocationNode {
             )
             .await;
 
-        *guard = Some(Started {
+        // Publish the built node last, under a lock held only for the assignment itself.
+        // Stamped with the node ordinal so an `iroh endpoint bound` in the log can be attributed
+        // to a specific node rather than only to a moment. `ble_attached` is here for the same
+        // reason: BLE attaches at CONSTRUCTION and can never be attached later, so whether this
+        // node has it is fixed now and is what `ble_available()` will answer for its whole life.
+        tracing::info!(
+            node.ordinal = self.ordinal,
+            ble_attached = ble.available(),
+            ble_enabled,
+            "node.start: endpoint is up"
+        );
+        *self.inner.lock().await = Some(Started {
             endpoint,
             gossip,
             trail,
@@ -1983,6 +2070,17 @@ impl LocationNode {
     /// *that* teardown hung. These markers tell you **where**: the last one logged is the await
     /// that did not return.
     pub async fn shutdown(&self) -> Result<(), LocationError> {
+        // Exclude an in-flight `start` before touching anything. `start` publishes to `inner` only
+        // at the very end, so without this a teardown landing mid-build takes `None`, tears down
+        // nothing, and then watches the build install a live node it believed it had killed —
+        // which is precisely the headless-vs-foreground clobber `native-runtime-owner.ts` exists
+        // to prevent, reintroduced one layer down.
+        //
+        // This is not a new wait: holding `inner` across the build used to serialize these two for
+        // free. Splitting the locks is what made it explicit, and the build is now bounded
+        // (`ATTACH_TIMEOUT` + `ENDPOINT_BIND_TIMEOUT`), so the wait is finite where it was not.
+        tracing::info!("shutdown: taking starting lock");
+        let _starting = self.starting.lock().await;
         tracing::info!("shutdown: taking inner lock");
         let started = self.inner.lock().await.take();
         if let Some(started) = started {
@@ -3019,6 +3117,23 @@ impl LocationNode {
             .await?
             .remove(&peer)
             .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// Drop every FINISHED pairing session with this peer. Returns how many were removed.
+    ///
+    /// The companion to [`forget_session`](Self::forget_session): that one erases the ratchet
+    /// state for a relationship that has ended, this one erases the pairing record of how it
+    /// began. Needs no live node — the sessions live on `PairCore`, which is built at
+    /// construction — so an unfriend still cleans up on a phone whose endpoint never came up.
+    ///
+    /// Live sessions are deliberately spared; see
+    /// [`PairCore::forget_finished_sessions_with`](crate::pairing::PairCore::forget_finished_sessions_with).
+    pub async fn forget_pair_sessions(
+        &self,
+        peer_endpoint_hex: String,
+    ) -> Result<u32, LocationError> {
+        let peer = decode_endpoint(&peer_endpoint_hex)?;
+        Ok(self.pair.forget_finished_sessions_with(&peer).await as u32)
     }
 
     /// Seal `fix` under **envelope v3** for each recipient's ratchet session and write it to our
@@ -4491,6 +4606,40 @@ impl Drop for Subscription {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Subscription {
+    /// Seal the last known position once, for a recipient set that has just grown.
+    ///
+    /// Called when a pairing is accepted. A sealed envelope is readable only by the recipients it
+    /// was sealed for, so a new friend cannot open anything published before they existed and
+    /// their first sight of you is otherwise your next scheduled publish — p90 92 minutes on a
+    /// parked iPhone. See [`publish::DrainEngine::publish_introduction`] for what it deliberately
+    /// does NOT touch (the slot cursor, the parked/live stamp, the battery suspension).
+    pub async fn publish_introduction(
+        &self,
+        subscription_id: String,
+        now_ms: u64,
+    ) -> Result<publish::IngestOutcome, LocationError> {
+        let sink = SubscriptionSink {
+            subscription: self,
+            subscription_id,
+        };
+        let seq = self.node.seq_store().await?;
+        let queue = self.node.outbox().await?;
+        let recipients = self.node.recipient_store().await?;
+        let gate_store = self.node.gate_store().await?;
+        let engine = publish::DrainEngine {
+            seq: seq.as_ref(),
+            queue: queue.as_ref(),
+            recipients: recipients.as_ref(),
+            gate: gate_store.as_ref(),
+            sink: &sink,
+            quality: gate::FixQualityConfig::default(),
+        };
+        engine
+            .publish_introduction(now_ms)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
     /// Publish the slots that have come due without a new fix, reusing the last known position.
     ///
     /// Driven on a timer by whoever is running the pipeline — the mounted app today, since neither

@@ -122,6 +122,16 @@ export declare class IrohLocationNativeModule
     intervalMs: number
   ): Promise<NativeIngestOutcome>;
   /**
+   * Seal the last known position once, because the recipient set has just grown.
+   *
+   * A sealed envelope is readable only by the recipients it was sealed for, so a friend who has
+   * just paired cannot open anything published before they existed — their first sight of you is
+   * otherwise the next scheduled publish, which on a parked iPhone is p90 92 minutes. Fills no
+   * slot and does not move the cadence; see `DrainEngine::publish_introduction`. Resolves with
+   * `enqueued: 0` on a device that has never captured a position. OPTIONAL.
+   */
+  publishIntroduction?(subscriptionId: string): Promise<NativeIngestOutcome>;
+  /**
    * Re-program the native background runtime from the sampling policy's decision.
    *
    * The cadence controller drives this. `intervalMs` is the publish slot the native gate enforces;
@@ -321,6 +331,8 @@ export declare class IrohLocationNativeModule
   pollResync?(peerEndpointHex: string, peerRecvPubHex: string): Promise<boolean>;
   clearResync?(): Promise<void>;
   forgetSession?(peerEndpointHex: string): Promise<void>;
+  /** Optional; absent on binaries built before the pairing-session forget existed. */
+  forgetPairSessions?(peerEndpointHex: string): Promise<number>;
   syncLatest(peerTickets: string[], traceparent?: string | null): Promise<void>;
   /** Optional for compatibility with installed iOS binaries built before the push API. */
   /** Optional; absence means this binary clobbers the node on a second createNode. */
@@ -343,6 +355,15 @@ export declare class IrohLocationNativeModule
 
   // Optional for compatibility with installed iOS binaries built before the telemetry API.
   configureTelemetry?(endpoint: string, instanceId: string): Promise<boolean>;
+  /**
+   * Drain the OS-reported crash / hang / CPU / disk diagnostics recorded since the last call,
+   * each a JSON object string (see `MetricKitDiagnostics.swift`).
+   *
+   * The only account of how a previous run ENDED — everything the app records itself stops at the
+   * moment it stops. OPTIONAL: iOS only, and absent on binaries built before this existed, so
+   * callers must guard on its presence.
+   */
+  takeCrashDiagnostics?(): Promise<string[]>;
   flushTelemetry?(): Promise<void>;
 
   // Native MVT map-tile decoder (see modules/iroh-location/rust/src/mvt.rs). Runs

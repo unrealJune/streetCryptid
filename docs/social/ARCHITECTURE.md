@@ -388,7 +388,7 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
 Friendship is established over a dedicated authenticated iroh protocol:
 
 ```
-ALPN: streetcryptid/pair/2 (wire v2)
+ALPN: streetcryptid/pair/4 (wire v4)
 
 invite / BLE discovery
         │

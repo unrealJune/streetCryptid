@@ -160,6 +160,21 @@ mod imp {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
     const SCAN_WINDOW: Duration = Duration::from_millis(1400);
     const PROBE_TIMEOUT: Duration = Duration::from_secs(6);
+    /// Upper bound on building the central/peripheral pair in [`setup`].
+    ///
+    /// Every other timeout here bounds an *operation* on a radio that already came up. This one
+    /// bounds the radio coming up at all, and it is the only one that can wedge the whole app:
+    /// `attach` is awaited inside `LocationNode::start` while the process-wide `inner` lock is
+    /// held, so a `setup` that never returns means `start` never returns, `inner` is never
+    /// released, and the next foreground launch hangs on the splash.
+    ///
+    /// That is not hypothetical. On 2026-09-13 an iPhone 16 Pro Max spent 22 m 53 s in here before
+    /// CoreBluetooth gave up on its own, then two later wakes never came back at all — 13 h of
+    /// silence ending in a locked UI. CoreBluetooth has no contract to ever report a powered-on
+    /// state (radio off, `bluetoothd` wedged, or a background launch that never gets one), so the
+    /// bound has to be ours. BLE is the optional nearby transport: giving up on it and continuing
+    /// with IP/relay is strictly better than not starting.
+    const ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
     /// Upper bound on the best-effort disconnect that follows a probe.
     const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
     const REDISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -205,7 +220,19 @@ mod imp {
     /// address lookup onto `builder` (additive — N0 IP/relay transports stay intact). If the radio
     /// or permission is unavailable, log the failure and return the untouched IP/relay builder.
     pub async fn attach(builder: Builder, endpoint_id: EndpointId) -> (Builder, BleHandle) {
-        match setup(endpoint_id).await {
+        let attached = match tokio::time::timeout(ATTACH_TIMEOUT, setup(endpoint_id)).await {
+            Ok(result) => result,
+            Err(_) => {
+                // Deliberately the same degraded outcome as a setup error, not an error out of
+                // `start`: a phone whose radio will not come up must still publish over IP/relay.
+                tracing::warn!(
+                    timeout_ms = ATTACH_TIMEOUT.as_millis() as u64,
+                    "BLE transport setup timed out; continuing with IP/relay"
+                );
+                return (builder, disabled());
+            }
+        };
+        match attached {
             Ok((transport, central, peripheral)) => {
                 let builder = builder
                     .hooks(transport.dedup_hook())

@@ -228,7 +228,7 @@ export interface ProfileView {
   ts: number;
 }
 
-// ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ──────────────────────────
+// ── Bilateral pairing (`streetcryptid/pair/4`) — ARCHITECTURE.md §4 ──────────────────────────
 
 /**
  * An out-of-band pairing invite carrying only immutable bootstrap material. Byte fields are
@@ -612,6 +612,16 @@ export interface IrohLocationApi {
     intervalMs: number
   ): Promise<NativeIngestOutcome>;
   /**
+   * Seal the last known position once, because the recipient set has just grown.
+   *
+   * A sealed envelope is readable only by the recipients it was sealed for, so a friend who has
+   * just paired cannot open anything published before they existed — their first sight of you is
+   * otherwise the next scheduled publish, which on a parked iPhone is p90 92 minutes. Fills no
+   * slot and does not move the cadence; see `DrainEngine::publish_introduction`. Resolves with
+   * `enqueued: 0` on a device that has never captured a position. OPTIONAL.
+   */
+  publishIntroduction?(subscriptionId: string): Promise<NativeIngestOutcome>;
+  /**
    * Re-program the native background runtime from the sampling policy's decision.
    *
    * The cadence controller drives this. `intervalMs` is the publish slot the native gate enforces;
@@ -969,6 +979,16 @@ export interface IrohLocationApi {
   clearResync?(): Promise<void>;
   /** Forget a peer's ratchet session entirely — unfriend, or revoke. */
   forgetSession?(peerEndpointHex: string): Promise<void>;
+  /**
+   * Forget the FINISHED pairing sessions with a peer, returning how many were dropped.
+   *
+   * The companion to {@link forgetSession}: that erases the ratchet state of what the friendship
+   * became, this erases the pairing record of how it began (their recv key, SAS material and
+   * tickets). Live sessions are spared — a pair in progress is the user's to cancel.
+   *
+   * Optional: absent on binaries built before the export existed.
+   */
+  forgetPairSessions?(peerEndpointHex: string): Promise<number>;
 
   /** Explicitly drop durable entries older than `olderThanTs`. */
   pruneTrail(olderThanTs: number): Promise<void>;
@@ -994,6 +1014,15 @@ export interface IrohLocationApi {
   configureTelemetry?(endpoint: string, instanceId: string): Promise<boolean>;
   /** Flush buffered native telemetry. Headless contexts call this before the OS freezes them. */
   flushTelemetry?(): Promise<void>;
+  /**
+   * Drain the OS-reported crash / hang / CPU / disk diagnostics recorded since the last call,
+   * each a JSON object string (see `MetricKitDiagnostics.swift`).
+   *
+   * The only account of how a previous run ENDED — everything the app records itself stops at the
+   * moment it stops. OPTIONAL: iOS only, and absent on binaries built before this existed, so
+   * callers must guard on its presence.
+   */
+  takeCrashDiagnostics?(): Promise<string[]>;
 
   // ── Profiles — see docs/social/ARCHITECTURE.md §3 ──────────────────────────────────────────
   /**
@@ -1015,7 +1044,7 @@ export interface IrohLocationApi {
   /** Drain profile-update events surfaced by docs live-sync since the last poll. */
   pollProfileEvents(): Promise<ProfileView[]>;
 
-  // ── Bilateral pairing (`streetcryptid/pair/2`) — ARCHITECTURE.md §4 ─────────────────────────
+  // ── Bilateral pairing (`streetcryptid/pair/4`) — ARCHITECTURE.md §4 ─────────────────────────
   /** Set whether we accept invite-less **nearby** (e.g. BLE) pairing Hellos. */
   setPairingReady(ready: boolean): Promise<void>;
   /** Whether invite-less nearby pairing is currently accepted. */
