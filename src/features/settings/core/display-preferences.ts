@@ -46,7 +46,17 @@ function readPreferences(raw: string | null): DisplayPreferences {
   return { distanceUnit, showFriendConnectionDetails, colorTheme };
 }
 
-export function createDisplayPreferencesStore(kv: PersistentKV) {
+/**
+ * @param kv The backing store, or a thunk that builds one.
+ *
+ * The thunk is not a convenience. `colorTheme` lives here, `useColorScheme` reads it, and every
+ * screen in the app reads THAT — so a KV built eagerly opens a SQLite database on the import path
+ * of anything that paints itself, before the first frame. Built once, inside {@link load}, which
+ * is already async and already off the render path.
+ */
+export function createDisplayPreferencesStore(kv: PersistentKV | (() => PersistentKV)) {
+  let store: PersistentKV | null = typeof kv === 'function' ? null : kv;
+  const backing = (): PersistentKV => (store ??= typeof kv === 'function' ? kv() : kv);
   let snapshot: DisplayPreferencesSnapshot = { ...DEFAULTS, ready: false, error: null };
   let loadPromise: Promise<void> | null = null;
   let loaded = false;
@@ -62,7 +72,7 @@ export function createDisplayPreferencesStore(kv: PersistentKV) {
     if (loadPromise) return loadPromise;
     loadPromise = (async () => {
       try {
-        const raw = await kv.get(STORAGE_KEY);
+        const raw = await backing().get(STORAGE_KEY);
         const saved = readPreferences(raw);
         loaded = true;
         emit({
@@ -84,7 +94,7 @@ export function createDisplayPreferencesStore(kv: PersistentKV) {
       if (!loaded) return;
       const next = { ...snapshot, ...change, error: null };
       try {
-        await kv.set(
+        await backing().set(
           STORAGE_KEY,
           JSON.stringify({
             distanceUnit: next.distanceUnit,
