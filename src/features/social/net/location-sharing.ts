@@ -31,6 +31,7 @@ import {
   getTelemetry,
   recordEventLog,
   traceparentFor,
+  type Attributes,
   type Span,
   type SpanContext,
   reportOsDiagnostics,
@@ -878,12 +879,12 @@ export class LocationSharingService {
     this.transportPreferences = next;
     this.rebindInFlight = true;
     try {
-      await this.rebindNode();
+      await this.rebindNode('transport-preferences');
       await saveTransportPreferences(this.kv, next);
       this.emit();
     } catch (error) {
       this.transportPreferences = previous;
-      await this.rebindNode().catch(() => undefined);
+      await this.rebindNode('transport-preferences-rollback').catch(() => undefined);
       throw error;
     } finally {
       this.rebindInFlight = false;
@@ -1026,7 +1027,33 @@ export class LocationSharingService {
         await this.awaitRuntimeIdleBounded();
       }
     }
-    this.keys = await this.mod.createNode(persisted.identitySecret, persisted.recvSecret);
+    // WHICH context built a node, paired with the native `node.construct` ordinal that says how
+    // many this PROCESS has built. Either alone is ambiguous — a JS context only knows what it
+    // asked for, and the native counter only knows that someone asked. Together they separate the
+    // three ways a node can appear out of nowhere: a rebuild (same context, shutdown logged), a
+    // clobber (second context, ordinal climbs, node count stays one), and a duplicate (second
+    // context, ordinal climbs, both nodes live and answering for one identity).
+    //
+    // On 2026-09-13 a process logged three `iroh endpoint bound` lines and ZERO shutdowns, and
+    // nothing could say which of the three it was — while pairings failed on top of it.
+    const createSpan = getTelemetry().startSpan('node.create', {
+      attributes: {
+        mode: interactive ? 'interactive' : 'headless',
+        claimed_runtime: this.ownsNativeRuntime,
+        // Cached, and it answers `false` rather than rejecting, so this costs nothing here.
+        adopts: await this.nativeAdoptsNode(),
+      },
+    });
+    try {
+      this.keys = await this.mod.createNode(persisted.identitySecret, persisted.recvSecret);
+      createSpan.setAttribute('endpoint', this.keys.endpointId.slice(0, 12));
+      createSpan.setStatus('ok');
+    } catch (err) {
+      createSpan.recordError(err);
+      throw err;
+    } finally {
+      createSpan.end();
+    }
     await saveKeys({
       identitySecret: this.keys.identitySecret,
       recvSecret: this.keys.recvSecret,
@@ -1145,6 +1172,7 @@ export class LocationSharingService {
   async addFriend(card: ContactCard): Promise<void> {
     if (this.removingFriends.has(card.endpointId)) return;
     this.state = pool.addFriend(this.state, card);
+    this.recordPoolChange('added', card.endpointId, 'contact-card');
     await this.subscribeToFriend(card);
     this.persistPool();
     this.emit();
@@ -1185,6 +1213,7 @@ export class LocationSharingService {
       throw error;
     }
 
+    this.recordPoolChange('removed', endpointId, 'manual', { was_sharing: wasSharing });
     if (this.discoveredFriend?.endpointId === endpointId) this.discoveredFriend = null;
     this.pendingProfiles.delete(endpointId);
     this.profileBackfill.delete(endpointId);
@@ -1253,8 +1282,19 @@ export class LocationSharingService {
     }
     this.rebindInFlight = true;
     try {
-      if (await this.mod.bleAvailable()) return;
-      await this.rebindNode();
+      const available = await this.mod.bleAvailable();
+      if (available) return;
+      // The only reason this rebuilds the node: BLE attaches at CONSTRUCTION, so a permission
+      // granted afterwards leaves the transport detached with no way to attach it in place.
+      //
+      // It is also the most frequently REACHED rebind in the app, because it sits on the Bump
+      // button: every arm asks, and every `false` answer costs a full node teardown in the middle
+      // of what the user is, by definition, in the middle of doing. Whether that actually happens
+      // in the field is an open question — it was assumed to be behind the 2026-09-13 pairing
+      // failures and was not — so if `node.rebind{trigger="ble-arm"}` does turn out to be common
+      // on a phone whose Bluetooth is fine, the thing to chase is why `bleAvailable()` says no:
+      // attach is asynchronous, and "not yet" is indistinguishable from "not going to" here.
+      await this.rebindNode('ble-arm');
       if (!(await this.mod.bleAvailable())) {
         throw new Error(
           'Bluetooth could not start. Confirm Bluetooth is on, then close and reopen streetCryptid.'
@@ -1384,11 +1424,56 @@ export class LocationSharingService {
     }
   }
 
-  private async rebindNode(): Promise<void> {
+  private async rebindNode(trigger = 'unknown'): Promise<void> {
     const mod = this.mod;
     const keys = this.keys;
     if (!mod || !keys) throw new Error('Friend sync is not ready yet.');
 
+    // A rebind is the largest thing this app does to itself and it used to emit nothing at all.
+    //
+    // It destroys the iroh endpoint and builds a new one: every pairing session goes, every
+    // subscription is torn down and remade, the invite on screen stops being redeemable, and the
+    // fresh endpoint starts with NO paths to anyone — roughly 2 s to get relays back and longer
+    // for a direct path to a specific peer. A handshake begun in that window talks to a node that
+    // cannot yet reach the other phone.
+    //
+    // It used to be invisible from JS entirely: on 2026-09-13 a run of failed pairings had to be
+    // reconstructed from the native core's `iroh endpoint bound` lines in Loki, and those turned
+    // out NOT to be rebinds at all — which is the whole reason `trigger` exists here, and the
+    // reason the native side counts nodes separately (`node.construct`'s `node.ordinal`). A
+    // rebind must be able to say "that one was me"; otherwise every node that appears looks alike.
+    const span = getTelemetry().startSpan('node.rebind', {
+      attributes: {
+        trigger,
+        // The blast radius, recorded BEFORE it is destroyed.
+        sessions_destroyed: this.pairSessions.length,
+        session_states: this.pairSessions.map((session) => session.state).join(','),
+        verifications: this.verifications.length,
+        friends: pool.friendList(this.state).length,
+        had_invite: this.inviteLink !== null,
+        pairing_ready: this.pairingReadyFlag,
+      },
+    });
+
+    try {
+      await this.rebindNodeInner(mod, keys, span);
+      span.setStatus('ok');
+    } catch (err) {
+      // A rebind that THREW is the reading that matters most — it leaves the app with no usable
+      // node — and it is exactly the one the old code dropped, because the span was ended only on
+      // the way out of the happy path.
+      span.recordError(err);
+      throw err;
+    } finally {
+      span.end();
+    }
+  }
+
+  private async rebindNodeInner(
+    mod: NonNullable<LocationSharingService['mod']>,
+    keys: NonNullable<LocationSharingService['keys']>,
+    span: Span
+  ): Promise<void> {
     const restorePairingReady = this.pairingReadyFlag;
     this.stopPairingPolling();
     this.fixSub?.remove();
@@ -1437,6 +1522,9 @@ export class LocationSharingService {
     this.startPairingPolling();
     await this.pollPairingOnce();
     void this.syncTrail(0);
+    // Friends are carried across in memory rather than reloaded, so this asserts the pool survived
+    // — the one thing a rebind must never take with it.
+    span.setAttribute('friends_after', pool.friendList(this.state).length);
   }
 
   /** Acknowledge the one-shot "cryptid discovered" reveal and keep the new friend. */
@@ -1444,6 +1532,40 @@ export class LocationSharingService {
     if (!this.discoveredFriend) return;
     this.discoveredFriend = null;
     this.emit();
+    void this.publishIntroduction();
+  }
+
+  /**
+   * Seal the last known position once, so a friend who has just paired sees a dot now.
+   *
+   * A sealed envelope is readable only by the recipients it was sealed FOR, so nothing already
+   * published can be opened by someone who did not exist when it went out. Their first sight of
+   * you is otherwise the next scheduled publish — on a parked iPhone that rides on `BGProcessing`
+   * wakes measured at p50 5 min, p90 92 min, with a 17-hour tail. A pairing that ends in a blank
+   * dot for an hour and a half reads as a pairing that did not work.
+   *
+   * Driven from ACKNOWLEDGE rather than from `onPairReady`, and that is the whole of the consent
+   * argument. Pairing arms sharing — `onPairReady` adds the friend and resubscribes — but the
+   * reveal screen still offers REJECT, and `rejectDiscoveredFriend` revokes. Today nothing goes
+   * out in that window, so the affordance is honest; publishing at `ready` would quietly pre-empt
+   * it. Acknowledging is the moment the human says "keep this friend", and it costs a second.
+   *
+   * Best-effort in every direction: guarded because a phone can be running an older binary than
+   * the JS bundle, swallowed because a friend who has to wait for the next slot is the behaviour
+   * we had before this existed.
+   */
+  private async publishIntroduction(): Promise<void> {
+    const mod = this.mod;
+    if (!mod || typeof mod.publishIntroduction !== 'function') return;
+    try {
+      // The recipient set has to be on the wire before anything is sealed for it, and the pair
+      // added a friend: without this the envelope goes out sealed for yesterday's set.
+      await this.ensureMySubscription();
+      if (!this.mySubId) return;
+      await mod.publishIntroduction(this.mySubId);
+    } catch {
+      // The next slot will carry it.
+    }
   }
 
   /** Reject the discovered friend, revoke sharing, and leave their live location topic. */
@@ -1453,6 +1575,12 @@ export class LocationSharingService {
 
     this.discoveredFriend = null;
     this.state = pool.removeFriend(this.state, friend.endpointId);
+    // The reveal screen's REJECT, which sits one thumb-width from ACKNOWLEDGE and undoes a pair
+    // both humans just verified. Named distinctly from `manual` precisely so the two can be told
+    // apart when a friend goes missing seconds after a successful pairing.
+    this.recordPoolChange('removed', friend.endpointId, 'reveal-reject', {
+      paired_ms_ago: friend.pairedAt ? Math.max(0, Date.now() - friend.pairedAt) : -1,
+    });
     this.pendingProfiles.delete(friend.endpointId);
     this.profileBackfill.delete(friend.endpointId);
     this.persistPool();
@@ -1736,6 +1864,68 @@ export class LocationSharingService {
     this.initiatedRoutes.delete(sessionId);
     this.setPairingActivity('pair canceled');
     await this.refreshPairing();
+  }
+
+  /**
+   * Walking away from the pairing screen: tell the peer about the sessions we are abandoning, and
+   * ONLY about those.
+   *
+   * ## Why this cannot take the caller's list at face value
+   * The screen decides what is abandonable from a pairing snapshot, and a snapshot is by
+   * construction one poll old — while a pair completes in well under one poll. On 2026-09-13 an
+   * iPhone reached `complete` at 16:10:35 and the screen it was dismissing still held the session
+   * as `peerAccepted` from :34, so the stand-down cancelled the pair that had just succeeded. The
+   * peer, still waiting on its own half, received the Reject and ended up with no friend at all
+   * while this phone kept one. "Only one of us got it" is what that looks like from the outside.
+   *
+   * So the caller's list is a list of CANDIDATES. Native is asked what those sessions actually are
+   * at the moment of leaving, and anything terminal — `complete` above all — is left alone. There
+   * is no version of walking away from a screen that should undo a friendship; tearing one down is
+   * `removeFriend`, which is a different, deliberate act with a different button.
+   *
+   * Failures are swallowed per session: this runs while a screen is unmounting, and a peer that
+   * cannot be reached is exactly the case where the local decision still has to stand.
+   */
+  async standDownPairing(candidateSessionIds: readonly string[]): Promise<void> {
+    if (!this.mod || candidateSessionIds.length === 0) return;
+    const span = getTelemetry().startSpan('pair.stand_down');
+    try {
+      const live = await this.mod.listPairSessions();
+      const byId = new Map(live.map((session) => [session.sessionId, session]));
+      // A session native no longer knows is already gone: nothing to cancel and nothing to tell.
+      const candidates = candidateSessionIds.map((sessionId) => ({
+        sessionId,
+        session: byId.get(sessionId),
+      }));
+      const cancellable = candidates.filter(
+        ({ session }) => session !== undefined && !TERMINAL_PAIR_STATES.includes(session.state)
+      );
+      span.setAttributes({
+        candidates: candidates.length,
+        cancelled: cancellable.length,
+        // The whole point of the span: which states the screen was about to walk out on. A
+        // `complete` in here is the bug this method exists to prevent, and it is one query away.
+        candidate_states: candidates.map(({ session }) => session?.state ?? 'unknown').join(','),
+        spared: candidates.length - cancellable.length,
+      });
+      for (const { sessionId, session } of cancellable) {
+        try {
+          await this.cancelPair(sessionId);
+        } catch (err) {
+          // Native refuses a contradictory decision (a session that accepted between our read and
+          // this call) — which is the same invariant as the filter above, enforced one layer down.
+          span.addEvent('cancel.refused', {
+            state: session?.state ?? 'unknown',
+            reason: errorMessage(err),
+          });
+        }
+      }
+      span.setStatus('ok');
+    } catch (err) {
+      span.recordError(err);
+    } finally {
+      span.end();
+    }
   }
 
   /** Drain the pairing/discovery queues once, on demand (also runs on a bounded timer). */
@@ -3330,6 +3520,41 @@ export class LocationSharingService {
   }
 
   /** Persist the current pool (fire-and-forget; best-effort). */
+  /**
+   * Record one deliberate change to the friend pool, with the reason it happened.
+   *
+   * ## Why this exists
+   * The pool going from one friend to none is the single most consequential thing this app can do
+   * to a user, and until now it left no trace at all. On 2026-09-13 an iPhone completed a pair at
+   * 16:10:53 and had no friend by 16:11:01, and the telemetry could not say whether a human had
+   * pressed REJECT on the reveal, whether the map's remove-friend had been used, or whether
+   * something had dropped it — the count was only visible at all as a side effect of
+   * `trail.sync.app`'s `sync.peers`, which counts durable tickets and is a proxy, not a record.
+   *
+   * `reason` is the whole value here: every path that adds or drops a friend names itself, so
+   * "who removed her" is a query rather than an afternoon of reading call sites.
+   */
+  private recordPoolChange(
+    change: 'added' | 'removed',
+    endpointId: string,
+    reason: string,
+    extra: Attributes = {}
+  ): void {
+    getTelemetry()
+      .startSpan(`pool.friend_${change}`, {
+        attributes: {
+          'sc.peer': endpointId.slice(0, 12),
+          reason,
+          friends: pool.friendList(this.state).length,
+          sharing_with: pool
+            .friendList(this.state)
+            .filter((f) => pool.isSharingWith(this.state, f.endpointId)).length,
+          ...extra,
+        },
+      })
+      .end();
+  }
+
   private persistPool(): void {
     void savePool(this.kv, this.state);
     this.pushSharingRecipients();
@@ -4386,6 +4611,15 @@ export class LocationSharingService {
     }
   }
 
+  /**
+   * Adopt any pair that reached `complete` without its `ready` event being seen.
+   *
+   * `complete` here is a state, not a promise: it means both decision bits are set, which happens
+   * a moment before native installs the ratchet. `pairResult` withholds the friendship until that
+   * has actually happened (see `result_data` in `pairing.rs`), so a session caught mid-finalize
+   * returns null, this leaves `handledPairSessions` alone, and the next poll picks it up. The
+   * alternative — trusting the state — adopted friends that had no ratchet session behind them.
+   */
   private async reconcileCompletedPairs(sessions: PairStateRecord[]): Promise<void> {
     for (const session of sessions) {
       if (session.state !== 'complete' || this.handledPairSessions.has(session.sessionId)) continue;
@@ -4534,6 +4768,12 @@ export class LocationSharingService {
     }
 
     this.state = pool.shareWith(pool.addFriend(this.state, friend), friend.endpointId);
+    this.recordPoolChange('added', friend.endpointId, 'pair', {
+      method: method ?? 'unknown',
+      nearby: event.nearby,
+      // Whether the persona rode in on the v4 Accept or still has to be backfilled.
+      persona: hasVerifiedProfile(friend),
+    });
     try {
       await this.subscribeToFriend(friend);
     } catch {

@@ -89,6 +89,12 @@ interface LocationSharingContextValue {
   submitPairChoice(sessionId: string, chosenIndex: number): Promise<void>;
   confirmPairDisplay(sessionId: string, matched: boolean): Promise<void>;
   cancelPair(sessionId: string): Promise<void>;
+  /**
+   * Abandon the listed pairing sessions on the way out of the pairing screen. The list is a set of
+   * candidates read from a (necessarily stale) snapshot; sessions that have since completed are
+   * spared rather than cancelled.
+   */
+  standDownPairing(sessionIds: readonly string[]): Promise<void>;
   refreshPairing(): Promise<void>;
   refreshTransportDiagnostics(): Promise<void>;
   toggleShare(endpointId: string, on: boolean): Promise<void>;
@@ -524,6 +530,10 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     },
     [run]
   );
+  const standDownPairing = useCallback(
+    (sessionIds: readonly string[]) => run((service) => service.standDownPairing(sessionIds)),
+    [run]
+  );
   const refreshPairing = useCallback(() => run((service) => service.refreshPairing()), [run]);
   const refreshTransportDiagnostics = useCallback(
     () => run((service) => service.refreshTransportDiagnostics()),
@@ -752,6 +762,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       submitPairChoice,
       confirmPairDisplay,
       cancelPair,
+      standDownPairing,
       refreshPairing,
       refreshTransportDiagnostics,
       toggleShare,
@@ -788,6 +799,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       submitPairChoice,
       confirmPairDisplay,
       cancelPair,
+      standDownPairing,
       refreshPairing,
       refreshTransportDiagnostics,
       toggleShare,

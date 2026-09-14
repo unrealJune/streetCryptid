@@ -103,6 +103,7 @@ export default function ActivePairingScreen() {
     submitPairChoice,
     confirmPairDisplay,
     cancelPair,
+    standDownPairing,
     refreshPairing,
     acknowledgeDiscoveredFriend,
     rejectDiscoveredFriend,
@@ -146,15 +147,17 @@ export default function ActivePairingScreen() {
    * there watching a handshake that had already been abandoned — and, before the invite was
    * tracked, went right back to offering the spent link. Cancelling is what turns "they left" into
    * something the other side learns immediately.
+   *
+   * The ref is a list of CANDIDATES, not a list of orders. It is filled from a pairing snapshot
+   * and is therefore always at least one poll behind the handshake — long enough for a pair to
+   * complete inside it — so `standDownPairing` re-reads each session from native and spares the
+   * ones that finished. See its doc comment for the pairing this cost.
    */
   const standDown = useCallback(async (): Promise<void> => {
     const sessionIds = abandonableRef.current;
     abandonableRef.current = [];
-    await Promise.allSettled([
-      cancelBump(),
-      ...sessionIds.map((sessionId) => cancelPair(sessionId)),
-    ]);
-  }, [cancelBump, cancelPair]);
+    await Promise.allSettled([cancelBump(), standDownPairing(sessionIds)]);
+  }, [cancelBump, standDownPairing]);
 
   useFocusEffect(
     useCallback(() => {

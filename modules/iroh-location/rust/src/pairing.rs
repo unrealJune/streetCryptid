@@ -650,6 +650,18 @@ enum LocalDecision {
     Contradiction(&'static str),
 }
 
+/// One stable word per [`LocalDecision`], for logs and queries. Deliberately not `Debug`: the
+/// `Contradiction` payload is an internal message that would make every query brittle.
+fn local_decision_label(decision: &LocalDecision) -> &'static str {
+    match decision {
+        LocalDecision::Accept => "accept",
+        LocalDecision::Reject => "reject",
+        LocalDecision::Fail => "fail",
+        LocalDecision::NoopOk => "noop",
+        LocalDecision::Contradiction(_) => "contradiction",
+    }
+}
+
 /// A committer's 96-byte transcript record: `endpoint id || recv pub || nonce`.
 fn sas_record(
     endpoint: &[u8; ENDPOINT_LEN],
@@ -1287,12 +1299,21 @@ impl PairSession {
     /// Fold a peer decision (`Accept` tickets / `Reject`). Disclosure-only messages are ignored.
     /// Monotonic and fail-closed: a peer `Reject` is sticky and always wins, so a contradictory
     /// Accept-vs-Reject (in either arrival order, or duplicated) can never leave us completable.
+    /// Apply the peer's decision message to this session.
+    ///
+    /// Every wire decision the session ever accepts passes through here, which is why the record
+    /// of it lives here too. A pair that dies as "rejected" on both phones says nothing about who
+    /// rejected it or when — and both sides showing `Rejected` is a genuinely reachable state that
+    /// took a log-free afternoon to reconstruct on 2026-09-13, because a stance response to our own
+    /// dial is a Reject that no human anywhere pressed.
     fn ingest_decision(&mut self, msg: &PairMsg) {
         self.absorb_disclosure(msg);
+        let before = self.peer_decision;
         match msg.decision {
             Decision::Accept => {
                 // Fail closed: never let a (later or racing) Accept override a peer Reject.
                 if self.peer_decision == Some(false) {
+                    self.note_peer_decision(msg, before, "ignored-after-reject");
                     return;
                 }
                 if !msg.profile_ticket.is_empty() {
@@ -1307,11 +1328,41 @@ impl PairSession {
                     self.peer_trail_ticket = Some(msg.trail_ticket.clone());
                 }
                 self.peer_decision = Some(true);
+                self.note_peer_decision(msg, before, "applied");
             }
             // Reject is monotonic and authoritative: it overrides any earlier accept and sticks.
-            Decision::Reject => self.peer_decision = Some(false),
+            Decision::Reject => {
+                self.peer_decision = Some(false);
+                self.note_peer_decision(
+                    msg,
+                    before,
+                    if before == Some(true) {
+                        // The case worth seeing from orbit: a pair that had gone bilateral being
+                        // taken back apart by the wire.
+                        "overrode-accept"
+                    } else {
+                        "applied"
+                    },
+                );
+            }
             Decision::Hello | Decision::Reveal => {}
         }
+    }
+
+    /// Record one applied peer decision: what it was, what it replaced, and what the session
+    /// became. `effect` names the interesting cases in a word so a query can filter on them.
+    fn note_peer_decision(&self, msg: &PairMsg, before: Option<bool>, effect: &'static str) {
+        tracing::info!(
+            sc.session = %crate::telemetry::short_hex(&self.session_id),
+            sc.peer = %crate::telemetry::short_hex(&self.peer_endpoint),
+            decision = ?msg.decision,
+            effect,
+            peer_before = ?before,
+            peer_after = ?self.peer_decision,
+            local = ?self.local_decision,
+            phase = ?self.phase(),
+            "pair.peer_decision: folded a decision from the wire"
+        );
     }
 }
 
@@ -1671,12 +1722,25 @@ impl PairCore {
             .collect()
     }
 
-    /// The completed friendship material, or `None` if the session isn't complete.
+    /// The completed friendship material, or `None` until [`PairCore::finalize`] has run.
+    ///
+    /// Gated on `result_emitted`, NOT on `is_complete()`, and the difference is a real one: the
+    /// decision bits go bilateral the instant a local accept latches, while `finalize` — which
+    /// installs the ratchet session, ingests the handed profile record and raises `Ready` — runs
+    /// afterwards and can still decline (a racing peer `Reject` folded in between makes
+    /// `is_complete()` false again, and finalize then no-ops by design).
+    ///
+    /// Reporting a result in that window handed the app a friend with no ratchet behind it: every
+    /// ratcheted publish to them would drop with `no_session`, and the pair the human watched
+    /// succeed was never actually completed by either side. Observed on 2026-09-13 16:10:35, where
+    /// a phone adopted a friend 2.5 s before its own finalize declined — the peer's `Reject`
+    /// arrived on the response to our own Accept dial, because the peer was unreachable for long
+    /// enough that its SAS window lapsed first.
     pub async fn result_data(&self, session_id: &[u8; SESSION_ID_LEN]) -> Option<PairResultData> {
         self.expire_pair_sessions().await;
         let sessions = self.sessions.lock().await;
         let s = sessions.get(session_id)?;
-        if !s.is_complete() {
+        if !s.result_emitted || !s.is_complete() {
             return None;
         }
         let peer_recv_pub = s.peer_recv_pub?;
@@ -1917,6 +1981,15 @@ impl PairCore {
         session_id: &[u8; SESSION_ID_LEN],
         decision: LocalDecision,
     ) -> Result<()> {
+        // The outbound half of the provenance `ingest_decision` records for the inbound one. A
+        // `Contradiction` is logged too and is the most informative of the five: it is the app
+        // asking for something the session has already ruled out, which is nearly always a UI
+        // holding a snapshot older than the handshake it is describing.
+        tracing::info!(
+            sc.session = %crate::telemetry::short_hex(session_id),
+            decision = local_decision_label(&decision),
+            "pair.local_decision: this phone decided"
+        );
         match decision {
             LocalDecision::Accept => self.send_accept_and_finalize(session_id).await,
             LocalDecision::Reject => self.send_negative(session_id, PairSignal::Rejected).await,
@@ -1927,6 +2000,28 @@ impl PairCore {
     }
 
     /// Deliver our (already-latched) `Accept` to the peer and finalize if the pair is bilateral.
+    ///
+    /// ## Finalize first, tell the peer second
+    /// When the peer has ALREADY accepted, this call is the moment the pair becomes bilateral and
+    /// nothing on the network can make it more true. Finalizing before the dial closes a window
+    /// that used to be as long as a dial to an unreachable phone:
+    ///
+    /// `best_effort_notify` does not merely send — it folds the peer's stance *response* back into
+    /// the session (that is how a peer who accepted in the same breath is noticed). So a peer whose
+    /// own SAS window lapsed while we were dialling answers `Reject`, `ingest_decision` applies it
+    /// (a wire Reject is authoritative and overrides an earlier accept), and the `is_complete()`
+    /// re-check below then reads false — finalize silently declines, no ratchet is installed, and
+    /// no `Ready` is ever raised. Meanwhile every reader saw `Complete` for the whole dial.
+    ///
+    /// That is the 2026-09-13 16:10:30 failure exactly: an iPhone latched its accept at :35, its
+    /// dial to a Pixel with no active paths took until :37.883, the stance that came back was a
+    /// Reject, and the pair both humans had just verified evaporated — after the app had already
+    /// adopted the friend. Ordering it this way means the ratchet exists before anything the peer
+    /// says can be folded in, and a late peer Reject leaves a completed pair to be torn down
+    /// explicitly rather than a half-finished one to be silently abandoned.
+    ///
+    /// The post-notify check stays for the case it was written for: a session that was NOT yet
+    /// bilateral when we accepted, completed by the peer's Accept riding the dial response.
     async fn send_accept_and_finalize(&self, session_id: &[u8; SESSION_ID_LEN]) -> Result<()> {
         let (peer_endpoint, peer_ticket, nearby) = {
             let sessions = self.sessions.lock().await;
@@ -1938,19 +2033,27 @@ impl PairCore {
         let msg = self
             .build_msg(Decision::Accept, *session_id, Vec::new())
             .await?;
+        // Bilateral already? Then the friendship is real now, not once the dial returns.
+        if self.session_is_complete(session_id).await {
+            self.finalize(session_id, peer_endpoint).await?;
+        }
         self.best_effort_notify(peer_endpoint, peer_ticket, msg, session_id, nearby)
             .await;
-        let complete = self
-            .sessions
+        // Idempotent via `result_emitted`, so this is a no-op when the branch above already ran.
+        if self.session_is_complete(session_id).await {
+            self.finalize(session_id, peer_endpoint).await?;
+        }
+        Ok(())
+    }
+
+    /// Whether `session_id` currently reads as a bilateral, non-terminal pair.
+    async fn session_is_complete(&self, session_id: &[u8; SESSION_ID_LEN]) -> bool {
+        self.sessions
             .lock()
             .await
             .get(session_id)
             .map(PairSession::is_complete)
-            .unwrap_or(false);
-        if complete {
-            self.finalize(session_id, peer_endpoint).await?;
-        }
-        Ok(())
+            .unwrap_or(false)
     }
 
     /// Best-effort deliver our (already-latched) negative decision (`Reject`) to the peer and
@@ -2957,7 +3060,10 @@ mod tests {
         let id = [7u8; SESSION_ID_LEN];
         invites.insert(id, issued);
         assert!(invites.remove(&id).is_some(), "first revoke withdraws it");
-        assert!(invites.remove(&id).is_none(), "revoking twice is not an error");
+        assert!(
+            invites.remove(&id).is_none(),
+            "revoking twice is not an error"
+        );
         assert_eq!(
             check_invite(invites.get(&id), &secret, &peer, 1),
             InviteCheck::Unknown
@@ -3806,6 +3912,86 @@ mod tests {
                 "exactly one terminal decision was reached"
             );
         }
+    }
+
+    /// A bilateral session is NOT a completed friendship until `finalize` has run.
+    ///
+    /// The two used to be the same test (`is_complete()`), and the gap between them is real time:
+    /// `send_accept_and_finalize` can spend a whole dial in it. An app that reads a result there
+    /// adopts a friend with no ratchet session behind it — see the doc comment on `result_data`.
+    #[tokio::test]
+    async fn result_is_withheld_until_finalize_has_run() {
+        let (core, _our_ep, _recv) = test_core();
+        let peer_ep = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
+        let (sid, _challenge) = insert_verifying(&core, peer_ep).await;
+
+        {
+            let mut sessions = core.sessions.lock().await;
+            let s = sessions.get_mut(&sid).unwrap();
+            s.local_decision = Some(true);
+            s.peer_decision = Some(true);
+            assert!(s.is_complete(), "the session is bilateral");
+        }
+
+        assert!(
+            core.result_data(&sid).await.is_none(),
+            "a bilateral session must not report a result before finalize installs the ratchet"
+        );
+
+        core.finalize(&sid, peer_ep).await.unwrap();
+
+        assert!(
+            core.result_data(&sid).await.is_some(),
+            "finalize is what makes the friendship readable"
+        );
+    }
+
+    /// A peer `Reject` that lands after the pair went bilateral cannot un-complete a pair that has
+    /// already been finalized — which is the point of finalizing before the dial that carries it.
+    ///
+    /// Before the reorder, the reject arrived on the response to our OWN accept dial, `finalize`
+    /// then read `is_complete() == false` and declined, and the pair both humans had verified was
+    /// lost with nothing but two `rejected` rows to show for it.
+    #[tokio::test]
+    async fn a_late_peer_reject_cannot_unmake_a_finalized_pair() {
+        let (core, _our_ep, _recv) = test_core();
+        let peer_sk = SigningKey::generate(&mut OsRng);
+        let peer_ep = peer_sk.verifying_key().to_bytes();
+        let (sid, _challenge) = insert_verifying(&core, peer_ep).await;
+
+        {
+            let mut sessions = core.sessions.lock().await;
+            let s = sessions.get_mut(&sid).unwrap();
+            s.local_decision = Some(true);
+            s.peer_decision = Some(true);
+        }
+        core.finalize(&sid, peer_ep).await.unwrap();
+        assert!(core.result_data(&sid).await.is_some(), "finalized");
+
+        // The stance response to our own dial, arriving late: authoritative, and it does move the
+        // session out of `Complete`.
+        {
+            let mut sessions = core.sessions.lock().await;
+            let s = sessions.get_mut(&sid).unwrap();
+            let peer_recv = s.peer_recv_pub.unwrap();
+            s.ingest_decision(&decision_msg(
+                Decision::Reject,
+                peer_ep,
+                peer_recv,
+                sid,
+                false,
+            ));
+            assert_eq!(s.phase(), PairPhase::Rejected);
+        }
+
+        // What must NOT happen is the pair silently evaporating: the ratchet was installed and the
+        // result was emitted before the reject could be folded in, so the friendship is a thing
+        // that exists and can be torn down deliberately, not one that was never made.
+        let sessions = core.sessions.lock().await;
+        assert!(
+            sessions.get(&sid).unwrap().result_emitted,
+            "the completed pair stays completed; a late reject is a teardown, not an undo"
+        );
     }
 
     /// Peer decision ingestion is monotonic and fails closed: a `Reject` always wins over an

@@ -122,6 +122,17 @@ Conventions when changing that code:
   separate frozen type (`StoredFix`) on purpose: the outbox and gate discard everything on a decode
   failure, so growing the type they persist would wipe `last_known_fix` fleet-wide on upgrade and
   silence every parked phone.
+- **A new friend's first dot comes from an INTRODUCTION, not from the wire.** A sealed envelope is
+  readable only by the recipients it was sealed for, so nothing already published can be opened by
+  someone who did not exist when it went out, and a new friend would otherwise wait for the next
+  scheduled publish (p90 92 min parked). `DrainEngine::publish_introduction` re-seals
+  `last_known_fix` once. Do NOT put a fix on the pairing `Accept` alongside the profile record: the
+  Accept is sent BEFORE `is_complete()`, so a peer who rejects or times out would still have your
+  position, and a fix outside the ratchet is the one payload FORWARD-SECRECY.md exists to protect.
+  It is driven from ACKNOWLEDGE rather than `ready` because the reveal screen still offers REJECT,
+  and it deliberately does not advance `last_published_slot` (the cadence is what the stash reads),
+  does not write `last_state` (pairing says nothing about having parked), and is not battery-
+  suspended (one envelope, at a moment the user chose).
 - **The PAIRING wire is the opposite, and the rule above does not carry over to it.** `PairMsg` is
   ed25519-signed, and `pair_signing_bytes` signs a re-encode of the DECODED struct — so a peer that
   does not know a newly appended field drops it, reconstructs different bytes, and fails the
@@ -130,6 +141,36 @@ Conventions when changing that code:
   refused the pair". v4 carries the sender's signed `ProfileRecord` on the `Accept`, which is why a
   persona now arrives WITH the pair instead of after a separate iroh-docs dial; the profile ticket
   still rides along, and is now only how later edits arrive.
+- **A pair is complete when `finalize` says so, not when the decision bits agree.** `is_complete()`
+  goes true the instant a local accept latches; `finalize` — which installs the ratchet, ingests the
+  handed profile record and raises `Ready` — runs after, and can still decline, because a wire
+  `Reject` is authoritative and `best_effort_notify` folds the peer's stance response back into the
+  session. So `send_accept_and_finalize` finalizes BEFORE that dial when the session is already
+  bilateral, and `result_data` is gated on `result_emitted` rather than `is_complete()`. Handing the
+  app a result from inside that window produced a friend with no ratchet behind it, whose every
+  publish would drop with `no_session`. Do not "simplify" either gate back to `is_complete()`.
+- **Nothing that is merely LEAVING a screen may cancel a pair that completed.** The pairing screen's
+  abandonable list comes from a snapshot and is always at least one poll behind the handshake, which
+  is longer than a pair takes to complete; `standDownPairing` therefore re-reads each session from
+  native and spares the terminal ones. A completed pair is torn down by `removeFriend`, deliberately,
+  never as a side effect of navigation.
+- **A node appearing in the log is not necessarily a REBIND, and assuming it is will cost you a
+  day.** Three different things build an endpoint and they are not distinguishable by eye:
+  `rebindNode` (deliberate; always `shutdown`s first, so Rust logs `shutdown: taking inner lock`), a
+  clobber (a second JS context calls `createNode`, which routes through `clearRuntime()` and logs
+  NOTHING), and a duplicate (a second context builds a second LIVE node on the same identity — two
+  endpoints answering for one endpoint id, so a dial lands on whichever the relay or BLE picked and
+  a pairing session on one node is unknown to the other). Read them apart with the table in
+  `infra/otel/README.md`: `node.construct`'s process-wide `node.ordinal` (above 1 is the alarm, and
+  it WARNs), whether a shutdown was logged, and how many JS contexts emitted `node.create`. On
+  2026-09-13 five constructions with zero shutdowns were misread as rebinds for most of a session.
+- **`ensureBleReady` rebuilds the whole iroh endpoint whenever `bleAvailable()` is false**, because
+  BLE attaches at CONSTRUCTION and can never be attached to a live node afterwards — which is also
+  why `node.start` records `ble_attached`, fixed for that node's whole life. The rebuild drops every
+  pairing session and leaves a new endpoint with no paths for seconds, and it sits on the Bump
+  button. Before changing it, check whether `node.rebind{trigger="ble-arm"}` is actually firing on
+  phones whose Bluetooth is fine: attach is asynchronous, so "not yet" and "no" are the same answer
+  at that call site. It was NOT the cause of the 2026-09-13 pairing failures.
 - Guard newly added native exports anyway (`typeof mod.configureTelemetry === 'function'`). Not
   because of bindgen now, but because a phone can be running an older binary than the JS bundle.
 

@@ -53,6 +53,7 @@ mod telemetry;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 #[cfg(target_os = "android")]
@@ -1093,6 +1094,9 @@ pub struct LocationNode {
     author: [u8; 32],
     recv_secret: Vec<u8>,
     recv_public: Vec<u8>,
+    /// Which node this is within this process. See [`NODE_ORDINAL`]; carried here so later spans
+    /// can say WHICH node they came from, not only that a node existed.
+    ordinal: u64,
     /// On-disk root for the persistent docs replica + blobs store (durable trail). Derived from
     /// the identity so it stays stable across restarts.
     ///
@@ -1618,12 +1622,30 @@ enum NodeDirs {
     Roots { data: PathBuf, state: PathBuf },
 }
 
+/// How many `LocationNode`s this PROCESS has built, ever.
+///
+/// The node is meant to be process-wide and singular — the host bridges refcount it so a mounted
+/// app and a headless session adopt one node rather than clobbering each other. This counter is
+/// what proves whether that actually held, and it is the only place that can: it sits below every
+/// constructor and below every JS context, so it counts nodes in a process rather than nodes a
+/// context believes it has.
+///
+/// **An ordinal above 1 with no intervening `shutdown` means two live nodes on one identity.** That
+/// is not a degraded mode, it is two endpoints publishing the same endpoint id: a dial to that
+/// identity lands on whichever one the relay or BLE picked, so a pairing handshake can reach
+/// `verifying` on one node and have its `Accept` delivered to the other, which has never heard of
+/// the session. It was reachable-but-unproven on 2026-09-13 — the evidence was three
+/// `iroh endpoint bound` lines in a process that logged no shutdowns at all, which says a node was
+/// built but not which context built it, and there was no way to tell a rebuild from a duplicate.
+static NODE_ORDINAL: AtomicU64 = AtomicU64::new(0);
+
 fn new_location_node_at(
     identity_secret: Option<Vec<u8>>,
     recv_secret: Option<Vec<u8>>,
     dirs: NodeDirs,
 ) -> Result<Arc<LocationNode>, LocationError> {
     telemetry::init_tracing();
+    let ordinal = NODE_ORDINAL.fetch_add(1, Ordering::Relaxed) + 1;
     let secret = match identity_secret {
         Some(bytes) => SecretKey::from_bytes(
             &bytes
@@ -1663,7 +1685,7 @@ fn new_location_node_at(
         }
     };
 
-    Ok(Arc::new(LocationNode {
+    let node = Arc::new(LocationNode {
         identity_seed,
         author,
         recv_secret,
@@ -1684,7 +1706,24 @@ fn new_location_node_at(
         delivery: Mutex::new(None),
         pending_bootstrap: Mutex::new(HashMap::new()),
         pending_resync: Mutex::new(None),
-    }))
+        ordinal,
+    });
+    tracing::info!(
+        node.ordinal = ordinal,
+        sc.author = %telemetry::short_hex(&author),
+        "node.construct: built a LocationNode in this process"
+    );
+    if ordinal > 1 {
+        // Loud on purpose. The bridges refcount precisely so this does not happen, and every way
+        // it still can (a second host module instance, an identity mismatch adopting nothing, a
+        // clobber) ends with two endpoints answering for one identity.
+        tracing::warn!(
+            node.ordinal = ordinal,
+            sc.author = %telemetry::short_hex(&author),
+            "node.construct: this process has now built more than one node for this identity"
+        );
+    }
+    Ok(node)
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -1998,6 +2037,16 @@ impl LocationNode {
             .await;
 
         // Publish the built node last, under a lock held only for the assignment itself.
+        // Stamped with the node ordinal so an `iroh endpoint bound` in the log can be attributed
+        // to a specific node rather than only to a moment. `ble_attached` is here for the same
+        // reason: BLE attaches at CONSTRUCTION and can never be attached later, so whether this
+        // node has it is fixed now and is what `ble_available()` will answer for its whole life.
+        tracing::info!(
+            node.ordinal = self.ordinal,
+            ble_attached = ble.available(),
+            ble_enabled,
+            "node.start: endpoint is up"
+        );
         *self.inner.lock().await = Some(Started {
             endpoint,
             gossip,
@@ -4529,6 +4578,40 @@ impl Drop for Subscription {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Subscription {
+    /// Seal the last known position once, for a recipient set that has just grown.
+    ///
+    /// Called when a pairing is accepted. A sealed envelope is readable only by the recipients it
+    /// was sealed for, so a new friend cannot open anything published before they existed and
+    /// their first sight of you is otherwise your next scheduled publish — p90 92 minutes on a
+    /// parked iPhone. See [`publish::DrainEngine::publish_introduction`] for what it deliberately
+    /// does NOT touch (the slot cursor, the parked/live stamp, the battery suspension).
+    pub async fn publish_introduction(
+        &self,
+        subscription_id: String,
+        now_ms: u64,
+    ) -> Result<publish::IngestOutcome, LocationError> {
+        let sink = SubscriptionSink {
+            subscription: self,
+            subscription_id,
+        };
+        let seq = self.node.seq_store().await?;
+        let queue = self.node.outbox().await?;
+        let recipients = self.node.recipient_store().await?;
+        let gate_store = self.node.gate_store().await?;
+        let engine = publish::DrainEngine {
+            seq: seq.as_ref(),
+            queue: queue.as_ref(),
+            recipients: recipients.as_ref(),
+            gate: gate_store.as_ref(),
+            sink: &sink,
+            quality: gate::FixQualityConfig::default(),
+        };
+        engine
+            .publish_introduction(now_ms)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
     /// Publish the slots that have come due without a new fix, reusing the last known position.
     ///
     /// Driven on a timer by whoever is running the pipeline — the mounted app today, since neither

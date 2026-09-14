@@ -117,7 +117,24 @@ export async function beginTelemetryRun(now: () => number = Date.now): Promise<v
 
 /**
  * Record the app state this run is now in, so the next run can say what it was doing when it
- * stopped. Cheap and rare — AppState changes a handful of times per session.
+ * stopped — and emit the transition, so THIS run can say it too.
+ *
+ * ## Why the transition is a span and not only a stored field
+ * `app.previous_run` answers "how did the last run end", which is a question you can only ask
+ * after the fact and only once per launch. It says nothing about a run that is still going, and
+ * "still going" is the state the app is in for every interesting question about it.
+ *
+ * On 2026-09-13 a pairing failed three times in ninety seconds, and the single most load-bearing
+ * fact — that one of the two phones had been sent to the home screen partway through — was not
+ * recorded anywhere. It had to be inferred from a burst of Skia deprecation warnings that happen
+ * to fire when the map screen remounts, which is not evidence, it is a coincidence that held.
+ * Backgrounding is a first-class event in the life of this app: it suspends the JS context, drops
+ * the transport's paths, and ends handshakes. It should not take a forensic reading of unrelated
+ * console noise to see one.
+ *
+ * The flush is the other half. A span recorded on the way to the background is describing the
+ * exact moment the OS may stop running us, so it is persisted and drained before we return rather
+ * than left in a batch that a suspended process will never export.
  */
 export async function noteTelemetryRunState(
   state: AppStateStatus,
@@ -125,7 +142,32 @@ export async function noteTelemetryRunState(
 ): Promise<void> {
   const run = current;
   if (!run) return;
-  await persist({ ...run, lastState: state, lastStateAt: now() });
+  const at = now();
+  const from = run.lastState;
+  if (state !== from) {
+    getTelemetry()
+      .startSpan('app.lifecycle', {
+        attributes: {
+          'app.from': from,
+          'app.to': state,
+          // How long it held the state it is leaving. A foreground stretch of two seconds is a
+          // user bouncing off something; two minutes is a user doing something.
+          'app.state_ms': Math.max(0, at - run.lastStateAt),
+          'app.run_ms': Math.max(0, at - run.startedAt),
+          // The transition worth filtering on: everything the app was in the middle of stops here.
+          'app.left_foreground': from === 'active' && state !== 'active',
+        },
+      })
+      .end();
+  }
+  await persist({ ...run, lastState: state, lastStateAt: at });
+  // Ordered after the persist so the durable record is already correct if the flush is the last
+  // thing this process ever does.
+  if (from === 'active' && state !== 'active') {
+    await getTelemetry()
+      .flush()
+      .catch(() => undefined);
+  }
 }
 
 /** Test seam: forget the in-memory claim and stop listening. */

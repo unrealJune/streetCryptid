@@ -122,6 +122,16 @@ export declare class IrohLocationNativeModule
     intervalMs: number
   ): Promise<NativeIngestOutcome>;
   /**
+   * Seal the last known position once, because the recipient set has just grown.
+   *
+   * A sealed envelope is readable only by the recipients it was sealed for, so a friend who has
+   * just paired cannot open anything published before they existed — their first sight of you is
+   * otherwise the next scheduled publish, which on a parked iPhone is p90 92 minutes. Fills no
+   * slot and does not move the cadence; see `DrainEngine::publish_introduction`. Resolves with
+   * `enqueued: 0` on a device that has never captured a position. OPTIONAL.
+   */
+  publishIntroduction?(subscriptionId: string): Promise<NativeIngestOutcome>;
+  /**
    * Re-program the native background runtime from the sampling policy's decision.
    *
    * The cadence controller drives this. `intervalMs` is the publish slot the native gate enforces;

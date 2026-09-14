@@ -24,6 +24,10 @@ function runSpans(): ReturnType<typeof getEventLog> {
   return getEventLog().filter((entry) => entry.action === 'app.previous_run');
 }
 
+function lifecycleSpans(): ReturnType<typeof getEventLog> {
+  return getEventLog().filter((entry) => entry.action === 'app.lifecycle');
+}
+
 describe('telemetry run lifecycle', () => {
   beforeEach(() => {
     mockMeta.clear();
@@ -107,6 +111,65 @@ describe('telemetry run lifecycle', () => {
     const stored = JSON.parse(mockMeta.get('run.foreground') as string) as Record<string, unknown>;
     expect(stored.lastState).toBe('background');
     expect(stored.lastStateAt).toBe(12_000);
+  });
+
+  // The gap this closes: on 2026-09-13 a phone was sent to the home screen in the middle of a
+  // pairing and NOTHING recorded it. The fact had to be inferred from unrelated console noise.
+  it('records leaving the foreground, with how long the run had been in it', async () => {
+    await beginTelemetryRun(() => 10_000);
+    await noteTelemetryRunState('background', () => 12_500);
+
+    const [span] = lifecycleSpans();
+    expect(span).toBeDefined();
+    expect(span.details).toMatchObject({
+      attributes: expect.objectContaining({
+        'app.from': 'active',
+        'app.to': 'background',
+        'app.state_ms': 2_500,
+        'app.left_foreground': true,
+      }),
+    });
+  });
+
+  it('records coming back, and does not call that leaving the foreground', async () => {
+    await beginTelemetryRun(() => 10_000);
+    await noteTelemetryRunState('background', () => 12_000);
+    await noteTelemetryRunState('active', () => 30_000);
+
+    // Newest first.
+    const [span] = lifecycleSpans();
+    expect(span.details).toMatchObject({
+      attributes: expect.objectContaining({
+        'app.from': 'background',
+        'app.to': 'active',
+        'app.state_ms': 18_000,
+        'app.left_foreground': false,
+      }),
+    });
+  });
+
+  // iOS reports `inactive` on the way through (control centre, the app switcher, a call banner)
+  // and settles back to `active`. Recording the repeat would be noise with no transition in it.
+  it('says nothing when the state has not actually changed', async () => {
+    await beginTelemetryRun(() => 10_000);
+    await noteTelemetryRunState('active', () => 11_000);
+    expect(lifecycleSpans()).toHaveLength(0);
+  });
+
+  // A span describing the moment the OS may stop running us is worthless if it is still sitting
+  // in an unexported batch when it does.
+  it('flushes on the way out, after the durable record is correct', async () => {
+    const flush = jest.fn(async () => undefined);
+    const telemetry = createTelemetry({ now: () => 10_000 });
+    setTelemetryForTesting({ ...telemetry, flush });
+
+    await beginTelemetryRun(() => 10_000);
+    await noteTelemetryRunState('background', () => 12_000);
+    expect(flush).toHaveBeenCalledTimes(1);
+
+    flush.mockClear();
+    await noteTelemetryRunState('active', () => 13_000);
+    expect(flush).not.toHaveBeenCalled();
   });
 
   // A resumed process is the SAME run. Reporting it as an ended one would turn every suspension
