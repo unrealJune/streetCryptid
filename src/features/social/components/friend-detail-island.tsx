@@ -7,6 +7,7 @@ import { resolveSignalColor } from '@/constants/signal-colors';
 import { Spacing } from '@/constants/theme';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import type { DrawerDetent } from '@/features/map/components/map-drawer';
+import { useDisplayPreferences } from '@/features/settings/hooks/use-display-preferences';
 
 import {
   describeDelivery,
@@ -91,6 +92,11 @@ export function FriendDetailIsland({
   onRemove,
 }: FriendDetailIslandProps) {
   const { chrome } = theme;
+  const {
+    distanceUnit,
+    showFriendConnectionDetails,
+    ready: displayPreferencesReady,
+  } = useDisplayPreferences();
   const [pathExpanded, setPathExpanded] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
   const [removing, setRemoving] = useState(false);
@@ -99,7 +105,9 @@ export function FriendDetailIsland({
 
   const signalColor = resolveSignalColor(presence.friend.color, chrome.green);
   const endpointId = presence.friend.endpointId;
-  const distance = formatDistance(presence.distanceM);
+  const distance = displayPreferencesReady
+    ? formatDistance(presence.distanceM, distanceUnit)
+    : null;
   const expanded = detent === 'mid' || detent === 'full';
   // Lower-cased keys: endpoint ids reach us from native hex, storage and tickets, and a case
   // difference between two spellings of the same device would read as two devices.
@@ -221,21 +229,25 @@ export function FriendDetailIsland({
             value={pairingLabel(presence.friend.pairingMethod)}
             theme={theme}
           />
-          <DetailRow
-            label="LAST FIX ACK"
-            value={formatAckAge(ratchetActivity?.fix)}
-            theme={theme}
-          />
-          <DetailRow
-            label="LAST NULL ACK"
-            value={formatAckAge(ratchetActivity?.null)}
-            theme={theme}
-          />
+          {displayPreferencesReady && showFriendConnectionDetails ? (
+            <>
+              <DetailRow
+                label="LAST FIX ACK"
+                value={formatAckAge(ratchetActivity?.fix)}
+                theme={theme}
+              />
+              <DetailRow
+                label="LAST NULL ACK"
+                value={formatAckAge(ratchetActivity?.null)}
+                theme={theme}
+              />
+            </>
+          ) : null}
 
           {/* States what it is rather than what pressing it would do: "PAUSE SHARING" made you
               read an action backwards to learn whether you were sharing at all. */}
           <Pressable
-            accessibilityLabel="Sharing your location with them"
+            accessibilityLabel="Location sharing"
             accessibilityRole="switch"
             accessibilityState={{ checked: sharing, busy: sharingBusy }}
             disabled={sharingBusy}
@@ -248,7 +260,7 @@ export function FriendDetailIsland({
               },
             ]}
           >
-            <Text style={[styles.sharingLabel, { color: chrome.steel }]}>SHARING WITH THEM</Text>
+            <Text style={[styles.sharingLabel, { color: chrome.steel }]}>LOCATION SHARING</Text>
             <View style={styles.sharingState}>
               <Text style={[styles.sharingValue, { color: sharing ? chrome.green : chrome.steel }]}>
                 {sharing ? 'ON' : 'OFF'}

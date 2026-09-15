@@ -42,10 +42,12 @@ float2 fieldFor(float mode, float2 grid, float2 delta, float distanceFromCenter)
     return float2(hot, 0.0);
   }
   if (mode < 1.5) {
-    // sweep — a radar arm: candidate phones are being ranked.
-    float angle = normalizedAngle(atan(delta.y, delta.x) - uTime * 1.7);
-    float hot = max(0.0, 1.0 - angle / 1.1) * (distanceFromCenter < 300.0 ? 1.0 : 0.0);
-    return float2(hot, 0.0);
+    // A single clockwise search window. Swept dots stay lit; time never wraps the arm.
+    float turn = normalizedAngle(atan(delta.y, delta.x) + PI * 0.5) / TWO_PI;
+    float elapsed = turn < uProgress ? 1.0 : 0.0;
+    float arm = max(0.0, 1.0 - abs(turn - uProgress) * TWO_PI / 0.13);
+    float inside = distanceFromCenter < 300.0 ? 1.0 : 0.0;
+    return float2(max(elapsed * 0.3, arm) * inside, elapsed * 0.08 * inside);
   }
   if (mode < 2.5) {
     // countdown — a ring that drains clockwise from twelve o'clock as the link expires.

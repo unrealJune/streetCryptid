@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { Text } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
@@ -12,19 +11,16 @@ jest.mock('expo-symbols', () => ({
 jest.mock('@/global.css', () => ({}));
 
 /**
- * `minimized` is owned by the screen — collapsing the body and taking the drawer's detents away
- * are one act — so the test supplies the state the screen would.
+ * `minimized` is the drawer's `collapsed` detent, reached by its grip — the body has no collapse
+ * control of its own any more, so these render the two states directly rather than pressing one.
  */
-function Harness({ sectorsVisible, coverage }: { sectorsVisible: boolean; coverage: number }) {
-  const [minimized, setMinimized] = useState(false);
-
+function island(props: { minimized: boolean; sectorsVisible: boolean; coverage: number }) {
   return (
     <CoverageIsland
-      coverage={coverage}
-      minimized={minimized}
-      onToggleMinimize={() => setMinimized((current) => !current)}
+      coverage={props.coverage}
+      minimized={props.minimized}
       placeName="Capitol Hill"
-      sectorsVisible={sectorsVisible}
+      sectorsVisible={props.sectorsVisible}
       signal="#2F9E6A"
       theme={CryptidThemes.daybreak}
     />
@@ -33,84 +29,48 @@ function Harness({ sectorsVisible, coverage }: { sectorsVisible: boolean; covera
 
 describe('CoverageIsland', () => {
   let renderer: ReactTestRenderer;
-  const SIGNAL = '#2F9E6A';
 
   afterEach(() => {
     act(() => renderer?.unmount());
   });
 
-  it('toggles between the detailed and compact location summaries', () => {
+  it('shows the full readout expanded and the place-plus-percent line collapsed', () => {
     act(() => {
-      renderer = create(<Harness coverage={0.42} sectorsVisible />);
+      renderer = create(island({ minimized: false, sectorsVisible: true, coverage: 0.42 }));
     });
 
-    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(1);
+    expect(findText(renderer, 'PERCENT EXPLORED')).toHaveLength(1);
+    expect(findText(renderer, 'Capitol Hill')).toHaveLength(1);
 
-    const minimizeButton = renderer.root.findByProps({
-      accessibilityLabel: 'Minimize location summary',
+    act(() => {
+      renderer.update(island({ minimized: true, sectorsVisible: true, coverage: 0.42 }));
     });
-    expect(minimizeButton.props.accessibilityState).toEqual({ expanded: true });
 
-    act(() => minimizeButton.props.onPress());
-
-    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(0);
+    // Collapsed is the same single line the roster collapses to: the hero and one number.
+    expect(findText(renderer, 'PERCENT EXPLORED')).toHaveLength(0);
+    expect(findText(renderer, 'Capitol Hill')).toHaveLength(1);
     expect(findText(renderer, '42%')).toHaveLength(1);
+  });
 
-    const expandButton = renderer.root.findByProps({
-      accessibilityLabel: 'Expand location summary',
+  it('carries no collapse control of its own — the drawer owns that', () => {
+    act(() => {
+      renderer = create(island({ minimized: false, sectorsVisible: true, coverage: 0.42 }));
     });
-    expect(expandButton.props.accessibilityState).toEqual({ expanded: false });
 
-    act(() => expandButton.props.onPress());
-
-    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(1);
+    expect(
+      renderer.root.findAllByProps({ accessibilityLabel: 'Minimize location summary' })
+    ).toHaveLength(0);
   });
 
   it('hides the sector readout below the exploration render cutoff', () => {
     act(() => {
-      renderer = create(
-        <CoverageIsland
-          theme={CryptidThemes.daybreak}
-          signal={SIGNAL}
-          placeName="Capitol Hill"
-          coverage={0}
-          minimized={false}
-          onToggleMinimize={jest.fn()}
-          sectorsVisible={false}
-        />
-      );
+      renderer = create(island({ minimized: false, sectorsVisible: false, coverage: 0 }));
     });
 
-    // No readout, no misleading 0%, and no chevron to expand into nothing.
-    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(0);
+    // No readout and no misleading 0% — just the place name.
+    expect(findText(renderer, 'PERCENT EXPLORED')).toHaveLength(0);
     expect(findText(renderer, '0%')).toHaveLength(0);
-    expect(
-      renderer.root.findAllByProps({ accessibilityLabel: 'Minimize location summary' })
-    ).toHaveLength(0);
-    // The place name still headlines the island.
     expect(findText(renderer, 'Capitol Hill')).toHaveLength(1);
-  });
-
-  it('restores the user’s own minimize choice when sectors come back', () => {
-    act(() => {
-      renderer = create(<Harness coverage={0.42} sectorsVisible />);
-    });
-    // User expands nothing — it starts expanded. Minimize it by hand.
-    act(() =>
-      renderer.root.findByProps({ accessibilityLabel: 'Minimize location summary' }).props.onPress()
-    );
-    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(0);
-
-    // Zoom out past the cutoff and back in: still minimized, not re-expanded.
-    act(() => {
-      renderer.update(<Harness coverage={0} sectorsVisible={false} />);
-    });
-    act(() => {
-      renderer.update(<Harness coverage={0.42} sectorsVisible />);
-    });
-
-    expect(findText(renderer, 'SECTORS IN VIEW')).toHaveLength(0);
-    expect(findText(renderer, '42%')).toHaveLength(1);
   });
 });
 

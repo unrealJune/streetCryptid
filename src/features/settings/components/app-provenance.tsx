@@ -16,7 +16,6 @@ export function AppProvenanceDetails({ provenance = getAppProvenance() }: AppPro
     { label: 'Commit', value: provenance.commit },
     { label: 'EAS build', value: provenance.buildId },
     { label: 'Build profile', value: provenance.profile },
-    { label: 'Runtime', value: provenance.runtimeVersion },
   ].filter((row): row is { label: string; value: string } => row.value !== null);
 
   return (

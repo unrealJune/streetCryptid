@@ -109,19 +109,31 @@ describe('describePairingFailure', () => {
     expect(copy.status).not.toMatch(/FIGURES/);
   });
 
-  it('points a link failure at a new link and a bump failure at another try', () => {
+  it('keeps nearby failure copy concise and links to a fresh remote attempt', () => {
     expect(describePairingFailure(brokenPair({ reason: 'lost', nearby: false })).detail).toMatch(
       /new link/i
     );
-    expect(describePairingFailure(brokenPair({ reason: 'lost', nearby: true })).detail).toMatch(
-      /both phones together/i
+    expect(describePairingFailure(brokenPair({ reason: 'lost', nearby: true })).detail).toBe(
+      'The other phone dropped out before pairing finished. Nothing was shared.'
+    );
+    expect(describePairingFailure(brokenPair({ reason: 'expired' })).detail).toBe(
+      'The visual check closed before both people confirmed. Nothing was shared.'
+    );
+    expect(describePairingFailure(brokenPair({ reason: 'declined', verified: true })).detail).toBe(
+      'The other phone reported a different figure, so nothing was shared.'
     );
   });
 
-  it('always says nothing was shared', () => {
+  it('says nothing was shared when the handshake never completed', () => {
     for (const reason of ['declined', 'lost', 'expired'] as const) {
       expect(describePairingFailure(brokenPair({ reason })).detail).toMatch(/nothing was shared/i);
     }
+  });
+
+  it('does not claim earlier locations were never shared when a completed pair is withdrawn', () => {
+    const copy = describePairingFailure(brokenPair({ reason: 'declined', withdrawn: true }));
+    expect(copy.detail).toBe('This pairing was declined. Location sharing is off.');
+    expect(copy.detail).not.toMatch(/nothing was shared/i);
   });
 });
 

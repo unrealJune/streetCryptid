@@ -66,7 +66,7 @@ export interface DeliveryStagePalette {
   readonly ground: string;
 }
 
-interface DeliveryStageProps {
+export interface DeliveryStageProps {
   readonly mode: DeliveryMode;
   readonly palette: DeliveryStagePalette;
   /** Seconds for one full loop. The design's default is 10. */

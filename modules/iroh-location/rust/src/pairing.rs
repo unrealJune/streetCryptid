@@ -44,6 +44,9 @@
 //! deliveries, replayed invites and expired invites are all rejected; sessions are keyed by a
 //! stable 16-byte id (the invite id, or a deterministic hash of the two endpoint ids for a
 //! nearby pair) so retries are idempotent.
+//! A completed result can still be withdrawn at the discovered-friend screen. This is separate
+//! from the immutable SAS decision: withdrawal sends the existing signed `Reject`, invalidates
+//! the result, and removes only this bump's ratchet. Both apps must handle `Rejected` after `Ready`.
 //!
 //! ## Pure vs live
 //! Everything up to and including [`encode_frame`]/[`decode_frame`], [`sign_msg`]/[`verify_msg`],
@@ -906,6 +909,10 @@ struct PairSession {
     peer_trail_ticket: Option<String>,
     pending_emitted: bool,
     result_emitted: bool,
+    /// Post-SAS withdrawal is not a contradictory answer to the visual check.
+    withdrawn: bool,
+    /// The installed bump, for cleanup that cannot erase a newer re-pair's ratchet.
+    ratchet_session_id: Option<[u8; SESSION_ID_LEN]>,
     created_ms: u64,
     // ── SAS material ──────────────────────────────────────────────────────────────────────
     /// Our own identity/keys/nonce, captured at creation so the transcript is pure + testable.
@@ -947,6 +954,7 @@ impl std::fmt::Debug for PairSession {
             .field("failed", &self.failed)
             .field("timed_out", &self.timed_out)
             .field("result_emitted", &self.result_emitted)
+            .field("withdrawn", &self.withdrawn)
             .finish_non_exhaustive()
     }
 }
@@ -980,6 +988,8 @@ impl PairSession {
             peer_trail_ticket: None,
             pending_emitted: false,
             result_emitted: false,
+            withdrawn: false,
+            ratchet_session_id: None,
             created_ms,
             local_endpoint,
             local_recv_pub,
@@ -1014,7 +1024,8 @@ impl PairSession {
         if self.failed || self.timed_out {
             return PairPhase::Failed;
         }
-        if self.local_decision == Some(false) || self.peer_decision == Some(false) {
+        if self.withdrawn || self.local_decision == Some(false) || self.peer_decision == Some(false)
+        {
             return PairPhase::Rejected;
         }
         match (self.local_decision, self.peer_decision) {
@@ -1036,6 +1047,7 @@ impl PairSession {
     fn is_complete(&self) -> bool {
         !self.failed
             && !self.timed_out
+            && !self.withdrawn
             && self.local_decision == Some(true)
             && self.peer_decision == Some(true)
     }
@@ -1046,6 +1058,7 @@ impl PairSession {
     fn is_terminal_failure(&self) -> bool {
         self.failed
             || self.timed_out
+            || self.withdrawn
             || self.local_decision == Some(false)
             || self.peer_decision == Some(false)
     }
@@ -1068,7 +1081,8 @@ impl PairSession {
     }
 
     fn is_untouched_handshake(&self) -> bool {
-        self.peer_recv_pub.is_none()
+        !self.is_terminal_failure()
+            && self.peer_recv_pub.is_none()
             && self.peer_sas_commit.is_none()
             && self.peer_sas_nonce.is_none()
             && self.local_decision.is_none()
@@ -1084,6 +1098,34 @@ impl PairSession {
             bail!("pair message came from an unexpected peer");
         }
         Ok(())
+    }
+
+    /// Nearby retries reuse the pairing id, but never the bump's signed ephemeral.
+    fn ensure_peer_message(&self, remote: &[u8; ENDPOINT_LEN], msg: &PairMsg) -> Result<()> {
+        self.ensure_peer(remote)?;
+        if matches!(msg.decision, Decision::Accept | Decision::Reject)
+            && (self.peer_ratchet_pub.is_none() || self.peer_sas_commit.is_none())
+        {
+            // A decision carries no commitment to this round. Letting it supply the first key
+            // would let an old signed Reject poison a freshly initiated deterministic nearby id.
+            bail!("pair decision arrived before the peer's pairing commitment");
+        }
+        if self
+            .peer_ratchet_pub
+            .is_some_and(|key| msg.ratchet_pub.as_slice() != key)
+        {
+            bail!("pair message belongs to an earlier pairing attempt");
+        }
+        Ok(())
+    }
+
+    fn cancel_or_withdraw(&mut self, now_ms: u64) -> LocalDecision {
+        if self.is_complete() || self.withdrawn {
+            self.withdrawn = true;
+            LocalDecision::Reject
+        } else {
+            self.decide_local(LocalIntent::Fail, now_ms)
+        }
     }
 
     /// Whether a human SAS action is currently permitted (gate live, not yet decided, not late).
@@ -1148,16 +1190,16 @@ impl PairSession {
     ///   * **monotonic / fail-closed**: a repeat of the decision already made is a harmless
     ///     `NoopOk`, while a *conflicting* later action is refused (`Contradiction`) rather than
     ///     allowed to produce a second, contradictory decision (so a session can never end up
-    ///     `failed == true && local_decision == Some(true)` and can never send both Accept and
-    ///     Reject).
+    ///     `failed == true && local_decision == Some(true)`). A subsequent result withdrawal is
+    ///     a separate operation, permitted only after bilateral completion.
     /// An accept only latches while the SAS gate is genuinely live ([`sas_action_allowed`]); a
     /// correct-but-late accept degrades to a `Fail` (timeout), preserving the two-human gate.
     fn decide_local(&mut self, intent: LocalIntent, now_ms: u64) -> LocalDecision {
         let want_accept = matches!(intent, LocalIntent::Accept);
         // A peer rejection is sticky. Never send an Accept after observing it.
-        if self.peer_decision == Some(false) {
+        if self.withdrawn || self.peer_decision == Some(false) {
             return if want_accept {
-                LocalDecision::Contradiction("peer already rejected the pairing session")
+                LocalDecision::Contradiction("pairing session already withdrawn or peer rejected")
             } else {
                 LocalDecision::NoopOk
             };
@@ -1482,6 +1524,28 @@ impl PairCore {
         ))
     }
 
+    async fn runtime_sessions(&self) -> Option<Arc<SessionManager>> {
+        self.runtime
+            .lock()
+            .await
+            .as_ref()
+            .map(|rt| rt.sessions.clone())
+    }
+
+    /// Called under the pairing lock, just like bootstrap. No network I/O in either path.
+    fn remove_pair_ratchet(&self, session: &PairSession, ratchets: Option<&SessionManager>) {
+        if let (Some(ratchets), Some(id)) = (ratchets, session.ratchet_session_id) {
+            if let Err(err) = ratchets.remove_if_session(&session.peer_endpoint, id) {
+                tracing::warn!(
+                    error = %err,
+                    sc.peer = %crate::telemetry::short_hex(&session.peer_endpoint),
+                    sc.session = %crate::telemetry::short_hex(&session.session_id),
+                    "could not remove the rejected pairing's ratchet"
+                );
+            }
+        }
+    }
+
     /// The address we advertise in an invite, as a ticket.
     ///
     /// Awaits `Endpoint::online()` first, and that await is load-bearing rather than defensive.
@@ -1568,16 +1632,62 @@ impl PairCore {
         session_id: [u8; SESSION_ID_LEN],
         invite_secret: Vec<u8>,
     ) -> Result<PairMsg> {
+        let session = self
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("no such pair session"))?;
+        self.build_session_msg(decision, &session, invite_secret)
+            .await
+    }
+
+    async fn build_session_msg(
+        &self,
+        decision: Decision,
+        session: &PairSession,
+        invite_secret: Vec<u8>,
+    ) -> Result<PairMsg> {
+        let session_id = session.session_id;
         let build_started = Instant::now();
         let endpoint_ticket = self.our_endpoint_ticket().await;
         let ticket_ms = build_started.elapsed().as_millis() as u64;
-        let (profile_ticket, trail_ticket, profile_record) = match decision {
+        let (mut profile_ticket, mut trail_ticket, mut profile_record) = match decision {
             Decision::Accept => (
                 self.our_profile_ticket().await,
                 self.our_trail_ticket().await,
                 self.our_profile_record().await,
             ),
             _ => (String::new(), String::new(), Vec::new()),
+        };
+        // The ratchet ephemeral rides every message, like `recv_pub`: it is the same disclosure on
+        // each, the receiver binds the first one it sees, and a message that omitted it would fail
+        // the length check in `verify_msg` rather than silently pairing without a ratchet root.
+        let (decision, sas_commit, sas_nonce, ratchet_pub) = {
+            let sessions = self.sessions.lock().await;
+            let s = sessions
+                .get(&session_id)
+                .filter(|s| s.sas_nonce == session.sas_nonce)
+                .ok_or_else(|| anyhow!("pairing attempt was replaced"))?;
+            // Relay/ticket awaits may have yielded to withdrawal. Never revive its prior stance
+            // or sign an old operation using a newer attempt's ephemeral.
+            let decision = if s.is_terminal_failure() {
+                Decision::Reject
+            } else {
+                decision
+            };
+            let (commit, nonce) = match decision {
+                Decision::Hello => (s.local_commit().to_vec(), Vec::new()),
+                Decision::Reveal => (Vec::new(), s.sas_nonce.to_vec()),
+                _ => (Vec::new(), Vec::new()),
+            };
+            if decision != Decision::Accept {
+                profile_ticket.clear();
+                trail_ticket.clear();
+                profile_record.clear();
+            }
+            (decision, commit, nonce, s.local_ratchet_pub().to_vec())
         };
         // `ticket_ms` vs the total separates "waiting for a relay" from "reading our own docs".
         // Both sides build a message per round and the responder builds its reply INSIDE the
@@ -1589,23 +1699,6 @@ impl PairCore {
             local_only = endpoint_ticket.is_empty(),
             "pair.build_msg: assembled one handshake message"
         );
-        // The ratchet ephemeral rides every message, like `recv_pub`: it is the same disclosure on
-        // each, the receiver binds the first one it sees, and a message that omitted it would fail
-        // the length check in `verify_msg` rather than silently pairing without a ratchet root.
-        let (sas_commit, sas_nonce, ratchet_pub) = {
-            let sessions = self.sessions.lock().await;
-            match sessions.get(&session_id) {
-                Some(s) => {
-                    let (commit, nonce) = match decision {
-                        Decision::Hello => (s.local_commit().to_vec(), Vec::new()),
-                        Decision::Reveal => (Vec::new(), s.sas_nonce.to_vec()),
-                        _ => (Vec::new(), Vec::new()),
-                    };
-                    (commit, nonce, s.local_ratchet_pub().to_vec())
-                }
-                None => (Vec::new(), Vec::new(), vec![0u8; RATCHET_PUB_LEN]),
-            }
-        };
         let msg = PairMsg {
             v: PAIR_WIRE_V,
             session_id: session_id.to_vec(),
@@ -2082,25 +2175,31 @@ impl PairCore {
     /// The post-notify check stays for the case it was written for: a session that was NOT yet
     /// bilateral when we accepted, completed by the peer's Accept riding the dial response.
     async fn send_accept_and_finalize(&self, session_id: &[u8; SESSION_ID_LEN]) -> Result<()> {
-        let (peer_endpoint, peer_ticket, nearby) = {
+        let s = {
             let sessions = self.sessions.lock().await;
-            let s = sessions
+            sessions
                 .get(session_id)
-                .ok_or_else(|| anyhow!("no such pair session"))?;
-            (s.peer_endpoint, s.peer_endpoint_ticket.clone(), s.nearby)
+                .cloned()
+                .ok_or_else(|| anyhow!("no such pair session"))?
         };
         let msg = self
-            .build_msg(Decision::Accept, *session_id, Vec::new())
+            .build_session_msg(Decision::Accept, &s, Vec::new())
             .await?;
         // Bilateral already? Then the friendship is real now, not once the dial returns.
         if self.session_is_complete(session_id).await {
-            self.finalize(session_id, peer_endpoint).await?;
+            self.finalize(session_id, s.peer_endpoint).await?;
         }
-        self.best_effort_notify(peer_endpoint, peer_ticket, msg, session_id, nearby)
-            .await;
+        self.best_effort_notify(
+            s.peer_endpoint,
+            s.peer_endpoint_ticket,
+            msg,
+            session_id,
+            s.nearby,
+        )
+        .await;
         // Idempotent via `result_emitted`, so this is a no-op when the branch above already ran.
         if self.session_is_complete(session_id).await {
-            self.finalize(session_id, peer_endpoint).await?;
+            self.finalize(session_id, s.peer_endpoint).await?;
         }
         Ok(())
     }
@@ -2123,19 +2222,25 @@ impl PairCore {
         session_id: &[u8; SESSION_ID_LEN],
         signal: PairSignal,
     ) -> Result<()> {
-        let (peer_endpoint, peer_ticket, nearby) = {
+        let s = {
             let sessions = self.sessions.lock().await;
-            let s = sessions
+            sessions
                 .get(session_id)
-                .ok_or_else(|| anyhow!("no such pair session"))?;
-            (s.peer_endpoint, s.peer_endpoint_ticket.clone(), s.nearby)
+                .cloned()
+                .ok_or_else(|| anyhow!("no such pair session"))?
         };
         let msg = self
-            .build_msg(Decision::Reject, *session_id, Vec::new())
+            .build_session_msg(Decision::Reject, &s, Vec::new())
             .await?;
-        self.best_effort_notify(peer_endpoint, peer_ticket, msg, session_id, nearby)
-            .await;
-        self.push_notice(signal, *session_id, peer_endpoint, nearby)
+        self.best_effort_notify(
+            s.peer_endpoint,
+            s.peer_endpoint_ticket,
+            msg,
+            session_id,
+            s.nearby,
+        )
+        .await;
+        self.push_notice(signal, *session_id, s.peer_endpoint, s.nearby)
             .await;
         Ok(())
     }
@@ -2177,11 +2282,20 @@ impl PairCore {
         let now = now_ms();
         let mut emit: Option<PairSignal> = None;
         let mut reveal_err: Option<anyhow::Error> = None;
+        let ratchets = if resp.decision == Decision::Reject {
+            self.runtime_sessions().await
+        } else {
+            None
+        };
         {
             let mut sessions = self.sessions.lock().await;
             let s = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| anyhow!("no such pair session"))?;
+            s.ensure_peer_message(peer_endpoint, &resp)?;
+            if s.is_terminal_failure() && resp.decision != Decision::Reject {
+                return Ok(());
+            }
             if s.expire_if_needed(now) {
                 emit = Some(PairSignal::Failed);
             } else {
@@ -2202,7 +2316,14 @@ impl PairCore {
                         if s.peer_decision == Some(true) && before != Some(true) {
                             emit = Some(PairSignal::PeerResponded);
                         } else if s.peer_decision == Some(false) {
-                            emit = Some(PairSignal::Rejected);
+                            self.remove_pair_ratchet(s, ratchets.as_deref());
+                            self.push_notice(
+                                PairSignal::Rejected,
+                                *session_id,
+                                s.peer_endpoint,
+                                s.nearby,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -2232,21 +2353,13 @@ impl PairCore {
     /// The role is fixed by endpoint-id ordering, never by who dialled: simultaneous nearby
     /// initiation makes both sides "the initiator", and two initiators would both bootstrap a
     /// sending chain against a peer that has none.
-    async fn bootstrap_ratchet(
+    fn bootstrap_ratchet(
         &self,
+        sessions: &SessionManager,
         peer_endpoint: &[u8; ENDPOINT_LEN],
         our_secret: XStaticSecret,
         peer_ratchet_pub: [u8; RATCHET_PUB_LEN],
-    ) -> Result<()> {
-        let sessions = {
-            let guard = self.runtime.lock().await;
-            guard
-                .as_ref()
-                .ok_or_else(|| anyhow!("pair runtime not attached"))?
-                .sessions
-                .clone()
-        };
-
+    ) -> Result<[u8; SESSION_ID_LEN]> {
         let shared = our_secret.diffie_hellman(&XPublicKey::from(peer_ratchet_pub));
         if !shared.was_contributory() {
             bail!("peer ratchet key is a low-order point");
@@ -2276,7 +2389,7 @@ impl PairCore {
             initiator = crate::ratchet::initiator_by_endpoint(&self.endpoint_id, peer_endpoint),
             "bootstrapped a ratchet session from the pairing bump"
         );
-        Ok(())
+        Ok(session_id)
     }
 
     /// Import the peer's tickets, start watching their profile, and raise a `Ready` notice —
@@ -2286,11 +2399,13 @@ impl PairCore {
         session_id: &[u8; SESSION_ID_LEN],
         peer_endpoint: [u8; ENDPOINT_LEN],
     ) -> Result<()> {
-        let (profile_ticket, profile_record, trail_ticket, nearby, boot) = {
+        let ratchets = self.runtime_sessions().await;
+        let (profile_ticket, profile_record, trail_ticket, nonce) = {
             let mut sessions = self.sessions.lock().await;
             let s = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| anyhow!("no such pair session"))?;
+            s.ensure_peer(&peer_endpoint)?;
             if s.result_emitted {
                 return Ok(());
             }
@@ -2301,46 +2416,38 @@ impl PairCore {
                 return Ok(());
             }
             s.result_emitted = true;
-            // Take the bump's ratchet material out under the same lock and the same
-            // exactly-once guard as the rest of completion, so a duplicate delivery cannot
-            // bootstrap the session twice and reset it to epoch 0 the second time.
-            let boot = s
-                .peer_ratchet_pub
-                .map(|peer_pub| (s.local_ratchet_secret.clone(), peer_pub));
+            // Reserve completion AND install its ratchet under the pairing lock. Withdrawal
+            // cannot slip between those operations and have a late bootstrap undo its cleanup.
+            // Only local disk I/O is inside this lock; ticket imports stay outside.
+            if let (Some(ratchets), Some(peer_pub)) = (ratchets.as_deref(), s.peer_ratchet_pub) {
+                match self.bootstrap_ratchet(
+                    ratchets,
+                    &peer_endpoint,
+                    s.local_ratchet_secret.clone(),
+                    peer_pub,
+                ) {
+                    Ok(id) => s.ratchet_session_id = Some(id),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            sc.peer = %crate::telemetry::short_hex(&peer_endpoint),
+                            "pair completed but the ratchet session could not be bootstrapped"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    sc.peer = %crate::telemetry::short_hex(&peer_endpoint),
+                    "pair completed without a runtime or peer ratchet key; no session bootstrapped"
+                );
+            }
             (
                 s.peer_profile_ticket.clone(),
                 s.peer_profile_record.clone(),
                 s.peer_trail_ticket.clone(),
-                s.nearby,
-                boot,
+                s.sas_nonce,
             )
         };
-
-        // Install the ratchet session before anything else completion does. A pair that reaches
-        // Ready without one would look friended while every ratcheted publish to them dropped
-        // with `no_session` — the failure mode §4.2 is least able to explain to a user.
-        match boot {
-            Some((our_secret, peer_ratchet_pub)) => {
-                if let Err(err) = self
-                    .bootstrap_ratchet(&peer_endpoint, our_secret, peer_ratchet_pub)
-                    .await
-                {
-                    // Not fatal to the friendship: the pair is real and the humans verified it.
-                    // The session is recoverable by §4.6 resync, and `is_desynced` will say so.
-                    tracing::warn!(
-                        error = %err,
-                        sc.peer = %crate::telemetry::short_hex(&peer_endpoint),
-                        "pair completed but the ratchet session could not be bootstrapped"
-                    );
-                }
-            }
-            None => {
-                tracing::warn!(
-                    sc.peer = %crate::telemetry::short_hex(&peer_endpoint),
-                    "pair completed without a peer ratchet key; no session bootstrapped"
-                );
-            }
-        }
 
         if let Ok((trail, profile, sink)) = self.runtime_docs().await {
             // BEFORE the ticket import and before `Ready`, so the persona is already readable by
@@ -2368,9 +2475,20 @@ impl PairCore {
             }
         }
 
-        self.push_notice(PairSignal::Ready, *session_id, peer_endpoint, nearby)
-            .await;
+        self.publish_ready(session_id, nonce).await;
         Ok(())
+    }
+
+    async fn publish_ready(&self, session_id: &[u8; SESSION_ID_LEN], nonce: [u8; SAS_NONCE_LEN]) {
+        let sessions = self.sessions.lock().await;
+        if let Some(s) = sessions.get(session_id) {
+            // Ticket imports may have yielded to withdrawal or a fresh nearby attempt. Queue
+            // Ready under the same lock as the final check, never after a terminal transition.
+            if s.sas_nonce == nonce && s.result_emitted && s.is_complete() {
+                self.push_notice(PairSignal::Ready, *session_id, s.peer_endpoint, s.nearby)
+                    .await;
+            }
+        }
     }
 
     // ── SAS visual gate (human-driven) ──────────────────────────────────────────────────────
@@ -2454,19 +2572,42 @@ impl PairCore {
         self.apply_local_decision(session_id, decision).await
     }
 
-    /// Explicitly cancel a pairing under verification — terminal. Reserved under the session lock
-    /// so a cancel that races a correct action can never both win: if the accept already latched
-    /// the cancel is refused (and sends no `Reject`), and if the cancel wins a later accept is
-    /// refused (and sends no `Accept`).
+    /// Cancel verification, or withdraw a completed discovered-friend result. A local-only SAS
+    /// accept still refuses a conflicting cancel; bilateral withdrawal uses a separate latch
+    /// and the existing signed Reject. Repeated withdrawal safely retries delivery.
     pub async fn cancel_sas(&self, session_id: &[u8; SESSION_ID_LEN]) -> Result<()> {
         let now = now_ms();
-        let decision = {
+        let ratchets = self.runtime_sessions().await;
+        let (decision, withdrawn) = {
             let mut sessions = self.sessions.lock().await;
             let s = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| anyhow!("no such pair session"))?;
-            s.decide_local(LocalIntent::Fail, now)
+            let decision = s.cancel_or_withdraw(now);
+            let withdrawn = if s.withdrawn {
+                self.remove_pair_ratchet(s, ratchets.as_deref());
+                self.push_notice(PairSignal::Rejected, *session_id, s.peer_endpoint, s.nearby)
+                    .await;
+                Some(s.clone())
+            } else {
+                None
+            };
+            (decision, withdrawn)
         };
+        if let Some(s) = withdrawn {
+            let msg = self
+                .build_session_msg(Decision::Reject, &s, Vec::new())
+                .await?;
+            self.best_effort_notify(
+                s.peer_endpoint,
+                s.peer_endpoint_ticket,
+                msg,
+                session_id,
+                s.nearby,
+            )
+            .await;
+            return Ok(());
+        }
         self.apply_local_decision(session_id, decision).await
     }
 
@@ -2521,7 +2662,18 @@ impl PairCore {
                 let emit_pending = {
                     let mut sessions = self.sessions.lock().await;
                     if let Some(existing) = sessions.get_mut(&session_id) {
+                        existing.ensure_peer(&remote)?;
                         existing.expire_if_needed(now);
+                        if existing.is_terminal_failure()
+                            && existing
+                                .peer_sas_commit
+                                .as_ref()
+                                .is_none_or(|commit| msg.sas_commit.as_slice() == commit)
+                        {
+                            // With no prior commitment, a late first Hello cannot prove it is a
+                            // fresh attempt either. A local human-triggered retry can reset it.
+                            bail!("terminal pairing handshake cannot be replayed");
+                        }
                     }
                     // A fresh nearby Hello after a terminal session is a human-triggered retry —
                     // replace the dead session with fresh SAS material. Live sessions are reused
@@ -2543,7 +2695,7 @@ impl PairCore {
                     let s = sessions
                         .get_mut(&session_id)
                         .ok_or_else(|| anyhow!("session vanished"))?;
-                    s.ensure_peer(&remote)?;
+                    s.ensure_peer_message(&remote, &msg)?;
                     if s.is_terminal_failure() {
                         bail!("pair session is terminal; start a fresh attempt");
                     }
@@ -2569,7 +2721,11 @@ impl PairCore {
                     let s = sessions
                         .get_mut(&session_id)
                         .ok_or_else(|| anyhow!("reveal for unknown session"))?;
-                    s.ensure_peer(&remote)?;
+                    s.ensure_peer_message(&remote, &msg)?;
+                    if s.is_terminal_failure() {
+                        drop(sessions);
+                        return self.build_stance_response(session_id).await;
+                    }
                     let before = s.sas_verified;
                     let res = if s.expire_if_needed(now) {
                         Err(anyhow!("SAS verification timed out"))
@@ -2601,58 +2757,54 @@ impl PairCore {
                 }
             }
             Decision::Accept => {
-                let (complete, nearby, expired) = {
+                let complete = {
                     let mut sessions = self.sessions.lock().await;
                     let s = sessions
                         .get_mut(&session_id)
                         .ok_or_else(|| anyhow!("accept for unknown session"))?;
-                    s.ensure_peer(&remote)?;
-                    let expired = s.expire_if_needed(now);
-                    if !expired {
+                    s.ensure_peer_message(&remote, &msg)?;
+                    s.expire_if_needed(now);
+                    if !s.is_terminal_failure() {
                         s.ingest_decision(&msg);
                     }
-                    (s.is_complete(), s.nearby, expired)
+                    let signal = match s.phase() {
+                        PairPhase::Failed => PairSignal::Failed,
+                        PairPhase::Rejected => PairSignal::Rejected,
+                        _ => PairSignal::PeerResponded,
+                    };
+                    self.push_notice(signal, session_id, remote, s.nearby).await;
+                    s.is_complete()
                 };
-                self.push_notice(
-                    if expired {
-                        PairSignal::Failed
-                    } else {
-                        PairSignal::PeerResponded
-                    },
-                    session_id,
-                    remote,
-                    nearby,
-                )
-                .await;
                 if complete {
                     self.finalize(&session_id, remote).await?;
                 }
                 self.build_stance_response(session_id).await
             }
             Decision::Reject => {
-                let (nearby, expired) = {
+                let ratchets = self.runtime_sessions().await;
+                {
                     let mut sessions = self.sessions.lock().await;
                     let s = sessions
                         .get_mut(&session_id)
                         .ok_or_else(|| anyhow!("reject for unknown session"))?;
-                    s.ensure_peer(&remote)?;
+                    s.ensure_peer_message(&remote, &msg)?;
                     let expired = s.expire_if_needed(now);
                     if !expired {
                         s.ingest_decision(&msg);
+                        self.remove_pair_ratchet(s, ratchets.as_deref());
                     }
-                    (s.nearby, expired)
-                };
-                self.push_notice(
-                    if expired {
-                        PairSignal::Failed
-                    } else {
-                        PairSignal::Rejected
-                    },
-                    session_id,
-                    remote,
-                    nearby,
-                )
-                .await;
+                    self.push_notice(
+                        if expired {
+                            PairSignal::Failed
+                        } else {
+                            PairSignal::Rejected
+                        },
+                        session_id,
+                        remote,
+                        s.nearby,
+                    )
+                    .await;
+                }
                 self.build_stance_response(session_id).await
             }
         }
@@ -3573,6 +3725,38 @@ mod tests {
         assert!(s.is_terminal_failure());
     }
 
+    #[test]
+    fn withdrawal_is_separate_from_the_immutable_sas_decision() {
+        let mut s = test_session([1; SESSION_ID_LEN], true, true, [2; ENDPOINT_LEN]);
+        s.local_decision = Some(true);
+        s.local_sas_confirmed = true;
+        assert!(matches!(
+            s.cancel_or_withdraw(1),
+            LocalDecision::Contradiction(_)
+        ));
+        assert!(!s.withdrawn, "a local-only accept cannot be withdrawn");
+
+        s.peer_decision = Some(true);
+        assert!(matches!(
+            s.decide_local(LocalIntent::Fail, 1),
+            LocalDecision::Contradiction(_)
+        ));
+        for _ in 0..2 {
+            assert!(matches!(s.cancel_or_withdraw(1), LocalDecision::Reject));
+            assert_eq!(s.local_decision, Some(true));
+            assert_eq!(s.peer_decision, Some(true));
+            assert!(s.local_sas_confirmed);
+            assert!(!s.failed);
+            assert!(!s.is_complete());
+            assert!(s.is_terminal_failure());
+            assert_eq!(s.phase(), PairPhase::Rejected);
+        }
+        assert!(matches!(
+            s.decide_local(LocalIntent::Accept, 1),
+            LocalDecision::Contradiction(_)
+        ));
+    }
+
     // ── SAS: live-core gating over PairCore ─────────────────────────────────────────────────
 
     /// A `PairCore` whose `endpoint_id` is the public half of a fresh identity seed.
@@ -4033,6 +4217,360 @@ mod tests {
             SasRole::Picker => core.submit_sas_choice(sid, challenge.target_index).await,
             SasRole::Displayer => core.confirm_sas_display(sid, true).await,
         }
+    }
+
+    /// Drive the real signed protocol without a transport runtime. This also exercises response
+    /// folding, endpoint/ephemeral binding, and both human SAS gates.
+    async fn complete_pair(a: &PairCore, b: &PairCore) -> [u8; SESSION_ID_LEN] {
+        let sid = derive_nearby_id(&a.endpoint_id, &b.endpoint_id);
+        b.set_pairing_ready(true);
+        a.sessions.lock().await.insert(
+            sid,
+            a.new_session(sid, true, true, b.endpoint_id, now_ms())
+                .unwrap(),
+        );
+        for decision in [Decision::Hello, Decision::Reveal] {
+            let message = a.build_msg(decision, sid, Vec::new()).await.unwrap();
+            let response = b.handle_incoming(a.endpoint_id, message).await.unwrap();
+            a.fold_peer_msg(&sid, &b.endpoint_id, response, true)
+                .await
+                .unwrap();
+        }
+        for core in [a, b] {
+            let challenge = core.sas_challenge(&sid).await.unwrap();
+            correct_action(core, &sid, &challenge).await.unwrap();
+        }
+        let accept_a = a
+            .build_msg(Decision::Accept, sid, Vec::new())
+            .await
+            .unwrap();
+        let accept_b = b
+            .build_msg(Decision::Accept, sid, Vec::new())
+            .await
+            .unwrap();
+        a.handle_incoming(b.endpoint_id, accept_b).await.unwrap();
+        b.handle_incoming(a.endpoint_id, accept_a).await.unwrap();
+        for core in [a, b] {
+            assert!(core.result_data(&sid).await.is_some());
+            assert_eq!(
+                core.poll_notices()
+                    .await
+                    .iter()
+                    .filter(|notice| notice.signal == PairSignal::Ready)
+                    .count(),
+                1
+            );
+        }
+        sid
+    }
+
+    #[tokio::test]
+    async fn cancel_pending_stays_terminal_and_cannot_be_discarded_for_retry() {
+        let (core, _, _) = test_core();
+        let (peer_seed, peer) = identity();
+        let sid = derive_nearby_id(&core.endpoint_id, &peer);
+        core.set_pairing_ready(true);
+        core.sessions.lock().await.insert(
+            sid,
+            core.new_session(sid, true, true, peer, now_ms()).unwrap(),
+        );
+        core.cancel_sas(&sid).await.unwrap();
+        core.cancel_sas(&sid).await.unwrap();
+        assert!(!core.discard_untouched_handshake(&sid).await);
+        let late_hello = signed_hello_nearby(
+            &peer_seed,
+            &peer,
+            &[3; RECV_PUB_LEN],
+            sid,
+            [4; SAS_COMMIT_LEN],
+        );
+        assert!(core.handle_incoming(peer, late_hello).await.is_err());
+        assert_eq!(
+            core.session_state(&sid).await.unwrap().phase,
+            PairPhase::Failed
+        );
+        assert!(core.result_data(&sid).await.is_none());
+        assert!(core.respond(&sid, true).await.is_err());
+        assert_eq!(
+            core.poll_notices()
+                .await
+                .iter()
+                .filter(|notice| notice.signal == PairSignal::Failed)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_local_only_accept_still_refuses_a_conflicting_sas_answer() {
+        let (core, _, _) = test_core();
+        let (_, peer) = identity();
+        let (sid, challenge) = insert_verifying(&core, peer).await;
+        correct_action(&core, &sid, &challenge).await.unwrap();
+        assert!(core.cancel_sas(&sid).await.is_err());
+        assert_eq!(
+            core.session_state(&sid).await.unwrap().phase,
+            PairPhase::LocalAccepted
+        );
+        assert!(core.result_data(&sid).await.is_none());
+        assert!(core.poll_notices().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn completed_withdrawal_preserves_sas_and_rejects_the_already_ready_peer() {
+        let (a, _, _) = test_core();
+        let (b, _, _) = test_core();
+        let sid = complete_pair(&a, &b).await;
+        a.cancel_sas(&sid).await.unwrap();
+        let state = a.session_state(&sid).await.unwrap();
+        assert_eq!(state.phase, PairPhase::Rejected);
+        assert!(state.local_accepted && state.peer_accepted && state.local_sas_confirmed);
+        assert!(a.result_data(&sid).await.is_none());
+        assert_eq!(a.poll_notices().await[0].signal, PairSignal::Rejected);
+
+        let reject = a.build_stance_response(sid).await.unwrap();
+        verify_bound(&reject, &a.endpoint_id).unwrap();
+        assert_eq!(reject.decision, Decision::Reject);
+        assert!(reject.profile_ticket.is_empty() && reject.trail_ticket.is_empty());
+        let reply = b.handle_incoming(a.endpoint_id, reject).await.unwrap();
+        assert_eq!(reply.decision, Decision::Reject);
+        assert!(b.result_data(&sid).await.is_none());
+        assert_eq!(
+            b.session_state(&sid).await.unwrap().phase,
+            PairPhase::Rejected
+        );
+        assert_eq!(b.poll_notices().await[0].signal, PairSignal::Rejected);
+    }
+
+    #[tokio::test]
+    async fn duplicate_withdrawal_and_late_finalize_or_messages_cannot_revive_result() {
+        let (a, _, _) = test_core();
+        let (b, _, _) = test_core();
+        let sid = complete_pair(&a, &b).await;
+        let nonce = a.sessions.lock().await[&sid].sas_nonce;
+        let accept = b
+            .build_msg(Decision::Accept, sid, Vec::new())
+            .await
+            .unwrap();
+        let reveal = b
+            .build_msg(Decision::Reveal, sid, Vec::new())
+            .await
+            .unwrap();
+        let hello = b.build_msg(Decision::Hello, sid, Vec::new()).await.unwrap();
+        a.set_pairing_ready(true);
+        a.cancel_sas(&sid).await.unwrap();
+        a.cancel_sas(&sid).await.unwrap();
+        a.finalize(&sid, b.endpoint_id).await.unwrap();
+        // An import already in flight before withdrawal finishes here.
+        a.publish_ready(&sid, nonce).await;
+        for message in [accept.clone(), reveal] {
+            assert_eq!(
+                a.handle_incoming(b.endpoint_id, message)
+                    .await
+                    .unwrap()
+                    .decision,
+                Decision::Reject
+            );
+        }
+        a.fold_peer_msg(&sid, &b.endpoint_id, accept, true)
+            .await
+            .unwrap();
+        assert!(a.handle_incoming(b.endpoint_id, hello).await.is_err());
+        assert_eq!(
+            a.build_msg(Decision::Accept, sid, Vec::new())
+                .await
+                .unwrap()
+                .decision,
+            Decision::Reject,
+            "an accept assembled after withdrawal must use the terminal stance"
+        );
+        assert!(a.result_data(&sid).await.is_none());
+        assert_eq!(a.list_sessions().await[0].phase, PairPhase::Rejected);
+        assert!(a
+            .poll_notices()
+            .await
+            .iter()
+            .all(|notice| notice.signal == PairSignal::Rejected));
+    }
+
+    #[tokio::test]
+    async fn folded_peer_withdrawal_is_sticky_after_ready() {
+        let (a, _, _) = test_core();
+        let (b, _, _) = test_core();
+        let sid = complete_pair(&a, &b).await;
+        let accept = b
+            .build_msg(Decision::Accept, sid, Vec::new())
+            .await
+            .unwrap();
+        b.cancel_sas(&sid).await.unwrap();
+        let reject = b.build_stance_response(sid).await.unwrap();
+        for response in [reject.clone(), accept, reject] {
+            a.fold_peer_msg(&sid, &b.endpoint_id, response, true)
+                .await
+                .unwrap();
+        }
+        a.finalize(&sid, b.endpoint_id).await.unwrap();
+        assert!(a.result_data(&sid).await.is_none());
+        assert!(a
+            .poll_notices()
+            .await
+            .iter()
+            .all(|notice| notice.signal == PairSignal::Rejected));
+    }
+
+    #[tokio::test]
+    async fn message_build_in_flight_adopts_withdrawal_instead_of_sending_accept() {
+        let (a, _, _) = test_core();
+        let (b, _, _) = test_core();
+        let sid = complete_pair(&a, &b).await;
+        let snapshot = a.sessions.lock().await[&sid].clone();
+        let runtime = a.runtime.lock().await;
+        let builder = {
+            let a = a.clone();
+            tokio::spawn(async move {
+                a.build_session_msg(Decision::Accept, &snapshot, Vec::new())
+                    .await
+            })
+        };
+        // Queue construction's endpoint lookup, then withdrawal's runtime lookup. The FIFO
+        // mutex makes withdrawal run while construction awaits its next ticket lookup.
+        tokio::task::yield_now().await;
+        let withdrawal = {
+            let a = a.clone();
+            tokio::spawn(async move { a.cancel_sas(&sid).await })
+        };
+        tokio::task::yield_now().await;
+        drop(runtime);
+        let message = tokio::time::timeout(Duration::from_secs(2), async {
+            let message = builder.await.unwrap().unwrap();
+            withdrawal.await.unwrap().unwrap();
+            message
+        })
+        .await
+        .unwrap();
+        assert_eq!(message.decision, Decision::Reject);
+        assert!(message.profile_ticket.is_empty() && message.trail_ticket.is_empty());
+        assert!(a.result_data(&sid).await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_finalize_and_withdrawal_never_emit_ready_after_rejected() {
+        for _ in 0..25 {
+            let (core, _, _) = test_core();
+            let (_, peer) = identity();
+            let (sid, challenge) = insert_verifying(&core, peer).await;
+            correct_action(&core, &sid, &challenge).await.unwrap();
+            core.sessions
+                .lock()
+                .await
+                .get_mut(&sid)
+                .unwrap()
+                .peer_decision = Some(true);
+            let barrier = Arc::new(tokio::sync::Barrier::new(2));
+            let finalizer = {
+                let core = core.clone();
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    core.finalize(&sid, peer).await
+                })
+            };
+            let withdrawal = {
+                let core = core.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    core.cancel_sas(&sid).await
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(2), async {
+                finalizer.await.unwrap().unwrap();
+                withdrawal.await.unwrap().unwrap();
+            })
+            .await
+            .unwrap();
+            let notices = core.poll_notices().await;
+            let rejected = notices
+                .iter()
+                .position(|n| n.signal == PairSignal::Rejected)
+                .unwrap();
+            assert!(!notices[rejected..]
+                .iter()
+                .any(|n| n.signal == PairSignal::Ready));
+            assert!(core.result_data(&sid).await.is_none());
+            core.finalize(&sid, peer).await.unwrap();
+            assert!(core.poll_notices().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn old_withdrawal_and_finalize_cannot_target_a_fresh_nearby_attempt() {
+        let (a, _, _) = test_core();
+        let (b, _, _) = test_core();
+        let sid = complete_pair(&a, &b).await;
+        let old_b_nonce = b.sessions.lock().await[&sid].sas_nonce;
+        let old_a = a.sessions.lock().await[&sid].clone();
+        a.cancel_sas(&sid).await.unwrap();
+        let old_reject = a.build_stance_response(sid).await.unwrap();
+        b.handle_incoming(a.endpoint_id, old_reject.clone())
+            .await
+            .unwrap();
+        a.poll_notices().await;
+        b.poll_notices().await;
+
+        assert_eq!(complete_pair(&a, &b).await, sid);
+        b.publish_ready(&sid, old_b_nonce).await;
+        assert!(b
+            .handle_incoming(a.endpoint_id, old_reject.clone())
+            .await
+            .is_err());
+        assert!(b
+            .fold_peer_msg(&sid, &a.endpoint_id, old_reject, true)
+            .await
+            .is_err());
+        assert!(a
+            .build_session_msg(Decision::Reject, &old_a, Vec::new())
+            .await
+            .is_err());
+        assert!(a.result_data(&sid).await.is_some());
+        assert!(b.result_data(&sid).await.is_some());
+        assert!(b.poll_notices().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn replayed_decisions_cannot_bind_a_fresh_nearby_round() {
+        let (a, _, _) = test_core();
+        let (b, _, _) = test_core();
+        let sid = complete_pair(&a, &b).await;
+        let old_accept = a.build_stance_response(sid).await.unwrap();
+        a.cancel_sas(&sid).await.unwrap();
+        let old_reject = a.build_stance_response(sid).await.unwrap();
+        b.sessions.lock().await.insert(
+            sid,
+            b.new_session(sid, true, true, a.endpoint_id, now_ms())
+                .unwrap(),
+        );
+        a.poll_notices().await;
+
+        for message in [old_accept, old_reject] {
+            assert!(b
+                .handle_incoming(a.endpoint_id, message.clone())
+                .await
+                .is_err());
+            assert!(b
+                .fold_peer_msg(&sid, &a.endpoint_id, message, true)
+                .await
+                .is_err());
+        }
+        {
+            let sessions = b.sessions.lock().await;
+            let session = &sessions[&sid];
+            assert!(session.peer_ratchet_pub.is_none());
+            assert!(session.peer_sas_commit.is_none());
+            assert!(session.peer_decision.is_none());
+            assert_eq!(session.phase(), PairPhase::Handshaking);
+        }
+        assert!(b.poll_notices().await.is_empty());
+        assert_eq!(complete_pair(&a, &b).await, sid);
     }
 
     /// An unsigned peer decision message (signatures are checked at the transport layer).

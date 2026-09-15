@@ -6,12 +6,12 @@ import {
   ScrollView,
   StyleSheet,
   TextInput,
-  useColorScheme,
   View,
 } from 'react-native';
 import { SymbolView } from 'expo-symbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
 import { SIGNAL_COLOR_OPTIONS, signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Fonts, Spacing } from '@/constants/theme';
@@ -27,6 +27,7 @@ import {
   normalizeAsciiArt,
   profileToDraft,
   sigilMeasurements,
+  USERNAME_GUIDANCE,
   validateCryptidProfileFields,
   type CryptidProfile,
   type CryptidProfileDraft,
@@ -35,27 +36,15 @@ import { randomPersona, type RandomPersona } from '../core/random-persona';
 import { CryptidAvatar } from './cryptid-avatar';
 import { CryptidGeneratorDialog } from './cryptid-generator-dialog';
 
-// Loaded lazily so its `@shopify/react-native-skia` import does NOT evaluate at
-// app boot. On web, importing Skia snapshots `global.CanvasKit` at module-eval
-// time (react-native-skia's `Skia.web.ts`); if that happens before
-// `WithSkiaWeb` (the map screen) loads CanvasKit, the singleton `Skia` freezes
-// with an undefined CanvasKit and every `Skia.Image.MakeImage` throws. Deferring
-// this leaf lets the map's WithSkiaWeb be the first to evaluate Skia — after
-// CanvasKit is loaded. Harmless on native (Metro supports dynamic import).
+// Defer Skia at boot; the web loader also gates first-run use on CanvasKit,
+// because onboarding can open this picker before the map initializes it.
 const SignalColorPicker = lazy(() =>
-  import('./signal-color-picker').then((m) => ({ default: m.SignalColorPicker }))
+  import('./signal-color-picker-loader').then((m) => ({ default: m.SignalColorPicker }))
 );
 
-const AUTOSAVE_DELAY_MS = 450;
 const PROFILE_MAX_WIDTH = 640;
 
 type ActiveEditor = 'icon' | 'signal' | null;
-type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
-
-interface QueuedProfile {
-  key: string;
-  profile: CryptidProfile;
-}
 
 interface CryptidProfileEditorProps {
   mode: 'onboarding' | 'edit';
@@ -69,10 +58,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function profileKey(profile: CryptidProfile): string {
-  return JSON.stringify(profile);
-}
-
 /** The three fields a roll of the dice replaces, together. */
 type PersonaFields = RandomPersona;
 
@@ -84,7 +69,7 @@ type PersonaFields = RandomPersona;
  */
 function startingDraft(profile: CryptidProfile | null | undefined): CryptidProfileDraft {
   if (!profile) return { handle: '', presetId: null, ...randomPersona() };
-  const draft = profileToDraft(profile);
+  const draft = { ...profileToDraft(profile), handle: handleInputValue(profile.handle) };
   const preset = findCryptidPreset(draft.presetId);
   if (!preset) return draft;
   return { ...draft, cryptidName: preset.name, sigil: preset.art, presetId: null };
@@ -104,7 +89,8 @@ export function CryptidProfileEditor({
   const [initialDraft] = useState<CryptidProfileDraft>(() => startingDraft(initialProfile));
   const initialColor = initialDraft.color || DEFAULT_SIGNAL_COLOR;
 
-  const [handle, setHandle] = useState(handleInputValue(initialDraft.handle));
+  const [savedDraft, setSavedDraft] = useState(initialDraft);
+  const [handle, setHandle] = useState(initialDraft.handle);
   const [cryptidName, setCryptidName] = useState(initialDraft.cryptidName);
   const [sigil, setSigil] = useState(initialDraft.sigil);
   const [color, setColor] = useState(initialColor);
@@ -114,15 +100,9 @@ export function CryptidProfileEditor({
   const [handleTouched, setHandleTouched] = useState(false);
   const [customNameTouched, setCustomNameTouched] = useState(false);
   const [customArtTouched, setCustomArtTouched] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<SaveStatus>(initialProfile ? 'saved' : 'idle');
+  const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [finishing, setFinishing] = useState(false);
   const [generatorOpen, setGeneratorOpen] = useState(false);
-  // Set only in `edit` mode, and only between a roll and the decision about it:
-  // holds the persona the roll displaced, so Revert has something to go back to.
-  // While it is set the profile does NOT autosave — an unconfirmed roll must not
-  // reach storage or friends' maps.
-  const [displacedPersona, setDisplacedPersona] = useState<PersonaFields | null>(null);
 
   const draft = useMemo<CryptidProfileDraft>(
     () => ({ handle, cryptidName, sigil, color, presetId: null }),
@@ -134,6 +114,11 @@ export function CryptidProfileEditor({
     () => (hasIssues ? null : createCryptidProfile(draft)),
     [draft, hasIssues]
   );
+  const hasChanges =
+    handle !== savedDraft.handle ||
+    cryptidName !== savedDraft.cryptidName ||
+    sigil !== savedDraft.sigil ||
+    color !== savedDraft.color;
   const measurements = sigilMeasurements(sigil);
   const colorOptions = SIGNAL_COLOR_OPTIONS.some(
     (option) => option.value.toLowerCase() === initialColor.toLowerCase()
@@ -157,158 +142,58 @@ export function CryptidProfileEditor({
   const openIconFromHero = useCallback(() => setActiveEditor('icon'), []);
 
   const mountedRef = useRef(true);
-  const onSaveRef = useRef(onSave);
-  const latestValidProfileRef = useRef(validProfile);
-  const displacedPersonaRef = useRef(displacedPersona);
-  const lastSavedKeyRef = useRef(initialProfile ? profileKey(initialProfile) : null);
-  const desiredSaveRef = useRef<QueuedProfile | null>(null);
-  const activeSaveRef = useRef<Promise<void> | null>(null);
-  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    onSaveRef.current = onSave;
-  }, [onSave]);
-
-  useEffect(() => {
-    latestValidProfileRef.current = validProfile;
-  }, [validProfile]);
-
-  useEffect(() => {
-    displacedPersonaRef.current = displacedPersona;
-  }, [displacedPersona]);
-
-  const drainSaveQueue = useCallback((): Promise<void> => {
-    if (activeSaveRef.current) return activeSaveRef.current;
-
-    const run = (async () => {
-      while (true) {
-        const next = desiredSaveRef.current;
-        if (!next || next.key === lastSavedKeyRef.current) break;
-
-        if (mountedRef.current) {
-          setSaveStatus('saving');
-          setSaveError(null);
-        }
-
-        try {
-          await onSaveRef.current(next.profile);
-        } catch (error: unknown) {
-          if (mountedRef.current) {
-            setSaveError(errorMessage(error));
-            setSaveStatus('error');
-          }
-          throw error;
-        }
-
-        lastSavedKeyRef.current = next.key;
-      }
-
-      if (mountedRef.current) {
-        setSaveError(null);
-        setSaveStatus('saved');
-      }
-    })();
-
-    activeSaveRef.current = run;
-    void run
-      .finally(() => {
-        if (activeSaveRef.current === run) activeSaveRef.current = null;
-      })
-      .catch(() => undefined);
-    return run;
-  }, []);
-
-  const requestProfileSave = useCallback(
-    (profile: CryptidProfile): Promise<void> => {
-      const queued = { key: profileKey(profile), profile };
-      desiredSaveRef.current = queued;
-      if (queued.key === lastSavedKeyRef.current && !activeSaveRef.current) {
-        if (mountedRef.current) {
-          setSaveError(null);
-          setSaveStatus('saved');
-        }
-        return Promise.resolve();
-      }
-      return drainSaveQueue();
-    },
-    [drainSaveQueue]
-  );
-
-  useEffect(() => {
-    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
-
-    // An unconfirmed roll is held back until Keep accepts it.
-    if (!validProfile || displacedPersona) {
-      desiredSaveRef.current = null;
-      return;
-    }
-
-    const key = profileKey(validProfile);
-    desiredSaveRef.current = { key, profile: validProfile };
-    if (key === lastSavedKeyRef.current && !activeSaveRef.current) {
-      return;
-    }
-
-    autosaveTimerRef.current = setTimeout(() => {
-      void requestProfileSave(validProfile).catch(() => undefined);
-    }, AUTOSAVE_DELAY_MS);
-
-    return () => {
-      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
-    };
-  }, [displacedPersona, requestProfileSave, validProfile]);
+  const savingRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
-      // Leaving without deciding discards the roll: dismissing the sheet is a
-      // revert, not a silent Keep.
-      if (displacedPersonaRef.current) return;
-      const profile = latestValidProfileRef.current;
-      if (profile) void requestProfileSave(profile).catch(() => undefined);
     };
-  }, [requestProfileSave]);
+  }, []);
 
   const handleErrors = handleTouched ? fieldIssues.handle : [];
   const customNameErrors = customNameTouched ? fieldIssues.cryptidName : [];
   const customArtErrors = customArtTouched ? fieldIssues.sigil : [];
   const globalError = saveError ?? notice;
-  const statusLabel =
-    !hasIssues && saveStatus === 'saving'
-      ? 'Saving...'
-      : !hasIssues && saveStatus === 'saved'
-        ? 'Saved'
-        : !hasIssues && saveStatus === 'error'
-          ? 'Not saved'
-          : null;
+
+  const saveDraft = async (): Promise<boolean> => {
+    if (!validProfile || savingRef.current) return false;
+    savingRef.current = true;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await onSave(validProfile);
+      // Edits made during this request remain drafts; only its snapshot was saved.
+      if (mountedRef.current) setSavedDraft(draft);
+      return true;
+    } catch (error: unknown) {
+      if (mountedRef.current) setSaveError(errorMessage(error));
+      return false;
+    } finally {
+      savingRef.current = false;
+      if (mountedRef.current) setSaving(false);
+    }
+  };
 
   const finish = async (): Promise<void> => {
-    if (!onDone || finishing) return;
-    if (!validProfile) {
-      if (mode === 'edit') onDone();
-      return;
-    }
+    if (!onDone) return;
+    if ((await saveDraft()) && mountedRef.current) onDone();
+  };
 
-    // Done is a decision: it keeps whatever is on screen, roll included.
-    setDisplacedPersona(null);
-    displacedPersonaRef.current = null;
-    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
-    setFinishing(true);
-    try {
-      await requestProfileSave(validProfile);
-      onDone();
-    } catch {
-      // The save error is surfaced next to the autosave status.
-    } finally {
-      if (mountedRef.current) setFinishing(false);
-    }
+  const discardDraft = (): void => {
+    if (savingRef.current) return;
+    setHandle(savedDraft.handle);
+    setCryptidName(savedDraft.cryptidName);
+    setSigil(savedDraft.sigil);
+    setColor(savedDraft.color);
+    setHandleTouched(false);
+    setCustomNameTouched(false);
+    setCustomArtTouched(false);
+    setSaveError(null);
   };
 
   const applyPersona = (persona: PersonaFields | Omit<PersonaFields, 'color'>): void => {
     setSaveError(null);
-    setSaveStatus('idle');
     setCryptidName(persona.cryptidName);
     setSigil(persona.sigil);
     if ('color' in persona) setColor(persona.color);
@@ -316,27 +201,8 @@ export function CryptidProfileEditor({
     setCustomArtTouched(false);
   };
 
-  /**
-   * Rolls a whole persona — cryptid, title, and signal color. In `edit` mode the
-   * previous one is parked in `displacedPersona` first, which both freezes
-   * autosave and puts the Keep/Revert bar on screen. Rolling repeatedly keeps the
-   * ORIGINAL persona parked, so Revert always lands where you started rather than
-   * on the previous roll.
-   */
   const rollPersona = (): void => {
-    const rolled = randomPersona({ avoid: { cryptidName } });
-    if (mode === 'edit') {
-      setDisplacedPersona((current) => current ?? { cryptidName, sigil, color });
-    }
-    applyPersona(rolled);
-  };
-
-  const keepRolledPersona = (): void => setDisplacedPersona(null);
-
-  const revertRolledPersona = (): void => {
-    if (!displacedPersona) return;
-    applyPersona(displacedPersona);
-    setDisplacedPersona(null);
+    applyPersona(randomPersona({ avoid: { cryptidName } }));
   };
 
   const useGeneratedCryptid = (generated: GeneratedCryptid): void => {
@@ -384,24 +250,13 @@ export function CryptidProfileEditor({
               <ThemedText style={styles.title}>
                 {mode === 'onboarding' ? 'Set up your profile' : 'Profile'}
               </ThemedText>
-              <ThemedText type="small" themeColor="textSecondary" style={styles.intro}>
-                {mode === 'onboarding'
-                  ? 'Choose how you appear to friends. The cryptid, the name and the color are all yours to change, now or later.'
-                  : 'This is how you appear to friends. Tap anything here to change it.'}
-              </ThemedText>
+              {mode === 'onboarding' ? (
+                <ThemedText type="small" themeColor="textSecondary" style={styles.intro}>
+                  Choose how you appear to friends. You can change this later.
+                </ThemedText>
+              ) : null}
             </View>
           </View>
-
-          {statusLabel ? (
-            <ThemedText
-              accessibilityLiveRegion="polite"
-              type="small"
-              themeColor="textSecondary"
-              style={styles.saveStatus}
-            >
-              {statusLabel}
-            </ThemedText>
-          ) : null}
 
           {globalError ? (
             <View
@@ -426,6 +281,24 @@ export function CryptidProfileEditor({
           >
             <View style={styles.preview}>
               <Pressable
+                accessibilityHint="Replaces the cryptid, its title, and your signal color"
+                accessibilityLabel="Randomize profile"
+                accessibilityRole="button"
+                testID="randomize-persona"
+                disabled={saving}
+                onPress={rollPersona}
+                style={({ pressed }) => [
+                  styles.rollButton,
+                  { backgroundColor: color, opacity: saving ? 0.38 : pressed ? 0.72 : 1 },
+                ]}
+              >
+                <SymbolView
+                  name={{ ios: 'dice', android: 'casino', web: 'casino' }}
+                  size={24}
+                  tintColor={signalColorInk(color)}
+                />
+              </Pressable>
+              <Pressable
                 accessibilityHint="Opens the profile icon picker"
                 accessibilityLabel={`Profile icon: ${iconLabel}. Tap to change it.`}
                 accessibilityRole="button"
@@ -439,13 +312,6 @@ export function CryptidProfileEditor({
                   size="large"
                   style={styles.previewAvatar}
                 />
-                {/* The ASCII cryptid is the thing people assume is fixed — it
-                    arrives already rolled, and nothing about a block of art says
-                    "editable". So the hero says so in words, at the one place
-                    everybody looks. */}
-                <ThemedText type="small" themeColor="textSecondary" style={styles.changeHint}>
-                  TAP THE CRYPTID TO CHANGE IT
-                </ThemedText>
               </Pressable>
               <Pressable
                 accessibilityHint="Focuses the username field"
@@ -467,70 +333,56 @@ export function CryptidProfileEditor({
                 </ThemedText>
               </Pressable>
 
-              <Pressable
-                accessibilityHint="Replaces the cryptid, its title, and your signal color"
-                accessibilityLabel="Randomize persona"
-                accessibilityRole="button"
-                testID="randomize-persona"
-                onPress={rollPersona}
-                style={({ pressed }) => [
-                  styles.rollButton,
-                  { backgroundColor: color, opacity: pressed ? 0.72 : 1 },
-                ]}
-              >
-                <ThemedText style={[styles.rollGlyph, { color: signalColorInk(color) }]}>
-                  {'(*)'}
-                </ThemedText>
-                <ThemedText style={[styles.rollLabel, { color: signalColorInk(color) }]}>
-                  {displacedPersona ? 'Roll again' : 'Randomize'}
-                </ThemedText>
-              </Pressable>
-              <ThemedText type="small" themeColor="textSecondary" style={styles.rollHint}>
-                Rolls a cryptid, a title, and a color. Everything stays editable.
-              </ThemedText>
-
-              {displacedPersona ? (
+              {mode === 'edit' && hasChanges ? (
                 <View
                   accessibilityLiveRegion="polite"
                   style={[
-                    styles.rollDecision,
+                    styles.profileDecision,
                     { backgroundColor: theme.background, borderColor: chrome.amber },
                   ]}
                 >
-                  <ThemedText type="smallBold">Not saved yet</ThemedText>
+                  <ThemedText type="smallBold">Unsaved profile changes</ThemedText>
                   <ThemedText type="small" themeColor="textSecondary">
-                    {`Keep this persona, or go back to ${displacedPersona.cryptidName.trim() || 'your previous one'}.`}
+                    Save or discard your changes.
                   </ThemedText>
-                  <View style={styles.rollDecisionActions}>
+                  <View style={styles.profileDecisionActions}>
                     <Pressable
-                      accessibilityLabel="Keep the new persona"
+                      accessibilityLabel="Save profile changes"
                       accessibilityRole="button"
-                      testID="keep-rolled-persona"
-                      onPress={keepRolledPersona}
+                      accessibilityState={{ disabled: hasIssues || saving }}
+                      testID="save-profile"
+                      disabled={hasIssues || saving}
+                      onPress={() => void saveDraft()}
                       style={({ pressed }) => [
-                        styles.rollDecisionButton,
-                        { backgroundColor: color, borderColor: color, opacity: pressed ? 0.72 : 1 },
-                      ]}
-                    >
-                      <ThemedText type="smallBold" style={{ color: signalColorInk(color) }}>
-                        Keep it
-                      </ThemedText>
-                    </Pressable>
-                    <Pressable
-                      accessibilityLabel="Revert to the previous persona"
-                      accessibilityRole="button"
-                      testID="revert-rolled-persona"
-                      onPress={revertRolledPersona}
-                      style={({ pressed }) => [
-                        styles.rollDecisionButton,
+                        styles.profileDecisionButton,
                         {
-                          backgroundColor: theme.backgroundElement,
-                          borderColor: theme.backgroundSelected,
-                          opacity: pressed ? 0.72 : 1,
+                          backgroundColor: color,
+                          borderColor: color,
+                          opacity: hasIssues || saving ? 0.38 : pressed ? 0.72 : 1,
                         },
                       ]}
                     >
-                      <ThemedText type="smallBold">Revert</ThemedText>
+                      <ThemedText type="smallBold" style={{ color: signalColorInk(color) }}>
+                        {saving ? 'Saving...' : 'Save'}
+                      </ThemedText>
+                    </Pressable>
+                    <Pressable
+                      accessibilityLabel="Discard profile changes"
+                      accessibilityRole="button"
+                      accessibilityState={{ disabled: saving }}
+                      testID="discard-profile"
+                      disabled={saving}
+                      onPress={discardDraft}
+                      style={({ pressed }) => [
+                        styles.profileDecisionButton,
+                        {
+                          backgroundColor: theme.backgroundElement,
+                          borderColor: theme.backgroundSelected,
+                          opacity: saving ? 0.38 : pressed ? 0.72 : 1,
+                        },
+                      ]}
+                    >
+                      <ThemedText type="smallBold">Discard</ThemedText>
                     </Pressable>
                   </View>
                 </View>
@@ -558,12 +410,12 @@ export function CryptidProfileEditor({
                   testID="username-input"
                   autoCapitalize="none"
                   autoCorrect={false}
+                  editable={!saving}
                   maxLength={20}
                   ref={handleInputRef}
                   onBlur={() => setHandleTouched(true)}
                   onChangeText={(value) => {
                     setSaveError(null);
-                    setSaveStatus('idle');
                     setHandleTouched(true);
                     setHandle(value.replace(/^@+/, '').toLowerCase());
                   }}
@@ -578,7 +430,7 @@ export function CryptidProfileEditor({
               <FieldNote
                 errorColor={chrome.amberDark}
                 issues={handleErrors}
-                hint="Lowercase letters, numbers, underscores, or dashes. Up to 20."
+                hint={USERNAME_GUIDANCE}
               />
             </View>
 
@@ -593,42 +445,19 @@ export function CryptidProfileEditor({
 
             {activeEditor === 'icon' ? (
               <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
-                <ThemedText style={styles.fieldLabel}>Make an icon</ThemedText>
-                <ThemedText type="small" themeColor="textSecondary">
-                  Roll a random one, describe one and let the phone draw it, or type your own ASCII
-                  art below. Change it as often as you like.
-                </ThemedText>
-                <View style={styles.iconActions}>
-                  <Pressable
-                    accessibilityHint="Rolls a new cryptid, title, and signal color"
-                    accessibilityLabel="Randomize persona"
-                    accessibilityRole="button"
-                    onPress={rollPersona}
-                    style={({ pressed }) => [
-                      styles.iconActionButton,
-                      {
-                        backgroundColor: theme.backgroundElement,
-                        borderColor: theme.backgroundSelected,
-                        opacity: pressed ? 0.62 : 1,
-                      },
-                    ]}
-                  >
-                    <ThemedText style={[styles.iconActionGlyph, { color }]}>{'(*)'}</ThemedText>
-                    <ThemedText type="small" style={styles.iconActionLabel}>
-                      Random
-                    </ThemedText>
-                  </Pressable>
+                {Platform.OS !== 'ios' ? (
                   <Pressable
                     accessibilityHint="Draws an icon from a description, on this phone"
                     accessibilityLabel="Generate a profile icon"
                     accessibilityRole="button"
+                    disabled={saving}
                     onPress={() => setGeneratorOpen(true)}
                     style={({ pressed }) => [
                       styles.iconActionButton,
                       {
                         backgroundColor: theme.backgroundElement,
                         borderColor: theme.backgroundSelected,
-                        opacity: pressed ? 0.62 : 1,
+                        opacity: saving ? 0.38 : pressed ? 0.62 : 1,
                       },
                     ]}
                   >
@@ -637,7 +466,7 @@ export function CryptidProfileEditor({
                       Generate
                     </ThemedText>
                   </Pressable>
-                </View>
+                ) : null}
 
                 {/* Custom is not a mode any more — the fields below ARE the custom
                     option, and they stay open so a rolled or generated icon can be
@@ -647,11 +476,11 @@ export function CryptidProfileEditor({
                   <TextInput
                     accessibilityLabel="Custom profile icon name"
                     autoCapitalize="words"
+                    editable={!saving}
                     maxLength={24}
                     onBlur={() => setCustomNameTouched(true)}
                     onChangeText={(value) => {
                       setSaveError(null);
-                      setSaveStatus('idle');
                       setCustomNameTouched(true);
                       setCryptidName(value);
                     }}
@@ -687,11 +516,11 @@ export function CryptidProfileEditor({
                     allowFontScaling={false}
                     autoCapitalize="none"
                     autoCorrect={false}
+                    editable={!saving}
                     multiline
                     onBlur={() => setCustomArtTouched(true)}
                     onChangeText={(value) => {
                       setSaveError(null);
-                      setSaveStatus('idle');
                       setCustomArtTouched(true);
                       setSigil(normalizeAsciiArt(value));
                     }}
@@ -732,15 +561,12 @@ export function CryptidProfileEditor({
             {activeEditor === 'signal' ? (
               <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
                 <ThemedText style={styles.fieldLabel}>Choose a signal color</ThemedText>
-                <ThemedText type="small" themeColor="textSecondary">
-                  This marks your profile icon, map pin, and shared trail on friends&apos; maps.
-                </ThemedText>
                 <Suspense fallback={null}>
                   <SignalColorPicker
                     color={color}
+                    disabled={saving}
                     onChange={(value) => {
                       setSaveError(null);
-                      setSaveStatus('idle');
                       setColor(value);
                     }}
                   />
@@ -759,9 +585,9 @@ export function CryptidProfileEditor({
                         accessibilityRole="radio"
                         accessibilityState={{ checked: selected }}
                         key={option.value}
+                        disabled={saving}
                         onPress={() => {
                           setSaveError(null);
-                          setSaveStatus('idle');
                           setColor(option.value);
                         }}
                         style={({ pressed }) => [
@@ -771,7 +597,7 @@ export function CryptidProfileEditor({
                               ? `${option.value}14`
                               : theme.backgroundElement,
                             borderColor: selected ? option.value : theme.backgroundSelected,
-                            opacity: pressed ? 0.58 : 1,
+                            opacity: saving ? 0.38 : pressed ? 0.58 : 1,
                           },
                         ]}
                       >
@@ -800,29 +626,32 @@ export function CryptidProfileEditor({
             <Pressable
               accessibilityRole="button"
               testID="onboarding-continue"
-              disabled={hasIssues || finishing}
+              accessibilityState={{ disabled: hasIssues || saving }}
+              disabled={hasIssues || saving}
               onPress={() => void finish()}
               style={({ pressed }) => [
                 styles.continueButton,
                 {
                   backgroundColor: color,
-                  opacity: hasIssues || finishing ? 0.38 : pressed ? 0.72 : 1,
+                  opacity: hasIssues || saving ? 0.38 : pressed ? 0.72 : 1,
                 },
               ]}
             >
               <ThemedText style={[styles.continueButtonText, { color: signalColorInk(color) }]}>
-                {finishing ? 'Saving...' : 'Continue'}
+                {saving ? 'Saving...' : 'Continue'}
               </ThemedText>
             </Pressable>
           ) : null}
         </View>
       </ScrollView>
-      <CryptidGeneratorDialog
-        color={color}
-        onClose={() => setGeneratorOpen(false)}
-        onUse={useGeneratedCryptid}
-        visible={generatorOpen}
-      />
+      {Platform.OS !== 'ios' ? (
+        <CryptidGeneratorDialog
+          color={color}
+          onClose={() => setGeneratorOpen(false)}
+          onUse={useGeneratedCryptid}
+          visible={generatorOpen}
+        />
+      ) : null}
     </KeyboardAvoidingView>
   );
 }
@@ -926,10 +755,6 @@ const styles = StyleSheet.create({
   backButtonText: {
     letterSpacing: 1,
   },
-  saveStatus: {
-    alignSelf: 'flex-end',
-    marginTop: -Spacing.two,
-  },
   notice: {
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
@@ -957,13 +782,6 @@ const styles = StyleSheet.create({
   previewAvatar: {
     minHeight: 126,
   },
-  changeHint: {
-    fontFamily: Fonts.mono,
-    fontSize: 10,
-    letterSpacing: 1.6,
-    marginTop: Spacing.one,
-    textAlign: 'center',
-  },
   handlePreview: {
     fontFamily: 'Rajdhani_700Bold',
     fontSize: 32,
@@ -977,43 +795,29 @@ const styles = StyleSheet.create({
   },
   rollButton: {
     alignItems: 'center',
-    alignSelf: 'stretch',
     borderRadius: 12,
-    flexDirection: 'row',
-    gap: Spacing.two,
+    height: 44,
     justifyContent: 'center',
-    minHeight: 54,
-    paddingHorizontal: Spacing.three,
+    position: 'absolute',
+    right: Spacing.three,
+    top: Spacing.three,
+    width: 44,
+    zIndex: 1,
   },
-  rollGlyph: {
-    fontFamily: Fonts.mono,
-    fontSize: 18,
-    fontWeight: '700',
-    lineHeight: 24,
-  },
-  rollLabel: {
-    fontSize: 16,
-    fontWeight: '700',
-    letterSpacing: 0.3,
-    lineHeight: 22,
-  },
-  rollHint: {
-    textAlign: 'center',
-  },
-  rollDecision: {
+  profileDecision: {
     alignSelf: 'stretch',
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
     gap: Spacing.one,
     padding: Spacing.three,
   },
-  rollDecisionActions: {
+  profileDecisionActions: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: Spacing.two,
     paddingTop: Spacing.one,
   },
-  rollDecisionButton: {
+  profileDecisionButton: {
     alignItems: 'center',
     borderRadius: 999,
     borderWidth: 1,
@@ -1078,17 +882,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.one,
     paddingVertical: Spacing.two,
   },
-  iconActions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.two,
-  },
   iconActionButton: {
     alignItems: 'center',
     borderRadius: 12,
     borderWidth: 1,
-    flexBasis: '46%',
-    flexGrow: 1,
     gap: Spacing.one,
     justifyContent: 'center',
     minHeight: 88,

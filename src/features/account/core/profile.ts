@@ -46,6 +46,7 @@ export const CRYPTID_PROFILE_VERSION = 1 as const;
 export const MAX_SIGIL_LINES = 12;
 export const MAX_SIGIL_COLUMNS = 32;
 export const MAX_SIGIL_CHARS = 512;
+export const USERNAME_GUIDANCE = 'Use up to 20 lowercase letters, numbers, underscores, or dashes.';
 
 export interface CryptidProfileDraft {
   handle: string;
@@ -151,7 +152,7 @@ export function validateCryptidProfileFields(
   // drops the caption). Only the upper bounds are real constraints — they are
   // what the wire, the roster row and the marker chip have room for.
   if (!/^[a-z0-9][a-z0-9_-]{0,19}$/.test(handle)) {
-    handleIssues.push('Use up to 20 lowercase letters, numbers, underscores, or dashes.');
+    handleIssues.push(USERNAME_GUIDANCE);
   }
   if (cryptidName.length > 24) {
     cryptidNameIssues.push('Keep the profile icon name to 24 characters or fewer.');

@@ -37,6 +37,7 @@ import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 
 import { scaleFor, visibleWorldRect } from '../src/features/map/core/camera';
+import { DOT_STEP, lineDotIntervals } from '../src/features/map/core/dot-style';
 import { latLonToWorld } from '../src/features/map/core/mercator';
 import {
   buildPaletteLut,
@@ -51,6 +52,7 @@ import type {
   AeroLineKind,
   CameraState,
   MapPalette,
+  TransitMode,
   Viewport,
 } from '../src/features/map/core/types';
 import { buildCellField } from '../src/features/map/core/cell-field';
@@ -86,8 +88,11 @@ import { DOT_FIELD_SKSL } from '../src/features/map/render/dot-field-sksl';
 import { buildMaskPaths } from '../src/features/map/render/mask-paths';
 import { buildHatchPath, buildStructurePaths } from '../src/features/map/render/structure-paths';
 import { buildTransitPaths } from '../src/features/map/render/transit-paths';
-import { FERRY_DASH, transitWidthFor } from '../src/features/map/core/transit-lod';
-import type { TransitMode } from '../src/features/map/core/types';
+import {
+  TRANSIT_ALPHA,
+  TRANSIT_CASING_ALPHA,
+  transitWidthFor,
+} from '../src/features/map/core/transit-lod';
 import {
   AERODROME_DASH,
   AERODROME_STROKE_WIDTH,
@@ -385,7 +390,7 @@ function renderShot({
     rectH,
     spec.maskWidth,
     spec.maskHeight,
-    2.0, // DOT_STEP
+    DOT_STEP,
     palette.bg[0] / 255,
     palette.bg[1] / 255,
     palette.bg[2] / 255,
@@ -438,8 +443,8 @@ function renderShot({
     paint
   );
   if (!args.noStructures) drawStructures(CanvasKit, canvas, geometry, spec, palette, cellField);
-  if (args.transit) drawTransitLines(CanvasKit, canvas, geometry, spec, palette);
   if (cellField) drawCellOverlays(CanvasKit, canvas, cellField, spec, palette);
+  if (args.transit) drawTransitLines(CanvasKit, canvas, geometry, spec, palette);
   canvas.restore();
 
   // The React overlays sit in SCREEN space, not region space — so they are drawn
@@ -527,7 +532,11 @@ function drawStructures(
   }
   for (const kind of ['taxiway', 'runway'] as const satisfies readonly AeroLineKind[]) {
     const svg = paths.aeroLines[kind];
-    if (svg) draw(svg, AERO_LINE_ALPHA[kind], aeroLineWidthFor(kind, spec.zoom));
+    const width = aeroLineWidthFor(kind, spec.zoom);
+    if (svg && width !== null) {
+      // Both solid: a runway is a road that happens to be very straight.
+      draw(svg, AERO_LINE_ALPHA[kind], width);
+    }
   }
   const buildingStyle = buildingStyleFor(spec.zoom);
   if (buildingStyle && paths.buildings) {
@@ -578,10 +587,9 @@ function drawStructures(
   canvas.restore();
 }
 
-/** The feature mask, built exactly like `render/mask-image.ts` but on CanvasKit. */
 /**
  * Transit lines over the dot field, mirroring `drawTransitLines` in
- * `render/region-shader.ts` (same widths, same per-mode alphas, same ferry dash).
+ * `render/region-shader.ts` (same diameters, per-mode alphas and round-dot cadence).
  */
 function drawTransitLines(
   CanvasKit: any,
@@ -590,15 +598,6 @@ function drawTransitLines(
   spec: RegionSpec,
   palette: MapPalette
 ): void {
-  const alphas: Record<TransitMode, number> = {
-    rail: 0.5,
-    subway: 0.82,
-    light_rail: 0.82,
-    tram: 0.58,
-    monorail: 0.72,
-    funicular: 0.58,
-    ferry: 0.5,
-  };
   const paths = buildTransitPaths(geometry, spec);
 
   canvas.save();
@@ -609,18 +608,20 @@ function drawTransitLines(
     const path = CanvasKit.Path.MakeFromSVGString(svg);
     if (!path) continue;
     const ink = palette.transit;
-    const paint = new CanvasKit.Paint();
-    paint.setColor(CanvasKit.Color(ink[0], ink[1], ink[2], alphas[mode]));
-    paint.setStyle(CanvasKit.PaintStyle.Stroke);
-    paint.setStrokeWidth(width);
-    paint.setStrokeJoin(CanvasKit.StrokeJoin.Round);
-    paint.setStrokeCap(CanvasKit.StrokeCap.Round);
-    paint.setAntiAlias(true);
-    if (mode === 'ferry') {
-      paint.setPathEffect(CanvasKit.PathEffect.MakeDash([FERRY_DASH[0], FERRY_DASH[1]]));
+    // Casing, then dots over it — the same two passes `drawTransitLines` makes.
+    for (const dotted of [false, true]) {
+      const paint = new CanvasKit.Paint();
+      const alpha = TRANSIT_ALPHA[mode] * (dotted ? 1 : TRANSIT_CASING_ALPHA);
+      paint.setColor(CanvasKit.Color(ink[0], ink[1], ink[2], alpha));
+      paint.setStyle(CanvasKit.PaintStyle.Stroke);
+      paint.setStrokeWidth(width);
+      paint.setStrokeJoin(CanvasKit.StrokeJoin.Round);
+      paint.setStrokeCap(CanvasKit.StrokeCap.Round);
+      paint.setAntiAlias(true);
+      if (dotted) paint.setPathEffect(CanvasKit.PathEffect.MakeDash(lineDotIntervals(width)));
+      canvas.drawPath(path, paint);
+      paint.delete();
     }
-    canvas.drawPath(path, paint);
-    paint.delete();
     path.delete();
   }
   canvas.restore();

@@ -1,6 +1,7 @@
 import { reportStorageDegraded } from './storage-health';
 import {
   deliveryModeFromLegacyStashOptIn,
+  DEFAULT_DELIVERY_MODE,
   parseDeliveryMode,
   type DeliveryMode,
 } from '../core/delivery-mode';
@@ -451,10 +452,16 @@ const DELIVERY_MODE_KEY = 'sc.social.deliveryMode';
  * quietly demoted to `direct` on the update that introduced the picker. The old key is left
  * in place: rolling back to a build that only understands the boolean must still find it.
  */
-export async function loadDeliveryMode(kv: PersistentKV): Promise<DeliveryMode> {
+export async function loadDeliveryMode(
+  kv: PersistentKV,
+  whenUnset: DeliveryMode = DEFAULT_DELIVERY_MODE
+): Promise<DeliveryMode> {
   const raw = await kv.get(DELIVERY_MODE_KEY);
   if (raw !== null && raw !== undefined) return parseDeliveryMode(raw);
-  return deliveryModeFromLegacyStashOptIn(await loadStashOptIn(kv));
+  const legacy = await kv.get(STASH_OPTIN_KEY);
+  if (legacy !== null && legacy !== undefined)
+    return deliveryModeFromLegacyStashOptIn(legacy === '1');
+  return whenUnset;
 }
 
 /**

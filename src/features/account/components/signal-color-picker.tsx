@@ -9,7 +9,6 @@ import {
   type GestureResponderEvent,
 } from 'react-native';
 
-import { ThemedText } from '@/components/themed-text';
 import { ThemedTextInput } from '@/components/themed-text-input';
 import { fullBrightnessColor, isSignalColor, signalColorInk } from '@/constants/signal-colors';
 import { Fonts, Spacing } from '@/constants/theme';
@@ -29,8 +28,9 @@ const HUE_STEP = 10;
 const SATURATION_STEP = 0.05;
 const HUE_COLORS = ['#FF0000', '#FFFF00', '#00FF00', '#00FFFF', '#0000FF', '#FF00FF', '#FF0000'];
 
-interface SignalColorPickerProps {
+export interface SignalColorPickerProps {
   color: string;
+  disabled?: boolean;
   onChange(color: string): void;
 }
 
@@ -38,7 +38,7 @@ function changedHsv(hsv: HsvColor, changes: Partial<Omit<HsvColor, 'value'>>): s
   return hsvToHex({ ...hsv, ...changes, value: SIGNAL_COLOR_VALUE });
 }
 
-export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
+export function SignalColorPicker({ color, disabled = false, onChange }: SignalColorPickerProps) {
   const theme = useTheme();
   const normalizedColor = color.toUpperCase();
   const [hexInput, setHexInput] = useState({ color: normalizedColor, value: normalizedColor });
@@ -50,6 +50,7 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
   }
 
   const changeWheel = (event: GestureResponderEvent): void => {
+    if (disabled) return;
     const { locationX, locationY } = event.nativeEvent;
     onChange(hsvToHex(colorAtWheelPosition(locationX, locationY, WHEEL_SIZE)));
   };
@@ -73,6 +74,7 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
   };
 
   const changeWheelWithAccessibility = (event: AccessibilityActionEvent): void => {
+    if (disabled) return;
     switch (event.nativeEvent.actionName) {
       case 'increment':
         onChange(changedHsv(hsv, { hue: hsv.hue + HUE_STEP }));
@@ -104,15 +106,16 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
         accessibilityHint="Swipe up or down to change hue. Use the custom actions to change saturation."
         accessibilityLabel="Signal color wheel"
         accessibilityRole="adjustable"
+        accessibilityState={{ disabled }}
         accessibilityValue={{
           text: `${Math.round(hsv.hue)} degree hue, ${Math.round(hsv.saturation * 100)} percent saturation`,
         }}
         onAccessibilityAction={changeWheelWithAccessibility}
-        onMoveShouldSetResponder={() => true}
+        onMoveShouldSetResponder={() => !disabled}
         onResponderGrant={grantWheel}
         onResponderMove={changeWheel}
         onResponderTerminationRequest={() => false}
-        onStartShouldSetResponder={() => true}
+        onStartShouldSetResponder={() => !disabled}
         style={styles.wheel}
       >
         <Canvas pointerEvents="none" style={styles.canvas}>
@@ -145,10 +148,6 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
         </Canvas>
       </View>
 
-      <ThemedText type="small" themeColor="textSecondary" style={styles.lockNote}>
-        Brightness is locked at 100% so signals stay legible on the map.
-      </ThemedText>
-
       <View
         style={[
           styles.currentColor,
@@ -159,6 +158,7 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
           accessibilityLabel="Signal color hex value"
           autoCapitalize="characters"
           autoCorrect={false}
+          editable={!disabled}
           maxLength={7}
           onBlur={() => {
             if (!isSignalColor(hexInput.value)) {
@@ -166,6 +166,7 @@ export function SignalColorPicker({ color, onChange }: SignalColorPickerProps) {
             }
           }}
           onChangeText={(value) => {
+            if (disabled) return;
             const next = `#${value
               .replace(/^#/, '')
               .replace(/[^0-9a-f]/gi, '')
@@ -198,10 +199,6 @@ const styles = StyleSheet.create({
   },
   canvas: {
     flex: 1,
-  },
-  lockNote: {
-    textAlign: 'center',
-    width: WHEEL_SIZE,
   },
   currentColor: {
     alignItems: 'center',

@@ -49,4 +49,9 @@ describe('SettingsMenuRow', () => {
   it('omits the accessibility value when there is no state to summarise', () => {
     expect(render().props.accessibilityValue).toBeUndefined();
   });
+
+  it('keeps the optional navigation hint out of the visible row', () => {
+    render();
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('"children":["Which paths');
+  });
 });

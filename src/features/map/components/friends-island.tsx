@@ -1,12 +1,13 @@
 import { SymbolView } from 'expo-symbols';
-import type { ReactNode } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { CryptidTheme } from '@/constants/cryptid-theme';
 import { Spacing } from '@/constants/theme';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
+import { formatDistanceValue, type DistanceUnit } from '@/features/settings/core/distance-units';
+import { useDisplayPreferences } from '@/features/settings/hooks/use-display-preferences';
 
-import { islandBody, IslandMinimizeToggle } from './island-minimize';
+import { islandBody } from './island-body';
 
 /** One roster row's worth of friend, already resolved from live presence. */
 export interface MapRosterFriend {
@@ -33,14 +34,13 @@ export interface MapRosterFriend {
 
 interface FriendsIslandProps {
   readonly friends: readonly MapRosterFriend[];
-  /** The bump pairing readout. The island being open is what arms it. */
-  readonly pairing?: ReactNode;
   readonly theme: CryptidTheme;
-  /** Collapsed content; the drawer keeps its grip available to reopen it. */
+  /** Collapsed to the count alone; the drawer's grip is what reopens it. */
   readonly minimized: boolean;
-  readonly onToggleMinimize?: () => void;
   onSelect(friendId: string): void;
   onOpenProfile(friendId: string): void;
+  /** Opens the pairing screen. Rendered as the one glyph beside the count. */
+  onOpenPairing(): void;
 }
 
 /**
@@ -57,21 +57,24 @@ interface FriendsIslandProps {
  * region inside a surface whose whole job is to get taller.
  *
  * The card surface and the FRIENDS label both belong to `MapDrawer`, so the header leads with the
- * one fact the tab cannot carry: how many are near you.
+ * one fact the tab cannot carry: how many are near you — and, beside it, the only way to add
+ * anyone. Adding a friend used to be a full-width strip at the top of the list reading "PAIR WITH
+ * SOMEONE / OPEN PAIRING", which said the same thing twice and cost a row of roster to do it. It
+ * is a glyph on the header line now, present at every detent including the collapsed one, so the
+ * roster starts with friends rather than with an advertisement for the pairing screen.
  *
- * The drawer owns minimizing through its grip. Standalone callers may supply a
- * toggle, but the map never shows two competing collapse controls.
+ * The drawer owns minimizing through its grip; there is no collapse control in here.
  */
 export function FriendsIsland({
   friends,
-  pairing,
   theme,
   minimized,
-  onToggleMinimize,
   onSelect,
   onOpenProfile,
+  onOpenPairing,
 }: FriendsIslandProps) {
   const { chrome } = theme;
+  const { distanceUnit, ready: displayPreferencesReady } = useDisplayPreferences();
   const nearby = friends.filter((friend) => friend.nearby).length;
 
   return (
@@ -82,35 +85,44 @@ export function FriendsIsland({
           accessibilityRole="summary"
           accessibilityLabel={
             friends.length === 0
-              ? 'No friends in your atlas yet.'
+              ? 'No cryptids yet!'
               : `${friends.length} friend${friends.length === 1 ? '' : 's'}, ${nearby} nearby.`
           }
           style={islandBody.summary}
         >
-          <View style={[styles.pip, { backgroundColor: nearby > 0 ? chrome.green : chrome.seg }]} />
           <Text style={[styles.title, { color: chrome.ink }]}>{nearby} NEARBY</Text>
         </View>
-        {onToggleMinimize ? (
-          <IslandMinimizeToggle
-            minimized={minimized}
-            onToggle={onToggleMinimize}
-            subject="friends roster"
-            theme={theme}
+        {/* The pairing screen's only entrance. Kept on the header line at every
+            detent: it is the answer to an empty roster, and the roster is at its
+            emptiest exactly when the panel is smallest. */}
+        <Pressable
+          accessibilityHint="Opens the active pairing screen and starts nearby listening"
+          accessibilityLabel="Open pairing"
+          accessibilityRole="button"
+          hitSlop={8}
+          onPress={onOpenPairing}
+          style={({ pressed }) => [
+            styles.add,
+            { backgroundColor: chrome.seg, opacity: pressed ? 0.55 : 1 },
+          ]}
+        >
+          <SymbolView
+            name={{ ios: 'person.badge.plus', android: 'person_add', web: 'person_add' }}
+            size={18}
+            tintColor={chrome.green}
           />
-        ) : null}
+        </Pressable>
       </View>
 
       {minimized ? null : (
         <>
-          {pairing}
           {friends.length === 0 ? (
-            <Text style={[styles.empty, { color: chrome.steel }]}>
-              No cryptids in your atlas yet. Touch two phones together while both are on this tab.
-            </Text>
+            <Text style={[styles.empty, { color: chrome.steel }]}>No cryptids yet!</Text>
           ) : (
             <View style={styles.list}>
               {friends.map((friend, index) => (
                 <FriendRow
+                  distanceUnit={displayPreferencesReady ? distanceUnit : null}
                   divider={index > 0}
                   friend={friend}
                   key={friend.id}
@@ -128,12 +140,14 @@ export function FriendsIsland({
 }
 
 function FriendRow({
+  distanceUnit,
   divider,
   friend,
   onOpenProfile,
   onSelect,
   theme,
 }: {
+  readonly distanceUnit: DistanceUnit | null;
   readonly divider: boolean;
   readonly friend: MapRosterFriend;
   readonly theme: CryptidTheme;
@@ -141,8 +155,12 @@ function FriendRow({
   onSelect(friendId: string): void;
 }) {
   const { chrome } = theme;
-  const distance = compactDistance(friend.distanceM);
-  const trailing = friend.online ? (distance ?? 'NO FIX') : 'OFFLINE';
+  const distance = distanceUnit === null ? null : compactDistance(friend.distanceM, distanceUnit);
+  const trailing = !friend.online
+    ? 'OFFLINE'
+    : distanceUnit === null
+      ? null
+      : (distance ?? 'NO FIX');
 
   return (
     <View
@@ -158,7 +176,7 @@ function FriendRow({
         accessibilityHint={
           friend.locatable ? 'Centers the map on them and shows their trail' : undefined
         }
-        accessibilityLabel={`${friend.handle}. ${trailing.toLowerCase()}. ${friend.status.toLowerCase()}.`}
+        accessibilityLabel={`${friend.handle}. ${trailing ? `${trailing.toLowerCase()}. ` : ''}${friend.status.toLowerCase()}.`}
         accessibilityRole="button"
         accessibilityState={{ disabled: !friend.locatable }}
         disabled={!friend.locatable}
@@ -183,9 +201,11 @@ function FriendRow({
             {friend.status}
           </Text>
         </View>
-        <Text style={[styles.trailing, { color: friend.online ? chrome.ink : chrome.steel }]}>
-          {trailing}
-        </Text>
+        {trailing ? (
+          <Text style={[styles.trailing, { color: friend.online ? chrome.ink : chrome.steel }]}>
+            {trailing}
+          </Text>
+        ) : null}
       </Pressable>
       {/* Two targets, two questions: the row asks "where are they", this one
           asks "who are they, and what do I want to do about it".
@@ -220,34 +240,36 @@ function FriendRow({
  * Distance for a roster row: short, uppercase, and rounded to a precision the
  * fix actually supports — never a false-precision metre count.
  */
-export function compactDistance(distanceM: number | null): string | null {
-  if (distanceM === null || !Number.isFinite(distanceM)) return null;
-  if (distanceM < 950) return `${Math.max(0, Math.round(distanceM / 10) * 10)} M`;
-  const km = distanceM / 1000;
-  return `${km.toFixed(km < 10 ? 1 : 0)} KM`;
+export function compactDistance(
+  distanceM: number | null,
+  unit: DistanceUnit = 'km'
+): string | null {
+  return formatDistanceValue(distanceM, unit)?.toUpperCase() ?? null;
 }
 
 const styles = StyleSheet.create({
   title: {
     fontFamily: 'Rajdhani_700Bold',
-    fontSize: 24,
+    fontSize: 22,
     letterSpacing: 3,
-    lineHeight: 28,
+    lineHeight: 26,
   },
-  pip: {
-    borderRadius: 5,
-    height: 10,
-    width: 10,
+  add: {
+    alignItems: 'center',
+    borderRadius: 15,
+    height: 30,
+    justifyContent: 'center',
+    width: 30,
   },
   empty: {
     fontFamily: 'IBMPlexMono_400Regular',
     fontSize: 12,
     lineHeight: 18,
     paddingBottom: Spacing.two,
-    paddingTop: Spacing.two,
+    paddingTop: Spacing.one,
   },
   list: {
-    paddingBottom: Spacing.one,
+    paddingBottom: Spacing.half,
   },
   row: {
     alignItems: 'center',
@@ -258,19 +280,26 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: 'row',
     gap: Spacing.three,
-    minHeight: 64,
+    // The sigil is what sets a row's height — four lines of art plus its caption
+    // clears 56 on its own — so the padding here is a separator, not a floor.
+    // At Spacing.two the roster read as a list of cards with air between them.
+    minHeight: 52,
     minWidth: 0,
-    paddingVertical: Spacing.two,
+    paddingVertical: Spacing.half,
   },
   manage: {
     alignItems: 'center',
-    borderRadius: 17,
-    height: 34,
+    borderRadius: 15,
+    height: 30,
     justifyContent: 'center',
     marginLeft: Spacing.two,
-    width: 34,
+    width: 30,
   },
   avatar: {
+    // Do NOT narrow this to shorten rows. `CryptidAvatar` only scales the art
+    // down once `onTextLayout` has measured it, and where that never fires —
+    // react-native-web, which is what the screenshot harness renders — the art
+    // WRAPS instead, which mangles it and makes the row taller, not shorter.
     width: 72,
   },
   copy: {
@@ -280,8 +309,8 @@ const styles = StyleSheet.create({
   },
   handle: {
     fontFamily: 'Rajdhani_700Bold',
-    fontSize: 22,
-    lineHeight: 25,
+    fontSize: 20,
+    lineHeight: 23,
   },
   status: {
     fontFamily: 'IBMPlexMono_500Medium',

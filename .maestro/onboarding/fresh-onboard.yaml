@@ -1,7 +1,7 @@
 appId: com.unrealjune.streetcryptid
 ---
 # Wipes the app's local state (equivalent to uninstall+reinstall) so onboarding
-# starts from a genuinely fresh profile, then drives the username step and the
+# starts from a genuinely fresh profile, then drives the username and delivery steps and the
 # location-disclosure gate through to the live map. Run per-device with --udid
 # so each simulator gets its own clean identity, e.g.:
 #   maestro --udid <UDID> test -e USERNAME=alice .maestro/onboarding/fresh-onboard.yaml
@@ -28,6 +28,15 @@ appId: com.unrealjune.streetcryptid
 - hideKeyboard
 - tapOn:
     id: 'onboarding-continue'
+- scrollUntilVisible:
+    element:
+      id: 'onboarding-delivery-continue'
+      enabled: true
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: 'onboarding-delivery-continue'
+    enabled: true
 - tapOn: 'Turn on location'
 - assertVisible:
     id: 'map-view'

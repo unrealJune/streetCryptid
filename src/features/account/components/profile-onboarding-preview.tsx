@@ -11,7 +11,7 @@ import { CryptidProfileEditor } from './cryptid-profile-editor';
  * DEBUG-only: render the real first-run profile editor over the app, with a save
  * that goes nowhere.
  *
- * `CryptidProfileEditor` autosaves through the `onSave` prop, so passing a no-op
+ * `CryptidProfileEditor` saves on Continue through the `onSave` prop, so passing a no-op
  * (and a null `initialProfile`, the true first-run state) exercises the actual
  * onboarding layout and interactions without touching the stored profile. It is
  * the same component `AccountOnboardingScreen` mounts — not a copy — so what you

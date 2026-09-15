@@ -23,11 +23,20 @@ describe('SettingsControl', () => {
     return onPress;
   }
 
+  /**
+   * The `Pressable` inside `IslandPressable`, not the host view under it — the label is on all
+   * three, and the Pressable is the one carrying `onPress` and the style function.
+   */
+  function button() {
+    return renderer.root
+      .findAllByProps({ accessibilityLabel: 'Settings' })
+      .find((node) => typeof node.props.style === 'function')!;
+  }
+
   it('opens settings from the map', () => {
     const onPress = render();
 
-    const button = renderer.root.findByProps({ accessibilityLabel: 'Settings' });
-    act(() => button.props.onPress());
+    act(() => button().props.onPress());
 
     expect(onPress).toHaveBeenCalledTimes(1);
   });
@@ -36,11 +45,12 @@ describe('SettingsControl', () => {
     render();
     const { chrome } = CryptidThemes.daybreak;
 
-    const button = renderer.root.findByProps({ accessibilityLabel: 'Settings' });
-    const style = button.props.style({ pressed: false });
-    expect(style).toContainEqual(
-      expect.objectContaining({ backgroundColor: chrome.island, borderColor: chrome.islandBorder })
-    );
+    const style = button().props.style({ pressed: false }) as object[];
+    // The opaque island surface — what Android, web and every iPhone before iOS 26 draw. Liquid
+    // glass is off in tests by default (see `jest.setup.js`); `glass-surface.test.tsx` is where
+    // the other path is covered.
+    expect(style).toContainEqual(expect.objectContaining({ backgroundColor: chrome.island }));
+    expect(style).toContainEqual(expect.objectContaining({ borderColor: chrome.islandBorder }));
     // Never amber (YOU / frontier) and never green (friends).
     expect(JSON.stringify(style)).not.toContain(chrome.amber);
     expect(JSON.stringify(style)).not.toContain(chrome.green);

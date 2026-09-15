@@ -111,6 +111,8 @@ export interface Friend extends ContactCard {
   pairedAt?: number;
   /** How this friend was added. Absent on legacy contact-card records. */
   pairingMethod?: PairingMethod;
+  /** Local provenance for withdrawing this pairing without removing a different friendship. */
+  pairingSessionId?: string;
 }
 
 /** This device's own identity (public parts) for rendering / sharing. */

@@ -1,7 +1,8 @@
 import { SymbolView } from 'expo-symbols';
-import { Pressable, StyleSheet } from 'react-native';
 
 import type { CryptidTheme } from '@/constants/cryptid-theme';
+
+import { FAB_RADIUS, IslandPressable, islandStyles } from './glass-surface';
 
 interface SettingsControlProps {
   readonly theme: CryptidTheme;
@@ -14,41 +15,24 @@ interface SettingsControlProps {
  * opposite the attribution line.
  *
  * Steel, never an accent: green belongs to friends and amber to YOU and the
- * frontier rim. Settings is not a signal.
+ * frontier rim. Settings is not a signal — which is also why it passes no tint to
+ * the glass.
  */
 export function SettingsControl({ theme, onPress }: SettingsControlProps) {
-  const { chrome } = theme;
-
   return (
-    <Pressable
+    <IslandPressable
       accessibilityLabel="Settings"
       accessibilityRole="button"
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.fab,
-        {
-          backgroundColor: chrome.island,
-          borderColor: chrome.islandBorder,
-          opacity: pressed ? 0.68 : 1,
-        },
-      ]}
+      radius={FAB_RADIUS}
+      style={islandStyles.fab}
+      theme={theme}
     >
       <SymbolView
         name={{ ios: 'gearshape', android: 'settings', web: 'settings' }}
         size={21}
-        tintColor={chrome.steel}
+        tintColor={theme.chrome.steel}
       />
-    </Pressable>
+    </IslandPressable>
   );
 }
-
-const styles = StyleSheet.create({
-  fab: {
-    alignItems: 'center',
-    borderRadius: 24,
-    borderWidth: StyleSheet.hairlineWidth,
-    height: 48,
-    justifyContent: 'center',
-    width: 48,
-  },
-});

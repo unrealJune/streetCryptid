@@ -373,6 +373,7 @@ describe('LocationSharingService — encrypted short pairing-code path', () => {
       { kind: 'ready', sessionId: 'sess-invite', peerEndpointId: 'peer-code', nearby: false },
     ];
     await svc.refreshPairing();
+    await svc.acknowledgeDiscoveredFriend();
 
     const friend = snap.current?.friends.find((f) => f.endpointId === 'peer-code');
     expect(friend?.pairingMethod).toBe('code');

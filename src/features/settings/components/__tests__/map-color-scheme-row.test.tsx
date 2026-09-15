@@ -8,16 +8,23 @@ const mockSelect = jest.fn();
 const mockSaveCustom = jest.fn();
 
 jest.mock('@/global.css', () => ({}));
-jest.mock('@/features/map/hooks/use-map-color-scheme', () => ({
-  useMapColorScheme: () => ({
-    customJson: '{}',
-    saveCustom: mockSaveCustom,
-    schemes: jest.requireActual('@/features/map/theme/map-color-schemes')
-      .BUILT_IN_MAP_COLOR_SCHEMES,
-    select: mockSelect,
-    selectedId: 'tokyo',
-  }),
-}));
+jest.mock('@/features/map/hooks/use-map-color-scheme', () => {
+  const schemes = jest.requireActual('@/features/map/theme/map-color-schemes')
+    .BUILT_IN_MAP_COLOR_SCHEMES as { id: string }[];
+  return {
+    useMapColorScheme: () => ({
+      customJson: '{}',
+      saveCustom: mockSaveCustom,
+      schemes,
+      select: mockSelect,
+      selectedId: 'tokyo',
+      // A real scheme, not a stub: the row's own `useTheme()` now retints the app's chrome from
+      // whatever palette is selected, so a `selected` without light/dark palettes no longer
+      // renders at all.
+      selected: schemes.find((scheme) => scheme.id === 'tokyo'),
+    }),
+  };
+});
 
 describe('MapColorSchemeRow', () => {
   let renderer: ReactTestRenderer;

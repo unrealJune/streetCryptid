@@ -48,7 +48,14 @@ function ramp(colors: readonly string[]): readonly RampStop[] {
   }));
 }
 
-function palette(input: MapPaletteInput): MapPalette {
+/**
+ * Hex-authored palette → the numeric triples the Skia canvas works in.
+ *
+ * Exported because a palette does not have to be written by hand any more: `material-you.ts`
+ * builds one out of the OS's Material 3 roles at runtime, and it should land in exactly the same
+ * shape as Seattle rather than growing a parallel converter.
+ */
+export function mapPaletteFromHex(input: MapPaletteInput): MapPalette {
   return {
     bg: rgb(input.bg),
     accent: rgb(input.accent),
@@ -69,7 +76,7 @@ function scheme(
   light: MapPaletteInput,
   dark: MapPaletteInput
 ): MapColorScheme {
-  return { id, name, light: palette(light), dark: palette(dark) };
+  return { id, name, light: mapPaletteFromHex(light), dark: mapPaletteFromHex(dark) };
 }
 
 export const DEFAULT_MAP_COLOR_SCHEME_ID = 'seattle';
@@ -263,8 +270,20 @@ export const BUILT_IN_MAP_COLOR_SCHEMES: readonly MapColorScheme[] = [
   ),
 ] as const;
 
-export function findMapColorScheme(id: string, custom: MapColorScheme | null): MapColorScheme {
-  if (id === custom?.id) return custom;
+/**
+ * Resolve a saved id against the schemes that exist right now.
+ *
+ * `extra` is the runtime ones — the user's custom palette, and the OS's Material You palette
+ * where the phone has one. Both can vanish between launches (a custom palette cleared, a
+ * wallpaper theme that stopped resolving, or the same preference restored onto an iPhone), and
+ * falling back to the first built-in is how that degrades without a special case anywhere else.
+ */
+export function findMapColorScheme(
+  id: string,
+  ...extra: (MapColorScheme | null | undefined)[]
+): MapColorScheme {
+  const runtime = extra.find((candidate) => candidate?.id === id);
+  if (runtime) return runtime;
   return (
     BUILT_IN_MAP_COLOR_SCHEMES.find((candidate) => candidate.id === id) ??
     BUILT_IN_MAP_COLOR_SCHEMES[0]
@@ -370,8 +389,8 @@ export function parseCustomMapColorScheme(json: string): {
     scheme: {
       id: 'custom',
       name,
-      light: palette(input.light),
-      dark: palette(input.dark),
+      light: mapPaletteFromHex(input.light),
+      dark: mapPaletteFromHex(input.dark),
       custom: true,
     },
   };

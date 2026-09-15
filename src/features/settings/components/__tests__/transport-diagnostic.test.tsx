@@ -56,4 +56,30 @@ describe('TransportDiagnostic', () => {
       renderer.root.findAllByType(Text).some((node) => node.props.children === 'PEER PATHS')
     ).toBe(true);
   });
+
+  it('omits the unimplemented Wi-Fi Aware and Multipeer path', () => {
+    act(() => {
+      renderer = create(
+        <TransportDiagnostic
+          report={{
+            ...REPORT,
+            rows: [
+              ...REPORT.rows,
+              {
+                id: 'nearby',
+                label: 'Wi-Fi Aware / Multipeer',
+                status: 'planned',
+                detail: 'Planned',
+                groups: [],
+              },
+            ],
+          }}
+          activeColor="#2f9e6a"
+          availableColor="#f2ad42"
+        />
+      );
+    });
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('Wi-Fi Aware');
+    expect(JSON.stringify(renderer.toJSON())).toContain('Direct (IP)');
+  });
 });

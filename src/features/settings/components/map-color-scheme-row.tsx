@@ -3,14 +3,42 @@ import { Pressable, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedTextInput } from '@/components/themed-text-input';
+import { CryptidThemes, type CryptidChrome } from '@/constants/cryptid-theme';
 import { Fonts, Spacing } from '@/constants/theme';
 import { ramp, rgbToHex } from '@/features/map/core/color';
 import type { MapPalette } from '@/features/map/core/types';
 import { useMapColorScheme } from '@/features/map/hooks/use-map-color-scheme';
+import { deriveChrome } from '@/features/map/theme/derive-chrome';
 import type { MapColorScheme } from '@/features/map/theme/map-color-schemes';
 import { useTheme } from '@/hooks/use-theme';
 
-function MiniMap({ palette }: { palette: MapPalette }) {
+/**
+ * The island and a FAB, at preview scale.
+ *
+ * Choosing a scheme has not been a map-only decision since chrome started deriving from the
+ * palette (`derive-chrome.ts`), and a preview that showed only the canvas was describing half of
+ * what the tap does — the surfaces, the ink and the accent all move too. Same tokens the real
+ * island uses, so what is drawn here is the actual answer rather than an impression of one.
+ */
+function MiniChrome({ chrome }: { chrome: CryptidChrome }) {
+  const surface = { backgroundColor: chrome.island, borderColor: chrome.islandBorder };
+  return (
+    <>
+      <View style={[styles.miniFab, surface]}>
+        <View style={[styles.miniFabDot, { backgroundColor: chrome.steel }]} />
+      </View>
+      <View style={[styles.miniIsland, surface]}>
+        <View style={[styles.miniGrip, { backgroundColor: chrome.seg }]} />
+        <View style={styles.miniRow}>
+          <View style={[styles.miniInk, { backgroundColor: chrome.ink }]} />
+          <View style={[styles.miniAccent, { backgroundColor: chrome.amber }]} />
+        </View>
+      </View>
+    </>
+  );
+}
+
+function MiniMap({ chrome, palette }: { chrome: CryptidChrome; palette: MapPalette }) {
   const road = rgbToHex(ramp(palette.terr, 0.58));
   const arterial = rgbToHex(ramp(palette.terr, 0.82));
   const highway = rgbToHex(ramp(palette.terr, 0.98));
@@ -39,6 +67,7 @@ function MiniMap({ palette }: { palette: MapPalette }) {
       <View style={[styles.highway, { backgroundColor: highway }]} />
       <View style={[styles.transit, { backgroundColor: rgbToHex(palette.transit) }]} />
       <View style={[styles.accent, { backgroundColor: rgbToHex(palette.accent) }]} />
+      <MiniChrome chrome={chrome} />
     </View>
   );
 }
@@ -46,8 +75,8 @@ function MiniMap({ palette }: { palette: MapPalette }) {
 function SchemePreview({ scheme }: { scheme: MapColorScheme }) {
   return (
     <View style={styles.preview} testID={`${scheme.id}-map-preview`}>
-      <MiniMap palette={scheme.light} />
-      <MiniMap palette={scheme.dark} />
+      <MiniMap chrome={deriveChrome(CryptidThemes.daybreak, scheme.light)} palette={scheme.light} />
+      <MiniMap chrome={deriveChrome(CryptidThemes.deepsea, scheme.dark)} palette={scheme.dark} />
       <View pointerEvents="none" style={styles.previewDivider} />
       <View pointerEvents="none" style={styles.modeLabels}>
         <ThemedText style={styles.modeLabel} type="code">
@@ -80,13 +109,6 @@ export function MapColorSchemeRow() {
 
   return (
     <View style={[styles.container, { borderColor: theme.backgroundSelected }]}>
-      <View style={styles.copy}>
-        <ThemedText type="smallBold">Map colors</ThemedText>
-        <ThemedText type="small" themeColor="textSecondary">
-          Each scheme includes a light and dark palette and follows your device appearance.
-        </ThemedText>
-      </View>
-
       <View accessibilityRole="radiogroup" style={styles.options}>
         {schemes.map((scheme) => {
           const selected = scheme.id === selectedId;
@@ -195,9 +217,6 @@ const styles = StyleSheet.create({
     gap: Spacing.three,
     padding: Spacing.three,
   },
-  copy: {
-    gap: Spacing.one,
-  },
   options: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -249,6 +268,56 @@ const styles = StyleSheet.create({
     flex: 1,
     overflow: 'hidden',
     position: 'relative',
+  },
+  // The chrome sketch. Sized to sit clear of the L / D badges along the bottom edge.
+  miniFab: {
+    alignItems: 'center',
+    borderRadius: 7,
+    borderWidth: StyleSheet.hairlineWidth,
+    height: 14,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 5,
+    top: 6,
+    width: 14,
+  },
+  miniFabDot: {
+    borderRadius: 3,
+    height: 6,
+    width: 6,
+  },
+  miniIsland: {
+    borderRadius: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    bottom: 17,
+    gap: 3,
+    left: 5,
+    paddingBottom: 5,
+    paddingTop: 3,
+    position: 'absolute',
+    right: 5,
+  },
+  miniGrip: {
+    alignSelf: 'center',
+    borderRadius: 1,
+    height: 2,
+    width: 14,
+  },
+  miniRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 3,
+    paddingHorizontal: 5,
+  },
+  miniInk: {
+    borderRadius: 1,
+    flex: 1,
+    height: 3,
+  },
+  miniAccent: {
+    borderRadius: 2,
+    height: 4,
+    width: 4,
   },
   water: {
     borderRadius: 28,

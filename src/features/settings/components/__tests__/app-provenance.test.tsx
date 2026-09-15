@@ -22,7 +22,7 @@ describe('AppProvenanceDetails', () => {
             commit: '88f28ab5ea39108ade978de2d0d1adeedf0ece76',
             buildId: 'f51831f0-ea30-406a-8c5f-f8e1cc57d39c',
             profile: 'production',
-            runtimeVersion: null,
+            runtimeVersion: 'removed-runtime-row',
           }}
         />
       );
@@ -44,5 +44,6 @@ describe('AppProvenanceDetails', () => {
       ])
     );
     expect(text).not.toContain('Runtime');
+    expect(text).not.toContain('removed-runtime-row');
   });
 });

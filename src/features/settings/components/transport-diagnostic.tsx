@@ -74,83 +74,85 @@ export function TransportDiagnostic({
         </View>
       ) : null}
       <View style={[styles.list, { borderColor: theme.backgroundSelected }]}>
-        {report.rows.map((row, index) => {
-          const isExpanded = expanded[row.id] ?? false;
-          const groups = row.groups.filter((group) => group.items.length > 0);
-          return (
-            <View
-              key={row.id}
-              style={[
-                index > 0 && {
-                  borderTopColor: theme.backgroundSelected,
-                  borderTopWidth: StyleSheet.hairlineWidth,
-                },
-              ]}
-            >
-              <Pressable
-                accessibilityRole="button"
-                accessibilityState={{ expanded: isExpanded }}
-                accessibilityLabel={`${row.label}, ${STATUS_LABEL[row.status]}`}
-                onPress={() => setExpanded((current) => ({ ...current, [row.id]: !isExpanded }))}
-                style={({ pressed }) => [styles.row, pressed && styles.pressed]}
+        {report.rows
+          .filter((row) => row.id !== 'nearby')
+          .map((row, index) => {
+            const isExpanded = expanded[row.id] ?? false;
+            const groups = row.groups.filter((group) => group.items.length > 0);
+            return (
+              <View
+                key={row.id}
+                style={[
+                  index > 0 && {
+                    borderTopColor: theme.backgroundSelected,
+                    borderTopWidth: StyleSheet.hairlineWidth,
+                  },
+                ]}
               >
-                <View style={[styles.dot, { backgroundColor: dotColor(row.status) }]} />
-                <View style={styles.copy}>
-                  <View style={styles.headerRow}>
-                    <ThemedText type="smallBold">{row.label}</ThemedText>
-                    <View style={styles.status}>
-                      <ThemedText type="small" themeColor="textSecondary">
-                        {STATUS_LABEL[row.status]}
-                      </ThemedText>
-                      <SymbolView
-                        name={
-                          isExpanded
-                            ? {
-                                ios: 'chevron.up',
-                                android: 'keyboard_arrow_up',
-                                web: 'keyboard_arrow_up',
-                              }
-                            : {
-                                ios: 'chevron.down',
-                                android: 'keyboard_arrow_down',
-                                web: 'keyboard_arrow_down',
-                              }
-                        }
-                        size={16}
-                        weight="bold"
-                        tintColor={theme.textSecondary}
-                      />
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ expanded: isExpanded }}
+                  accessibilityLabel={`${row.label}, ${STATUS_LABEL[row.status]}`}
+                  onPress={() => setExpanded((current) => ({ ...current, [row.id]: !isExpanded }))}
+                  style={({ pressed }) => [styles.row, pressed && styles.pressed]}
+                >
+                  <View style={[styles.dot, { backgroundColor: dotColor(row.status) }]} />
+                  <View style={styles.copy}>
+                    <View style={styles.headerRow}>
+                      <ThemedText type="smallBold">{row.label}</ThemedText>
+                      <View style={styles.status}>
+                        <ThemedText type="small" themeColor="textSecondary">
+                          {STATUS_LABEL[row.status]}
+                        </ThemedText>
+                        <SymbolView
+                          name={
+                            isExpanded
+                              ? {
+                                  ios: 'chevron.up',
+                                  android: 'keyboard_arrow_up',
+                                  web: 'keyboard_arrow_up',
+                                }
+                              : {
+                                  ios: 'chevron.down',
+                                  android: 'keyboard_arrow_down',
+                                  web: 'keyboard_arrow_down',
+                                }
+                          }
+                          size={16}
+                          weight="bold"
+                          tintColor={theme.textSecondary}
+                        />
+                      </View>
                     </View>
-                  </View>
-                  <ThemedText type="small" themeColor="textSecondary">
-                    {row.detail}
-                  </ThemedText>
-                </View>
-              </Pressable>
-              {isExpanded ? (
-                <View style={[styles.details, { borderTopColor: theme.backgroundSelected }]}>
-                  {groups.map((group) => (
-                    <View key={group.label} style={styles.group}>
-                      <ThemedText
-                        type="smallBold"
-                        themeColor="textSecondary"
-                        style={styles.groupLabel}
-                      >
-                        {group.label}
-                      </ThemedText>
-                      <View style={styles.groupItems}>{group.items.map(detailItem)}</View>
-                    </View>
-                  ))}
-                  {groups.length === 0 ? (
                     <ThemedText type="small" themeColor="textSecondary">
-                      No additional state is available.
+                      {row.detail}
                     </ThemedText>
-                  ) : null}
-                </View>
-              ) : null}
-            </View>
-          );
-        })}
+                  </View>
+                </Pressable>
+                {isExpanded ? (
+                  <View style={[styles.details, { borderTopColor: theme.backgroundSelected }]}>
+                    {groups.map((group) => (
+                      <View key={group.label} style={styles.group}>
+                        <ThemedText
+                          type="smallBold"
+                          themeColor="textSecondary"
+                          style={styles.groupLabel}
+                        >
+                          {group.label}
+                        </ThemedText>
+                        <View style={styles.groupItems}>{group.items.map(detailItem)}</View>
+                      </View>
+                    ))}
+                    {groups.length === 0 ? (
+                      <ThemedText type="small" themeColor="textSecondary">
+                        No additional state is available.
+                      </ThemedText>
+                    ) : null}
+                  </View>
+                ) : null}
+              </View>
+            );
+          })}
       </View>
     </View>
   );

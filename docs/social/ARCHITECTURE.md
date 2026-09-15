@@ -435,9 +435,16 @@ each human action latches that side's signed Accept
   both people have 60 seconds to act: the picker chooses the matching figure and the displayer
   confirms that the other person chose it. A wrong choice, negative confirmation, cancellation,
   timeout, or invalid reveal is terminal; retrying requires a fresh session.
-- Pairing is bilateral and idempotent. A friend enters the local pool only after both human-gated
-  `Accept` decisions, and only then does the app create reciprocal location grants. Either person
-  can later pause their outbound grant from the friend's profile.
+- Pairing is bilateral and idempotent. Both human-gated `Accept` decisions produce a pending
+  discovery, not a friend or location grant. Only the local **Acknowledge** action persists the
+  friend and enables outbound sharing. Pending discoveries remain outside the pool and survive
+  duplicate completion notices without being silently accepted.
+- **Reject** withdraws the completed handshake with a signed `Reject`. Native code erases only
+  that round's ratchet, and the app removes the corresponding pending or acknowledged friendship.
+  A newer re-pair must survive an older withdrawal; ordinary route teardown must never withdraw
+  an acknowledged result. Notification of the peer is best-effort, not a recall of location
+  updates already delivered. The UI therefore says sharing is off, not that nothing was shared.
+  Either person can also pause their outbound grant from the friend's profile.
 - Protocol v1 peers are intentionally incompatible and fail closed instead of bypassing the SAS
   gate. The 256-entry UI catalog in `pairing-figures.ts` is part of protocol v2 and must remain
   index-stable.
@@ -462,11 +469,10 @@ period.
 
 ## 9b. Nearby and remote exchange
 
-The island's **FRIENDS tab** is the pairing surface; there is no separate pairing mode
-and no Friends route. Arming is an explicit tap on **ARM BUMP** inside that tab — leaving
-the tab, drilling into a friend's trace, or backgrounding the app disarms again. The tab
-itself does not arm: doing so raised the OS Bluetooth prompt from a view transition, and a
-declined prompt left the strip with no action to offer.
+The island's **FRIENDS tab** and **Settings → Pair** open the dedicated pairing screen.
+Opening that screen arms nearby listening; a shake starts the search. Leaving the screen
+or backgrounding the app disarms nearby discovery. The friends tab itself does not arm
+Bluetooth or request permission.
 
 ### Nearby: Bump over iroh BLE
 
@@ -477,9 +483,10 @@ declined prompt left the strip with no action to offer.
 - BLE uses one shared central/peripheral pair for transport and Bump discovery. The transport's
   primary GATT service exposes a static, read-only full EndpointId characteristic; the advertised
   key UUID still carries its 12-byte prefix. This identity service survives GATT-server rebuilds.
-- Nearby pairing is explicit. Both people tap **ARM BUMP**, then tap the phones together. One clear
-  accelerometer impact commits the attempt; the same visible button remains a fallback if the
-  sensor misses. The acceptance gate is active only during the short armed window.
+- Nearby pairing is explicit. Both people open Pair, then shake their phones to start searching
+  at the same time. An accelerometer impact commits the attempt; a visible fallback is available
+  when motion sensing is unavailable. One radar rotation represents the 12-second search window,
+  with elapsed dots distinguished from the remaining window. A found peer ends the search early.
 - On commit, the shared scanner is restarted in low-latency mode. Fresh streetCryptid
   advertisements are ranked by RSSI, equally close candidates fail as ambiguous, and the strongest
   peer is connected long enough to read its full EndpointId. The read must match the advertised
@@ -489,11 +496,11 @@ declined prompt left the strip with no action to offer.
   consent.
 - Transport discovery never grants friendship. After key exchange, the inline visual check
   requires the picker and displayer actions described in §9a before either side accepts.
-- Haptics accelerate from soft search ticks through contact and key exchange, then settle while
-  both people compare the figure. Verified completion produces a heavy success "pop" followed by a
-  full-screen `CRYPTID DISCOVERED` ASCII-art dance. The reveal stays open until the user explicitly
-  acknowledges the new friend or rejects them; rejection revokes sharing and removes the friend.
-  An acknowledged friend appears on the map as soon as their first encrypted fix arrives.
+- Haptics accompany searching, connecting, and the visual check. Verified completion opens the
+  `CRYPTID DISCOVERED` reveal; a profile that arrives later updates that pending discovery.
+  Acknowledge adds the friend and sharing grant. Reject (or closing an unconfirmed reveal)
+  withdraws the pairing instead. An acknowledged friend appears on the map as soon as their first
+  encrypted fix arrives.
 - BLE permission is checked before node creation without prompting. If Android permission is first
   granted from Bump, the node is rebuilt so the BLE transport actually attaches; queued location
   fixes remain durable during the short rebind.

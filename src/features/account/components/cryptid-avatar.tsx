@@ -12,6 +12,7 @@ interface CryptidAvatarProps {
   color: string;
   size?: AvatarSize;
   muted?: boolean;
+  showLabel?: boolean;
   style?: StyleProp<ViewStyle>;
 }
 
@@ -38,6 +39,7 @@ export function CryptidAvatar({
   color,
   size = 'compact',
   muted = false,
+  showLabel = true,
   style,
 }: CryptidAvatarProps) {
   const dimensions = sizes[size];
@@ -90,7 +92,7 @@ export function CryptidAvatar({
       >
         {normalizedArt}
       </Text>
-      {label ? (
+      {showLabel && label ? (
         <Text
           allowFontScaling={false}
           style={[styles.label, { color: signalColor, fontSize: dimensions.labelSize }]}

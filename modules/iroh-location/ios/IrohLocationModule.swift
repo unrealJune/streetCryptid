@@ -981,6 +981,13 @@ public final class IrohLocationModule: Module {
       return dict
     }
 
+    // The token, not a decoded invite: it is the only form the app still holds once the link has
+    // been handed out, and `CANCEL LINK` is the one caller.
+    AsyncFunction("revokePairInvite") { (token: String) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.revokePairInvite(token: token)
+    }
+
     AsyncFunction("initiatePair") { (invite: [String: Any]) async throws -> String in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return dataToHex(try await node.initiatePair(invite: pairInvite(from: invite)))

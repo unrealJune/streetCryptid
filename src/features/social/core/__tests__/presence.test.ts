@@ -99,6 +99,8 @@ describe('friend presence', () => {
     expect(metres).toBeLessThan(120);
     expect(formatDistance(metres)).toBe('110 m away');
     expect(formatDistance(2400)).toBe('2.4 km away');
+    expect(formatDistance(2400, 'mi')).toBe('1.5 mi away');
+    expect(formatDistance(null, 'mi')).toBeNull();
     expect(formatAge(30_000)).toBe('moments');
     expect(formatAge(3_600_000)).toBe('1 hr');
     expect(formatAge(50 * 60_000)).toBe('50 min');

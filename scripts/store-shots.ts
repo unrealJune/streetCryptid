@@ -199,9 +199,15 @@ async function waitFor(page: Page, predicate: string, timeoutMs = 30_000): Promi
 }
 
 /**
- * Walk first run: pick a persona, claim a handle, and accept the location
- * disclosure. This is the app's real onboarding, driven rather than bypassed —
- * a fresh browser profile starts here every time, and the map is behind it.
+ * Walk first run: pick a persona, claim a handle, choose a delivery route, and
+ * accept the location disclosure. This is the app's real onboarding, driven
+ * rather than bypassed — a fresh browser profile starts here every time, and
+ * the map is behind it.
+ *
+ * Every step after the first is probed rather than assumed. Onboarding gains
+ * screens (the delivery choice is the most recent), and a run that walked a
+ * fixed number of Continues did not fail — it photographed whatever screen it
+ * had stalled on and labelled it `map`.
  */
 async function onboard(page: Page, handle: string): Promise<void> {
   const atProfile = await waitFor(page, `document.querySelector('input')`);
@@ -213,8 +219,21 @@ async function onboard(page: Page, handle: string): Promise<void> {
   await sleep(600);
   await clickText(page, 'Continue');
 
-  // The background-location disclosure gate stands between the profile screen
-  // and the map on every platform (Play requires it); accept it explicitly.
+  // The delivery choice, second half of the account onboarding. It keeps its
+  // default; this only gets past it.
+  const atDelivery = await waitFor(
+    page,
+    `!!document.querySelector('[data-testid="delivery-onboarding"]')`,
+    20_000
+  );
+  if (atDelivery) {
+    await sleep(1200);
+    await clickText(page, 'Continue');
+    await sleep(900);
+  }
+
+  // The background-location disclosure gate stands between onboarding and the
+  // map on every platform (Play requires it); accept it explicitly.
   const atDisclosure = await waitFor(
     page,
     `[...document.querySelectorAll('*')].some((n) => n.textContent === 'Turn on location')`,
@@ -224,6 +243,15 @@ async function onboard(page: Page, handle: string): Promise<void> {
     await clickText(page, 'Turn on location');
     await sleep(1200);
   }
+
+  // Nothing below this point can recover from still being in onboarding, and a
+  // capture that silently photographs the wrong screen is worse than a failure.
+  const atMap = await waitFor(
+    page,
+    `[...document.querySelectorAll('*')].some((n) => n.textContent === 'FRIENDS')`,
+    30_000
+  );
+  if (!atMap) throw new Error('onboarding did not reach the map');
 }
 
 /**
@@ -309,7 +337,7 @@ const SCENES: readonly Scene[] = [
       // One level in, to the screen the headline is actually about. The settings
       // menu itself is a list of rows ending in DEBUG — honest, since that
       // section does ship, but not what this plate is claiming.
-      await mustClick(page, 'Delivery options');
+      await mustClick(page, 'Delivery');
       await sleep(1400);
     },
     async reset(page) {

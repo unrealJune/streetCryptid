@@ -6,11 +6,12 @@ import type { AeroAreaKind, AeroLineKind, Rgb } from './types';
  * twin of `road-lod.ts`, `water-lod.ts` and `transit-lod.ts`.
  *
  * Like transit and unlike streets, these are **region-logical px**: buildings and
- * runways are stroked as vectors over the finished region bitmap
+ * runways are drawn as paths over the finished region bitmap
  * (`render/structure-paths.ts`), not stamped as coverage into the feature mask,
- * so mask resolution never enters the arithmetic. The reason is the same one
- * `transit-lod.ts` gives: the dot lattice quantizes anything it touches, which
- * would turn a building outline into a scatter of unrelated dots.
+ * so mask resolution never enters the arithmetic. Buildings keep their crisp
+ * outlines; aeroway lines are ordinary solid strokes — a runway is a road that
+ * happens to be very straight, and drawing it as anything else made every
+ * airport the loudest thing on the map. Taxiways remain quiet hairlines.
  *
  * The load-bearing lever here is NOT a zoom cutoff but {@link BUILDING_MIN_PX}.
  * Filtering on **projected** size means large structures appear the moment the
@@ -96,16 +97,22 @@ export const AERO_AREA_STYLE: Record<
   aerodrome: { minZoom: 9, fillAlpha: 0, strokeAlpha: 0.16 },
   // The paved ground planes stand on: the thing that makes an airport read as
   // built rather than blank.
-  apron: { minZoom: 10, fillAlpha: 0.1, strokeAlpha: 0.2 },
+  apron: { minZoom: 10, fillAlpha: 0.07, strokeAlpha: 0.14 },
 };
 
 /** Aerodrome boundaries are dashed, so they read as a limit and not a wall. */
 export const AERODROME_DASH: readonly [number, number] = [6, 5];
 export const AERODROME_STROKE_WIDTH = 1;
 
-/** Base stroke width per aeroway line kind, region-logical px. */
+/**
+ * Base stroke width per aeroway line kind, region-logical px.
+ *
+ * The runway sits just above a primary road and below a motorway (`ROAD_WIDTHS`
+ * is 3.8 and 5.0 in mask px): wide enough to be the airport's one legible
+ * landmark, not so wide that it is the first thing the eye lands on.
+ */
 export const AERO_LINE_WIDTHS: Record<AeroLineKind, number> = {
-  runway: 4,
+  runway: 2.4,
   taxiway: 1,
 };
 
@@ -117,7 +124,7 @@ export const AERO_LINE_MIN_ZOOM: Record<AeroLineKind, number> = {
 
 /** Aeroway line opacity: runways are the landmark, taxiways are texture. */
 export const AERO_LINE_ALPHA: Record<AeroLineKind, number> = {
-  runway: 0.52,
+  runway: 0.4,
   taxiway: 0.22,
 };
 

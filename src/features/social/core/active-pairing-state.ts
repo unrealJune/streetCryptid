@@ -99,13 +99,18 @@ export interface PairingFailureCopy {
  * which is the security check doing its job and must not be softened into a network hiccup.
  */
 export function describePairingFailure(failure: PairingFailure): PairingFailureCopy {
+  if (failure.withdrawn) {
+    return {
+      status: 'PAIRING DECLINED',
+      detail: 'This pairing was declined. Location sharing is off.',
+    };
+  }
   switch (failure.reason) {
     case 'declined':
       return failure.verified
         ? {
             status: 'FIGURES DID NOT MATCH',
-            detail:
-              'The other phone reported a different figure, so nothing was shared. If you were both looking at the same screens, try again — and if it keeps happening, stop and compare in person.',
+            detail: 'The other phone reported a different figure, so nothing was shared.',
           }
         : {
             status: 'THEY DECLINED',
@@ -114,14 +119,13 @@ export function describePairingFailure(failure: PairingFailure): PairingFailureC
     case 'expired':
       return {
         status: 'CHECK RAN OUT OF TIME',
-        detail:
-          'The visual check closed before both people confirmed. Nothing was shared. Start again with both phones in hand.',
+        detail: 'The visual check closed before both people confirmed. Nothing was shared.',
       };
     case 'lost':
       return {
         status: failure.nearby ? 'CONTACT LOST' : 'CONNECTION LOST',
         detail: failure.nearby
-          ? 'The other phone dropped out before pairing finished. Nothing was shared. Keep both phones together and try again.'
+          ? 'The other phone dropped out before pairing finished. Nothing was shared.'
           : 'The other phone dropped out before pairing finished. Nothing was shared. Make a new link and send it again.',
       };
   }

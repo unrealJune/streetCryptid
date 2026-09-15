@@ -1,17 +1,16 @@
-import { useColorScheme } from 'react-native';
-
+import { useColorScheme } from '@/hooks/use-color-scheme';
 import { CryptidThemes } from '@/constants/theme';
-import { ProfileOnboardingPreview } from '@/features/account/components/profile-onboarding-preview';
 import { DEV_TELEMETRY_ENABLED } from '@/features/dev/telemetry';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 
 import { DebugLocationControls } from '../components/debug-location-controls';
+import { FriendConnectionDetailsRow } from '../components/friend-connection-details-row';
 import { EventLogPanel } from '../components/event-log-panel';
+import { GlassStatusRow } from '../components/glass-status-row';
 import { SettingsPage, SettingsSection } from '../components/settings-page';
 
 /**
- * The instruments: force a publish, replay first-run onboarding without saving, and
- * read the local event journal.
+ * Force a publish, reveal connection details, and read the local event journal.
  */
 export default function DebugScreen() {
   const scheme = useColorScheme();
@@ -20,17 +19,18 @@ export default function DebugScreen() {
   const { forceLocationPush } = useLocationSharing();
 
   return (
-    <SettingsPage title="Debug" subtitle="Instruments, not settings">
+    <SettingsPage title="Debug" backLabel="Advanced">
+      <FriendConnectionDetailsRow accent={chrome.green} />
+      <SettingsSection label="LIQUID GLASS">
+        <GlassStatusRow accent={chrome.green} warningColor={chrome.amber} />
+      </SettingsSection>
+
       <SettingsSection label="LOCATION">
         <DebugLocationControls
           accent={chrome.green}
           warningColor={chrome.amber}
           onPush={forceLocationPush}
         />
-      </SettingsSection>
-
-      <SettingsSection label="ONBOARDING">
-        <ProfileOnboardingPreview accent={chrome.green} />
       </SettingsSection>
 
       {/* The journal does not exist in a stripped build, so the viewer would render a

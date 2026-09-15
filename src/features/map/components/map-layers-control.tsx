@@ -1,8 +1,12 @@
+import { GlassContainer } from 'expo-glass-effect';
 import { SymbolView } from 'expo-symbols';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import type { CryptidTheme } from '@/constants/cryptid-theme';
 import { Spacing } from '@/constants/theme';
+
+import { formatColor, parseColor } from '../theme/derive-chrome';
+import { FAB_RADIUS, IslandPressable, islandStyles, useGlassAvailable } from './glass-surface';
 
 /** The map layers this control switches. */
 export interface MapLayerToggles {
@@ -39,6 +43,23 @@ const LAYERS: { readonly id: MapLayerId; readonly title: string }[] = [
   { id: 'structures', title: 'Buildings' },
 ];
 
+const ROW_RADIUS = 12;
+
+/**
+ * How far apart two glass surfaces still pull on each other. At this distance the rows and the
+ * button read as drops of the same liquid rather than as a stack of separate panels — which is
+ * the one thing the material does that a translucent rectangle cannot.
+ */
+const GLASS_MERGE_SPACING = 24;
+
+/** A tint strong enough to say "lit" and weak enough to still be a window. */
+const LIT_TINT_ALPHA = 0.22;
+
+function tint(color: string, alpha: number): string | undefined {
+  const parsed = parseColor(color);
+  return parsed ? formatColor(parsed.rgb, alpha) : undefined;
+}
+
 /** A compact map-layer control that expands in place instead of opening a modal. */
 export function MapLayersControl({
   layers,
@@ -48,11 +69,14 @@ export function MapLayersControl({
   onExpandedChange,
 }: MapLayersControlProps) {
   const { chrome } = theme;
+  const glass = useGlassAvailable();
   // The FAB reads lit while anything the panel can switch off is still on.
   const anyEnabled = LAYERS.some((layer) => layers[layer.id]);
 
   return (
-    <View pointerEvents="box-none" style={styles.control}>
+    // One container, so that opening the panel is the button growing rather than four panels
+    // appearing next to it. Off iOS 26 this is a plain View and the layout is unchanged.
+    <GlassContainer pointerEvents="box-none" spacing={GLASS_MERGE_SPACING} style={styles.control}>
       {/* Panel first so it expands UPWARD out of the button. The control sits at
           the bottom of the screen, so downward has nowhere to go — it would open
           off-screen behind the island. */}
@@ -70,27 +94,26 @@ export function MapLayersControl({
         </View>
       ) : null}
 
-      <Pressable
+      <IslandPressable
         accessibilityLabel="Map layers"
         accessibilityRole="button"
         accessibilityState={{ expanded }}
+        // Open is said with the border off glass and with the material's own tint on it: an amber
+        // hairline around a pane of amber-tinted glass is one statement made twice.
+        borderColor={expanded && !glass ? chrome.amber : undefined}
         onPress={() => onExpandedChange(!expanded)}
-        style={({ pressed }) => [
-          styles.fab,
-          {
-            backgroundColor: chrome.island,
-            borderColor: expanded ? chrome.amber : chrome.islandBorder,
-            opacity: pressed ? 0.68 : 1,
-          },
-        ]}
+        radius={FAB_RADIUS}
+        style={islandStyles.fab}
+        theme={theme}
+        tintColor={expanded ? tint(chrome.amber, LIT_TINT_ALPHA) : undefined}
       >
         <SymbolView
           name={{ ios: 'square.3.layers.3d', android: 'layers', web: 'layers' }}
           size={21}
           tintColor={anyEnabled ? chrome.amber : chrome.steel}
         />
-      </Pressable>
-    </View>
+      </IslandPressable>
+    </GlassContainer>
   );
 }
 
@@ -111,19 +134,14 @@ function LayerToggle({
 }) {
   const { chrome } = theme;
   return (
-    <Pressable
+    <IslandPressable
       accessibilityLabel={`${label} layer`}
       accessibilityRole="checkbox"
       accessibilityState={{ checked }}
       onPress={() => onChange(!checked)}
-      style={({ pressed }) => [
-        styles.row,
-        {
-          backgroundColor: chrome.island,
-          borderColor: chrome.islandBorder,
-          opacity: pressed ? 0.68 : 1,
-        },
-      ]}
+      radius={ROW_RADIUS}
+      style={styles.row}
+      theme={theme}
     >
       <Text style={[styles.title, { color: chrome.ink }]}>{label}</Text>
       <View
@@ -143,7 +161,7 @@ function LayerToggle({
           />
         ) : null}
       </View>
-    </Pressable>
+    </IslandPressable>
   );
 }
 
@@ -157,9 +175,6 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
   },
   row: {
-    alignItems: 'center',
-    borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
     flexDirection: 'row',
     gap: Spacing.three,
     minHeight: 44,
@@ -178,13 +193,5 @@ const styles = StyleSheet.create({
     height: 20,
     justifyContent: 'center',
     width: 20,
-  },
-  fab: {
-    alignItems: 'center',
-    borderRadius: 24,
-    borderWidth: StyleSheet.hairlineWidth,
-    height: 48,
-    justifyContent: 'center',
-    width: 48,
   },
 });

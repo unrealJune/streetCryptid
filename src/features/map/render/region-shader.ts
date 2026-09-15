@@ -18,6 +18,7 @@ import {
 } from '@shopify/react-native-skia';
 
 import { buildPaletteLut } from '../core/region';
+import { lineDotIntervals } from '../core/dot-style';
 import type { RoadLayerOptions } from '../core/road-lod';
 import type { AeroAreaKind, AeroLineKind, MapPalette, Rgb, TransitMode } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
@@ -28,7 +29,7 @@ import { getDotFieldEffect } from './dot-field-shader';
 import { buildMaskImage } from './mask-image';
 import { buildHatchPath, buildStructurePaths } from './structure-paths';
 import { buildTransitPaths } from './transit-paths';
-import { FERRY_DASH, transitWidthFor } from '../core/transit-lod';
+import { TRANSIT_ALPHA, TRANSIT_CASING_ALPHA, transitWidthFor } from '../core/transit-lod';
 import {
   AERODROME_DASH,
   AERODROME_STROKE_WIDTH,
@@ -68,21 +69,6 @@ const RIM_ALPHA = 0.42;
 const AERO_AREA_DRAW_ORDER: readonly AeroAreaKind[] = ['apron', 'aerodrome'];
 const AERO_LINE_DRAW_ORDER: readonly AeroLineKind[] = ['taxiway', 'runway'];
 
-/**
- * Transit-line opacity per mode. Rapid transit (subway/light rail/monorail) is
- * the spine people navigate by, so it reads strongest; heavy rail, trams and
- * ferries sit back a step so the layer never competes with the dot field.
- */
-const TRANSIT_ALPHA: Record<TransitMode, number> = {
-  rail: 0.5,
-  subway: 0.82,
-  light_rail: 0.82,
-  tram: 0.58,
-  monorail: 0.72,
-  funicular: 0.58,
-  ferry: 0.5,
-};
-
 /** Wrap a tightly-packed opaque RGBA8888 buffer as an SkImage. */
 function imageFromRgba(data: Uint8Array, width: number, height: number): SkImage | null {
   const bytes = Skia.Data.fromBytes(data);
@@ -120,7 +106,7 @@ export interface RegionImageInput {
   readonly reveal?: number;
   /** Show the explored/unexplored fog treatment (default true). */
   readonly explorationEnabled?: boolean;
-  /** Stroke the transit lines over the dot field (default false). */
+  /** Draw dotted transit routes over the dot field (default false). */
   readonly transitEnabled?: boolean;
   /** Draw building footprints and aeroway surfaces over the dot field (default false). */
   readonly structuresEnabled?: boolean;
@@ -261,8 +247,8 @@ function drawCellOverlays(
 
 /**
  * Building footprints and aeroway surfaces over the dot field, in region-logical
- * coords. Vectors for the same reason transit is: the dot lattice would scatter
- * an outline into unrelated dots.
+ * coords. Footprints keep their crisp outlines; runway dots follow their paths
+ * instead of snapping to the terrain lattice.
  *
  * Drawn back to front — apron fill, aerodrome boundary, taxiways, runways, then
  * buildings (see {@link AERO_AREA_DRAW_ORDER}) — so the ground reads first and
@@ -318,6 +304,11 @@ function drawStructures(
     if (width === null || !svg) continue;
     const path = Skia.Path.MakeFromSVGString(svg);
     if (!path) continue;
+    // Both kinds are plain solid strokes. A runway drawn as a chain of 4px
+    // round dots was the loudest mark on any region that contained an airport —
+    // louder than the motorways beside it — for a surface that is, to someone
+    // walking around a city, just a very long stretch of tarmac. It reads as
+    // road now, because that is what it is.
     const paint = strokePaint(ink, width, AERO_LINE_ALPHA[kind] * reveal);
     paint.setStrokeCap(StrokeCap.Round);
     canvas.drawPath(path, paint);
@@ -414,9 +405,9 @@ function fillPaint(rgb: Rgb, alpha: number): SkPaint {
 
 /**
  * Transit lines over the dot field, in region-logical coords (the canvas scale
- * maps them to device px). Vectors rather than mask coverage on purpose: the
- * dot lattice would break a continuous rail line into an unreadable dotted
- * trail. Fades with `reveal` alongside the cell overlays.
+ * maps them to device px). Each mode draws twice from ONE batched path: a
+ * continuous casing, then round dots over it. Still no per-dot geometry and no
+ * per-frame work. Fades with `reveal` alongside the cell overlays.
  */
 function drawTransitLines(
   canvas: SkCanvas,
@@ -435,13 +426,16 @@ function drawTransitLines(
     if (width === null || !svg) continue;
     const path = Skia.Path.MakeFromSVGString(svg);
     if (!path) continue;
-    const paint = strokePaint(palette.transit, width, TRANSIT_ALPHA[mode] * reveal);
-    // Ferries are a route over open water, not track — dash them so they read
-    // as a crossing rather than a rail line.
-    if (mode === 'ferry') {
-      const effect = Skia.PathEffect.MakeDash([FERRY_DASH[0], FERRY_DASH[1]]);
-      if (effect) paint.setPathEffect(effect);
-    }
+    const alpha = TRANSIT_ALPHA[mode] * reveal;
+    // The casing goes down whether or not the dots can: a solid route is a
+    // worse transit line than a dotted one, but an ABSENT one is worse still.
+    const casing = strokePaint(palette.transit, width, alpha * TRANSIT_CASING_ALPHA);
+    casing.setStrokeCap(StrokeCap.Round);
+    canvas.drawPath(path, casing);
+    const paint = strokePaint(palette.transit, width, alpha);
+    const dots = Skia.PathEffect.MakeDash(lineDotIntervals(width));
+    if (!dots) continue;
+    paint.setPathEffect(dots);
     paint.setStrokeCap(StrokeCap.Round);
     canvas.drawPath(path, paint);
   }

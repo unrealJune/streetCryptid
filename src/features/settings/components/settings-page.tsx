@@ -5,17 +5,19 @@ import { SymbolView } from 'expo-symbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
-import { MaxContentWidth, Spacing } from '@/constants/theme';
+import { BrandFonts, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
 interface SettingsPageProps {
   readonly title: string;
-  readonly subtitle: string;
+  readonly testID?: string;
+  readonly subtitle?: string;
   /**
    * `root` is the menu itself: it owns the sheet, so it closes it. `sub` is one
    * menu deep and pops back to the menu instead.
    */
-  readonly kind?: 'root' | 'sub';
+  readonly kind?: 'root' | 'sub' | 'onboarding';
+  readonly backLabel?: string;
   readonly children: ReactNode;
 }
 
@@ -30,13 +32,21 @@ interface SettingsPageProps {
  * level. Maestro keys on those two accessibility labels — see
  * `.maestro/pairing/close-settings.yaml`.
  */
-export function SettingsPage({ title, subtitle, kind = 'sub', children }: SettingsPageProps) {
+export function SettingsPage({
+  title,
+  testID,
+  subtitle,
+  kind = 'sub',
+  backLabel = 'Settings',
+  children,
+}: SettingsPageProps) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
 
   return (
     <ScrollView
+      testID={testID}
       style={{ backgroundColor: theme.background }}
       contentContainerStyle={[
         styles.content,
@@ -48,7 +58,7 @@ export function SettingsPage({ title, subtitle, kind = 'sub', children }: Settin
     >
       {kind === 'sub' ? (
         <Pressable
-          accessibilityLabel="Back to settings"
+          accessibilityLabel={`Back to ${backLabel.toLowerCase()}`}
           accessibilityRole="button"
           hitSlop={8}
           onPress={() => router.back()}
@@ -59,18 +69,20 @@ export function SettingsPage({ title, subtitle, kind = 'sub', children }: Settin
             size={15}
             tintColor={theme.textSecondary}
           />
-          <ThemedText type="smallBold" themeColor="textSecondary" style={styles.backLabel}>
-            SETTINGS
+          <ThemedText themeColor="textSecondary" style={styles.backLabel}>
+            {backLabel.toUpperCase()}
           </ThemedText>
         </Pressable>
       ) : null}
 
       <View style={styles.header}>
         <View style={styles.headerCopy}>
-          <ThemedText type="subtitle">{title}</ThemedText>
-          <ThemedText type="small" themeColor="textSecondary">
-            {subtitle}
-          </ThemedText>
+          <ThemedText style={styles.title}>{title.toUpperCase()}</ThemedText>
+          {subtitle ? (
+            <ThemedText type="small" themeColor="textSecondary">
+              {subtitle}
+            </ThemedText>
+          ) : null}
         </View>
         {kind === 'root' ? (
           <Pressable
@@ -105,11 +117,18 @@ export function SettingsSection({
   readonly label: string;
   readonly children: ReactNode;
 }) {
+  const theme = useTheme();
+
   return (
     <View style={styles.section}>
-      <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionLabel}>
-        {label}
-      </ThemedText>
+      {/* The rule is the section, not the word above it. It is what separates one group
+          of rows from the next on a page whose rows are already hairline-separated, and
+          it is the device the design reference uses under IDENTITY / LOCATION. */}
+      <View style={[styles.sectionRule, { borderColor: theme.backgroundSelected }]}>
+        <ThemedText themeColor="textSecondary" style={styles.sectionLabel}>
+          {label.toUpperCase()}
+        </ThemedText>
+      </View>
       {children}
     </View>
   );
@@ -118,7 +137,10 @@ export function SettingsSection({
 const styles = StyleSheet.create({
   content: {
     alignSelf: 'center',
-    gap: Spacing.five,
+    // Spacing.five was calibrated when the title and every menu row carried a
+    // subtitle under it. With those gone the page was mostly air between four
+    // short lines, so the section rhythm comes in one step to match.
+    gap: Spacing.four,
     maxWidth: MaxContentWidth,
     paddingHorizontal: Spacing.four,
     width: '100%',
@@ -128,11 +150,25 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     flexDirection: 'row',
     gap: Spacing.one,
-    marginBottom: -Spacing.four,
+    // Pulls the back link up against the title rather than a full section step
+    // away from it; the negative tracks `content.gap` and must move with it.
+    marginBottom: -Spacing.three,
     minHeight: 32,
   },
   backLabel: {
-    letterSpacing: 1,
+    fontFamily: BrandFonts.data,
+    fontSize: 10.5,
+    fontWeight: '500',
+    letterSpacing: 1.6,
+    lineHeight: 14,
+  },
+  title: {
+    fontFamily: BrandFonts.display,
+    fontSize: 34,
+    // Stated as well as named — see the note in `settings-menu-row.tsx`.
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    lineHeight: 38,
   },
   header: {
     alignItems: 'flex-start',
@@ -155,7 +191,15 @@ const styles = StyleSheet.create({
   section: {
     gap: Spacing.two,
   },
+  sectionRule: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingBottom: Spacing.one,
+  },
   sectionLabel: {
-    letterSpacing: 1,
+    fontFamily: BrandFonts.data,
+    fontSize: 10.5,
+    fontWeight: '500',
+    letterSpacing: 1.6,
+    lineHeight: 14,
   },
 });

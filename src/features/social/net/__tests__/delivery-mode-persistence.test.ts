@@ -1,4 +1,5 @@
 import { InMemoryKV } from '../background/persistent-kv';
+import { NEW_USER_DELIVERY_MODE } from '../../core/delivery-mode';
 import { loadDeliveryMode, loadStashOptIn, saveDeliveryMode, saveStashOptIn } from '../persistence';
 
 describe('delivery mode persistence', () => {
@@ -12,6 +13,22 @@ describe('delivery mode persistence', () => {
       await saveDeliveryMode(kv, mode);
       expect(await loadDeliveryMode(kv)).toBe(mode);
     }
+  });
+
+  it('uses stash for new-user onboarding without changing existing-user defaults', async () => {
+    const kv = new InMemoryKV();
+    expect(await loadDeliveryMode(kv, NEW_USER_DELIVERY_MODE)).toBe('stash');
+    expect(await loadDeliveryMode(kv)).toBe('mutual');
+  });
+
+  it('preserves explicit and legacy choices when onboarding requests the new default', async () => {
+    const kv = new InMemoryKV();
+    await saveStashOptIn(kv, false);
+    expect(await loadDeliveryMode(kv, NEW_USER_DELIVERY_MODE)).toBe('mutual');
+    await saveDeliveryMode(kv, 'mutual');
+    expect(await loadDeliveryMode(kv, NEW_USER_DELIVERY_MODE)).toBe('mutual');
+    await saveDeliveryMode(kv, 'stash');
+    expect(await loadDeliveryMode(kv, NEW_USER_DELIVERY_MODE)).toBe('stash');
   });
 
   describe('migration off the legacy boolean', () => {

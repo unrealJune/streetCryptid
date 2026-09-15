@@ -23,6 +23,7 @@ import {
   TAB_BAR_HEIGHT,
   type DrawerDetent,
 } from '../core/drawer-detents';
+import { GlassFill, useGlassAvailable } from './glass-surface';
 import { IslandTabs, type IslandTab } from './island-tabs';
 
 export type { DrawerDetent };
@@ -37,7 +38,26 @@ const DOCK_SPAN = 72;
 const SETTLE = { damping: 26, stiffness: 240, mass: 0.9 } as const;
 
 /** Corner radius at peek/mid, matching the island this drawer grew out of. */
-const ISLAND_RADIUS = 26;
+const ISLAND_RADIUS = 24;
+
+/**
+ * Gap under the island at rest: the bottom inset itself, so the surface stops ABOVE the system's
+ * bar rather than behind it.
+ *
+ * The drawer once floated `insetBottom + Spacing.three` up — 46pt of empty canvas, none of it map
+ * and none of it island — and the correction overshot: hugging the edge at a flat 8pt and keeping
+ * the handle clear from INSIDE the sheet put the home indicator in the strip between the island's
+ * bottom edge and the ME/FRIENDS row, where it read as a band of dead island under the tabs. The
+ * island now ends where that band began, and the bar sits on the map, which is the only surface it
+ * has ever belonged on. On a device with no bottom inset there is nothing to clear and only the
+ * minimum gap remains.
+ *
+ * The tab row still sits the same distance from the screen's edge at EVERY detent: as the sheet
+ * docks it gives up the whole of that margin and the row takes exactly that much padding back. The
+ * bar is the app's only navigation and it is present at every height — having it drift upward as
+ * the drawer opened made the one fixed thing on screen the thing that moved.
+ */
+const MIN_EDGE_GAP = Spacing.two;
 
 interface MapDrawerProps {
   readonly children: ReactNode;
@@ -97,6 +117,7 @@ export function MapDrawer({
   onSelectTab,
 }: MapDrawerProps) {
   const { chrome } = theme;
+  const glass = useGlassAvailable();
   const [peekBody, setPeekBody] = useState(0);
   // The tab bar as laid out, not as estimated. `peek` is body + chrome and the bar is then laid
   // out inside that total, so a chrome figure a hairline under the truth hands the body a
@@ -117,7 +138,13 @@ export function MapDrawer({
   // be a handle on a surface that cannot move. Minimized, that is also what turns the drawer back
   // into the bare bubble the island used to collapse to.
   const hasGrip = detents.length > 1;
-  const bodyChrome = drawerChrome(hasGrip ? GRIP_HEIGHT : 0, tabBarHeight);
+  // How far the whole surface floats above the screen's edge at rest. The inset is the system
+  // bar's own band, so clearing it is what keeps that bar off the island entirely.
+  const restMargin = Math.max(insetBottom, MIN_EDGE_GAP);
+  // The tab row is flush with the drawer's bottom edge at rest — the clearance is the margin
+  // underneath it now, which is outside the drawer and so costs the body nothing.
+  const tabChrome = tabBarHeight;
+  const bodyChrome = drawerChrome(hasGrip ? GRIP_HEIGHT : 0, tabChrome);
   const heights = useMemo(
     () =>
       detentHeights({
@@ -127,9 +154,9 @@ export function MapDrawer({
         insetBottom,
         margin: Spacing.three,
         gripHeight: hasGrip ? GRIP_HEIGHT : 0,
-        tabBarHeight,
+        tabBarHeight: tabChrome,
       }),
-    [peekBody, screenHeight, insetTop, insetBottom, hasGrip, tabBarHeight]
+    [peekBody, screenHeight, insetTop, insetBottom, hasGrip, tabChrome]
   );
   const resolved = heights[detents.includes(detent) ? detent : topDetent];
   /**
@@ -238,7 +265,7 @@ export function MapDrawer({
       // The island becomes a sheet across the last stretch of travel: side inset, bottom radius
       // and side borders fall away together, so it reads as one surface docking.
       marginHorizontal: Spacing.three * (1 - dock),
-      marginBottom: (insetBottom + Spacing.three) * (1 - dock),
+      marginBottom: restMargin * (1 - dock),
       borderBottomLeftRadius: ISLAND_RADIUS * (1 - dock),
       borderBottomRightRadius: ISLAND_RADIUS * (1 - dock),
       borderBottomWidth: StyleSheet.hairlineWidth * (1 - dock),
@@ -246,14 +273,16 @@ export function MapDrawer({
       borderRightWidth: StyleSheet.hairlineWidth * (1 - dock),
     };
   });
-  // The tab bar clears the home indicator only once the drawer has docked; before that the
-  // drawer's own bottom margin is already doing it.
+  // At rest the margin under the drawer is the whole of the clearance and the row needs no padding
+  // of its own; a docked sheet has no margin left, so the row takes on exactly what the margin
+  // gives up. Either way the row's distance from the screen's bottom edge is the same at peek and
+  // at full, and the bar does not travel.
   const tabPadStyle = useAnimatedStyle(() => {
     const dock =
       heights[topDetent] > heights[detents[0]]
         ? interpolate(height.value, [heights.full - DOCK_SPAN, heights.full], [0, 1], 'clamp')
         : 0;
-    return { paddingBottom: insetBottom * dock };
+    return { paddingBottom: restMargin * dock };
   });
 
   const measureTabs = useCallback((event: LayoutChangeEvent) => {
@@ -291,10 +320,24 @@ export function MapDrawer({
     <Animated.View
       style={[
         styles.drawer,
-        { backgroundColor: chrome.island, borderColor: chrome.islandBorder },
+        {
+          backgroundColor: glass ? 'transparent' : chrome.island,
+          borderColor: chrome.islandBorder,
+        },
         dockStyle,
       ]}
     >
+      {/* A flat fill under everything, clipped to the drawer's animated shape by the
+          `overflow: hidden` above. The glass deliberately does NOT own the radii: Reanimated
+          drives the dock interpolation on the UI thread and cannot push per-frame values into a
+          native custom prop, so letting the material carry `borderBottomLeftRadius` would mean
+          crossing to JS every frame of a drag. Its own corner configuration is the island's, which
+          is the shape it actually has at peek and mid; at full the bottom corners are square and
+          the parent's clip is what says so. */}
+      {glass ? (
+        <GlassFill pointerEvents="none" radius={ISLAND_RADIUS} scheme={theme.scheme} />
+      ) : null}
+
       <View style={styles.sheet}>
         {hasGrip ? (
           <GestureDetector gesture={pans.grip}>
@@ -317,8 +360,6 @@ export function MapDrawer({
           <View style={styles.body}>
             <GestureDetector gesture={nativeScroll}>
               <ScrollView
-                accessibilityElementsHidden={detent === 'collapsed'}
-                importantForAccessibility={detent === 'collapsed' ? 'no-hide-descendants' : 'auto'}
                 // iOS bounces a ScrollView vertically even when its content fits, which made the
                 // ME panel — a body that always fits its own detent — feel like a list that had
                 // somewhere to go and then sprang back. Bounce only when there is genuinely more
