@@ -6,6 +6,7 @@ import { useLocationSharing } from '@/features/social/hooks/use-location-sharing
 import { DebugLocationControls } from '../components/debug-location-controls';
 import { FriendConnectionDetailsRow } from '../components/friend-connection-details-row';
 import { EventLogPanel } from '../components/event-log-panel';
+import { GlassStatusRow } from '../components/glass-status-row';
 import { SettingsPage, SettingsSection } from '../components/settings-page';
 
 /**
@@ -20,6 +21,10 @@ export default function DebugScreen() {
   return (
     <SettingsPage title="Debug" backLabel="Advanced">
       <FriendConnectionDetailsRow accent={chrome.green} />
+      <SettingsSection label="LIQUID GLASS">
+        <GlassStatusRow accent={chrome.green} warningColor={chrome.amber} />
+      </SettingsSection>
+
       <SettingsSection label="LOCATION">
         <DebugLocationControls
           accent={chrome.green}
