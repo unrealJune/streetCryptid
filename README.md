@@ -30,9 +30,9 @@ and markers are all derived by the shipping code.</sub>
 
 ## What it is
 
-streetCryptid is a privacy focused location sharing app that operates over peer to peer networks. 
-It is able to contact other devices directly, allowing for location updates to be sent without 
-any servers in the chain. No tracking or data collection, and all dependency servers for map hosting and (optional) offline delivery can be self hosted. 
+streetCryptid is a privacy focused location sharing app that operates over peer to peer networks.
+It is able to contact other devices directly, allowing for location updates to be sent without
+any servers in the chain. No tracking or data collection, and all dependency servers for map hosting and (optional) offline delivery can be self hosted.
 
 It runs in the background at a low ping rate, so you are not operating it most of the time; you
 open it to _browse_ the territory you have accumulated. A low-battery background ping acquires a

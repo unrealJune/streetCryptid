@@ -44,7 +44,7 @@ describe('streets mask', () => {
     };
     const masks = buildFeatureMasks(packGeometry(geo), camera, viewport);
 
-    expect(sample(masks.streets, 50, sy)).toBe(ROAD_VALUES[4]); // 245
+    expect(sample(masks.streets, 50, sy)).toBe(ROAD_VALUES[4]);
     expect(sample(masks.parks, 50, sy)).toBe(0);
     expect(sample(masks.water, 50, sy)).toBe(0);
   });
@@ -106,7 +106,8 @@ describe('streets mask – class layering', () => {
       ],
     };
     const masks = buildFeatureMasks(packGeometry(geo), hiCamera, viewport);
-    expect(sample(masks.streets, 50, 50)).toBe(ROAD_VALUES[3]); // 225, not 205
+    // max-blend, so the higher class wins the overlap
+    expect(sample(masks.streets, 50, 50)).toBe(ROAD_VALUES[3]);
   });
 });
 
