@@ -66,8 +66,20 @@ export function CoverageIsland({
     ? `${hero}. ${pct} percent of visible sectors explored.`
     : `${hero}. Sector coverage is hidden at this zoom.`;
 
+  // The DETENT decides the body's shape; `sectorsVisible` only decides whether the bar is in it.
+  //
+  // These were one condition, and past the exploration cutoff that put the one-line body into
+  // `islandBody.minimized` — a height pinned to `COLLAPSED_BODY_HEIGHT`, which is the row PLUS one
+  // grip's worth of air, top-aligned because at `collapsed` the grip strip above supplies the
+  // matching margin. But the cutoff is not the collapsed detent: it takes `collapsed` away
+  // entirely, which leaves the drawer with a single stop and therefore no grip. So the body was
+  // reserving 16pt for a handle that was not rendered, and the place name sat hard against the top
+  // of the island with a band of dead surface under it.
   return (
-    <View style={showSectors ? islandBody.expanded : islandBody.minimized}>
+    <View
+      style={minimized ? islandBody.minimized : islandBody.expanded}
+      testID="coverage-island-body"
+    >
       <View style={islandBody.header}>
         <View
           accessible
