@@ -105,6 +105,14 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
   crossing four tiles is still one road), rotated to the road's heading, colliding labels
   dropped rather than stacked. Park names sit on the polygon centroid, gated on on-screen
   area. Mono, uppercase, letter-spaced — the map's text is data, not chrome.
+- **Place names arrive with the zoom and then LEAVE again.** City, town and state names are the
+  one label kind gated by a band rather than a floor (`PLACE_LABEL_BANDS`): a name is only useful
+  while the thing it names is bigger than the screen is showing, so SEATTLE is what a Puget Sound
+  view is called and is gone by the time the street names have arrived to say it better. The
+  drawer's headline follows the same ladder — neighbourhood, city, state, country — so the panel
+  and the canvas always agree about what the camera is looking at. Which state you are in is
+  answered by the nearest state label point, so it is a Voronoi cell and not a containment test;
+  within ~50 km of a border it can name the neighbour, and fixing that needs real admin polygons.
 - **Buildings obey exploration.** Revealed footprints retain their fill, hatch and
   outline. Outside revealed hexes, footprints are desaturated silhouettes at 24% of
   normal opacity with no interior hatch. A building crossing the frontier is clipped

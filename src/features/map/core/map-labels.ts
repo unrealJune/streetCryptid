@@ -26,7 +26,7 @@ import { CLASS_MIN_ZOOM } from './road-lod';
 import type { WorldPoint } from './types';
 import type { PackedAreas, PackedGeometry, PackedStreets } from '../tiles/packed-geometry';
 
-export type MapLabelKind = 'street' | 'area' | 'poi' | 'transit' | 'housenumber';
+export type MapLabelKind = 'street' | 'area' | 'poi' | 'transit' | 'housenumber' | 'place';
 
 /** One placed label: where it goes in world space and how it is turned. */
 export interface MapLabel {
@@ -71,6 +71,57 @@ export const POI_LABEL_MIN_ZOOM = 13.5;
  * single block fills the screen.
  */
 export const HOUSENUMBER_MIN_ZOOM = 17;
+
+/**
+ * Camera-zoom band in which an OMT `place` class earns a chip — the "city nodes" half of
+ * DESIGN.md's region view, which the tiles have always carried and nothing ever drew.
+ *
+ * A BAND, not a floor, which is what makes this different from every other label kind here. The
+ * rest of the map's names appear as you come down and stay; a place name is only useful while the
+ * thing it names is bigger than the screen is showing. SEATTLE across a Puget Sound view is the
+ * map telling you what you are looking at; the same chip pinned to a downtown block is noise on
+ * top of the street names that have by then arrived to say it better. The upper bounds are
+ * therefore set where the next kind of name takes over — `city` ends at 12.5, exactly where
+ * {@link LABEL_MIN_ZOOM} starts naming secondary roads.
+ *
+ * Localities finer than `town` are deliberately absent. They would land at the default opening
+ * zoom (z15) on top of a view that is already labelled, and nothing here needs them yet.
+ */
+export const PLACE_LABEL_BANDS: Readonly<Record<string, readonly [number, number]>> = {
+  country: [0, 5.0],
+  state: [3.5, 9.0],
+  province: [3.5, 9.0],
+  region: [3.5, 9.0],
+  island: [6.0, 11.0],
+  city: [4.5, 12.5],
+  town: [7.5, 12.5],
+};
+
+/**
+ * Coarsest-first, so a state chip is placed before the cities inside it and a city before the
+ * towns around it. The collision pass is greedy, so this order IS the priority.
+ */
+const PLACE_CLASS_ORDER: readonly string[] = [
+  'country',
+  'state',
+  'province',
+  'region',
+  'island',
+  'city',
+  'town',
+];
+
+/** At most this many place chips — the region view is a shape to recognize, not a gazetteer. */
+const MAX_PLACE_LABELS = 12;
+
+/**
+ * How many OMT place ranks to admit at `zoom` (1-based, lower = more prominent). Doubling every
+ * two zoom levels: a continental view shows the two or three names that carry it, and a county
+ * view shows the towns as well as the cities.
+ */
+export function placeRankBudget(zoom: number): number {
+  return Math.max(1, Math.round(2 * Math.pow(2, (zoom - 4) / 2)));
+}
 
 /**
  * OMT `poi` classes that are street furniture, and never earn a name at all.
@@ -172,6 +223,7 @@ interface PlacedBox {
  */
 export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): MapLabel[] {
   const pxPerWorld = scaleFor(spec.zoom);
+  const places = placeCandidates(geometry, spec);
   const areas = areaCandidates(geometry, spec, pxPerWorld).slice(0, MAX_AREA_LABELS);
   const streets = streetCandidates(geometry, spec, pxPerWorld);
   const pois = poiCandidates(geometry, spec);
@@ -195,6 +247,14 @@ export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): Map
     });
     return true;
   };
+
+  // Places before everything: in the band where they appear at all, the name of the city IS the
+  // map's headline, and a park inside it must not be allowed to suppress it.
+  let placeCount = 0;
+  for (const candidate of places) {
+    if (placeCount >= MAX_PLACE_LABELS) break;
+    if (tryPlace(candidate)) placeCount++;
+  }
 
   for (const candidate of areas) tryPlace(candidate);
 
@@ -230,6 +290,55 @@ export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): Map
   }
 
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Places (OpenMapTiles `place` points)
+// ---------------------------------------------------------------------------
+
+/**
+ * City, town and state names for the zoomed-out map.
+ *
+ * Reads `geometry.places`, which the tile decoders have always produced and which until now only
+ * the drawer headline consumed (`readout.ts`). Upright, unrotated, no fit gate — a point has no
+ * length to measure a name against — so what keeps the field clean is the class band, the rank
+ * budget and the shared collision pass.
+ */
+function placeCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] {
+  const budget = placeRankBudget(spec.zoom);
+
+  // One chip per name: a place on a tile seam arrives from both tiles, and at these zooms a name
+  // can also repeat across a region (two Springfields) — the nearer wins, as it should.
+  const best = new Map<string, Candidate>();
+  for (const place of geometry.places) {
+    if (!place.name) continue;
+    const band = PLACE_LABEL_BANDS[place.kind];
+    if (!band) continue;
+    if (spec.zoom < band[0] || spec.zoom > band[1]) continue;
+    // An absent rank means the tileset did not rank it; treat it as lowest priority rather than
+    // dropping it, so a bake without ranks still labels.
+    if ((place.rank ?? budget) > budget) continue;
+    const text = place.name.toUpperCase();
+    const priority = -PLACE_CLASS_ORDER.indexOf(place.kind);
+    const existing = best.get(text);
+    if (existing && existing.priority >= priority) continue;
+    best.set(text, {
+      id: `place:${text}`,
+      kind: 'place',
+      text,
+      world: place.world,
+      angle: 0,
+      priority,
+    });
+  }
+
+  // Coarser class first, then nearest the camera — the same argument `poiCandidates` makes about
+  // a region being nine times the view, with the class tier standing in for the rank sort a point
+  // that is merely CLOSE would otherwise win.
+  const cx = (spec.rect.minX + spec.rect.maxX) / 2;
+  const cy = (spec.rect.minY + spec.rect.maxY) / 2;
+  const distSq = (c: Candidate) => (c.world[0] - cx) ** 2 + (c.world[1] - cy) ** 2;
+  return [...best.values()].sort((a, b) => b.priority - a.priority || distSq(a) - distSq(b));
 }
 
 // ---------------------------------------------------------------------------

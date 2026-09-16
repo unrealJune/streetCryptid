@@ -1,6 +1,8 @@
 import { scaleFor } from '../camera';
 import {
   AREA_LABEL_MIN_ZOOM,
+  PLACE_LABEL_BANDS,
+  placeRankBudget,
   HOUSENUMBER_MIN_ZOOM,
   labelWidthPx,
   LABEL_MIN_ZOOM,
@@ -418,5 +420,81 @@ describe('selectMapLabels — house numbers', () => {
       houseNumbers: [number('1200', [0.2, 0.2]), number('1200', [0.8, 0.8])],
     });
     expect(found).toHaveLength(2);
+  });
+});
+
+describe('selectMapLabels — places (the region view: city nodes)', () => {
+  const city = (name: string, world: WorldPoint, rank = 1) => ({
+    name,
+    world,
+    kind: 'city',
+    rank,
+  });
+
+  it('names cities across a region view', () => {
+    const found = labelsAt(8, { places: [city('Seattle', [0.5, 0.5])] });
+    expect(found.map((l) => ({ text: l.text, kind: l.kind }))).toEqual([
+      { text: 'SEATTLE', kind: 'place' },
+    ]);
+  });
+
+  it('hands off to the street names rather than following them down', () => {
+    // A band, not a floor: the same chip pinned to a downtown block is noise on top of the street
+    // names that have by then arrived to say where you are better.
+    const places = [city('Seattle', [0.5, 0.5])];
+    const [, cityMax] = PLACE_LABEL_BANDS.city;
+    expect(labelsAt(cityMax - 0.1, { places }).map((l) => l.text)).toEqual(['SEATTLE']);
+    expect(labelsAt(cityMax + 0.1, { places })).toEqual([]);
+  });
+
+  it('holds a state name back until the camera is showing a state', () => {
+    const places = [
+      { name: 'Washington', world: [0.5, 0.5] as WorldPoint, kind: 'state', rank: 1 },
+    ];
+    const [stateMin, stateMax] = PLACE_LABEL_BANDS.state;
+    expect(labelsAt(stateMin - 0.1, { places })).toEqual([]);
+    expect(labelsAt((stateMin + stateMax) / 2, { places }).map((l) => l.text)).toEqual([
+      'WASHINGTON',
+    ]);
+    expect(labelsAt(stateMax + 0.1, { places })).toEqual([]);
+  });
+
+  it('ignores classes with no band — a suburb is not a region-view name', () => {
+    const places = [{ name: 'Fremont', world: [0.5, 0.5] as WorldPoint, kind: 'suburb', rank: 1 }];
+    expect(labelsAt(8, { places })).toEqual([]);
+  });
+
+  it('spends a coarse view on the names that carry it', () => {
+    // The rank budget is what keeps a continental view from listing every town it can reach.
+    const budget = placeRankBudget(5);
+    const places = [city('Major', [0.5, 0.5], budget), city('Minor', [0.5001, 0.5001], budget + 1)];
+    expect(labelsAt(5, { places }).map((l) => l.text)).toEqual(['MAJOR']);
+  });
+
+  it('places the state before the cities inside it', () => {
+    // Greedy collision: whatever is offered first wins the ground. A city must not be able to
+    // suppress the name of the state it is in.
+    const world: WorldPoint = [0.5, 0.5];
+    const found = labelsAt(8.5, {
+      places: [city('Seattle', world), { name: 'Washington', world, kind: 'state', rank: 1 }],
+    });
+    expect(found.map((l) => l.text)).toEqual(['WASHINGTON']);
+  });
+
+  it('keeps one chip per name when a place straddles a tile seam', () => {
+    const found = labelsAt(8, {
+      places: [city('Seattle', [0.5, 0.5]), city('Seattle', [0.5, 0.5])],
+    });
+    expect(found).toHaveLength(1);
+  });
+
+  it('leaves the street-zoom map exactly as it was', () => {
+    // Nothing in the place bands reaches the default opening zoom, so a view that was already
+    // labelled does not grow a second set of names.
+    const places = [
+      city('Seattle', [0.5, 0.5]),
+      { name: 'Washington', world: [0.5, 0.5] as WorldPoint, kind: 'state', rank: 1 },
+    ];
+    expect(labelsAt(15, { places })).toEqual([]);
   });
 });
