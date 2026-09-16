@@ -16,6 +16,7 @@ import { Spacing } from '@/constants/theme';
 
 import {
   allowedDetents,
+  clampDetent,
   detentHeights,
   drawerChrome,
   GRIP_HEIGHT,
@@ -158,7 +159,20 @@ export function MapDrawer({
       }),
     [peekBody, screenHeight, insetTop, insetBottom, hasGrip, tabChrome]
   );
-  const resolved = heights[detents.includes(detent) ? detent : topDetent];
+  /**
+   * The stop the drawer is ACTUALLY at, which is not always the one the caller thinks it is at.
+   *
+   * `maxDetent`/`minDetent` are props and they move under a resting drawer: zooming past the
+   * exploration cutoff takes `collapsed` away from the ME panel, opening the roster gives `full`
+   * back. The caller's `detent` is not reset when that happens, so it can point at a stop that is
+   * no longer allowed — and everything downstream then disagrees about where the drawer is. Height
+   * resolved one way while the body was styled the other, and `measureBody` (which declines to
+   * measure at `collapsed`) went on feeding `peek` the height of a body that had left the screen:
+   * a one-line panel inside an island sized for the three-line one, with a band of empty glass
+   * under it. Resolve it in ONE place and push the correction back to the caller below.
+   */
+  const effective = clampDetent(detent, detents);
+  const resolved = heights[effective];
   /**
    * Whether the body is a list to be read rather than a summary to be glanced at, and whether that
    * list has anywhere to scroll where the drawer is now.
@@ -170,7 +184,7 @@ export function MapDrawer({
    * That is the whole of the ME panel's remaining bounce: content 118, frame 117.6666, iOS bounce
    * turning a rounding error into a pull that springs back under your finger.
    */
-  const bodyIsList = detent === topDetent;
+  const bodyIsList = effective === topDetent;
   const listScrolls = peekBody > resolved - bodyChrome + 1;
 
   // Settle whenever the resolved height changes: a detent change, a rotation, a body that grew a
@@ -189,6 +203,12 @@ export function MapDrawer({
     // the body is not allowed to modify. `resolved` is the real input.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolved]);
+
+  // Hand the correction back, so the caller's state stops describing a stop that no longer exists.
+  // An effect rather than a render-time call: `onDetentChange` is the parent's setState.
+  useEffect(() => {
+    if (effective !== detent) onDetentChange(effective);
+  }, [detent, effective, onDetentChange]);
 
   const commitDetent = useCallback(
     (next: DrawerDetent) => {
@@ -292,11 +312,11 @@ export function MapDrawer({
 
   const measureBody = useCallback(
     (event: LayoutChangeEvent) => {
-      if (detent === 'collapsed' || gestureActive.value) return;
+      if (effective === 'collapsed' || gestureActive.value) return;
       const measured = Math.ceil(event.nativeEvent.layout.height);
       setPeekBody((current) => (Math.abs(current - measured) > 1 ? measured : current));
     },
-    [detent, gestureActive]
+    [effective, gestureActive]
   );
 
   const onScrollBeginDrag = useCallback(() => {

@@ -55,6 +55,10 @@ export function MapLabelLayer({
         // POIs read as built ground (the `building` ink) rather than as street
         // furniture — they name what the footprints under them are. House
         // numbers use the same ink, dimmed, so they never compete with a name.
+        // Place names take the map's neutral ink, the same one the street names
+        // and the hex lattice wear: in the band where they appear the streets
+        // have no names yet, so this is the only ink on the canvas. Deliberately
+        // NOT the accent — that is the frontier rim's and the YOU locator's.
         const rgb =
           label.kind === 'area'
             ? palette.parkLabel

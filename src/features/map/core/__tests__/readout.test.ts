@@ -79,6 +79,45 @@ describe('nearestPlaceName', () => {
     const places: Place[] = [{ name: 'Road', world: [0.5, 0.5], kind: 'motorway' }];
     expect(nearestPlaceName(places, center)).toBeNull();
   });
+
+  describe('zoom tiers', () => {
+    const places: Place[] = [
+      { name: 'Fremont', world: [0.5, 0.5], kind: 'neighbourhood' },
+      { name: 'Seattle', world: [0.52, 0.52], kind: 'city' },
+      { name: 'Washington', world: [0.6, 0.6], kind: 'state' },
+      { name: 'United States', world: [0.8, 0.8], kind: 'country' },
+    ];
+
+    it('names the neighbourhood you are standing in', () => {
+      expect(nearestPlaceName(places, center, 15)).toBe('Fremont');
+    });
+
+    it('names the city once the neighbourhood is off the screen', () => {
+      expect(nearestPlaceName(places, center, 9)).toBe('Seattle');
+    });
+
+    it('names the state once the camera is showing one', () => {
+      // The whole point of the tier: pulled back to a region, the nearest neighbourhood is a place
+      // you cannot see and did not ask about.
+      expect(nearestPlaceName(places, center, 6)).toBe('Washington');
+    });
+
+    it('names the country from orbit', () => {
+      expect(nearestPlaceName(places, center, 2)).toBe('United States');
+    });
+
+    it('falls through an empty tier rather than answering with an em dash', () => {
+      // A small country has no `state` place at all; a region view of one still has a name.
+      const stateless: Place[] = [{ name: 'Malta', world: [0.5, 0.5], kind: 'country' }];
+      expect(nearestPlaceName(stateless, center, 6)).toBe('Malta');
+    });
+
+    it('still answers about a POINT with its locality, whatever the camera is doing', () => {
+      // `placeNameInRegion` asks about a friend's dot, not about the camera: their neighbourhood
+      // is their neighbourhood however far back you are looking at it from.
+      expect(nearestPlaceName(places, center)).toBe('Fremont');
+    });
+  });
 });
 
 describe('coverageInView', () => {

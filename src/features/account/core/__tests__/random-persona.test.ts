@@ -15,28 +15,44 @@ describe('random persona', () => {
   it('rolls a cryptid, a title, and a color together', () => {
     const persona = randomPersona({ random: sequence([0]) });
 
-    expect(persona.cryptidName).toBe(`${TITLES[0]} ${FORMS[0].creatures[0]}`);
+    expect(persona.cryptidName).toBe(`${TITLES[0]} ${FORMS[0].creature}`);
     expect(persona.sigil).toBe(FORMS[0].render(EYES[0][0], EYES[0][1], MOUTHS[0]));
     // hue 0, saturation at the floor, value 1.
     expect(persona.color).toBe('#FF6161');
   });
 
-  it('every reachable persona fits the profile grid', () => {
+  /**
+   * The name and the drawing are rolled independently, so they are checked
+   * independently: crossing them would be 48 x 24 x 9 x 8 validations to prove
+   * something two loops of 1152 and 3456 already prove.
+   */
+  it('every reachable name fits the profile grid', () => {
+    for (const form of FORMS) {
+      for (const title of TITLES) {
+        const issues = validateCryptidProfileFields({
+          handle: '@tester',
+          cryptidName: `${title} ${form.creature}`,
+          sigil: 'x',
+          color: '#4CFFAB',
+          presetId: null,
+        });
+        expect(issues.cryptidName).toEqual([]);
+      }
+    }
+  });
+
+  it('every reachable drawing fits the profile grid', () => {
     for (const form of FORMS) {
       for (const eyes of EYES) {
         for (const mouth of MOUTHS) {
-          for (const creature of form.creatures) {
-            for (const title of TITLES) {
-              const issues = validateCryptidProfileFields({
-                handle: '@tester',
-                cryptidName: `${title} ${creature}`,
-                sigil: form.render(eyes[0], eyes[1], mouth),
-                color: '#4CFFAB',
-                presetId: null,
-              });
-              expect([...issues.cryptidName, ...issues.sigil]).toEqual([]);
-            }
-          }
+          const issues = validateCryptidProfileFields({
+            handle: '@tester',
+            cryptidName: form.creature,
+            sigil: form.render(eyes[0], eyes[1], mouth),
+            color: '#4CFFAB',
+            presetId: null,
+          });
+          expect(issues.sigil).toEqual([]);
         }
       }
     }
@@ -50,18 +66,19 @@ describe('random persona', () => {
   });
 
   it('rolls a different name than the one it was told to avoid', () => {
-    // The first draw would reproduce the avoided name; the retry moves on.
-    const avoided = `${TITLES[0]} ${FORMS[0].creatures[0]}`;
+    // One roll draws six numbers (form, eyes, title, mouth, hue, saturation), so
+    // the seventh is the retry's form and 0.5 lands it somewhere else in the roster.
+    const avoided = `${TITLES[0]} ${FORMS[0].creature}`;
     const persona = randomPersona({
       avoid: { cryptidName: avoided },
-      random: sequence([0, 0, 0, 0, 0, 0, 0, 0.5]),
+      random: sequence([0, 0, 0, 0, 0, 0, 0.5]),
     });
 
     expect(persona.cryptidName).not.toBe(avoided);
   });
 
   it('gives up rather than looping when every retry collides', () => {
-    const avoided = `${TITLES[0]} ${FORMS[0].creatures[0]}`;
+    const avoided = `${TITLES[0]} ${FORMS[0].creature}`;
     const persona = randomPersona({ avoid: { cryptidName: avoided }, random: () => 0 });
 
     expect(persona.cryptidName).toBe(avoided);

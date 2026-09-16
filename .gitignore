@@ -79,6 +79,10 @@ modules/iroh-location/ios/IrohLocationFFI.xcframework/
 # uploaded, and a listing asset is worth being able to diff.
 store/screenshots/raw/
 
+# `just cryptid-preview` — the roster gallery. Generated from CRYPTID_FORMS on every
+# run, so it is output, never source; regenerate it rather than reading a stale copy.
+store/cryptid-preview/
+
 # `just island-shots` — captures of the drawer at each detent. A working note for
 # reviewing a UI change, not a listing asset; nothing downstream reads them.
 store/island-preview/

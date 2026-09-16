@@ -421,8 +421,10 @@ export function useMapEngine(
   // rungs far below this, they just aren't measurable (see `coverageInView`).
   const sectorsVisible = useMemo(() => coverageMeasurable(camera.zoom), [camera.zoom]);
 
+  // Zoom-aware: the headline names a neighbourhood when the map is showing one and the STATE once
+  // the camera is pulled back past a county's worth of ground. See `headlineTiers` in `readout.ts`.
   const placeName = useMemo(
-    () => (region ? nearestPlaceName(region.places, camera.center) : null),
+    () => (region ? nearestPlaceName(region.places, camera.center, camera.zoom) : null),
     [region, camera]
   );
 

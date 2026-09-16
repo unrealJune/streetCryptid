@@ -44,27 +44,81 @@ export function friendPlaceName(
     : null;
 }
 
+/**
+ * What the headline NAMES, by how far back the camera is.
+ *
+ * A locality is the right answer only while the map is showing one. Pulled back to a whole state
+ * the nearest neighbourhood is a place you cannot see and did not ask about — the answer to "where
+ * am I" is "Washington", which is what the mock's region view says and what the hex ladder is
+ * drawing by then (`cell-ladder.ts` is still on a coarse rung at this zoom; it does not hide until
+ * ~z5.9).
+ *
+ * The bands are camera zooms, not tile zooms: this is a question about what the user is looking at.
+ */
+export const LOCALITY_HEADLINE_MIN_ZOOM = 10.5;
+export const CITY_HEADLINE_MIN_ZOOM = 8;
+export const STATE_HEADLINE_MIN_ZOOM = 3.5;
+
 /** Kinds that make sense as a "where you are" headline, most local first. */
-const PLACE_KINDS = new Set(['neighbourhood', 'suburb', 'quarter', 'village', 'town', 'city']);
+const LOCALITY_KINDS = new Set(['neighbourhood', 'suburb', 'quarter', 'village', 'town', 'city']);
+/** The county/metro band: the nearest real settlement, not the nearest hamlet. */
+const CITY_KINDS = new Set(['city', 'town']);
+/** OMT calls this `state`; some bakes of the schema also emit `province` / `region`. */
+const STATE_KINDS = new Set(['state', 'province', 'region']);
+const COUNTRY_KINDS = new Set(['country']);
 
 /**
- * Nearest prominent place to `center`, for the island headline. Ignores kinds
- * that aren't localities (roads, POIs, …) and compares in squared world space.
+ * The headline tiers at `zoom`, most specific first. A cascade rather than one set, because a
+ * tier can legitimately be empty — a small country has no `state` place at all, and an ocean view
+ * has nothing but the country on its far shore. Falling through beats rendering an em dash.
  */
-export function nearestPlaceName(places: readonly Place[], center: WorldPoint): string | null {
-  let best: Place | null = null;
-  let bestDist = Infinity;
-  for (const place of places) {
-    if (place.kind && !PLACE_KINDS.has(place.kind)) continue;
-    const dx = place.world[0] - center[0];
-    const dy = place.world[1] - center[1];
-    const d = dx * dx + dy * dy;
-    if (d < bestDist) {
-      bestDist = d;
-      best = place;
+function headlineTiers(zoom: number): readonly ReadonlySet<string>[] {
+  if (zoom >= LOCALITY_HEADLINE_MIN_ZOOM)
+    return [LOCALITY_KINDS, CITY_KINDS, STATE_KINDS, COUNTRY_KINDS];
+  if (zoom >= CITY_HEADLINE_MIN_ZOOM) return [CITY_KINDS, STATE_KINDS, COUNTRY_KINDS];
+  if (zoom >= STATE_HEADLINE_MIN_ZOOM) return [STATE_KINDS, COUNTRY_KINDS, CITY_KINDS];
+  return [COUNTRY_KINDS, STATE_KINDS];
+}
+
+/**
+ * Nearest prominent place to `center`, for the island headline. Ignores kinds that aren't places
+ * of the tier `zoom` calls for (roads, POIs, …) and compares in squared world space.
+ *
+ * `zoom` defaults to the locality tier, which is the right answer for the callers that are asking
+ * about a POINT rather than about the camera — a friend's dot is in a neighbourhood no matter how
+ * far back you are looking at it from.
+ *
+ * **The state tier is a Voronoi cell, not a containment test.** OMT gives a state one label POINT,
+ * so "which state is this" is answered by whichever label point is nearest — which is right across
+ * the body of a state and wrong within roughly 50 km of a border (standing in Vancouver WA, the
+ * Oregon label point is the closer of the two). Making it exact needs real admin polygons; the
+ * cheapest source is a bundled low-res Natural Earth admin-1 set, NOT the `boundary` tile layer,
+ * which is lines that would have to be stitched into rings first.
+ */
+export function nearestPlaceName(
+  places: readonly Place[],
+  center: WorldPoint,
+  zoom: number = LOCALITY_HEADLINE_MIN_ZOOM
+): string | null {
+  for (const kinds of headlineTiers(zoom)) {
+    let best: Place | null = null;
+    let bestDist = Infinity;
+    for (const place of places) {
+      // A place the bake left unclassed is admitted only by the locality tier — that is where the
+      // old flat filter let it through, and letting it answer "which state" would put a nameless
+      // point in the region headline.
+      if (place.kind ? !kinds.has(place.kind) : kinds !== LOCALITY_KINDS) continue;
+      const dx = place.world[0] - center[0];
+      const dy = place.world[1] - center[1];
+      const d = dx * dx + dy * dy;
+      if (d < bestDist) {
+        bestDist = d;
+        best = place;
+      }
     }
+    if (best) return best.name;
   }
-  return best?.name ?? null;
+  return null;
 }
 
 /**

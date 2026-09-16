@@ -72,6 +72,30 @@ describe('CoverageIsland', () => {
     expect(findText(renderer, '0%')).toHaveLength(0);
     expect(findText(renderer, 'Capitol Hill')).toHaveLength(1);
   });
+
+  it('does not take the collapsed detent’s shape just because the sectors are hidden', () => {
+    // The cutoff is not the collapsed detent — it takes `collapsed` AWAY, so the drawer has one
+    // stop and renders no grip. Borrowing the collapsed body reserved 16pt for a handle that was
+    // not there, and the place name sat hard against the top of the island.
+    act(() => {
+      renderer = create(island({ minimized: false, sectorsVisible: false, coverage: 0 }));
+    });
+    const atCutoff = renderer.root.findByProps({ testID: 'coverage-island-body' }).props.style;
+
+    act(() => {
+      renderer.update(island({ minimized: true, sectorsVisible: true, coverage: 0.42 }));
+    });
+    const collapsed = renderer.root.findByProps({ testID: 'coverage-island-body' }).props.style;
+
+    expect(atCutoff).not.toEqual(collapsed);
+    // …and it is the same shape the expanded body uses, so the row sits in balanced padding.
+    act(() => {
+      renderer.update(island({ minimized: false, sectorsVisible: true, coverage: 0.42 }));
+    });
+    expect(atCutoff).toEqual(
+      renderer.root.findByProps({ testID: 'coverage-island-body' }).props.style
+    );
+  });
 });
 
 function findText(renderer: ReactTestRenderer, value: string) {

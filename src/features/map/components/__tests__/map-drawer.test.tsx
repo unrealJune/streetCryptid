@@ -234,3 +234,61 @@ describe('MapDrawer body drags', () => {
     expect(mockPans[mockPans.length - 1].isEnabled).toBe(true);
   });
 });
+
+describe('MapDrawer — the allowed range moving under a resting drawer', () => {
+  let renderer: ReactTestRenderer;
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    mockPans.length = 0;
+  });
+
+  function render(minDetent: 'collapsed' | 'peek', onDetentChange: jest.Mock) {
+    act(() => {
+      renderer = create(
+        <MapDrawer
+          activeTab="me"
+          detent="collapsed"
+          minDetent={minDetent}
+          maxDetent="peek"
+          insetBottom={34}
+          insetTop={59}
+          screenHeight={844}
+          signal="#2f9e6a"
+          theme={CryptidThemes.daybreak}
+          onDetentChange={onDetentChange}
+          onSelectTab={jest.fn()}
+        >
+          <Text>Seattle</Text>
+        </MapDrawer>
+      );
+    });
+  }
+
+  // Zooming the map past the exploration cutoff takes `collapsed` away from the ME panel, while
+  // the screen's own detent state still says `collapsed`. The drawer used to resolve its HEIGHT to
+  // peek and say nothing, so the body went on rendering its collapsed one-liner inside an island
+  // sized for the expanded one — and `measureBody`, which declines to measure at `collapsed`, kept
+  // feeding that stale height back. The correction has to reach the caller.
+  it('hands the caller back a detent that has left the allowed range', () => {
+    const onDetentChange = jest.fn();
+    render('peek', onDetentChange);
+    expect(onDetentChange).toHaveBeenCalledWith('peek');
+  });
+
+  it('says nothing while the detent is still allowed', () => {
+    const onDetentChange = jest.fn();
+    render('collapsed', onDetentChange);
+    expect(onDetentChange).not.toHaveBeenCalled();
+  });
+
+  it('measures the body once the drawer is no longer really collapsed', () => {
+    const onDetentChange = jest.fn();
+    render('peek', onDetentChange);
+    // The guard keys on where the drawer actually is, not on the stale prop — otherwise `peek`
+    // keeps the height of a body that has left the screen.
+    act(() => {
+      measuredBody(renderer).props.onLayout({ nativeEvent: { layout: { height: 46 } } });
+    });
+    expect(renderer.root.findByType(ScrollView).props.scrollEnabled).toBe(false);
+  });
+});

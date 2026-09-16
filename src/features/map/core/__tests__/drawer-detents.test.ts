@@ -1,5 +1,6 @@
 import {
   allowedDetents,
+  clampDetent,
   COLLAPSED_BODY_HEIGHT,
   detentHeights,
   pickDetent,
@@ -134,5 +135,28 @@ describe('pickDetent', () => {
   it('measures travel from where the drag began, not from the nearest stop', () => {
     // Released mid-flight between mid and full, having started at mid: 165 of a 330px span.
     expect(pickDetent(615, 0, 450, DETENTS, HEIGHTS)).toBe('full');
+  });
+});
+
+describe('clampDetent — the allowed range moving under a resting drawer', () => {
+  it('leaves an allowed detent exactly where it is', () => {
+    expect(clampDetent('mid', ['peek', 'mid', 'full'])).toBe('mid');
+  });
+
+  it('raises a collapsed ME panel one stop when the exploration cutoff takes collapsed away', () => {
+    // Zooming past the cutoff drops `collapsed` from the range. The panel should rise to `peek`,
+    // not stay pointing at a stop that no longer exists — that mismatch is what left a one-line
+    // body inside an island still sized for the three-line one.
+    expect(clampDetent('collapsed', ['peek'])).toBe('peek');
+  });
+
+  it('lowers a full drawer onto a mid ceiling rather than jumping to the top stop', () => {
+    expect(clampDetent('full', ['peek', 'mid'])).toBe('mid');
+  });
+
+  it('picks the NEAREST allowed stop, not the tallest', () => {
+    // The old fallback resolved every out-of-range detent to `topDetent`, which is only right by
+    // accident when the range shrinks from the top.
+    expect(clampDetent('collapsed', ['peek', 'mid', 'full'])).toBe('peek');
   });
 });
