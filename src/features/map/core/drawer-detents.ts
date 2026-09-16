@@ -175,3 +175,32 @@ export function pickDetent(
   if (velocityY > FLING_SPEED) destination = Math.min(destination, Math.max(fromIndex - 1, 0));
   return detents[destination];
 }
+
+/**
+ * The nearest allowed detent to `detent`, for when the allowed RANGE moves under a drawer that is
+ * already resting somewhere.
+ *
+ * The range is not fixed: `collapsed` is taken away from the ME panel when the camera zooms past
+ * the exploration cutoff (a grip that moves nothing is worse than no grip), and `full` is given
+ * back when the roster opens. Nothing resets the caller's detent when that happens, so it can be
+ * left pointing at a stop that no longer exists — and a drawer resolving its height one way while
+ * the body it carries is styled the other way is the whole of that bug.
+ *
+ * Nearest by ORDER, not a fall back to the top: a friend's pane dropping from `full` to a `mid`
+ * ceiling should settle on `mid`, and a collapsed ME panel losing `collapsed` should rise one stop
+ * to `peek` — not jump to whatever the tallest stop happens to be.
+ */
+export function clampDetent(detent: DrawerDetent, detents: readonly DrawerDetent[]): DrawerDetent {
+  if (detents.includes(detent)) return detent;
+  const index = DETENT_ORDER.indexOf(detent);
+  let best = detents[0];
+  let bestGap = Infinity;
+  for (const candidate of detents) {
+    const gap = Math.abs(DETENT_ORDER.indexOf(candidate) - index);
+    if (gap < bestGap) {
+      bestGap = gap;
+      best = candidate;
+    }
+  }
+  return best;
+}
