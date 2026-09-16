@@ -30,12 +30,9 @@ and markers are all derived by the shipping code.</sub>
 
 ## What it is
 
-streetCryptid is a **"walk every street" fog-of-war map** of the city you live in. As you move
-through the world, the map reveals where you've been in discrete **hex sectors**; everywhere you
-haven't been stays a desaturated "ghost city." It is a passive **where-you've-been-vs-haven't
-atlas — not** a route tracker, trip logger, or fitness app. Success looks like the quiet
-satisfaction of watching your city fill in over months, plus a light social layer for comparing
-territory with friends.
+streetCryptid is a privacy focused location sharing app that operates over peer to peer networks. 
+It is able to contact other devices directly, allowing for location updates to be sent without 
+any servers in the chain. No tracking or data collection, and all dependency servers for map hosting and (optional) offline delivery can be self hosted. 
 
 It runs in the background at a low ping rate, so you are not operating it most of the time; you
 open it to _browse_ the territory you have accumulated. A low-battery background ping acquires a
