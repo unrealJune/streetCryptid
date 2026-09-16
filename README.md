@@ -1,23 +1,124 @@
-# streetCryptid
+<div align="center">
 
-A cross-platform (iOS · Android · Web) fog-of-war city atlas for people who want
-to **walk every street**. The app records explored sectors, broadcasts
-encrypted location updates directly to paired friends, discovers nearby phones
-over BLE, and renders current friend presence on the map.
+<img src="docs/media/banner.webp" alt="streetCryptid" width="800">
+
+**A fog-of-war atlas of the city you actually walk — and a friend map that no server can read.**
+
+iOS · Android · Web · [AGPL-3.0](#license) · no accounts, no ads, no brokers ·
+every server it touches is one you can run yourself
+
+</div>
+
+<table>
+<tr>
+<td width="25%"><img src="docs/media/map.webp" alt="The map, with friends on it"></td>
+<td width="25%"><img src="docs/media/friends.webp" alt="The friends drawer"></td>
+<td width="25%"><img src="docs/media/coverage.webp" alt="Explored sectors filling in"></td>
+<td width="25%"><img src="docs/media/delivery.webp" alt="The delivery system screen"></td>
+</tr>
+<tr>
+<td align="center"><sub>End-to-end encrypted · peer-to-peer</sub></td>
+<td align="center"><sub>No accounts · no ads · no brokers</sub></td>
+<td align="center"><sub>Your trail · your coverage · yours alone</sub></td>
+<td align="center"><sub>Direct · via mutuals · via your stash</sub></td>
+</tr>
+</table>
+
+<sub>Real captures of the running app, photographed by `just store-shots` — the same build the
+stores get, driven through its own controls. The people on the map are fixtures; everything
+about them on screen is derived by the shipping code.</sub>
+
+## What it is
+
+streetCryptid is a **"walk every street" fog-of-war map** of the city you live in. As you move
+through the world, the map reveals where you've been in discrete **hex sectors**; everywhere you
+haven't been stays a desaturated "ghost city." It is a passive **where-you've-been-vs-haven't
+atlas — not** a route tracker, trip logger, or fitness app. Success looks like the quiet
+satisfaction of watching your city fill in over months, plus a light social layer for comparing
+territory with friends.
+
+It runs in the background at a low ping rate, so you are not operating it most of the time; you
+open it to _browse_ the territory you have accumulated. A low-battery background ping acquires a
+whole sector, so the reveal comes in chunks, not traces. The city is drawn as a field of tiny
+dots — calm, precise, instrument-like. See [PRODUCT.md](./PRODUCT.md) for the product register and
+[DESIGN.md](./DESIGN.md) for the visual system of record.
+
+## Nobody but your friends can read it
+
+- **End-to-end encrypted, per recipient.** Every fix is sealed on your device individually for each
+  friend you share with. Stop sharing with someone and they can no longer open **new** fixes, even
+  though the envelopes still travel over a shared channel.
+- **No central service.** There is no streetCryptid server that holds your location — there is no
+  streetCryptid server at all. Peers talk directly; the infrastructure in the middle only ever
+  handles sealed bytes it cannot open.
+- **No accounts.** No sign-up, no email, no username, no phone number. You add a friend by tapping
+  phones together over Bluetooth, or by exchanging a one-time pairing link.
+- **No advertising, no tracking, no data brokers, no analytics SDKs.** The only instrumentation
+  that exists is a developer tracing pipeline that has to be compiled in deliberately, and CI
+  fails a store build that enables it. (While the app is TestFlight-only, that check carries one
+  recorded exception so the background pipeline can be diagnosed — see
+  `scripts/check-release-telemetry.mjs`.)
+- **Forward secrecy.** Sharing runs over a Double Ratchet, so a seized phone or an archived stash
+  does not retroactively open the trail — see [docs/social/FORWARD-SECRECY.md](docs/social/FORWARD-SECRECY.md)
+  for the threat model and [docs/social/POST-QUANTUM.md](docs/social/POST-QUANTUM.md) for where the
+  primitives are going.
+- **Even the map server is kept ignorant.** Detailed tiles are fetched as complete z10 bundles, so
+  the tile host learns the district you are somewhere inside and never which tile you are actually
+  looking at ([docs/map-stream-protocol.md](docs/map-stream-protocol.md)).
+
+The full, plain-language version is [docs/privacy-policy.md](docs/privacy-policy.md).
+
+## How your location travels
+
+You choose the route in **Settings → Delivery system**, and the app tells you what each one costs
+you in plain words:
+
+| Route              | What happens                                                                                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Direct**         | Phone to phone over QUIC — on the same Wi-Fi, or across the internet with a relay used only for NAT traversal, which cannot read the connection. |
+| **Via mutuals**    | Friends you have in common carry sealed updates for you, so you can catch up from any of them. They hold a read ticket, not a key.               |
+| **Via your stash** | An always-on, ciphertext-blind replica holds sealed updates so a friend receives your trail even when your phones are never online together.     |
+
+Offline delivery through a stash is opt-in and off until you turn it on. The architecture contract
+for all of it — identities, the per-recipient envelope, gossip vs. durable reconciliation — is
+[docs/social/ARCHITECTURE.md](docs/social/ARCHITECTURE.md).
+
+## The servers, and running your own
+
+streetCryptid has no home server, which means every endpoint it talks to is a deployment decision
+rather than a deployment of ours. Two of the four below are our own open-source servers; all of
+them are replaceable, and the stash can be left out entirely.
+
+| Piece               | What it does                                                                                              | What it can read                                  | Where it comes from                                                                                     |
+| ------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| **Map server**      | Serves the base map: coarse XYZ tiles plus the privacy-quantized z10 bundles the detailed view streams.   | Which z10 district you are somewhere inside.      | [unrealJune/streetCryptid-map-server](https://github.com/unrealJune/streetCryptid-map-server)           |
+| **Trail stash**     | Stateless iroh-docs replica + push-to-sync waker, for delivery when both phones are never awake together. | Nothing. Ciphertext-blind by construction.        | [unrealJune/trail-stash](https://github.com/unrealJune/trail-stash) — Docker image + Helm chart on GHCR |
+| **iroh relay**      | NAT traversal when a direct path can't be found.                                                          | Nothing. Relay-blind QUIC.                        | Any [iroh](https://iroh.computer) relay, including your own.                                            |
+| **Pairing mailbox** | A one-time, short-lived KV that hands over an already-sealed pairing capsule.                             | Nothing. The capsule is sealed before it arrives. | Any KV endpoint implementing the tiny contract in `src/features/social/net/pairing-mailbox.ts`.         |
+
+The endpoints are build-time `EXPO_PUBLIC_*` values — see [.env.example](./.env.example), which
+documents each one, and note that the trail stash is disabled outright if its URL and ticket are
+unset. So whoever builds the app picks the infrastructure; a community, a festival, or one person
+with a VPS can each run the whole stack for themselves, and the map server bootstraps its own
+signed tile data.
 
 ## Tech stack
 
-| Piece            | Choice                                                                              |
-| ---------------- | ----------------------------------------------------------------------------------- |
-| Framework        | [Expo](https://expo.dev) SDK **57**                                                 |
-| Native runtime   | React Native **0.86** (New Architecture, on)                                        |
-| UI runtime       | React **19.2** (React Compiler enabled)                                             |
-| Routing          | [expo-router](https://docs.expo.dev/router/introduction) (file-based, typed routes) |
-| Language         | TypeScript **6** (strict)                                                           |
-| Package manager  | [bun](https://bun.sh)                                                               |
-| Task runner      | [just](https://github.com/casey/just)                                               |
-| Build/distribute | GitHub Actions + [EAS](https://docs.expo.dev/eas/) (`eas.json`)                     |
-| Lint / format    | ESLint 9 (`eslint-config-expo`) + Prettier                                          |
+| Piece            | Choice                                                                                                                      |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Framework        | [Expo](https://expo.dev) SDK **57**                                                                                         |
+| Native runtime   | React Native **0.86** (New Architecture, on)                                                                                |
+| UI runtime       | React **19.2** (React Compiler enabled)                                                                                     |
+| Routing          | [expo-router](https://docs.expo.dev/router/introduction) (file-based, typed routes)                                         |
+| Language         | TypeScript **6** (strict)                                                                                                   |
+| Networking core  | Rust — [iroh](https://iroh.computer) 1.0 + iroh-gossip + iroh-docs and the envelope crypto, in `modules/iroh-location/rust` |
+| Native bridge    | UniFFI (Swift + Kotlin) behind an Expo Module; bindings are regenerated by CI                                               |
+| Map rendering    | A Skia dot-field engine (CanvasKit on web) over vector tiles, with H3 sectors for exploration                               |
+| On-device store  | expo-sqlite (trail, outbox, exploration, telemetry journal)                                                                 |
+| Package manager  | [bun](https://bun.sh)                                                                                                       |
+| Task runner      | [just](https://github.com/casey/just)                                                                                       |
+| Build/distribute | GitHub Actions + [EAS](https://docs.expo.dev/eas/) (`eas.json`), built on GitHub runners                                    |
+| Lint / format    | ESLint 9 (`eslint-config-expo`) + Prettier                                                                                  |
 
 ## Prerequisites
 
@@ -43,6 +144,10 @@ client; Expo Go does not include the local `iroh-location` native module.
 > First run of `just start` also generates the Expo type files
 > (`expo-env.d.ts`, `.expo/types/`). These are git-ignored, so run the dev server
 > once before `just typecheck` on a fresh clone.
+
+Copy [.env.example](./.env.example) to `.env.local` and point it at reachable deployments before
+the first build — the defaults are placeholders, and these values are inlined at bundle time, so an
+already-built app cannot be repointed without rebuilding it.
 
 ### Local iOS development
 
@@ -108,6 +213,7 @@ just build android production
 just build-dev             # installable development client
 just submit ios app.ipa    # send a built archive to the store (no EAS Submit)
 just update "message"      # publish an OTA update
+just store-shots           # photograph the real app for the store listings
 ```
 
 EAS pre-install hooks rebuild the git-ignored Rust artifacts for both Android and iOS, so local
@@ -119,7 +225,13 @@ Dev and preview builds can export OpenTelemetry traces + logs from every compone
 native iroh core, trail-stash server) to a self-hosted collector, correlated across devices by
 envelope hash. `docker compose up -d` in `infra/otel/`, set `EXPO_PUBLIC_OTEL_ENDPOINT` in
 `.env.local`, and see [infra/otel/README.md](infra/otel/README.md) for the
-"follow one ping" cookbook. Production builds contain no active telemetry.
+"follow one ping" cookbook.
+
+Without `EXPO_PUBLIC_DEV_TELEMETRY=1` the entire graph — encoder, shipper, SQLite journal, console
+bridge — is resolved away by `metro.config.js` and is not in the bundle at all, and
+`scripts/check-release-telemetry.mjs` fails CI if a store profile sets it. The `production` profile
+currently holds the one acknowledged exception to that rule, deliberately and temporarily, because
+production _is_ TestFlight for this app right now; deleting that entry re-arms the check.
 
 ## Project structure
 
@@ -131,7 +243,13 @@ src/
   features/account/ # local cryptid identity and ASCII profile editor
   components/     # shared UI components (themed text/view, icons, ...)
   constants/      # theme tokens
-assets/           # icons, splash, images
+modules/
+  iroh-location/  # the Expo Module: Rust core, UniFFI bindings, Swift/Kotlin glue
+assets/           # icons, splash, images, marketing art
+docs/             # architecture, privacy, protocol, design archive
+infra/otel/       # self-hosted collector + dashboards for developer telemetry
+scripts/          # build profiling, store screenshots, submission, bindgen
+store/            # generated App Store / Play listing screenshots
 app.json          # Expo app config (name, scheme, bundle ids, plugins)
 eas.json          # EAS build/submit profiles (development / preview / production)
 eslint.config.js  # ESLint flat config (expo + prettier)
@@ -140,176 +258,33 @@ justfile          # developer task runner
 
 Path alias: `@/*` → `src/*`, `@/assets/*` → `assets/*`.
 
-## Building & shipping (EAS)
+## Documentation
 
-App identifiers are set in `app.json` (`com.unrealjune.streetcryptid` for both
-iOS and Android — change these before your first release if desired).
+| Document                                                         | What it covers                                                        |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------- |
+| [PRODUCT.md](./PRODUCT.md)                                       | Product register: users, purpose, brand, anti-references              |
+| [DESIGN.md](./DESIGN.md)                                         | Visual system of record (the design archive is in `docs/design/`)     |
+| [docs/social/ARCHITECTURE.md](docs/social/ARCHITECTURE.md)       | Decentralized, E2E-encrypted location sharing — the security contract |
+| [docs/social/FORWARD-SECRECY.md](docs/social/FORWARD-SECRECY.md) | Threat model and the ratchet schedule                                 |
+| [docs/social/POST-QUANTUM.md](docs/social/POST-QUANTUM.md)       | Where the primitives are headed                                       |
+| [docs/map-stream-protocol.md](docs/map-stream-protocol.md)       | SCB2 tile streams, and what the map server is allowed to learn        |
+| [docs/map-performance.md](docs/map-performance.md)               | Map engine performance budget and measurements                        |
+| [docs/privacy-policy.md](docs/privacy-policy.md)                 | The published privacy policy                                          |
+| [docs/mesh/DESIGN.md](docs/mesh/DESIGN.md)                       | Festival mesh hardware design of record                               |
+| [docs/release-engineering.md](docs/release-engineering.md)       | How a commit becomes a release, and how PR builds are made            |
+| [infra/otel/README.md](infra/otel/README.md)                     | Telemetry span map, join keys, and the TraceQL cookbook               |
+| [AGENTS.md](./AGENTS.md)                                         | The conventions and hard-won constraints to read before changing code |
 
-```bash
-just eas-login     # authenticate
-just eas-init      # link this repo to an EAS project (writes projectId)
-just build         # cloud build (android / preview APK by default)
-```
+## Building & shipping
 
-Build profiles live in `eas.json`: `development` (dev client), `preview`
-(internal APK), and `production` (auto-incrementing store build).
+Every push to `main` that passes CI cuts a version, builds both store archives on GitHub-hosted
+runners with `eas build --local` (no cloud build quota), and uploads them — iOS to TestFlight with
+`fastlane pilot`, Android to the Play internal track through the Play Developer API. Neither binary
+nor either store credential passes through Expo. PRs from allow-listed authors build installable
+iOS and Android apps and post install links to a Discord thread.
 
-### Automatic releases
-
-Every push to `main` that passes CI runs `.github/workflows/release.yml`, which cuts a version,
-builds both store archives on GitHub-hosted runners, and uploads them — iOS to TestFlight, Android
-to the Google Play internal track. Nothing is built on EAS infrastructure: the jobs run `eas build
---local`, so no cloud build quota is consumed.
-
-Submission does not go through EAS either. The iOS job hands the `.ipa` to App Store Connect with
-`fastlane pilot` (`scripts/submit-testflight.sh`), which also writes the "What to Test" notes once
-Apple finishes processing; the Android job drives the Play Developer API directly with curl and a
-service-account JWT (`scripts/submit-play.sh`). Neither binary and neither store credential passes
-through Expo — the credentials are GitHub environment secrets. `just submit <platform> <artifact>`
-runs the same two scripts by hand.
-
-The release is gated on CI rather than triggered by the push itself: it starts from a successful
-`CI` workflow run and refuses to ship if `main` has moved on since that run, leaving the newer
-commit's own CI run to release it.
-
-The user-facing version is derived from the commits since the last `v*` tag, and
-`scripts/next-version.sh` decides the bump:
-
-| Commit range since the last tag                            | Result               |
-| ---------------------------------------------------------- | -------------------- |
-| `!` after the type, or a `BREAKING CHANGE:` footer         | major                |
-| a `feat:` commit                                           | minor                |
-| anything else that is not housekeeping                     | patch                |
-| only `docs`/`chore`/`ci`/`test`/`style`/`build`/`refactor` | no release, no build |
-
-Merge commits are ignored, so a merge subject alone never ships anything. Most of this
-repository's history is freeform prose, which is why an unrecognized subject earns a patch instead
-of being skipped. Run `just next-version` to see what the next push would do, or dispatch the
-workflow manually with a `patch`/`minor`/`major` override.
-
-The version job commits `chore(release): vX.Y.Z` to `main` (updating `app.json` and
-`package.json`), tags it, and the build jobs check that exact commit out, so a shipped binary
-always reports its own version. The workflow ignores its own `chore(release):` commits, so it
-cannot loop. `1.0.0` is the baseline: `app.json`, `package.json`, and the `v1.0.0` tag all agree,
-and everything increments from there. `ios.buildNumber` and `android.versionCode` are not in this
-repository at all — `cli.appVersionSource` is `remote`, so EAS increments them per build.
-
-A repository administrator must configure the `production-release` GitHub environment before the
-first release:
-
-1. Add `EXPO_TOKEN` as an environment secret. Do not add required reviewers unless you want every
-   release to block on a human. This is the only Expo credential the pipeline needs: it fetches the
-   signing credentials for `eas build --local`.
-2. Create an App Store Connect API key (Users and Access → Integrations → App Store Connect API,
-   role **App Manager**) and add three environment secrets: `ASC_API_KEY_ID`, `ASC_API_ISSUER_ID`,
-   and `ASC_API_KEY_P8_BASE64` (`base64 < AuthKey_XXXXXXXX.p8`, whitespace does not matter). Apple
-   lets you download the `.p8` exactly once.
-3. Create a Google Cloud service account, grant it access in **Play Console → Users and
-   permissions** with _Release to testing tracks_ on this app, download its JSON key, and add it as
-   `PLAY_SERVICE_ACCOUNT_JSON_BASE64` (`base64 < key.json`). The Play Developer API refuses the
-   first-ever bundle for an app, so the app must already have one release uploaded by hand.
-4. Only if a branch protection rule rejects pushes authenticated with `GITHUB_TOKEN`, add a
-   `RELEASE_TOKEN` repository secret that is allowed to push the release commit and tag to `main`.
-
-Both jobs check their credentials before starting the build, so a missing secret fails in seconds
-rather than after forty minutes of compiling.
-
-If a submission fails, the version commit and tag still stand; fix the problem and the next push
-releases the following patch. To reship the same code, dispatch the workflow with an explicit
-bump.
-
-The release and PR build jobs prepare their runners through the same composite action,
-`.github/actions/eas-local-build-setup` (Node, Bun, the JavaScript and Cargo caches, the NDK or
-Xcode toolchain, the CocoaPods/Gradle caches, and the EAS CLI). Almost every one of those inputs
-lands in a cache key, so keeping them in one file is what stops the two workflows from silently
-drifting into permanent cache misses. `cache-warm.yml` uses the same action with
-`save-caches: 'true'`.
-
-### PR standalone Release builds
-
-PRs authored by the allow-listed human accounts `Cobular`, `ava-ankenbrandt`, or `unrealJune` from
-branches in this repository build installable iOS and Android internal Release apps on ephemeral
-GitHub-hosted runners.
-Copilot coding agent PRs are also eligible only when the author is exactly
-`copilot-swe-agent[bot]`, the branch is in this repository, and its name starts with `copilot/`.
-Copilot generates the remainder of that branch name, so it is intentionally not allow-listed; the
-exact bot identity and same-repository check are the security boundaries.
-The jobs run `eas build --local` with the production-internal profiles, so the Hermes bundle is
-embedded and the installed apps run without Metro. They upload only the finished IPA/APK with
-`eas upload` and post EAS install pages (including QR codes) on the PR without consuming EAS
-cloud-build quota.
-
-The build jobs use the `development-builds` GitHub environment. A repository administrator must
-configure that environment before enabling the workflow:
-
-1. In **Settings → Environments → development-builds**, add maintainers as required reviewers and
-   enable **Prevent self-review**. **Critical:** uncheck **Allow administrators to bypass configured
-   protection rules**.
-2. Add a Developer-role Expo robot-user token named `EXPO_TOKEN` as an environment secret. Do not
-   duplicate it as a repository or organization secret.
-3. Approve each pending workflow run separately, including every run created after new commits.
-   Do not substitute a persistent PR label for this per-run approval: a label persists when
-   unreviewed commits are added.
-
-Before approving, verify that the pending deployment's commit SHA is the exact revision reviewed.
-Pay particular attention to changes in GitHub Actions workflows, package lifecycle scripts, Expo
-configuration hooks, and native build scripts: after approval, that revision executes with access
-to the environment secret and remote signing credentials.
-
-Remote EAS signing credentials and the iOS ad hoc provisioning profile must already exist. CI
-freezes those credentials rather than modifying them; register new iPhones and refresh the profile
-outside the PR workflow. Build working directories stay under `runner.temp`, are never cached or
-uploaded as GitHub artifacts, and are explicitly removed after the final app archive is uploaded
-to EAS. Only package-manager downloads and Cargo compiler outputs are cached; generated native
-projects, app archives, keychains, provisioning profiles, and other EAS state remain excluded.
-
-An Actions cache is readable only from the ref that wrote it and that ref's ancestors, so caches
-written by a `pull_request` run are invisible to every other PR while still counting against the
-repository's 10 GB budget. `cache-warm.yml` therefore runs the Cargo and package-manager half of
-these builds on `main` — no `eas build --local`, no credentials — and the PR build jobs restore
-those caches without writing their own. Both sides go through
-`.github/actions/eas-rust-cache`, which owns `CARGO_TARGET_DIR` and `RUSTUP_TOOLCHAIN`: rust-cache
-hashes those variables and the `key` input into its _restore_ prefix, so any drift between the two
-workflows — or a source-file hash in the key — silently turns every restore into a miss. The
-CocoaPods and Gradle caches are the exception: only `eas build --local` fills them, and
-`release.yml` is the one workflow that runs it on `main`, so a release warms both for every pull
-request. PR runs still save their own entries — which warms reruns of that same PR — because a
-release only happens when something ships.
-
-EAS CLI serializes the local build job, including signing credentials, into a base64 child-process
-argument. Debug/error output can therefore be sensitive. The CI wrapper never forwards any
-`eas build` output to GitHub or disk, and it removes the GitHub command-file variables from the EAS
-subprocess environment. Failures emit only a fixed message.
-
-The two submitters follow the same rule for the store credentials, in two independent layers.
-
-**Masking.** GitHub scrubs the exact value of every secret it injects, but nothing _derived_ from
-one — a base64 secret decoded back to a PEM, the JWT signed with it, and the access token that JWT
-buys are all different strings that would otherwise print in the clear. Each submitter therefore
-registers those derived values with `::add-mask::` the moment they exist, before anything can print
-them, so the runner scrubs them even out of output the scripts never see. (A PEM is registered a
-line at a time, since `::add-mask::` is line-oriented; that also covers its single-line JSON form,
-because the scrubber matches substrings.)
-
-**Withholding.** On failure the tool's full output is withheld and only a short redacted tail is
-echoed — PEM bodies, long base64-ish runs, and query-string values substituted out — which is
-enough to tell a permissions error from a rejected binary without replaying whatever the tool
-decided to print.
-
-Neither key is ever passed on a command line: the App Store Connect key reaches fastlane through a
-JSON descriptor, and the Google assertion and bearer token reach curl through a file and a config
-file, so nothing lands on a process table readable by the rest of the runner. Each key is decoded
-into a `runner.temp` directory created with `umask 077` and removed by a trap that also fires on
-`INT`/`TERM`, so a cancelled release does not leave one behind; the jobs' `always()` cleanup sweeps
-the same paths in case of a hard kill.
-
-`scripts/test-eas-ci-log-isolation.sh` (`just test-release`) exercises all of it against fake
-`eas`, `fastlane` and `curl` binaries: build success and failure, upload success and failure, a
-malformed distribution response, and a Play API rejection — each with a credential sentinel that
-must appear in the transcript only inside an `::add-mask::` directive, and nowhere else. The fake
-Google token endpoint records the assertion it was actually sent and the test asserts that exact
-value was masked, rather than recomputing the signature and reimplementing the code under test.
-Both fakes reject the call outright if a credential arrives on argv.
+The full account — version derivation, the cache topology, the credential-isolation rules and the
+tests that enforce them — is in [docs/release-engineering.md](docs/release-engineering.md).
 
 ## License
 
@@ -335,3 +310,5 @@ Because the app links AGPL code, anyone you distribute a build to (TestFlight
 and Play testers included) is entitled to the corresponding source for that
 build. `app.config.ts` stamps the commit into every build, which is what makes
 that answerable.
+
+Map data is © OpenStreetMap contributors.
