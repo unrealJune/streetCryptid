@@ -893,8 +893,32 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   ///
   /// `nil` means this process should not have a background node — the app owns the stores, or the
   /// device has no identity yet. Both are ordinary.
+  ///
+  /// ## The refusal is the steady state, so it has to be remembered
+  ///
+  /// While the app is mounted, `startStored()` throws on **every** call — the store claim is
+  /// process-wide and JS holds it (see `eventSink`). That is by design. What was not by design is
+  /// that the failure path memoised nothing: `ingest` and `heartbeat` call this on every delivery,
+  /// so each one built a fresh `LocationNode` — a keygen, a `derive_recv_public` KDF, fifteen
+  /// mutexes and a `telemetry::init_tracing` — purely to have the claim refused again, and
+  /// `node.construct` counts every one of them in a process-wide ordinal it then WARNs about.
+  ///
+  /// On 2026-09-16 that reached **187 constructions in one minute** on an iPhone 16 Pro Max, which
+  /// MetricKit reported as a CPU exception (48 s of CPU in a 55 s window) and which locked the UI
+  /// hard enough that the app never flushed another span. A second phone ran the same loop at
+  /// 20–29/min for hours; iOS answered by taking its background execution away, and its dot stopped
+  /// moving — the failure looked exactly like a parked phone, which is the one thing the whole
+  /// `fix_state` design exists to tell apart.
+  ///
+  /// So a refusal now suppresses the next few attempts, backing off to `claimRetryCeiling`
+  /// below. The one property that must survive is the handover: `release()`
+  /// promises the native path takes over "on the next delivery" once JS closes the stores, so it
+  /// clears the suppression outright rather than waiting it out. The ceiling is bounded rather than
+  /// a latch for the case `release()` never comes at all — a JS teardown that throws before it, say
+  /// — because a latch there would be a phone that never publishes again and never says why.
   private func ensureStarted() async -> Subscription? {
     if let subscription { return subscription }
+    if let until = claimRetryAfter, Date() < until { return nil }
     guard KeychainDeviceSecrets.shared.identitySecret() != nil else {
       // A fresh install whose app has never run. Minting an identity here would create one no
       // friend has paired with and orphan the one the app makes later.
@@ -913,19 +937,60 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         listener: SilentFixListener())
       node = built
       subscription = sub
+      if claimRefusals > 0 {
+        NSLog("[iroh-location] background node started after \(claimRefusals) refused claim(s)")
+      }
+      clearClaimBackoff()
       return sub
     } catch {
       // The store claim refusing is the common case and means the app is mounted and already
-      // publishing — expected, not a fault.
-      NSLog("[iroh-location] background node not started: \(error.localizedDescription)")
-      teardown()
+      // publishing — expected, not a fault. Log the first one of a run and then fall silent: at one
+      // line per delivery this was itself a meaningful share of the load it is reporting.
+      if claimRefusals == 0 {
+        NSLog("[iroh-location] background node not started: \(error.localizedDescription)")
+      }
+      dropNodeHandles()
+      backOffFromRefusedClaim()
       return nil
     }
   }
 
-  private func teardown() {
+  /// How long to wait after the first refused claim before trying to build a node again.
+  private static let claimRetryFloor: TimeInterval = 5
+  /// The longest a refusal may suppress a rebuild. See `ensureStarted` for why this is not a latch.
+  private static let claimRetryCeiling: TimeInterval = 60
+
+  /// Consecutive refused store claims. Reset by a success or by `release()`.
+  private var claimRefusals = 0
+  /// When `ensureStarted` may next attempt a build. `nil` means "now".
+  private var claimRetryAfter: Date?
+
+  private func backOffFromRefusedClaim() {
+    claimRefusals += 1
+    let delay = min(
+      Self.claimRetryCeiling,
+      Self.claimRetryFloor * pow(2, Double(claimRefusals - 1)))
+    claimRetryAfter = Date().addingTimeInterval(delay)
+  }
+
+  private func clearClaimBackoff() {
+    claimRefusals = 0
+    claimRetryAfter = nil
+  }
+
+  /// Drop the node handles WITHOUT touching the backoff.
+  ///
+  /// Split from `teardown` deliberately: the refusal path must not clear the very suppression it is
+  /// setting, and `release()` must clear it. Collapsing these two back together restores the loop.
+  private func dropNodeHandles() {
     subscription = nil
     node = nil
+  }
+
+  private func teardown() {
+    dropNodeHandles()
+    // JS is handing the stores back; the next delivery must be able to claim them immediately.
+    clearClaimBackoff()
   }
 
   // MARK: - Conversions

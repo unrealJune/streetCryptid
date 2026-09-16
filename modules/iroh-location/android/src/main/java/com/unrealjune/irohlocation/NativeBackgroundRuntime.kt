@@ -59,10 +59,27 @@ internal object NativeBackgroundRuntime {
    *
    * Returns false when this process should not have a background node — either the app owns it, or
    * the device has no identity yet. Both are ordinary; neither is worth a crash or a retry loop.
+   *
+   * ## The refusal is the steady state, so it has to be remembered
+   *
+   * While the app is mounted the claim is refused on **every** call, by design — see the class
+   * docs. What was not by design is that the failure path remembered nothing, so every capture
+   * rebuilt a whole [LocationNode] (a keygen, a `derive_recv_public` KDF, fifteen mutexes and a
+   * `telemetry::init_tracing`) purely to be refused again, and `node.construct` incremented a
+   * process-wide ordinal it then WARNs about. A Pixel 10 logged 86 constructions with zero
+   * shutdowns in five hours; the iOS runtime, whose deliveries are far denser, reached 187 in one
+   * minute on 2026-09-16 and took a CPU exception for it.
+   *
+   * A refusal therefore suppresses the next few attempts, to a ceiling of
+   * [CLAIM_RETRY_CEILING_MS]. [stop] clears the suppression outright, because its whole contract is
+   * that the app can take the claim back immediately. The ceiling is bounded rather than a latch
+   * for the case [stop] is never reached — a crash on the JS side — since a latch there would be a
+   * phone that never publishes again and never says why.
    */
   suspend fun ensureStarted(context: Context): Boolean =
     lock.withLock {
       if (subscription != null) return@withLock true
+      if (System.currentTimeMillis() < claimRetryAfterMs) return@withLock false
       val app = context.applicationContext
       IrohAndroidBootstrap.install(app)
 
@@ -87,17 +104,48 @@ internal object NativeBackgroundRuntime {
         val sub = built.subscribe(deriveTopic(built.endpointId()), emptyList(), SilentListener)
         node = built
         subscription = sub
-        Log.i(TAG, "background node started")
+        val recovered = if (claimRefusals > 0) " after $claimRefusals refused claim(s)" else ""
+        Log.i(TAG, "background node started$recovered")
+        clearClaimBackoff()
         true
       } catch (e: Exception) {
         // `AlreadyOpen` from the store claim is the common one and means the app is mounted and
         // already publishing — see the class docs. It is logged at info because on a phone the user
-        // is actively looking at, it is the expected path, not a fault.
-        Log.i(TAG, "background node not started: ${e.message}")
-        stopLocked()
+        // is actively looking at, it is the expected path, not a fault. Only the first of a run is
+        // logged: at one line per capture this was itself part of the load it reports.
+        if (claimRefusals == 0) Log.i(TAG, "background node not started: ${e.message}")
+        dropNodeHandlesLocked()
+        backOffFromRefusedClaim()
         false
       }
     }
+
+  /** How long to wait after the first refused claim before building a node again. */
+  private const val CLAIM_RETRY_FLOOR_MS = 5_000L
+
+  /**
+   * The longest a refusal may suppress a rebuild. See [ensureStarted] for why this is not a latch.
+   */
+  private const val CLAIM_RETRY_CEILING_MS = 60_000L
+
+  /** Consecutive refused store claims. Reset by a success or by [stop]. */
+  private var claimRefusals = 0
+
+  /** Wall clock before which [ensureStarted] will not attempt a build. */
+  private var claimRetryAfterMs = 0L
+
+  private fun backOffFromRefusedClaim() {
+    claimRefusals += 1
+    val delay =
+      (CLAIM_RETRY_FLOOR_MS shl (claimRefusals - 1).coerceAtMost(10))
+        .coerceAtMost(CLAIM_RETRY_CEILING_MS)
+    claimRetryAfterMs = System.currentTimeMillis() + delay
+  }
+
+  private fun clearClaimBackoff() {
+    claimRefusals = 0
+    claimRetryAfterMs = 0L
+  }
 
   /**
    * What happened to one captured location, in the three ways it can differ for the caller.
@@ -172,6 +220,19 @@ internal object NativeBackgroundRuntime {
   suspend fun stop() = lock.withLock { stopLocked() }
 
   private fun stopLocked() {
+    // Before the early return below: after a refused claim there is no node to close, and that is
+    // precisely the state whose suppression has to be lifted.
+    clearClaimBackoff()
+    dropNodeHandlesLocked()
+  }
+
+  /**
+   * Drop the node handles WITHOUT touching the backoff.
+   *
+   * Split from [stopLocked] deliberately: the refusal path must not clear the very suppression it
+   * is setting. Collapsing these two back together restores the rebuild-per-capture loop.
+   */
+  private fun dropNodeHandlesLocked() {
     subscription = null
     val current = node ?: return
     node = null
