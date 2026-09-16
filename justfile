@@ -208,6 +208,21 @@ e2e-soak devices="auto" scenarios="background-walking" hours="2":
 e2e-local-stash cmd="start":
     bash scripts/e2e/ensure-local-stash.sh {{cmd}}
 
+# Lay the whole cryptid roster out on one page, at the three sizes it is actually
+# seen at: map marker (the real 3-7px clamp), roster row (9px), profile tile (15px).
+# Reads CRYPTID_FORMS directly - no export, no browser - so it regenerates instantly
+# while drawings are being authored. Exits non-zero if any form fails the profile grid.
+#   just cryptid-preview
+cryptid-preview *args:
+    #!/usr/bin/env sh
+    set -eu
+    bun scripts/cryptid-preview.ts {{args}}
+    page="store/cryptid-preview/index.html"
+    if command -v open >/dev/null 2>&1; then open "$page"
+    elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$page"
+    elif command -v start >/dev/null 2>&1; then start "" "$page"
+    fi
+
 # Profile the deterministic launch/zoom/pan region-build sequence (fixture by default).
 profile-map source="":
     bun scripts/profile-scene.ts {{source}}

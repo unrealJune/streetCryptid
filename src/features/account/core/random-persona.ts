@@ -1,3 +1,4 @@
+import { CRYPTID_FORMS, EYES, MOUTHS } from './cryptid-forms';
 import { hsvToHex, SIGNAL_COLOR_VALUE } from './signal-color';
 
 /**
@@ -13,122 +14,10 @@ import { hsvToHex, SIGNAL_COLOR_VALUE } from './signal-color';
  * null`) whose fields happen to have been filled in for you.
  */
 
-/** A cryptid drawing, plus the nouns that suit its silhouette. */
-interface CryptidForm {
-  /** Names that read correctly for this shape — the title is prefixed to one. */
-  readonly creatures: readonly string[];
-  render(leftEye: string, rightEye: string, mouth: string): string;
-}
-
-const art = (...lines: string[]): string => lines.join('\n');
-
-const FORMS: readonly CryptidForm[] = [
-  {
-    creatures: ['Mothman', 'Flutterer', 'Nightwing'],
-    render: (left, right, mouth) =>
-      art(
-        '  /\\     /\\',
-        ' /  \\___/  \\',
-        `((  ${left}   ${right}  ))`,
-        ` \\\\   ${mouth}   //`,
-        '   \\_/_\\_/'
-      ),
-  },
-  {
-    creatures: ['Stag', 'Warden', 'Briarkin'],
-    render: (left, right, mouth) =>
-      art(
-        ' \\|/   \\|/',
-        '  \\ \\_/ /',
-        `  / ${left} ${right} \\`,
-        ` (   ${mouth}   )`,
-        '  \\_===_/',
-        '   /   \\'
-      ),
-  },
-  {
-    creatures: ['Shuck', 'Hound', 'Howler'],
-    render: (left, right, mouth) =>
-      art(
-        '   /^---^\\',
-        `  / ${left}   ${right} \\`,
-        ` |    ${mouth}    |`,
-        '  \\  ===  /',
-        '   /|   |\\'
-      ),
-  },
-  {
-    creatures: ['Lake Thing', 'Reedling', 'Tidekin'],
-    render: (left, right, mouth) =>
-      art(
-        '     .-.',
-        ` .--(${left} ${right})--.`,
-        `(    \\${mouth}/    )`,
-        " `--.___.--'",
-        '    /~~~\\'
-      ),
-  },
-  {
-    creatures: ['Owl', 'Watcher', 'Rook'],
-    render: (left, right, mouth) =>
-      art('   .---.', `  / ${left} ${right} \\`, ` |   ${mouth}   |`, '  \\ /|\\ /', "   '---'"),
-  },
-  {
-    creatures: ['Crawler', 'Longstep', 'Strider'],
-    render: (left, right, mouth) =>
-      art(
-        '    _____',
-        `   / ${left} ${right} \\`,
-        `  /   ${mouth}   \\`,
-        '  |  ---  |',
-        ' /|       |\\',
-        '/_|       |_\\'
-      ),
-  },
-  {
-    creatures: ['Ram', 'Cragling', 'Hornkin'],
-    render: (left, right, mouth) =>
-      art(
-        '   /\\/\\',
-        '  /    \\',
-        ` | ${left}  ${right} |`,
-        ` |  ${mouth}   |`,
-        '  \\_==_/',
-        '  / || \\'
-      ),
-  },
-  {
-    creatures: ['Wisp', 'Drifter', 'Veil'],
-    render: (left, right, mouth) =>
-      art(
-        '    .-.',
-        `   (${left} ${right})`,
-        ` .--\`${mouth}'--.`,
-        ' (   /|\\   )',
-        "  `- /_\\ -'"
-      ),
-  },
-  {
-    creatures: ['Jackalope', 'Leaper', 'Thistle'],
-    render: (left, right, mouth) =>
-      art('  \\Y/ \\Y/', '   \\   /', `  ( ${left} ${right} )`, `  ( >${mouth}< )`, '   /"   "\\'),
-  },
-  {
-    creatures: ['Grinner', 'Passenger', 'Straphanger'],
-    render: (left, right, mouth) =>
-      art(
-        '  ,--------.',
-        ` |  ${left}   ${right}  |`,
-        ` |    ${mouth}    |`,
-        ' | \\_____/ |',
-        "  `-.____.-'"
-      ),
-  },
-];
-
 /**
  * The title half of the name. Kept short: the profile name caps at 24 characters
- * and the longest creature above is 11, so a title has to fit inside 12.
+ * and the longest creature in `CRYPTID_FORMS` is 13, so a title has to fit inside
+ * 10. `cryptid-forms.test.ts` asserts both halves of that arithmetic.
  */
 const TITLES = [
   'Fogbound',
@@ -156,9 +45,6 @@ const TITLES = [
   'Wayward',
   'Last Bus',
 ] as const;
-
-const EYES = ['oo', 'OO', '..', '^^', '**', '++'] as const;
-const MOUTHS = ['^', '~', '-', 'v', '_'] as const;
 
 /** Below this the color reads as grey against the map; at 1 it is a pure hue. */
 const MIN_SATURATION = 0.62;
@@ -198,10 +84,10 @@ function randomSignalColor(random: () => number): string {
 }
 
 function rollOnce(random: () => number): RandomPersona {
-  const form = choose(FORMS, random);
+  const form = choose(CRYPTID_FORMS, random);
   const eyes = choose(EYES, random);
   return {
-    cryptidName: `${choose(TITLES, random)} ${choose(form.creatures, random)}`,
+    cryptidName: `${choose(TITLES, random)} ${form.creature}`,
     sigil: form.render(eyes[0], eyes[1], choose(MOUTHS, random)),
     color: randomSignalColor(random),
   };
@@ -219,4 +105,9 @@ export function randomPersona(options: RandomPersonaOptions = {}): RandomPersona
 }
 
 /** Exposed for the test that proves every reachable persona fits the profile grid. */
-export const RANDOM_PERSONA_VOCABULARY = { FORMS, TITLES, EYES, MOUTHS } as const;
+export const RANDOM_PERSONA_VOCABULARY = {
+  FORMS: CRYPTID_FORMS,
+  TITLES,
+  EYES,
+  MOUTHS,
+} as const;

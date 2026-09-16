@@ -3,6 +3,9 @@ import Animated, { useAnimatedStyle, type SharedValue } from 'react-native-reani
 
 import { signalColorInk } from '@/constants/signal-colors';
 import { normalizeAsciiArt } from '@/features/account/core/profile';
+import { sigilMetrics } from './sigil-metrics';
+
+export { sigilMetrics, type SigilMetrics } from './sigil-metrics';
 
 interface FriendLocatorProps {
   x: number;
@@ -19,29 +22,6 @@ interface FriendLocatorProps {
   /** They have stopped and said so. Shown, but never dimmed — the position is correct. */
   parked?: boolean;
   onPress(): void;
-}
-
-export interface SigilMetrics {
-  fontSize: number;
-  height: number;
-  lineHeight: number;
-  width: number;
-}
-
-export function sigilMetrics(sigil: string): SigilMetrics {
-  const lines = sigil.replace(/\r\n?/g, '\n').split('\n');
-  const columns = Math.max(1, ...lines.map((line) => line.replace(/\t/g, '    ').length));
-  const fontSize = Math.max(
-    3,
-    Math.min(7, 52 / (columns * 0.62), 38 / (Math.max(1, lines.length) * 1.12))
-  );
-  const lineHeight = fontSize * 1.12;
-  return {
-    fontSize,
-    lineHeight,
-    width: Math.ceil(columns * fontSize * 0.62 + 10),
-    height: Math.ceil(lines.length * lineHeight + 8),
-  };
 }
 
 /** A screen-space friend marker: map position moves, visual size never zooms. */

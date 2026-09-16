@@ -5,6 +5,7 @@ import {
 } from 'cryptid-generator';
 
 import { recordEventLog } from '@/features/dev/telemetry';
+import { CRYPTID_FORMS, EYES, MOUTHS, type CryptidForm } from './cryptid-forms';
 import { DEFAULT_SIGNAL_COLOR, normalizeAsciiArt, validateCryptidProfileFields } from './profile';
 import { repairCryptidName, repairSigil, sigilHasEnoughInk } from './sigil-repair';
 
@@ -23,112 +24,6 @@ export interface GeneratedCryptid {
   repairs?: readonly string[];
 }
 
-interface LocalArchetype {
-  keywords: readonly string[];
-  nouns: readonly string[];
-  render(leftEye: string, rightEye: string, mouth: string): string;
-}
-
-const art = (...lines: string[]): string => lines.join('\n');
-
-const ARCHETYPES: readonly LocalArchetype[] = [
-  {
-    keywords: ['moth', 'wing', 'fly', 'bat'],
-    nouns: ['Moth', 'Flutter', 'Nightwing'],
-    render: (left, right, mouth) =>
-      art(
-        '  /\\     /\\',
-        ' /  \\___/  \\',
-        `((  ${left}   ${right}  ))`,
-        ` \\\\   ${mouth}   //`,
-        '   \\_/_\\_/'
-      ),
-  },
-  {
-    keywords: ['antler', 'deer', 'stag', 'forest'],
-    nouns: ['Stag', 'Warden', 'Briar'],
-    render: (left, right, mouth) =>
-      art(
-        ' \\|/   \\|/',
-        '  \\ \\_/ /',
-        `  / ${left} ${right} \\`,
-        ` (   ${mouth}   )`,
-        '  \\_===_/',
-        '   /   \\'
-      ),
-  },
-  {
-    keywords: ['dog', 'hound', 'wolf', 'shuck'],
-    nouns: ['Hound', 'Shuck', 'Howler'],
-    render: (left, right, mouth) =>
-      art(
-        '   /^---^\\',
-        `  / ${left}   ${right} \\`,
-        ` |    ${mouth}    |`,
-        '  \\  ===  /',
-        '   /|   |\\'
-      ),
-  },
-  {
-    keywords: ['lake', 'water', 'river', 'fish', 'swamp'],
-    nouns: ['Lake Thing', 'Reedling', 'Tidekin'],
-    render: (left, right, mouth) =>
-      art(
-        '     .-.',
-        ` .--(${left} ${right})--.`,
-        `(    \\${mouth}/    )`,
-        " `--.___.--'",
-        '    /~~~\\'
-      ),
-  },
-  {
-    keywords: ['owl', 'bird', 'feather', 'sky'],
-    nouns: ['Owl', 'Watcher', 'Rook'],
-    render: (left, right, mouth) =>
-      art('   .---.', `  / ${left} ${right} \\`, ` |   ${mouth}   |`, '  \\ /|\\ /', "   '---'"),
-  },
-  {
-    keywords: ['crawl', 'long', 'leg', 'tall'],
-    nouns: ['Crawler', 'Longstep', 'Strider'],
-    render: (left, right, mouth) =>
-      art(
-        '    _____',
-        `   / ${left} ${right} \\`,
-        `  /   ${mouth}   \\`,
-        '  |  ---  |',
-        ' /|       |\\',
-        '/_|       |_\\'
-      ),
-  },
-  {
-    keywords: ['horn', 'goat', 'ram', 'mountain'],
-    nouns: ['Ram', 'Cragling', 'Hornkin'],
-    render: (left, right, mouth) =>
-      art(
-        '   /\\/\\',
-        '  /    \\',
-        ` | ${left}  ${right} |`,
-        ` |  ${mouth}   |`,
-        '  \\_==_/',
-        '  / || \\'
-      ),
-  },
-  {
-    keywords: ['ghost', 'wisp', 'fog', 'mist', 'spirit'],
-    nouns: ['Wisp', 'Drifter', 'Veil'],
-    render: (left, right, mouth) =>
-      art(
-        '    .-.',
-        `   (${left} ${right})`,
-        ` .--\`${mouth}'--.`,
-        ' (   /|\\   )',
-        "  `- /_\\ -'"
-      ),
-  },
-] as const;
-
-const EYES = ['oo', 'OO', '..', '^^', '**', '++'] as const;
-const MOUTHS = ['^', '~', '-', 'v', '_'] as const;
 const PREFIXES = ['Quiet', 'Fog', 'Moss', 'Night', 'Rain', 'Alley', 'Signal', 'Ash'] as const;
 
 const PREFIX_KEYWORDS: readonly [readonly string[], string][] = [
@@ -162,20 +57,26 @@ export function normalizeCryptidDescription(value: string): string {
   return value.trim().replace(/\s+/g, ' ').slice(0, MAX_DESCRIPTION_LENGTH);
 }
 
-function matchingArchetype(description: string, hash: number): LocalArchetype {
+/**
+ * The creature whose keywords the description names, or one picked off the hash.
+ *
+ * First match in roster order wins, so a description matching two creatures gets
+ * the earlier one rather than an arbitrary one.
+ */
+function matchingForm(description: string, hash: number): CryptidForm {
   return (
-    ARCHETYPES.find((candidate) =>
+    CRYPTID_FORMS.find((candidate) =>
       candidate.keywords.some((keyword) => description.includes(keyword))
-    ) ?? pick(ARCHETYPES, hash, 0)
+    ) ?? pick(CRYPTID_FORMS, hash, 0)
   );
 }
 
-function generatedName(description: string, archetype: LocalArchetype, hash: number): string {
+function generatedName(description: string, form: CryptidForm, hash: number): string {
   const keywordPrefix = PREFIX_KEYWORDS.find(([keywords]) =>
     keywords.some((keyword) => description.includes(keyword))
   )?.[1];
   const prefix = keywordPrefix ?? pick(PREFIXES, hash, 8);
-  return `${prefix} ${pick(archetype.nouns, hash, 16)}`;
+  return `${prefix} ${form.creature}`;
 }
 
 /**
@@ -232,14 +133,14 @@ export function generateLocalCryptid(
   const normalizedDescription = normalizeCryptidDescription(description).toLowerCase();
   const normalizedSeed = normalizeSeed(seed);
   const hash = hashString(`${normalizedDescription || 'surprise'}:${normalizedSeed}`);
-  const archetype = matchingArchetype(normalizedDescription, hash);
+  const form = matchingForm(normalizedDescription, hash);
   const eyes = pick(EYES, hash, 4);
   const mouth = pick(MOUTHS, hash, 12);
 
   const generated = validateGeneratedCryptid(
     {
-      name: generatedName(normalizedDescription, archetype, hash),
-      sigil: archetype.render(eyes[0], eyes[1], mouth),
+      name: generatedName(normalizedDescription, form, hash),
+      sigil: form.render(eyes[0], eyes[1], mouth),
     },
     'local'
   );
