@@ -17,16 +17,16 @@ every server it touches is one you can run yourself
 <td width="25%"><img src="docs/media/delivery.webp" alt="The delivery system screen"></td>
 </tr>
 <tr>
-<td align="center"><sub>End-to-end encrypted · peer-to-peer</sub></td>
-<td align="center"><sub>No accounts · no ads · no brokers</sub></td>
-<td align="center"><sub>Your trail · your coverage · yours alone</sub></td>
-<td align="center"><sub>Direct · via mutuals · via your stash</sub></td>
+<td align="center"><sub>Your sectors, and the friends in them</sub></td>
+<td align="center"><sub>Who is nearby, and how to pair</sub></td>
+<td align="center"><sub>A neighbourhood filling in</sub></td>
+<td align="center"><sub>Choosing how your location travels</sub></td>
 </tr>
 </table>
 
-<sub>Real captures of the running app, photographed by `just store-shots` — the same build the
-stores get, driven through its own controls. The people on the map are fixtures; everything
-about them on screen is derived by the shipping code.</sub>
+<sub>Bare captures of the running app at iPhone 6.9" metrics (`just store-shots "--raw-only"`),
+not the framed store plates. The people on the map are fixtures; their presence states, distances
+and markers are all derived by the shipping code.</sub>
 
 ## What it is
 
