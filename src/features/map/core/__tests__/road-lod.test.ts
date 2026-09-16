@@ -1,7 +1,11 @@
+import { DOT_FIELD_SKSL } from '../../render/dot-field-sksl';
 import { ROAD_WIDTHS } from '../masks';
 import {
   CLASS_MIN_ZOOM,
   HIGHWAY_CLASS,
+  ROAD_DILATE_MIN,
+  ROAD_MASK_FLOOR,
+  ROAD_VALUES,
   roadClassVisible,
   roadWidthFor,
   roadWidthScale,
@@ -89,5 +93,47 @@ describe('roadClassVisible', () => {
       expect(roadClassVisible(cls, { highways: false })).toBe(true);
     }
     expect(roadClassVisible(HIGHWAY_CLASS, { highways: false })).toBe(false);
+  });
+});
+
+describe('the road brightness ladder', () => {
+  it('rises with class and spans most of the terrain ramp', () => {
+    for (let cls = 1; cls < ROAD_VALUES.length; cls++) {
+      expect(ROAD_VALUES[cls]).toBeGreaterThan(ROAD_VALUES[cls - 1]);
+    }
+    // The previous ladder lived in 0.50-0.96 of the ramp and squeezed classes
+    // 2-4 into the top 0.16 of it, which is what made the map a field of road.
+    expect(ROAD_VALUES[0] / 255).toBeLessThan(0.3);
+    expect(ROAD_VALUES[4] / 255).toBeGreaterThan(0.9);
+    for (let cls = 1; cls < ROAD_VALUES.length; cls++) {
+      expect((ROAD_VALUES[cls] - ROAD_VALUES[cls - 1]) / 255).toBeGreaterThan(0.1);
+    }
+  });
+
+  it('straddles the background-noise band with class 0 under and class 1 over', () => {
+    // `dot-field-sksl.ts`: unbuilt ground is val = 0.24 + 0.13 * hash.
+    const NOISE_LO = 0.24;
+    const NOISE_HI = 0.37;
+    expect(ROAD_VALUES[0] / 255).toBeLessThan(NOISE_LO);
+    expect(ROAD_VALUES[1] / 255).toBeGreaterThan(NOISE_HI);
+  });
+
+  it('gates dot dilation between service and residential', () => {
+    expect(ROAD_DILATE_MIN).toBeGreaterThan(ROAD_VALUES[0]);
+    expect(ROAD_DILATE_MIN).toBeLessThanOrEqual(ROAD_VALUES[1]);
+  });
+
+  it('puts the antialiasing floor at half the quietest class', () => {
+    // At exactly half, the cutoff is the 50%-coverage point of a class-0 stroke
+    // and it renders at its nominal width. Above, it erodes; below, it fringes.
+    expect(ROAD_MASK_FLOOR * 2).toBeLessThanOrEqual(ROAD_VALUES[0]);
+    expect(ROAD_MASK_FLOOR * 2).toBeGreaterThanOrEqual(ROAD_VALUES[0] * 0.8);
+  });
+
+  it('is the same ladder the shader was compiled against', () => {
+    // SkSL cannot import, so the constants are interpolated into the source.
+    // This is the drift guard.
+    expect(DOT_FIELD_SKSL).toContain(`>= ${ROAD_DILATE_MIN}.0`);
+    expect(DOT_FIELD_SKSL).toContain(`sv > ${ROAD_MASK_FLOOR}.0`);
   });
 });

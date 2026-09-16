@@ -2,17 +2,14 @@ import type { PackedAreas, PackedGeometry } from '../tiles/packed-geometry';
 import { worldToScreen } from './camera';
 import type { MaskRasterizer } from './raster';
 import { softwareRasterizer } from './raster';
-import { roadWidthFor } from './road-lod';
+import { ROAD_VALUES, roadWidthFor } from './road-lod';
 import { riverWidthFor } from './water-lod';
 import type { CameraState, FeatureMasks, Mask, RoadClass, ScreenPoint, Viewport } from './types';
 
-// Stroke widths live with the road/water LOD logic; re-exported here for the
-// mask builders and tests that reference them alongside ROAD_VALUES.
-export { ROAD_WIDTHS } from './road-lod';
+// Stroke widths and the brightness ladder live with the road/water LOD logic;
+// re-exported here for the mask builders and tests that reference them together.
+export { ROAD_WIDTHS, ROAD_VALUES, ROAD_DILATE_MIN, ROAD_MASK_FLOOR } from './road-lod';
 export { RIVER_WIDTH } from './water-lod';
-
-/** Mask values per road class 0–4 — the mock's RGRAY brightness ladder. */
-export const ROAD_VALUES = [128, 170, 205, 225, 245] as const;
 
 const FULL = 255;
 

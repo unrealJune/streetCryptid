@@ -1,3 +1,5 @@
+import { ROAD_DILATE_MIN, ROAD_MASK_FLOOR } from '../core/road-lod';
+
 /**
  * The GPU dot-field shader — a faithful port of the CPU `buildDotField` +
  * background fill (see the retired `core/scene.ts` / `core/dot-raster.ts`),
@@ -96,15 +98,20 @@ float4 dotAt(float ix, float iy, float2 frag) {
   float3 m = maskAt(center);
   float wv = m.b * 255.0;
   float pv = m.g * 255.0;
-  float o = uStep * 0.4;                               // street sampleMax5
-  float sv = max(m.r,
-             max(maskAt(center + float2(o, 0.0)).r,
-             max(maskAt(center + float2(-o, 0.0)).r,
-             max(maskAt(center + float2(0.0, o)).r,
-                 maskAt(center + float2(0.0, -o)).r)))) * 255.0;
+  // street sampleMax5, gated: a road may only claim a dot it does not cover if
+  // it is big enough to be worth the lie (ROAD_DILATE_MIN). Ungated, the six
+  // hundred service roads in a downtown tile each grow to a full dot and the
+  // network becomes a field.
+  float o = uStep * 0.4;
+  float here = m.r * 255.0;
+  float near = max(maskAt(center + float2(o, 0.0)).r,
+              max(maskAt(center + float2(-o, 0.0)).r,
+              max(maskAt(center + float2(0.0, o)).r,
+                  maskAt(center + float2(0.0, -o)).r))) * 255.0;
+  float sv = near >= ${ROAD_DILATE_MIN}.0 ? max(here, near) : here;
 
   float3 color; float val; float isArea; int kind;    // 0 street 1 park 2 water 3 bg
-  if (sv > 28.0) {
+  if (sv > ${ROAD_MASK_FLOOR}.0) {
     val = clamp(sv / 255.0, 0.0, 1.0);
     color = rampLut(val, 0.0);
     isArea = 0.0; kind = 0;
