@@ -1301,6 +1301,9 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(snap.current?.pairing.bump.stage).toBe('idle');
 
     await svc.acknowledgeDiscoveredFriend();
+    // The friend exists the moment ACKNOWLEDGE returns — the subscribe/introduction wiring is
+    // deliberately NOT awaited by it (see `decideDiscovery`), so the assertions below that reach
+    // the network wait for it explicitly.
     const friend = snap.current?.friends.find((f) => f.endpointId === 'peer-ready');
     expect(friend).toBeDefined();
     expect(friend?.handle).toBe('@fresh'); // verified profile applied
@@ -1308,6 +1311,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(snap.current?.sharingWith).toEqual(['peer-ready']);
     expect(friend?.pairingSessionId).toBe('sess-ready');
     // Subscribed + profile-imported via the normal friend path.
+    await svc.awaitFriendWiring();
     expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-peer-ready')).toBe(true);
     expect(
       mockHolder.mod.calls.subscribe.some(
@@ -1944,10 +1948,35 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     it('seals the last known position once the friend is acknowledged', async () => {
       const { svc } = await pairAndWatch();
       await svc.acknowledgeDiscoveredFriend();
-      await Promise.resolve();
-      await Promise.resolve();
+      await svc.awaitFriendWiring();
 
       expect(mockHolder.mod.calls.publishIntroduction).toHaveLength(1);
+    });
+
+    // THE regression from 2026-09-17 00:50 UTC. `subscribeToFriend` was awaited by ACKNOWLEDGE,
+    // and it held the node-wide native lock across a dial to an internet-unreachable peer — so the
+    // acknowledge promise never settled, `pool.friend_added` was never recorded, the pairing poll
+    // stopped within the second, and the phone needed a force-quit. The peer gave up and
+    // unfriended a minute later.
+    //
+    // A friend is a local decision. Nothing the network does may stand between the human saying
+    // "keep this one" and the app having kept them.
+    it('adopts the friend even when the network wiring never comes back', async () => {
+      const { svc, snap } = await pairAndWatch();
+      // A subscribe that never settles — not one that rejects. A rejection would have been
+      // reported and moved on; it is the pending-forever case that wedged the app.
+      mockHolder.mod.subscribe = () => new Promise<string>(() => {});
+
+      await svc.acknowledgeDiscoveredFriend();
+
+      expect(snap.current?.friends.some((f) => f.endpointId === 'cc330099')).toBe(true);
+      expect(snap.current?.sharingWith).toEqual(['cc330099']);
+      expect(snap.current?.pairing.discoveredFriend).toBeNull();
+      // And the pool change is on the record. `pool.friend_added` is emitted AFTER the wiring
+      // used to be awaited, so on 2026-09-17 a wedged acknowledge left no trace of itself at all.
+      expect(poolSpans('pool.friend_added')[0]?.details).toMatchObject({
+        attributes: expect.objectContaining({ reason: 'pair-acknowledged', friends: 1 }),
+      });
     });
 
     it('sends nothing when the friend is rejected instead', async () => {
@@ -2103,6 +2132,36 @@ describe('LocationSharingService — pairing / profile wiring', () => {
 
     resolveSession('sess-slow');
     await pairing;
+  });
+
+  it('polls a live bump from one driver, not two', async () => {
+    // Tempo, 2026-09-17 04:03-04:04 UTC: 6-7 `pairing.poll` spans PER SECOND on the iPhone being
+    // bumped and 2-3/s on the Pixel bumping it. Two 300ms drivers were running the same drain —
+    // this loop, re-armed fast because a session was live, and Bump's own `setInterval` — and
+    // each pass is six crossings of the native bridge that take the pairing locks the handshake
+    // itself needs. That bump took 44s from armed to SAS gate.
+    //
+    // The cadence is the point, so this asserts the RATE, not the absence of an interval: sampling
+    // stays sub-second while a bump is up (the handshake is ~390ms of machine time), and one
+    // driver means roughly one poll per PAIRING_ACTIVE_POLL_INTERVAL_MS rather than two.
+    jest.useFakeTimers();
+    try {
+      const svc = makeService();
+      await svc.init('@me', 'mothman');
+      await jest.advanceTimersByTimeAsync(0);
+
+      await svc.armBump();
+      const armed = mockHolder.mod.calls.pollPairEvents;
+      await jest.advanceTimersByTimeAsync(3000);
+      const polls = mockHolder.mod.calls.pollPairEvents - armed;
+
+      // 3s at a 300ms cadence is ~10 passes from one driver and ~20 from two. The window is wide
+      // on both sides: this is a guard against a duplicate driver, not a metronome test.
+      expect(polls).toBeGreaterThanOrEqual(5);
+      expect(polls).toBeLessThanOrEqual(14);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('stops polling after shutdown', async () => {
