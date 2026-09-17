@@ -15,6 +15,7 @@ import {
 } from '@/features/social/net/persistence';
 
 import { CryptidProfileEditor } from '../components/cryptid-profile-editor';
+import { LocationPrivacyIntro } from '../components/location-privacy-intro';
 import type { CryptidProfile } from '../core/profile';
 import { useCryptidProfile } from '../hooks/use-cryptid-profile';
 
@@ -31,7 +32,7 @@ export function AccountOnboardingScreen({
   const [kv] = useState(createPersistentKV);
   const [availability] = useState(() => ({ stashConfigured: getStashConfig() !== null }));
   const [draft, setDraft] = useState<CryptidProfile | null>(profile);
-  const [step, setStep] = useState<'profile' | 'delivery'>('profile');
+  const [step, setStep] = useState<'profile' | 'privacy' | 'delivery'>('profile');
   const [mode, setMode] = useState<DeliveryMode>(NEW_USER_DELIVERY_MODE);
   const [ready, setReady] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -82,8 +83,19 @@ export function AccountOnboardingScreen({
         initialProfile={draft}
         mode="onboarding"
         notice={profileError}
-        onDone={() => setStep('delivery')}
+        onDone={() => setStep('privacy')}
         onSave={async (next) => setDraft(next)}
+      />
+    );
+  }
+
+  if (step === 'privacy') {
+    // Read before the route is picked, not after: the delivery picker is a choice between two
+    // ways of moving a sealed envelope, and this is what says the envelope is sealed at all.
+    return (
+      <LocationPrivacyIntro
+        onBack={() => setStep('profile')}
+        onContinue={() => setStep('delivery')}
       />
     );
   }
@@ -119,9 +131,9 @@ export function AccountOnboardingScreen({
       <View style={styles.actions}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Back to profile"
+          accessibilityLabel="Back to privacy"
           disabled={saving}
-          onPress={() => setStep('profile')}
+          onPress={() => setStep('privacy')}
           style={styles.back}
         >
           <ThemedText type="smallBold">Back</ThemedText>

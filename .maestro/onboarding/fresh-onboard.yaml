@@ -28,6 +28,14 @@ appId: com.unrealjune.streetcryptid
 - hideKeyboard
 - tapOn:
     id: 'onboarding-continue'
+# The first-run privacy read, between the persona and the route choice.
+- scrollUntilVisible:
+    element:
+      id: 'onboarding-privacy-continue'
+    direction: DOWN
+    timeout: 30000
+- tapOn:
+    id: 'onboarding-privacy-continue'
 - scrollUntilVisible:
     element:
       id: 'onboarding-delivery-continue'

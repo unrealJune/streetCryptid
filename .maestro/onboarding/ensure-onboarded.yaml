@@ -3,7 +3,8 @@ appId: com.unrealjune.streetcryptid
 # Idempotent: brings whatever profile state the app is in the rest of the way to
 # the live map, without wiping existing data. Safe to run on a device that's
 # already fully onboarded (the onboarding runFlow blocks just no-op) or one that's
-# mid-onboarding (e.g. delivery not confirmed or location disclosure not yet accepted).
+# mid-onboarding (e.g. the privacy read or delivery not confirmed, or the location disclosure not
+# yet accepted).
 # For a guaranteed-fresh profile instead, use fresh-onboard.yaml.
 #
 # Every `when:` carries an explicit `timeout`. maestro-runner defaults condition checks to 1000ms,
@@ -32,6 +33,19 @@ appId: com.unrealjune.streetcryptid
       - hideKeyboard
       - tapOn:
           id: 'onboarding-continue'
+- runFlow:
+    when:
+      visible:
+        id: 'privacy-onboarding'
+      timeout: 15000
+    commands:
+      - scrollUntilVisible:
+          element:
+            id: 'onboarding-privacy-continue'
+          direction: DOWN
+          timeout: 30000
+      - tapOn:
+          id: 'onboarding-privacy-continue'
 - runFlow:
     when:
       visible:
