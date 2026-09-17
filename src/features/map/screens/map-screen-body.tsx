@@ -36,6 +36,7 @@ import {
   isPresenceOnline,
   isPresenceStale,
 } from '@/features/social/core/presence';
+import { SharingMutedBanner } from '@/features/social/components/sharing-muted-banner';
 import type { LocationFix } from '@/features/social/core/types';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 import { SELF_AUTHOR, type TrailPoint } from '@/features/social/net/background/trail-store';
@@ -455,6 +456,17 @@ export default function MapScreenBody() {
           theme={theme}
         />
       </View>
+      {/* The one thing on this screen that is not a map affordance. See `SharingMutedBanner`:
+          a phone that cannot share in the background looks completely healthy from in here, and
+          the person who needs to know is the one holding it. */}
+      {locationStatus === 'permission-denied' ? (
+        <View
+          pointerEvents="box-none"
+          style={[styles.bannerLayer, { top: insets.top + Spacing.five + Spacing.three }]}
+        >
+          <SharingMutedBanner theme={theme} />
+        </View>
+      ) : null}
       {/* Only map affordances float: layers and locate. They ride above the drawer and are
           pushed off-screen as it docks, which is correct — a full sheet is not a map view. */}
       <View pointerEvents="box-none" style={styles.islandLayer}>
@@ -635,6 +647,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: Spacing.three,
+  },
+  bannerLayer: {
+    left: Spacing.three,
+    position: 'absolute',
+    right: Spacing.three,
   },
   attribution: {
     flexShrink: 1,

@@ -410,8 +410,18 @@ const PAIRING_POLL_INTERVAL_MS = 4000;
  */
 const PAIRING_ACTIVE_POLL_INTERVAL_MS = 300;
 
-const BUMP_POLL_INTERVAL_MS = 300;
 export const BUMP_WINDOW_MS = 120_000;
+
+/**
+ * How often to check whether the bump window has closed.
+ *
+ * Only a clock check — no native call — so it is deliberately slower than the old 300ms bump
+ * interval it replaced. The worst case is standing the radio down a second late.
+ */
+const BUMP_EXPIRY_CHECK_MS = 1000;
+
+/** How long shutdown waits for acknowledge-time friend wiring before going ahead without it. */
+const FRIEND_WIRING_TEARDOWN_TIMEOUT_MS = 2000;
 
 /**
  * The gap between the first re-arm of a friend's profile replication and the second.
@@ -788,6 +798,8 @@ export class LocationSharingService {
   private shareIntervalMs: number = DEFAULT_SHARE_INTERVAL_MS;
   private backgroundSharing = false;
   private backgroundAccess: BackgroundAccess = 'unknown';
+  /** Acknowledge-time friend wiring still in flight. See {@link awaitFriendWiring}. */
+  private readonly friendWiring = new Set<Promise<void>>();
   private latestLocalFix: LocationFix | null = null;
   private shutdownPromise: Promise<void> | null = null;
 
@@ -1636,6 +1648,88 @@ export class LocationSharingService {
     }
   }
 
+  /**
+   * Wire up a freshly acknowledged friend: subscriptions, then the introduction, then a trail sync.
+   *
+   * Deliberately NOT awaited by {@link decideDiscovery} — see the note there. Ordered rather than
+   * parallel because the steps depend on each other: {@link publishIntroduction} seals for the
+   * recipient set {@link ensureMySubscription} puts on the wire, so running them together is how
+   * you publish an envelope sealed for yesterday's set.
+   *
+   * Instrumented as one span because until now there was NOTHING between `pool.friend_added` and
+   * the first fix a friend sees, and that gap is exactly where a pair that "worked" stops working.
+   * Each step reports its own duration and whether it failed, and a failure is recorded rather
+   * than surfaced: the friend is already real, and the next launch retries all of it.
+   */
+  private connectNewFriend(friend: Friend): Promise<void> {
+    const wiring = this.wireUpNewFriend(friend).finally(() => {
+      this.friendWiring.delete(wiring);
+    });
+    this.friendWiring.add(wiring);
+    return wiring;
+  }
+
+  /**
+   * Wait for any acknowledge-time friend wiring still in flight.
+   *
+   * {@link decideDiscovery} deliberately does not await {@link connectNewFriend}, so something has
+   * to. Shutdown does, because tearing the native module out from under a half-finished subscribe
+   * is how you get a rejection with nobody left to report it to; tests do, because "eventually"
+   * is not a thing a test can assert.
+   */
+  async awaitFriendWiring(): Promise<void> {
+    while (this.friendWiring.size > 0) {
+      await Promise.allSettled([...this.friendWiring]);
+    }
+  }
+
+  private async wireUpNewFriend(friend: Friend): Promise<void> {
+    const span = getTelemetry().startSpan('pair.connect_friend', {
+      attributes: {
+        'sc.peer': friend.endpointId.slice(0, 10),
+        method: friend.pairingMethod ?? 'unknown',
+      },
+    });
+    const started = Date.now();
+    try {
+      for (const [name, step] of [
+        ['subscribe', () => this.subscribeToFriend(friend)],
+        ['my_subscription', () => this.ensureMySubscription()],
+        ['introduction', () => this.publishIntroduction()],
+        ['trail_sync', () => this.syncTrail(0)],
+      ] as const) {
+        // Re-checked EVERY step, because this runs after `decideDiscovery` has returned: a wire
+        // `Reject` is authoritative and can land at any point during it, and
+        // `withdrawDiscoveredFriend` takes the friend straight back out of the pool. Sealing an
+        // introduction for someone who has since withdrawn is the one step here that cannot be
+        // taken back. Used to be covered by a re-check inside the acknowledge itself; the check
+        // has to move with the work.
+        if (!this.state.friends[friend.endpointId] || this.removingFriends.has(friend.endpointId)) {
+          span.setAttributes({ withdrawn_at: name, total_ms: Date.now() - started });
+          span.setStatus('ok');
+          return;
+        }
+        const stepStarted = Date.now();
+        try {
+          await step();
+          span.setAttribute(`${name}_ms`, Date.now() - stepStarted);
+        } catch (error) {
+          span.setAttributes({
+            [`${name}_ms`]: Date.now() - stepStarted,
+            [`${name}_failed`]: true,
+          });
+          this.reportError(error);
+        }
+      }
+      span.setAttribute('total_ms', Date.now() - started);
+      span.setStatus('ok');
+    } catch (error) {
+      span.recordError(error);
+    } finally {
+      span.end();
+    }
+  }
+
   private async decideDiscovery(accept: boolean): Promise<void> {
     const discovery = this.discoveries.entries().next().value;
     if (!discovery) return;
@@ -1647,6 +1741,18 @@ export class LocationSharingService {
       throw new Error('This pairing was rejected. Start a new pairing to add this friend.');
     }
     this.discoveryDecision = { sessionId, accept };
+    // The human's last word on a pair, and the last thing that happened before the app froze on
+    // 2026-09-17. It gets its own span: `pool.friend_added` only exists when this SUCCEEDS, so
+    // until now an acknowledge that never returned left no record that it had been pressed.
+    const span = getTelemetry().startSpan('pair.acknowledge', {
+      attributes: {
+        'sc.session': sessionId.slice(0, 10),
+        'sc.peer': friend.endpointId.slice(0, 10),
+        accept,
+        method: friend.pairingMethod ?? 'unknown',
+      },
+    });
+    const decisionStarted = Date.now();
     try {
       if (!accept) {
         this.rejectedPairSessions.add(sessionId);
@@ -1673,16 +1779,21 @@ export class LocationSharingService {
       if (this.rejectedPairSessions.has(sessionId)) {
         throw new Error('The other phone rejected this pairing. Nothing was added.');
       }
-      const connections = await Promise.allSettled([
-        this.subscribeToFriend(friend),
-        this.ensureMySubscription(),
-      ]);
-      for (const result of connections) {
-        if (result.status === 'rejected') this.reportError(result.reason);
-      }
-      if (this.rejectedPairSessions.has(sessionId)) {
-        throw new Error('The other phone rejected this pairing. Nothing was added.');
-      }
+      // ADOPT FIRST, WIRE UP AFTER — and never the other way round.
+      //
+      // The pool write above is the friendship. Everything below is plumbing for it: a gossip
+      // subscribe, a docs ticket import, an introduction publish. All three reach the network for
+      // a peer we have never dialled before, none of them is required for the friend to exist,
+      // and `restorePool` re-runs every one of them on the next launch.
+      //
+      // They used to be awaited here, and that is what "I hit acknowledge and the app froze" was:
+      // `subscribeToFriend` held the node-wide native lock across a dial to an
+      // internet-unreachable Pixel, so ACKNOWLEDGE never returned, `pool.friend_added` was never
+      // recorded, the pairing poll stopped within the second, and the phone needed a force-quit
+      // (2026-09-17 00:50 UTC; the peer gave up and unfriended a minute later). The native lock is
+      // fixed too, but the ordering is the part that makes this failure impossible rather than
+      // merely unlikely: no network call stands between a human confirming a friend and the app
+      // showing them one.
       this.discoveries.delete(sessionId);
       this.recordPoolChange('added', friend.endpointId, 'pair-acknowledged', {
         method: friend.pairingMethod ?? 'unknown',
@@ -1691,9 +1802,13 @@ export class LocationSharingService {
       });
       this.pairingFailure = null;
       this.emit();
-      void this.publishIntroduction();
-      void this.syncTrail(0);
+      void this.connectNewFriend(friend);
+    } catch (error) {
+      span.recordError(error);
+      throw error;
     } finally {
+      span.setAttribute('ms', Date.now() - decisionStarted);
+      span.end();
       this.discoveryDecision = null;
     }
   }
@@ -1900,6 +2015,49 @@ export class LocationSharingService {
     return this.runPairingOperation(() => this.pairFromInputUnlocked(input));
   }
 
+  /**
+   * Run the native call that starts a handshake, under a span.
+   *
+   * This is the one the pairing screen's "REACHING THEM" is waiting on: from JS it is a single
+   * await, and until the native dial gained a timeout it could simply never come back. It had no
+   * instrumentation of any kind — the Rust side logged its round trips as `tracing` events, whose
+   * fields are dropped on the way to Loki, so on 2026-09-17 there was nothing at all to say
+   * whether a stuck redemption had connected, or how long it had been trying.
+   *
+   * `outcome` distinguishes the three endings that need different copy in front of a human:
+   * `started` (we have a session; the SAS gate is next), `timeout` (native gave up inside its own
+   * budget — retrying is reasonable) and `failed` (anything else).
+   */
+  private async beginPairSession(
+    method: PairingMethod,
+    start: () => Promise<string>
+  ): Promise<string> {
+    const span = getTelemetry().startSpan('pair.initiate', { attributes: { method } });
+    const started = Date.now();
+    try {
+      const sessionId = await start();
+      span.setAttributes({
+        ms: Date.now() - started,
+        outcome: 'started',
+        'sc.session': sessionId.slice(0, 10),
+      });
+      span.setStatus('ok');
+      return sessionId;
+    } catch (error) {
+      // `outcome` is read off the native message rather than a typed error because
+      // `LocationError::Network` is the only variant the pairing exports use. Both sentences are
+      // written in `dial_exchange`; keep them in step with this test.
+      span.setAttributes({
+        ms: Date.now() - started,
+        outcome: /did not answer|could not reach/i.test(errorMessage(error)) ? 'timeout' : 'failed',
+      });
+      span.recordError(error);
+      throw error;
+    } finally {
+      span.end();
+    }
+  }
+
   private async pairFromInputUnlocked(input: string): Promise<string> {
     if (!this.mod) throw new Error('pairFromInput: native module not bound');
     if (this.isBumpActive()) await this.cancelBump();
@@ -1910,7 +2068,9 @@ export class LocationSharingService {
     const token = decodePairLink(trimmed);
     // A full app pair link is an invite; a bare pasted/typed token is a manual code.
     const method: PairingMethod = isPairLink(trimmed) && !isPairToken(trimmed) ? 'invite' : 'code';
-    const sessionId = await this.mod.initiatePairByToken(token);
+    const sessionId = await this.beginPairSession(method, () =>
+      this.mod!.initiatePairByToken(token)
+    );
     this.initiatedRoutes.set(sessionId, method);
     this.setPairingActivity('pairing…');
     await this.refreshPairing();
@@ -1932,7 +2092,9 @@ export class LocationSharingService {
     const lookupId = await deriveLookupId(secret);
     const capsule = await this.mailbox.take(lookupId);
     const token = await openPairCapsule(capsule, secret);
-    const sessionId = await this.mod.initiatePairByToken(token);
+    const sessionId = await this.beginPairSession('code', () =>
+      this.mod!.initiatePairByToken(token)
+    );
     this.initiatedRoutes.set(sessionId, 'code');
     this.setPairingActivity('pairing…');
     await this.refreshPairing();
@@ -3535,6 +3697,17 @@ export class LocationSharingService {
     // Stop callbacks synchronously before awaiting native teardown.
     this.stopPairingPolling();
     this.stopBumpPolling();
+    // Let acknowledge-time wiring finish before the module goes away. Bounded like every other
+    // teardown await on this path (AGENTS.md: never `await` native teardown unbounded) — a
+    // subscribe that is itself stuck must not become the reason shutdown never returns.
+    await Promise.race([
+      this.awaitFriendWiring(),
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, FRIEND_WIRING_TEARDOWN_TIMEOUT_MS);
+        // Same reason as the poll timers: don't hold jest's event loop open on our account.
+        (timer as unknown as { unref?: () => void }).unref?.();
+      }),
+    ]);
     if (this.trailChangeTimer) {
       clearTimeout(this.trailChangeTimer);
       this.trailChangeTimer = null;
@@ -4513,11 +4686,7 @@ export class LocationSharingService {
           // Only re-arm if polling was not stopped while this pass ran.
           if (this.pollTimer === timer) {
             this.pollTimer = null;
-            arm(
-              this.pairSessions.length > 0
-                ? PAIRING_ACTIVE_POLL_INTERVAL_MS
-                : PAIRING_POLL_INTERVAL_MS
-            );
+            arm(this.pairingPollDelay());
           }
         });
       }, delay);
@@ -4525,7 +4694,42 @@ export class LocationSharingService {
       // Don't keep the Node event loop (jest / tooling) alive on our account; no-op in RN/Hermes.
       (timer as unknown as { unref?: () => void }).unref?.();
     };
-    arm(PAIRING_POLL_INTERVAL_MS);
+    // The FIRST tick uses the same rule as every later one. Starting at the idle interval
+    // unconditionally meant `repollSoon` — the thing that exists to speed the loop up when a bump
+    // arms — actually slowed it to 4s for one window.
+    arm(this.pairingPollDelay());
+  }
+
+  /**
+   * How long to wait before the next pairing poll — the ONE place that decides the cadence.
+   *
+   * There used to be two drivers. This loop re-armed at 300ms while a session was live, and Bump
+   * ran its own 300ms `setInterval` calling the same `pollPairingOnce`, so an armed bump during a
+   * handshake ran both at once. Tempo, 2026-09-17 04:03-04:04 UTC: 6-7 `pairing.poll` spans per
+   * second on the iPhone being bumped and 2-3/s on the Pixel doing the bumping, each one six
+   * crossings of the native bridge that take the same pairing locks the handshake needs. The
+   * bump that produced them took 44s from armed to SAS gate.
+   *
+   * Sub-second sampling is still right while something is happening — the handshake itself is
+   * ~390ms of machine time — so the cadence is kept and the duplicate driver is gone.
+   */
+  private pairingPollDelay(): number {
+    const busy = this.pairSessions.length > 0 || this.isBumpActive();
+    return busy ? PAIRING_ACTIVE_POLL_INTERVAL_MS : PAIRING_POLL_INTERVAL_MS;
+  }
+
+  /**
+   * Re-arm the poll loop NOW rather than waiting out the delay it is currently sitting on.
+   *
+   * Arming a bump moves the cadence from 4s to 300ms, but the timer already scheduled does not
+   * know that — so without this, arming could sit idle for most of a wasted 4s window. This is
+   * what replaced Bump's own interval: the same responsiveness, from the one loop.
+   */
+  private repollSoon(): void {
+    if (!this.pollTimer || !this.mod) return;
+    this.stopPairingPolling();
+    this.startPairingPolling();
+    void this.pollPairingOnce();
   }
 
   private stopPairingPolling(): void {
@@ -4535,19 +4739,26 @@ export class LocationSharingService {
     }
   }
 
+  /**
+   * Watch for the bump window closing.
+   *
+   * This used to ALSO drive `pollPairingOnce` every 300ms, in parallel with the pairing loop doing
+   * the same — see {@link pairingPollDelay} for what that cost. All it does now is notice expiry
+   * and stand the radio down; the polling is the pairing loop's job and it speeds up on its own
+   * while {@link isBumpActive} is true.
+   */
   private startBumpPolling(): void {
     if (this.bumpTimer) return;
     const timer = setInterval(() => {
-      if (!this.isBumpActive()) {
-        this.stopBumpPolling(false);
-        if (this.pairingReadyFlag) void this.setPairingReady(false);
-        if (!this.discoveredFriend) this.setPairingActivity('bump idle');
-        return;
-      }
-      void this.pollPairingOnce();
-    }, BUMP_POLL_INTERVAL_MS);
+      if (this.isBumpActive()) return;
+      this.stopBumpPolling(false);
+      if (this.pairingReadyFlag) void this.setPairingReady(false);
+      if (!this.discoveredFriend) this.setPairingActivity('bump idle');
+    }, BUMP_EXPIRY_CHECK_MS);
     this.bumpTimer = timer;
     (timer as unknown as { unref?: () => void }).unref?.();
+    // The pairing loop may be mid-4s nap; tell it the cadence just changed.
+    this.repollSoon();
   }
 
   private stopBumpPolling(invalidateAttempt = true): void {
@@ -4975,7 +5186,9 @@ export class LocationSharingService {
 
   private async initiateNearbyPair(endpointId: string): Promise<string> {
     if (!this.mod) throw new Error('pairNearby: native module not bound');
-    const sessionId = await this.mod.initiatePairNearby(endpointId);
+    const sessionId = await this.beginPairSession('nearby', () =>
+      this.mod!.initiatePairNearby(endpointId)
+    );
     this.beginPairRound(sessionId);
     this.initiatedRoutes.set(sessionId, 'nearby');
     this.setPairingActivity('signal found');
