@@ -199,8 +199,8 @@ async function waitFor(page: Page, predicate: string, timeoutMs = 30_000): Promi
 }
 
 /**
- * Walk first run: pick a persona, claim a handle, choose a delivery route, and
- * accept the location disclosure. This is the app's real onboarding, driven
+ * Walk first run: pick a persona, claim a handle, read where location goes, choose
+ * a delivery route, and accept the location disclosure. This is the app's real onboarding, driven
  * rather than bypassed — a fresh browser profile starts here every time, and
  * the map is behind it.
  *
@@ -219,7 +219,19 @@ async function onboard(page: Page, handle: string): Promise<void> {
   await sleep(600);
   await clickText(page, 'Continue');
 
-  // The delivery choice, second half of the account onboarding. It keeps its
+  // The first-run privacy read, between the persona and the route choice. It asks
+  // for nothing, so this only turns the page.
+  const atPrivacy = await waitFor(
+    page,
+    `!!document.querySelector('[data-testid="privacy-onboarding"]')`,
+    20_000
+  );
+  if (atPrivacy) {
+    await clickText(page, 'Continue');
+    await sleep(900);
+  }
+
+  // The delivery choice, last step of the account onboarding. It keeps its
   // default; this only gets past it.
   const atDelivery = await waitFor(
     page,

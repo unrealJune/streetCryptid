@@ -144,6 +144,17 @@ async function onboard(page: Page): Promise<void> {
   await sleep(600);
   await clickText(page, 'Continue');
 
+  // The first-run privacy read, between the persona and the route choice.
+  const atPrivacy = await waitFor(
+    page,
+    `!!document.querySelector('[data-testid="privacy-onboarding"]')`,
+    20_000
+  );
+  if (atPrivacy) {
+    await clickText(page, 'Continue');
+    await sleep(900);
+  }
+
   const atDelivery = await waitFor(
     page,
     `!!document.querySelector('[data-testid="delivery-onboarding"]')`,

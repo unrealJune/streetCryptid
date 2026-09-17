@@ -71,11 +71,15 @@ describe('delivery onboarding', () => {
     });
   }
 
+  /** Past the persona step and the privacy intro, which stands between it and delivery. */
   async function openDelivery() {
     await act(async () => {
       const editor = renderer.root.findByType(CryptidProfileEditor);
       await editor.props.onSave(PROFILE);
       editor.props.onDone();
+    });
+    await act(async () => {
+      renderer.root.findByProps({ testID: 'onboarding-privacy-continue' }).props.onPress();
     });
     return renderer.root.findAllByType(DeliveryOptions)[0];
   }
@@ -121,11 +125,17 @@ describe('delivery onboarding', () => {
     const delivery = await openDelivery();
     act(() => {
       delivery.props.onSelect('mutual');
+      renderer.root.findByProps({ accessibilityLabel: 'Back to privacy' }).props.onPress();
+    });
+    act(() => {
       renderer.root.findByProps({ accessibilityLabel: 'Back to profile' }).props.onPress();
     });
     const editor = renderer.root.findByType(CryptidProfileEditor);
     expect(editor.props.initialProfile).toEqual(PROFILE);
     act(() => editor.props.onDone());
+    act(() => {
+      renderer.root.findByProps({ testID: 'onboarding-privacy-continue' }).props.onPress();
+    });
     expect(renderer.root.findByType(DeliveryOptions).props.selected).toBe('mutual');
     await finish();
     expect(await loadDeliveryMode(mockKV)).toBe('mutual');
@@ -201,5 +211,28 @@ describe('delivery onboarding', () => {
     expect(delivery.props.availability).toEqual({ stashConfigured: false });
     await finish();
     expect(await loadDeliveryMode(mockKV)).toBe('stash');
+  });
+
+  it('reads the privacy intro between the persona and the route, and stores nothing there', async () => {
+    const writes = jest.spyOn(mockKV, 'set');
+    await render();
+    await act(async () => {
+      const editor = renderer.root.findByType(CryptidProfileEditor);
+      await editor.props.onSave(PROFILE);
+      editor.props.onDone();
+    });
+
+    // The intro, not the picker: its last line promises the route choice is the NEXT screen.
+    expect(renderer.root.findByProps({ testID: 'privacy-onboarding' })).toBeTruthy();
+    expect(renderer.root.findAllByType(DeliveryOptions)).toHaveLength(0);
+    expect(JSON.stringify(renderer.toJSON())).toContain('there is no streetCryptid server at all');
+    expect(writes).not.toHaveBeenCalled();
+    expect(mockSaveProfile).not.toHaveBeenCalled();
+
+    await act(async () => {
+      renderer.root.findByProps({ testID: 'onboarding-privacy-continue' }).props.onPress();
+    });
+    expect(renderer.root.findAllByProps({ testID: 'privacy-onboarding' })).toHaveLength(0);
+    expect(renderer.root.findByType(DeliveryOptions)).toBeTruthy();
   });
 });
