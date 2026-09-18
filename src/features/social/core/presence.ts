@@ -333,3 +333,147 @@ export function describePresence(presence: FriendPresence): string {
       return `No signal for ${formatAge(contactAgeMs ?? 0)}`;
   }
 }
+
+/**
+ * Never re-render faster than this, whatever the arithmetic below says.
+ *
+ * A pure floor against a pathological input (a fix stamped in the future, a threshold crossed
+ * during the render that produced it). Without it a boundary computed as "due 0 ms from now"
+ * schedules a timeout that fires into the same state and computes 0 again.
+ */
+const MIN_PRESENCE_TICK_MS = 1_000;
+
+/** Wall-clock granularity {@link formatAge} actually renders at, for a given age. */
+function msUntilAgeLabelChanges(ageMs: number): number {
+  if (ageMs < 60_000) return 60_000 - ageMs;
+  const hours = ageMs / 3_600_000;
+  if (hours < 1) return 60_000 - (ageMs % 60_000);
+  if (hours < 24) return 3_600_000 - (ageMs % 3_600_000);
+  return 86_400_000 - (ageMs % 86_400_000);
+}
+
+/**
+ * Which of the two clocks {@link describePresence} actually puts on screen for a state, if either.
+ *
+ * Scheduling against both is the obvious shortcut and it is wrong in the case that matters most: a
+ * parked friend renders position age ("Parked here 3 hr") and never contact age, so watching the
+ * contact clock would wake the roster every minute to re-render a string that only changes hourly —
+ * which is precisely the idle cost this model exists to avoid. `no-fix` renders a fixed sentence
+ * and so needs no label clock at all.
+ */
+function labelAgeFor(presence: FriendPresence): number | null {
+  switch (presence.state) {
+    case 'live':
+    case 'recent':
+    case 'parked':
+      return presence.positionAgeMs;
+    case 'out-of-contact':
+    case 'lapsed':
+      return presence.contactAgeMs;
+    case 'no-fix':
+    case 'unknown':
+      return null;
+  }
+}
+
+/**
+ * How long until anything this friend's row displays would read differently.
+ *
+ * Both halves matter and they are not the same clock. A state TRANSITION (live → recent →
+ * out-of-contact → lapsed) changes the marker styling and the sentence; an age LABEL changes only
+ * the number in it, but it changes far more often, and a "Parked here 2 hr" that is silently four
+ * hours old is the same lie in a smaller font.
+ *
+ * Returns `null` when nothing will ever change on its own — a friend with no fix, or one already
+ * `lapsed`, whose text is in days and whose state is terminal. That is what lets the caller hold no
+ * timer at all in the common idle case rather than polling to discover there is nothing to do.
+ */
+function msUntilPresenceChanges(presence: FriendPresence): number | null {
+  const { fix, state, positionAgeMs, contactAgeMs } = presence;
+  if (!fix || positionAgeMs === null || contactAgeMs === null) return null;
+
+  const due: number[] = [];
+  const toLapsed = STALE_CONTACT_WINDOW_MS - contactAgeMs;
+
+  switch (state) {
+    case 'lapsed':
+      // Terminal. Only the "N days" label still moves, and `msUntilAgeLabelChanges` has that.
+      break;
+    case 'parked':
+      // A parked declaration stands until it is a day old; nothing shorter can unseat it.
+      due.push(toLapsed);
+      break;
+    case 'no-fix':
+      due.push(MOVING_SILENCE_WINDOW_MS - contactAgeMs);
+      break;
+    case 'live':
+      // Whichever clock leaves the window first ends `live` — they only coincide while moving.
+      due.push(LIVE_PRESENCE_WINDOW_MS - contactAgeMs, LIVE_PRESENCE_WINDOW_MS - positionAgeMs);
+      break;
+    case 'recent':
+      due.push(MOVING_SILENCE_WINDOW_MS - contactAgeMs);
+      break;
+    case 'out-of-contact':
+      due.push(toLapsed);
+      break;
+    case 'unknown':
+      return null;
+  }
+
+  const labelAge = labelAgeFor(presence);
+  if (labelAge !== null) due.push(msUntilAgeLabelChanges(labelAge));
+
+  if (due.length === 0) return null;
+  const soonest = Math.min(...due.filter((ms) => Number.isFinite(ms)));
+  return Number.isFinite(soonest) ? Math.max(soonest + 1, MIN_PRESENCE_TICK_MS) : null;
+}
+
+/**
+ * When the roster as a whole next needs re-deriving, or `null` if it never does.
+ *
+ * Presence is a function of wall-clock time, so a screen left open goes quietly wrong without
+ * something to invalidate it: until this existed, `buildFriendPresence` ran only when the DATA
+ * changed, which meant a friend could sit at "Here now" for an hour after their last fix and a
+ * parked friend's "2 hr" never counted past two. The fix is deliberately a computed deadline
+ * rather than an interval — the exact moment the next thing on screen becomes wrong — so an idle
+ * roster of parked friends costs one timer an hour instead of a re-render every second.
+ */
+export function msUntilPresenceRosterChanges(presences: readonly FriendPresence[]): number | null {
+  let soonest: number | null = null;
+  for (const presence of presences) {
+    const due = msUntilPresenceChanges(presence);
+    if (due === null) continue;
+    if (soonest === null || due < soonest) soonest = due;
+  }
+  return soonest;
+}
+
+/** How often a foregrounded app should reconcile, given who it is currently looking at. */
+export const PRESENCE_SYNC_MOVING_MS = 20_000;
+export const PRESENCE_SYNC_RECENT_MS = 60_000;
+export const PRESENCE_SYNC_IDLE_MS = 5 * 60_000;
+
+/**
+ * How long to wait before the next durable reconciliation while the app is open.
+ *
+ * Live gossip already delivers a moving friend's fixes the instant both nodes are connected, and
+ * when that is working this poll finds nothing and costs a range check. It exists for when it is
+ * NOT working — the friend published from a headless wake to the stash and we were never dialled —
+ * which on the measured fleet is the common case, not the exception.
+ *
+ * Scaled by what is actually on screen, because the cost is not symmetric: a friend who is moving
+ * is the one case where a minute of staleness is visible as a wrong dot, while a roster of parked
+ * friends can wait five minutes without anything on screen being untrue. Returns `null` for an
+ * empty roster so a user with no friends holds no timer.
+ */
+export function presenceSyncIntervalMs(presences: readonly FriendPresence[]): number | null {
+  if (presences.length === 0) return null;
+  let interval = PRESENCE_SYNC_IDLE_MS;
+  for (const presence of presences) {
+    if (presence.state === 'live') return PRESENCE_SYNC_MOVING_MS;
+    if (presence.state === 'recent' || presence.state === 'no-fix') {
+      interval = Math.min(interval, PRESENCE_SYNC_RECENT_MS);
+    }
+  }
+  return interval;
+}
