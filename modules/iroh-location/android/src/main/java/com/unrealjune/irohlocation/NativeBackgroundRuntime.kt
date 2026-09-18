@@ -207,6 +207,47 @@ internal object NativeBackgroundRuntime {
     }
   }
 
+  /**
+   * Fill the slots that have come due with no new position, because the phone has not moved.
+   *
+   * The counterpart of [ingest] and the Android half of the seam `DrainEngine::heartbeat` already
+   * names — "iOS's parked coarse stream, Android's no-delivery tick". It exists because
+   * `LocationManager.requestLocationUpdates` only delivers when BOTH the time and the distance
+   * minimum are met, so a phone on a desk generates no callbacks at all and the publish path had
+   * nothing to run it. A foreground service is not Doze-suspended, so unlike iOS we can simply
+   * hold a clock — see [BackgroundLocationService.startStationaryTicker].
+   *
+   * Deliberately NOT an [ingest] of the last known position: the gate would judge it as a fresh
+   * observation and stamp `FIX_STATE_NO_FIX` when it failed the movement test, which reads on a
+   * friend's screen as "moving, no signal fix" — the opposite of the truth. `heartbeatFix` stamps
+   * `FIX_STATE_PARKED`, which is the whole point of the declaration.
+   */
+  suspend fun heartbeat(
+    context: Context,
+    battery: BatteryState,
+    intervalMs: ULong,
+  ): Capture {
+    if (!ensureStarted(context)) {
+      return if (hasIdentity(context)) Capture.AppOwnsNode else Capture.Unavailable
+    }
+    val sub = lock.withLock { subscription } ?: return Capture.Unavailable
+    return try {
+      Capture.Ingested(
+        sub.heartbeatFix(
+          SUBSCRIPTION_ID,
+          battery,
+          intervalMs,
+          System.currentTimeMillis().toULong(),
+        )
+      )
+    } catch (e: Exception) {
+      // Same reasoning as `ingest`: a transient relay error must not take down the service. The
+      // anchor is still in the gate, so the next tick republishes it.
+      Log.w(TAG, "heartbeat failed; the anchor stays queued", e)
+      Capture.Unavailable
+    }
+  }
+
   /** Whether this device has an identity at all — the one case a handoff cannot help. */
   private fun hasIdentity(context: Context): Boolean =
     try {

@@ -19,7 +19,10 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import uniffi.iroh_location.BatteryState
 import uniffi.iroh_location.LocationFix
@@ -66,9 +69,23 @@ class BackgroundLocationService : Service() {
 
   private val listener =
     LocationListener { location ->
+      // Stamped before the launch, not inside it: the ticker asks "did the provider deliver in this
+      // slot", and a coroutine that has been dispatched but not yet run still answers yes.
+      lastDeliveryAtMs = System.currentTimeMillis()
       // Straight into the native path. No JS, no headless bridge, no spool.
       scope.launch { publish(location) }
     }
+
+  /**
+   * When the provider last handed us a location, or 0 before the first one.
+   *
+   * The only state the stationary ticker needs. Deliberately not a "moving/stopped" state machine
+   * like the iOS runtime's: that exists there because Core Location has to be re-tiered to a
+   * cheaper stream to keep the process ALIVE, and a foreground service has no such problem.
+   */
+  @Volatile private var lastDeliveryAtMs: Long = 0L
+
+  private var stationaryTicker: Job? = null
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -77,6 +94,7 @@ class BackgroundLocationService : Service() {
     startForeground(NOTIFICATION_ID, notification())
     running = true
     startLocationUpdates()
+    startStationaryTicker()
   }
 
   /**
@@ -88,6 +106,8 @@ class BackgroundLocationService : Service() {
 
   override fun onDestroy() {
     running = false
+    stationaryTicker?.cancel()
+    stationaryTicker = null
     locationManager?.removeUpdates(listener)
     locationManager = null
     // Release the directory claims so a mounted app can take them back immediately, rather than
@@ -123,6 +143,75 @@ class BackgroundLocationService : Service() {
       } catch (e: IllegalArgumentException) {
         Log.i(TAG, "provider $provider is unavailable on this device")
       }
+    }
+  }
+
+  /**
+   * Publish a parked heartbeat for every slot the provider does not deliver into.
+   *
+   * ## Why this has to exist
+   *
+   * `LocationManager.requestLocationUpdates` delivers only when BOTH `MIN_UPDATE_INTERVAL_MS` has
+   * elapsed AND the device has moved `cadenceDistanceM`. With a 50 m filter a phone on a desk
+   * produces **no callbacks at all, indefinitely** — so the send path simply never ran, and the
+   * only thing publishing a stationary Pixel's position was the deferrable `expo-background-task`
+   * refresh. On 2026-09-18 App Standby decayed that from a run every ~16 minutes to one in fourteen
+   * hours, and the phone went silent for 7.8 of them with `task.location_running = true`,
+   * `perm.background = granted` and every other flag green. That is the same shape the iOS runtime
+   * was rewritten to fix (see `BackgroundLocationRuntime.swift`, 2026-08-30); Android never got the
+   * other half.
+   *
+   * ## Why a plain timer is the right answer HERE
+   *
+   * iOS cannot do this — it has no clock that survives suspension, which is why that side has to be
+   * parasitic on Core Location and re-tier to a coarse stream to stay alive at all. A foreground
+   * service is exempt from Doze and App Standby, so on Android the clock is simply available. Using
+   * it means the parked heartbeat stops depending on WorkManager, which is the component that
+   * actually failed.
+   *
+   * Lowering `cadenceDistanceM` to zero would also produce deliveries, and is the wrong fix twice
+   * over: it spins GPS for positions the gate will discard, and it routes them through `ingest`,
+   * where failing the movement test stamps `FIX_STATE_NO_FIX` — "moving, no signal fix" on a
+   * friend's screen, for a phone that is parked. The heartbeat path stamps `FIX_STATE_PARKED`,
+   * which is true.
+   *
+   * The tick is skipped whenever the provider has delivered inside the current slot, so a moving
+   * phone costs nothing and never publishes twice for one slot. `heartbeatFix` is idempotent
+   * against the slot grid anyway (`gate::due_slots` returns 0 when none are due), so a race between
+   * a late delivery and a tick is absorbed rather than duplicated.
+   */
+  private fun startStationaryTicker() {
+    stationaryTicker?.cancel()
+    stationaryTicker =
+      scope.launch {
+        while (isActive && running) {
+          val slotMs = slotIntervalMs.toLong().coerceAtLeast(MIN_TICK_INTERVAL_MS)
+          delay(slotMs)
+          if (!running) break
+          val since = System.currentTimeMillis() - lastDeliveryAtMs
+          // A delivery inside this slot means `publish` has already run the gate for it.
+          if (lastDeliveryAtMs != 0L && since < slotMs) continue
+          heartbeat()
+        }
+      }
+  }
+
+  private suspend fun heartbeat() {
+    val battery = readBattery()
+    when (NativeBackgroundRuntime.heartbeat(applicationContext, battery, slotIntervalMs)) {
+      is NativeBackgroundRuntime.Capture.Ingested -> Unit
+      // Same handover as a capture, and for the same reason — while the app is mounted it holds the
+      // store claim and is the only thing that can publish. `null` fix: a parked tick has no
+      // position, and `routeNativeCapture` reads `kind` to know that.
+      NativeBackgroundRuntime.Capture.AppOwnsNode ->
+        IrohLocationModule.handOffCapture(
+          fix = null,
+          battery = battery,
+          reason = "periodic",
+          kind = "heartbeat",
+          state = "stopped",
+        )
+      NativeBackgroundRuntime.Capture.Unavailable -> Unit
     }
   }
 
@@ -250,6 +339,15 @@ class BackgroundLocationService : Service() {
      * minutes old. One minute and fifty metres is the same shape `AMBIENT_*` uses in JS.
      */
     private const val MIN_UPDATE_INTERVAL_MS = 60_000L
+
+    /**
+     * Floor on the stationary tick, independent of the user's chosen slot interval.
+     *
+     * The interval is user-selectable down to one minute (`SHARE_INTERVAL_OPTIONS_MS`), and a
+     * heartbeat is cheap — no GPS, one sealed envelope — but this stops a future cadence change
+     * from turning the ticker into a spin loop.
+     */
+    private const val MIN_TICK_INTERVAL_MS = 60_000L
 
     fun start(context: Context) {
       val intent = Intent(context, BackgroundLocationService::class.java)
