@@ -80,6 +80,62 @@ Conventions when changing that code:
   forwarded (binary+offset, attributed thread first, 48 frames) — a full call-stack tree is
   hundreds of kilobytes and would make telemetry the reason a phone stops shipping telemetry.
   `diag.*` attributes describe the build that DIED, which is routinely not the build reporting it.
+- **A backgrounded iOS app is not a suspended one, and that is where the CPU went.**
+  `UIBackgroundModes: ["location"]` plus `allowsBackgroundLocationUpdates` means iOS does not
+  suspend this process while sharing is on, so a swiped-away app keeps every JS timer it had
+  running indefinitely. MetricKit recorded **41 CPU exceptions in 7 days** across three iPhones on
+  builds 78-83, each reporting `cpu_time_ms = 48000` over a 49-60 s window — that constant is iOS's
+  `MXCPUExceptionDiagnostic` threshold, not a measurement — and the flattened stack is the
+  `NSThread`/`CFRunLoop` React Native runs JS on. `onBackground` now stops the pairing poll, and
+  `pollingSuspended` is a SECOND guard because `onPairReady`, `rebindNodeInner` and `armBump` all
+  re-arm the loop and none of them knows the app is in a pocket. The Skia loops pause through
+  `useIsAppActive()`. Note `event-log.ts` stamps a row `background` from `AppState` alone, so
+  "background entries" in the journal conflate a cold wake with a mounted app in a pocket — the
+  latter was most of them. **Do NOT also stop the heartbeat timer**: Android's
+  `BackgroundLocationService` only ever hands off `reason = "movement"`, so on that platform it is
+  the only thing filling slots for a parked phone while mounted. The bump loop needs no guard
+  either; it bounds itself against `isBumpActive()` inside a two-minute window a human opened.
+- **The background budget is measured now, not inferred.** Every earlier claim about it —
+  `SHIP_MAX_BATCHES = 3`, `HEADLESS_TEARDOWN_TIMEOUT_MS`, "throttled into silence" — came from
+  reading silence after the fact. `BackgroundWakeLedger.swift` samples `CLOCK_PROCESS_CPUTIME_ID`
+  and `CLOCK_MONOTONIC` around each wake into durable UserDefaults counters, surfaced as `wake.*`
+  on the next `device.health`. Counters and not spans, for the reason `init-watermark.ts` exists: a
+  wake that ends before it can ship cannot describe itself, and on a JS-free wake there is no
+  journal to write to. `recordDeviceHealth` is the ONLY caller allowed to reset them — a
+  take-and-reset inside the read lets two records in one minute take half the counts each.
+  `wake.cpu_ms_max` near 48000 is the exception threshold, not a high reading. `bg.refresh.expired`
+  covers the other half: `BGTask.expirationHandler` is the only notice iOS gives, and nothing
+  listened to it, so a refresh cut short and one never scheduled both left a span that never ends.
+- **`bg.wake` and `bg.backfill` do not exist.** They went dead when capture moved into Rust — the
+  location wake is native and emits no JS span at all. Six e2e scenarios asserted them,
+  `background-location-e2e.sh` gated its PASS on `bg.wake > 0` so it could never pass, and two
+  Grafana panels counted them behind `or vector(0)`, which renders a reassuring **0** forever. Use
+  `device.health` (with its `wake.*`) and `bg.refresh`. Check for this shape before trusting any
+  tile: a span name nothing emits looks exactly like a fleet that is fine.
+- **Who owns the Rust stores is now stated, not raced.** `BackgroundLocationRuntime.owner` defaults
+  to `.app`, and `ensureStarted()` returns on its first line unless it is `.native` — which removes
+  the reason for the 2026-09-16 construction storm rather than merely bounding it, since the
+  refusal path no longer builds a whole `LocationNode` to have it refused. Only a launch that does
+  not start React calls `adoptNodeOwnership()`. **`releaseNativeBackground` does NOT free the
+  claims**: `WriterClaim` releases on the last `Arc` drop, and `Subscription` and the spawned
+  receive task each hold their own `Arc<LocationNode>` — only `shutdown` nils them all and detaches
+  the pair runtime. `yieldNode` races that shutdown against a Swift-side timeout so the promise
+  always settles (AGENTS.md's rule is about a promise that never _settles_), JS bounds it again,
+  and `startNativeBounded` retries once — once, not in a loop.
+- **`IrohBackgroundBootstrap.swift` runs before React, and must return `true`.**
+  `ExpoAppDelegateSubscriberManager` reduces `willFinishLaunchingWithOptions` with
+  `?? false || result` and short-circuits to `true` only when NO subscriber implements it; once ours
+  does, returning anything else breaks universal-link cold launches, and `applinks:streetcrypt.id`
+  is live. `willFinishLaunching` is the only usable hook — `subscriberDidRegister` runs from `+load`
+  before `main()`, and a subscriber's `didFinishLaunching` runs after the app delegate's own, which
+  is where `startReactNative` already happened. It arms the Core Location ladder but deliberately
+  does NOT take ownership, so a foreground launch is byte-for-byte unchanged.
+- **A local simulator build needs `just bindgen-ios` when the XCFramework is older than the
+  bindings.** CI regenerates `modules/iroh-location/ios/generated/*` on every Rust API change but
+  cannot build the XCFramework, so a checkout can carry today's bindings against a weeks-old
+  binary. The symptom is not obvious: two `iroh_locationFFI.h` headers disagree and the Swift fails
+  with "missing argument for parameter 'onSync'" inside generated code you did not touch.
+
 - **Do not add a battery-optimisation prompt to "fix" Android background reliability without
   re-checking this first.** Android already restores sharing on its own: expo-task-manager's
   `TaskBroadcastReceiver` is registered for `BOOT_COMPLETED` (and `RECEIVE_BOOT_COMPLETED` is
