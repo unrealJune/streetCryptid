@@ -8,7 +8,7 @@ import {
   useState,
   type PropsWithChildren,
 } from 'react';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 
 import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
 import { runDevCommand as runDevCommandImpl } from '@/features/dev/commands/dev-commands';
@@ -18,7 +18,12 @@ import {
   resolveLocationStatus,
   type LocationRuntimeStatus,
 } from '@/features/social/core/location-status';
-import { buildFriendPresence, type FriendPresence } from '@/features/social/core/presence';
+import {
+  buildFriendPresence,
+  msUntilPresenceRosterChanges,
+  presenceSyncIntervalMs,
+  type FriendPresence,
+} from '@/features/social/core/presence';
 import type { IncomingFix, LocationFix } from '@/features/social/core/types';
 import { type TrailPoint } from '@/features/social/net/background/trail-store';
 import {
@@ -197,6 +202,9 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   const [disclosureStatus, setDisclosureStatus] = useState<LocationDisclosureStatus>('loading');
   const [serviceReady, setServiceReady] = useState(false);
   const locationStartRequested = useRef(false);
+  // Bumped when wall-clock time — not data — has made the rendered roster wrong. See the effect
+  // below `friends`; the value itself is only ever read as a memo dependency.
+  const [presenceClock, setPresenceClock] = useState(() => Date.now());
 
   // Read the disclosure choice as soon as possible — independent of (and faster than) the heavy
   // service-init effect below, so the gate can render its "loading" state as briefly as possible.
@@ -707,8 +715,121 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
           selfFix: hasLiveSelfFix ? selfFix : null,
         })
       ),
-    [snapshot?.friends, friendFixes, hasLiveSelfFix, selfFix]
+    // `presenceClock` is an invalidation trigger, not an input. Presence is derived from wall-clock
+    // time, so this has to re-run when a threshold falls due even though nothing about the data
+    // changed; `buildFriendPresence` reads `Date.now()` itself, which is also what keeps an
+    // ordinary data-driven recompute current. See `msUntilPresenceRosterChanges`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+    [snapshot?.friends, friendFixes, hasLiveSelfFix, selfFix, presenceClock]
   );
+  // Re-derive presence at the exact moment the next thing on screen becomes wrong.
+  //
+  // One timeout, re-armed from the roster it just produced — never an interval. A roster of parked
+  // friends schedules one wake an hour; a friend moving beside you schedules one a minute, which is
+  // the granularity `formatAge` renders at anyway. Nothing is scheduled at all when no friend has a
+  // fix, so the idle case costs nothing.
+  //
+  // Foreground-only: a backgrounded app has no screen to keep honest, and re-rendering the map
+  // behind a headless wake is pure waste. Coming back to the foreground recomputes immediately
+  // rather than waiting out whatever deadline was pending when we left.
+  useEffect(() => {
+    if (friends.length === 0) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      if (AppState.currentState !== 'active') return;
+      const due = msUntilPresenceRosterChanges(friends);
+      if (due === null) return;
+      timer = setTimeout(() => setPresenceClock(Date.now()), due);
+    };
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next === 'active') setPresenceClock(Date.now());
+      else if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    });
+    tick();
+    return () => {
+      if (timer) clearTimeout(timer);
+      subscription.remove();
+    };
+  }, [friends]);
+  // Derived as a NUMBER on purpose: the roster below re-derives on every clock tick, and an effect
+  // keyed on the array itself would tear down and re-arm its timer once a minute for no reason.
+  // The cadence class changes only when someone starts or stops moving.
+  const syncIntervalMs = useMemo(() => presenceSyncIntervalMs(friends), [friends]);
+  /**
+   * Keep an open map current, on the two occasions the live path does not.
+   *
+   * Live gossip already delivers a friend's fix the moment it is published, but only while the two
+   * nodes are actually connected — and on the measured fleet they usually are not: a friend's phone
+   * publishes from a headless wake into the stash and nobody dials us. Until now the only pulls were
+   * at service init and on the service's own foreground handler, which is installed inside
+   * `startBackground` and so does not exist at all when background sharing never armed. A phone with
+   * sharing off could therefore sit on a map that never refreshed.
+   *
+   * Nothing here blocks a render or gates one. It is fire-and-forget behind three guards — dropped
+   * while backgrounded, never stacked with itself, and the replica read it triggers is already
+   * versioned by `trailRefreshId` — so a slow sync can only ever arrive late, never out of order,
+   * and the map keeps drawing the positions it has while one is in flight.
+   */
+  useEffect(() => {
+    if (!serviceReady || syncIntervalMs === null) return;
+    let cancelled = false;
+    let inFlight = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const pull = async (): Promise<void> => {
+      if (cancelled || inFlight || AppState.currentState !== 'active') return;
+      const service = serviceRef.current;
+      if (!service) return;
+      inFlight = true;
+      try {
+        await service.syncTrail(0);
+      } catch (syncError: unknown) {
+        // Best effort by construction — a failed reconciliation leaves the last known fixes on
+        // screen, which is the correct fallback. Surfacing it as `serviceError` would put a banner
+        // over the map every time a friend's phone was asleep.
+        console.warn(`[location] foreground refresh failed: ${errorMessage(syncError)}`);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const arm = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        void pull().finally(() => {
+          // Re-check the app state rather than only `cancelled`: a tick that landed just after we
+          // went to the background no-ops inside `pull`, and re-arming on it would leave a timer
+          // cycling behind a screen nobody is looking at. The listener below re-arms on the way in.
+          if (!cancelled && AppState.currentState === 'active') arm();
+        });
+      }, syncIntervalMs);
+    };
+
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next !== 'active') {
+        if (timer) clearTimeout(timer);
+        timer = null;
+        return;
+      }
+      // Coming back is the one moment the data is guaranteed stale, so pull straight away rather
+      // than waiting out an interval. `reconcileTrailOnce` coalesces this with the service's own
+      // foreground sync when both are armed, so the duplicate costs one replica read.
+      void pull();
+      arm();
+    });
+
+    arm();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      subscription.remove();
+    };
+  }, [serviceReady, syncIntervalMs]);
   // Likewise the identity outside a screenshot run. The demo walk is what gives
   // the exploration layer something to reveal: coverage is the residue of weeks
   // of walking, and a fresh install has none.
