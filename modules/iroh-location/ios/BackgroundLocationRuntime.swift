@@ -326,6 +326,24 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // and one-shot requests are not a supported combination with `startUpdatingLocation()`. If there
     // is no cached position — a genuinely fresh install — the stream's first delivery seeds it
     // instead, which is why this is best-effort rather than a precondition.
+    seedGateFromCache()
+
+    manager.startUpdatingLocation()
+  }
+
+  /// Push the cached position through the gate, so `heartbeat` has something to repeat.
+  ///
+  /// Split out of `start()` because `start()` is idempotent and its seed therefore happens exactly
+  /// once — on whichever call armed the ladder. That was fine while `startNativeBackground` was the
+  /// only caller. It is not fine now that the app-delegate bootstrap can arm the ladder first: that
+  /// call runs before the event sink is wired and with the node owned by the app, so its seed has
+  /// nowhere to go, and the later `startNativeBackground` finds the runtime already running and
+  /// returns without seeding. The gate would never be seeded at all, which is precisely the
+  /// 2026-08-30 failure — armed, authorised, running, and publishing nothing for 88 minutes.
+  ///
+  /// Safe to repeat: a seed is an ordinary capture, and the slot grid absorbs everything inside a
+  /// slot, so a second one costs nothing on the wire.
+  func seedGateFromCache() {
     if let cached = manager.location {
       note(.seed)
       let fix = Self.fix(from: cached)
@@ -348,8 +366,6 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         considerStopping(at: cached)
       }
     }
-
-    manager.startUpdatingLocation()
   }
 
   /// Give up the node this runtime holds, and change nothing else.
@@ -368,6 +384,13 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   func release() {
     guard running else { return }
     NSLog("[iroh-location] releasing the node; ladder stays armed")
+    // Ownership moves WITH the release, and this is the whole point of the call: the JS runtime is
+    // going away and is about to close the stores it built on, so from here this runtime is the
+    // only thing that can publish. `ensureStarted` refuses unless it owns the node, so without this
+    // the promise in the doc comment above — "rebuilds against the freed stores on the next
+    // delivery" — could never be kept, and a phone whose app was torn down would publish nothing
+    // until someone opened it again.
+    owner = .native
     queue.async { self.teardown() }
   }
 

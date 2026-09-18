@@ -589,6 +589,11 @@ public final class IrohLocationModule: Module {
       // means "a mounted app is driving", and the runtime must not try to build a rival node.
       BackgroundLocationRuntime.shared.yieldOwnershipToApp()
       BackgroundLocationRuntime.shared.start()
+      // Seed explicitly, because `start()` is idempotent: if the app-delegate bootstrap already
+      // armed the ladder, `start()` returned without seeding and its own seed was captured before
+      // this sink existed. Without this the gate is never seeded — armed, authorised, running and
+      // publishing nothing, the 2026-08-30 failure.
+      BackgroundLocationRuntime.shared.seedGateFromCache()
     }
 
     /// Re-program the background runtime from the sampling policy's decision.
@@ -968,13 +973,7 @@ public final class IrohLocationModule: Module {
     }
 
     Function("configureTelemetry") { (endpoint: String, instanceId: String) -> Bool in
-      // Mirror what JS configured, so a launch that never starts React can re-apply it. The Rust
-      // OTLP layer is dormant until something hands it an endpoint, and on a JS-free wake there is
-      // nothing to hand it one. See `IrohBackgroundBootstrap`.
-      let defaults = UserDefaults.standard
-      defaults.set(endpoint, forKey: "sc.otel.endpoint")
-      defaults.set(instanceId, forKey: "sc.otel.instance_id")
-      return configureTelemetry(endpoint: endpoint, instanceId: instanceId)
+      TelemetryConfigurator.apply(endpoint: endpoint, instanceId: instanceId, remember: true)
     }
 
     AsyncFunction("flushTelemetry") { () async in

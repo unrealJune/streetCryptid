@@ -40,12 +40,19 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
     let background = application.applicationState == .background
     BackgroundWakeLedger.noteLaunch(background: background)
 
-    // 3. Rust telemetry. The OTLP layer is dormant until something hands it an endpoint, and on a
-    //    launch with no JS there is nothing to. Re-applied from what JS last configured.
-    let defaults = UserDefaults.standard
-    if let endpoint = defaults.string(forKey: "sc.otel.endpoint"), !endpoint.isEmpty {
-      let instance = defaults.string(forKey: "sc.otel.instance_id") ?? "bg"
-      _ = configureTelemetry(endpoint: endpoint, instanceId: instance)
+    // 3. Rust telemetry, but ONLY on a launch that will not start React.
+    //
+    //    The OTLP layer is dormant until something hands it an endpoint, and a JS-free wake has
+    //    nothing to hand it one. A FOREGROUND launch does — `init()` calls `configureTelemetry`
+    //    within a second — and doing it here as well means Rust reconfigures, which begins by
+    //    shutting the previous pipeline down and blocks on the exporter's blocking HTTP client.
+    //    Caught on the simulator doing exactly that: the launch stalled inside the
+    //    `mirror-secrets` phase. `TelemetryConfigurator` makes
+    //    a repeat call idempotent regardless; this gate is the other half, so a foreground launch
+    //    does no telemetry work at all before React is up.
+    if background, let persisted = TelemetryConfigurator.persisted {
+      TelemetryConfigurator.apply(
+        endpoint: persisted.endpoint, instanceId: persisted.instanceId, remember: false)
     }
 
     NSLog(
@@ -54,13 +61,18 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
 
     // 4. Arm the Core Location ladder if sharing was on when we last ran.
     //
-    //    Ownership is deliberately NOT taken here. Arming is safe on every launch — `start()` is
-    //    idempotent and the ladder is what brings a terminated app back — but taking the stores is
-    //    not: `start()` seeds the gate from `manager.location`, which fires an `ingest` and
-    //    therefore `ensureStarted()`. With ownership left at `.app` that returns on its first line,
-    //    so a foreground launch behaves exactly as it always has. Only a launch that decides not to
-    //    start React calls `adoptNodeOwnership()`.
-    if BackgroundLocationRuntime.wasArmed {
+    //    Only on a launch with no JS coming, for the same reason as the telemetry gate above: a
+    //    foreground launch reaches `startNativeBackground` within a second and arms the ladder
+    //    properly, with the event sink wired. Arming it here first would make that later call a
+    //    no-op (`start()` is idempotent) and strand the gate seed this call captured before any
+    //    sink existed — see `seedGateFromCache`. Gating keeps a foreground launch byte-for-byte
+    //    what it was before this file existed.
+    //
+    //    Ownership is deliberately NOT taken even here. Taking it is what lets this runtime build
+    //    its own node, and nothing should do that while React is still going to start; the launch
+    //    that skips React is the one that calls `adoptNodeOwnership()`.
+    let locationLaunch = launchOptions?[.location] != nil
+    if BackgroundLocationRuntime.wasArmed && (background || locationLaunch) {
       BackgroundLocationRuntime.shared.start()
     }
 
