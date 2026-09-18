@@ -155,6 +155,7 @@ them describe a ping; all of them describe why there wasn't one.
 | `bg.selfheal` (`sharing-disabled` / `already-running`) | the self-heal ran and had nothing to do — distinct from never running                                                                                 |
 | `bg.session` (`precheck-empty`)                        | a headless wake found an empty outbox — distinct from no wake at all                                                                                  |
 | `revive.arm` (`outcome`)                               | whether the iOS tripwire is actually armed, rather than only believed to be — `armed` \| `throttled` \| `task-undefined` \| `unavailable` \| `failed` |
+| `device.health` (`sharing.muted`)                      | this phone believes it is sharing and cannot — `foreground-permission` \| `background-permission` \| `location-task-stopped` \| `no-recipients`       |
 
 ### Spans that say what the phone and its human were doing
 
@@ -174,12 +175,44 @@ the node had been rebuilt), and a friend count that was only observable as a sid
 | `node.create`         | a JS context asked for a node — `mode` (interactive/headless), `claimed_runtime`, `adopts`; pair with the native `node.construct` ordinal below |
 | `pool.friend_removed` | a friend left it — `manual` (the map's remove) vs `reveal-reject` (the button beside ACKNOWLEDGE), which is the distinction that cost a day     |
 
-The native core's own two, in Loki rather than Tempo (`{service_name="streetcryptid-core"} |~ "pair\."`):
+### The handshake itself
+
+Added 2026-09-17, after a night in which two pairings failed in two different ways and neither left
+a single queryable number behind. The native core's timings existed — `connect_ms`, `exchange_ms`,
+`ticket_ms` — as `tracing::info!` **events**, and Loki's OTLP ingest keeps the message and drops the
+fields. So "how long did the dial take, and which half was slow" had no answer at all. These are
+spans now, which also means the collector's `spanmetrics` connector counts them per device for free.
+
+| Span                       | Says                                                                                                                                                                                           |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pair.initiate` (JS)       | the native call that "REACHING THEM" is waiting on — `method`, `ms`, and `outcome`: `started` \| `timeout` \| `failed`                                                                         |
+| `pair.handshake`           | one initiator-side run to the SAS gate — `round` (`hello` \| `reveal`) says which leg it died on, `outcome` is `verifying` or `failed`                                                         |
+| `pair.dial`                | one round trip, split: `connect_ms` (paths, hole punching, relay) vs `exchange_ms` (**the peer's own reply**). `outcome` names which budget was blown: `connect_timeout` \| `exchange_timeout` |
+| `pair.inbound`             | the same round trip from the answering side — `decision`, `ms`, `outcome`                                                                                                                      |
+| `pair.build_msg`           | assembling one message: `ticket_ms` (waiting for a relay) vs `docs_ms` (reading our own profile/trail)                                                                                         |
+| `pair.endpoint_ticket`     | the relay wait specifically — `latched=true` means it was already online and cost nothing                                                                                                      |
+| `pair.accept`              | ACKNOWLEDGE's native half — `bilateral_before_dial` distinguishes "we completed the pair, then told them" from "their Accept rode our dial response"                                           |
+| `pair.finalize`            | the ratchet install + ticket imports — `ratchet=false` is a friend who will drop every publish with `no_session`                                                                               |
+| `pair.acknowledge` (JS)    | the human's last word: `accept`, `ms`. It exists because `pool.friend_added` only fires on SUCCESS, so a wedged acknowledge left no record of having been pressed                              |
+| `pair.connect_friend` (JS) | what happens AFTER the friend is adopted — per-step `*_ms` / `*_failed` for subscribe, my_subscription, introduction, trail_sync                                                               |
+
+Two readings worth knowing:
+
+- **A 40-second bump is usually not BLE.** `resolve_bump_peer` spends up to 12 s scanning by design;
+  after that, `pair.build_msg`'s `ticket_ms` is the cost to watch. Four messages are built to reach
+  the SAS gate (two per side) and each side's reply is built _inside_ the other's dial, so they
+  serialize across both phones. That is what `pair.endpoint_ticket`'s `latched` exists to show.
+- **`outcome=exchange_timeout` accuses the other phone, not the link.** We connected; they did not
+  answer. Look for their `pair.inbound` — if it is missing, their handler never ran; if it is there
+  with a large `ms`, look at their `pair.build_msg`.
+
+The native core's own log lines, in Loki rather than Tempo (`{service_name="streetcryptid-core"} |~ "pair\."`):
 
 | Log                   | Says                                                                                                                                                                           |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `pair.local_decision` | what this phone decided and whether the core accepted it — `accept` \| `reject` \| `fail` \| `noop` \| `contradiction`                                                         |
 | `pair.peer_decision`  | a decision folded in off the wire, what it replaced, and the resulting phase. `effect=overrode-accept` is a pair being taken back apart by the network, which no human pressed |
+| `pair.docs_timeout`   | a handshake docs read gave up inside `PAIR_DOCS_TIMEOUT`; the pair continued without that ticket                                                                               |
 | `node.construct`      | a `LocationNode` was built, with `node.ordinal` — how many this PROCESS has built. **Above 1 is the alarm**                                                                    |
 | `node.start`          | the endpoint came up, stamped with the same `node.ordinal`, plus `ble_attached` (fixed at construction and never changeable after)                                             |
 

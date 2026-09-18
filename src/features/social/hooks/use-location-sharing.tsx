@@ -14,6 +14,10 @@ import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile'
 import { runDevCommand as runDevCommandImpl } from '@/features/dev/commands/dev-commands';
 import type { DeliveryMode } from '@/features/social/core/delivery-mode';
 import { withFixtureFriends, withFixtureTrail } from '@/features/dev/fixtures';
+import {
+  resolveLocationStatus,
+  type LocationRuntimeStatus,
+} from '@/features/social/core/location-status';
 import { buildFriendPresence, type FriendPresence } from '@/features/social/core/presence';
 import type { IncomingFix, LocationFix } from '@/features/social/core/types';
 import { type TrailPoint } from '@/features/social/net/background/trail-store';
@@ -38,8 +42,7 @@ import {
   ensurePairingPermissions,
 } from '@/features/social/net/pairing-permissions';
 
-export type LocationRuntimeStatus =
-  'starting' | 'running' | 'permission-denied' | 'unavailable' | 'error';
+export type { LocationRuntimeStatus };
 
 /**
  * Google Play requires a "prominent disclosure" screen — shown in-app, before the OS runtime
@@ -712,20 +715,23 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   const shownTrail = useMemo(() => withFixtureTrail(trail, selfFix), [trail, selfFix]);
 
   // `permission-denied` is a claim about the OS, and it is the one bit of location state that goes
-  // stale in our hand. It is set once, from whatever `startBackground` read at start-up; the service
-  // re-derives the real answer on every foreground and reports it on the snapshot. Derived rather
-  // than written back, so there is one source of truth and no cascading render.
-  //
-  // This replaces an effect that tore the whole runtime down and restarted it on every foreground
-  // while the status was denied — which on 2026-08-30 was a phone that had held `authorizedAlways`
-  // the entire time and had merely read the permission one beat too early on a fresh install. A
-  // genuine denial leaves `backgroundAccess` at `foreground`, and the banner correctly stands.
+  // stale in our hand: it is written once by `startLocation`, and the service re-reads the real
+  // answer on every foreground. The reconciliation — and the two incidents behind each half of it
+  // — lives in `resolveLocationStatus`. Derived rather than written back, so there is one source
+  // of truth and no cascading render.
+  const effectiveLocationStatus = resolveLocationStatus({
+    reported: locationStatus,
+    backgroundAccess: snapshot?.backgroundAccess,
+  });
   const accessRecovered =
-    locationStatus === 'permission-denied' && snapshot?.backgroundAccess === 'full';
-  const effectiveLocationStatus: LocationRuntimeStatus = accessRecovered
-    ? 'running'
-    : locationStatus;
-  const error = (accessRecovered ? null : locationError) ?? serviceError;
+    locationStatus === 'permission-denied' && effectiveLocationStatus === 'running';
+  const error =
+    (accessRecovered
+      ? null
+      : (locationError ??
+        (effectiveLocationStatus === 'permission-denied'
+          ? 'Allow background location so your friends stay current.'
+          : null))) ?? serviceError;
 
   const transportReport = useMemo<TransportReport>(
     () =>

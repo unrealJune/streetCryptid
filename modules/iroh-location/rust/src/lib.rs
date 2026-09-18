@@ -1082,6 +1082,64 @@ struct Started {
     _router: Router,
 }
 
+/// Every live handle a started node holds, cloned out from under [`LocationNode::inner`].
+///
+/// ## Why this type exists
+/// `inner` is the ONE process-wide node lock, and every JS-visible native call goes through it.
+/// Holding it across an `await` therefore does not merely slow that call down — it stops the whole
+/// phone: the pairing poll that opens the SAS gate, `ble_capabilities`, `transport_diagnostics`,
+/// the publish path and the inbound `PairProtocol` handler all queue behind whatever the holder is
+/// waiting for. If that await is a docs import or a gossip subscribe aimed at a peer that is not
+/// reachable, nothing ever releases it and only force-quitting the app clears it.
+///
+/// That is not hypothetical. On 2026-09-10 a busy docs engine produced `pairing.poll` spans of
+/// 47-131 s. On 2026-09-17 00:50 UTC a long-distance pair completed its SAS, and ACKNOWLEDGE —
+/// which calls `import_doc_ticket` then `subscribe` for a brand-new, internet-unreachable peer —
+/// wedged both phones: `pool.friend_added` never landed on one of them, its `pairing.poll` cadence
+/// stopped dead within a second, and `app.previous_run` records three force-quits over the next
+/// three minutes. Both sides then sat on "REACHING THEM" for every retry, because the inbound pair
+/// handler needs the same docs engine to build its reply and so stopped answering dials.
+///
+/// So: take the handles, drop the guard, then do the work. Every handle here is cheap to clone
+/// (`Endpoint`, `Gossip` and `MemoryLookup` are handle types; the docs are `Arc`), and cloning a
+/// handle is exactly what makes the release safe — a `shutdown` that replaces `inner` cannot pull
+/// the engine out from under an in-flight call, it can only stop being the node the NEXT call sees.
+#[derive(Clone)]
+struct Live {
+    endpoint: Endpoint,
+    gossip: Gossip,
+    trail: Arc<TrailDocs>,
+    profile: Arc<ProfileDocs>,
+    ble: BleHandle,
+    memory: MemoryLookup,
+}
+
+impl LocationNode {
+    /// Clone this node's live handles and RELEASE the node lock. See [`Live`].
+    ///
+    /// Every method below that touches the endpoint, gossip or the docs engines starts here. The
+    /// rule it enforces is one line long and has cost us two multi-day outages when broken: the
+    /// `inner` guard must never be alive across an `await`.
+    async fn live(&self) -> Result<Live, LocationError> {
+        self.live_opt().await.ok_or(LocationError::NotStarted)
+    }
+
+    /// [`Self::live`] for the callers whose honest answer to "not started" is a default, not an
+    /// error (BLE capability reads, diagnostics).
+    async fn live_opt(&self) -> Option<Live> {
+        let guard = self.inner.lock().await;
+        let started = guard.as_ref()?;
+        Some(Live {
+            endpoint: started.endpoint.clone(),
+            gossip: started.gossip.clone(),
+            trail: started.trail.clone(),
+            profile: started.profile.clone(),
+            ble: started.ble.clone(),
+            memory: started.memory.clone(),
+        })
+    }
+}
+
 // The process-global `tracing` subscriber (Android logcat pipe + the optional OTLP developer
 // telemetry reload slot) lives in `telemetry.rs` — see the module docs there for the layering
 // and the `sc.*` correlation model.
@@ -1277,8 +1335,7 @@ impl LocationNode {
 
     async fn read_latest_ratcheted_events_inner(&self) -> Result<Vec<RatchetEvent>, LocationError> {
         let (trail, sealed) = {
-            let guard = self.inner.lock().await;
-            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            let started = self.live().await?;
             let sealed = started
                 .trail
                 .read_latest_sealed()
@@ -1476,8 +1533,7 @@ impl LocationNode {
             "published a resync record"
         );
 
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let started = self.live().await?;
         let ns = started.trail.own_namespace();
         started
             .trail
@@ -1503,8 +1559,7 @@ impl LocationNode {
         let peer = decode_endpoint(&peer_endpoint_hex)?;
 
         let payloads = {
-            let guard = self.inner.lock().await;
-            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            let started = self.live().await?;
             started
                 .trail
                 .read_rsy(&peer, &self.recv_secret)
@@ -2136,8 +2191,7 @@ impl LocationNode {
     /// `ConnectivityManager` and calls this on every default-network transition, prompting a socket
     /// rebind + relay re-check. No-op before `start()`; harmless to over-call.
     pub async fn network_changed(&self) {
-        let guard = self.inner.lock().await;
-        if let Some(started) = guard.as_ref() {
+        if let Some(started) = self.live_opt().await {
             // The rebind/relay re-check details show up as iroh's own magicsock/net_report
             // events; this marker is the join point telling us WHY they fired.
             tracing::info!("network_change: OS connectivity transition signaled");
@@ -2168,8 +2222,7 @@ impl LocationNode {
 
     /// A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
     pub async fn ticket(&self) -> Result<String, LocationError> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let started = self.live().await?;
         let addr = started.endpoint.addr();
         Ok(EndpointTicket::new(addr).to_string())
     }
@@ -2190,8 +2243,7 @@ impl LocationNode {
                 .map_err(|_| LocationError::Decode("topic must be 32 bytes".into()))?,
         );
 
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let started = self.live().await?;
 
         // Collect bootstrap peer ids AND seed each ticket's full node addr (id + LAN/direct
         // socket addrs + relay) into our in-memory address lookup. This lets gossip dial the peer
@@ -2219,7 +2271,6 @@ impl LocationNode {
         // Kept for the receive loop: classifying the path an envelope arrived over needs the
         // endpoint's remote-address table, and the loop must not take the node lock per message.
         let delivery_endpoint = started.endpoint.clone();
-        drop(guard);
 
         // The node itself, not a snapshot of its session manager: `shutdown` replaces that handle,
         // and a task holding the old one would keep opening envelopes against a store whose writer
@@ -2454,8 +2505,7 @@ impl LocationNode {
         );
         telemetry::set_parent(&span, traceparent.as_deref());
         async move {
-            let guard = self.inner.lock().await;
-            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            let started = self.live().await?;
             let payload = encode_fix_payload(fix.as_ref())?;
             let envelope = crypto::seal(
                 &self.identity_seed,
@@ -2510,8 +2560,7 @@ impl LocationNode {
             sc.entry_hash = tracing::field::Empty,
         );
         async move {
-            let guard = self.inner.lock().await;
-            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            let started = self.live().await?;
             let payload = postcard::to_allocvec(&msg)
                 .map_err(|_| LocationError::Decode("encode control".into()))?;
             let envelope = crypto::seal(
@@ -2548,8 +2597,7 @@ impl LocationNode {
     ///
     /// Callers MUST still check freshness and dedupe by `nonce`; see [`ControlMsg`].
     pub async fn read_control(&self, author: Vec<u8>) -> Result<Vec<ControlMsg>, LocationError> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let started = self.live().await?;
         let payloads = started
             .trail
             .read_ctl(&author, &self.recv_secret)
@@ -2608,10 +2656,8 @@ impl LocationNode {
                     "trail sync: some peer tickets were unparseable and were skipped"
                 );
             }
-            let guard = self.inner.lock().await;
-            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            let started = self.live().await?;
             let trail = started.trail.clone();
-            drop(guard);
 
             // No sink and no `recovered` count here any more: with one overwritten slot per author
             // there is no back-catalogue to stream, so a sync just reconciles and the app reads the
@@ -2734,11 +2780,9 @@ impl LocationNode {
                     "trail push: some peer tickets were unparseable and were skipped"
                 );
             }
-            let guard = self.inner.lock().await;
-            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            let started = self.live().await?;
             let trail = started.trail.clone();
             let ns = trail.own_namespace();
-            drop(guard);
 
             let sent = trail.push(ns, peers).await.map_err(|e| {
                 tracing::warn!(error = %e, "trail push failed");
@@ -2974,10 +3018,8 @@ impl LocationNode {
         psk: Option<String>,
     ) -> Result<u64, LocationError> {
         use tracing::Instrument;
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let started = self.live().await?;
         let trail = started.trail.clone();
-        drop(guard);
         let span = tracing::info_span!(
             "trail.content.upload",
             sc.author = %telemetry::short_hex(&self.author),
@@ -3015,8 +3057,7 @@ impl LocationNode {
     /// Read the latest decryptable fix per author (friends who share with us) from the local
     /// replica. One entry per author — the durable path holds no history (FORWARD-SECRECY §4.4).
     pub async fn read_latest(&self) -> Result<Vec<IncomingFix>, LocationError> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let started = self.live().await?;
         let fixes = started
             .trail
             .read_latest(&self.recv_secret)
@@ -3283,8 +3324,7 @@ impl LocationNode {
                 set.wraps,
             )?;
 
-            let guard = self.inner.lock().await;
-            let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+            let started = self.live().await?;
             let ns = started.trail.own_namespace();
             let write = if null {
                 started.trail.write_nul(ns, &self.author, envelope).await
@@ -3326,8 +3366,7 @@ impl LocationNode {
 
     /// Explicitly drop durable entries older than `older_than_ts`.
     pub async fn prune_trail(&self, older_than_ts: u64) -> Result<(), LocationError> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let started = self.live().await?;
         let ns = started.trail.own_namespace();
         started
             .trail
@@ -3340,8 +3379,7 @@ impl LocationNode {
     /// A shareable docs **read-ticket** granting replication of our trail namespace (the
     /// swarm-join half of a grant). Goes in the contact card.
     pub async fn doc_ticket(&self) -> Result<String, LocationError> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let started = self.live().await?;
         let ns = started.trail.own_namespace();
         started
             .trail
@@ -3354,8 +3392,7 @@ impl LocationNode {
     /// namespace and can recover their missed fixes via [`sync_trail`]. This grants only
     /// replication; reading still requires our per-recipient wrap in each envelope (ARCHITECTURE §6).
     pub async fn import_doc_ticket(&self, ticket: String) -> Result<(), LocationError> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let started = self.live().await?;
         started
             .trail
             .import_ticket(&ticket)
@@ -3377,8 +3414,7 @@ impl LocationNode {
         sigil: String,
         color: String,
     ) -> Result<u64, LocationError> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let started = self.live().await?;
         let fields = ProfileFields {
             handle,
             cryptid_name,
@@ -3407,8 +3443,7 @@ impl LocationNode {
     /// A shareable **read**-ticket for our profile namespace. Also exchanged automatically inside
     /// a pairing Accept, so friends usually don't need to import it by hand.
     pub async fn profile_ticket(&self) -> Result<String, LocationError> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let started = self.live().await?;
         started
             .profile
             .ticket()
@@ -3424,14 +3459,7 @@ impl LocationNode {
         // take, so holding it across a docs import made one unreachable friend stall every
         // unrelated native call — including the pairing poll that opens the SAS gate. Measured
         // 2026-09-10: `pairing.poll` spans of 47-131s on a phone whose docs engine was busy.
-        let profile = {
-            let guard = self.inner.lock().await;
-            guard
-                .as_ref()
-                .ok_or(LocationError::NotStarted)?
-                .profile
-                .clone()
-        };
+        let profile = self.live().await?.profile;
         let ns = profile
             .import_ticket(&ticket)
             .await
@@ -3449,14 +3477,7 @@ impl LocationNode {
     ) -> Result<Option<ProfileView>, LocationError> {
         // Same reason as `import_profile_ticket`: the replica read reaches the docs engine, and
         // the node-wide `inner` lock must not be held while it waits its turn there.
-        let profile = {
-            let guard = self.inner.lock().await;
-            guard
-                .as_ref()
-                .ok_or(LocationError::NotStarted)?
-                .profile
-                .clone()
-        };
+        let profile = self.live().await?.profile;
         let rec = profile
             .read_for_endpoint(&endpoint_id)
             .await
@@ -3665,8 +3686,9 @@ impl LocationNode {
             Some(d) => d,
             None => return Ok(None),
         };
-        let guard = self.inner.lock().await;
-        let peer_profile = match guard.as_ref() {
+        // `live_opt` rather than the guard: this runs the instant a pair completes, and a profile
+        // read that stalled here used to stall the whole node with it.
+        let peer_profile = match self.live_opt().await {
             Some(started) => started
                 .profile
                 .read_for_endpoint(&data.peer_endpoint)
@@ -3685,14 +3707,7 @@ impl LocationNode {
         &self,
         peer_endpoint_ids: Vec<Vec<u8>>,
     ) -> Result<TransportDiagnostics, LocationError> {
-        let endpoint = {
-            let guard = self.inner.lock().await;
-            guard
-                .as_ref()
-                .ok_or(LocationError::NotStarted)?
-                .endpoint
-                .clone()
-        };
+        let endpoint = self.live().await?.endpoint;
 
         let local_addresses = endpoint
             .addr()
@@ -3752,10 +3767,8 @@ impl LocationNode {
     /// ungated, like [`Self::transport_diagnostics`]. `NamespaceId` is not an FFI type, so the
     /// exported shape reports by author endpoint id rather than by namespace.
     pub async fn trail_replica_status(&self) -> Result<Vec<TrailReplicaAuthor>, LocationError> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+        let started = self.live().await?;
         let trail = started.trail.clone();
-        drop(guard);
         let slots = trail
             .replica_status()
             .await
@@ -3775,14 +3788,15 @@ impl LocationNode {
 
     /// Whether a BLE transport is wired into this node's endpoint on this platform.
     pub async fn ble_available(&self) -> bool {
-        let guard = self.inner.lock().await;
-        guard.as_ref().map(|s| s.ble.available()).unwrap_or(false)
+        self.live_opt()
+            .await
+            .map(|s| s.ble.available())
+            .unwrap_or(false)
     }
 
     /// Honest BLE capability report combined with the app-level pairing-ready gate.
     pub async fn ble_capabilities(&self) -> BleCapabilities {
-        let guard = self.inner.lock().await;
-        let caps = guard.as_ref().map(|s| s.ble.capabilities());
+        let caps = self.live_opt().await.map(|s| s.ble.capabilities());
         let pairing_ready = self.pair.pairing_ready();
         match caps {
             Some(c) => BleCapabilities {
@@ -3810,9 +3824,8 @@ impl LocationNode {
     /// guard, then await — never holding the lock across the probe.
     pub async fn nearby_ble_peers(&self) -> Vec<BlePeer> {
         let handle = {
-            let guard = self.inner.lock().await;
-            match guard.as_ref() {
-                Some(started) => started.ble.clone(),
+            match self.live_opt().await {
+                Some(started) => started.ble,
                 None => return Vec::new(),
             }
         };
@@ -3826,9 +3839,8 @@ impl LocationNode {
     /// nearby pairing + mandatory SAS flow.
     pub async fn resolve_bump_peer(&self, timeout_ms: u64) -> BumpResolution {
         let handle = {
-            let guard = self.inner.lock().await;
-            match guard.as_ref() {
-                Some(started) => started.ble.clone(),
+            match self.live_opt().await {
+                Some(started) => started.ble,
                 None => {
                     return BumpResolution {
                         status: "unavailable".into(),
@@ -3890,9 +3902,8 @@ impl LocationNode {
     /// the honest substitute for RSSI/active-scan the vendored crate does not expose; it triggers
     /// no active scan (the transport scans continuously). Always `false` on host / when unavailable.
     pub async fn ble_has_scan_hint(&self, endpoint_id: Vec<u8>) -> bool {
-        let guard = self.inner.lock().await;
-        guard
-            .as_ref()
+        self.live_opt()
+            .await
             .map(|s| s.ble.has_scan_hint(&endpoint_id))
             .unwrap_or(false)
     }
@@ -3939,8 +3950,7 @@ impl LocationNode {
         );
         async move {
             let (endpoint, trail, memory) = {
-                let guard = self.inner.lock().await;
-                let started = guard.as_ref().ok_or(LocationError::NotStarted)?;
+                let started = self.live().await?;
                 (
                     started.endpoint.clone(),
                     started.trail.clone(),

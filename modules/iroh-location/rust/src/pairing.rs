@@ -150,6 +150,48 @@ const SAS_TIMEOUT_MS: u64 = 60_000;
 /// hand out in an invite. See `our_endpoint_ticket`.
 const ENDPOINT_ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long `Endpoint::connect` may spend finding a path to the peer before one pairing round
+/// trip is abandoned.
+///
+/// **Every await on this wire is bounded, and that is not defensive tidiness.** `dial_exchange`
+/// had no timeout on connect, on the write, or on the read, and the peer's own reply is built
+/// INSIDE our read — so a phone whose docs engine was busy simply never answered, and the dialling
+/// side waited forever. That is what "REACHING THEM" on a pairing screen that never moves is:
+/// `initiate_by_invite` is awaited straight from JS, so an unbounded read there is an unbounded
+/// promise, a spinner with no end state, and a pairing screen that only a force-quit clears.
+/// Observed on two Pixels on 2026-09-17 00:50-00:54 UTC: five `pair.stand_down`s, no completion,
+/// and three `app.previous_run` records in three minutes.
+///
+/// A bounded failure is strictly better than an unbounded wait even when the budget is wrong: the
+/// session is discarded by `discard_untouched_handshake`, the human is told, and RETRYING WORKS.
+const PAIR_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long the framed request/response exchange may take once connected. Generous relative to
+/// the connect budget because the peer builds its reply inside it — including, on an `Accept`, a
+/// relay wait and two docs reads.
+const PAIR_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// How long any single docs read on the handshake's critical path may take.
+///
+/// The tickets and the profile record on an `Accept` are all optional by construction — every
+/// consumer treats an empty string as "they have not published one yet", and the peer's own
+/// backfill closes the gap. So a docs engine that is slow costs a persona that arrives a moment
+/// later, whereas waiting for it costs the pair. Take the cheaper failure.
+const PAIR_DOCS_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// How long the inbound handler may take to produce a reply before the connection is dropped.
+/// Bounds the SERVER half of the same argument: a stuck handler is indistinguishable from a dead
+/// phone to the dialler, and holding the stream open only makes them wait for it.
+const PAIR_INBOUND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long to wait for the peer to close a finished pairing connection before letting go of it.
+/// `conn.closed()` on its own never returns for a peer that vanished mid-handshake.
+const PAIR_CLOSE_LINGER: Duration = Duration::from_secs(5);
+
+/// The budget for a SECOND or later attempt to reach a relay, once a full
+/// [`ENDPOINT_ONLINE_TIMEOUT`] has already been spent and failed. See `our_endpoint_ticket`.
+const ENDPOINT_ONLINE_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Maximum time for the automatic commit/reveal exchange to reach the visual SAS gate.
 const PAIR_HANDSHAKE_TIMEOUT_MS: u64 = 60_000;
 
@@ -1448,6 +1490,11 @@ pub struct PairCore {
     notices: Mutex<VecDeque<PairNotice>>,
     runtime: Mutex<Option<PairRuntime>>,
     pairing_ready: AtomicBool,
+    /// Whether this node has been seen fully online (relay handshake complete) at least once,
+    /// and whether a full relay wait has already been spent and lost. See
+    /// [`Self::our_endpoint_ticket`] for why both are worth remembering.
+    endpoint_was_online: AtomicBool,
+    endpoint_wait_spent: AtomicBool,
 }
 
 impl PairCore {
@@ -1461,6 +1508,8 @@ impl PairCore {
             notices: Mutex::new(VecDeque::new()),
             runtime: Mutex::new(None),
             pairing_ready: AtomicBool::new(false),
+            endpoint_was_online: AtomicBool::new(false),
+            endpoint_wait_spent: AtomicBool::new(false),
         })
     }
 
@@ -1566,39 +1615,100 @@ impl PairCore {
     /// Bounded, because being offline is a legitimate state: on timeout we fall back to the
     /// local-only address, which is still correct for same-LAN pairing.
     async fn our_endpoint_ticket(&self) -> String {
-        match self.runtime_endpoint().await {
-            Ok(ep) => {
-                // Instrumented because this is the one cost in the handshake that is invisible
-                // from outside: `pairing.poll` samples the state machine every ~4s from JS, which
-                // cannot distinguish "waiting on a relay" from "waiting on the human at the SAS
-                // gate". `Endpoint::online()` resolves only once a relay handshake has completed
-                // and pends forever with no relay reachable, so with the relays unreachable this
-                // burns the full ENDPOINT_ONLINE_TIMEOUT -- and it is paid once per message built,
-                // not once per pairing.
-                let started = Instant::now();
-                let online = tokio::time::timeout(ENDPOINT_ONLINE_TIMEOUT, ep.online()).await;
-                let waited_ms = started.elapsed().as_millis() as u64;
-                let timed_out = online.is_err();
-                if timed_out || waited_ms >= 250 {
-                    tracing::info!(
-                        sc.author = %crate::telemetry::short_hex(&self.endpoint_id),
-                        waited_ms,
-                        timed_out,
-                        budget_ms = ENDPOINT_ONLINE_TIMEOUT.as_millis() as u64,
-                        "pair.endpoint_ticket: waited for the endpoint to reach a relay"
-                    );
-                }
-                EndpointTicket::new(ep.addr()).to_string()
+        let Ok(ep) = self.runtime_endpoint().await else {
+            return String::new();
+        };
+
+        // THE FULL WAIT IS PAID ONCE PER NODE, not once per message — and that distinction is
+        // most of a slow bump.
+        //
+        // The argument in the doc comment above is about the FIRST address this node hands out,
+        // and it is unchanged. What was never intended is that the same wait is paid on every
+        // message: a nearby pair builds two messages per side to reach the SAS gate, and each
+        // side's reply is built INSIDE the other's dial, so four of them serialize across two
+        // phones. Bump adds a 12 s scan in front. Measured at a bar on 2026-09-17
+        // 04:03:29-04:04:13 UTC: 44 seconds from arming Bump to the visual gate — which reads as
+        // "extremely slow BLE" and is not BLE at all.
+        //
+        // Three states, three budgets:
+        // * seen online once — `Endpoint::online()` resolves on a completed relay handshake and the
+        //   endpoint does not go back off-line inside one handshake, so `addr()` is already
+        //   complete and there is nothing to wait for. Zero.
+        // * never waited — the full budget. This is the one the invite-address argument is about.
+        // * waited the full budget and lost it — a short retry. We are probably offline, and
+        //   paying ten seconds again per message is how a handshake becomes a minute. A
+        //   local-only address is still correct for same-LAN and BLE pairing, which is exactly
+        //   the case a phone in this state is most likely to be in.
+        let latched = self.endpoint_was_online.load(Ordering::SeqCst);
+        let budget = if latched {
+            Duration::ZERO
+        } else if self.endpoint_wait_spent.load(Ordering::SeqCst) {
+            ENDPOINT_ONLINE_RETRY_TIMEOUT
+        } else {
+            ENDPOINT_ONLINE_TIMEOUT
+        };
+        let started = Instant::now();
+        let online = if budget.is_zero() {
+            Ok(())
+        } else {
+            tokio::time::timeout(budget, ep.online())
+                .await
+                .map_err(|_| ())
+        };
+        self.endpoint_wait_spent.store(true, Ordering::SeqCst);
+        if online.is_ok() {
+            self.endpoint_was_online.store(true, Ordering::SeqCst);
+        }
+        let waited_ms = started.elapsed().as_millis() as u64;
+        let timed_out = online.is_err();
+        // A span, not an event: this is the one cost in the handshake that is invisible from
+        // outside — `pairing.poll` samples the state machine from JS and cannot tell "waiting on a
+        // relay" from "waiting on the human at the SAS gate" — and as a `tracing::info!` its
+        // fields were dropped on the way to Loki, so it answered neither.
+        tracing::info_span!(
+            "pair.endpoint_ticket",
+            sc.author = %crate::telemetry::short_hex(&self.endpoint_id),
+            waited_ms,
+            timed_out,
+            latched,
+            budget_ms = budget.as_millis() as u64,
+        )
+        .in_scope(|| {});
+        EndpointTicket::new(ep.addr()).to_string()
+    }
+
+    /// Run one optional docs read on the handshake's critical path, bounded by
+    /// [`PAIR_DOCS_TIMEOUT`], degrading to the empty answer.
+    ///
+    /// Every caller below already treats empty as a real state ("we have not published one yet"),
+    /// so the timeout does not introduce a new case — it only stops a slow docs engine from being
+    /// able to hold the pairing wire open. `label` names which read gave up, because from outside
+    /// they are indistinguishable and they fail for different reasons.
+    async fn bounded_docs<T: Default>(
+        label: &'static str,
+        work: impl std::future::Future<Output = T>,
+    ) -> T {
+        match tokio::time::timeout(PAIR_DOCS_TIMEOUT, work).await {
+            Ok(v) => v,
+            Err(_) => {
+                tracing::warn!(
+                    read = label,
+                    budget_ms = PAIR_DOCS_TIMEOUT.as_millis() as u64,
+                    "pair.docs_timeout: a handshake docs read gave up; pairing continues without it"
+                );
+                T::default()
             }
-            Err(_) => String::new(),
         }
     }
 
     async fn our_profile_ticket(&self) -> String {
-        match self.runtime_docs().await {
-            Ok((_, profile, _)) => profile.ticket().await.unwrap_or_default(),
-            Err(_) => String::new(),
-        }
+        Self::bounded_docs("profile_ticket", async {
+            match self.runtime_docs().await {
+                Ok((_, profile, _)) => profile.ticket().await.unwrap_or_default(),
+                Err(_) => String::new(),
+            }
+        })
+        .await
     }
 
     /// Our own signed profile record for the `Accept`, or empty if we have not published one.
@@ -1607,20 +1717,26 @@ impl PairCore {
     /// node still coming up) must still be able to complete a pair. The ticket still goes out,
     /// and the peer's backfill is what closes the gap in that case.
     async fn our_profile_record(&self) -> Vec<u8> {
-        match self.runtime_docs().await {
-            Ok((_, profile, _)) => profile.own_record_bytes().await.unwrap_or_default(),
-            Err(_) => Vec::new(),
-        }
+        Self::bounded_docs("profile_record", async {
+            match self.runtime_docs().await {
+                Ok((_, profile, _)) => profile.own_record_bytes().await.unwrap_or_default(),
+                Err(_) => Vec::new(),
+            }
+        })
+        .await
     }
 
     async fn our_trail_ticket(&self) -> String {
-        match self.runtime_docs().await {
-            Ok((trail, _, _)) => {
-                let ns = trail.own_namespace();
-                trail.read_ticket(ns).await.unwrap_or_default()
+        Self::bounded_docs("trail_ticket", async {
+            match self.runtime_docs().await {
+                Ok((trail, _, _)) => {
+                    let ns = trail.own_namespace();
+                    trail.read_ticket(ns).await.unwrap_or_default()
+                }
+                Err(_) => String::new(),
             }
-            Err(_) => String::new(),
-        }
+        })
+        .await
     }
 
     /// Build + sign one of our messages. `Hello` carries our SAS commitment; `Reveal` carries our
@@ -1691,14 +1807,18 @@ impl PairCore {
         };
         // `ticket_ms` vs the total separates "waiting for a relay" from "reading our own docs".
         // Both sides build a message per round and the responder builds its reply INSIDE the
-        // initiator's dial, so these costs serialize across the two phones rather than overlap.
-        tracing::info!(
+        // initiator's dial, so these costs serialize across the two phones rather than overlap —
+        // which is why this is a span (in Tempo, and counted per device by the collector's
+        // spanmetrics connector) rather than the log event it was, whose fields Loki drops.
+        tracing::info_span!(
+            "pair.build_msg",
             sc.session = %crate::telemetry::short_hex(&session_id),
             decision = ?decision,
             ticket_ms,
+            docs_ms = build_started.elapsed().as_millis() as u64 - ticket_ms,
             local_only = endpoint_ticket.is_empty(),
-            "pair.build_msg: assembled one handshake message"
-        );
+        )
+        .in_scope(|| {});
         let msg = PairMsg {
             v: PAIR_WIRE_V,
             session_id: session_id.to_vec(),
@@ -1989,10 +2109,22 @@ impl PairCore {
         ticket: Option<String>,
         nearby: bool,
     ) -> Result<()> {
+        let span = tracing::info_span!(
+            "pair.handshake",
+            sc.session = %crate::telemetry::short_hex(&session_id),
+            sc.peer = %crate::telemetry::short_hex(&peer_endpoint),
+            nearby,
+            round = tracing::field::Empty,
+            ms = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+        );
+        let _guard = span.enter();
+        let handshake_started = Instant::now();
         let outcome = async {
             let endpoint = self.runtime_endpoint().await?;
 
             // Round 1 — Hello / commitment exchange.
+            span.record("round", "hello");
             let hello = self
                 .build_msg(Decision::Hello, session_id, invite_secret)
                 .await?;
@@ -2002,6 +2134,7 @@ impl PairCore {
                 .await?;
 
             // Round 2 — Reveal / nonce exchange + commitment verification.
+            span.record("round", "reveal");
             let reveal = self
                 .build_msg(Decision::Reveal, session_id, Vec::new())
                 .await?;
@@ -2013,10 +2146,16 @@ impl PairCore {
         }
         .await;
 
+        span.record("ms", handshake_started.elapsed().as_millis() as u64);
         if let Err(error) = outcome {
+            span.record("outcome", "failed");
+            // The session is discarded here precisely BECAUSE the dial is now bounded: a
+            // handshake that gave up leaves nothing behind, so the human's retry starts clean
+            // instead of colliding with a half-built session under the same id.
             self.discard_untouched_handshake(&session_id).await;
             return Err(error);
         }
+        span.record("outcome", "verifying");
         Ok(())
     }
 
@@ -2182,11 +2321,26 @@ impl PairCore {
                 .cloned()
                 .ok_or_else(|| anyhow!("no such pair session"))?
         };
+        // This whole call is awaited from JS behind the human's ACKNOWLEDGE, so its duration IS
+        // the time that thumb spends on a button that has not come back yet.
+        let span = tracing::info_span!(
+            "pair.accept",
+            sc.session = %crate::telemetry::short_hex(session_id),
+            sc.peer = %crate::telemetry::short_hex(&s.peer_endpoint),
+            nearby = s.nearby,
+            bilateral_before_dial = tracing::field::Empty,
+            complete_after_dial = tracing::field::Empty,
+            ms = tracing::field::Empty,
+        );
+        let _guard = span.enter();
+        let started = Instant::now();
         let msg = self
             .build_session_msg(Decision::Accept, &s, Vec::new())
             .await?;
         // Bilateral already? Then the friendship is real now, not once the dial returns.
-        if self.session_is_complete(session_id).await {
+        let bilateral = self.session_is_complete(session_id).await;
+        span.record("bilateral_before_dial", bilateral);
+        if bilateral {
             self.finalize(session_id, s.peer_endpoint).await?;
         }
         self.best_effort_notify(
@@ -2198,9 +2352,12 @@ impl PairCore {
         )
         .await;
         // Idempotent via `result_emitted`, so this is a no-op when the branch above already ran.
-        if self.session_is_complete(session_id).await {
+        let complete = self.session_is_complete(session_id).await;
+        span.record("complete_after_dial", complete);
+        if complete {
             self.finalize(session_id, s.peer_endpoint).await?;
         }
+        span.record("ms", started.elapsed().as_millis() as u64);
         Ok(())
     }
 
@@ -2400,6 +2557,7 @@ impl PairCore {
         peer_endpoint: [u8; ENDPOINT_LEN],
     ) -> Result<()> {
         let ratchets = self.runtime_sessions().await;
+        let mut ratchet_installed = false;
         let (profile_ticket, profile_record, trail_ticket, nonce) = {
             let mut sessions = self.sessions.lock().await;
             let s = sessions
@@ -2426,7 +2584,10 @@ impl PairCore {
                     s.local_ratchet_secret.clone(),
                     peer_pub,
                 ) {
-                    Ok(id) => s.ratchet_session_id = Some(id),
+                    Ok(id) => {
+                        ratchet_installed = true;
+                        s.ratchet_session_id = Some(id);
+                    }
                     Err(err) => {
                         tracing::warn!(
                             error = %err,
@@ -2449,6 +2610,16 @@ impl PairCore {
             )
         };
 
+        let span = tracing::info_span!(
+            "pair.finalize",
+            sc.session = %crate::telemetry::short_hex(session_id),
+            sc.peer = %crate::telemetry::short_hex(&peer_endpoint),
+            handed_record = profile_record.is_some(),
+            ratchet = ratchet_installed,
+            ms = tracing::field::Empty,
+        );
+        let _guard = span.enter();
+        let started = Instant::now();
         if let Ok((trail, profile, sink)) = self.runtime_docs().await {
             // BEFORE the ticket import and before `Ready`, so the persona is already readable by
             // the time the app asks for the pair result. This is the whole point of carrying it:
@@ -2465,16 +2636,23 @@ impl PairCore {
                     ),
                 }
             }
+            // BOUNDED. Both imports are how LATER edits arrive; the persona itself came in on the
+            // Accept above. On the inbound path this runs inside the peer's dial, so an import
+            // that hangs here is a peer left waiting on a pair we have already completed — the
+            // worst possible place to spend an unbounded await.
             if let Some(pt) = profile_ticket.as_deref() {
-                if let Ok(ns) = profile.import_ticket(pt).await {
+                if let Ok(Ok(ns)) =
+                    tokio::time::timeout(PAIR_DOCS_TIMEOUT, profile.import_ticket(pt)).await
+                {
                     profile.watch(ns, sink);
                 }
             }
             if let Some(tt) = trail_ticket.as_deref() {
-                let _ = trail.import_ticket(tt).await;
+                let _ = tokio::time::timeout(PAIR_DOCS_TIMEOUT, trail.import_ticket(tt)).await;
             }
         }
 
+        span.record("ms", started.elapsed().as_millis() as u64);
         self.publish_ready(session_id, nonce).await;
         Ok(())
     }
@@ -2831,26 +3009,79 @@ impl PairCore {
 
 /// Open a fresh bi-stream, send our framed message, and read the framed response.
 async fn dial_exchange(endpoint: &Endpoint, addr: EndpointAddr, msg: &PairMsg) -> Result<PairMsg> {
+    // A SPAN, not a log line. Its fields used to ride on a `tracing::info!` event, and events land
+    // in Loki as a bare message with the fields stripped — so on the one night this needed
+    // answering, "how long did the dial take, and which half was slow" had nothing to answer it.
+    // As a span it is in Tempo, and the collector's spanmetrics connector turns it into a
+    // per-device RED series for free, which is what makes "pairing got slower" a graph.
+    let span = tracing::info_span!(
+        "pair.dial",
+        sc.session = %crate::telemetry::short_hex(&msg.session_id),
+        sc.peer = %crate::telemetry::short_hex(&addr.id.as_bytes()[..]),
+        decision = ?msg.decision,
+        connect_ms = tracing::field::Empty,
+        exchange_ms = tracing::field::Empty,
+        outcome = tracing::field::Empty,
+    );
+    let _guard = span.enter();
+
     // Split into connect vs round-trip on purpose. `connect` is where hole punching and relay
     // fallback live, and the round-trip is where the PEER's own build_msg runs -- so a slow
     // round-trip here means the other phone is waiting on ITS relay, not that the link is slow.
+    // Both halves are bounded separately for the same reason: the two failures need different
+    // words in front of the human, and they need telling apart in Tempo.
     let dial_started = Instant::now();
-    let conn = endpoint
-        .connect(addr, PAIR_ALPN)
-        .await
-        .map_err(|e| anyhow!("pair dial: {e}"))?;
+    let conn =
+        match tokio::time::timeout(PAIR_CONNECT_TIMEOUT, endpoint.connect(addr, PAIR_ALPN)).await {
+            Ok(Ok(conn)) => conn,
+            Ok(Err(e)) => {
+                span.record("connect_ms", dial_started.elapsed().as_millis() as u64);
+                span.record("outcome", "connect_failed");
+                return Err(anyhow!("pair dial: {e}"));
+            }
+            Err(_) => {
+                span.record("connect_ms", dial_started.elapsed().as_millis() as u64);
+                span.record("outcome", "connect_timeout");
+                // Worded for the pairing screen, which shows this verbatim. The two timeouts get
+                // different sentences because they mean different things to the person holding
+                // the phone: this one is "no path to them", the other is "they are not answering".
+                return Err(anyhow!(
+                    "Could not reach that phone. Check you are both online, then try again."
+                ));
+            }
+        };
     let connect_ms = dial_started.elapsed().as_millis() as u64;
+    span.record("connect_ms", connect_ms);
+
     let exchange_started = Instant::now();
-    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| anyhow!("open_bi: {e}"))?;
-    write_frame(&mut send, &encode_msg(msg)?).await?;
-    let resp_bytes = read_frame(&mut recv).await?;
-    let resp = decode_msg(&resp_bytes)?;
+    let exchange = async {
+        let (mut send, mut recv) = conn.open_bi().await.map_err(|e| anyhow!("open_bi: {e}"))?;
+        write_frame(&mut send, &encode_msg(msg)?).await?;
+        let resp_bytes = read_frame(&mut recv).await?;
+        decode_msg(&resp_bytes)
+    };
+    let resp = match tokio::time::timeout(PAIR_EXCHANGE_TIMEOUT, exchange).await {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => {
+            span.record("exchange_ms", exchange_started.elapsed().as_millis() as u64);
+            span.record("outcome", "exchange_failed");
+            conn.close(0u32.into(), b"pair-error");
+            return Err(e);
+        }
+        Err(_) => {
+            span.record("exchange_ms", exchange_started.elapsed().as_millis() as u64);
+            span.record("outcome", "exchange_timeout");
+            conn.close(0u32.into(), b"pair-timeout");
+            // Named from the peer's side deliberately: we connected, so the link is fine and the
+            // other phone is the thing that did not answer.
+            return Err(anyhow!(
+                "That phone did not answer. Keep streetCryptid open on both phones and try again."
+            ));
+        }
+    };
+    span.record("exchange_ms", exchange_started.elapsed().as_millis() as u64);
+    span.record("outcome", "ok");
     conn.close(0u32.into(), b"pair-done");
-    tracing::info!(
-        connect_ms,
-        exchange_ms = exchange_started.elapsed().as_millis() as u64,
-        "pair.dial_exchange: one handshake round trip"
-    );
     Ok(resp)
 }
 
@@ -2877,21 +3108,67 @@ fn accept_err(e: impl std::fmt::Display) -> AcceptError {
 }
 
 impl ProtocolHandler for PairProtocol {
+    /// Answer one pairing round trip.
+    ///
+    /// Bounded end to end, because the dialler is blocked on this: their `read_frame` cannot
+    /// finish until this writes, and until 2026-09-17 neither side had a deadline. The whole
+    /// request/handle/reply sequence therefore sits under one budget, and the trailing
+    /// `conn.closed()` — which never returns at all for a peer that walked away — gets its own.
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let remote = conn.remote_id();
         let remote_bytes = *remote.as_bytes();
-        let (mut send, mut recv) = conn.accept_bi().await.map_err(accept_err)?;
-        let req = read_frame(&mut recv).await.map_err(accept_err)?;
-        let msg = decode_msg(&req).map_err(accept_err)?;
-        let resp = self
-            .core
-            .handle_incoming(remote_bytes, msg)
-            .await
-            .map_err(accept_err)?;
-        let encoded = encode_msg(&resp).map_err(accept_err)?;
-        write_frame(&mut send, &encoded).await.map_err(accept_err)?;
-        conn.closed().await;
-        Ok(())
+        let span = tracing::info_span!(
+            "pair.inbound",
+            sc.peer = %crate::telemetry::short_hex(&remote_bytes),
+            sc.session = tracing::field::Empty,
+            decision = tracing::field::Empty,
+            ms = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+        );
+        let started = Instant::now();
+        let served = tokio::time::timeout(PAIR_INBOUND_TIMEOUT, async {
+            let (mut send, mut recv) = conn.accept_bi().await.map_err(accept_err)?;
+            let req = read_frame(&mut recv).await.map_err(accept_err)?;
+            let msg = decode_msg(&req).map_err(accept_err)?;
+            span.record(
+                "sc.session",
+                tracing::field::display(crate::telemetry::short_hex(&msg.session_id)),
+            );
+            span.record("decision", tracing::field::debug(msg.decision));
+            let resp = self
+                .core
+                .handle_incoming(remote_bytes, msg)
+                .await
+                .map_err(accept_err)?;
+            let encoded = encode_msg(&resp).map_err(accept_err)?;
+            write_frame(&mut send, &encoded).await.map_err(accept_err)?;
+            Ok::<_, AcceptError>(())
+        })
+        .await;
+        let _guard = span.enter();
+        span.record("ms", started.elapsed().as_millis() as u64);
+        match served {
+            Ok(Ok(())) => {
+                span.record("outcome", "ok");
+                // Linger only as long as a well-behaved peer needs to close. Awaiting this
+                // unbounded kept one task alive per abandoned pair attempt, for the life of the
+                // process.
+                let _ = tokio::time::timeout(PAIR_CLOSE_LINGER, conn.closed()).await;
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                span.record("outcome", "failed");
+                Err(e)
+            }
+            Err(_) => {
+                span.record("outcome", "timeout");
+                conn.close(0u32.into(), b"pair-slow");
+                Err(accept_err(format!(
+                    "pair handler exceeded {}s",
+                    PAIR_INBOUND_TIMEOUT.as_secs()
+                )))
+            }
+        }
     }
 }
 
