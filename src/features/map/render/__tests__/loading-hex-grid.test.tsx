@@ -1,4 +1,5 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import { AppState } from 'react-native';
 import { cancelAnimation, withRepeat } from 'react-native-reanimated';
 
 import type { ScreenHexLattice } from '../../core/hex-lattice';
@@ -29,6 +30,9 @@ const lattice: ScreenHexLattice = {
 };
 
 let renderer: ReactTestRenderer | undefined;
+beforeEach(() => {
+  (AppState as unknown as { currentState: string }).currentState = 'active';
+});
 afterEach(() => {
   act(() => renderer?.unmount());
   jest.clearAllMocks();
@@ -83,6 +87,21 @@ it('keeps a visible but motionless grid when reduced motion is enabled', () => {
   draw({ loading: true, reducedMotion: true });
   expect(withRepeat).not.toHaveBeenCalled();
   expect(uniforms().uSweep).toBeGreaterThan(0);
+});
+
+/**
+ * Off screen is the same answer as reduced motion: stop moving.
+ *
+ * On iOS the app is NOT suspended while sharing is on — `UIBackgroundModes: ["location"]` keeps
+ * the process alive — so an unbounded `withRepeat` here pins a full-screen shader to the refresh
+ * rate for a canvas nobody can see. That is a share of the 48s-of-CPU-in-60s MetricKit exceptions
+ * this change exists to stop.
+ */
+it('does not sweep while the app is in the background', () => {
+  (AppState as unknown as { currentState: string }).currentState = 'background';
+  draw({ loading: true });
+  expect(withRepeat).not.toHaveBeenCalled();
+  expect(cancelAnimation).toHaveBeenCalled();
 });
 
 // The shader's space is the Group's, which the translation puts at the rect's corner — an origin

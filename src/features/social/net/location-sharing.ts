@@ -418,6 +418,15 @@ const BUMP_POLL_INTERVAL_MS = 300;
 export const BUMP_WINDOW_MS = 120_000;
 
 /**
+ * How many unchanged transport polls pass before one rollup row is written.
+ *
+ * 60 is four minutes at the idle pairing cadence. Low enough that a loop which stopped is visible
+ * within one `device.health` window, high enough that a phone whose transport is simply stable
+ * writes one small row instead of sixty large ones.
+ */
+const TRANSPORT_POLL_ROLLUP_EVERY = 60;
+
+/**
  * The gap between the first re-arm of a friend's profile replication and the second.
  *
  * The FIRST attempt is not delayed at all — {@link LocationSharingService.onPairReady} makes it
@@ -635,6 +644,16 @@ export class LocationSharingService {
   private transportDiagnosticsInFlight: Promise<void> | null = null;
   /** Count of polls that saw a genuine change; asserted by tests to catch comparison regressions. */
   private transportDiagnosticsChangeCount = 0;
+  /**
+   * Polls observed since the last one that actually changed anything.
+   *
+   * `recordEventLog` persists every level unconditionally — there is no level filter in the write
+   * path — so an unchanged `debug` row still costs a SQLite write, and this one serialised ~1.5 KB
+   * of every peer and local address, v4 and v6. That was 568 KB of journal writes in a single
+   * six-hour window, describing a transport that had not moved. The count is what is worth
+   * keeping; the payload is not.
+   */
+  private transportPollsSinceChange = 0;
   private pendingPairRequests: PairEvent[] = [];
   private verifications: PairingVerification[] = [];
   private bumpUntil = 0;
@@ -723,6 +742,21 @@ export class LocationSharingService {
    */
   private readonly profileBackfill = new Map<string, { attempts: number; nextAt: number }>();
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Set while the app is backgrounded, and the reason {@link startPairingPolling} has a second
+   * guard rather than just being stopped.
+   *
+   * Stopping the loop is not enough on its own: `onPairReady`, `rebindNodeInner` and `armBump` all
+   * re-arm it, and none of them knows the app is in a pocket. On 2026-09-18 this loop was 414 of
+   * the 1059 journal entries an iPhone wrote while backgrounded, every one of them returning
+   * `sessions: 0, ble_peers: 0, pairing_ready: false` — a phone polling hard for a handshake that
+   * needs two present humans. Each tick is three native pairing calls, three BLE calls (one of
+   * which can spin 1.5s of 50ms polls), and a ~1.5KB SQLite row.
+   *
+   * Deliberately NOT applied to {@link startBumpPolling}: that loop bounds itself against
+   * `isBumpActive()` inside a two-minute window a human opened, so it expires on its own.
+   */
+  private pollingSuspended = false;
   private pollInFlight: Promise<void> | null = null;
   /**
    * The in-flight native reconciliation, so a second caller JOINS it instead of starting a rival.
@@ -3210,36 +3244,8 @@ export class LocationSharingService {
       this.armHeartbeat(this.shareIntervalMs);
 
       this.bgLifecycleStop = createAppLifecycleController({
-        onForeground: () => {
-          void this.engine?.flush();
-          void this.syncTrail(0);
-          // Re-derive rather than trust what start-up decided. Authorization moves in both
-          // directions without us: iOS settles a fresh grant a beat after the request resolves, and
-          // it also re-prompts days later with a map of everywhere we have tracked the user, where
-          // a great many downgrade. Both are product events and both surface here.
-          void this.refreshBackgroundAccess();
-          // A foreground record is the fastest way to learn what state a phone came back in —
-          // notably whether the OS still has its location task running, which is exactly what a
-          // process kill takes away. Self-throttled to one per
-          // DEVICE_HEALTH_MIN_INTERVAL_MS, so app-switching does not flood the pipeline.
-          void recordDeviceHealth('foreground');
-          // Coming back to the foreground is the best network opportunity a phone gets, and the
-          // moment a background backlog should leave. `flush` drains the journal, so this is where
-          // everything recorded while the app was frozen or offline finally ships.
-          void getTelemetry().flush();
-          // Re-center the revive fence on wherever we are now. A stale fence still works (being far
-          // outside it only makes the exit fire sooner), but keeping it current stops a user who
-          // never leaves a 200 m radius from having a tripwire they can't trip.
-          const fix = this.engine?.getState().lastAcceptedFix;
-          if (fix) {
-            void import('./background/revive-task')
-              .then(({ armReviveFence }) => armReviveFence(fix))
-              .catch(() => undefined);
-          }
-        },
-        onBackground: () => {
-          // OS keep-alive (Android foreground service / iOS background location) covers this.
-        },
+        onForeground: () => this.onEnterForeground(),
+        onBackground: () => this.onEnterBackground(),
       }).start();
 
       this.backgroundSharing = true;
@@ -4551,6 +4557,66 @@ export class LocationSharingService {
   // ── Pairing / discovery polling — ARCHITECTURE.md §2, §4 ────────────────────────────────────
 
   /**
+   * The app came back on screen: resume what the background stopped, and close the gap it left.
+   */
+  private onEnterForeground(): void {
+    // Resume the pairing loop, and close the gap rather than only re-arming it: the poll
+    // also drains `pollProfileEvents` and runs `reconcileCompletedPairs`, so a friend who
+    // finished pairing while we were backgrounded is reconciled now, not in four seconds.
+    this.pollingSuspended = false;
+    this.startPairingPolling();
+    void this.pollPairingOnce();
+    void this.engine?.flush();
+    void this.syncTrail(0);
+    // Re-derive rather than trust what start-up decided. Authorization moves in both
+    // directions without us: iOS settles a fresh grant a beat after the request resolves, and
+    // it also re-prompts days later with a map of everywhere we have tracked the user, where
+    // a great many downgrade. Both are product events and both surface here.
+    void this.refreshBackgroundAccess();
+    // A foreground record is the fastest way to learn what state a phone came back in —
+    // notably whether the OS still has its location task running, which is exactly what a
+    // process kill takes away. Self-throttled to one per
+    // DEVICE_HEALTH_MIN_INTERVAL_MS, so app-switching does not flood the pipeline.
+    void recordDeviceHealth('foreground');
+    // Coming back to the foreground is the best network opportunity a phone gets, and the
+    // moment a background backlog should leave. `flush` drains the journal, so this is where
+    // everything recorded while the app was frozen or offline finally ships.
+    void getTelemetry().flush();
+    // Re-center the revive fence on wherever we are now. A stale fence still works (being far
+    // outside it only makes the exit fire sooner), but keeping it current stops a user who
+    // never leaves a 200 m radius from having a tripwire they can't trip.
+    const fix = this.engine?.getState().lastAcceptedFix;
+    if (fix) {
+      void import('./background/revive-task')
+        .then(({ armReviveFence }) => armReviveFence(fix))
+        .catch(() => undefined);
+    }
+  }
+
+  /**
+   * The app left the screen. Stop the work that cannot accomplish anything out here.
+   */
+  private onEnterBackground(): void {
+    // Stop the pairing loop. It is the single largest consumer of a backgrounded phone's
+    // CPU and it cannot accomplish anything out here — a pair needs two present humans,
+    // and every sampled poll returned zero sessions and zero BLE peers.
+    //
+    // This is not a cold-launch concern. `UIBackgroundModes: ["location"]` plus
+    // `allowsBackgroundLocationUpdates` means iOS does not suspend this process while
+    // sharing is on, so a swiped-away app keeps its JS timers running indefinitely. The
+    // 48s-of-CPU-in-60s MetricKit exceptions are mostly this, not the wakes.
+    //
+    // Deliberately NOT stopped here: the heartbeat timer. Android's
+    // `BackgroundLocationService` only ever hands off `reason = "movement"` — there is no
+    // native heartbeat handoff there — so this timer is the ONLY thing filling slots for a
+    // parked Android phone while mounted, and stopping it would silence every stationary
+    // device. At one tick per 1-15 min it costs nothing. The bump loop is left alone too;
+    // it bounds itself (see `pollingSuspended`).
+    this.pollingSuspended = true;
+    this.stopPairingPolling();
+  }
+
+  /**
    * Start the bounded pairing/discovery poll loop (idempotent; native only).
    *
    * The cadence follows whether a session is live: {@link PAIRING_ACTIVE_POLL_INTERVAL_MS} while
@@ -4559,7 +4625,7 @@ export class LocationSharingService {
    * immediately instead of on the next slow tick.
    */
   private startPairingPolling(): void {
-    if (this.pollTimer || !this.mod) return;
+    if (this.pollTimer || !this.mod || this.pollingSuspended) return;
     const arm = (delay: number): void => {
       const timer = setTimeout(() => {
         void this.pollPairingOnce().finally(() => {
@@ -4798,6 +4864,15 @@ export class LocationSharingService {
       this.transportDiagnosticsError = null;
       const changed = stableStringify(previous) !== stableStringify(current);
       if (changed) this.transportDiagnosticsChangeCount += 1;
+      const pollsSinceChange = changed
+        ? this.transportPollsSinceChange
+        : ++this.transportPollsSinceChange;
+      // An unchanged poll writes nothing. The rollup every TRANSPORT_POLL_ROLLUP_EVERY polls is
+      // what keeps a long quiet run from being indistinguishable from a loop that died — the same
+      // reason `device.health` is emitted on a phone that is doing nothing.
+      const rollup = !changed && pollsSinceChange % TRANSPORT_POLL_ROLLUP_EVERY === 0;
+      if (changed) this.transportPollsSinceChange = 0;
+      if (!changed && !rollup) return;
       const activePaths = current.peers.flatMap((peer) =>
         peer.addresses.filter((address) => address.active).map((address) => address.kind)
       );
@@ -4810,11 +4885,15 @@ export class LocationSharingService {
         status: 'ok',
         transport: activePaths.length > 0 ? [...new Set(activePaths)].join(', ') : 'iroh',
         details: {
-          requested_peers: peerEndpointIds,
+          // Short ids, the `sc.author` convention: a full 64-char hex per friend, every poll, is
+          // most of what made this row expensive and none of what made it useful.
+          requested_peers: peerEndpointIds.map((id) => id.slice(0, 10)),
           changed,
+          polls_since_change: pollsSinceChange,
           active_paths: activePaths,
-          diagnostics: current,
-          previous: changed ? previous : undefined,
+          // `previous` is recoverable from the prior row, which by construction exists whenever
+          // this one says `changed`.
+          ...(changed ? { diagnostics: current } : {}),
         },
       });
     } catch (error) {
