@@ -1,6 +1,13 @@
-import { type Href, useLocalSearchParams, useRouter } from 'expo-router';
+import { type Href, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
+import {
+  BackHandler,
+  Platform,
+  StyleSheet,
+  Text,
+  View,
+  type LayoutChangeEvent,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { resolveSignalColor } from '@/constants/signal-colors';
@@ -27,6 +34,7 @@ import {
   type MapRosterFriend,
   type Rgb,
 } from '@/features/map';
+import { resolveMapBackAction } from '@/features/map/core/back-action';
 import { sampleTrailForMap } from '@/features/map/core/trail-sampling';
 import { friendPlaceName } from '@/features/map/core/readout';
 import { FriendDetailIsland } from '@/features/social/components/friend-detail-island';
@@ -335,6 +343,47 @@ export default function MapScreenBody() {
     closeHistory();
     setDetent('peek');
   }, [closeHistory]);
+  /**
+   * Android back dismisses what is open before it leaves the app.
+   *
+   * The map is the root route and everything layered over it — the layers popover, a friend's
+   * detail pane, the drawer's raised detents — is local state rather than navigation state, so
+   * there was nothing for the system back to pop and it went straight to exiting. Opening a friend
+   * from the roster and then swiping back closed the app, which is the one thing back is never
+   * supposed to do while something is plainly open on screen.
+   *
+   * Unwound in the order the user stacked it, most-nested first, one press per layer.
+   *
+   * `peek` and `collapsed` are deliberately NOT consumed: they are the drawer's resting states, not
+   * something the user opened, and treating them as dismissible would make back feel like it could
+   * never leave the app at all. So the contract is "back closes what you opened, then back exits" —
+   * and from a map with nothing open the very first press still exits, as it always did.
+   *
+   * Registered through `useFocusEffect` rather than a bare effect because this screen stays MOUNTED
+   * under anything pushed over it (Settings, pairing). A handler live behind a modal would eat that
+   * modal's back press and dismiss the map's island underneath it instead.
+   */
+  useFocusEffect(
+    useCallback(() => {
+      if (Platform.OS !== 'android') return;
+      const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+        switch (resolveMapBackAction({ layersOpen, selectedEndpoint, detent })) {
+          case 'close-layers':
+            closeLayers();
+            return true;
+          case 'close-detail':
+            closeDetail();
+            return true;
+          case 'collapse-drawer':
+            setDetent('peek');
+            return true;
+          default:
+            return false;
+        }
+      });
+      return () => subscription.remove();
+    }, [closeDetail, closeLayers, detent, layersOpen, selectedEndpoint])
+  );
   // `streetcryptid://dev?cmd=…&id=…` — the e2e harness driving a RUNNING app (see
   // `features/dev/commands`). Dispatch keys off the `id` nonce rather than the command name, so
   // issuing the same command twice fires twice; clearing the params afterwards stops a re-render
