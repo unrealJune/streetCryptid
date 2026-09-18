@@ -672,6 +672,22 @@ export interface IrohLocationApi {
   takeBackgroundWakeStats?(): Record<string, unknown>;
   /** Clear the wake counters. Called by whoever owns the reporting cadence, nothing else. OPTIONAL. */
   resetBackgroundWakeStats?(): void;
+  /**
+   * Take the Rust stores back from the native background runtime, bounded.
+   *
+   * Not {@link releaseNativeBackground}: that drops the Swift references and returns, while
+   * `Subscription` and the spawned receive task each still hold an `Arc<LocationNode>` — only
+   * `shutdown` frees the process-wide writer claims. Without this, opening the app after a
+   * background launch that armed the native runtime meets `AlreadyOpen` and fails `init()` before
+   * the map can mount.
+   *
+   * Bounded on the native side so it always settles whatever Rust does. Resolves `true` when the
+   * shutdown completed; `false` still hands ownership over, because leaving it with the runtime
+   * would mean nothing could ever claim the stores again. iOS only. OPTIONAL.
+   */
+  handOverNativeBackground?(timeoutMs: number): Promise<boolean>;
+  /** Which half of the process owns the Rust stores: `app` or `native`. iOS only. OPTIONAL. */
+  nativeNodeOwner?(): string;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**

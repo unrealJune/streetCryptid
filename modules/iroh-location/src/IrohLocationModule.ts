@@ -166,6 +166,8 @@ export declare class IrohLocationNativeModule
   nativeBackgroundAuthorized?(): boolean;
   takeBackgroundWakeStats?(): Record<string, unknown>;
   resetBackgroundWakeStats?(): void;
+  handOverNativeBackground?(timeoutMs: number): Promise<boolean>;
+  nativeNodeOwner?(): string;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**

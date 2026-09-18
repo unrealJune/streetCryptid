@@ -120,30 +120,6 @@ jest.mock('expo-secure-store', () => ({
   setItemAsync: async () => {},
 }));
 
-/** Replace `addEventListener` so a state transition can actually be delivered. */
-function appStateHarness(AppState: { currentState: string; addEventListener: unknown }) {
-  const listeners: ((state: string) => void)[] = [];
-  const original = AppState.addEventListener;
-  AppState.addEventListener = (_event: string, listener: (state: string) => void) => {
-    listeners.push(listener);
-    return {
-      remove: () => {
-        const at = listeners.indexOf(listener);
-        if (at >= 0) listeners.splice(at, 1);
-      },
-    };
-  };
-  return {
-    go(state: string) {
-      AppState.currentState = state;
-      for (const listener of [...listeners]) listener(state);
-    },
-    restore: () => {
-      AppState.addEventListener = original;
-    },
-  };
-}
-
 // eslint-disable-next-line import/first
 import { AppState } from 'react-native';
 // eslint-disable-next-line import/first

@@ -63,6 +63,24 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// a significant-location-change delivery arrives through `didUpdateLocations` looking exactly
   /// like any other, so claiming to distinguish it would be a field that lies. What separates an SLC
   /// relaunch from a running app is `relaunch`, which is what a cold start reports.
+  /// Who owns the Rust stores right now.
+  ///
+  /// Until this existed, "who holds the process-wide writer claim" was an emergent property of
+  /// whoever called `start_stored()` first, and it was discovered only as a thrown exception. That
+  /// is the same shape of problem `native-runtime-owner.ts` records on the JS side, and it wants
+  /// the same answer: one explicit, single-valued, observable state.
+  ///
+  /// It becomes load-bearing the moment this runtime can start itself on a background launch. Then
+  /// `.native` is the ordinary state of a phone in a pocket, and the app opening has to take the
+  /// stores back — see `yieldNode`. Without the guard it adds to `ensureStarted`, arming the
+  /// runtime at launch would invert the claim race onto the most common path in the app.
+  enum NodeOwner: String {
+    /// The mounted JS app holds the claim. The default, and what a foreground launch means.
+    case app
+    /// This runtime holds it, or may take it. Set only on a launch that never starts React.
+    case native
+  }
+
   enum WakeReason: String {
     /// A delivery on the precise stream, i.e. the phone is going somewhere.
     case movement
@@ -130,6 +148,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   private var running = false
 
   private var state: MotionState = .moving
+  /// Defaults to `.app`, so nothing changes until something deliberately hands ownership over.
+  private(set) var owner: NodeOwner = .app
   private var lastWakeReason: WakeReason = .relaunch
   private var lastWakeAt: Date?
 
@@ -215,6 +235,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       "auth_status": Self.authorizationName(manager.authorizationStatus),
       "precise": manager.accuracyAuthorization == .fullAccuracy,
       "anchor_armed": stopAnchor != nil,
+      // Which half of the process is actually publishing. "sharing is on" and "this runtime is the
+      // one sending" are different claims, and after the app can launch without React the gap
+      // between them is where a stuck handover would hide.
+      "node_owner": owner.rawValue,
       "fence_registered": manager.monitoredRegions.contains {
         $0.identifier == Self.stopAnchorRegionId
       },
@@ -277,6 +301,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
 
     manager.allowsBackgroundLocationUpdates = true
     running = true
+    // Record the intent NOW, before anything below can throw or hang. A launch that dies here must
+    // still come back armed — the same argument as arming the resurrection ladder first.
+    persistState()
 
     // A background launch is amnesia: `restorePersistedState` has put the state machine back, so
     // honour it rather than assuming we start moving. A phone that was parked overnight should
@@ -344,6 +371,83 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     queue.async { self.teardown() }
   }
 
+  /// Take ownership of the stores, so this runtime may build its own node.
+  ///
+  /// Called only from a launch that is NOT starting React. Everything else leaves ownership with
+  /// the app, which is the default and the common case.
+  func adoptNodeOwnership() {
+    owner = .native
+    clearClaimBackoff()
+  }
+
+  /// Hand ownership back without tearing anything down — what a mounted app asserts on start.
+  ///
+  /// Distinct from `yieldNode`, which also shuts the node down and waits for the claims. This one
+  /// is for the ordinary foreground case where this runtime never built a node at all, so there is
+  /// nothing to release and nothing to wait for.
+  func yieldOwnershipToApp() {
+    owner = .app
+  }
+
+  /// Give the stores back to the mounted app, and wait — bounded — until they are actually free.
+  ///
+  /// ## Why `release()` is not enough
+  ///
+  /// `release()` drops two Swift references and returns. It does not free the Rust writer claims:
+  /// `WriterClaim` releases on the last `Arc` drop, and `Subscription` holds its own
+  /// `Arc<LocationNode>`, as does the spawned receive task. Only `LocationNode::shutdown`
+  /// deterministically nils sessions/seq/outbox/recipients/gate/transport AND detaches the pair
+  /// runtime, which holds an `Arc<SessionManager>` of its own.
+  ///
+  /// That was survivable while this runtime essentially never held the claim. Once it can start
+  /// itself on a background launch, `.native` is the ordinary state of a phone in a pocket — and a
+  /// user opening the app would meet `AlreadyOpen`, which fails `init()` before
+  /// `setServiceReady(true)`: the 2026-09-18 dead-app shape, arriving from the other end of the
+  /// lifecycle.
+  ///
+  /// ## Why the bound is here and not only in JS
+  ///
+  /// AGENTS.md's rule is about a promise that never *settles*, as distinct from one that rejects.
+  /// A race decided in Swift guarantees this settles whatever Rust does, so the JS side can bound
+  /// it again on the outside without either bound being the only one. Ownership moves either way:
+  /// a shutdown we could not confirm still hands the app its turn, because leaving it `.native`
+  /// would mean nothing could ever claim the stores again.
+  ///
+  /// - Returns: whether the shutdown actually completed inside the timeout.
+  func yieldNode(timeoutMs: UInt64) async -> Bool {
+    eventSink = nil
+    let node = self.node
+    dropNodeHandles()
+    owner = .app
+    clearClaimBackoff()
+    guard let node else { return true }
+
+    let completed = await withTaskGroup(of: Bool.self) { group -> Bool in
+      group.addTask {
+        do {
+          try await node.shutdown()
+          return true
+        } catch {
+          // A shutdown that FAILED still finished — the claims are released either way. Only one
+          // that never returns is a problem, and that is what the timeout is for.
+          NSLog("[iroh-location] handover shutdown failed: \(error.localizedDescription)")
+          return true
+        }
+      }
+      group.addTask {
+        try? await Task.sleep(nanoseconds: timeoutMs * 1_000_000)
+        return false
+      }
+      let first = await group.next() ?? false
+      group.cancelAll()
+      return first
+    }
+    if !completed {
+      NSLog("[iroh-location] handover timed out after \(timeoutMs)ms; app may still be refused")
+    }
+    return completed
+  }
+
   func stop() {
     guard running else { return }
     manager.stopUpdatingLocation()
@@ -370,6 +474,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     slotIntervalMs = max(1, intervalMs)
     movingDistanceFilter = distanceM > 0 ? distanceM : kCLDistanceFilterNone
     movingAccuracy = Self.accuracy(for: accuracy)
+    // Persisted so a launch with no JS to re-program us restores this cadence rather than the
+    // compiled-in default. The interval is the one property of a sealed envelope the stash can
+    // read, so publishing on a different one is a wire-visible change, not an internal detail.
+    persistState()
     // The `state == .moving` half is that rule; `stopCandidate == nil` is the same rule one step
     // earlier. A candidate is dwelling on an unfiltered stream, and putting the policy's distance
     // filter back over the top of it is exactly how the confirming delivery goes missing.
@@ -638,6 +746,17 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   private func persistState() {
     let defaults = UserDefaults.standard
     defaults.set(state.rawValue, forKey: "sc.bg.state")
+    // The sharing INTENT, mirrored where Swift can read it.
+    //
+    // `sc.social.sharingEnabled` lives in expo-sqlite and is unreachable from a launch that never
+    // starts React — which is precisely the launch that needs to know whether to arm. Mirroring it
+    // here needs no JS change at all: `startNativeBackground` / `stopNativeBackground` /
+    // `setBackgroundCadence` are the only things that drive this runtime, so every transition
+    // already passes through `persistState`.
+    defaults.set(running, forKey: Self.armedKey)
+    defaults.set(Int(slotIntervalMs), forKey: "sc.bg.interval_ms")
+    defaults.set(movingDistanceFilter, forKey: "sc.bg.distance_m")
+    defaults.set(movingAccuracy, forKey: "sc.bg.accuracy_m")
     if let stopAnchor {
       defaults.set(stopAnchor.coordinate.latitude, forKey: "sc.bg.anchor.lat")
       defaults.set(stopAnchor.coordinate.longitude, forKey: "sc.bg.anchor.lon")
@@ -649,11 +768,27 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     }
   }
 
+  /// Whether sharing was on when this app was last running — readable with no JS and no SQLite.
+  static let armedKey = "sc.bg.armed"
+
+  /// Was sharing armed when we last persisted? The question a JS-free launch has to answer before
+  /// it can decide whether to start the Core Location ladder.
+  static var wasArmed: Bool { UserDefaults.standard.bool(forKey: armedKey) }
+
   private func restorePersistedState() {
     let defaults = UserDefaults.standard
     if let raw = defaults.string(forKey: "sc.bg.state"), let restored = MotionState(rawValue: raw) {
       state = restored
     }
+    // Come back on the cadence we were last told to use rather than the compiled-in default, so a
+    // launch with no JS to re-program us does not quietly publish on a different schedule — the
+    // interval IS the thing the stash can read.
+    let interval = defaults.integer(forKey: "sc.bg.interval_ms")
+    if interval > 0 { slotIntervalMs = UInt64(interval) }
+    let distance = defaults.double(forKey: "sc.bg.distance_m")
+    if distance > 0 { movingDistanceFilter = distance }
+    let accuracy = defaults.double(forKey: "sc.bg.accuracy_m")
+    if accuracy > 0 { movingAccuracy = accuracy }
     guard defaults.object(forKey: "sc.bg.anchor.lat") != nil else { return }
     let lat = defaults.double(forKey: "sc.bg.anchor.lat")
     let lon = defaults.double(forKey: "sc.bg.anchor.lon")
@@ -927,6 +1062,12 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// — because a latch there would be a phone that never publishes again and never says why.
   private func ensureStarted() async -> Subscription? {
     if let subscription { return subscription }
+    // Ownership first, before anything that costs. While the app is mounted this returns on the
+    // very first line, where the old code would build a whole `LocationNode` — a keygen, a
+    // `derive_recv_public` KDF, fifteen mutexes and a `telemetry::init_tracing` — purely to have
+    // the claim refused. The backoff below bounded how often that happened; this removes the
+    // reason for it. It stays, for the genuine `.native` refusal.
+    guard owner == .native else { return nil }
     if let until = claimRetryAfter, Date() < until { return nil }
     guard KeychainDeviceSecrets.shared.identitySecret() != nil else {
       // A fresh install whose app has never run. Minting an identity here would create one no

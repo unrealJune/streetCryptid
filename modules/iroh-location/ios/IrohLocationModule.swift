@@ -585,6 +585,9 @@ public final class IrohLocationModule: Module {
       // Wire the handoff before starting, or the first captures of a mounted session have nowhere
       // to go — and on a fresh install those are the only ones there are.
       BackgroundLocationRuntime.shared.eventSink = self
+      // JS is here, so JS owns the stores. Explicit rather than emergent: this is the call that
+      // means "a mounted app is driving", and the runtime must not try to build a rival node.
+      BackgroundLocationRuntime.shared.yieldOwnershipToApp()
       BackgroundLocationRuntime.shared.start()
     }
 
@@ -649,6 +652,27 @@ public final class IrohLocationModule: Module {
     Function("releaseNativeBackground") {
       BackgroundLocationRuntime.shared.eventSink = nil
       BackgroundLocationRuntime.shared.release()
+    }
+
+    /// Take the stores back from the native runtime, bounded, before the app claims them.
+    ///
+    /// The counterpart to a background launch having armed the runtime with `owner = .native`.
+    /// `releaseNativeBackground` drops Swift references and returns; it does NOT free the Rust
+    /// writer claims, because `Subscription` and the spawned receive task each hold their own
+    /// `Arc<LocationNode>` and only `shutdown` nils them all. Without this, opening the app after
+    /// a background launch would meet `AlreadyOpen` and fail `init()` before `setServiceReady`.
+    ///
+    /// Bounded in Swift so the promise always settles — AGENTS.md's rule is about a promise that
+    /// never settles, and a Swift-side race guarantees it does whatever Rust decides to do.
+    /// Returns whether the shutdown completed; `false` still hands ownership over, because leaving
+    /// it `.native` would mean nothing could ever claim the stores again.
+    AsyncFunction("handOverNativeBackground") { (timeoutMs: Double) async -> Bool in
+      await BackgroundLocationRuntime.shared.yieldNode(timeoutMs: UInt64(max(0, timeoutMs)))
+    }
+
+    /// Whether the native runtime currently owns the stores. Reported on `device.health`.
+    Function("nativeNodeOwner") { () -> String in
+      BackgroundLocationRuntime.shared.owner.rawValue
     }
 
     // MARK: - Native publish state
@@ -944,7 +968,13 @@ public final class IrohLocationModule: Module {
     }
 
     Function("configureTelemetry") { (endpoint: String, instanceId: String) -> Bool in
-      configureTelemetry(endpoint: endpoint, instanceId: instanceId)
+      // Mirror what JS configured, so a launch that never starts React can re-apply it. The Rust
+      // OTLP layer is dormant until something hands it an endpoint, and on a JS-free wake there is
+      // nothing to hand it one. See `IrohBackgroundBootstrap`.
+      let defaults = UserDefaults.standard
+      defaults.set(endpoint, forKey: "sc.otel.endpoint")
+      defaults.set(instanceId, forKey: "sc.otel.instance_id")
+      return configureTelemetry(endpoint: endpoint, instanceId: instanceId)
     }
 
     AsyncFunction("flushTelemetry") { () async in
