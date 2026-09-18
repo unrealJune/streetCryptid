@@ -654,6 +654,24 @@ export interface IrohLocationApi {
    * reporting `access=foreground` for an evening. OPTIONAL.
    */
   nativeBackgroundAuthorized?(): boolean;
+  /**
+   * How much of its iOS background execution budget this app has been spending.
+   *
+   * The denominator every other claim about the background budget was missing. Until this existed,
+   * "iOS took our execution away" could only be inferred from silence — a gap between
+   * `device.health` records, a MetricKit CPU exception delivered on the launch AFTER the one that
+   * offended. `cpu_ms_max` approaching 48000 is not "high": it is `MXCPUExceptionDiagnostic`'s
+   * threshold, the constant every one of the 41 diagnostics in that 7-day window reported.
+   *
+   * `bg_launches` climbing while `js_boots` tracks it means a background launch is still paying
+   * for the whole React Native bundle.
+   *
+   * Read-only — {@link resetBackgroundWakeStats} is separate so two health records in the same
+   * minute cannot each take half the counts. iOS only. OPTIONAL.
+   */
+  takeBackgroundWakeStats?(): Record<string, unknown>;
+  /** Clear the wake counters. Called by whoever owns the reporting cadence, nothing else. OPTIONAL. */
+  resetBackgroundWakeStats?(): void;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**

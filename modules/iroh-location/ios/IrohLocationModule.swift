@@ -608,6 +608,25 @@ public final class IrohLocationModule: Module {
       BackgroundLocationRuntime.shared.healthSnapshot
     }
 
+    /// How much of its background execution budget this app has been spending.
+    ///
+    /// The denominator every other claim about the background budget has been missing: until this
+    /// existed, "iOS took our execution away" could only be inferred from silence, and MetricKit
+    /// reported it on the launch AFTER the one that offended. `cpu_ms_max` approaching 48 000 is
+    /// not "high" — it is `MXCPUExceptionDiagnostic`'s threshold, the constant every one of the 41
+    /// diagnostics in that 7-day window reported.
+    ///
+    /// Read-only. Resetting is a separate call so two health records in the same minute cannot
+    /// each take half the counts — see `BackgroundWakeLedger.reset`.
+    Function("takeBackgroundWakeStats") { () -> [String: Any] in
+      BackgroundWakeLedger.snapshot
+    }
+
+    /// Clear the wake counters. Called by whoever owns the reporting cadence, and nothing else.
+    Function("resetBackgroundWakeStats") {
+      BackgroundWakeLedger.reset()
+    }
+
     /// Whether Core Location grants background updates **right now**.
     ///
     /// Distinct from `expo-location`'s request round-trip, which on a fresh install returns before

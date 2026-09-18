@@ -547,13 +547,13 @@
           },
           "filters": [],
           "limit": 100,
-          "query": "{ name=\"bg.wake\" && resource.service.instance.id =~ \"$author\" } | rate() by (resource.service.instance.id)",
+          "query": "{ name=\"device.health\" && resource.service.instance.id =~ \"$author\" } | rate() by (resource.service.instance.id)",
           "queryType": "traceql",
           "refId": "A",
           "tableType": "spans"
         }
       ],
-      "title": "Background wakes — bg.wake /s by author",
+      "title": "Health records — device.health /s by author",
       "type": "timeseries"
     },
     {
@@ -602,13 +602,13 @@
           },
           "filters": [],
           "limit": 100,
-          "query": "{ name=\"bg.backfill\" && resource.service.instance.id =~ \"$author\" } | rate() by (resource.service.instance.id)",
+          "query": "{ name=\"bg.refresh\" && resource.service.instance.id =~ \"$author\" } | rate() by (resource.service.instance.id)",
           "queryType": "traceql",
           "refId": "A",
           "tableType": "spans"
         }
       ],
-      "title": "Periodic backfill — bg.backfill /s by author",
+      "title": "Periodic refresh — bg.refresh /s by author",
       "type": "timeseries"
     },
     {

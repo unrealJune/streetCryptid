@@ -669,6 +669,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   private func note(_ reason: WakeReason) {
     lastWakeReason = reason
     lastWakeAt = Date()
+    // Every reason here IS a wake — this is the one place all five paths converge, which is why
+    // the ledger hangs off it rather than off each delegate callback.
+    BackgroundWakeLedger.noteWake()
   }
 
   // MARK: - CLLocationManagerDelegate
@@ -834,6 +837,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       ]
     }
     let sink = eventSink
+    // Handing off ends this side's part of the wake, whatever JS then does with it.
+    BackgroundWakeLedger.closeWindow()
     DispatchQueue.main.async { sink?.sendEvent("onNativeFix", payload) }
   }
 
@@ -851,6 +856,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         intervalMs: slotIntervalMs,
         nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
       report("ingest", outcome)
+      // The wake's work is done; fold what it cost into the counters. A window left open is not a
+      // measurement error, it is the signal that the process did not survive its own wake.
+      BackgroundWakeLedger.closeWindow()
     } catch {
       // The fix stays in the native outbox, so the next delivery retries it.
       NSLog("[iroh-location] ingest failed, fix stays queued: \(error.localizedDescription)")
@@ -874,6 +882,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         intervalMs: slotIntervalMs,
         nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
       report("heartbeat", outcome)
+      BackgroundWakeLedger.closeWindow()
     } catch {
       NSLog("[iroh-location] heartbeat failed: \(error.localizedDescription)")
     }

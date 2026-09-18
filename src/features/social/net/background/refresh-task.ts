@@ -1,3 +1,5 @@
+import { Platform } from 'react-native';
+
 import {
   getTelemetry,
   type SpanContext,
@@ -26,8 +28,10 @@ import { stampWatermark } from './watermarks';
  * (Expo Go, web, a dev client built before the package was added).
  */
 
+type BackgroundTaskModule = typeof import('expo-background-task');
+
 let taskManagerMod: typeof import('expo-task-manager') | null | undefined;
-let backgroundTaskMod: typeof import('expo-background-task') | null | undefined;
+let backgroundTaskMod: BackgroundTaskModule | null | undefined;
 
 function tryTaskManager(): typeof import('expo-task-manager') | null {
   if (taskManagerMod !== undefined) return taskManagerMod;
@@ -87,11 +91,15 @@ export function defineBackgroundRefreshTask(run: (parent?: SpanContext) => Promi
   const taskManager = tryTaskManager();
   const backgroundTask = tryBackgroundTask();
   if (!taskManager || !backgroundTask) return;
+  // When the refresh started, so an expiry can say how much window it actually got.
+  let startedAt: number | null = null;
+  armExpiryListener(backgroundTask, () => startedAt);
   taskManager.defineTask(BACKGROUND_REFRESH_TASK, () =>
     withEventLogLaunchContext('background', async () => {
       const telemetry = getTelemetry();
       // One span per OS-scheduled refresh — the periodic counterpart of `bg.wake`.
       const span = telemetry.startSpan('bg.refresh');
+      startedAt = Date.now();
       await stampRefresh();
       try {
         await run(span.context);
@@ -103,11 +111,53 @@ export function defineBackgroundRefreshTask(run: (parent?: SpanContext) => Promi
         return backgroundTask.BackgroundTaskResult.Failed;
       } finally {
         span.end();
+        startedAt = null;
         // The OS may freeze this headless context the moment we return; unexported batches die with it.
         await telemetry.flush();
       }
     })
   );
+}
+
+/**
+ * Report a refresh the OS cut off before it finished.
+ *
+ * `BGTask.expirationHandler` is the only notice iOS gives that it is about to stop us, and until
+ * now nothing listened to it — so a refresh that was terminated mid-flight was indistinguishable
+ * from one that was never scheduled: both leave a `bg.refresh` span that simply never ends, and a
+ * `last_refresh_age_ms` that climbs. Those want different fixes. One means the work is too big for
+ * the window; the other means we are not being given windows at all.
+ *
+ * The flush is not optional and not deferrable. The OS is about to stop this process, so a span
+ * left in the journal unexported dies describing the very thing it exists to describe — the same
+ * rule every headless path in this codebase follows, at the one moment it is guaranteed to matter.
+ *
+ * `addExpirationListener` has shipped in expo-background-task since before this app used it; the
+ * guard is for a bundle running against an older native module, per AGENTS.md's last rule.
+ */
+function armExpiryListener(
+  backgroundTask: BackgroundTaskModule,
+  startedAt: () => number | null
+): void {
+  if (typeof backgroundTask.addExpirationListener !== 'function') return;
+  backgroundTask.addExpirationListener(() => {
+    void withEventLogLaunchContext('background', async () => {
+      const telemetry = getTelemetry();
+      const began = startedAt();
+      telemetry
+        .startSpan('bg.refresh.expired', {
+          attributes: {
+            // How much window we actually got. `-1` means the expiry arrived with no refresh in
+            // flight, which is worth seeing rather than reporting as zero elapsed.
+            elapsed_ms: began === null ? -1 : Math.max(0, Date.now() - began),
+            platform: Platform.OS,
+            'sc.drop_reason': 'refresh-expired',
+          },
+        })
+        .end();
+      await telemetry.flush();
+    });
+  });
 }
 
 /** Ask the OS to run the refresh task periodically. Idempotent — re-registering just re-arms it. */

@@ -67,7 +67,7 @@
     {
       "type": "stat",
       "title": "Phones not waking (6h)",
-      "description": "Devices that have had no bg.wake for six hours. This is the core background failure: the OS has stopped delivering location and nothing else on the device will say so. Six hours is chosen against the platform floor — the periodic refresh is ~15 min at best and both OSes defer it much further under battery pressure, so a shorter window would be noise. Confirm in the state table below: sharing.enabled=true with task.location_running=false is the bug.",
+      "description": "Devices that have sent no device.health for six hours. This is the core background failure: the OS has stopped running us and nothing else on the device will say so. Six hours is chosen against the platform floor — the periodic refresh is ~15 min at best and both OSes defer it much further under battery pressure, so a shorter window would be noise. Confirm in the state table below: sharing.enabled=true with task.location_running=false is the bug. NOTE: this used to count bg.wake, which stopped existing when capture moved into Rust — a span name nothing emits makes this tile read a reassuring 0 forever.",
       "datasource": {
         "type": "prometheus",
         "uid": "${prometheus}"
@@ -127,7 +127,7 @@
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "expr": "count(sum by (device_id) (increase(traces_span_metrics_calls_total{service_name=\"streetcryptid-app\", span_name=\"bg.wake\"}[6h])) < 1) or vector(0)",
+          "expr": "count(sum by (device_id) (increase(traces_span_metrics_calls_total{service_name=\"streetcryptid-app\", span_name=\"device.health\"}[6h])) < 1) or vector(0)",
           "instant": true,
           "legendFormat": "__auto",
           "refId": "A"
@@ -413,7 +413,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Background wakes — bg.wake /min by device",
+      "title": "Health records — device.health /min by device",
       "description": "Flat zero on a device whose last `device.health` said sharing.enabled=true is the core failure this whole dashboard exists for: the OS has stopped delivering location to us and nothing else will say so. Empty and errored wakes are included on purpose — being woken and handed nothing is a different fault from not being woken, and both are wakes.",
       "datasource": {
         "type": "prometheus",
@@ -442,7 +442,7 @@
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "expr": "sum by (device_id) (rate(traces_span_metrics_calls_total{span_name=\"bg.wake\", device_id=~\"$device\"}[15m])) * 60",
+          "expr": "sum by (device_id) (rate(traces_span_metrics_calls_total{span_name=\"device.health\", device_id=~\"$device\"}[15m])) * 60",
           "legendFormat": "{{device_id}}",
           "refId": "A"
         }
@@ -533,7 +533,7 @@
     {
       "type": "timeseries",
       "title": "Health records — device.health /min by device",
-      "description": "The liveness assertion itself, emitted once per periodic refresh and on foreground resume. A gap here with no gap in bg.wake means the periodic task (BGTaskScheduler / WorkManager) has stopped, not location.",
+      "description": "The liveness assertion itself, emitted once per periodic refresh and on foreground resume. A gap here means the periodic task (BGTaskScheduler / WorkManager) has stopped. Per-wake counts live in this record's own wake.* attributes, not in a span of their own — the location wake is native and emits none.",
       "datasource": {
         "type": "prometheus",
         "uid": "${prometheus}"

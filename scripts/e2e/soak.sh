@@ -117,7 +117,7 @@ sample_once() {
   data="$(app_data_dir "$DEVICE" "$APP_ID")"
   events="$(events_db_path "$data")"
   local bg_wake publish_ok publish_error stash_push_ok drop_reasons
-  bg_wake="$(event_log_count "$events" "$run_start_ms" bg.wake)"
+  bg_wake="$(event_log_count "$events" "$run_start_ms" device.health)"
   publish_ok="$(event_log_count "$events" "$run_start_ms" publish.fix ok)"
   publish_error="$(event_log_count "$events" "$run_start_ms" publish.fix error)"
   stash_push_ok="$(event_log_count "$events" "$run_start_ms" trail.push.app ok)"
@@ -125,7 +125,7 @@ sample_once() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$scenario_name" "$elapsed" "$(date -u +%FT%TZ)" \
     "$bg_wake" "$publish_ok" "$publish_error" "$stash_push_ok" "$drop_reasons" >>"$SAMPLES"
-  log "  [$scenario_name +${elapsed}s] bg.wake=$bg_wake publish.ok=$publish_ok publish.error=$publish_error stash.push.ok=$stash_push_ok${drop_reasons:+ drops=$drop_reasons}"
+  log "  [$scenario_name +${elapsed}s] device.health=$bg_wake publish.ok=$publish_ok publish.error=$publish_error stash.push.ok=$stash_push_ok${drop_reasons:+ drops=$drop_reasons}"
 }
 
 for f in "${SCENARIO_FILES[@]}"; do

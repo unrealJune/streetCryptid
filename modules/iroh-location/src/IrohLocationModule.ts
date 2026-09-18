@@ -164,6 +164,8 @@ export declare class IrohLocationNativeModule
    * reporting `access=foreground` for an evening. OPTIONAL.
    */
   nativeBackgroundAuthorized?(): boolean;
+  takeBackgroundWakeStats?(): Record<string, unknown>;
+  resetBackgroundWakeStats?(): void;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**
