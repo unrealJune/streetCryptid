@@ -8,8 +8,9 @@ import {
   useState,
   type PropsWithChildren,
 } from 'react';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 
+import { getTelemetry } from '@/features/dev/telemetry';
 import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
 import { runDevCommand as runDevCommandImpl } from '@/features/dev/commands/dev-commands';
 import type { DeliveryMode } from '@/features/social/core/delivery-mode';
@@ -17,6 +18,7 @@ import { withFixtureFriends, withFixtureTrail } from '@/features/dev/fixtures';
 import { buildFriendPresence, type FriendPresence } from '@/features/social/core/presence';
 import type { IncomingFix, LocationFix } from '@/features/social/core/types';
 import { type TrailPoint } from '@/features/social/net/background/trail-store';
+import { awaitInitBounded, INIT_WATCHDOG_MS } from '@/features/social/net/background/init-watchdog';
 import {
   BLUETOOTH_OFF_MESSAGE,
   BLUETOOTH_UNSUPPORTED_MESSAGE,
@@ -168,9 +170,35 @@ function profileSignature(
 let sharedService: LocationSharingService | null = null;
 let sharedServiceInit: Promise<void> | null = null;
 
+/** Set when the last init attempt overran {@link INIT_WATCHDOG_MS}, so a resume can retry it. */
+let sharedServiceInitTimedOut = false;
+
 function getSharedService(): LocationSharingService {
   if (!sharedService) sharedService = new LocationSharingService();
   return sharedService;
+}
+
+/**
+ * Drop the shared service so the next mount builds a clean one.
+ *
+ * The in-process equivalent of the force-quit that was previously the only cure. The old service's
+ * `init` may still be pending inside native code, so its `shutdown` is fired and NOT awaited — the
+ * one thing we must not do here is block recovery on the same call that is already stuck (AGENTS.md:
+ * never `await` native teardown unbounded). `createNode` refcounts, so the fresh service adopts the
+ * live node rather than clobbering it.
+ */
+function discardWedgedService(): void {
+  const wedged = sharedService;
+  sharedService = null;
+  sharedServiceInit = null;
+  sharedServiceInitTimedOut = false;
+  if (wedged) {
+    try {
+      wedged.shutdown();
+    } catch {
+      // A wedged service failing to start its own teardown is exactly the case this exists for.
+    }
+  }
 }
 
 export function LocationSharingProvider({ children }: PropsWithChildren) {
@@ -193,6 +221,8 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   const [serviceError, setServiceError] = useState<string | null>(null);
   const [disclosureStatus, setDisclosureStatus] = useState<LocationDisclosureStatus>('loading');
   const [serviceReady, setServiceReady] = useState(false);
+  // Bumped by the foreground self-heal to re-run the init effect against a rebuilt service.
+  const [initAttempt, setInitAttempt] = useState(0);
   const locationStartRequested = useRef(false);
 
   // Read the disclosure choice as soon as possible — independent of (and faster than) the heavy
@@ -350,7 +380,40 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
             throw error;
           });
         }
-        await sharedServiceInit;
+        // Held in a local, NOT re-read from `sharedServiceInit`: the catch above nulls the latch
+        // before it rethrows, so by the time a rejection lands the module-level binding is already
+        // null and awaiting it again would resolve on `null` and swallow the error.
+        const pending = sharedServiceInit;
+        // Bounded, because a promise that never settles here is terminal for every later mount.
+        // A `failed` outcome re-awaits the original promise so the catch below still reports the
+        // error exactly as it used to; only `timeout` is new behaviour.
+        const outcome = await awaitInitBounded(pending, INIT_WATCHDOG_MS);
+        if (outcome === 'failed') await pending;
+        if (outcome === 'timeout') {
+          // The span carries the phase because that is the question the data could not answer on
+          // 2026-09-18: the journal stopped after `node.create` and nothing said what came next.
+          // Emitted from the live process, so it lands even when the durable watermark is only
+          // read by some later launch that may never come.
+          getTelemetry()
+            .startSpan('app.init.timeout', {
+              attributes: {
+                'init.phase': service.currentInitPhase() ?? 'unknown',
+                'init.elapsed_ms': service.initElapsedMs(),
+                watchdog_ms: INIT_WATCHDOG_MS,
+                'sc.drop_reason': 'init-timeout',
+              },
+            })
+            .end();
+          // Let the stalled init keep running — it may still land — but stop holding the latch, and
+          // remember that it overran so a foreground resume can rebuild rather than wait again.
+          sharedServiceInitTimedOut = true;
+          if (!active) return;
+          setLocationStatus('error');
+          setServiceError(
+            'Location sync is taking longer than expected. Reopening the app retries.'
+          );
+          return;
+        }
         publishedProfileSignature.current = profileSignature(initialProfile);
         if (!active) return;
         await refreshTrail(service);
@@ -379,7 +442,37 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       offFix();
       offError();
     };
-  }, [initialProfile, refreshTrail, startLocation]);
+  }, [initialProfile, refreshTrail, startLocation, initAttempt]);
+
+  /**
+   * Retry a wedged init when the app comes back to the foreground.
+   *
+   * This is the self-heal for the 2026-09-18 failure, and the foreground transition is the right
+   * trigger for it: the process was frozen mid-`init()` during a BACKGROUND launch, so the moment
+   * it is next made active is both the first moment it can do anything about it and the moment a
+   * user is looking at the broken screen. Before this, the only cure was a force-quit.
+   *
+   * Gated on the watchdog having actually fired, not merely on `!serviceReady` — an init that is
+   * still legitimately in flight (a slow node build, an unanswered permission prompt) must be left
+   * alone, or resuming the app would restart a healthy launch out from under itself.
+   */
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next !== 'active') return;
+      if (!sharedServiceInitTimedOut) return;
+      getTelemetry()
+        .startSpan('app.init.recover', {
+          attributes: { trigger: 'foreground', 'sc.drop_reason': 'init-timeout' },
+        })
+        .end();
+      discardWedgedService();
+      setServiceError(null);
+      setLocationStatus('starting');
+      // Re-runs the init effect above against a freshly built service.
+      setInitAttempt((n) => n + 1);
+    });
+    return () => sub.remove();
+  }, []);
 
   useEffect(() => {
     if (!profile || !snapshot?.ready) return;

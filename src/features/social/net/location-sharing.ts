@@ -118,6 +118,9 @@ import {
   SHARE_INTERVAL_OPTIONS_MS,
   type TransportPreferences,
   DEFAULT_TRANSPORT_PREFERENCES,
+  saveInitWatermark,
+  clearInitWatermark,
+  type InitPhase,
 } from './persistence';
 import { createAppLifecycleController } from './background/lifecycle';
 import {
@@ -128,6 +131,7 @@ import {
 import { DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
 import { recordDeviceHealth } from './background/device-health';
 import { reportStrandedTeardown } from './background/teardown-watermark';
+import { reportStrandedInit } from './background/init-watermark';
 import { stampWatermark } from './background/watermarks';
 import { createDefaultStashClient, type StashClient } from './stash-client';
 import { loadKeys, saveKeys } from './secure-keys';
@@ -753,6 +757,11 @@ export class LocationSharingService {
 
   /** Cached answer from {@link nativeAdoptsNode}; `null` until first probed. */
   private nodeAdoptionSupported: boolean | null = null;
+
+  /** The phase {@link init} is standing in; null before it starts and once it reaches `ready`. */
+  private initPhase: InitPhase | null = null;
+  /** When the in-flight {@link init} attempt started (epoch ms); 0 when none is running. */
+  private initStartedAt = 0;
   private lastSyncRecovered: number | null = null;
 
   // Background service runtime (native-only; lazily imported so web/Expo Go never load it).
@@ -1020,6 +1029,14 @@ export class LocationSharingService {
     this.color = color;
     this.setStatus('starting');
 
+    // A fresh context is the only place a PREVIOUS init that never finished can be reported: the
+    // stalled one could not describe itself, and a suspension that resumes the same context leaves
+    // `sc.run_id` unchanged, so nothing else marks the hole. Before any of our own work, and
+    // never allowed to fail it. See `init-watermark.ts`.
+    await reportStrandedInit(this.kv, interactive ? 'mounted' : 'headless').catch(() => null);
+    this.initStartedAt = Date.now();
+    await this.markInitPhase('permissions', interactive);
+
     this.mod = getIrohLocation();
     const persisted = await loadKeys();
     if (interactive) {
@@ -1051,6 +1068,7 @@ export class LocationSharingService {
     //
     // On 2026-09-13 a process logged three `iroh endpoint bound` lines and ZERO shutdowns, and
     // nothing could say which of the three it was — while pairings failed on top of it.
+    await this.markInitPhase('create-node', interactive);
     const createSpan = getTelemetry().startSpan('node.create', {
       attributes: {
         mode: interactive ? 'interactive' : 'headless',
@@ -1075,6 +1093,7 @@ export class LocationSharingService {
     });
     // And into the native store the background drain path reads, which `expo-secure-store` cannot
     // serve because that path runs with no JS context alive.
+    await this.markInitPhase('mirror-secrets', interactive);
     await this.mirrorDeviceSecrets();
     this.configureDevTelemetry();
     // Restore the monotonic seq before anything can publish, so we never hand out a reused seq.
@@ -1083,12 +1102,14 @@ export class LocationSharingService {
     // by older persisted diagnostics a few awaits later.
     this.ratchetActivity = await loadRatchetActivity(this.kv);
     this.transportPreferences = await loadTransportPreferences(this.kv);
+    await this.markInitPhase('native-start', interactive);
     await this.startNativeBounded(this.mod);
     // After `start`, which is where the native drain path's stores are opened.
     await this.adoptNativeSeq();
     await this.resolveStashEndpointId();
     await this.mirrorTransportConfig();
     if (interactive) {
+      await this.markInitPhase('tickets', interactive);
       this.ticketStr = await this.mod.ticket();
       this.docTicketStr = await this.safeDocTicket();
       // Publish our profile so friends can replicate it; web reports epoch 0 (no capability).
@@ -1099,6 +1120,7 @@ export class LocationSharingService {
         this.handleOpaque(event)
       );
     }
+    await this.markInitPhase('restore-pool', interactive);
     await this.restorePool(interactive);
     // Seed the native sharing set from the pool we have just loaded — AFTER `restorePool`, and the
     // ordering is the whole of it.
@@ -1119,12 +1141,43 @@ export class LocationSharingService {
     // background sharing has been switched on.
     this.shareIntervalMs = await loadShareIntervalMs(this.kv);
     if (interactive) {
+      await this.markInitPhase('pairing', interactive);
       await this.importFriendProfiles();
       await this.syncStashGrants();
       this.startPairingPolling();
       await this.pollPairingOnce();
     }
+    // Reaching `ready` is the only thing that clears the watermark, so a value left on disk always
+    // means an init that did not get here — never one that merely took a while.
+    this.initPhase = null;
+    await clearInitWatermark(this.kv).catch(() => undefined);
     this.setStatus('ready');
+  }
+
+  /**
+   * The phase `init()` is standing in, or null before it starts and once it has reached `ready`.
+   *
+   * Read by the mounted watchdog so an `app.init.timeout` can name the step that overran while the
+   * process is still alive — the in-memory half of the durable watermark.
+   */
+  currentInitPhase(): InitPhase | null {
+    return this.initPhase;
+  }
+
+  /** How long the in-flight `init()` has been running, or 0 when none is. */
+  initElapsedMs(): number {
+    return this.initStartedAt ? Date.now() - this.initStartedAt : 0;
+  }
+
+  /**
+   * Record the phase in memory and on disk.
+   *
+   * Never allowed to fail an init: a phone that cannot write this is having a worse day than the
+   * telemetry, and losing the breadcrumb is strictly better than losing the launch.
+   */
+  private async markInitPhase(phase: InitPhase, interactive: boolean): Promise<void> {
+    this.initPhase = phase;
+    await saveInitWatermark(this.kv, phase, this.initStartedAt, interactive).catch(() => undefined);
   }
 
   /** Publish profile edits without rebuilding the native node or dropping background GPS. */
