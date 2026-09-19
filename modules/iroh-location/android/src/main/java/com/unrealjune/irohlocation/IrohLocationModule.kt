@@ -1300,23 +1300,32 @@ class IrohLocationModule : Module() {
      * `false` means the fix is genuinely lost rather than queued, which is worth logging at the
      * call site: it is the signature of the bug this exists to prevent.
      */
-    fun handOffCapture(fix: LocationFix, battery: BatteryState, reason: String): Boolean {
+    fun handOffCapture(
+      fix: LocationFix?,
+      battery: BatteryState,
+      reason: String,
+      kind: String = "fix",
+      state: String = "moving",
+    ): Boolean {
       val module = sink?.get() ?: return false
-      module.sendEvent(
-        "onNativeFix",
-        mapOf(
-          "kind" to "fix",
+      val payload =
+        mutableMapOf<String, Any?>(
+          // `kind` is what `routeNativeCapture` switches on: "fix" runs the gate, "heartbeat"
+          // refills the due slots from the anchor already in it. A parked tick carries no position
+          // worth gating, which is why `fix` is nullable here — the iOS `handOff` has taken both
+          // shapes since the rewrite and this is Android catching up to it.
+          "kind" to kind,
           "reason" to reason,
-          "state" to "moving",
+          "state" to state,
           "battery" to
             mapOf(
               "level" to battery.level,
               "charging" to battery.charging,
               "lowPower" to battery.lowPower,
             ),
-          "fix" to fixToMap(fix),
-        ),
-      )
+        )
+      if (fix != null) payload["fix"] = fixToMap(fix)
+      module.sendEvent("onNativeFix", payload)
       return true
     }
   }

@@ -91,9 +91,10 @@ Conventions when changing that code:
   re-arm the loop and none of them knows the app is in a pocket. The Skia loops pause through
   `useIsAppActive()`. Note `event-log.ts` stamps a row `background` from `AppState` alone, so
   "background entries" in the journal conflate a cold wake with a mounted app in a pocket — the
-  latter was most of them. **Do NOT also stop the heartbeat timer**: Android's
-  `BackgroundLocationService` only ever hands off `reason = "movement"`, so on that platform it is
-  the only thing filling slots for a parked phone while mounted. The bump loop needs no guard
+  latter was most of them. **Do NOT also stop the heartbeat timer**: it is what fills slots for a
+  parked phone while the app is mounted. Android grew a native parked heartbeat of its own in
+  v2.15.0 (idempotent per slot, so the overlap is free), but iOS's only runs on the coarse stream
+  once the native runtime owns the node — which a mounted app does not. The bump loop needs no guard
   either; it bounds itself against `isBumpActive()` inside a two-minute window a human opened.
 - **The background budget is measured now, not inferred.** Every earlier claim about it —
   `SHIP_MAX_BATCHES = 3`, `HEADLESS_TEARDOWN_TIMEOUT_MS`, "throttled into silence" — came from
@@ -227,6 +228,51 @@ Conventions when changing that code:
   bilateral, and `result_data` is gated on `result_emitted` rather than `is_complete()`. Handing the
   app a result from inside that window produced a friend with no ratchet behind it, whose every
   publish would drop with `no_session`. Do not "simplify" either gate back to `is_complete()`.
+- **The node-wide `inner` lock must never be held across an await, and there is a test that says so.**
+  `LocationNode::inner` is the single lock behind every JS-visible native call, so a guard held
+  across an `await` does not slow one call — it stops the phone: the pairing poll that opens the SAS
+  gate, the BLE reads, `transport_diagnostics`, the publish path and the inbound `PairProtocol`
+  handler all queue behind it. Take the handles with `self.live().await?` (or `live_opt()`) and let
+  the guard go. `tests/node_lock.rs` scans the source for the violation, because the failure is a
+  future that never completes and there is nothing a runtime assertion can wait for. It has been
+  introduced twice: `import_profile_ticket` on 2026-09-10 (`pairing.poll` spans of 47-131 s), and
+  `import_doc_ticket` + `subscribe` on 2026-09-17, where ACKNOWLEDGE on a long-distance pair wedged
+  BOTH Pixels — the acknowledge never returned, `pool.friend_added` never landed, and
+  `app.previous_run` recorded three force-quits in three minutes.
+- **Every await on the pairing wire is bounded, and ACKNOWLEDGE waits for none of them.**
+  `dial_exchange` splits `PAIR_CONNECT_TIMEOUT` from `PAIR_EXCHANGE_TIMEOUT` because the second is
+  the PEER building its reply inside our read; `PairProtocol::accept` is bounded end to end and
+  lingers on `conn.closed()` only for `PAIR_CLOSE_LINGER`; the optional docs reads on an `Accept`
+  and finalize's ticket imports are bounded by `PAIR_DOCS_TIMEOUT` and degrade to empty, which
+  every consumer already treats as "not published yet". An unbounded await here is an unbounded
+  JS promise, which is a pairing screen stuck on "REACHING THEM" with no error and no end state.
+  On the JS side `decideDiscovery` adopts the friend, emits, and hands the subscribe / introduction
+  / trail-sync to `connectNewFriend` WITHOUT awaiting it — a friend is a local decision, and nothing
+  the network does may stand between a human saying "keep this one" and the app having kept them.
+  `awaitFriendWiring()` is what shutdown and the tests use instead.
+- **`our_endpoint_ticket` pays the relay wait once per NODE, not once per message.** Four messages
+  are built to reach the SAS gate (two per side) and each side's reply is built inside the other's
+  dial, so an `Endpoint::online()` wait that is paid per message serializes across both phones.
+  Measured 2026-09-17 at a bar: 44 s from arming Bump to the visual gate, which reads as slow BLE
+  and is not BLE. `endpoint_was_online` latches; `pair.endpoint_ticket`'s `latched` is how you see
+  it. The FIRST wait is still the full budget — that is where the invite-address argument lives.
+- **Pairing telemetry is spans, not `tracing::info!`.** Loki's OTLP ingest keeps the message and
+  drops the fields, so the core's `connect_ms` / `exchange_ms` / `ticket_ms` existed and answered
+  nothing on the one night they were needed. `pair.dial`, `pair.handshake`, `pair.inbound`,
+  `pair.accept`, `pair.finalize`, `pair.build_msg` and `pair.endpoint_ticket` are spans; the JS half
+  adds `pair.initiate`, `pair.acknowledge` and `pair.connect_friend`. The span map is in
+  `infra/otel/README.md`. Anything new on this path goes in as a span.
+- **One poll driver.** `pollPairingOnce` is driven by exactly one re-armed timer whose cadence comes
+  from `pairingPollDelay()`; Bump's interval only watches for its own window closing. Two 300 ms
+  drivers running the same drain produced 6-7 `pairing.poll` per second on 2026-09-17, each one six
+  crossings of the bridge taking the same pairing locks the handshake needs.
+- **A phone that believes it is sharing and cannot must say so.** `device.health` carries
+  `sharing.muted` (`foreground-permission` / `background-permission` / `location-task-stopped` /
+  `no-recipients`), and `use-location-sharing` derives `permission-denied` from the LIVE
+  `backgroundAccess` snapshot in both directions rather than latching whatever `startBackground`
+  read once at launch. A reinstall resets iOS location authorization to "While Using", which is how
+  a phone paired at a bar on 2026-09-17, delivered one introduction fix while the app was open, and
+  went silent for the night while its owner believed she was sharing.
 - **Nothing that is merely LEAVING a screen may cancel a pair that completed.** The pairing screen's
   abandonable list comes from a snapshot and is always at least one poll behind the handshake, which
   is longer than a pair takes to complete; `standDownPairing` therefore re-reads each session from

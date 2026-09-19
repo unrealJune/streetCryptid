@@ -318,6 +318,35 @@ async function intentAttributes(): Promise<Attributes> {
 }
 
 /**
+ * Why a phone that BELIEVES it is sharing cannot actually share — as one attribute.
+ *
+ * Every input is already on this record. That was the problem: on 2026-09-17 an iPhone reinstalled
+ * the app, which on iOS resets location authorization to "While Using", and its next
+ * `device.health` reported `sharing.enabled=true` alongside `perm.background=denied`. It then
+ * paired at a bar, delivered exactly one introduction fix while the app was open, and went silent
+ * for the rest of the night. Diagnosing that meant knowing to put those two fields side by side
+ * and knowing what the combination means. As a named reason it is one query, it is a panel, and it
+ * is countable per build — which matters because a reinstall is the most common way to arrive in
+ * this state and a TestFlight cohort does nothing but reinstall.
+ *
+ * Absent when sharing is off (nothing is being promised, so nothing is broken) and when nothing is
+ * wrong. Ordered most-fundamental first: without permission the rest cannot be judged.
+ */
+export function mutedSharingReason(attrs: Attributes): Attributes {
+  if (attrs['sharing.enabled'] !== true) return {};
+  const reason = ((): string | undefined => {
+    if (attrs['perm.foreground'] !== 'granted') return 'foreground-permission';
+    if (attrs['perm.background'] !== 'granted') return 'background-permission';
+    if (attrs['task.location_running'] === false) return 'location-task-stopped';
+    // A friend with no grant is the 2026-09-03 shape: a pool that looks healthy and a native
+    // recipient list that is empty, so every envelope is sealed for nobody.
+    if (attrs['sharing.native_recipients'] === 0) return 'no-recipients';
+    return undefined;
+  })();
+  return reason ? { 'sharing.muted': reason } : {};
+}
+
+/**
  * Emit a `device.health` record.
  *
  * Never throws and never rejects: it is called from a `finally` on the background refresh path,
@@ -367,6 +396,7 @@ export async function recordDeviceHealth(
           ...permissions,
           ...tasks,
           ...intent,
+          ...mutedSharingReason({ ...permissions, ...tasks, ...intent }),
           ...watermarkAges(marksWithNative, now),
         },
       })

@@ -4,7 +4,7 @@ import {
   setTelemetryForTesting,
 } from '@/features/dev/telemetry';
 import { createTelemetry } from '@/features/dev/telemetry/telemetry';
-import { recordDeviceHealth } from '../device-health';
+import { mutedSharingReason, recordDeviceHealth } from '../device-health';
 
 function healthRecords(): { attributes: Record<string, unknown> }[] {
   return getEventLog()
@@ -51,5 +51,58 @@ describe('device.health', () => {
     const attributes = healthRecords()[0].attributes;
     // Whatever could not be read is simply absent; nothing is guessed and nothing is a sentinel.
     expect(attributes['sc.drop_reason']).toBeUndefined();
+  });
+});
+
+describe('sharing.muted', () => {
+  // The attribute that would have answered "why has she been out of contact since the bar?" in one
+  // query. On 2026-09-17 an iPhone reinstalled the app — which on iOS resets location authorization
+  // to "While Using" — paired at 04:04 UTC, delivered exactly one introduction fix while the app
+  // was open, and went silent. Its `device.health` already said `sharing.enabled=true` and
+  // `perm.background=denied` in the same record; nothing named the combination.
+  const sharing = {
+    'sharing.enabled': true,
+    'perm.foreground': 'granted',
+    'perm.background': 'granted',
+    'task.location_running': true,
+    'sharing.native_recipients': 2,
+  };
+
+  it('is absent when a sharing phone can actually share', () => {
+    expect(mutedSharingReason(sharing)).toEqual({});
+  });
+
+  it('is absent when sharing is off, because nothing is being promised', () => {
+    expect(
+      mutedSharingReason({ ...sharing, 'sharing.enabled': false, 'perm.background': 'denied' })
+    ).toEqual({});
+  });
+
+  it('names a reinstall that reset background authorization', () => {
+    expect(mutedSharingReason({ ...sharing, 'perm.background': 'denied' })).toEqual({
+      'sharing.muted': 'background-permission',
+    });
+  });
+
+  it('reports the most fundamental cause first', () => {
+    // Without foreground permission the background answer is not even meaningful, so a phone
+    // missing both is reported as the one that has to be fixed first.
+    expect(
+      mutedSharingReason({
+        ...sharing,
+        'perm.foreground': 'denied',
+        'perm.background': 'denied',
+        'task.location_running': false,
+      })
+    ).toEqual({ 'sharing.muted': 'foreground-permission' });
+  });
+
+  it('names a stopped location task and an empty native recipient list', () => {
+    expect(mutedSharingReason({ ...sharing, 'task.location_running': false })).toEqual({
+      'sharing.muted': 'location-task-stopped',
+    });
+    expect(mutedSharingReason({ ...sharing, 'sharing.native_recipients': 0 })).toEqual({
+      'sharing.muted': 'no-recipients',
+    });
   });
 });
