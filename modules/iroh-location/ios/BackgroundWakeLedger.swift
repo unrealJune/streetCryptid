@@ -48,6 +48,7 @@ enum BackgroundWakeLedger {
   private static let wallTotal = "sc.bg.wall_ms_total"
   private static let lastWake = "sc.bg.last_wake_ms"
   private static let syncs = "sc.bg.syncs"
+  private static let dropped = "sc.bg.dropped_captures"
 
   /// Marks of an open window. Absent means nothing is being timed, which is the ordinary state of a
   /// foregrounded app.
@@ -131,6 +132,15 @@ enum BackgroundWakeLedger {
     if defaults.object(forKey: openCpu) == nil { openWindow() }
   }
 
+  /// Record a capture that reached neither a node nor a JS sink, and was therefore thrown away.
+  ///
+  /// Should always be zero. It exists because the alternative — the `sink?.sendEvent(...)` this
+  /// replaced — made exactly that failure invisible, and a phone that was moving published nothing
+  /// for an hour with no log line, no span and no counter to say why.
+  static func noteDroppedCapture() {
+    defaults.set(defaults.integer(forKey: dropped) + 1, forKey: dropped)
+  }
+
   /// Record that a receive-side sync ran during a wake, so its cost is attributable.
   static func noteSync() {
     defaults.set(defaults.integer(forKey: syncs) + 1, forKey: syncs)
@@ -164,6 +174,8 @@ enum BackgroundWakeLedger {
       "bg_launches": defaults.integer(forKey: bgLaunches),
       "js_boots": defaults.integer(forKey: jsBoots),
       "syncs": defaults.integer(forKey: syncs),
+      // Always expected to be 0. Anything else means captures are being discarded.
+      "dropped_captures": defaults.integer(forKey: dropped),
       "cpu_ms_total": Int(defaults.double(forKey: cpuTotal)),
       "cpu_ms_max": Int(defaults.double(forKey: cpuMax)),
       "wall_ms_total": Int(defaults.double(forKey: wallTotal)),
@@ -184,7 +196,7 @@ enum BackgroundWakeLedger {
   /// half the counts and neither would be a true reading. The caller that OWNS the reporting
   /// cadence resets; everything else reads.
   static func reset() {
-    for key in [wakes, bgLaunches, jsBoots, cpuTotal, cpuMax, wallTotal, syncs] {
+    for key in [wakes, bgLaunches, jsBoots, cpuTotal, cpuMax, wallTotal, syncs, dropped] {
       defaults.removeObject(forKey: key)
     }
   }

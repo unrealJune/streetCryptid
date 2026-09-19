@@ -675,9 +675,13 @@ public final class IrohLocationModule: Module {
       await BackgroundLocationRuntime.shared.yieldNode(timeoutMs: UInt64(max(0, timeoutMs)))
     }
 
-    /// Whether the native runtime currently owns the stores. Reported on `device.health`.
+    /// Whether the native runtime currently owns the stores — observed, not declared.
+    ///
+    /// `refusalReason()` in `headless-runtime.ts` refuses to build a second node on this answer, so
+    /// it has to be the fact rather than a launch's intent: reporting `.native` when this runtime
+    /// holds no node would block a headless session for nothing.
     Function("nativeNodeOwner") { () -> String in
-      BackgroundLocationRuntime.shared.owner.rawValue
+      BackgroundLocationRuntime.shared.holdsNode ? "native" : "app"
     }
 
     // MARK: - Native publish state

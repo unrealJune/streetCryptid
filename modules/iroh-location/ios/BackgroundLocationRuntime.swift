@@ -212,6 +212,12 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     restorePersistedState()
   }
 
+  /// Whether this runtime is actually holding the Rust node right now.
+  ///
+  /// The observed counterpart to `owner`, which is only ever an intent. Everything that gates on
+  /// "does native own the stores" reads this.
+  var holdsNode: Bool { subscription != nil }
+
   /// Whether this runtime is the one currently receiving locations.
   ///
   /// `device.health` reports it, because "sharing is on" and "something is actually being handed
@@ -235,10 +241,12 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       "auth_status": Self.authorizationName(manager.authorizationStatus),
       "precise": manager.accuracyAuthorization == .fullAccuracy,
       "anchor_armed": stopAnchor != nil,
-      // Which half of the process is actually publishing. "sharing is on" and "this runtime is the
-      // one sending" are different claims, and after the app can launch without React the gap
-      // between them is where a stuck handover would hide.
-      "node_owner": owner.rawValue,
+      // Which half of the process is actually publishing — OBSERVED, not declared. `owner` records
+      // what a launch intended; holding a subscription is what makes it true, and the two came
+      // apart badly enough once to silence a moving phone for an hour. Report the fact.
+      "node_owner": (subscription != nil ? NodeOwner.native : .app).rawValue,
+      "node_owner_intent": owner.rawValue,
+      "js_sink_wired": eventSink != nil,
       "fence_registered": manager.monitoredRegions.contains {
         $0.identifier == Self.stopAnchorRegionId
       },
@@ -997,7 +1005,16 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     let sink = eventSink
     // Handing off ends this side's part of the wake, whatever JS then does with it.
     BackgroundWakeLedger.closeWindow()
-    DispatchQueue.main.async { sink?.sendEvent("onNativeFix", payload) }
+    guard let sink else {
+      // Nobody to hand it to, and `ensureStarted` has already declined to take the node — so this
+      // fix is being discarded. That must never be silent: a `sink?.sendEvent(...)` on a nil sink
+      // is how a moving phone published nothing for an hour with nothing in any log to say so.
+      // If this line appears at all, the gate above is wrong again.
+      BackgroundWakeLedger.noteDroppedCapture()
+      NSLog("[iroh-location] DROPPED \(kind): no node and no JS sink — nothing will publish this")
+      return
+    }
+    DispatchQueue.main.async { sink.sendEvent("onNativeFix", payload) }
   }
 
   /// Run one captured fix through gate → outbox → seal → send.
@@ -1134,12 +1151,23 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// — because a latch there would be a phone that never publishes again and never says why.
   private func ensureStarted() async -> Subscription? {
     if let subscription { return subscription }
-    // Ownership first, before anything that costs. While the app is mounted this returns on the
-    // very first line, where the old code would build a whole `LocationNode` — a keygen, a
-    // `derive_recv_public` KDF, fifteen mutexes and a `telemetry::init_tracing` — purely to have
-    // the claim refused. The backoff below bounded how often that happened; this removes the
-    // reason for it. It stays, for the genuine `.native` refusal.
-    guard owner == .native else { return nil }
+    // "Is anyone ELSE going to publish this?" — and the only honest answer is whether a sink is
+    // wired. A mounted JS runtime sets `eventSink` and publishes what we hand it, so building a
+    // rival node would only earn a refused claim; nobody wired means nobody else will send this
+    // fix, so we must take the node ourselves.
+    //
+    // This gate was `owner == .native` for one day and that was a serious mistake. `owner` says
+    // what a launch DECLARED, not what is true: on a debug build `decideReactNativeDeferral`
+    // always returns false, so nothing ever declared `.native`, and every process in which JS had
+    // not yet reached `startNativeBackground` refused here, fell through to `handOff`, and dropped
+    // the fix into a nil sink. Silently, forever, on a phone that was moving. It reproduced within
+    // an hour on an iPhone 16 Pro.
+    //
+    // The cost this gate exists to avoid — 187 node constructions in a minute on 2026-09-16 — is
+    // still avoided, and better: a mounted app has a sink, so it returns here without building
+    // anything. The claim backoff below covers the genuine race, where JS holds the stores but has
+    // not wired the sink yet.
+    if eventSink != nil { return nil }
     if let until = claimRetryAfter, Date() < until { return nil }
     guard KeychainDeviceSecrets.shared.identitySecret() != nil else {
       // A fresh install whose app has never run. Minting an identity here would create one no
