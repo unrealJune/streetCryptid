@@ -442,6 +442,18 @@ const NATIVE_HANDOVER_TIMEOUT_MS = 5_000;
  * Only a clock check — no native call — so it is deliberately slower than the old 300ms bump
  * interval it replaced. The worst case is standing the radio down a second late.
  */
+/**
+ * Whether this platform still wakes a JS context in the background.
+ *
+ * iOS no longer does: `BackgroundLocationRuntime` captures, gates, seals, sends AND pulls with no
+ * JS in the loop, and owns a better resurrection ladder than the JS tasks ever could (significant
+ * location changes relaunch a TERMINATED app; a geofence only approximates it). Scheduling those
+ * tasks there would ask the OS to launch this app specifically to run JavaScript with nothing left
+ * to do — and with React deferred on background launches, servicing one means booting the whole
+ * bundle, which is the cost the deferral exists to remove. Mirrors the gate in `register-task.ts`.
+ */
+const JS_BACKGROUND_TASKS_SUPPORTED = Platform.OS === 'android';
+
 const BUMP_EXPIRY_CHECK_MS = 1000;
 
 /** How long shutdown waits for acknowledge-time friend wiring before going ahead without it. */
@@ -3441,12 +3453,19 @@ export class LocationSharingService {
       // friends' fixes that arrived while we were backgrounded — the SEND task only fires on movement
       // and never pulls. Best-effort and inert on builds without expo-background-task; scheduling it
       // must never fail startBackground.
-      try {
-        const { isBackgroundRefreshAvailable, scheduleBackgroundRefresh } =
-          await import('./background/refresh-task');
-        if (isBackgroundRefreshAvailable()) await scheduleBackgroundRefresh();
-      } catch (error) {
-        console.warn('[background-refresh] schedule failed', error);
+      //
+      // ANDROID ONLY now. On iOS the native runtime pulls for itself (`pullFriendFixes`), and
+      // scheduling this would ask the OS to launch the app specifically to run JavaScript with
+      // nothing left to do — which, with React deferred on background launches, is a wake that
+      // services nothing. `register-task.ts` no longer defines the handler there either.
+      if (JS_BACKGROUND_TASKS_SUPPORTED) {
+        try {
+          const { isBackgroundRefreshAvailable, scheduleBackgroundRefresh } =
+            await import('./background/refresh-task');
+          if (isBackgroundRefreshAvailable()) await scheduleBackgroundRefresh();
+        } catch (error) {
+          console.warn('[background-refresh] schedule failed', error);
+        }
       }
 
       // Record the INTENT last, once everything is actually up. A headless wake compares this against
@@ -3464,31 +3483,39 @@ export class LocationSharingService {
         // Best-effort: a refused or unavailable prompt must not stop sharing from starting.
       }
       this.setNativeBackground(true);
-      // Arm the revive fence around where we are now. On iOS it is the only mechanism that
-      // relaunches a terminated app; on Android it cannot do that, but a geofence event is a
-      // documented exemption to the ban on starting a foreground service from the background, which
-      // is the only way the self-heal can legally re-arm. See `revive-task.ts`.
-      try {
-        const { armReviveFence, lastKnownFixForFence } = await import('./background/revive-task');
-        // The one call that bypasses the re-arm floor: sharing is starting and there may be no
-        // fence standing at all, so "keep whatever is already armed" is not a safe outcome here.
-        // A slightly stale centre still works — being outside it only makes the exit fire sooner.
-        //
-        // The fallback read is not belt-and-braces, it is the fresh-install case, and skipping it
-        // cost an iPhone its only resurrection path on 2026-08-30: `latestLocalFix` is empty until
-        // something publishes, `lastAcceptedFix` is empty because the native runtime no longer
-        // feeds the JS engine at all, so on a new install `centre` was always undefined and the
-        // fence was silently never armed — `task.fence_registered` sat `false` for the whole
-        // evening. A cached OS position needs no GPS and is more than good enough to centre a
-        // 200 m tripwire.
-        const centre =
-          this.latestLocalFix ??
-          this.engine?.getState().lastAcceptedFix ??
-          (await lastKnownFixForFence());
-        if (centre) await armReviveFence(centre, { force: true });
-        else console.warn('[revive-fence] no position to centre on; fence not armed');
-      } catch (error) {
-        console.warn('[revive-fence] arm failed', error);
+      // Arm the revive fence around where we are now.
+      //
+      // ANDROID ONLY now. It cannot relaunch a terminated app there, but a geofence event is a
+      // documented exemption to the ban on starting a foreground service from the background,
+      // which is the only way the self-heal can legally re-arm. On iOS it has been superseded:
+      // `BackgroundLocationRuntime` monitors significant location changes — which DOES relaunch a
+      // terminated app, the thing this fence existed to approximate — behind a 100 m stop-anchor
+      // fence that is tighter than this one's 200 m. Worse, every arm of this fence delivers a
+      // synthetic state-determination callback back into its own handler, and after the React
+      // deferral each of those would be a launch that has to boot the whole bundle to service it.
+      if (JS_BACKGROUND_TASKS_SUPPORTED) {
+        try {
+          const { armReviveFence, lastKnownFixForFence } = await import('./background/revive-task');
+          // The one call that bypasses the re-arm floor: sharing is starting and there may be no
+          // fence standing at all, so "keep whatever is already armed" is not a safe outcome here.
+          // A slightly stale centre still works — being outside it only makes the exit fire sooner.
+          //
+          // The fallback read is not belt-and-braces, it is the fresh-install case, and skipping it
+          // cost an iPhone its only resurrection path on 2026-08-30: `latestLocalFix` is empty until
+          // something publishes, `lastAcceptedFix` is empty because the native runtime no longer
+          // feeds the JS engine at all, so on a new install `centre` was always undefined and the
+          // fence was silently never armed — `task.fence_registered` sat `false` for the whole
+          // evening. A cached OS position needs no GPS and is more than good enough to centre a
+          // 200 m tripwire.
+          const centre =
+            this.latestLocalFix ??
+            this.engine?.getState().lastAcceptedFix ??
+            (await lastKnownFixForFence());
+          if (centre) await armReviveFence(centre, { force: true });
+          else console.warn('[revive-fence] no position to centre on; fence not armed');
+        } catch (error) {
+          console.warn('[revive-fence] arm failed', error);
+        }
       }
 
       this.emit();

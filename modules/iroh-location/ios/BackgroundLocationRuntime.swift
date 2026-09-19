@@ -1014,6 +1014,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         intervalMs: slotIntervalMs,
         nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
       report("ingest", outcome)
+      await pullFriendFixes()
       // The wake's work is done; fold what it cost into the counters. A window left open is not a
       // measurement error, it is the signal that the process did not survive its own wake.
       BackgroundWakeLedger.closeWindow()
@@ -1040,11 +1041,59 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         intervalMs: slotIntervalMs,
         nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
       report("heartbeat", outcome)
+      await pullFriendFixes()
       BackgroundWakeLedger.closeWindow()
     } catch {
       NSLog("[iroh-location] heartbeat failed: \(error.localizedDescription)")
     }
   }
+
+  /// Pull friends' new fixes, so a JS-free wake RECEIVES as well as sends.
+  ///
+  /// Publishing without pulling makes a phone that never opens the app a write-only participant:
+  /// its own dot moves for everyone else while every friend's dot on ITS map is frozen at whatever
+  /// was last reconciled. That used to be the periodic `bg.refresh`'s job, which needed a JS
+  /// context; with the refresh retired on iOS this is the only thing left that does it.
+  ///
+  /// ## Gated hard, because this is the expensive half
+  ///
+  /// `sync_latest` dials every delivery peer. `push_trail_budgeted`'s own notes record that 74% of
+  /// pushes burned the full 30 s budget waiting on peers that never answered — 41.7 hours a week —
+  /// so an ungated pull on every coarse tick is a new way to spend the exact budget this work
+  /// exists to protect. Two gates:
+  ///
+  /// - only on a wake that means something moved (`movement`, `geofence_exit`, `relaunch`), never
+  ///   on a `periodic` tick from the parked coarse stream, which fires purely as a clock;
+  /// - and a durable floor between pulls, so a burst of deliveries is still one pull.
+  ///
+  /// Failures are swallowed on purpose: a pull that could not reach anyone must not fail the
+  /// publish that has already succeeded, and the next wake tries again.
+  private func pullFriendFixes() async {
+    switch lastWakeReason {
+    case .movement, .geofenceExit, .relaunch: break
+    case .periodic, .coarseDeparture, .stateChange, .seed: return
+    }
+    let now = Date().timeIntervalSince1970 * 1000
+    let last = UserDefaults.standard.double(forKey: Self.lastSyncKey)
+    guard now - last >= Self.syncFloorMs else { return }
+    UserDefaults.standard.set(now, forKey: Self.lastSyncKey)
+
+    guard let node else { return }
+    do {
+      let config = try await node.deliveryConfig()
+      guard !config.peerTickets.isEmpty else { return }
+      try await node.syncLatest(peerTickets: config.peerTickets, traceparent: nil)
+      BackgroundWakeLedger.noteSync()
+      NSLog("[iroh-location] pulled from \(config.peerTickets.count) peer(s)")
+    } catch {
+      NSLog("[iroh-location] pull failed, next wake retries: \(error.localizedDescription)")
+    }
+  }
+
+  private static let lastSyncKey = "sc.bg.last_sync_ms"
+  /// Minimum gap between receive-side pulls. Five minutes matches the default publish slot, so a
+  /// phone in motion pulls about as often as it sends and no more.
+  private static let syncFloorMs: Double = 5 * 60 * 1000
 
   /// One line per wake that did something, so a quiet phone and a broken one look different in the
   /// device log. The equivalent spans reach the collector from the Rust side.

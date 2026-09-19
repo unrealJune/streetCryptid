@@ -72,12 +72,40 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
     //    its own node, and nothing should do that while React is still going to start; the launch
     //    that skips React is the one that calls `adoptNodeOwnership()`.
     let locationLaunch = launchOptions?[.location] != nil
+    let jsFree = Self.decideReactNativeDeferral(background: background)
     if BackgroundLocationRuntime.wasArmed && (background || locationLaunch) {
+      // A launch with no JS coming is the one case this runtime must own the stores, because
+      // nothing else will ever claim them. `ensureStarted` returns on its first line until it
+      // does, so this is what turns the whole native path from scaffolding into the live one.
+      // The app takes them back through `handOverNativeBackground` if it is ever opened.
+      if jsFree { BackgroundLocationRuntime.shared.adoptNodeOwnership() }
       BackgroundLocationRuntime.shared.start()
     }
 
     // MUST be true — see the note above about the subscriber reduction.
     return true
+  }
+
+  /// Decide — once — whether React Native will be started on this launch, and publish the answer.
+  ///
+  /// The AppDelegate makes the same call a moment later in `didFinishLaunchingWithOptions`, and two
+  /// copies of a predicate this load-bearing WILL drift: one of them says "own the stores" and the
+  /// other says "start React", and the pair that disagrees is a mounted app that cannot claim its
+  /// own node. So it is computed here, where the state is legible, and read from UserDefaults by
+  /// the generated AppDelegate — which cannot import this module and should not have to.
+  ///
+  /// DEBUG never defers: `expo-dev-launcher` owns the React delegate seam in dev-client builds, so
+  /// deferring there is both unnecessary and hard to reason about.
+  static func decideReactNativeDeferral(background: Bool) -> Bool {
+    let defaults = UserDefaults.standard
+#if DEBUG
+    let defer_ = false
+#else
+    let killed = defaults.bool(forKey: "sc.bg.defer_rn_disabled")
+    let defer_ = background && !killed
+#endif
+    defaults.set(defer_, forKey: "sc.bg.rn_deferred")
+    return defer_
   }
 
   public func applicationDidEnterBackground(_ application: UIApplication) {

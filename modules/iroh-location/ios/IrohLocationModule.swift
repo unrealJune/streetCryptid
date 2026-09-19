@@ -1169,6 +1169,12 @@ public final class IrohLocationModule: Module {
     // about — which is every launch that matters.
     OnCreate {
       MetricKitDiagnostics.shared.start()
+      // Module creation IS a JS boot: this block runs when the JavaScript module registry is
+      // built, which happens once per React Native start and never without one. That makes it the
+      // honest place to count them — `wake.bg_launches` climbing while `wake.js_boots` tracks it
+      // is how you see that a background launch is still paying for the whole bundle, and after
+      // the deferral lands it is how you see that it has stopped.
+      BackgroundWakeLedger.noteJsBoot()
     }
 
     /// Drain the diagnostics stored since the last call. Each string is a JSON object.
