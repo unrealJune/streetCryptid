@@ -67,7 +67,7 @@
     {
       "type": "stat",
       "title": "Phones not waking (6h)",
-      "description": "Devices that have sent no device.health for six hours. This is the core background failure: the OS has stopped running us and nothing else on the device will say so. Six hours is chosen against the platform floor — the periodic refresh is ~15 min at best and both OSes defer it much further under battery pressure, so a shorter window would be noise. Confirm in the state table below: sharing.enabled=true with task.location_running=false is the bug. NOTE: this used to count bg.wake, which stopped existing when capture moved into Rust — a span name nothing emits makes this tile read a reassuring 0 forever.",
+      "description": "Devices that have sent no device.health AND published nothing for six hours. Both halves are required, and on iOS the second is the one that matters: since the app no longer boots React on a background wake, device.health there is emitted only on foreground resume \\u2014 so counting its absence alone would count every user who simply has not opened the app, which for an ambient location app is most of them, most of the time. A phone that is still publishing is alive whether or not anyone opened it. Keyed on service_instance_id rather than device_id because that is the join key the app and the Rust core share; native-lane publishes carry no device.id at all. Six hours is chosen against the platform floor — the periodic refresh is ~15 min at best and both OSes defer it much further under battery pressure, so a shorter window would be noise. Confirm in the state table below: sharing.enabled=true with task.location_running=false is the bug. NOTE: this used to count bg.wake, which stopped existing when capture moved into Rust — a span name nothing emits makes this tile read a reassuring 0 forever.",
       "datasource": {
         "type": "prometheus",
         "uid": "${prometheus}"
@@ -127,7 +127,7 @@
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "expr": "count(sum by (device_id) (increase(traces_span_metrics_calls_total{service_name=\"streetcryptid-app\", span_name=\"device.health\"}[6h])) < 1) or vector(0)",
+          "expr": "count((sum by (service_instance_id) (increase(traces_span_metrics_calls_total{span_name=\"device.health\"}[6h])) < 1) and (sum by (service_instance_id) (increase(traces_span_metrics_calls_total{span_name=\"publish.fix\"}[6h])) < 1)) or vector(0)",
           "instant": true,
           "legendFormat": "__auto",
           "refId": "A"
@@ -137,7 +137,7 @@
     {
       "type": "stat",
       "title": "Phones not reporting state (2h)",
-      "description": "Devices that have emitted no device.health for two hours. Either the periodic task itself has stopped, or the device cannot reach the collector — and those two are told apart by what arrives NEXT. The app ships from a durable journal, so a phone that was merely offline delivers its backlog later with the ORIGINAL timestamps and a large telemetry.queued, and the gap fills in retrospectively. A gap that stays empty is a phone that genuinely stopped.",
+      "description": "Devices that have emitted no device.health and published nothing for two hours. See the six-hour tile for why both halves are required: on iOS device.health is foreground-only now, so its absence alone means \\\"nobody opened the app\\\", not \\\"the phone is broken\\\". Either the periodic task itself has stopped, or the device cannot reach the collector — and those two are told apart by what arrives NEXT. The app ships from a durable journal, so a phone that was merely offline delivers its backlog later with the ORIGINAL timestamps and a large telemetry.queued, and the gap fills in retrospectively. A gap that stays empty is a phone that genuinely stopped.",
       "datasource": {
         "type": "prometheus",
         "uid": "${prometheus}"
@@ -197,7 +197,7 @@
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "expr": "count(sum by (device_id) (increase(traces_span_metrics_calls_total{service_name=\"streetcryptid-app\", span_name=\"device.health\"}[2h])) < 1) or vector(0)",
+          "expr": "count((sum by (service_instance_id) (increase(traces_span_metrics_calls_total{span_name=\"device.health\"}[2h])) < 1) and (sum by (service_instance_id) (increase(traces_span_metrics_calls_total{span_name=\"publish.fix\"}[2h])) < 1)) or vector(0)",
           "instant": true,
           "legendFormat": "__auto",
           "refId": "A"

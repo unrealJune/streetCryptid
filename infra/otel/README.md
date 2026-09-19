@@ -540,6 +540,18 @@ one alike — on 2026-08-30 an iPhone reported exactly that while 88 minutes pas
 and no other span could separate the two. Note `auth_status`, not `authorization`: the event log
 redacts any key matching `/authorization|password|psk|secret|ticket|token/i`.
 
+**On iOS, `device.health` is foreground-only, and liveness is read from publishing instead.** A
+background wake there no longer starts React, so nothing JS-side is running to emit a record. Its
+absence therefore means "nobody opened the app", which for an ambient location app is the normal
+state of most phones most of the time — not a fault. The two absence tiles require BOTH no
+`device.health` and no `publish.fix` in the window for this reason, and are keyed on
+`service_instance_id` rather than `device_id`: that is the join key the app and the Rust core
+share, and native-lane publishes carry no `device.id` at all. A phone that is still publishing is
+alive whether or not anyone opened it; a phone doing neither has gone dark.
+
+This is also why the launch bootstrap re-applies the OTLP endpoint on a JS-free wake — without it
+the Rust core would ship nothing, and the only remaining liveness signal would go with it.
+
 `wake.*` comes from `BackgroundWakeLedger` (iOS only), and is the one block here that describes the
 _interval between records_ rather than the phone at the instant of reporting. It exists because
 everything else in this document infers the background execution budget from silence after the fact
