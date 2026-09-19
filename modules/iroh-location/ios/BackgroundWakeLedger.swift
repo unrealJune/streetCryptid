@@ -81,10 +81,38 @@ enum BackgroundWakeLedger {
   /// separately by whoever actually starts React, so `bg_launches` climbing while `js_boots`
   /// tracks it is the signal that a background launch is still paying for the whole bundle.
   static func noteLaunch(background: Bool) {
+    backgrounded = background
     if background {
       defaults.set(defaults.integer(forKey: bgLaunches) + 1, forKey: bgLaunches)
       openWindow()
     }
+  }
+
+  /// Whether the app is off screen, and therefore whether a window may be open at all.
+  ///
+  /// This is the difference between an instrument and a number. Core Location delivers while the
+  /// app is MOUNTED too — the native runtime runs either way — so `noteWake` opening a window
+  /// unconditionally meant a delivery during foreground use started a "background wake" that then
+  /// stayed open across map renders and bundle loads until the next ingest closed it. Measured on
+  /// the simulator that produced a `cpu_ms_max` of 69 s over a 75 s window: 91% CPU, attributed to
+  /// a wake, and almost all of it foreground work.
+  ///
+  /// `wake.cpu_ms_max` is read against iOS's 48 s exception threshold. A figure contaminated by
+  /// foreground CPU does not just overstate — it makes the one comparison the metric exists for
+  /// into a lie. Set from the app-delegate subscriber's own lifecycle callbacks rather than read
+  /// from `UIApplication.shared`, which may not be touched off the main thread.
+  private(set) static var backgrounded = false
+
+  /// The app went off screen. Everything from here until the next foreground is fair to measure.
+  static func enterBackground() {
+    backgrounded = true
+    openWindow()
+  }
+
+  /// The app came back. Close the window and stop measuring.
+  static func enterForeground() {
+    closeWindow()
+    backgrounded = false
   }
 
   /// Record that React Native was started. Deliberately separate from `noteLaunch`: the gap
@@ -97,6 +125,9 @@ enum BackgroundWakeLedger {
   static func noteWake() {
     defaults.set(defaults.integer(forKey: wakes) + 1, forKey: wakes)
     defaults.set(Date().timeIntervalSince1970 * 1000, forKey: lastWake)
+    // Only while off screen. A delivery to a mounted app is not a background wake, and measuring
+    // one as though it were is how foreground CPU ends up in `cpu_ms_max` — see `backgrounded`.
+    guard backgrounded else { return }
     if defaults.object(forKey: openCpu) == nil { openWindow() }
   }
 

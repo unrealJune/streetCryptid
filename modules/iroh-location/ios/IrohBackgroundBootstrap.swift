@@ -116,10 +116,10 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
   }
 
   public func applicationDidEnterBackground(_ application: UIApplication) {
-    BackgroundWakeLedger.openWindow()
+    BackgroundWakeLedger.enterBackground()
   }
 
   public func applicationWillEnterForeground(_ application: UIApplication) {
-    BackgroundWakeLedger.closeWindow()
+    BackgroundWakeLedger.enterForeground()
   }
 }
