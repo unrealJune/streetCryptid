@@ -104,6 +104,16 @@ function refusalReason(): string | null {
   // A mounted runtime owns the node from before its `createNode` until its shutdown. This is the
   // authoritative signal; `AppState` below is only a backstop for the window before the claim.
   if (isNativeRuntimeClaimed()) return 'runtime-claimed';
+  // The NATIVE runtime can own the Rust stores too, which this function knew nothing about: it
+  // only ever tracked the JS-side claim. On iOS a background launch can arm
+  // `BackgroundLocationRuntime` with no React at all, and a headless session that then builds its
+  // own node meets `AlreadyOpen` — or worse, wins the race and leaves the runtime that was
+  // publishing unable to. Guarded on the export, which is absent on Android and on older binaries.
+  try {
+    if (tryGetIrohLocation()?.nativeNodeOwner?.() === 'native') return 'native-owns-node';
+  } catch {
+    // An older binary than this bundle. Falling through is the pre-existing behaviour.
+  }
   // Foreground-ish. NOTE the explicit 'inactive': the old test here was `=== 'active'`, and iOS
   // reports 'inactive' both during a cold launch into the foreground and for as long as a system
   // permission alert is up — the two windows where the mounted runtime is most likely to be

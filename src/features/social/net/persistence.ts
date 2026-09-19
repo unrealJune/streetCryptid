@@ -608,6 +608,85 @@ export async function clearTeardownWatermark(kv: PersistentKV): Promise<void> {
   await kv.remove(TEARDOWN_WATERMARK_KEY);
 }
 
+const INIT_WATERMARK_KEY = 'sc.social.initPhase';
+
+/**
+ * The phases of {@link LocationSharingService.init}, in the order it runs them.
+ *
+ * Coarse on purpose: each one brackets a step that can block on native code, the network or the
+ * OS, and nothing else is worth a disk write on the launch path. `ready` is never persisted — it
+ * is the value {@link clearInitWatermark} implies.
+ */
+export type InitPhase =
+  | 'permissions'
+  | 'create-node'
+  | 'mirror-secrets'
+  | 'native-start'
+  | 'tickets'
+  | 'restore-pool'
+  | 'pairing';
+
+/** An in-progress `init()`, as recorded on disk before each step that can block. */
+export interface InitWatermark {
+  /** When THIS init attempt started (epoch ms) — not when the phase was entered. */
+  startedAt: number;
+  /** The last phase entered, i.e. the one that was in flight if the process never came back. */
+  phase: InitPhase;
+  /** Whether this was the mounted (interactive) init or a headless session's. */
+  interactive: boolean;
+}
+
+/**
+ * Stamp the phase `init()` is entering.
+ *
+ * This is the init-path counterpart of {@link saveTeardownWatermark}, and it exists because of the
+ * same blind spot with the roles reversed. On 2026-09-18 an iPhone was frozen by the OS 128 ms into
+ * a **background** launch, mid-`init()`. Every span it would have emitted was downstream of the
+ * call that never returned, so the journal simply stopped after `node.create` and the device was
+ * dark for nine hours — and nothing on disk or on the wire could say WHICH step had been in flight.
+ * `app.previous_run` reports how the last run ended; it cannot report where it was standing.
+ *
+ * Written before each phase rather than after, so the value that survives a freeze names the step
+ * that was running. Cleared by {@link clearInitWatermark} on a completed init, so a value still
+ * present on a later launch means the previous init never finished. See `init-watermark.ts`.
+ *
+ * Cost is one small `kv.set` per phase — six or seven per interactive launch. That is deliberate
+ * and is the whole price of the mechanism: an in-memory phase would be lost in exactly the freeze
+ * it exists to describe.
+ */
+export async function saveInitWatermark(
+  kv: PersistentKV,
+  phase: InitPhase,
+  startedAt: number,
+  interactive: boolean
+): Promise<void> {
+  await kv.set(INIT_WATERMARK_KEY, JSON.stringify({ startedAt, phase, interactive }));
+}
+
+/** Read an init that never completed, or null when the last one finished (or none has run). */
+export async function loadInitWatermark(kv: PersistentKV): Promise<InitWatermark | null> {
+  const raw = await kv.get(INIT_WATERMARK_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<InitWatermark>;
+    if (typeof parsed?.startedAt !== 'number' || typeof parsed?.phase !== 'string') return null;
+    return {
+      startedAt: parsed.startedAt,
+      phase: parsed.phase as InitPhase,
+      interactive: parsed.interactive ?? true,
+    };
+  } catch {
+    // Same reasoning as the teardown watermark: a corrupt value must not make every later launch
+    // report a phantom stall.
+    return null;
+  }
+}
+
+/** Clear the watermark once `init()` has reached `ready`. */
+export async function clearInitWatermark(kv: PersistentKV): Promise<void> {
+  await kv.remove(INIT_WATERMARK_KEY);
+}
+
 const RELAY_ONLY_KEY = 'sc.social.relayOnly';
 const TRANSPORT_CONFIG_KEY = 'sc.social.transportConfig';
 

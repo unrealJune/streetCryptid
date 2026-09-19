@@ -24,6 +24,7 @@ import {
   type PlacedCryptid,
 } from '../core/ocean-cryptids';
 import type { CameraState, MapPalette, Viewport } from '../core/types';
+import { useIsAppActive } from '@/hooks/use-is-app-active';
 
 interface OceanCryptidLayerProps {
   readonly cryptids: readonly PlacedCryptid[];
@@ -147,8 +148,12 @@ function DriftingCryptid({
   // One 0→1 driver per figure; the drift is derived from it, so the whole
   // animation lives on the UI thread and costs nothing on the JS side.
   const drift = useSharedValue(phase);
+  // Off screen is the same answer as reduced motion: stop moving. See `useIsAppActive`.
+  const appActive = useIsAppActive();
+  const animate = !reducedMotion && appActive;
   useEffect(() => {
-    if (reducedMotion) {
+    if (!animate) {
+      cancelAnimation(drift);
       drift.value = phase;
       return;
     }
@@ -161,7 +166,7 @@ function DriftingCryptid({
     return () => {
       cancelAnimation(drift);
     };
-  }, [drift, phase, reducedMotion]);
+  }, [drift, phase, animate]);
 
   const { width, height } = cryptidMetrics(art, waves);
   const offset = useDerivedValue(() => {

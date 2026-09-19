@@ -87,8 +87,11 @@ and `service.instance.id` (short endpoint id) — so "device A" vs "device B" is
 ```
 device A                                stash                       device B
 ────────                                ─────                       ────────
-bg.wake            (fixes, net/battery/app state; ALSO emitted with fixes=0 for an
-│                    empty or errored delivery — a wake is a wake)
+bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cut it short)
+│                  NOTE: capture no longer routes through JS at all — the location wake runs
+│                  natively (BackgroundLocationRuntime -> gate/outbox/drain in Rust) and emits
+│                  no JS span. `wake.*` on device.health is what counts those; there is no
+│                  `bg.wake` span any more, and no `bg.backfill`.
 └ bg.dispatch      (branch: mounted | headless)
   └ engine.ingest  (motion, decision, sc.drop_reason?)
     └ outbox.enqueue (coalesced / overflow?)
@@ -432,9 +435,11 @@ to whatever child you searched for — which is exactly how an early pass at thi
 
 ## Reading a dropped ping, end to end
 
-1. **Did the phone even wake?** Filter `{ name = "bg.wake" }` for device A's
-   `service.instance.id` around the gap. No span → the OS never delivered fixes (check battery
-   saver / permission attributes on the last wake it _did_ get).
+1. **Did the phone even wake?** There is no `bg.wake` span: the location wake is native and emits
+   none. Read `device.health` for device A's `service.instance.id` around the gap instead —
+   `wake.wakes` counts the Core Location wakes in the interval, `location.wake_reason` says what
+   last ran it, and `last_wake_age_ms` says how long ago. All zero or absent → the OS never
+   delivered fixes (check battery saver / permission attributes on the last record it _did_ send).
 2. **Did the policy gate it?** The wake's `engine.ingest` child says `decision.active=false` +
    `sc.drop_reason=sampling-suspended` when battery/motion suppressed publishing.
 3. **Did it die in the outbox?** `outbox.enqueue` shows `coalesced` / `outbox-overflow`;
@@ -450,8 +455,9 @@ to whatever child you searched for — which is exactly how an early pass at thi
 5. **Did the stash see it?** `stash.entry.received` with the same hash. Note `wake_targets` will be
    **0** and there will be no child `stash.wake.push`: the app no longer uploads a device push
    token, so nothing is ever nudged (ARCHITECTURE §10). That is expected, not a fault.
-6. **Did device B recover it?** B pulls on its own schedule now — the periodic `bg.backfill`
-   (~15 min) or the 5-min live-request poll — rather than being woken. Follow
+6. **Did device B recover it?** B pulls on its own schedule now — the periodic `bg.refresh`
+   (~15 min requested, throttled further) or the 5-min live-request poll — rather than being
+   woken. Follow
    `trail.sync.app` (`recovered` count) → `trail.backfill` log with the hash → `fix.received.app`,
    where `sc.drop_reason=unknown-or-removing-author` is the last gate that can silently eat a fix.
    A gap of up to a backfill interval between steps 5 and 6 is now normal.
@@ -522,12 +528,41 @@ foreground resume. Its value is in the _mismatches_:
 | `location.state=stopped` + `location.anchor_distance_m` in the km                                   | parked, and nowhere near the anchor: the stop fence is not firing                                                                                                                                      |
 | `location.wake_reason=coarse_departure`                                                             | the fence missed a departure and the parked clock caught it — count these                                                                                                                              |
 | `location.auth_status` not `always` while `perm.background=granted`                                 | the two disagree; Core Location's own read is the one that governs                                                                                                                                     |
+| `wake.bg_launches` climbing while `wake.js_boots` tracks it                                         | background launches are still booting the whole React Native bundle — the deferral is not working                                                                                                      |
+| `wake.cpu_ms_max` approaching 48000                                                                 | not "high": that is `MXCPUExceptionDiagnostic`'s threshold, the constant all 41 exceptions in the 2026-09 window reported                                                                              |
+| `wake.window_open=true` on a record that is not mid-wake                                            | a previous wake never closed its window — the process was frozen or killed inside it                                                                                                                   |
+| `wake.wakes` large with `wake.syncs` at 0                                                           | the phone is being woken and publishing, but never pulling — friends' fixes only arrive on foreground                                                                                                  |
+| `bg.refresh.expired` present at all                                                                 | iOS is cutting the periodic refresh short. Invisible before this span existed: a terminated refresh and one that was never scheduled both leave a span that never ends                                 |
 
 `location.*` comes from the native runtime's `nativeBackgroundState()` (`BackgroundLocationRuntime`
 on iOS). It exists because `task.location_running=true` is true of a parked phone and of a broken
 one alike — on 2026-08-30 an iPhone reported exactly that while 88 minutes past its last publish,
 and no other span could separate the two. Note `auth_status`, not `authorization`: the event log
 redacts any key matching `/authorization|password|psk|secret|ticket|token/i`.
+
+**On iOS, `device.health` is foreground-only, and liveness is read from publishing instead.** A
+background wake there no longer starts React, so nothing JS-side is running to emit a record. Its
+absence therefore means "nobody opened the app", which for an ambient location app is the normal
+state of most phones most of the time — not a fault. The two absence tiles require BOTH no
+`device.health` and no `publish.fix` in the window for this reason, and are keyed on
+`service_instance_id` rather than `device_id`: that is the join key the app and the Rust core
+share, and native-lane publishes carry no `device.id` at all. A phone that is still publishing is
+alive whether or not anyone opened it; a phone doing neither has gone dark.
+
+This is also why the launch bootstrap re-applies the OTLP endpoint on a JS-free wake — without it
+the Rust core would ship nothing, and the only remaining liveness signal would go with it.
+
+`wake.*` comes from `BackgroundWakeLedger` (iOS only), and is the one block here that describes the
+_interval between records_ rather than the phone at the instant of reporting. It exists because
+everything else in this document infers the background execution budget from silence after the fact
+— a climbing `last_refresh_age_ms`, a gap between records, a MetricKit exception delivered on the
+launch AFTER the one that offended. The ledger is durable UserDefaults counters rather than spans,
+for the same reason `init-watermark.ts` is: a wake that ends before it can ship cannot describe
+itself, and on a JS-free wake there is no journal to write to. `recordDeviceHealth` is the only
+caller allowed to reset them, so two records in the same minute cannot each take half the counts.
+
+Absent on Android, and on any iOS binary older than the export — **absent, never zero**. A zero
+would read as "nothing happened" when the truth is "nobody was counting".
 
 `last_fix_age_ms`, `last_publish_age_ms` and `last_push_age_ms` are read from the **native** gate
 state, not from the JS watermark row. The drain moved into Rust and the row's writers went with it,
@@ -545,8 +580,8 @@ also serves as a backstop exit (`considerDeparture`), so `coarse_departure` appe
 the fence is unreliable on that device rather than that anything is broken now.
 
 The top row of the device-health dashboard carries those checks as counts — devices with no
-`bg.wake` in 6h, no `device.health` in 2h, any terminal native-runtime state, and publishes with no
-pushes. They are **deliberately not alerts**: nothing routes to Alertmanager or Discord. The
+`device.health` in 2h, `wake.wakes` at zero across consecutive records, any terminal
+native-runtime state, and publishes with no pushes. They are **deliberately not alerts**: nothing routes to Alertmanager or Discord. The
 conditions are worth seeing when you open the page, not worth waking someone for, and a rule that
 pages at 3am for a phone in a pocket would be turned off within a week anyway.
 

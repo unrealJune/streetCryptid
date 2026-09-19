@@ -118,6 +118,9 @@ import {
   SHARE_INTERVAL_OPTIONS_MS,
   type TransportPreferences,
   DEFAULT_TRANSPORT_PREFERENCES,
+  saveInitWatermark,
+  clearInitWatermark,
+  type InitPhase,
 } from './persistence';
 import { createAppLifecycleController } from './background/lifecycle';
 import {
@@ -128,6 +131,7 @@ import {
 import { DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
 import { recordDeviceHealth } from './background/device-health';
 import { reportStrandedTeardown } from './background/teardown-watermark';
+import { reportStrandedInit } from './background/init-watermark';
 import { stampWatermark } from './background/watermarks';
 import { createDefaultStashClient, type StashClient } from './stash-client';
 import { loadKeys, saveKeys } from './secure-keys';
@@ -413,11 +417,43 @@ const PAIRING_ACTIVE_POLL_INTERVAL_MS = 300;
 export const BUMP_WINDOW_MS = 120_000;
 
 /**
+ * How many unchanged transport polls pass before one rollup row is written.
+ *
+ * 60 is four minutes at the idle pairing cadence. Low enough that a loop which stopped is visible
+ * within one `device.health` window, high enough that a phone whose transport is simply stable
+ * writes one small row instead of sixty large ones.
+ */
+const TRANSPORT_POLL_ROLLUP_EVERY = 60;
+
+/**
+ * How long the native runtime may take to give the Rust stores back before the app stops waiting.
+ *
+ * Sized against the same measurements as `NATIVE_RUNTIME_SESSION_WATCHDOG_MS`: a healthy native
+ * shutdown is well under a second, and a whole headless session including node build, sync and
+ * teardown measured 6-15s. Five seconds is generous for a shutdown alone and short enough that a
+ * user opening the app does not sit on a splash screen wondering. An overrun is not fatal — the
+ * app tries to start anyway and `startNativeBounded` retries once.
+ */
+const NATIVE_HANDOVER_TIMEOUT_MS = 5_000;
+
+/**
  * How often to check whether the bump window has closed.
  *
  * Only a clock check — no native call — so it is deliberately slower than the old 300ms bump
  * interval it replaced. The worst case is standing the radio down a second late.
  */
+/**
+ * Whether this platform still wakes a JS context in the background.
+ *
+ * iOS no longer does: `BackgroundLocationRuntime` captures, gates, seals, sends AND pulls with no
+ * JS in the loop, and owns a better resurrection ladder than the JS tasks ever could (significant
+ * location changes relaunch a TERMINATED app; a geofence only approximates it). Scheduling those
+ * tasks there would ask the OS to launch this app specifically to run JavaScript with nothing left
+ * to do — and with React deferred on background launches, servicing one means booting the whole
+ * bundle, which is the cost the deferral exists to remove. Mirrors the gate in `register-task.ts`.
+ */
+const JS_BACKGROUND_TASKS_SUPPORTED = Platform.OS === 'android';
+
 const BUMP_EXPIRY_CHECK_MS = 1000;
 
 /** How long shutdown waits for acknowledge-time friend wiring before going ahead without it. */
@@ -641,6 +677,16 @@ export class LocationSharingService {
   private transportDiagnosticsInFlight: Promise<void> | null = null;
   /** Count of polls that saw a genuine change; asserted by tests to catch comparison regressions. */
   private transportDiagnosticsChangeCount = 0;
+  /**
+   * Polls observed since the last one that actually changed anything.
+   *
+   * `recordEventLog` persists every level unconditionally — there is no level filter in the write
+   * path — so an unchanged `debug` row still costs a SQLite write, and this one serialised ~1.5 KB
+   * of every peer and local address, v4 and v6. That was 568 KB of journal writes in a single
+   * six-hour window, describing a transport that had not moved. The count is what is worth
+   * keeping; the payload is not.
+   */
+  private transportPollsSinceChange = 0;
   private pendingPairRequests: PairEvent[] = [];
   private verifications: PairingVerification[] = [];
   private bumpUntil = 0;
@@ -729,6 +775,21 @@ export class LocationSharingService {
    */
   private readonly profileBackfill = new Map<string, { attempts: number; nextAt: number }>();
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Set while the app is backgrounded, and the reason {@link startPairingPolling} has a second
+   * guard rather than just being stopped.
+   *
+   * Stopping the loop is not enough on its own: `onPairReady`, `rebindNodeInner` and `armBump` all
+   * re-arm it, and none of them knows the app is in a pocket. On 2026-09-18 this loop was 414 of
+   * the 1059 journal entries an iPhone wrote while backgrounded, every one of them returning
+   * `sessions: 0, ble_peers: 0, pairing_ready: false` — a phone polling hard for a handshake that
+   * needs two present humans. Each tick is three native pairing calls, three BLE calls (one of
+   * which can spin 1.5s of 50ms polls), and a ~1.5KB SQLite row.
+   *
+   * Deliberately NOT applied to {@link startBumpPolling}: that loop bounds itself against
+   * `isBumpActive()` inside a two-minute window a human opened, so it expires on its own.
+   */
+  private pollingSuspended = false;
   private pollInFlight: Promise<void> | null = null;
   /**
    * The in-flight native reconciliation, so a second caller JOINS it instead of starting a rival.
@@ -763,6 +824,11 @@ export class LocationSharingService {
 
   /** Cached answer from {@link nativeAdoptsNode}; `null` until first probed. */
   private nodeAdoptionSupported: boolean | null = null;
+
+  /** The phase {@link init} is standing in; null before it starts and once it reaches `ready`. */
+  private initPhase: InitPhase | null = null;
+  /** When the in-flight {@link init} attempt started (epoch ms); 0 when none is running. */
+  private initStartedAt = 0;
   private lastSyncRecovered: number | null = null;
 
   // Background service runtime (native-only; lazily imported so web/Expo Go never load it).
@@ -1032,6 +1098,14 @@ export class LocationSharingService {
     this.color = color;
     this.setStatus('starting');
 
+    // A fresh context is the only place a PREVIOUS init that never finished can be reported: the
+    // stalled one could not describe itself, and a suspension that resumes the same context leaves
+    // `sc.run_id` unchanged, so nothing else marks the hole. Before any of our own work, and
+    // never allowed to fail it. See `init-watermark.ts`.
+    await reportStrandedInit(this.kv, interactive ? 'mounted' : 'headless').catch(() => null);
+    this.initStartedAt = Date.now();
+    await this.markInitPhase('permissions', interactive);
+
     this.mod = getIrohLocation();
     const persisted = await loadKeys();
     if (interactive) {
@@ -1053,6 +1127,20 @@ export class LocationSharingService {
       if (!(await this.nativeAdoptsNode())) {
         await this.awaitRuntimeIdleBounded();
       }
+      // And take the stores back from the NATIVE runtime, which on iOS may have been publishing
+      // without us since a background launch armed it.
+      //
+      // This is not the JS-side claim above. The Rust writer claim is process-wide and held by
+      // whichever half built a node first; if that was `BackgroundLocationRuntime`, `createNode` /
+      // `start` below throw `AlreadyOpen` and `init` fails before `setServiceReady(true)` — an app
+      // that draws its chrome from `hydrateFromStore()` and then never finishes, which is exactly
+      // the 2026-09-18 shape arriving from the other end of the lifecycle.
+      //
+      // `releaseNativeBackground` does not do this: it drops two Swift references and returns,
+      // while `Subscription` and the spawned receive task each still hold an `Arc<LocationNode>`.
+      // Only `shutdown` frees the claims, and only the native side can bound it so this always
+      // settles.
+      await this.handOverNativeBackground();
     }
     // WHICH context built a node, paired with the native `node.construct` ordinal that says how
     // many this PROCESS has built. Either alone is ambiguous — a JS context only knows what it
@@ -1063,6 +1151,7 @@ export class LocationSharingService {
     //
     // On 2026-09-13 a process logged three `iroh endpoint bound` lines and ZERO shutdowns, and
     // nothing could say which of the three it was — while pairings failed on top of it.
+    await this.markInitPhase('create-node', interactive);
     const createSpan = getTelemetry().startSpan('node.create', {
       attributes: {
         mode: interactive ? 'interactive' : 'headless',
@@ -1087,6 +1176,7 @@ export class LocationSharingService {
     });
     // And into the native store the background drain path reads, which `expo-secure-store` cannot
     // serve because that path runs with no JS context alive.
+    await this.markInitPhase('mirror-secrets', interactive);
     await this.mirrorDeviceSecrets();
     this.configureDevTelemetry();
     // Restore the monotonic seq before anything can publish, so we never hand out a reused seq.
@@ -1095,12 +1185,14 @@ export class LocationSharingService {
     // by older persisted diagnostics a few awaits later.
     this.ratchetActivity = await loadRatchetActivity(this.kv);
     this.transportPreferences = await loadTransportPreferences(this.kv);
+    await this.markInitPhase('native-start', interactive);
     await this.startNativeBounded(this.mod);
     // After `start`, which is where the native drain path's stores are opened.
     await this.adoptNativeSeq();
     await this.resolveStashEndpointId();
     await this.mirrorTransportConfig();
     if (interactive) {
+      await this.markInitPhase('tickets', interactive);
       this.ticketStr = await this.mod.ticket();
       this.docTicketStr = await this.safeDocTicket();
       // Publish our profile so friends can replicate it; web reports epoch 0 (no capability).
@@ -1111,6 +1203,7 @@ export class LocationSharingService {
         this.handleOpaque(event)
       );
     }
+    await this.markInitPhase('restore-pool', interactive);
     await this.restorePool(interactive);
     // Seed the native sharing set from the pool we have just loaded — AFTER `restorePool`, and the
     // ordering is the whole of it.
@@ -1131,12 +1224,43 @@ export class LocationSharingService {
     // background sharing has been switched on.
     this.shareIntervalMs = await loadShareIntervalMs(this.kv);
     if (interactive) {
+      await this.markInitPhase('pairing', interactive);
       await this.importFriendProfiles();
       await this.syncStashGrants();
       this.startPairingPolling();
       await this.pollPairingOnce();
     }
+    // Reaching `ready` is the only thing that clears the watermark, so a value left on disk always
+    // means an init that did not get here — never one that merely took a while.
+    this.initPhase = null;
+    await clearInitWatermark(this.kv).catch(() => undefined);
     this.setStatus('ready');
+  }
+
+  /**
+   * The phase `init()` is standing in, or null before it starts and once it has reached `ready`.
+   *
+   * Read by the mounted watchdog so an `app.init.timeout` can name the step that overran while the
+   * process is still alive — the in-memory half of the durable watermark.
+   */
+  currentInitPhase(): InitPhase | null {
+    return this.initPhase;
+  }
+
+  /** How long the in-flight `init()` has been running, or 0 when none is. */
+  initElapsedMs(): number {
+    return this.initStartedAt ? Date.now() - this.initStartedAt : 0;
+  }
+
+  /**
+   * Record the phase in memory and on disk.
+   *
+   * Never allowed to fail an init: a phone that cannot write this is having a worse day than the
+   * telemetry, and losing the breadcrumb is strictly better than losing the launch.
+   */
+  private async markInitPhase(phase: InitPhase, interactive: boolean): Promise<void> {
+    this.initPhase = phase;
+    await saveInitWatermark(this.kv, phase, this.initStartedAt, interactive).catch(() => undefined);
   }
 
   /** Publish profile edits without rebuilding the native node or dropping background GPS. */
@@ -3319,36 +3443,8 @@ export class LocationSharingService {
       this.armHeartbeat(this.shareIntervalMs);
 
       this.bgLifecycleStop = createAppLifecycleController({
-        onForeground: () => {
-          void this.engine?.flush();
-          void this.syncTrail(0);
-          // Re-derive rather than trust what start-up decided. Authorization moves in both
-          // directions without us: iOS settles a fresh grant a beat after the request resolves, and
-          // it also re-prompts days later with a map of everywhere we have tracked the user, where
-          // a great many downgrade. Both are product events and both surface here.
-          void this.refreshBackgroundAccess();
-          // A foreground record is the fastest way to learn what state a phone came back in —
-          // notably whether the OS still has its location task running, which is exactly what a
-          // process kill takes away. Self-throttled to one per
-          // DEVICE_HEALTH_MIN_INTERVAL_MS, so app-switching does not flood the pipeline.
-          void recordDeviceHealth('foreground');
-          // Coming back to the foreground is the best network opportunity a phone gets, and the
-          // moment a background backlog should leave. `flush` drains the journal, so this is where
-          // everything recorded while the app was frozen or offline finally ships.
-          void getTelemetry().flush();
-          // Re-center the revive fence on wherever we are now. A stale fence still works (being far
-          // outside it only makes the exit fire sooner), but keeping it current stops a user who
-          // never leaves a 200 m radius from having a tripwire they can't trip.
-          const fix = this.engine?.getState().lastAcceptedFix;
-          if (fix) {
-            void import('./background/revive-task')
-              .then(({ armReviveFence }) => armReviveFence(fix))
-              .catch(() => undefined);
-          }
-        },
-        onBackground: () => {
-          // OS keep-alive (Android foreground service / iOS background location) covers this.
-        },
+        onForeground: () => this.onEnterForeground(),
+        onBackground: () => this.onEnterBackground(),
       }).start();
 
       this.backgroundSharing = true;
@@ -3357,12 +3453,19 @@ export class LocationSharingService {
       // friends' fixes that arrived while we were backgrounded — the SEND task only fires on movement
       // and never pulls. Best-effort and inert on builds without expo-background-task; scheduling it
       // must never fail startBackground.
-      try {
-        const { isBackgroundRefreshAvailable, scheduleBackgroundRefresh } =
-          await import('./background/refresh-task');
-        if (isBackgroundRefreshAvailable()) await scheduleBackgroundRefresh();
-      } catch (error) {
-        console.warn('[background-refresh] schedule failed', error);
+      //
+      // ANDROID ONLY now. On iOS the native runtime pulls for itself (`pullFriendFixes`), and
+      // scheduling this would ask the OS to launch the app specifically to run JavaScript with
+      // nothing left to do — which, with React deferred on background launches, is a wake that
+      // services nothing. `register-task.ts` no longer defines the handler there either.
+      if (JS_BACKGROUND_TASKS_SUPPORTED) {
+        try {
+          const { isBackgroundRefreshAvailable, scheduleBackgroundRefresh } =
+            await import('./background/refresh-task');
+          if (isBackgroundRefreshAvailable()) await scheduleBackgroundRefresh();
+        } catch (error) {
+          console.warn('[background-refresh] schedule failed', error);
+        }
       }
 
       // Record the INTENT last, once everything is actually up. A headless wake compares this against
@@ -3380,31 +3483,39 @@ export class LocationSharingService {
         // Best-effort: a refused or unavailable prompt must not stop sharing from starting.
       }
       this.setNativeBackground(true);
-      // Arm the revive fence around where we are now. On iOS it is the only mechanism that
-      // relaunches a terminated app; on Android it cannot do that, but a geofence event is a
-      // documented exemption to the ban on starting a foreground service from the background, which
-      // is the only way the self-heal can legally re-arm. See `revive-task.ts`.
-      try {
-        const { armReviveFence, lastKnownFixForFence } = await import('./background/revive-task');
-        // The one call that bypasses the re-arm floor: sharing is starting and there may be no
-        // fence standing at all, so "keep whatever is already armed" is not a safe outcome here.
-        // A slightly stale centre still works — being outside it only makes the exit fire sooner.
-        //
-        // The fallback read is not belt-and-braces, it is the fresh-install case, and skipping it
-        // cost an iPhone its only resurrection path on 2026-08-30: `latestLocalFix` is empty until
-        // something publishes, `lastAcceptedFix` is empty because the native runtime no longer
-        // feeds the JS engine at all, so on a new install `centre` was always undefined and the
-        // fence was silently never armed — `task.fence_registered` sat `false` for the whole
-        // evening. A cached OS position needs no GPS and is more than good enough to centre a
-        // 200 m tripwire.
-        const centre =
-          this.latestLocalFix ??
-          this.engine?.getState().lastAcceptedFix ??
-          (await lastKnownFixForFence());
-        if (centre) await armReviveFence(centre, { force: true });
-        else console.warn('[revive-fence] no position to centre on; fence not armed');
-      } catch (error) {
-        console.warn('[revive-fence] arm failed', error);
+      // Arm the revive fence around where we are now.
+      //
+      // ANDROID ONLY now. It cannot relaunch a terminated app there, but a geofence event is a
+      // documented exemption to the ban on starting a foreground service from the background,
+      // which is the only way the self-heal can legally re-arm. On iOS it has been superseded:
+      // `BackgroundLocationRuntime` monitors significant location changes — which DOES relaunch a
+      // terminated app, the thing this fence existed to approximate — behind a 100 m stop-anchor
+      // fence that is tighter than this one's 200 m. Worse, every arm of this fence delivers a
+      // synthetic state-determination callback back into its own handler, and after the React
+      // deferral each of those would be a launch that has to boot the whole bundle to service it.
+      if (JS_BACKGROUND_TASKS_SUPPORTED) {
+        try {
+          const { armReviveFence, lastKnownFixForFence } = await import('./background/revive-task');
+          // The one call that bypasses the re-arm floor: sharing is starting and there may be no
+          // fence standing at all, so "keep whatever is already armed" is not a safe outcome here.
+          // A slightly stale centre still works — being outside it only makes the exit fire sooner.
+          //
+          // The fallback read is not belt-and-braces, it is the fresh-install case, and skipping it
+          // cost an iPhone its only resurrection path on 2026-08-30: `latestLocalFix` is empty until
+          // something publishes, `lastAcceptedFix` is empty because the native runtime no longer
+          // feeds the JS engine at all, so on a new install `centre` was always undefined and the
+          // fence was silently never armed — `task.fence_registered` sat `false` for the whole
+          // evening. A cached OS position needs no GPS and is more than good enough to centre a
+          // 200 m tripwire.
+          const centre =
+            this.latestLocalFix ??
+            this.engine?.getState().lastAcceptedFix ??
+            (await lastKnownFixForFence());
+          if (centre) await armReviveFence(centre, { force: true });
+          else console.warn('[revive-fence] no position to centre on; fence not armed');
+        } catch (error) {
+          console.warn('[revive-fence] arm failed', error);
+        }
       }
 
       this.emit();
@@ -3615,7 +3726,18 @@ export class LocationSharingService {
    * start that never returns is otherwise completely silent, because every span the launch would
    * have emitted is downstream of the call that is stuck.
    */
-  private async startNativeBounded(mod: IrohLocationNativeModule): Promise<void> {
+  /**
+   * Whether a native `start` failure is the store claim being held by the other half of the process.
+   *
+   * Matched on the message because that is all `LocationError` gives us across the bridge. Kept
+   * deliberately loose: the exact wording comes from `durable.rs` and is not a contract.
+   */
+  private static isClaimRefusal(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /already open|already claimed|writer claim|AlreadyOpen/i.test(message);
+  }
+
+  private async startNativeBounded(mod: IrohLocationNativeModule, attempt = 0): Promise<void> {
     const startedAt = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<'timeout'>((resolve) => {
@@ -3641,6 +3763,22 @@ export class LocationSharingService {
         await this.flushDevTelemetry().catch(() => undefined);
         throw new Error(`native start did not return within ${NATIVE_START_TIMEOUT_MS}ms`);
       }
+    } catch (error) {
+      // The store claim is still held by the native runtime. One retry, and only one: the handover
+      // in `init` has already run, so reaching here means either it timed out or the runtime armed
+      // itself between the two calls. A second handover is cheap; a loop would be the 2026-09-16
+      // construction storm in a different costume.
+      if (attempt === 0 && LocationSharingService.isClaimRefusal(error)) {
+        getTelemetry()
+          .startSpan('node.start.claim_refused', {
+            attributes: { attempt, 'sc.drop_reason': 'native-claim-refused' },
+          })
+          .end();
+        await this.handOverNativeBackground();
+        clearTimeout(timer);
+        return this.startNativeBounded(mod, attempt + 1);
+      }
+      throw error;
     } finally {
       clearTimeout(timer);
     }
@@ -4041,6 +4179,45 @@ export class LocationSharingService {
    * Android leaving a foreground service running with no JS and no way to reach it is worse than
    * disarming, and on iOS the old behaviour is what that binary has always done.
    */
+  /**
+   * Ask the native runtime to give the Rust stores back, bounded on both sides.
+   *
+   * Bounded twice on purpose. The Swift side races the shutdown against its own timeout so the
+   * promise always settles whatever Rust does — AGENTS.md's rule is about a promise that never
+   * settles, as distinct from one that rejects. This side bounds it again because a native call
+   * that never returns is still a native call that never returns.
+   *
+   * Never throws. A handover we could not complete is reported and then proceeded past: the claim
+   * may well be free anyway, and `startNativeBounded` retries once on `AlreadyOpen`. Inert on
+   * Android and on any binary older than the export, where `releaseNativeBackground` is the older,
+   * weaker equivalent and the best that binary can do.
+   */
+  private async handOverNativeBackground(): Promise<void> {
+    const mod = this.mod;
+    if (typeof mod?.handOverNativeBackground !== 'function') {
+      this.releaseNativeBackground();
+      return;
+    }
+    const span = getTelemetry().startSpan('node.handover');
+    const started = Date.now();
+    try {
+      const completed = await Promise.race([
+        mod.handOverNativeBackground(NATIVE_HANDOVER_TIMEOUT_MS),
+        new Promise<boolean>((resolve) =>
+          setTimeout(() => resolve(false), NATIVE_HANDOVER_TIMEOUT_MS * 2)
+        ),
+      ]);
+      span.setAttributes({ completed, waited_ms: Date.now() - started });
+      if (!completed) span.setAttribute('sc.drop_reason', 'handover-timeout');
+      span.setStatus('ok');
+    } catch (error) {
+      // An older binary, or a native call that threw. Either way the app still has to try to start.
+      span.recordError(error);
+    } finally {
+      span.end();
+    }
+  }
+
   private releaseNativeBackground(): void {
     const mod = this.mod;
     try {
@@ -4671,6 +4848,70 @@ export class LocationSharingService {
   // ── Pairing / discovery polling — ARCHITECTURE.md §2, §4 ────────────────────────────────────
 
   /**
+   * The app came back on screen: resume what the background stopped, and close the gap it left.
+   */
+  private onEnterForeground(): void {
+    // Resume the pairing loop, and close the gap rather than only re-arming it: the poll
+    // also drains `pollProfileEvents` and runs `reconcileCompletedPairs`, so a friend who
+    // finished pairing while we were backgrounded is reconciled now, not in four seconds.
+    this.pollingSuspended = false;
+    this.startPairingPolling();
+    void this.pollPairingOnce();
+    void this.engine?.flush();
+    void this.syncTrail(0);
+    // Re-derive rather than trust what start-up decided. Authorization moves in both
+    // directions without us: iOS settles a fresh grant a beat after the request resolves, and
+    // it also re-prompts days later with a map of everywhere we have tracked the user, where
+    // a great many downgrade. Both are product events and both surface here.
+    void this.refreshBackgroundAccess();
+    // A foreground record is the fastest way to learn what state a phone came back in —
+    // notably whether the OS still has its location task running, which is exactly what a
+    // process kill takes away. Self-throttled to one per
+    // DEVICE_HEALTH_MIN_INTERVAL_MS, so app-switching does not flood the pipeline.
+    void recordDeviceHealth('foreground');
+    // Coming back to the foreground is the best network opportunity a phone gets, and the
+    // moment a background backlog should leave. `flush` drains the journal, so this is where
+    // everything recorded while the app was frozen or offline finally ships.
+    void getTelemetry().flush();
+    // Re-center the revive fence on wherever we are now. A stale fence still works (being far
+    // outside it only makes the exit fire sooner), but keeping it current stops a user who
+    // never leaves a 200 m radius from having a tripwire they can't trip.
+    const fix = this.engine?.getState().lastAcceptedFix;
+    if (fix) {
+      void import('./background/revive-task')
+        .then(({ armReviveFence }) => armReviveFence(fix))
+        .catch(() => undefined);
+    }
+  }
+
+  /**
+   * The app left the screen. Stop the work that cannot accomplish anything out here.
+   */
+  private onEnterBackground(): void {
+    // Stop the pairing loop. It is the single largest consumer of a backgrounded phone's
+    // CPU and it cannot accomplish anything out here — a pair needs two present humans,
+    // and every sampled poll returned zero sessions and zero BLE peers.
+    //
+    // This is not a cold-launch concern. `UIBackgroundModes: ["location"]` plus
+    // `allowsBackgroundLocationUpdates` means iOS does not suspend this process while
+    // sharing is on, so a swiped-away app keeps its JS timers running indefinitely. The
+    // 48s-of-CPU-in-60s MetricKit exceptions are mostly this, not the wakes.
+    //
+    // Deliberately NOT stopped here: the heartbeat timer. It is what fills slots for a parked
+    // phone while the app is mounted, and a series that stops when its owner sits still is a
+    // series that leaks when its owner sits still. Android grew its own native parked heartbeat
+    // in `BackgroundLocationService` (idempotent per slot, so the overlap is free), but iOS's
+    // native heartbeat only runs on the coarse stream once the native runtime owns the node —
+    // which, while the app is mounted, it does not. At one tick per 1-15 min this costs nothing
+    // and stopping it risks the one failure the uniform-cadence rule exists to prevent.
+    //
+    // The bump loop is left alone too: it expires against `isBumpActive()` inside a two-minute
+    // window a human opened.
+    this.pollingSuspended = true;
+    this.stopPairingPolling();
+  }
+
+  /**
    * Start the bounded pairing/discovery poll loop (idempotent; native only).
    *
    * The cadence follows whether a session is live: {@link PAIRING_ACTIVE_POLL_INTERVAL_MS} while
@@ -4679,7 +4920,7 @@ export class LocationSharingService {
    * immediately instead of on the next slow tick.
    */
   private startPairingPolling(): void {
-    if (this.pollTimer || !this.mod) return;
+    if (this.pollTimer || !this.mod || this.pollingSuspended) return;
     const arm = (delay: number): void => {
       const timer = setTimeout(() => {
         void this.pollPairingOnce().finally(() => {
@@ -4956,6 +5197,15 @@ export class LocationSharingService {
       this.transportDiagnosticsError = null;
       const changed = stableStringify(previous) !== stableStringify(current);
       if (changed) this.transportDiagnosticsChangeCount += 1;
+      const pollsSinceChange = changed
+        ? this.transportPollsSinceChange
+        : ++this.transportPollsSinceChange;
+      // An unchanged poll writes nothing. The rollup every TRANSPORT_POLL_ROLLUP_EVERY polls is
+      // what keeps a long quiet run from being indistinguishable from a loop that died — the same
+      // reason `device.health` is emitted on a phone that is doing nothing.
+      const rollup = !changed && pollsSinceChange % TRANSPORT_POLL_ROLLUP_EVERY === 0;
+      if (changed) this.transportPollsSinceChange = 0;
+      if (!changed && !rollup) return;
       const activePaths = current.peers.flatMap((peer) =>
         peer.addresses.filter((address) => address.active).map((address) => address.kind)
       );
@@ -4968,11 +5218,15 @@ export class LocationSharingService {
         status: 'ok',
         transport: activePaths.length > 0 ? [...new Set(activePaths)].join(', ') : 'iroh',
         details: {
-          requested_peers: peerEndpointIds,
+          // Short ids, the `sc.author` convention: a full 64-char hex per friend, every poll, is
+          // most of what made this row expensive and none of what made it useful.
+          requested_peers: peerEndpointIds.map((id) => id.slice(0, 10)),
           changed,
+          polls_since_change: pollsSinceChange,
           active_paths: activePaths,
-          diagnostics: current,
-          previous: changed ? previous : undefined,
+          // `previous` is recoverable from the prior row, which by construction exists whenever
+          // this one says `changed`.
+          ...(changed ? { diagnostics: current } : {}),
         },
       });
     } catch (error) {

@@ -59,6 +59,8 @@ function parseOpenRun(raw: string | null): OpenRun | null {
 
 let current: OpenRun | null = null;
 let subscription: { remove(): void } | null = null;
+/** The one-shot listener waiting for a foreground, when the app was launched into the background. */
+let deferred: { remove(): void } | null = null;
 
 async function persist(run: OpenRun): Promise<void> {
   current = run;
@@ -76,6 +78,27 @@ async function persist(run: OpenRun): Promise<void> {
 export async function beginTelemetryRun(now: () => number = Date.now): Promise<void> {
   const runId = getRunId();
   if (current?.runId === runId) return;
+
+  // A BACKGROUND launch is not a foreground run, and claiming one here is how the docstring above
+  // stopped being true. `_layout.tsx` calls this at module scope, which iOS reaches on a background
+  // launch too — that is the `app.previous_run` in the 2026-09-18 timeline, emitted at 00:36 from a
+  // launch nobody was looking at. Claiming there writes `lastState: 'background'` over the record
+  // the real foreground run left, so the next launch reports the wrong ending for the wrong run.
+  //
+  // Wait for a foreground instead. Exactly `'background'`: iOS reports `'inactive'` during a cold
+  // foreground launch and while a permission alert is up, and treating that as background would
+  // defer every normal launch — the lesson `native-runtime-owner.ts` records about using
+  // `AppState.currentState` as a guard at all.
+  if (AppState.currentState === 'background') {
+    if (deferred) return;
+    deferred = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return;
+      deferred?.remove();
+      deferred = null;
+      void beginTelemetryRun(now);
+    });
+    return;
+  }
 
   const previous = parseOpenRun(await readMeta(RUN_KEY));
   const startedAt = now();
@@ -174,5 +197,7 @@ export async function noteTelemetryRunState(
 export function resetTelemetryRunForTesting(): void {
   subscription?.remove();
   subscription = null;
+  deferred?.remove();
+  deferred = null;
   current = null;
 }

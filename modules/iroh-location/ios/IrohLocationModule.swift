@@ -585,7 +585,15 @@ public final class IrohLocationModule: Module {
       // Wire the handoff before starting, or the first captures of a mounted session have nowhere
       // to go — and on a fresh install those are the only ones there are.
       BackgroundLocationRuntime.shared.eventSink = self
+      // JS is here, so JS owns the stores. Explicit rather than emergent: this is the call that
+      // means "a mounted app is driving", and the runtime must not try to build a rival node.
+      BackgroundLocationRuntime.shared.yieldOwnershipToApp()
       BackgroundLocationRuntime.shared.start()
+      // Seed explicitly, because `start()` is idempotent: if the app-delegate bootstrap already
+      // armed the ladder, `start()` returned without seeding and its own seed was captured before
+      // this sink existed. Without this the gate is never seeded — armed, authorised, running and
+      // publishing nothing, the 2026-08-30 failure.
+      BackgroundLocationRuntime.shared.seedGateFromCache()
     }
 
     /// Re-program the background runtime from the sampling policy's decision.
@@ -606,6 +614,25 @@ public final class IrohLocationModule: Module {
     /// inferred from an absence of spans, which is to say could not be inferred at all.
     Function("nativeBackgroundState") { () -> [String: Any] in
       BackgroundLocationRuntime.shared.healthSnapshot
+    }
+
+    /// How much of its background execution budget this app has been spending.
+    ///
+    /// The denominator every other claim about the background budget has been missing: until this
+    /// existed, "iOS took our execution away" could only be inferred from silence, and MetricKit
+    /// reported it on the launch AFTER the one that offended. `cpu_ms_max` approaching 48 000 is
+    /// not "high" — it is `MXCPUExceptionDiagnostic`'s threshold, the constant every one of the 41
+    /// diagnostics in that 7-day window reported.
+    ///
+    /// Read-only. Resetting is a separate call so two health records in the same minute cannot
+    /// each take half the counts — see `BackgroundWakeLedger.reset`.
+    Function("takeBackgroundWakeStats") { () -> [String: Any] in
+      BackgroundWakeLedger.snapshot
+    }
+
+    /// Clear the wake counters. Called by whoever owns the reporting cadence, and nothing else.
+    Function("resetBackgroundWakeStats") {
+      BackgroundWakeLedger.reset()
     }
 
     /// Whether Core Location grants background updates **right now**.
@@ -630,6 +657,31 @@ public final class IrohLocationModule: Module {
     Function("releaseNativeBackground") {
       BackgroundLocationRuntime.shared.eventSink = nil
       BackgroundLocationRuntime.shared.release()
+    }
+
+    /// Take the stores back from the native runtime, bounded, before the app claims them.
+    ///
+    /// The counterpart to a background launch having armed the runtime with `owner = .native`.
+    /// `releaseNativeBackground` drops Swift references and returns; it does NOT free the Rust
+    /// writer claims, because `Subscription` and the spawned receive task each hold their own
+    /// `Arc<LocationNode>` and only `shutdown` nils them all. Without this, opening the app after
+    /// a background launch would meet `AlreadyOpen` and fail `init()` before `setServiceReady`.
+    ///
+    /// Bounded in Swift so the promise always settles — AGENTS.md's rule is about a promise that
+    /// never settles, and a Swift-side race guarantees it does whatever Rust decides to do.
+    /// Returns whether the shutdown completed; `false` still hands ownership over, because leaving
+    /// it `.native` would mean nothing could ever claim the stores again.
+    AsyncFunction("handOverNativeBackground") { (timeoutMs: Double) async -> Bool in
+      await BackgroundLocationRuntime.shared.yieldNode(timeoutMs: UInt64(max(0, timeoutMs)))
+    }
+
+    /// Whether the native runtime currently owns the stores — observed, not declared.
+    ///
+    /// `refusalReason()` in `headless-runtime.ts` refuses to build a second node on this answer, so
+    /// it has to be the fact rather than a launch's intent: reporting `.native` when this runtime
+    /// holds no node would block a headless session for nothing.
+    Function("nativeNodeOwner") { () -> String in
+      BackgroundLocationRuntime.shared.holdsNode ? "native" : "app"
     }
 
     // MARK: - Native publish state
@@ -925,7 +977,7 @@ public final class IrohLocationModule: Module {
     }
 
     Function("configureTelemetry") { (endpoint: String, instanceId: String) -> Bool in
-      configureTelemetry(endpoint: endpoint, instanceId: instanceId)
+      TelemetryConfigurator.apply(endpoint: endpoint, instanceId: instanceId, remember: true)
     }
 
     AsyncFunction("flushTelemetry") { () async in
@@ -1121,6 +1173,12 @@ public final class IrohLocationModule: Module {
     // about — which is every launch that matters.
     OnCreate {
       MetricKitDiagnostics.shared.start()
+      // Module creation IS a JS boot: this block runs when the JavaScript module registry is
+      // built, which happens once per React Native start and never without one. That makes it the
+      // honest place to count them — `wake.bg_launches` climbing while `wake.js_boots` tracks it
+      // is how you see that a background launch is still paying for the whole bundle, and after
+      // the deferral lands it is how you see that it has stopped.
+      BackgroundWakeLedger.noteJsBoot()
     }
 
     /// Drain the diagnostics stored since the last call. Each string is a JSON object.
