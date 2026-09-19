@@ -68,9 +68,10 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
     //    sink existed — see `seedGateFromCache`. Gating keeps a foreground launch byte-for-byte
     //    what it was before this file existed.
     //
-    //    Ownership is deliberately NOT taken even here. Taking it is what lets this runtime build
-    //    its own node, and nothing should do that while React is still going to start; the launch
-    //    that skips React is the one that calls `adoptNodeOwnership()`.
+    //    Ownership follows the SAME decision, one line down: taking it is what lets this runtime
+    //    build its own node, and nothing may do that while React is still going to start. So a
+    //    launch that will boot JS arms the ladder and leaves the stores alone, exactly as before
+    //    this file existed; only the launch that skips React claims them.
     let locationLaunch = launchOptions?[.location] != nil
     let jsFree = Self.decideReactNativeDeferral(background: background)
     if BackgroundLocationRuntime.wasArmed && (background || locationLaunch) {
@@ -86,7 +87,13 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
     return true
   }
 
-  /// Decide — once — whether React Native will be started on this launch, and publish the answer.
+  /// Decide — once, and on EVERY launch — whether React Native will be started, and publish it.
+  ///
+  /// Rewriting the flag unconditionally is the safety property. `willFinishLaunchingWithOptions`
+  /// runs before the AppDelegate's `didFinishLaunchingWithOptions`, so the value it reads is always
+  /// this launch's. Skip the write on some path and a `true` left by a background launch would
+  /// still be sitting there on the next foreground one — an app that never starts React and looks,
+  /// from the outside, exactly like the nine-hour freeze this whole branch exists to prevent.
   ///
   /// The AppDelegate makes the same call a moment later in `didFinishLaunchingWithOptions`, and two
   /// copies of a predicate this load-bearing WILL drift: one of them says "own the stores" and the
