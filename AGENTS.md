@@ -131,6 +131,16 @@ Conventions when changing that code:
   before `main()`, and a subscriber's `didFinishLaunching` runs after the app delegate's own, which
   is where `startReactNative` already happened. It arms the Core Location ladder but deliberately
   does NOT take ownership, so a foreground launch is byte-for-byte unchanged.
+- **`BackgroundLocationRuntime.shared` is built by the launch bootstrap, on main, on every launch.**
+  Core Location delivers to the run loop of the thread that created the manager, and a thread
+  without one receives nothing and says nothing. Left to JS, the first touch was
+  `handOverNativeBackground` — an `AsyncFunction`, so a Swift concurrency worker — and every
+  foreground-launched process was armed, authorised, `running` and deaf: on 2026-09-29 an iPhone
+  drove for twenty minutes with the app in the background, took zero deliveries, and heartbeated
+  its launch position. Its SLC wakes went to the same dead thread, so iOS had no reason to relaunch
+  it until the process was reclaimed. `location.delegate_on_main` in `device.health` must read
+  `true`; `location.wake_reason` stuck on `seed` with `last_wake_age_ms` climbing on a moving phone
+  is what `false` looks like.
 - **`start()` claims every durable store before it touches the network, and must keep doing so.**
   Until 2026-09-28 the native runtime's node had never started on either platform: `start_stored`
   read its config from a store only `start` opens, so it was `NotStarted` on every fresh node and

@@ -41,6 +41,22 @@ import UIKit
 /// first owns the counter and the queue and the other stands down. That needs no agreement between
 /// them — see `durable.rs`, and `native-runtime-owner.ts` for what the coordinated version cost.
 final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
+  /// The one runtime. **It must first be touched on the main thread**, and
+  /// `IrohBackgroundAppDelegateSubscriber` does exactly that on every launch, before React exists.
+  ///
+  /// Core Location delivers delegate callbacks on the run loop of the thread that CREATED the
+  /// manager, and `manager` is created in `init`. A thread without a running run loop receives
+  /// nothing — no location, no fence exit, no authorization change — and says nothing about it.
+  ///
+  /// Until 2026-09-29 the first touch on a foreground launch was whichever bridge call JS made
+  /// first, and `init()` makes that `handOverNativeBackground`: an `AsyncFunction`, so a Swift
+  /// concurrency worker with no run loop. Every foreground-launched process from then on was
+  /// armed, authorised, `running`, `moving` and deaf. An iPhone 16 Pro Max drove for twenty
+  /// minutes with the app mounted in the background, took zero deliveries, and published the
+  /// position it had at launch on every heartbeat; its SLC wakes went to the same dead thread, so
+  /// iOS had no reason to relaunch it until the process was finally reclaimed. The background
+  /// launch that followed built the runtime from the bootstrap, on main, and took 45 deliveries in
+  /// nine minutes. `delegate_on_main` in `device.health` is how a regression shows itself.
   static let shared = BackgroundLocationRuntime()
 
   // MARK: - Vocabulary
@@ -188,8 +204,18 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// across a launch, and a stop that was real got promoted to `stopAnchor` before we died.
   private var candidateFence: CLLocation?
 
+  /// Whether `manager` was created on the main thread, i.e. whether its callbacks can arrive at all.
+  /// See `shared`.
+  private let delegateOnMain = Thread.isMainThread
+
   private override init() {
     super.init()
+    if !delegateOnMain {
+      NSLog(
+        "[iroh-location] runtime created OFF the main thread: Core Location will deliver nothing "
+          + "to this process. Something touched BackgroundLocationRuntime.shared before the "
+          + "launch bootstrap did.")
+    }
     manager.delegate = self
     manager.desiredAccuracy = movingAccuracy
     manager.distanceFilter = movingDistanceFilter
@@ -239,6 +265,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // otherwise ship this as `[REDACTED]` and hide the one field that says whether the user
       // downgraded us. The design doc's heartbeat payload spells it this way too.
       "auth_status": Self.authorizationName(manager.authorizationStatus),
+      // `false` means every other field here describes a runtime that cannot hear Core Location.
+      "delegate_on_main": delegateOnMain,
       "precise": manager.accuracyAuthorization == .fullAccuracy,
       "anchor_armed": stopAnchor != nil,
       // Which half of the process is actually publishing — OBSERVED, not declared. `owner` records
@@ -940,7 +968,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       note(.stateChange)
     case .authorizedWhenInUse:
       // Foreground updates still work; background ones will not survive suspension. Keep running
-      // so the app is useful, and let `device.health` carry the truth.
+      // so the app is useful, and let `device.health` carry the truth. Core Location reports the
+      // current status once at construction, which the bootstrap now does on every launch; that
+      // is not a wake of a runtime that is not running.
+      guard running else { return }
       note(.stateChange)
     default:
       guard running else { return }
@@ -1149,7 +1180,38 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// clears the suppression outright rather than waiting it out. The ceiling is bounded rather than
   /// a latch for the case `release()` never comes at all — a JS teardown that throws before it, say
   /// — because a latch there would be a phone that never publishes again and never says why.
+  ///
+  /// ## One start at a time
+  ///
+  /// Every delivery runs `ingest` in its own unstructured `Task`, and a relaunch delivers a burst:
+  /// the cache seed plus the first few stream positions, within milliseconds. Each one used to find
+  /// no subscription and build its own node. On 2026-09-29 a background launch built three in one
+  /// second; the first took the stores, the other two were refused and armed the claim backoff,
+  /// and any capture that landed inside that backoff went to `handOff` with no sink — the likeliest
+  /// source of that wake's `dropped_captures = 4`. Concurrent callers now wait on the one start in
+  /// flight and share its answer.
   private func ensureStarted() async -> Subscription? {
+    startLock.lock()
+    let pending: Task<Subscription?, Never>
+    if let startInFlight {
+      pending = startInFlight
+    } else {
+      pending = Task { await self.startNode() }
+      startInFlight = pending
+    }
+    startLock.unlock()
+
+    let result = await pending.value
+    startLock.lock()
+    if startInFlight == pending { startInFlight = nil }
+    startLock.unlock()
+    return result
+  }
+
+  private let startLock = NSLock()
+  private var startInFlight: Task<Subscription?, Never>?
+
+  private func startNode() async -> Subscription? {
     if let subscription { return subscription }
     // "Is anyone ELSE going to publish this?" — and the only honest answer is whether a sink is
     // wired. A mounted JS runtime sets `eventSink` and publishes what we hand it, so building a

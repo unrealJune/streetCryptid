@@ -305,9 +305,17 @@ impl GateStore {
     /// Replace the state and persist it. Best-effort on the write: the in-memory copy is updated
     /// either way, because refusing to advance the slot after a failed save would republish the
     /// same slot on every fix for as long as the disk stayed unhappy.
+    ///
+    /// The write happens UNDER the lock, as the outbox's does. `write_atomic` stages through one
+    /// fixed `state.tmp`, so two unserialised writers truncate each other's staging file and the
+    /// loser's rename finds nothing — "could not persist state", logged in pairs on an iPhone on
+    /// 2026-09-29 when a burst of deliveries reached the gate together. Worse than the log line,
+    /// the two renames can land in either order, and the one that lands last is what a relaunch
+    /// reads back as `last_known_fix`.
     pub fn set(&self, next: GateState) {
         let bytes = postcard::to_allocvec(&next).ok();
-        *self.current.lock().unwrap_or_else(|e| e.into_inner()) = next;
+        let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        *current = next;
         if let Some(bytes) = bytes {
             if let Err(err) = crate::durable::write_atomic(&self.dir, &self.path, &bytes) {
                 tracing::warn!(error = %err, "gate: could not persist state");

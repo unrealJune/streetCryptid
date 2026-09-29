@@ -40,6 +40,17 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
     let background = application.applicationState == .background
     BackgroundWakeLedger.noteLaunch(background: background)
 
+    // 2a. Build the location runtime HERE, on the main thread, on every launch — foreground ones
+    //     included, and before anything below decides whether to start it.
+    //
+    //     Core Location delivers to the run loop of the thread that created the manager. Leave the
+    //     first touch to JS and it lands on a bridge thread — `handOverNativeBackground` is an
+    //     `AsyncFunction`, so a Swift concurrency worker with no run loop — and the process never
+    //     receives a single location. Construction only: nothing is armed or started by it, and a
+    //     launch that is not sharing pays for one idle `CLLocationManager`. See
+    //     `BackgroundLocationRuntime.shared`.
+    _ = BackgroundLocationRuntime.shared
+
     // 3. Rust telemetry, but ONLY on a launch that will not start React.
     //
     //    The OTLP layer is dormant until something hands it an endpoint, and a JS-free wake has
@@ -65,8 +76,8 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
     //    foreground launch reaches `startNativeBackground` within a second and arms the ladder
     //    properly, with the event sink wired. Arming it here first would make that later call a
     //    no-op (`start()` is idempotent) and strand the gate seed this call captured before any
-    //    sink existed — see `seedGateFromCache`. Gating keeps a foreground launch byte-for-byte
-    //    what it was before this file existed.
+    //    sink existed — see `seedGateFromCache`. Gating keeps a foreground launch's ladder exactly
+    //    as JS arms it; the only thing this file does to such a launch is step 2a.
     //
     //    Ownership follows the SAME decision, one line down: taking it is what lets this runtime
     //    build its own node, and nothing may do that while React is still going to start. So a
