@@ -22,9 +22,15 @@ const SEVERITY_NUMBER: Record<LogSeverity, number> = {
   error: 17,
 };
 
-/** ms epoch → OTLP nanosecond decimal string. String concat: ms*1e6 exceeds 2^53. */
+/**
+ * ms epoch → OTLP nanosecond decimal string. String concat: ms*1e6 exceeds 2^53.
+ *
+ * A non-finite input would encode as `"NaN000000"`, which the collector rejects with a 400 — and a
+ * row the collector can never accept used to sit at the head of the journal forever, silencing
+ * every row behind it. Zero is a wrong timestamp; a poisoned journal is a silent phone.
+ */
 function nanos(ms: number): string {
-  return `${Math.round(ms)}000000`;
+  return Number.isFinite(ms) ? `${Math.round(ms)}000000` : '0';
 }
 
 function toAnyValue(value: AttrValue): Record<string, unknown> {
@@ -34,8 +40,11 @@ function toAnyValue(value: AttrValue): Record<string, unknown> {
     case 'boolean':
       return { boolValue: value };
     default:
-      // proto3 JSON encodes int64 as a decimal string; doubles stay numbers.
-      return Number.isInteger(value) ? { intValue: String(value) } : { doubleValue: value };
+      // proto3 JSON encodes int64 as a decimal string; doubles stay numbers. Only a SAFE integer is
+      // an int: `String(1e21)` is "1e+21", which is not an int64 and fails the whole request — as
+      // does a NaN or Infinity `doubleValue`, which JSON cannot even spell.
+      if (!Number.isFinite(value)) return { stringValue: String(value) };
+      return Number.isSafeInteger(value) ? { intValue: String(value) } : { doubleValue: value };
   }
 }
 
@@ -115,6 +124,28 @@ export function logPayload(resource: Attributes, batch: readonly LogRecord[]): s
   });
 }
 
+/**
+ * A collector answer that says the request itself is bad, so sending it again cannot succeed.
+ *
+ * Distinct from every other failure because the shipper must treat it differently: a 503 or a
+ * dropped connection is retried, but retrying a 400 or 413 is a loop, and because the journal
+ * drains oldest-first it is a loop that blocks every row queued behind it.
+ */
+export class OtlpRejectedError extends Error {
+  constructor(
+    readonly url: string,
+    readonly status: number
+  ) {
+    super(`OTLP export to ${url} rejected: HTTP ${status}`);
+    this.name = 'OtlpRejectedError';
+  }
+}
+
+/** 4xx other than 408 (timeout) and 429 (rate limit), which are about timing, not the payload. */
+export function isPermanentRejection(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
+
 /** The real network transport. Rejects on a non-2xx so the shipper keeps the batch for a retry. */
 export const fetchTransport: OtlpTransport = async (url, body) => {
   const response = await fetch(url, {
@@ -126,6 +157,7 @@ export const fetchTransport: OtlpTransport = async (url, body) => {
   // entirely and discarded the payload regardless, so a struggling collector silently ate
   // telemetry that a retry would have delivered.
   if (!response.ok) {
+    if (isPermanentRejection(response.status)) throw new OtlpRejectedError(url, response.status);
     throw new Error(`OTLP export to ${url} failed: HTTP ${response.status}`);
   }
 };

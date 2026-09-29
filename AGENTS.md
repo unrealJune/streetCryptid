@@ -131,6 +131,13 @@ Conventions when changing that code:
   before `main()`, and a subscriber's `didFinishLaunching` runs after the app delegate's own, which
   is where `startReactNative` already happened. It arms the Core Location ladder but deliberately
   does NOT take ownership, so a foreground launch is byte-for-byte unchanged.
+- **`start()` claims every durable store before it touches the network, and must keep doing so.**
+  Until 2026-09-28 the native runtime's node had never started on either platform: `start_stored`
+  read its config from a store only `start` opens, so it was `NotStarted` on every fresh node and
+  a JS-free wake dropped everything it captured. Fixing that alone was not enough — with the claims
+  taken after the endpoint bind, a refused native start (the app holding the stores) bound a second
+  endpoint on our identity and then HUNG on the app's open blob/docs stores. `tests/native_start.rs`
+  covers both, and bounds the refusal so that regression fails instead of hanging.
 - **A local simulator build needs `just bindgen-ios` when the XCFramework is older than the
   bindings.** CI regenerates `modules/iroh-location/ios/generated/*` on every Rust API change but
   cannot build the XCFramework, so a checkout can carry today's bindings against a weeks-old

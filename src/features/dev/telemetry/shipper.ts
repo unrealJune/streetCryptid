@@ -1,5 +1,11 @@
 import { markShipped, takeUnshipped, type EventLogEntry } from './event-log';
-import { fetchTransport, logPayload, spanPayload, type OtlpTransport } from './exporter';
+import {
+  fetchTransport,
+  logPayload,
+  OtlpRejectedError,
+  spanPayload,
+  type OtlpTransport,
+} from './exporter';
 import type { Attributes, FinishedSpan, LogRecord, LogSeverity, SpanContext } from './types';
 
 /**
@@ -242,6 +248,17 @@ export function createShipper(options: ShipperOptions): Shipper {
       try {
         await sendBatch(entries);
       } catch (error) {
+        if (error instanceof OtlpRejectedError) {
+          // The collector will never take this batch, and the journal drains oldest-first, so
+          // retrying it would silence every row behind it for good — which is how a phone can go
+          // dark in the collector for a week while its journal fills. Drop it, say so, and keep
+          // draining.
+          console.warn(
+            `[dev-telemetry] collector rejected ${entries.length} journal rows (HTTP ${error.status}); dropping them so the rows behind can ship`
+          );
+          await markShipped(entries.map((entry) => entry.id));
+          continue;
+        }
         consecutiveFailures += 1;
         nextAttemptAt = now() + backoffMs();
         if (!warned) {

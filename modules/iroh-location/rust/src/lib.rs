@@ -1882,6 +1882,87 @@ impl LocationNode {
         if self.inner.lock().await.is_some() {
             return Ok(());
         }
+        // Claim every durable store BEFORE anything touches the network.
+        //
+        // The claims are process-wide, and while the app is mounted the native background runtime
+        // asks for them and is refused. Taken after the endpoint bind, every refusal would first
+        // have bound a second endpoint on our identity, spawned a router and opened the blob and
+        // docs stores, then dropped them unannounced. Refused here, it costs a directory lock and
+        // nothing else, which is what makes a refused claim safe to retry.
+        //
+        // Claim the ratchet session directory for this process (§4.2's structural single-writer
+        // guard). A second live writer is refused rather than tolerated, because with sequential
+        // state two writers is key reuse rather than a clobber.
+        {
+            let mut slot = self.sessions.lock().await;
+            if slot.is_none() {
+                std::fs::create_dir_all(&self.state_dir)
+                    .map_err(|e| LocationError::Network(e.to_string()))?;
+                let store = session_store::SessionStore::open(&self.state_dir, &self.identity_seed)
+                    .map_err(|e| LocationError::Network(e.to_string()))?;
+                *slot = Some(Arc::new(sessions::SessionManager::new(store)));
+            }
+        }
+        // The publish counter, claimed in the same breath and under the same rule. It shares the
+        // state dir because it shares the lifetime: both are per-identity, neither is recoverable
+        // from the replica without a scan, and both must be released when the node shuts down.
+        {
+            let mut slot = self.seq.lock().await;
+            if slot.is_none() {
+                let store = seq_store::SeqStore::open(&self.state_dir)
+                    .map_err(|e| LocationError::Network(e.to_string()))?;
+                *slot = Some(Arc::new(store));
+            }
+        }
+        // The drain path's own state. All three live beside the counter because they share its
+        // lifetime and its reason for existing: an OS location callback has to be able to read
+        // them before any JS module has loaded.
+        {
+            let mut slot = self.outbox.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    outbox::Outbox::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.recipients.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    recipients::RecipientStore::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.gate.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    gate::GateStore::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.transport.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    transport::TransportStore::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.delivery.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    delivery::DeliveryStore::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+
         let relay_mode = if relay_enabled {
             relay::custom_relay_mode(&relay_urls, &relay_auth_token)
                 .map_err(LocationError::Network)?
@@ -1986,78 +2067,6 @@ impl LocationNode {
                 .await
                 .map_err(|e| LocationError::Network(e.to_string()))?,
         );
-        // Claim the ratchet session directory for this process (§4.2's structural single-writer
-        // guard). A second live writer is refused rather than tolerated, because with sequential
-        // state two writers is key reuse rather than a clobber.
-        {
-            let mut slot = self.sessions.lock().await;
-            if slot.is_none() {
-                std::fs::create_dir_all(&self.state_dir)
-                    .map_err(|e| LocationError::Network(e.to_string()))?;
-                let store = session_store::SessionStore::open(&self.state_dir, &self.identity_seed)
-                    .map_err(|e| LocationError::Network(e.to_string()))?;
-                *slot = Some(Arc::new(sessions::SessionManager::new(store)));
-            }
-        }
-        // The publish counter, claimed in the same breath and under the same rule. It shares the
-        // state dir because it shares the lifetime: both are per-identity, neither is recoverable
-        // from the replica without a scan, and both must be released when the node shuts down.
-        {
-            let mut slot = self.seq.lock().await;
-            if slot.is_none() {
-                let store = seq_store::SeqStore::open(&self.state_dir)
-                    .map_err(|e| LocationError::Network(e.to_string()))?;
-                *slot = Some(Arc::new(store));
-            }
-        }
-        // The drain path's own state. All three live beside the counter because they share its
-        // lifetime and its reason for existing: an OS location callback has to be able to read
-        // them before any JS module has loaded.
-        {
-            let mut slot = self.outbox.lock().await;
-            if slot.is_none() {
-                *slot = Some(Arc::new(
-                    outbox::Outbox::open(&self.state_dir)
-                        .map_err(|e| LocationError::Network(e.to_string()))?,
-                ));
-            }
-        }
-        {
-            let mut slot = self.recipients.lock().await;
-            if slot.is_none() {
-                *slot = Some(Arc::new(
-                    recipients::RecipientStore::open(&self.state_dir)
-                        .map_err(|e| LocationError::Network(e.to_string()))?,
-                ));
-            }
-        }
-        {
-            let mut slot = self.gate.lock().await;
-            if slot.is_none() {
-                *slot = Some(Arc::new(
-                    gate::GateStore::open(&self.state_dir)
-                        .map_err(|e| LocationError::Network(e.to_string()))?,
-                ));
-            }
-        }
-        {
-            let mut slot = self.transport.lock().await;
-            if slot.is_none() {
-                *slot = Some(Arc::new(
-                    transport::TransportStore::open(&self.state_dir)
-                        .map_err(|e| LocationError::Network(e.to_string()))?,
-                ));
-            }
-        }
-        {
-            let mut slot = self.delivery.lock().await;
-            if slot.is_none() {
-                *slot = Some(Arc::new(
-                    delivery::DeliveryStore::open(&self.state_dir)
-                        .map_err(|e| LocationError::Network(e.to_string()))?,
-                ));
-            }
-        }
         let profile = Arc::new(
             ProfileDocs::init(docs, (*blobs).clone(), self.data_dir.clone())
                 .await
@@ -2878,9 +2887,20 @@ impl LocationNode {
     /// reports healthy, and can only reach peers on the same LAN — which looks exactly like the
     /// connectivity failures this path exists to eliminate.
     pub async fn start_stored(&self) -> Result<(), LocationError> {
-        let config = self
-            .transport_store()
-            .await?
+        // Read from disk when the node is not started yet, which is the only time this is called
+        // for real. The in-memory store is opened by `start` itself, so asking for it here used to
+        // fail with `NotStarted` on every fresh node — the native background path on both platforms
+        // could never build a node, and every capture that reached it was dropped. The store takes
+        // no writer claim, so reading it beside a node that holds one is safe.
+        let store = match self.transport_store().await {
+            Ok(store) => store,
+            Err(LocationError::NotStarted) => Arc::new(
+                transport::TransportStore::open(&self.state_dir)
+                    .map_err(|e| LocationError::Network(e.to_string()))?,
+            ),
+            Err(e) => return Err(e),
+        };
+        let config = store
             .get()
             .map_err(|e| LocationError::Network(e.to_string()))?;
         self.start(
