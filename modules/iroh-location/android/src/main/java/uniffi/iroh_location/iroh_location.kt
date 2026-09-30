@@ -871,6 +871,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_read_latest_ratch
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_read_profile(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_record_own_published(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_recv_public(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_recv_secret(
@@ -908,6 +910,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_submit_pair_choic
 external fun uniffi_iroh_location_checksum_method_locationnode_subscribe(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_sync_latest(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_take_own_published(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_ticket(
 ): Int
@@ -1125,6 +1129,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_read_latest_ratcheted_e
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_read_profile(`ptr`: Long,`endpointId`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_record_own_published(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_recv_public(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_method_locationnode_recv_secret(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1162,6 +1168,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_submit_pair_choice(`ptr
 external fun uniffi_iroh_location_fn_method_locationnode_subscribe(`ptr`: Long,`topic`: RustBuffer.ByValue,`bootstrap`: RustBuffer.ByValue,`listener`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_sync_latest(`ptr`: Long,`peerTickets`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_take_own_published(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_ticket(`ptr`: Long,
 ): Long
@@ -1613,6 +1621,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_read_profile() != 28632) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_record_own_published() != 15233) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_recv_public() != 14228) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1668,6 +1679,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_sync_latest() != 8256) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_take_own_published() != 62996) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {
@@ -3557,6 +3571,12 @@ public interface LocationNodeInterface {
     suspend fun `readProfile`(`endpointId`: kotlin.ByteArray): ProfileView?
     
     /**
+     * Record a published position locally. Best-effort: a node without the log (not started) and
+     * a log that cannot write both lose only a trail point, never the publish.
+     */
+    suspend fun `recordOwnPublished`(`seq`: kotlin.ULong, `fix`: LocationFix)
+    
+    /**
      * The X25519 receiving PUBLIC key — this is the "receiving key" you hand to a friend
      * so they can wrap fixes for you.
      */
@@ -3737,6 +3757,12 @@ public interface LocationNodeInterface {
      * a silent skip is exactly the kind of thing that hides a real break.
      */
     suspend fun `syncLatest`(`peerTickets`: List<kotlin.String>, `traceparent`: kotlin.String?)
+    
+    /**
+     * Every position this device has published since the app last asked, oldest first, and forget
+     * them. The app appends them to its own trail; see [`own_log`] for why the replica cannot.
+     */
+    suspend fun `takeOwnPublished`(): List<OwnPublished>
     
     /**
      * A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
@@ -5473,6 +5499,31 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Record a published position locally. Best-effort: a node without the log (not started) and
+     * a log that cannot write both lose only a trail point, never the publish.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `recordOwnPublished`(`seq`: kotlin.ULong, `fix`: LocationFix) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_record_own_published(
+                uniffiHandle,
+                FfiConverterULong.lower(`seq`),FfiConverterTypeLocationFix.lower(`fix`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
      * The X25519 receiving PUBLIC key — this is the "receiving key" you hand to a friend
      * so they can wrap fixes for you.
      */override fun `recvPublic`(): kotlin.ByteArray {
@@ -5993,6 +6044,31 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         // lift function
         { Unit },
         
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Every position this device has published since the app last asked, oldest first, and forget
+     * them. The app appends them to its own trail; see [`own_log`] for why the replica cannot.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `takeOwnPublished`() : List<OwnPublished> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_take_own_published(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeOwnPublished.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -8106,6 +8182,47 @@ public object FfiConverterTypeMeshTag: FfiConverterRustBuffer<MeshTag> {
 
 
 /**
+ * One published position, as the app's trail store wants it.
+ */
+data class OwnPublished (
+    var `seq`: kotlin.ULong
+    , 
+    var `fix`: LocationFix
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeOwnPublished: FfiConverterRustBuffer<OwnPublished> {
+    override fun read(buf: ByteBuffer): OwnPublished {
+        return OwnPublished(
+            FfiConverterULong.read(buf),
+            FfiConverterTypeLocationFix.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: OwnPublished) = (
+            FfiConverterULong.allocationSize(value.`seq`) +
+            FfiConverterTypeLocationFix.allocationSize(value.`fix`)
+    )
+
+    override fun write(value: OwnPublished, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`seq`, buf)
+            FfiConverterTypeLocationFix.write(value.`fix`, buf)
+    }
+}
+
+
+
+/**
  * A polled pairing event (node-level queue; see `poll_pair_events`).
  */
 data class PairEvent (
@@ -8880,6 +8997,15 @@ data class SealReport (
      * `state_unavailable` + `no_sending_chain`: transient, telemetered, never shown to a human.
      */
     var `other`: kotlin.UInt
+    , 
+    /**
+     * Who was left out, as `<endpoint hex>:<reason>` — the per-friend half of the counts above.
+     *
+     * The app's "needs re-pair" / "lapsed" badges are drawn from this. They were fed by the JS
+     * publish path, which the native drain replaced, so from then on they never changed: a friend
+     * could be dropped from every envelope for a week while their row in the app looked fine.
+     */
+    var `droppedPeers`: List<kotlin.String>
     
 ){
     
@@ -8902,6 +9028,7 @@ public object FfiConverterTypeSealReport: FfiConverterRustBuffer<SealReport> {
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterSequenceString.read(buf),
         )
     }
 
@@ -8911,7 +9038,8 @@ public object FfiConverterTypeSealReport: FfiConverterRustBuffer<SealReport> {
             FfiConverterUInt.allocationSize(value.`dropped`) +
             FfiConverterUInt.allocationSize(value.`lapsed`) +
             FfiConverterUInt.allocationSize(value.`noSession`) +
-            FfiConverterUInt.allocationSize(value.`other`)
+            FfiConverterUInt.allocationSize(value.`other`) +
+            FfiConverterSequenceString.allocationSize(value.`droppedPeers`)
     )
 
     override fun write(value: SealReport, buf: ByteBuffer) {
@@ -8921,6 +9049,7 @@ public object FfiConverterTypeSealReport: FfiConverterRustBuffer<SealReport> {
             FfiConverterUInt.write(value.`lapsed`, buf)
             FfiConverterUInt.write(value.`noSession`, buf)
             FfiConverterUInt.write(value.`other`, buf)
+            FfiConverterSequenceString.write(value.`droppedPeers`, buf)
     }
 }
 
@@ -10150,6 +10279,34 @@ public object FfiConverterSequenceTypeMeshTag: FfiConverterRustBuffer<List<MeshT
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeMeshTag.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeOwnPublished: FfiConverterRustBuffer<List<OwnPublished>> {
+    override fun read(buf: ByteBuffer): List<OwnPublished> {
+        val len = buf.getInt()
+        return List<OwnPublished>(len) {
+            FfiConverterTypeOwnPublished.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<OwnPublished>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeOwnPublished.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<OwnPublished>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeOwnPublished.write(it, buf)
         }
     }
 }

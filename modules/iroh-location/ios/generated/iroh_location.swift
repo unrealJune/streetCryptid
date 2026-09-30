@@ -1685,6 +1685,12 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func readProfile(endpointId: Data) async throws  -> ProfileView?
     
     /**
+     * Record a published position locally. Best-effort: a node without the log (not started) and
+     * a log that cannot write both lose only a trail point, never the publish.
+     */
+    func recordOwnPublished(seq: UInt64, fix: LocationFix) async 
+    
+    /**
      * The X25519 receiving PUBLIC key — this is the "receiving key" you hand to a friend
      * so they can wrap fixes for you.
      */
@@ -1865,6 +1871,12 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * a silent skip is exactly the kind of thing that hides a real break.
      */
     func syncLatest(peerTickets: [String], traceparent: String?) async throws 
+    
+    /**
+     * Every position this device has published since the app last asked, oldest first, and forget
+     * them. The app appends them to its own trail; see [`own_log`] for why the replica cannot.
+     */
+    func takeOwnPublished() async throws  -> [OwnPublished]
     
     /**
      * A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
@@ -3364,6 +3376,28 @@ open func readProfile(endpointId: Data)async throws  -> ProfileView?  {
 }
     
     /**
+     * Record a published position locally. Best-effort: a node without the log (not started) and
+     * a log that cannot write both lose only a trail point, never the publish.
+     */
+open func recordOwnPublished(seq: UInt64, fix: LocationFix)async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_record_own_published(
+                    self.uniffiCloneHandle(),
+                    FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
+        )
+}
+    
+    /**
      * The X25519 receiving PUBLIC key — this is the "receiving key" you hand to a friend
      * so they can wrap fixes for you.
      */
@@ -3800,6 +3834,27 @@ open func syncLatest(peerTickets: [String], traceparent: String?)async throws   
             completeFunc: ffi_iroh_location_rust_future_complete_void,
             freeFunc: ffi_iroh_location_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Every position this device has published since the app last asked, oldest first, and forget
+     * them. The app appends them to its own trail; see [`own_log`] for why the replica cannot.
+     */
+open func takeOwnPublished()async throws  -> [OwnPublished]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_take_own_published(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeOwnPublished.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -5891,6 +5946,63 @@ public func FfiConverterTypeMeshTag_lower(_ value: MeshTag) -> RustBuffer {
 
 
 /**
+ * One published position, as the app's trail store wants it.
+ */
+public struct OwnPublished: Equatable, Hashable {
+    public var seq: UInt64
+    public var fix: LocationFix
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(seq: UInt64, fix: LocationFix) {
+        self.seq = seq
+        self.fix = fix
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension OwnPublished: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOwnPublished: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OwnPublished {
+        return
+            try OwnPublished(
+                seq: FfiConverterUInt64.read(from: &buf), 
+                fix: FfiConverterTypeLocationFix.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: OwnPublished, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.seq, into: &buf)
+        FfiConverterTypeLocationFix.write(value.fix, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOwnPublished_lift(_ buf: RustBuffer) throws -> OwnPublished {
+    return try FfiConverterTypeOwnPublished.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOwnPublished_lower(_ value: OwnPublished) -> RustBuffer {
+    return FfiConverterTypeOwnPublished.lower(value)
+}
+
+
+/**
  * A polled pairing event (node-level queue; see `poll_pair_events`).
  */
 public struct PairEvent: Equatable, Hashable {
@@ -6881,6 +6993,14 @@ public struct SealReport: Equatable, Hashable {
      * `state_unavailable` + `no_sending_chain`: transient, telemetered, never shown to a human.
      */
     public var other: UInt32
+    /**
+     * Who was left out, as `<endpoint hex>:<reason>` — the per-friend half of the counts above.
+     *
+     * The app's "needs re-pair" / "lapsed" badges are drawn from this. They were fed by the JS
+     * publish path, which the native drain replaced, so from then on they never changed: a friend
+     * could be dropped from every envelope for a week while their row in the app looked fine.
+     */
+    public var droppedPeers: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -6890,13 +7010,21 @@ public struct SealReport: Equatable, Hashable {
          */at: UInt64, recipients: UInt32, dropped: UInt32, lapsed: UInt32, noSession: UInt32, 
         /**
          * `state_unavailable` + `no_sending_chain`: transient, telemetered, never shown to a human.
-         */other: UInt32) {
+         */other: UInt32, 
+        /**
+         * Who was left out, as `<endpoint hex>:<reason>` — the per-friend half of the counts above.
+         *
+         * The app's "needs re-pair" / "lapsed" badges are drawn from this. They were fed by the JS
+         * publish path, which the native drain replaced, so from then on they never changed: a friend
+         * could be dropped from every envelope for a week while their row in the app looked fine.
+         */droppedPeers: [String]) {
         self.at = at
         self.recipients = recipients
         self.dropped = dropped
         self.lapsed = lapsed
         self.noSession = noSession
         self.other = other
+        self.droppedPeers = droppedPeers
     }
 
     
@@ -6920,7 +7048,8 @@ public struct FfiConverterTypeSealReport: FfiConverterRustBuffer {
                 dropped: FfiConverterUInt32.read(from: &buf), 
                 lapsed: FfiConverterUInt32.read(from: &buf), 
                 noSession: FfiConverterUInt32.read(from: &buf), 
-                other: FfiConverterUInt32.read(from: &buf)
+                other: FfiConverterUInt32.read(from: &buf), 
+                droppedPeers: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
@@ -6931,6 +7060,7 @@ public struct FfiConverterTypeSealReport: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.lapsed, into: &buf)
         FfiConverterUInt32.write(value.noSession, into: &buf)
         FfiConverterUInt32.write(value.other, into: &buf)
+        FfiConverterSequenceString.write(value.droppedPeers, into: &buf)
     }
 }
 
@@ -8305,6 +8435,31 @@ fileprivate struct FfiConverterSequenceTypeMeshTag: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeOwnPublished: FfiConverterRustBuffer {
+    typealias SwiftType = [OwnPublished]
+
+    public static func write(_ value: [OwnPublished], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeOwnPublished.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [OwnPublished] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [OwnPublished]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeOwnPublished.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePairEvent: FfiConverterRustBuffer {
     typealias SwiftType = [PairEvent]
 
@@ -9091,6 +9246,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_read_profile() != 28632) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_record_own_published() != 15233) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_recv_public() != 14228) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -9146,6 +9304,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_sync_latest() != 8256) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_take_own_published() != 62996) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {
