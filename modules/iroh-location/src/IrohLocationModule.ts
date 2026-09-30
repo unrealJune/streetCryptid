@@ -231,6 +231,30 @@ export declare class IrohLocationNativeModule
     watcherEndpointsHex: string[]
   ): Promise<void>;
   /**
+   * Mirror each friend's X25519 receiving key (parallel lists, same order), so the native drain
+   * can run §4.6 session recovery on a wake with no JS alive. The resync record is sealed to these
+   * keys and the ratchet session does not carry them. Push alongside {@link setSharingRecipients},
+   * for every friend, sharing and watch-only alike.
+   *
+   * OPTIONAL: absent on binaries built before native session recovery.
+   */
+  setRecipientKeys?(endpointsHex: string[], recvPublicsHex: string[]): Promise<void>;
+  /**
+   * Who the latest fix envelope was sealed for and who it left out, and why — recorded where the
+   * sealing happens. `null` before this install has sealed anything. `device.health` reports it
+   * as `ratchet.dropped*`; the JS row it replaces was only written by the JS publish path.
+   *
+   * OPTIONAL: absent on binaries built before native session recovery.
+   */
+  lastSealReport?(): Promise<{
+    at: number;
+    recipients: number;
+    dropped: number;
+    lapsed: number;
+    noSession: number;
+    other: number;
+  } | null>;
+  /**
    * Who the native drain path will seal for RIGHT NOW, read back from its durable store.
    *
    * The counterpart to {@link setSharingRecipients}, and the only way to see the two sides

@@ -35,7 +35,16 @@
 //! or neither, and "neither" is the dangerous one: a watch-only edge that stops receiving our null
 //! envelopes lapses at `T_lapse` (FORWARD-SECRECY.md §4.1), which is the mutual-lapse failure that
 //! took a day to find the first time.
+//!
+//! # Why receiving keys live here too
+//!
+//! §4.6 session recovery seals its record to each peer's X25519 receiving key, and the native
+//! drain is the only thing left that runs recovery. The ratchet session does not carry that key and
+//! a headless wake has no JS pool to ask, so JS mirrors it next to the endpoint lists. It is a
+//! cache of the pool, not an authority: a missing entry costs one recovery attempt, never a leak,
+//! because the record carries only an ephemeral public key.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -45,6 +54,8 @@ use crate::durable::write_atomic;
 const RECIPIENTS_DIR: &str = "recipients";
 const LIST_FILE: &str = "sharing";
 const WATCHERS_FILE: &str = "watchers";
+const KEYS_FILE: &str = "recv_keys";
+const SEAL_REPORT_FILE: &str = "last_seal";
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecipientsError {
@@ -74,6 +85,67 @@ pub struct RecipientStore {
     /// Friends we do NOT share position with. They still receive a null envelope on the same
     /// cadence, which is what carries our ratchet contribution to a watch-only edge.
     watchers: RwLock<Vec<String>>,
+    keys_path: PathBuf,
+    /// Endpoint id → receiving public key, both lowercase hex. See the module note.
+    keys: RwLock<BTreeMap<String, String>>,
+    seal_path: PathBuf,
+    /// Who the most recent envelope was sealed for and who it left out. See [`SealReport`].
+    last_seal: RwLock<Option<SealReport>>,
+}
+
+/// Who the most recent fix envelope was sealed for and who it had to leave out, and why.
+///
+/// `device.health` used to get this from a JS-side row that only the JS publish path wrote. The
+/// native drain replaced that path and the row stopped moving — so through a week-long mutual
+/// lapse the one attribute built to show "publishing to nobody" was simply absent. This is the same
+/// fact, recorded where the sealing happens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, uniffi::Record)]
+pub struct SealReport {
+    /// When the envelope was sealed (ms since epoch).
+    pub at: u64,
+    pub recipients: u32,
+    pub dropped: u32,
+    pub lapsed: u32,
+    pub no_session: u32,
+    /// `state_unavailable` + `no_sending_chain`: transient, telemetered, never shown to a human.
+    pub other: u32,
+}
+
+impl SealReport {
+    fn encode(&self) -> String {
+        format!(
+            "{} {} {} {} {} {}",
+            self.at, self.recipients, self.dropped, self.lapsed, self.no_session, self.other
+        )
+    }
+
+    fn decode(raw: &str) -> Option<Self> {
+        let mut it = raw.split_whitespace().map(|p| p.parse::<u64>().ok());
+        let mut next = || it.next().flatten();
+        Some(Self {
+            at: next()?,
+            recipients: next()? as u32,
+            dropped: next()? as u32,
+            lapsed: next()? as u32,
+            no_session: next()? as u32,
+            other: next()? as u32,
+        })
+    }
+}
+
+/// Parse `endpoint recv_pub` lines, skipping anything malformed.
+fn read_keys(path: &Path) -> Result<BTreeMap<String, String>, RecipientsError> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => Ok(raw
+            .lines()
+            .filter_map(|line| {
+                let (endpoint, key) = line.split_once(' ')?;
+                Some((normalise(endpoint).ok()?, normalise(key).ok()?))
+            })
+            .collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Endpoint ids are lowercase hex. Normalising on the way in means the native path never has to
@@ -120,12 +192,23 @@ impl RecipientStore {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(LIST_FILE);
         let watchers_path = dir.join(WATCHERS_FILE);
+        let keys_path = dir.join(KEYS_FILE);
+        let seal_path = dir.join(SEAL_REPORT_FILE);
+        // A report that cannot be read is a missing report, never a failed open: it is a cache
+        // for `device.health`, and nothing about sealing depends on it.
+        let last_seal = std::fs::read_to_string(&seal_path)
+            .ok()
+            .and_then(|raw| SealReport::decode(&raw));
         Ok(Self {
             current: RwLock::new(read_list(&path)?),
             watchers: RwLock::new(read_list(&watchers_path)?),
+            keys: RwLock::new(read_keys(&keys_path)?),
+            last_seal: RwLock::new(last_seal),
             dir,
             path,
             watchers_path,
+            keys_path,
+            seal_path,
         })
     }
 
@@ -180,6 +263,50 @@ impl RecipientStore {
     }
 }
 
+impl RecipientStore {
+    /// Replace the receiving-key map, durable before returning. Whole-map replacement for the same
+    /// reason [`Self::set`] replaces the whole list: the caller always knows the complete set.
+    pub fn set_keys(&self, entries: &[(String, String)]) -> Result<(), RecipientsError> {
+        let mut map = BTreeMap::new();
+        for (endpoint, key) in entries {
+            map.insert(normalise(endpoint)?, normalise(key)?);
+        }
+        let body = map
+            .iter()
+            .map(|(e, k)| format!("{e} {k}"))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        write_atomic(&self.dir, &self.keys_path, body.as_bytes())?;
+        *self.keys.write().unwrap_or_else(|e| e.into_inner()) = map;
+        Ok(())
+    }
+
+    /// The receiving public key JS last mirrored for `endpoint` (lowercase hex), if any.
+    pub fn key_for(&self, endpoint: &str) -> Option<String> {
+        let endpoint = normalise(endpoint).ok()?;
+        self.keys
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&endpoint)
+            .cloned()
+    }
+
+    /// Remember what the latest envelope was sealed for. Best-effort: the in-memory copy always
+    /// advances, and a failed write costs one stale health attribute after a restart.
+    pub fn record_seal(&self, report: SealReport) {
+        let _ = write_atomic(&self.dir, &self.seal_path, report.encode().as_bytes());
+        *self.last_seal.write().unwrap_or_else(|e| e.into_inner()) = Some(report);
+    }
+
+    /// The latest [`SealReport`], or `None` if this install has never sealed a fix envelope.
+    pub fn last_seal(&self) -> Option<SealReport> {
+        *self.last_seal.read().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 impl From<RecipientsError> for crate::publish::StoreError {
     fn from(e: RecipientsError) -> Self {
         match e {
@@ -200,5 +327,73 @@ impl crate::publish::Recipients for RecipientStore {
 
     fn set(&self, endpoints: &[String]) -> Result<(), crate::publish::StoreError> {
         RecipientStore::set(self, endpoints).map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sc-recipients-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn receiving_keys_survive_a_reopen_and_normalise_case() {
+        let dir = scratch();
+        let store = RecipientStore::open(&dir).unwrap();
+        store
+            .set_keys(&[
+                ("AA11".into(), "BEEF".into()),
+                ("bb22".into(), "cafe".into()),
+            ])
+            .unwrap();
+        assert_eq!(store.key_for("aa11").as_deref(), Some("beef"));
+
+        let reopened = RecipientStore::open(&dir).unwrap();
+        assert_eq!(reopened.key_for("AA11").as_deref(), Some("beef"));
+        assert_eq!(reopened.key_for("bb22").as_deref(), Some("cafe"));
+        assert_eq!(reopened.key_for("cc33"), None);
+    }
+
+    #[test]
+    fn a_malformed_key_is_refused_and_leaves_the_previous_map() {
+        let dir = scratch();
+        let store = RecipientStore::open(&dir).unwrap();
+        store.set_keys(&[("aa11".into(), "beef".into())]).unwrap();
+        assert!(store
+            .set_keys(&[("aa11".into(), "not hex".into())])
+            .is_err());
+        assert_eq!(store.key_for("aa11").as_deref(), Some("beef"));
+    }
+
+    #[test]
+    fn the_seal_report_survives_a_reopen() {
+        let dir = scratch();
+        let store = RecipientStore::open(&dir).unwrap();
+        assert_eq!(
+            store.last_seal(),
+            None,
+            "never sealed is not 'sealed for nobody'"
+        );
+        let report = SealReport {
+            at: 1_790_000_000_000,
+            recipients: 4,
+            dropped: 3,
+            lapsed: 2,
+            no_session: 1,
+            other: 0,
+        };
+        store.record_seal(report);
+        assert_eq!(
+            RecipientStore::open(&dir).unwrap().last_seal(),
+            Some(report)
+        );
     }
 }

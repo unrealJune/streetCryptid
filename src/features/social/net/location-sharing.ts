@@ -4119,6 +4119,23 @@ export class LocationSharingService {
         watchers: watchers.length,
       });
     });
+    // Every friend's receiving key, for native session recovery (§4.6). The resync record is
+    // sealed to it, the ratchet session does not carry it, and a headless wake has no pool to ask —
+    // so without this the only driver of recovery left would have nothing to seal for.
+    if (typeof mod.setRecipientKeys === 'function') {
+      const friends = pool.friendList(this.state);
+      void mod
+        .setRecipientKeys(
+          friends.map((f) => f.endpointId),
+          friends.map((f) => f.recvPublic)
+        )
+        .catch((err: unknown) => {
+          getTelemetry().log('warn', 'recipients: could not mirror receiving keys to native', {
+            reason: err instanceof Error ? err.message : String(err),
+            friends: friends.length,
+          });
+        });
+    }
   }
 
   /**

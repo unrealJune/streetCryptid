@@ -77,6 +77,7 @@ private func ingestOutcomeToDict(_ outcome: IngestOutcome) -> [String: Any?] {
     "rejection": outcome.rejection.map { String(describing: $0) },
     "enqueued": Double(outcome.enqueued),
     "published": Double(outcome.published),
+    "reached": Double(outcome.reached),
     "pending": Double(outcome.pending),
     "slotsSkipped": Double(outcome.slotsSkipped),
     "overflowDropped": Double(outcome.overflowDropped),
@@ -707,6 +708,26 @@ public final class IrohLocationModule: Module {
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       try await node.setSharingRecipients(
         recipientEndpoints: recipientEndpointsHex, watcherEndpoints: watcherEndpointsHex)
+    }
+
+    // Mirror each friend's receiving key so the native drain can run session recovery (§4.6) on a
+    // wake with no JS alive. Two parallel lists, built by JS from the same pool in one pass.
+    AsyncFunction("setRecipientKeys") {
+      (endpointsHex: [String], recvPublicsHex: [String]) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setRecipientKeys(
+        keys: zip(endpointsHex, recvPublicsHex).map { RecipientKey(endpointId: $0, recvPublic: $1) })
+    }
+
+    // Who the latest fix envelope was sealed for and who it left out, and why. nil before the first
+    // seal. `device.health` reports it as `ratchet.dropped*`.
+    AsyncFunction("lastSealReport") { () async throws -> [String: Any]? in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      guard let r = try await node.lastSealReport() else { return nil }
+      return [
+        "at": Double(r.at), "recipients": Double(r.recipients), "dropped": Double(r.dropped),
+        "lapsed": Double(r.lapsed), "noSession": Double(r.noSession), "other": Double(r.other),
+      ]
     }
 
     // Read the durable sharing set back. `device.health` reports its size next to the pool's, so a
