@@ -141,6 +141,17 @@ Conventions when changing that code:
   refused the pair". v4 carries the sender's signed `ProfileRecord` on the `Accept`, which is why a
   persona now arrives WITH the pair instead of after a separate iroh-docs dial; the profile ticket
   still rides along, and is now only how later edits arrive.
+- **Session recovery runs in the native drain, not in JS.** A pair that exchanges nothing for
+  `T_lapse` (24 h) lapses on BOTH sides; each then drops the other from its wrap set, so neither
+  can deliver the fresh ratchet key that would un-lapse it, and only §4.6 resync breaks it.
+  `DrainEngine::drain` calls `PublishSink::recover` once per drain (after the fixes, every friend,
+  watchers included) and pushes while `in_progress` because the push is also the pull that brings
+  the peer's half in. It used to be `runResyncDriver` on the JS publish tick, which the native
+  drain replaced — and a Pixel 9 then spent 2026-09-22..29 publishing 785 envelopes sealed for
+  nobody while `last_publish_age_ms` read 30 s. The resync record is sealed to receiving keys JS
+  mirrors with `setRecipientKeys`; `poll_resync` offers our half BEFORE looking for theirs (it
+  did not, so two polling sides waited on each other forever). An envelope with every recipient
+  dropped is not a publish: it does not stamp `last_published_at` or count as `reached`.
 - **A pair is complete when `finalize` says so, not when the decision bits agree.** `is_complete()`
   goes true the instant a local accept latches; `finalize` — which installs the ratchet, ingests the
   handed profile record and raises `Ready` — runs after, and can still decline, because a wire

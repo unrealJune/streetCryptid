@@ -25,6 +25,7 @@ class FakeNativeModule {
     publish: [] as unknown[][],
     docsWrite: [] as unknown[][],
     setSharingRecipients: [] as { recipients: string[]; watchers: string[] }[],
+    setRecipientKeys: [] as { endpoints: string[]; keys: string[] }[],
   };
 
   async createNode() {
@@ -57,6 +58,9 @@ class FakeNativeModule {
   }
   async setSharingRecipients(recipients: string[], watchers: string[]) {
     this.calls.setSharingRecipients.push({ recipients, watchers });
+  }
+  async setRecipientKeys(endpoints: string[], keys: string[]) {
+    this.calls.setRecipientKeys.push({ endpoints, keys });
   }
   async syncTrail(since: number, peerTicket: string | null) {
     this.calls.syncTrail.push({ since, peerTicket });
@@ -264,6 +268,31 @@ describe('LocationSharingService — headless init', () => {
     expect(mockHolder.mod.calls.setSharingRecipients).toEqual([
       { recipients: [friendA.endpointId], watchers: [friendB.endpointId] },
     ]);
+  });
+
+  /**
+   * Native session recovery (§4.6) seals its record to each friend's receiving key, and a headless
+   * wake has no pool to read it from. Without this mirror the only remaining driver of recovery
+   * has nothing to seal for, and a lapsed pair stays lapsed — a week of a Pixel 9 on 2026-09-29.
+   * Every friend, watch-only included: a watcher edge is a session like any other.
+   */
+  it('mirrors every friend receiving key for native recovery, watchers included', async () => {
+    mockHolder.pool = {
+      friends: { [friendA.endpointId]: friendA, [friendB.endpointId]: friendB },
+      sharingWith: [friendA.endpointId],
+    };
+    const svc = makeService();
+
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+
+    const [call] = mockHolder.mod.calls.setRecipientKeys;
+    const pairs = call.endpoints.map((e, i) => [e, call.keys[i]]).sort();
+    expect(pairs).toEqual(
+      [
+        [friendA.endpointId, friendA.recvPublic],
+        [friendB.endpointId, friendB.recvPublic],
+      ].sort()
+    );
   });
 
   it('re-opens every friend trail namespace so a background backfill has something to reconcile', async () => {

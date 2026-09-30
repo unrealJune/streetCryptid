@@ -943,6 +943,14 @@ pub struct PairEvent {
     pub nearby: bool,
 }
 
+/// A friend's endpoint id and X25519 receiving public key, both hex. See
+/// [`LocationNode::set_recipient_keys`].
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RecipientKey {
+    pub endpoint_id: String,
+    pub recv_public: String,
+}
+
 /// The result of a completed (bilaterally-accepted) pair. Contains everything the app needs to
 /// treat the peer as a friend: identity, dial hint, both read-tickets, and the verified profile.
 #[derive(Debug, Clone, uniffi::Record)]
@@ -1239,11 +1247,171 @@ struct PendingResync {
     public: [u8; 32],
     nonce: [u8; 16],
     ts: u64,
+    /// The receiving keys the record currently in our `rsy` slot is wrapped for, sorted. Lets the
+    /// native driver — which calls on every drain — skip rewriting an identical record, which would
+    /// otherwise put a fresh docs entry on the wire every few minutes for as long as a friend is
+    /// away.
+    wrapped_for: Vec<Vec<u8>>,
 }
 
 /// Internals kept out of the `#[uniffi::export]` block above — UniFFI exports every method in an
 /// exported impl, including private ones, and `SessionManager` is not an FFI type.
 impl LocationNode {
+    /// Drive §4.6 recovery for every one of `peers` whose session has stopped working.
+    ///
+    /// The native counterpart of what `runResyncDriver` in `location-sharing.ts` used to do on
+    /// every JS publish tick, and the reason it exists is that the JS tick no longer happens: the
+    /// native drain became the only publish path and nothing took recovery over. A session that
+    /// lapses (§4.5) cannot heal itself — each side drops the other from its wrap set, so neither
+    /// ever delivers the fresh ratchet key that would un-lapse it — so without this a lapse is
+    /// permanent. On 2026-09-29 that had cost a week of fixes from a Pixel 9, and it held three of
+    /// the four sessions on the phone that noticed.
+    ///
+    /// One record, wrapped for every desynced peer at once. The `rsy` slot holds a single record,
+    /// so offering it peer-by-peer would leave it wrapped for whoever came last. The poll per peer
+    /// then finds theirs and restarts the session; the exchange completes across two drains on
+    /// each side, and the push the drain makes while [`publish::RecoveryOutcome::in_progress`] is
+    /// set is what carries our half out and brings theirs in.
+    ///
+    /// Past [`RESYNC_ATTEMPT_LIMIT`] a peer is left alone: recovery that keeps recovering is not
+    /// recovering, and that pair needs an in-person bump. `no_session` peers are never touched —
+    /// there is no session to restart, and only pairing roots one.
+    pub async fn recover_sessions(&self, peers: &[String]) -> publish::RecoveryOutcome {
+        use tracing::Instrument;
+        let span = tracing::info_span!(
+            "session.recover",
+            sc.author = %telemetry::short_hex(&self.author),
+            peers = peers.len(),
+            desynced = tracing::field::Empty,
+            gave_up = tracing::field::Empty,
+            no_key = tracing::field::Empty,
+            restored = tracing::field::Empty,
+            remaining = tracing::field::Empty,
+            error = tracing::field::Empty,
+        );
+        async move {
+            let Ok(manager) = self.session_manager().await else {
+                return publish::RecoveryOutcome::default();
+            };
+            let store = self.recipient_store().await.ok();
+            let now = now_ms();
+
+            let mut unique: Vec<&String> = peers.iter().collect();
+            unique.sort();
+            unique.dedup();
+
+            let (mut desynced, mut gave_up, mut no_key) = (0u32, 0u32, 0u32);
+            let mut todo: Vec<(String, String)> = Vec::new();
+            for peer_hex in unique {
+                let Ok(peer) = decode_endpoint(peer_hex) else {
+                    continue;
+                };
+                if !manager.is_desynced(&peer, now) {
+                    continue;
+                }
+                desynced += 1;
+                if manager.resync_count(&peer) >= RESYNC_ATTEMPT_LIMIT {
+                    gave_up += 1;
+                    continue;
+                }
+                let key = match store.as_ref().and_then(|s| s.key_for(peer_hex)) {
+                    Some(key) => Some(key),
+                    None => self.profile_recv_key(&peer).await,
+                };
+                match key {
+                    Some(key) => todo.push((peer_hex.clone(), key)),
+                    None => no_key += 1,
+                }
+            }
+
+            let span = tracing::Span::current();
+            span.record("desynced", desynced);
+            span.record("gave_up", gave_up);
+            span.record("no_key", no_key);
+            if todo.is_empty() {
+                // The common case — nobody desynced — costs one state load per friend and nothing
+                // else. A desynced peer with no key or past the limit is on the span, not retried.
+                return publish::RecoveryOutcome::default();
+            }
+
+            if let Err(err) = self
+                .publish_resync(todo.iter().map(|(_, key)| key.clone()).collect())
+                .await
+            {
+                span.record("error", tracing::field::display(&err));
+                // Still in progress: the push this triggers may bring the peer's half in, and the
+                // next drain retries ours.
+                return publish::RecoveryOutcome {
+                    in_progress: true,
+                    restored: 0,
+                };
+            }
+
+            let (mut restored, mut remaining) = (0u32, 0u32);
+            for (peer_hex, key) in &todo {
+                match self.poll_resync(peer_hex.clone(), key.clone()).await {
+                    Ok(true) => restored += 1,
+                    Ok(false) => remaining += 1,
+                    Err(err) => {
+                        remaining += 1;
+                        span.record("error", tracing::field::display(&err));
+                    }
+                }
+            }
+            span.record("restored", restored);
+            span.record("remaining", remaining);
+
+            // Drop our ephemeral once nobody is mid-exchange: a private key held for no reason.
+            // The record stays in the slot, so a peer that has not pulled it yet still can.
+            if restored > 0 && remaining == 0 {
+                self.clear_resync().await;
+            }
+            publish::RecoveryOutcome {
+                in_progress: remaining > 0,
+                restored,
+            }
+        }
+        .instrument(span)
+        .await
+    }
+
+    /// Shorten or restore the §4.5 lapse bound on this node's live sessions. Tests only — it is
+    /// how an integration test lapses a real pair without waiting a day.
+    #[doc(hidden)]
+    pub async fn set_t_lapse_ms_for_tests(&self, t_lapse_ms: u64) -> Result<(), LocationError> {
+        self.session_manager().await?.set_t_lapse_ms(t_lapse_ms);
+        Ok(())
+    }
+
+    /// A friend's receiving key from their verified profile — the fallback when JS has not
+    /// mirrored one yet (a binary upgraded before its bundle, or a wake before the first launch).
+    async fn profile_recv_key(&self, peer: &[u8]) -> Option<String> {
+        let profile = self.live().await.ok()?.profile;
+        let record = profile.read_for_endpoint(peer).await.ok()??;
+        (!record.recv_pub.is_empty()).then(|| encode_hex(&record.recv_pub))
+    }
+
+    /// Record what the latest fix envelope was sealed for, for `device.health`.
+    async fn note_seal(&self, total: usize, dropped: &[String]) {
+        let Ok(store) = self.recipient_store().await else {
+            return;
+        };
+        let mut report = recipients::SealReport {
+            at: now_ms(),
+            recipients: total as u32,
+            dropped: dropped.len() as u32,
+            ..Default::default()
+        };
+        for entry in dropped {
+            match entry.rsplit_once(':').map(|(_, reason)| reason) {
+                Some("lapsed") => report.lapsed += 1,
+                Some("no_session") => report.no_session += 1,
+                _ => report.other += 1,
+            }
+        }
+        store.record_seal(report);
+    }
+
     async fn session_manager(&self) -> Result<Arc<sessions::SessionManager>, LocationError> {
         self.sessions
             .lock()
@@ -1454,12 +1622,14 @@ impl LocationNode {
         &self,
         recipient_recv_pubs: Vec<String>,
     ) -> Result<String, LocationError> {
-        let recipients = recipient_recv_pubs
+        let mut recipients = recipient_recv_pubs
             .iter()
             .map(|h| decode_hex(h).ok_or_else(|| LocationError::Decode("bad recv key hex".into())))
             .collect::<Result<Vec<_>, _>>()?;
+        recipients.sort();
+        recipients.dedup();
 
-        let (public, nonce, ts, reminted) = {
+        let (public, nonce, ts, reminted, unchanged) = {
             let mut pending = self.pending_resync.lock().await;
             let now = now_ms();
             // Idempotent while the record is still usable, re-minted once it is not.
@@ -1477,8 +1647,12 @@ impl LocationNode {
             let stale = pending
                 .as_ref()
                 .is_some_and(|p| now.saturating_sub(p.ts) >= sessions::RESYNC_REMINT_MS);
-            match pending.as_ref() {
-                Some(p) if !stale => (p.public, p.nonce, p.ts, false),
+            match pending.as_mut() {
+                Some(p) if !stale => {
+                    let unchanged = p.wrapped_for == recipients;
+                    p.wrapped_for = recipients.clone();
+                    (p.public, p.nonce, p.ts, false, unchanged)
+                }
                 _ => {
                     let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
                     let public = x25519_dalek::PublicKey::from(&secret).to_bytes();
@@ -1490,8 +1664,9 @@ impl LocationNode {
                         public,
                         nonce,
                         ts: now,
+                        wrapped_for: recipients.clone(),
                     });
-                    (public, nonce, now, was_pending)
+                    (public, nonce, now, was_pending, false)
                 }
             }
         };
@@ -1507,6 +1682,11 @@ impl LocationNode {
             if let Ok(manager) = self.session_manager().await {
                 manager.forget_applied_resyncs();
             }
+        }
+        // Same ephemeral, same recipients: the record already in our slot is byte-for-byte what
+        // we would write, bar a fresh signature. Nothing to do.
+        if unchanged {
+            return Ok(encode_hex(&public));
         }
 
         let record = ResyncRecord {
@@ -1558,6 +1738,16 @@ impl LocationNode {
     ) -> Result<bool, LocationError> {
         let peer = decode_endpoint(&peer_endpoint_hex)?;
 
+        // Offer our half if we have not — BEFORE looking for theirs. This used to sit below the
+        // early return for "no record from them yet", so a side that only ever polled never
+        // published: two phones that both noticed a lapse would each wait for the other forever,
+        // and the only test of the exchange published both halves by hand. Without this the
+        // exchange needs the two sides to independently decide to start one, and only one of them
+        // can see the failure.
+        if self.pending_resync.lock().await.is_none() {
+            self.publish_resync(vec![peer_recv_pub_hex]).await?;
+        }
+
         let payloads = {
             let started = self.live().await?;
             started
@@ -1573,12 +1763,6 @@ impl LocationNode {
         else {
             return Ok(false);
         };
-
-        // Offer our half if we have not. Without this the exchange needs the two sides to
-        // independently decide to start one, and only one of them can see the failure.
-        if self.pending_resync.lock().await.is_none() {
-            self.publish_resync(vec![peer_recv_pub_hex]).await?;
-        }
         let (our_secret, our_public) = {
             let pending = self.pending_resync.lock().await;
             let p = pending.as_ref().ok_or(LocationError::NotStarted)?;
@@ -1659,6 +1843,11 @@ struct ResyncRecord {
 }
 
 const RESYNC_V: u8 = 1;
+
+/// How many resyncs with one peer before recovery stops and the pair needs an in-person bump.
+/// Matches `RESYNC_ATTEMPT_LIMIT` in `location-sharing.ts`, which drove this before the native
+/// drain did.
+const RESYNC_ATTEMPT_LIMIT: u32 = 3;
 
 /// How a caller wants the node's two on-disk roots resolved.
 ///
@@ -2920,6 +3109,27 @@ impl LocationNode {
         Ok(self.recipient_store().await?.get())
     }
 
+    /// Mirror each friend's X25519 receiving key, so the native drain can run §4.6 recovery.
+    ///
+    /// Push next to [`Self::set_sharing_recipients`], every friend (sharing and watch-only). The
+    /// resync record is sealed to these keys, and a headless wake has no pool to read them from;
+    /// a friend with no key here falls back to their verified profile.
+    pub async fn set_recipient_keys(&self, keys: Vec<RecipientKey>) -> Result<(), LocationError> {
+        let entries = keys
+            .into_iter()
+            .map(|k| (k.endpoint_id, k.recv_public))
+            .collect::<Vec<_>>();
+        self.recipient_store()
+            .await?
+            .set_keys(&entries)
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// Who the latest fix envelope was sealed for and who it left out. `None` before the first.
+    pub async fn last_seal_report(&self) -> Result<Option<recipients::SealReport>, LocationError> {
+        Ok(self.recipient_store().await?.last_seal())
+    }
+
     /// Record where a drained envelope must be sent to leave this device — see [`crate::delivery`].
     ///
     /// Push it on every pool change and every stash opt-in change, next to
@@ -3286,6 +3496,8 @@ impl LocationNode {
             sc.envelope = 3,
             recipients = recipient_endpoints.len(),
             dropped = tracing::field::Empty,
+            sc.drop_reason = tracing::field::Empty,
+            dropped_peers = tracing::field::Empty,
         );
         telemetry::set_parent(&span, traceparent.as_deref());
         async move {
@@ -3306,7 +3518,7 @@ impl LocationNode {
                 .iter()
                 .map(|(peer, reason)| format!("{}:{}", encode_hex(peer), reason.as_str()))
                 .collect();
-            tracing::Span::current().record("dropped", dropped.len());
+            record_wrap_drops(&set.dropped);
 
             // Every recipient dropped means this envelope reaches nobody. Writing it anyway would
             // burn a `seq` and leave a wrap-less envelope in the replica for the stash to hold.
@@ -4465,6 +4677,38 @@ pub struct Subscription {
     receive_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
+/// Turn a ratcheted write's dropped list into what the drain needs to know about it.
+fn sealed_from(total: usize, dropped: &[String]) -> publish::Sealed {
+    let dropped = dropped.len().min(total);
+    publish::Sealed {
+        wrapped: (total - dropped) as u32,
+        dropped: dropped as u32,
+    }
+}
+
+/// Put who a ratcheted publish left out, and why, on the current span.
+///
+/// The count alone said "one recipient dropped" on 785 consecutive publishes and nothing about
+/// why; the reason is what separates "these two need to re-pair" (`no_session`) from "recovery is
+/// not running" (`lapsed`), and the short peer ids join it to that friend's own span stream.
+fn record_wrap_drops(dropped: &[(Vec<u8>, sessions::DropReason)]) {
+    let span = tracing::Span::current();
+    span.record("dropped", dropped.len());
+    if dropped.is_empty() {
+        return;
+    }
+    let mut reasons: Vec<&str> = dropped.iter().map(|(_, r)| r.as_str()).collect();
+    reasons.sort_unstable();
+    reasons.dedup();
+    let who = dropped
+        .iter()
+        .map(|(peer, r)| format!("{}:{}", telemetry::short_hex(peer), r.as_str()))
+        .collect::<Vec<_>>()
+        .join(",");
+    span.record("sc.drop_reason", reasons.join(","));
+    span.record("dropped_peers", who);
+}
+
 /// Binds a live [`Subscription`] to [`publish::PublishSink`], so the engine can send without
 /// knowing what gossip or iroh-docs are.
 ///
@@ -4507,7 +4751,7 @@ impl publish::PublishSink for SubscriptionSink<'_> {
         seq: u64,
         fix: LocationFix,
         recipients: Vec<String>,
-    ) -> Result<(), publish::PublishError> {
+    ) -> Result<publish::Sealed, publish::PublishError> {
         use tracing::Instrument;
         let span = tracing::info_span!(
             "publish.fix",
@@ -4527,12 +4771,16 @@ impl publish::PublishSink for SubscriptionSink<'_> {
                 .publish(seq, fix.clone(), recipients.clone())
                 .await
                 .map_err(|e| publish::PublishError::Send(e.to_string()))?;
-            self.subscription
+            let total = recipients.len();
+            let dropped = self
+                .subscription
                 .node
                 .docs_write_ratcheted(self.subscription_id.clone(), seq, fix, recipients)
                 .await
                 .map_err(|e| publish::PublishError::Send(e.to_string()))?;
-            Ok(())
+            let sealed = sealed_from(total, &dropped);
+            self.subscription.node.note_seal(total, &dropped).await;
+            Ok(sealed)
         }
         .instrument(span)
         .await
@@ -4543,17 +4791,23 @@ impl publish::PublishSink for SubscriptionSink<'_> {
         seq: u64,
         ts: u64,
         watchers: Vec<String>,
-    ) -> Result<(), publish::PublishError> {
+    ) -> Result<publish::Sealed, publish::PublishError> {
         self.subscription
             .publish_null(seq, ts, watchers.clone())
             .await
             .map_err(|e| publish::PublishError::Send(e.to_string()))?;
-        self.subscription
+        let total = watchers.len();
+        let dropped = self
+            .subscription
             .node
             .docs_write_null_ratcheted(self.subscription_id.clone(), seq, ts, watchers)
             .await
             .map_err(|e| publish::PublishError::Send(e.to_string()))?;
-        Ok(())
+        Ok(sealed_from(total, &dropped))
+    }
+
+    async fn recover(&self, peers: Vec<String>) -> publish::RecoveryOutcome {
+        self.subscription.node.recover_sessions(&peers).await
     }
 
     /// Reconcile the trail namespace with the stash and the pool, so the envelopes just written
@@ -4798,6 +5052,8 @@ impl Subscription {
             sc.entry_hash = tracing::field::Empty,
             recipients = recipient_endpoints.len(),
             dropped = tracing::field::Empty,
+            sc.drop_reason = tracing::field::Empty,
+            dropped_peers = tracing::field::Empty,
         );
         telemetry::set_parent(&span, traceparent.as_deref());
         async move {
@@ -4818,7 +5074,7 @@ impl Subscription {
                 .iter()
                 .map(|(peer, reason)| format!("{}:{}", encode_hex(peer), reason.as_str()))
                 .collect();
-            tracing::Span::current().record("dropped", dropped.len());
+            record_wrap_drops(&set.dropped);
             if set.wraps.is_empty() {
                 return Ok(dropped);
             }

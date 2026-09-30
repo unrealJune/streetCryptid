@@ -9,7 +9,13 @@ import {
   type SpanContext,
 } from '@/features/dev/telemetry';
 import { tryGetIrohLocation } from 'iroh-location';
-import { createPersistentKV, loadPool, loadRatchetDrops, loadSharingEnabled } from '../persistence';
+import {
+  createPersistentKV,
+  loadPool,
+  loadRatchetDrops,
+  loadSharingEnabled,
+  type RatchetDropCounts,
+} from '../persistence';
 import { getStorageBackend, getStorageDegradationCount } from '../storage-health';
 import { BACKGROUND_REFRESH_TASK } from './refresh-task';
 import { loadReviveFenceArmedAt, REVIVE_FENCE_TASK } from './revive-task';
@@ -41,6 +47,23 @@ async function nativeWatermarks(): Promise<Watermarks> {
   } catch {
     // A node that has never started has no gate state to read. Omitted rather than guessed.
     return {};
+  }
+}
+
+/**
+ * What the latest native seal left out, in the shape of the JS drop row. `null` when the binary
+ * predates the export, no node is running, or nothing has been sealed yet — all of which fall back
+ * to the JS row rather than reporting zero, which would read as "all fine".
+ */
+async function nativeSealDrops(): Promise<RatchetDropCounts | null> {
+  try {
+    const read = tryGetIrohLocation()?.lastSealReport;
+    if (!read) return null;
+    const report = await read();
+    if (!report) return null;
+    return { total: report.dropped, lapsed: report.lapsed, noSession: report.noSession };
+  } catch {
+    return null;
   }
 }
 
@@ -266,7 +289,10 @@ async function intentAttributes(): Promise<Attributes> {
     // `sharing.recipients`, this is the difference between "publishing to two friends" and
     // "publishing to nobody, twice" — states that are otherwise identical in every other span the
     // device emits, and which stayed indistinguishable through a day-long mutual lapse.
-    const drops = await loadRatchetDrops(kv);
+    // Native first: the drain is the only publish path now, and the JS row below is written only
+    // by the JS path it replaced — through the 2026-09-29 week-long mutual lapse it was simply
+    // absent. The row stays as the fallback for a binary that predates the export.
+    const drops = (await nativeSealDrops()) ?? (await loadRatchetDrops(kv));
     if (drops) {
       attrs['ratchet.dropped'] = drops.total;
       attrs['ratchet.dropped_lapsed'] = drops.lapsed;

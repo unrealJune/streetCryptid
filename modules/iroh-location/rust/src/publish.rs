@@ -104,7 +104,7 @@ pub trait PublishSink: Send + Sync {
         seq: u64,
         fix: LocationFix,
         recipients: Vec<String>,
-    ) -> impl std::future::Future<Output = Result<(), PublishError>> + Send;
+    ) -> impl std::future::Future<Output = Result<Sealed, PublishError>> + Send;
 
     /// The watcher lane: an envelope with no position, wrapped for friends we do NOT share with
     /// (FORWARD-SECRECY.md §4.1).
@@ -117,7 +117,23 @@ pub trait PublishSink: Send + Sync {
         seq: u64,
         ts: u64,
         watchers: Vec<String>,
-    ) -> impl std::future::Future<Output = Result<(), PublishError>> + Send;
+    ) -> impl std::future::Future<Output = Result<Sealed, PublishError>> + Send;
+
+    /// Run §4.6 session recovery for any of `peers` whose ratchet has stopped working, once per
+    /// drain.
+    ///
+    /// A port rather than something the platform layer does afterwards, for the same reason
+    /// [`Self::flush`] is one: recovery used to be driven by the JS publish path, the native drain
+    /// replaced that path, and nothing took the step over. From then on a session that lapsed
+    /// stayed lapsed — each side drops the other from its wrap set, so neither can ever deliver
+    /// the fresh ratchet key that would un-lapse it — and on 2026-09-29 a Pixel 9 had spent a
+    /// week publishing 785 envelopes, every one of them sealed for nobody.
+    ///
+    /// Best-effort by contract: recovery failing must never cost the fixes this drain published.
+    fn recover(
+        &self,
+        peers: Vec<String>,
+    ) -> impl std::future::Future<Output = RecoveryOutcome> + Send;
 
     /// Get everything just published **off the device**, once per drain that sent anything.
     ///
@@ -161,6 +177,42 @@ pub enum FlushOutcome {
     NoTargets,
 }
 
+/// What sealing one envelope actually achieved.
+///
+/// Returned rather than inferred because "the call succeeded" and "someone can open this" stopped
+/// being the same thing when the ratchet arrived: a recipient without a usable session is dropped
+/// from the wrap set, and an envelope with an empty wrap set is never written at all. Counting
+/// those as published is how a phone reached nobody for a week while `last_publish_age_ms` read
+/// thirty seconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sealed {
+    /// Recipients the envelope was wrapped for — the ones who can open it.
+    pub wrapped: u32,
+    /// Recipients left out, each for a reason `sessions::DropReason` names.
+    pub dropped: u32,
+}
+
+impl Sealed {
+    /// Whether anybody at all can open this envelope.
+    pub fn reached_anyone(&self) -> bool {
+        self.wrapped > 0
+    }
+}
+
+/// What one [`PublishSink::recover`] pass found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecoveryOutcome {
+    /// At least one peer is mid-exchange: our half is published and theirs has not been applied.
+    ///
+    /// The drain pushes whenever this is set, even if nothing else went out, because the push is
+    /// also the pull — reconciliation is what brings the peer's half INTO this replica, and a
+    /// phone that only reconciles after a successful publish would never receive the record that
+    /// makes its next publish succeed.
+    pub in_progress: bool,
+    /// Sessions restarted this pass.
+    pub restored: u32,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PublishError {
     #[error(transparent)]
@@ -187,6 +239,10 @@ pub struct IngestOutcome {
     /// Envelopes that actually reached the wire. Less than `enqueued` means the wake ran out of
     /// time or the network went away; the remainder is still queued.
     pub published: u32,
+    /// Of those, envelopes at least one friend can open. `published` without `reached` is every
+    /// recipient dropped from the wrap set — a lapsed or missing session — and nothing left the
+    /// device that anyone can read.
+    pub reached: u32,
     /// Depth of the queue afterwards.
     pub pending: u32,
     /// Slots the backfill cap declined to fill ([`gate::MAX_BACKFILL_MS`]).
@@ -195,6 +251,15 @@ pub struct IngestOutcome {
     pub overflow_dropped: u32,
     /// Publishing is suspended on critical battery. Distinct from "nothing was due".
     pub suspended: bool,
+}
+
+/// What one [`DrainEngine::drain`] put on the wire.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Drained {
+    /// Envelopes sealed, sent and committed.
+    pub published: u32,
+    /// Of those, the ones at least one friend can open.
+    pub reached: u32,
 }
 
 /// Ties the gate, the queue and the sink together. Holds no state of its own — everything durable
@@ -255,14 +320,14 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // the wire. The gate state is still saved — the accepted fix is real either way.
         if gate::critically_low(&battery) {
             self.gate.set(state);
-            return Ok(self.outcome(rejection, 0, 0, 0, 0, true));
+            return Ok(self.outcome(rejection, 0, Drained::default(), 0, 0, true));
         }
 
         let Some(known) = state.last_known_fix.as_ref().map(LocationFix::from) else {
             // Refused before we ever had a position. Nothing to republish, so no slot to fill; the
             // next acceptable fix anchors the grid.
             self.gate.set(state);
-            return Ok(self.outcome(rejection, 0, 0, 0, 0, false));
+            return Ok(self.outcome(rejection, 0, Drained::default(), 0, 0, false));
         };
 
         let plan = gate::due_slots(now_ms, interval_ms, state.last_published_slot);
@@ -277,11 +342,11 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // half-way, and re-running these slots on the next wake would double-publish them.
         self.gate.set(state);
 
-        let published = self.drain(now_ms).await?;
+        let drained = self.drain(now_ms).await?;
         Ok(self.outcome(
             rejection,
             plan.due,
-            published,
+            drained,
             plan.skipped,
             overflow_dropped,
             false,
@@ -311,12 +376,12 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         let mut state = self.gate.get();
 
         if gate::critically_low(&battery) {
-            return Ok(self.outcome(None, 0, 0, 0, 0, true));
+            return Ok(self.outcome(None, 0, Drained::default(), 0, 0, true));
         }
         let Some(known) = state.last_known_fix.as_ref().map(LocationFix::from) else {
             // Nothing has ever passed the gate, so there is no position to repeat. The first
             // acceptable fix anchors the grid.
-            return Ok(self.outcome(None, 0, 0, 0, 0, false));
+            return Ok(self.outcome(None, 0, Drained::default(), 0, 0, false));
         };
 
         // The declaration this whole field exists for. `heartbeat` is only reached from a phone
@@ -343,11 +408,11 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // earlier failed drain would then go out stamped `live` from a phone that is parked.
         self.gate.set(state);
 
-        let published = self.drain(now_ms).await?;
+        let drained = self.drain(now_ms).await?;
         Ok(self.outcome(
             None,
             plan.due,
-            published,
+            drained,
             plan.skipped,
             overflow_dropped,
             false,
@@ -384,11 +449,11 @@ impl<S: PublishSink> DrainEngine<'_, S> {
     pub async fn publish_introduction(&self, now_ms: u64) -> Result<IngestOutcome, PublishError> {
         let state = self.gate.get();
         let Some(known) = state.last_known_fix.as_ref().map(LocationFix::from) else {
-            return Ok(self.outcome(None, 0, 0, 0, 0, false));
+            return Ok(self.outcome(None, 0, Drained::default(), 0, 0, false));
         };
         let overflow_dropped = self.queue.enqueue(known)?.overflow_dropped;
-        let published = self.drain(now_ms).await?;
-        Ok(self.outcome(None, 1, published, 0, overflow_dropped, false))
+        let drained = self.drain(now_ms).await?;
+        Ok(self.outcome(None, 1, drained, 0, overflow_dropped, false))
     }
 
     /// Publish queued fixes in capture order, stopping at the first failure.
@@ -400,10 +465,11 @@ impl<S: PublishSink> DrainEngine<'_, S> {
     ///
     /// Returns how many reached the wire. A send failure is **not** an error here — a wake that
     /// published three of five envelopes did useful work, and the remainder is still queued.
-    pub async fn drain(&self, now_ms: u64) -> Result<u32, PublishError> {
+    pub async fn drain(&self, now_ms: u64) -> Result<Drained, PublishError> {
         let recipients = self.recipients.get();
         let watchers = self.recipients.watchers();
         let mut published = 0u32;
+        let mut reached = 0u32;
 
         // Read once for the whole drain: every envelope this wake seals is minted under the same
         // circumstances, whether it fills the current slot or backfills five that came due while
@@ -429,16 +495,15 @@ impl<S: PublishSink> DrainEngine<'_, S> {
                     .saturating_div(1000)
                     .min(u32::MAX as u64) as u32,
             );
-            if self
-                .sink
-                .publish(seq, fix, recipients.clone())
-                .await
-                .is_err()
-            {
+            let Ok(sealed) = self.sink.publish(seq, fix, recipients.clone()).await else {
                 break;
-            }
+            };
+            // Committed whether or not anyone could open it. A fix sealed for nobody is not worth
+            // retrying — the next slot will be sealed under the same sessions — and retaining it
+            // would back the queue up behind a condition only recovery can clear.
             self.queue.commit()?;
             published += 1;
+            let mut delivered = sealed.reached_anyone();
 
             // The watcher lane, on the same cadence and best-effort by design. The fix has already
             // gone out and been committed; a watch-only edge carries no position, so a failure here
@@ -447,11 +512,32 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             if !watchers.is_empty() {
                 let Ok(null_seq) = self.seq.next() else {
                     // The counter is gone; the next iteration's fix lane will stop on it too.
+                    if delivered {
+                        reached += 1;
+                    }
                     break;
                 };
-                let _ = self.sink.publish_null(null_seq, ts, watchers.clone()).await;
+                if let Ok(sealed) = self.sink.publish_null(null_seq, ts, watchers.clone()).await {
+                    // A null envelope a watcher can open is a real delivery: it carries our
+                    // ratchet contribution, which is what keeps their edge from lapsing.
+                    delivered |= sealed.reached_anyone();
+                }
+            }
+            if delivered {
+                reached += 1;
             }
         }
+
+        // After the fixes, so a slow recovery pass never delays them — and so a session it
+        // restores is used from the next drain rather than half-way through this one. Every
+        // friend, sharing and watch-only alike: a watcher edge is a session like any other.
+        let mut peers = recipients.clone();
+        peers.extend(watchers.iter().cloned());
+        let recovery = if peers.is_empty() {
+            RecoveryOutcome::default()
+        } else {
+            self.sink.recover(peers).await
+        };
 
         // One push per drain, not one per envelope: reconciliation moves everything the namespace
         // holds, so pushing per fix would pay a dial per fix to send a superset of the same thing.
@@ -461,12 +547,20 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // The error is deliberately swallowed. The fixes are committed and in the replica; a failed
         // push means the next one carries them, whereas propagating would make a drain that did
         // reach the wire look like a drain that did not, and retain fixes that already went out.
-        if published > 0 {
+        //
+        // Guarded on `reached`, not `published`: an envelope sealed for nobody is never written, so
+        // a drain whose every recipient was dropped has put nothing in the replica to push — and
+        // stamping `last_published_at` for it is how a phone reached nobody for a week while its
+        // health record said it had published thirty seconds ago. `recovery.in_progress` pushes
+        // anyway, because the push is also the pull that brings the peer's half of a resync in.
+        if reached > 0 || recovery.in_progress {
             // Stamp before the push, not after: these two answer different questions, and the gap
             // between them is the diagnosis. A phone that publishes and cannot push is a phone
             // whose fixes are sitting in its own replica — which read as perfect health for a whole
             // day on 2026-08-31, because nothing recorded either moment natively.
-            self.stamp(|state| state.last_published_at = Some(now_ms));
+            if reached > 0 {
+                self.stamp(|state| state.last_published_at = Some(now_ms));
+            }
             // Only a flush that actually reached a peer counts. `NoTargets` is a successful call
             // that pushed nothing, and stamping it would report a fresh push on a phone that has
             // never had anywhere to send.
@@ -474,7 +568,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
                 self.stamp(|state| state.last_pushed_at = Some(now_ms));
             }
         }
-        Ok(published)
+        Ok(Drained { published, reached })
     }
 
     /// Read-modify-write one field of the gate state. The store is last-write-wins and every field
@@ -489,7 +583,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         &self,
         rejection: Option<gate::FixRejection>,
         enqueued: u32,
-        published: u32,
+        drained: Drained,
         slots_skipped: u32,
         overflow_dropped: u32,
         suspended: bool,
@@ -498,7 +592,8 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             accepted: rejection.is_none(),
             rejection,
             enqueued,
-            published,
+            published: drained.published,
+            reached: drained.reached,
             pending: self.queue.pending(),
             slots_skipped,
             overflow_dropped,

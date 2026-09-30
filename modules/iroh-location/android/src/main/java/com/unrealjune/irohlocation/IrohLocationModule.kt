@@ -292,6 +292,7 @@ private fun ingestOutcomeToMap(o: IngestOutcome): Map<String, Any?> =
     "rejection" to o.rejection?.name?.lowercase(),
     "enqueued" to o.enqueued.toLong(),
     "published" to o.published.toLong(),
+    "reached" to o.reached.toLong(),
     "pending" to o.pending.toLong(),
     "slotsSkipped" to o.slotsSkipped.toLong(),
     "overflowDropped" to o.overflowDropped.toLong(),
@@ -765,6 +766,33 @@ class IrohLocationModule : Module() {
       { recipientEndpointsHex: List<String>, watcherEndpointsHex: List<String> ->
         requireNode().setSharingRecipients(recipientEndpointsHex, watcherEndpointsHex)
         Unit
+      }
+
+    /// Mirror each friend's receiving key so the native drain can run session recovery (§4.6) on a
+    /// wake with no JS alive. Two parallel lists rather than records: the bridge carries lists of
+    /// strings without a converter, and JS builds both from the same pool in one pass.
+    AsyncFunction("setRecipientKeys") Coroutine
+      { endpointsHex: List<String>, recvPublicsHex: List<String> ->
+        requireNode().setRecipientKeys(
+          endpointsHex.zip(recvPublicsHex).map { (e, k) -> RecipientKey(e, k) }
+        )
+        Unit
+      }
+
+    /// Who the latest fix envelope was sealed for and who it left out, and why. `null` before the
+    /// first seal. `device.health` reports it as `ratchet.dropped*`.
+    AsyncFunction("lastSealReport") Coroutine
+      { ->
+        requireNode().lastSealReport()?.let { r ->
+          mapOf(
+            "at" to r.at.toLong(),
+            "recipients" to r.recipients.toLong(),
+            "dropped" to r.dropped.toLong(),
+            "lapsed" to r.lapsed.toLong(),
+            "noSession" to r.noSession.toLong(),
+            "other" to r.other.toLong(),
+          )
+        }
       }
 
     /// Read the durable sharing set back. `device.health` reports its size next to the pool's, so a
