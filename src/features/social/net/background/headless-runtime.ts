@@ -7,7 +7,6 @@ import {
   clearTeardownWatermark,
   createPersistentKV,
   loadIosLocationBenchmarkProfile,
-  loadShareIntervalMs,
   loadSharingEnabled,
   saveTeardownWatermark,
 } from '../persistence';
@@ -287,7 +286,6 @@ export async function ensureSharingArmedHeadless(
   });
   try {
     const policy = createSamplingPolicy({
-      intervalMs: await loadShareIntervalMs(kv),
       ...benchmarkProfileOverrides(await loadIosLocationBenchmarkProfile(kv)),
     });
     // Ambient cadence only. A self-heal never restores live mode: the watcher's window has almost

@@ -1365,3 +1365,146 @@ async fn a_null_envelope_a_watcher_can_open_counts_as_reached() {
     assert_eq!(out.reached, 1);
     assert_eq!(*h.sink.flushes.lock().unwrap(), 1);
 }
+
+/// A realistic wall clock, so slot indices are the size a phone actually persists. The stall this
+/// guards against only exists because an index minted on one grid is enormous on a coarser one.
+const WALL: u64 = 1_790_740_000_000;
+
+#[tokio::test]
+async fn lengthening_the_interval_does_not_stop_publishing() {
+    // 2026-09-30: a phone whose gate had last published on a 1-minute grid was moved to 5 minutes.
+    // The stored index was ~5x anything the new grid produces, so every slot read as covered and
+    // the phone stopped publishing — fixes and heartbeats alike — for good.
+    let h = Harness::new();
+    let engine = h.engine();
+    engine
+        .ingest(fix(WALL, 20.0), healthy_battery(), MINUTE, WALL)
+        .await
+        .unwrap();
+    assert_eq!(h.sink.sent.lock().unwrap().len(), 1);
+
+    let later = WALL + 7 * MINUTE;
+    let out = engine
+        .heartbeat(healthy_battery(), INTERVAL, later)
+        .await
+        .unwrap();
+    assert!(
+        out.published >= 1,
+        "the coarser grid still owes slots once the old one's coverage has passed"
+    );
+
+    // And it keeps going on the new grid rather than publishing once and stalling again.
+    let much_later = later + 2 * INTERVAL;
+    let out = engine
+        .heartbeat(healthy_battery(), INTERVAL, much_later)
+        .await
+        .unwrap();
+    assert!(out.published >= 1);
+}
+
+#[tokio::test]
+async fn shortening_the_interval_does_not_republish_what_already_went_out() {
+    // 15 → 5 minutes. The slot published on the 15-minute grid covered a quarter hour; the 5-minute
+    // slots inside it are covered too, so the change costs no burst.
+    let h = Harness::new();
+    let engine = h.engine();
+    let fifteen = 15 * MINUTE;
+    let start = (WALL / fifteen) * fifteen;
+    engine
+        .ingest(fix(start, 20.0), healthy_battery(), fifteen, start)
+        .await
+        .unwrap();
+
+    let inside = start + 11 * MINUTE;
+    let out = engine
+        .heartbeat(healthy_battery(), INTERVAL, inside)
+        .await
+        .unwrap();
+    assert_eq!(
+        out.enqueued, 0,
+        "still inside the quarter hour that went out"
+    );
+
+    let after = start + fifteen + MINUTE;
+    let out = engine
+        .heartbeat(healthy_battery(), INTERVAL, after)
+        .await
+        .unwrap();
+    assert_eq!(out.enqueued, 1, "exactly the one new 5-minute slot");
+}
+
+#[tokio::test]
+async fn a_gate_written_before_the_interval_was_recorded_regrids_from_its_last_publish() {
+    // State from a build that did not store the interval: a 1-minute-grid index with no interval,
+    // but a `last_published_at`. The translation falls back to the timestamp.
+    let h = Harness::new();
+    *h.gate.0.lock().unwrap() = GateState {
+        last_known_fix: Some((&fix(WALL, 20.0)).into()),
+        last_accepted_at: Some(WALL),
+        last_published_slot: Some(WALL / MINUTE),
+        last_published_at: Some(WALL),
+        ..GateState::default()
+    };
+    let out = h
+        .engine()
+        .heartbeat(healthy_battery(), INTERVAL, WALL + 2 * INTERVAL)
+        .await
+        .unwrap();
+    assert!(out.published >= 1, "a legacy index must not wedge the grid");
+}
+
+#[test]
+fn drop_reasons_use_the_js_spellings() {
+    use iroh_location::gate::FixRejection;
+    use iroh_location::publish::{drop_reason, IngestOutcome};
+    let base = IngestOutcome {
+        accepted: true,
+        rejection: None,
+        enqueued: 1,
+        published: 1,
+        reached: 1,
+        pending: 0,
+        slots_skipped: 0,
+        overflow_dropped: 0,
+        suspended: false,
+    };
+    assert_eq!(
+        drop_reason(&base),
+        None,
+        "a slot that went out is not a drop"
+    );
+    let absorbed = IngestOutcome {
+        enqueued: 0,
+        published: 0,
+        reached: 0,
+        ..base.clone()
+    };
+    assert_eq!(
+        drop_reason(&absorbed),
+        None,
+        "absorbed is not a drop either"
+    );
+    let refused = IngestOutcome {
+        accepted: false,
+        rejection: Some(FixRejection::Inaccurate),
+        ..absorbed.clone()
+    };
+    assert_eq!(drop_reason(&refused), Some("fix-inaccurate"));
+    let nobody = IngestOutcome {
+        reached: 0,
+        ..base.clone()
+    };
+    assert_eq!(drop_reason(&nobody), Some("no-recipient-reached"));
+    let stuck = IngestOutcome {
+        published: 0,
+        reached: 0,
+        pending: 1,
+        ..base.clone()
+    };
+    assert_eq!(drop_reason(&stuck), Some("publish-incomplete"));
+    let low = IngestOutcome {
+        suspended: true,
+        ..absorbed
+    };
+    assert_eq!(drop_reason(&low), Some("sampling-suspended"));
+}

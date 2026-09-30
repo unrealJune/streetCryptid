@@ -727,6 +727,7 @@ public final class IrohLocationModule: Module {
       return [
         "at": Double(r.at), "recipients": Double(r.recipients), "dropped": Double(r.dropped),
         "lapsed": Double(r.lapsed), "noSession": Double(r.noSession), "other": Double(r.other),
+        "droppedPeers": r.droppedPeers,
       ]
     }
 
@@ -762,6 +763,13 @@ public final class IrohLocationModule: Module {
         "lastPublishedAt": w.lastPublishedAt.map { Double($0) },
         "lastPushedAt": w.lastPushedAt.map { Double($0) },
       ]
+    }
+
+    // Every position the drain published since the app last asked — how a stretch published with
+    // no JS alive reaches the own trail and the exploration map. See `own_log.rs`.
+    AsyncFunction("takeOwnPublished") { () async throws -> [[String: Any]] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.takeOwnPublished().map { ["seq": Double($0.seq), "fix": fixToDict($0.fix)] }
     }
 
     AsyncFunction("outboxPending") { () async throws -> Double in

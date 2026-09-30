@@ -136,8 +136,6 @@ export interface LocationEngine {
   heartbeat(parent?: SpanContext): Promise<number>;
   /** Drain whatever is queued. The native heartbeat does both, so this is the same call. */
   flush(parent?: SpanContext): Promise<number>;
-  /** Change the cadence the user chose. Re-decides so the controller re-arms the OS. */
-  setIntervalMs(intervalMs: number): Promise<SamplingDecision>;
   /** Re-run the policy against current power, without a new fix. */
   reevaluate(): Promise<SamplingDecision>;
   onState(cb: (s: EngineState) => void): () => void;
@@ -272,11 +270,6 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
       // and a heartbeat are the same call. Kept as two names because the callers mean different
       // things by them.
       return runHeartbeat('flush', parent);
-    },
-
-    async setIntervalMs(intervalMs: number): Promise<SamplingDecision> {
-      policy.setIntervalMs(intervalMs);
-      return this.reevaluate();
     },
 
     async reevaluate(): Promise<SamplingDecision> {

@@ -28,6 +28,7 @@ pub mod mesh;
 /// Native MVT tile/bundle decoder for the map pipeline (pure; see `mvt.rs`).
 pub mod mvt;
 pub mod outbox;
+pub mod own_log;
 pub mod pad;
 mod pairing;
 mod profile;
@@ -1220,6 +1221,9 @@ pub struct LocationNode {
     outbox: Mutex<Option<Arc<outbox::Outbox>>>,
     recipients: Mutex<Option<Arc<recipients::RecipientStore>>>,
     gate: Mutex<Option<Arc<gate::GateStore>>>,
+    /// Every position this device put on the wire, until the app takes them into its own trail.
+    /// See [`own_log`] for why the replica cannot answer that.
+    own_log: Mutex<Option<Arc<own_log::OwnLog>>>,
     /// The settings a background bootstrap needs before it can call `start` — see
     /// [`crate::transport`]. Opened eagerly with the node rather than lazily, because the one
     /// caller that needs it is the one with no JS context to fall back on.
@@ -1400,6 +1404,7 @@ impl LocationNode {
             at: now_ms(),
             recipients: total as u32,
             dropped: dropped.len() as u32,
+            dropped_peers: dropped.to_vec(),
             ..Default::default()
         };
         for entry in dropped {
@@ -1946,6 +1951,7 @@ fn new_location_node_at(
         outbox: Mutex::new(None),
         recipients: Mutex::new(None),
         gate: Mutex::new(None),
+        own_log: Mutex::new(None),
         transport: Mutex::new(None),
         delivery: Mutex::new(None),
         pending_bootstrap: Mutex::new(HashMap::new()),
@@ -2129,6 +2135,15 @@ impl LocationNode {
             if slot.is_none() {
                 *slot = Some(Arc::new(
                     gate::GateStore::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.own_log.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    own_log::OwnLog::open(&self.state_dir)
                         .map_err(|e| LocationError::Network(e.to_string()))?,
                 ));
             }
@@ -2372,6 +2387,7 @@ impl LocationNode {
         *self.outbox.lock().await = None;
         *self.recipients.lock().await = None;
         *self.gate.lock().await = None;
+        *self.own_log.lock().await = None;
         *self.transport.lock().await = None;
         tracing::info!("shutdown: complete");
         Ok(())
@@ -3187,6 +3203,27 @@ impl LocationNode {
             last_published_at: state.last_published_at,
             last_pushed_at: state.last_pushed_at,
         })
+    }
+
+    /// Every position this device has published since the app last asked, oldest first, and forget
+    /// them. The app appends them to its own trail; see [`own_log`] for why the replica cannot.
+    pub async fn take_own_published(&self) -> Result<Vec<own_log::OwnPublished>, LocationError> {
+        let log = self
+            .own_log
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)?;
+        log.take()
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// Record a published position locally. Best-effort: a node without the log (not started) and
+    /// a log that cannot write both lose only a trail point, never the publish.
+    async fn record_own_published(&self, seq: u64, fix: &LocationFix) {
+        if let Some(log) = self.own_log.lock().await.clone() {
+            log.record(seq, fix);
+        }
     }
 
     /// How many captured fixes are waiting to be sealed.
@@ -4792,6 +4829,7 @@ impl publish::PublishSink for SubscriptionSink<'_> {
                 .await
                 .map_err(|e| publish::PublishError::Send(e.to_string()))?;
             let total = recipients.len();
+            let own = fix.clone();
             let dropped = self
                 .subscription
                 .node
@@ -4800,6 +4838,9 @@ impl publish::PublishSink for SubscriptionSink<'_> {
                 .map_err(|e| publish::PublishError::Send(e.to_string()))?;
             let sealed = sealed_from(total, &dropped);
             self.subscription.node.note_seal(total, &dropped).await;
+            // After both lanes succeeded, and whatever the recipients made of it: this is the
+            // device's own trail, which records where it WAS, not who could read it.
+            self.subscription.node.record_own_published(seq, &own).await;
             Ok(sealed)
         }
         .instrument(span)

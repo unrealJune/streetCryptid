@@ -110,6 +110,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     case relaunch
     case stateChange = "state_change"
     case seed
+    /// A `BGProcessingTask` wake — `NativeRefreshTask`. A clock, like `periodic`, but a rare one
+    /// the OS chose to give us, so it is allowed to pull as well as publish.
+    case refresh
   }
 
   // MARK: - Tuning
@@ -207,6 +210,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// Whether `manager` was created on the main thread, i.e. whether its callbacks can arrive at all.
   /// See `shared`.
   private let delegateOnMain = Thread.isMainThread
+
+  /// A `CLBackgroundActivitySession`, held for as long as sharing runs. `AnyObject` so the stored
+  /// property compiles below iOS 17; see `holdActivitySession`.
+  private var activitySession: AnyObject?
 
   private override init() {
     super.init()
@@ -336,6 +343,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     rearmStopAnchorFence()
 
     manager.allowsBackgroundLocationUpdates = true
+    holdActivitySession()
     running = true
     // Record the intent NOW, before anything below can throw or hang. A launch that dies here must
     // still come back armed — the same argument as arming the resurrection ladder first.
@@ -365,6 +373,87 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     seedGateFromCache()
 
     manager.startUpdatingLocation()
+    NativeRefreshTask.schedule()
+  }
+
+  /// Keep this process eligible to run in the background while location updates flow.
+  ///
+  /// ## What it fixes
+  ///
+  /// On 2026-09-30 an iPhone 16 Pro Max arrived somewhere with a friend and never declared itself
+  /// parked. Its process had been relaunched in the background by Core Location, and from then on
+  /// it lived in bursts: 16:29:26 to 16:31:09, suspended, 16:36:44 to 16:38:13, suspended for good —
+  /// about ninety seconds of execution per wake, each ended by iOS while the unfiltered candidate
+  /// stream was still delivering every few seconds. Confirming a stop takes `stopDwellSeconds`
+  /// (180 s) inside one candidate, so it could not complete inside any single burst, and the last
+  /// envelope before the silence went out `live`.
+  ///
+  /// Since iOS 17, standard location updates alone do not keep a background-LAUNCHED app running;
+  /// that takes a `CLBackgroundActivitySession`. One created in the foreground is honoured in the
+  /// background, and a process the system relaunches because of it may recreate it — which is what
+  /// `start()` does on every launch. Recreated on each foreground entry too, so the session a
+  /// terminated process is later relaunched to resume is one the user established.
+  ///
+  /// With `Always` authorization this shows no indicator; the pill is for `When In Use`.
+  func holdActivitySession() {
+    guard #available(iOS 17.0, *) else { return }
+    (activitySession as? CLBackgroundActivitySession)?.invalidate()
+    activitySession = CLBackgroundActivitySession()
+  }
+
+  private func dropActivitySession() {
+    if #available(iOS 17.0, *) {
+      (activitySession as? CLBackgroundActivitySession)?.invalidate()
+    }
+    activitySession = nil
+  }
+
+  /// The app came to the foreground: re-establish the activity session from there. See
+  /// `holdActivitySession`. No-op when sharing is off.
+  func appWillEnterForeground() {
+    guard running else { return }
+    holdActivitySession()
+  }
+
+  /// Service a `NativeRefreshTask` wake: confirm a stop the wake windows starved, then publish and
+  /// pull.
+  ///
+  /// The confirmation is the part that is not a heartbeat. A process suspended mid-dwell keeps its
+  /// candidate in memory, and nothing else will ever complete it: with the phone still there, Core
+  /// Location has no delivery to make. So a refresh that finds a candidate older than the dwell,
+  /// and no evidence the phone has left it, takes the stop — and the heartbeat that follows then
+  /// seals `parked`, which is what the friend's map was waiting to be told.
+  func serviceRefresh() async {
+    let proceed = await MainActor.run { () -> Bool in
+      guard self.running else { return false }
+      self.note(.refresh)
+      self.confirmDwelledCandidate()
+      return true
+    }
+    guard proceed else { return }
+    await heartbeat(battery: Self.battery())
+  }
+
+  /// Take a stop whose dwell has elapsed without a delivery to confirm it. Returns whether we
+  /// stopped.
+  ///
+  /// Evidence against it is a position newer than the candidate that has left the jitter radius;
+  /// no position at all is not evidence — the candidate's fence is armed either way, so a phone
+  /// that did leave comes back to `moving` on the fence.
+  @discardableResult
+  private func confirmDwelledCandidate() -> Bool {
+    guard state == .moving, let candidate = stopCandidate,
+      Date().timeIntervalSince(candidate.since) >= Self.stopDwellSeconds
+    else { return false }
+    if let here = manager.location ?? lastSeenLocation,
+      here.timestamp > candidate.since,
+      here.distance(from: candidate.centre) > Self.stopJitterRadiusM
+    {
+      return false
+    }
+    NSLog("[iroh-location] confirming a stop the wake windows starved of its second delivery")
+    enterStopped(anchor: candidate.centre)
+    return state == .stopped
   }
 
   /// Push the cached position through the gate, so `heartbeat` has something to repeat.
@@ -513,6 +602,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     manager.stopMonitoringSignificantLocationChanges()
     clearStopAnchorFence()
     manager.allowsBackgroundLocationUpdates = false
+    dropActivitySession()
+    NativeRefreshTask.cancel()
     running = false
     state = .moving
     stopAnchor = nil
@@ -1139,7 +1230,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// publish that has already succeeded, and the next wake tries again.
   private func pullFriendFixes() async {
     switch lastWakeReason {
-    case .movement, .geofenceExit, .relaunch: break
+    case .movement, .geofenceExit, .relaunch, .refresh: break
     case .periodic, .coarseDeparture, .stateChange, .seed: return
     }
     let now = Date().timeIntervalSince1970 * 1000

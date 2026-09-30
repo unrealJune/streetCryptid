@@ -116,8 +116,6 @@ interface LocationSharingContextValue {
   setDeliveryMode(mode: DeliveryMode): Promise<void>;
   /** Enable or disable one native endpoint transport. */
   setTransportEnabled(transport: keyof TransportPreferences, enabled: boolean): Promise<void>;
-  /** Change how often location is published. One of `SHARE_INTERVAL_OPTIONS_MS`. */
-  setShareInterval(intervalMs: number): Promise<void>;
   /**
    * Read the user's current position for the UI, asking the OS if we do not have one.
    *
@@ -661,13 +659,6 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     },
     [run]
   );
-  const setShareInterval = useCallback(
-    (intervalMs: number) => {
-      setServiceError(null);
-      return run((service) => service.setShareInterval(intervalMs));
-    },
-    [run]
-  );
   /**
    * Where the user is, right now, for the UI — independent of the sharing pipeline entirely.
    *
@@ -1007,7 +998,6 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       retryLocation,
       setDeliveryMode,
       setTransportEnabled,
-      setShareInterval,
       locateNow,
       forceLocationPush,
       runDevCommand,
@@ -1044,7 +1034,6 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       retryLocation,
       setDeliveryMode,
       setTransportEnabled,
-      setShareInterval,
       locateNow,
       forceLocationPush,
       runDevCommand,

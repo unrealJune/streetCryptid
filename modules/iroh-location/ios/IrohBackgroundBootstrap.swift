@@ -36,6 +36,10 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
     //    still calls it — this is the earlier of two registrations, not a move.
     MetricKitDiagnostics.shared.start()
 
+    // 1a. The parked-phone wake. `BGTaskScheduler` insists every handler is registered before the
+    //     app finishes launching — on EVERY launch, including the one it launches us for.
+    NativeRefreshTask.register()
+
     // 2. The wake ledger, before anything can spend the budget it is measuring.
     let background = application.applicationState == .background
     BackgroundWakeLedger.noteLaunch(background: background)
@@ -128,9 +132,12 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
 
   public func applicationDidEnterBackground(_ application: UIApplication) {
     BackgroundWakeLedger.enterBackground()
+    // Keep a wake requested whenever we leave the screen; iOS may have run and consumed the last.
+    NativeRefreshTask.schedule()
   }
 
   public func applicationWillEnterForeground(_ application: UIApplication) {
     BackgroundWakeLedger.enterForeground()
+    BackgroundLocationRuntime.shared.appWillEnterForeground()
   }
 }

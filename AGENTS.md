@@ -118,6 +118,25 @@ Conventions when changing that code:
   Grafana panels counted them behind `or vector(0)`, which renders a reassuring **0** forever. Use
   `device.health` (with its `wake.*`) and `bg.refresh`. Check for this shape before trusting any
   tile: a span name nothing emits looks exactly like a fleet that is fine.
+- **The native drain lost four things the JS engine did, and each now has an owner.** Audited
+  2026-09-30 against v1.6.1. (1) `GateState.last_published_slot` is a slot INDEX; `gate::regrid`
+  translates it through time when the interval changes (`slot_interval_ms` records the grid it was
+  minted on) and `due_slots` treats an index ahead of the clock as unrecorded — without both,
+  lengthening the interval stopped publishing for good. The interval is no longer a setting at all
+  (`SHARE_INTERVAL_MS`). (2) The replica keeps one slot per author, so `own_log.rs` records every
+  published position and JS drains it (`takeOwnPublished`) into the own trail; without it a stretch
+  published with no JS alive reached the trail and the exploration map as one point.
+  (3) `lastSealReport().droppedPeers` + `isDesynced`/`resyncCount` feed the per-friend health
+  badges (`refreshSessionHealth`); they were written only by the JS publish path. (4)
+  `engine.ingest` / `engine.heartbeat` are emitted by `DrainEngine` itself, with the JS
+  `sc.drop_reason` spellings (`publish::drop_reason`), so JS-free wakes are observable.
+- **A background-relaunched iOS process needs a `CLBackgroundActivitySession`, and a parked one needs
+  `NativeRefreshTask`.** On 2026-09-30 a relaunched iPhone ran ~90 s per wake and was suspended mid
+  stop-dwell (180 s), so it never declared `parked`. `holdActivitySession` runs on every `start()`
+  and foreground entry. `NativeRefreshTask` is the `BGProcessingTask` the retired JS refresh used
+  to be: it confirms a dwell the wake windows starved (`confirmDwelledCandidate`), heartbeats and
+  pulls. Its identifier must stay in `BGTaskSchedulerPermittedIdentifiers` (`app.json`).
+  Android's `NativeBackgroundRuntime` pulls friends too (`pullFriendFixes`), floored at 5 min.
 - **Who owns the Rust stores is now stated, not raced.** `BackgroundLocationRuntime.owner` defaults
   to `.app`, and `ensureStarted()` returns on its first line unless it is `.native` — which removes
   the reason for the 2026-09-16 construction storm rather than merely bounding it, since the

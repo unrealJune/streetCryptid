@@ -190,7 +190,7 @@ internal object NativeBackgroundRuntime {
     }
     val sub = lock.withLock { subscription } ?: return Capture.Unavailable
     return try {
-      Capture.Ingested(
+      val outcome =
         sub.ingestFix(
           SUBSCRIPTION_ID,
           fix,
@@ -198,7 +198,8 @@ internal object NativeBackgroundRuntime {
           intervalMs,
           System.currentTimeMillis().toULong(),
         )
-      )
+      pullFriendFixes(context)
+      Capture.Ingested(outcome)
     } catch (e: Exception) {
       // The fix stays in the native outbox, so the next wake retries it. Failing loudly here would
       // take down a foreground service over a transient relay error.
@@ -232,14 +233,15 @@ internal object NativeBackgroundRuntime {
     }
     val sub = lock.withLock { subscription } ?: return Capture.Unavailable
     return try {
-      Capture.Ingested(
+      val outcome =
         sub.heartbeatFix(
           SUBSCRIPTION_ID,
           battery,
           intervalMs,
           System.currentTimeMillis().toULong(),
         )
-      )
+      pullFriendFixes(context)
+      Capture.Ingested(outcome)
     } catch (e: Exception) {
       // Same reasoning as `ingest`: a transient relay error must not take down the service. The
       // anchor is still in the gate, so the next tick republishes it.
@@ -247,6 +249,41 @@ internal object NativeBackgroundRuntime {
       Capture.Unavailable
     }
   }
+
+  /**
+   * Pull friends' new fixes, so a process with no JS alive RECEIVES as well as sends.
+   *
+   * The Android half of iOS's `pullFriendFixes`. With the app process gone, this runtime owns the
+   * node — and the JS periodic refresh, which used to reconcile against the stash every ~15 min,
+   * cannot build a node of its own while this one holds the store claims. So without this a phone
+   * whose app the OS had killed published its own position on time while every friend's dot on
+   * ITS map stayed wherever it was when the app died. Live gossip still arrives, but only while
+   * both phones are online at the same moment; the stash is the part that needs a pull.
+   *
+   * Floored at one pull per [SYNC_FLOOR_MS], durably, because `syncLatest` dials every delivery
+   * peer and a pull on every delivery would spend the budget the whole native path exists to
+   * protect. Failures are swallowed: the publish already succeeded, and the next wake retries.
+   */
+  private suspend fun pullFriendFixes(context: Context) {
+    val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    val now = System.currentTimeMillis()
+    if (now - prefs.getLong(LAST_SYNC_KEY, 0L) < SYNC_FLOOR_MS) return
+    prefs.edit().putLong(LAST_SYNC_KEY, now).apply()
+    val node = lock.withLock { node } ?: return
+    try {
+      val tickets = node.deliveryConfig().peerTickets
+      if (tickets.isEmpty()) return
+      node.syncLatest(tickets, null)
+      Log.i(TAG, "pulled from ${tickets.size} peer(s)")
+    } catch (e: Exception) {
+      Log.w(TAG, "pull failed; the next wake retries", e)
+    }
+  }
+
+  private const val PREFS = "iroh-location.background"
+  private const val LAST_SYNC_KEY = "last_sync_ms"
+  /** One pull per default publish slot: a phone in motion pulls about as often as it sends. */
+  private const val SYNC_FLOOR_MS = 5 * 60 * 1000L
 
   /** Whether this device has an identity at all — the one case a handoff cannot help. */
   private fun hasIdentity(context: Context): Boolean =

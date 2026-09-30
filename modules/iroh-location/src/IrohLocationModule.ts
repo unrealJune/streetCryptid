@@ -208,6 +208,12 @@ export declare class IrohLocationNativeModule
    * {@link saveDeviceSecrets} is unconditional. OPTIONAL.
    */
   deviceSecretsProvisioned?(): boolean;
+  /**
+   * Every position envelope the native drain published since the last call, oldest first, with the
+   * `seq` that went on the wire — and forget them. How a stretch published with no JS alive reaches
+   * the own trail; the replica keeps only the latest fix per author. OPTIONAL: older binaries.
+   */
+  takeOwnPublished?(): Promise<{ seq: number; fix: NativeLocationFix }[]>;
   /** Fixes captured but not yet sealed, in the native queue. OPTIONAL. */
   outboxPending?(): Promise<number>;
   /** Drop every queued fix (sign-out, or sharing off for good). OPTIONAL. */
@@ -253,6 +259,8 @@ export declare class IrohLocationNativeModule
     lapsed: number;
     noSession: number;
     other: number;
+    /** `<endpoint hex>:<reason>` per friend left out. Absent on binaries that predate it. */
+    droppedPeers?: string[];
   } | null>;
   /**
    * Who the native drain path will seal for RIGHT NOW, read back from its durable store.

@@ -35,14 +35,12 @@ jest.mock('../../components/friend-connection-details-row', () => ({
 jest.mock('../../components/event-log-panel', () => ({ EventLogPanel: () => null }));
 
 const mockSetDelivery = jest.fn().mockResolvedValue(undefined);
-const mockSetShareInterval = jest.fn();
 jest.mock('@/features/social/hooks/use-location-sharing', () => ({
   useLocationSharing: () => ({
     snapshot: { delivery: { mode: 'mutual', stashConfigured: true } },
     transportReport: { rows: [], error: null, updatedAt: null },
     refreshTransportDiagnostics: jest.fn(),
     setDeliveryMode: mockSetDelivery,
-    setShareInterval: mockSetShareInterval,
     disclosureStatus: 'accepted',
     acknowledgeLocationDisclosure: jest.fn(),
     forceLocationPush: jest.fn(),
@@ -120,6 +118,5 @@ describe('settings pages', () => {
     ).toEqual(['ACCESS']);
     await act(async () => renderer.root.findByType(DeliveryOptions).props.onSelect('stash'));
     expect(mockSetDelivery).toHaveBeenCalledWith('stash');
-    expect(mockSetShareInterval).not.toHaveBeenCalled();
   });
 });

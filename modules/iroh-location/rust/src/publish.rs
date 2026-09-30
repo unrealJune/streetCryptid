@@ -287,6 +287,20 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         interval_ms: u64,
         now_ms: u64,
     ) -> Result<IngestOutcome, PublishError> {
+        let outcome = self
+            .ingest_untraced(fix, battery, interval_ms, now_ms)
+            .await?;
+        trace_outcome("engine.ingest", &outcome);
+        Ok(outcome)
+    }
+
+    async fn ingest_untraced(
+        &self,
+        fix: LocationFix,
+        battery: BatteryState,
+        interval_ms: u64,
+        now_ms: u64,
+    ) -> Result<IngestOutcome, PublishError> {
         let mut state = self.gate.get();
 
         // Quality first — and note it does NOT stop the clock. A refused fix falls through to the
@@ -330,6 +344,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             return Ok(self.outcome(rejection, 0, Drained::default(), 0, 0, false));
         };
 
+        gate::regrid(&mut state, interval_ms);
         let plan = gate::due_slots(now_ms, interval_ms, state.last_published_slot);
         let mut overflow_dropped = 0u32;
         for _ in 0..plan.due {
@@ -373,6 +388,19 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         interval_ms: u64,
         now_ms: u64,
     ) -> Result<IngestOutcome, PublishError> {
+        let outcome = self
+            .heartbeat_untraced(battery, interval_ms, now_ms)
+            .await?;
+        trace_outcome("engine.heartbeat", &outcome);
+        Ok(outcome)
+    }
+
+    async fn heartbeat_untraced(
+        &self,
+        battery: BatteryState,
+        interval_ms: u64,
+        now_ms: u64,
+    ) -> Result<IngestOutcome, PublishError> {
         let mut state = self.gate.get();
 
         if gate::critically_low(&battery) {
@@ -392,6 +420,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // iOS is 92 minutes with a 17-hour tail.
         state.last_state = Some(FIX_STATE_PARKED);
 
+        gate::regrid(&mut state, interval_ms);
         let plan = gate::due_slots(now_ms, interval_ms, state.last_published_slot);
         let mut overflow_dropped = 0u32;
         for _ in 0..plan.due {
@@ -600,4 +629,76 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             suspended,
         }
     }
+}
+
+/// Why an ingest or heartbeat put nothing — or less than it owed — on the wire, in the
+/// `sc.drop_reason` spellings the JS engine used, so the same queries answer for both paths.
+///
+/// `None` for the ordinary outcomes: a slot published, or a fix absorbed into a slot that was
+/// already covered (the common case by far, and not a drop).
+pub fn drop_reason(outcome: &IngestOutcome) -> Option<&'static str> {
+    if let Some(rejection) = outcome.rejection {
+        return Some(rejection.as_str());
+    }
+    if outcome.suspended {
+        return Some("sampling-suspended");
+    }
+    if outcome.overflow_dropped > 0 {
+        return Some("outbox-overflow");
+    }
+    if outcome.published > 0 && outcome.reached == 0 {
+        return Some("no-recipient-reached");
+    }
+    if outcome.enqueued > outcome.published {
+        return Some("publish-incomplete");
+    }
+    if outcome.slots_skipped > 0 {
+        return Some("backfill-capped");
+    }
+    None
+}
+
+/// One span per ingest or heartbeat that did something worth seeing.
+///
+/// The JS engine emitted `engine.ingest` for every fix, with the gate's verdict, the slot outcome
+/// and the queue depth on it. Publishing moved into this engine and those spans went with the JS
+/// that emitted them: a phone whose GPS only produced fixes the gate refused, or whose queue was
+/// overflowing, or whose envelopes reached nobody, said so only in a device log. Same names, same
+/// `sc.drop_reason` values, now from wherever the pipeline runs — JS-free wakes included.
+///
+/// Absorbed fixes are not traced: they are most deliveries, and they are not an outcome.
+fn trace_outcome(name: &'static str, outcome: &IngestOutcome) {
+    let reason = drop_reason(outcome);
+    if reason.is_none() && outcome.enqueued == 0 && outcome.published == 0 {
+        return;
+    }
+    let span = if name == "engine.ingest" {
+        tracing::info_span!(
+            "engine.ingest",
+            lane = "native",
+            accepted = outcome.accepted,
+            enqueued = outcome.enqueued,
+            published = outcome.published,
+            reached = outcome.reached,
+            pending = outcome.pending,
+            slots_skipped = outcome.slots_skipped,
+            overflow_dropped = outcome.overflow_dropped,
+            suspended = outcome.suspended,
+            sc.drop_reason = reason.unwrap_or(""),
+        )
+    } else {
+        tracing::info_span!(
+            "engine.heartbeat",
+            lane = "native",
+            enqueued = outcome.enqueued,
+            published = outcome.published,
+            reached = outcome.reached,
+            pending = outcome.pending,
+            slots_skipped = outcome.slots_skipped,
+            overflow_dropped = outcome.overflow_dropped,
+            suspended = outcome.suspended,
+            sc.drop_reason = reason.unwrap_or(""),
+        )
+    };
+    drop(span.entered());
 }

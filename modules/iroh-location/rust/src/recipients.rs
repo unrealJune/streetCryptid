@@ -99,7 +99,7 @@ pub struct RecipientStore {
 /// native drain replaced that path and the row stopped moving — so through a week-long mutual
 /// lapse the one attribute built to show "publishing to nobody" was simply absent. This is the same
 /// fact, recorded where the sealing happens.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, uniffi::Record)]
 pub struct SealReport {
     /// When the envelope was sealed (ms since epoch).
     pub at: u64,
@@ -109,26 +109,46 @@ pub struct SealReport {
     pub no_session: u32,
     /// `state_unavailable` + `no_sending_chain`: transient, telemetered, never shown to a human.
     pub other: u32,
+    /// Who was left out, as `<endpoint hex>:<reason>` — the per-friend half of the counts above.
+    ///
+    /// The app's "needs re-pair" / "lapsed" badges are drawn from this. They were fed by the JS
+    /// publish path, which the native drain replaced, so from then on they never changed: a friend
+    /// could be dropped from every envelope for a week while their row in the app looked fine.
+    pub dropped_peers: Vec<String>,
 }
 
 impl SealReport {
+    /// Six numbers, then one token per dropped peer. Endpoint hex and the reason spellings contain
+    /// no whitespace, and a reader that predates the peers stops after the sixth number.
     fn encode(&self) -> String {
-        format!(
+        let mut out = format!(
             "{} {} {} {} {} {}",
             self.at, self.recipients, self.dropped, self.lapsed, self.no_session, self.other
-        )
+        );
+        for peer in &self.dropped_peers {
+            out.push(' ');
+            out.push_str(peer);
+        }
+        out
     }
 
     fn decode(raw: &str) -> Option<Self> {
-        let mut it = raw.split_whitespace().map(|p| p.parse::<u64>().ok());
-        let mut next = || it.next().flatten();
+        let mut tokens = raw.split_whitespace();
+        let mut next = || tokens.next().and_then(|p| p.parse::<u64>().ok());
+        let at = next()?;
+        let recipients = next()? as u32;
+        let dropped = next()? as u32;
+        let lapsed = next()? as u32;
+        let no_session = next()? as u32;
+        let other = next()? as u32;
         Some(Self {
-            at: next()?,
-            recipients: next()? as u32,
-            dropped: next()? as u32,
-            lapsed: next()? as u32,
-            no_session: next()? as u32,
-            other: next()? as u32,
+            at,
+            recipients,
+            dropped,
+            lapsed,
+            no_session,
+            other,
+            dropped_peers: tokens.map(str::to_owned).collect(),
         })
     }
 }
@@ -303,7 +323,10 @@ impl RecipientStore {
 
     /// The latest [`SealReport`], or `None` if this install has never sealed a fix envelope.
     pub fn last_seal(&self) -> Option<SealReport> {
-        *self.last_seal.read().unwrap_or_else(|e| e.into_inner())
+        self.last_seal
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -389,8 +412,9 @@ mod tests {
             lapsed: 2,
             no_session: 1,
             other: 0,
+            dropped_peers: vec!["aa11:lapsed".into(), "bb22:no_session".into()],
         };
-        store.record_seal(report);
+        store.record_seal(report.clone());
         assert_eq!(
             RecipientStore::open(&dir).unwrap().last_seal(),
             Some(report)

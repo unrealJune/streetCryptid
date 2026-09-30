@@ -6,8 +6,8 @@
 //! read (FORWARD-SECRECY.md §4.1).
 
 use iroh_location::gate::{
-    assess_fix, critically_low, due_slots, BatteryState, FixQualityConfig, FixRejection, GateStore,
-    MAX_BACKFILL_MS,
+    assess_fix, critically_low, due_slots, regrid, BatteryState, FixQualityConfig, FixRejection,
+    GateState, GateStore, MAX_BACKFILL_MS,
 };
 use iroh_location::LocationFix;
 
@@ -411,4 +411,37 @@ fn concurrent_writers_all_persist_and_the_newest_state_wins() {
         .get()
         .last_published_slot;
     assert_eq!(on_disk, in_memory);
+}
+
+#[test]
+fn a_stored_slot_ahead_of_the_clock_owes_the_current_slot() {
+    // A clock set back, or an index from a different grid. Waiting for the clock to catch up can
+    // mean forever, and calling the slot covered would never be persisted — so it is owed now.
+    let plan = due_slots(5 * MINUTE * 3 + 1_000, 5 * MINUTE, Some(900));
+    assert_eq!(plan.due, 1);
+    assert_eq!(plan.current_slot, 3);
+}
+
+#[test]
+fn regrid_translates_through_time() {
+    let wall = 1_790_740_000_000u64;
+    let mut state = GateState {
+        last_published_slot: Some(wall / MINUTE),
+        slot_interval_ms: Some(MINUTE),
+        ..GateState::default()
+    };
+    regrid(&mut state, 5 * MINUTE);
+    // The minute that went out ends inside exactly one 5-minute slot.
+    assert_eq!(
+        state.last_published_slot,
+        Some(((wall / MINUTE + 1) * MINUTE - 1) / (5 * MINUTE))
+    );
+    assert_eq!(state.slot_interval_ms, Some(5 * MINUTE));
+
+    let before = state.clone();
+    regrid(&mut state, 5 * MINUTE);
+    assert_eq!(
+        state.last_published_slot, before.last_published_slot,
+        "idempotent"
+    );
 }

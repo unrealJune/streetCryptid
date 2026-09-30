@@ -103,7 +103,6 @@ import {
   loadIosLocationBenchmarkProfile,
   loadPool,
   loadRatchetActivity,
-  loadShareIntervalMs,
   loadDeliveryMode,
   saveDeliveryMode,
   loadTransportPreferences,
@@ -112,10 +111,9 @@ import {
   saveRatchetDrops,
   type RatchetDropCounts,
   loadSharingEnabled,
-  saveShareIntervalMs,
+  clearLegacyShareInterval,
   saveSharingEnabled,
   saveTransportPreferences,
-  SHARE_INTERVAL_OPTIONS_MS,
   type TransportPreferences,
   DEFAULT_TRANSPORT_PREFERENCES,
   saveInitWatermark,
@@ -128,7 +126,7 @@ import {
   claimNativeRuntime,
   releaseNativeRuntime,
 } from './background/native-runtime-owner';
-import { DEFAULT_SHARE_INTERVAL_MS } from './background/sampling-policy';
+import { SHARE_INTERVAL_MS } from './background/sampling-policy';
 import { recordDeviceHealth } from './background/device-health';
 import { reportStrandedTeardown } from './background/teardown-watermark';
 import { reportStrandedInit } from './background/init-watermark';
@@ -337,8 +335,6 @@ export interface SharingSnapshot {
   };
   /** Native endpoint transports currently enabled for protocol-constrained debugging. */
   transports: TransportPreferences;
-  /** How often location is published, in ms. Constant by design; see `setShareInterval`. */
-  shareIntervalMs: number;
   /** Bilateral-pairing / nearby-discovery state. */
   pairing: PairingSnapshot;
   /** Live-mode request state (ARCHITECTURE §9c). */
@@ -515,6 +511,13 @@ export const TRAIL_CHANGE_COALESCE_MS = 250;
  * not work is telling us something a fourth rebuild will not fix.
  */
 const RESYNC_ATTEMPT_LIMIT = 3;
+
+/** Whether two maps hold the same entries — so a periodic health read only emits on a change. */
+function sameEntries<V>(a: ReadonlyMap<string, V>, b: ReadonlyMap<string, V>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [key, value] of a) if (b.get(key) !== value) return false;
+  return true;
+}
 
 /**
  * Normalize a ratcheted publish's return value into a dropped-recipient list.
@@ -860,8 +863,6 @@ export class LocationSharingService {
    * iOS may suspend this timer while stationary; the periodic OS refresh is the best-effort backstop.
    */
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  /** The user's chosen publish cadence; see `loadShareIntervalMs`. */
-  private shareIntervalMs: number = DEFAULT_SHARE_INTERVAL_MS;
   private backgroundSharing = false;
   private backgroundAccess: BackgroundAccess = 'unknown';
   /** Acknowledge-time friend wiring still in flight. See {@link awaitFriendWiring}. */
@@ -1220,9 +1221,8 @@ export class LocationSharingService {
     // Seed the native push targets from the pool and opt-in we have just loaded — after both, for
     // the same reason, or the stash would be mirrored as off on every launch.
     this.pushDeliveryConfig();
-    // Hydrated here as well as in startBackground so settings shows the real value even before
-    // background sharing has been switched on.
-    this.shareIntervalMs = await loadShareIntervalMs(this.kv);
+    // The cadence used to be a setting. Drop the stored choice so nothing can read it back.
+    await clearLegacyShareInterval(this.kv).catch(() => undefined);
     if (interactive) {
       await this.markInitPhase('pairing', interactive);
       await this.importFriendProfiles();
@@ -2462,14 +2462,14 @@ export class LocationSharingService {
    */
   async ingestNativeFix(fix: LocationFix, _parent?: SpanContext): Promise<number> {
     const battery = await readBatteryForNative();
-    const outcome = await this.nativeDrain().ingest(fix, battery, this.shareIntervalMs);
+    const outcome = await this.nativeDrain().ingest(fix, battery, SHARE_INTERVAL_MS);
     return outcome.published;
   }
 
   /** Fill the slots that elapsed while this phone was frozen, and drain. */
   async heartbeatNativeFix(_parent?: SpanContext): Promise<number> {
     const battery = await readBatteryForNative();
-    const outcome = await this.nativeDrain().heartbeat(battery, this.shareIntervalMs);
+    const outcome = await this.nativeDrain().heartbeat(battery, SHARE_INTERVAL_MS);
     return outcome.published;
   }
 
@@ -3174,6 +3174,11 @@ export class LocationSharingService {
    */
   private async refreshTrailFromReplica(sinceTs: number): Promise<number> {
     if (!this.mod) return 0;
+    // Our own history first. The replica below holds one slot per author, so on its own it would
+    // give the trail exactly one point for everything the native drain published while no JS was
+    // alive to hear about it — and the exploration map is drawn from that trail.
+    await this.takeOwnPublished();
+    await this.refreshSessionHealth();
     const selfId = this.keys?.endpointId;
     const known = new Set(pool.friendList(this.state).map((f) => f.endpointId));
 
@@ -3335,12 +3340,9 @@ export class LocationSharingService {
       ]);
 
       const battery = createBatterySource();
-      // Launch on the user's grid, not the default — otherwise a phone restarting at 15 min would
-      // publish at 5 min until they next opened settings.
-      this.shareIntervalMs = await loadShareIntervalMs(this.kv);
       const benchmarkProfile = await loadIosLocationBenchmarkProfile(this.kv);
       const policy = createSamplingPolicy({
-        intervalMs: this.shareIntervalMs,
+        intervalMs: SHARE_INTERVAL_MS,
         ...benchmarkProfileOverrides(benchmarkProfile),
       });
       this.engine = createLocationEngine({
@@ -3440,7 +3442,7 @@ export class LocationSharingService {
       }).start();
 
       // Fill due slots while the runtime remains alive. iOS may suspend this timer in the background.
-      this.armHeartbeat(this.shareIntervalMs);
+      this.armHeartbeat(SHARE_INTERVAL_MS);
 
       this.bgLifecycleStop = createAppLifecycleController({
         onForeground: () => this.onEnterForeground(),
@@ -3526,26 +3528,6 @@ export class LocationSharingService {
       await this.stopBackground();
       throw err;
     }
-  }
-
-  /**
-   * Change how often location is published. Read the current value from
-   * {@link SharingSnapshot.shareIntervalMs}. Persists the choice, re-grids the engine's slot
-   * boundaries, and re-arms the OS (via the cadence controller, which sees the changed interval on
-   * the engine's next state emission). Safe to call before the background service is running — the
-   * value is stored and picked up by {@link startBackground}.
-   *
-   * Values outside `SHARE_INTERVAL_OPTIONS_MS` are ignored: off-grid intervals would break the
-   * wall-clock slot alignment the uniform cadence depends on.
-   */
-  async setShareInterval(intervalMs: number): Promise<void> {
-    if (!SHARE_INTERVAL_OPTIONS_MS.some((option) => option === intervalMs)) return;
-    if (intervalMs === this.shareIntervalMs) return;
-    this.shareIntervalMs = intervalMs;
-    await saveShareIntervalMs(this.kv, intervalMs);
-    await this.engine?.setIntervalMs(intervalMs);
-    if (this.heartbeatTimer) this.armHeartbeat(intervalMs);
-    this.emit();
   }
 
   /**
@@ -4638,6 +4620,112 @@ export class LocationSharingService {
   }
 
   /**
+   * Read per-friend forward-secrecy health back from native, where publishing and recovery happen.
+   *
+   * `droppedRecipients` and `sessionVerdicts` — the "needs re-pair" / "lapsed" / "recovery failed"
+   * states on a friend's row — were written by the JS `publishFix` and `runResyncDriver`. The
+   * native drain replaced both, so the only thing still writing them was the debug Push button,
+   * and a friend dropped from every envelope for a week showed as healthy. Native records who each
+   * envelope left out (`lastSealReport().droppedPeers`) and runs §4.6 recovery itself
+   * (`PublishSink::recover`); this only reads the outcome, so it never races that driver.
+   *
+   * Best-effort, cheap (one native read plus two per friend), and never throws.
+   */
+  private async refreshSessionHealth(): Promise<void> {
+    const mod = this.mod;
+    if (!mod) return;
+    let changed = false;
+
+    if (typeof mod.lastSealReport === 'function') {
+      const report = await mod.lastSealReport().catch(() => null);
+      if (report?.droppedPeers) {
+        const next = new Map<string, RatchetDropReason>();
+        for (const entry of report.droppedPeers) {
+          const sep = entry.lastIndexOf(':');
+          if (sep <= 0) continue;
+          const reason = entry.slice(sep + 1);
+          if (reason === 'no_session' || reason === 'lapsed') next.set(entry.slice(0, sep), reason);
+        }
+        if (!sameEntries(next, this.droppedRecipients)) {
+          this.droppedRecipients = next;
+          changed = true;
+        }
+      }
+    }
+
+    if (typeof mod.isDesynced === 'function') {
+      const verdicts = new Map<string, SessionHealth>();
+      for (const friend of pool.friendList(this.state)) {
+        const desynced = await mod.isDesynced(friend.endpointId).catch(() => false);
+        if (!desynced) {
+          verdicts.set(friend.endpointId, 'ok');
+          continue;
+        }
+        const attempts =
+          typeof mod.resyncCount === 'function'
+            ? await mod.resyncCount(friend.endpointId).catch(() => 0)
+            : 0;
+        verdicts.set(
+          friend.endpointId,
+          attempts >= RESYNC_ATTEMPT_LIMIT ? 'recovery-failed' : 'desynced'
+        );
+      }
+      if (!sameEntries(verdicts, this.sessionVerdicts)) {
+        this.sessionVerdicts = verdicts;
+        changed = true;
+      }
+      this.sessionsCheckedAt = Date.now();
+    }
+
+    if (changed) this.emit();
+  }
+
+  /**
+   * Move every position the native drain published since the last call into our own trail.
+   *
+   * The JS engine used to append each fix as it published it. Publishing is native now, and on a
+   * wake with no JS alive — an iOS background relaunch, an Android process the OS killed — nothing
+   * on this side hears about it; the replica keeps only the latest fix per author, so a whole
+   * afternoon in a pocket used to land in the trail as one point. `own_log.rs` holds them until
+   * we ask. Keyed on `seq` downstream, so a repeat of the replica's own entry is harmless.
+   *
+   * Best-effort and never throws: a missed take only delays the points to the next one.
+   */
+  private async takeOwnPublished(): Promise<number> {
+    const mod = this.mod;
+    if (typeof mod?.takeOwnPublished !== 'function') return 0;
+    let taken: { seq: number; fix: NativeLocationFix }[];
+    try {
+      taken = await mod.takeOwnPublished();
+    } catch {
+      return 0;
+    }
+    if (taken.length === 0) return 0;
+    let latest: LocationFix | null = null;
+    for (const { seq, fix: nf } of taken) {
+      const fix: LocationFix = {
+        lat: nf.lat,
+        lon: nf.lon,
+        accuracyM: nf.accuracyM,
+        headingDeg: nf.headingDeg,
+        ts: nf.ts,
+      };
+      try {
+        await this.trail.appendOwn(fix, seq);
+      } catch (err) {
+        getTelemetry().log('warn', 'own trail: could not store a published fix', {
+          reason: err instanceof Error ? err.message : String(err),
+          'sc.seq': seq,
+        });
+      }
+      if (!latest || fix.ts >= latest.ts) latest = fix;
+    }
+    if (latest) this.recordLocalFix(latest);
+    this.notifyTrailChanged();
+    return taken.length;
+  }
+
+  /**
    * Announce that the retained trail changed, coalescing bursts into a single fan-out.
    * See {@link TRAIL_CHANGE_COALESCE_MS} for why this must never be per-fix.
    */
@@ -4690,7 +4778,6 @@ export class LocationSharingService {
         error: this.transportDiagnosticsError,
       },
       transports: this.transportState(),
-      shareIntervalMs: this.shareIntervalMs,
       pairing: this.pairingSnapshot(),
       sessions: this.sessionHealthSnapshot(),
       ratchetActivity: { ...this.ratchetActivity },

@@ -34,8 +34,9 @@ Pod::Spec.new do |s|
   # two the Swift sources need directly: CoreLocation for the background runtime's
   # `CLLocationManager`, and Security for the Keychain the device-secret store reads.
   # MetricKit is the OS's own crash/hang diagnostics, read by `MetricKitDiagnostics.swift`.
+  # BackgroundTasks is the parked-phone wake in `NativeRefreshTask.swift`.
   s.frameworks = 'Network', 'CoreBluetooth', 'SystemConfiguration', 'CoreLocation', 'Security',
-                 'MetricKit'
+                 'MetricKit', 'BackgroundTasks'
 
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',

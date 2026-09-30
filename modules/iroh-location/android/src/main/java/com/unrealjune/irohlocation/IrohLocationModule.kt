@@ -791,6 +791,7 @@ class IrohLocationModule : Module() {
             "lapsed" to r.lapsed.toLong(),
             "noSession" to r.noSession.toLong(),
             "other" to r.other.toLong(),
+            "droppedPeers" to r.droppedPeers,
           )
         }
       }
@@ -819,6 +820,15 @@ class IrohLocationModule : Module() {
           "lastPublishedAt" to w.lastPublishedAt?.toLong(),
           "lastPushedAt" to w.lastPushedAt?.toLong(),
         )
+      }
+
+    // Every position the drain published since the app last asked — how a stretch published with
+    // no JS alive reaches the own trail and the exploration map. See `own_log.rs`.
+    AsyncFunction("takeOwnPublished") Coroutine
+      { ->
+        requireNode().takeOwnPublished().map {
+          mapOf("seq" to it.seq.toDouble(), "fix" to fixToMap(it.fix))
+        }
       }
 
     AsyncFunction("outboxPending") Coroutine
