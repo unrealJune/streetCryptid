@@ -32,6 +32,7 @@ import uniffi.iroh_location.ControlMsg
 import uniffi.iroh_location.DeliveryConfig
 import uniffi.iroh_location.FixListener
 import uniffi.iroh_location.RatchetEvent
+import uniffi.iroh_location.RecipientKey
 import uniffi.iroh_location.LocationFix
 import uniffi.iroh_location.LocationNode
 import uniffi.iroh_location.PairEvent

@@ -269,11 +269,11 @@ internal object NativeBackgroundRuntime {
     val now = System.currentTimeMillis()
     if (now - prefs.getLong(LAST_SYNC_KEY, 0L) < SYNC_FLOOR_MS) return
     prefs.edit().putLong(LAST_SYNC_KEY, now).apply()
-    val node = lock.withLock { node } ?: return
+    val held = lock.withLock { node } ?: return
     try {
-      val tickets = node.deliveryConfig().peerTickets
+      val tickets = held.deliveryConfig().peerTickets
       if (tickets.isEmpty()) return
-      node.syncLatest(tickets, null)
+      held.syncLatest(tickets, null)
       Log.i(TAG, "pulled from ${tickets.size} peer(s)")
     } catch (e: Exception) {
       Log.w(TAG, "pull failed; the next wake retries", e)
