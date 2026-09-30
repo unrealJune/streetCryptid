@@ -821,6 +821,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nea
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_is_desynced(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_last_seal_report(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_list_pair_sessions(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_nearby_ble_peers(
@@ -886,6 +888,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_seed_seq(
 external fun uniffi_iroh_location_checksum_method_locationnode_set_delivery_config(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_set_recipient_keys(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients(
 ): Int
@@ -1071,6 +1075,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_initiate_pair_nearby(`p
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_is_desynced(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_last_seal_report(`ptr`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_list_pair_sessions(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_nearby_ble_peers(`ptr`: Long,
@@ -1137,6 +1143,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_set_delivery_config(`pt
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_set_pairing_ready(`ptr`: Long,`ready`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_iroh_location_fn_method_locationnode_set_recipient_keys(`ptr`: Long,`keys`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_set_sharing_recipients(`ptr`: Long,`recipientEndpoints`: RustBuffer.ByValue,`watcherEndpoints`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_set_transport_config(`ptr`: Long,`config`: RustBuffer.ByValue,
@@ -1530,6 +1538,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 27631) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_last_seal_report() != 27654) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_list_pair_sessions() != 11581) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1627,6 +1638,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_recipient_keys() != 16037) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients() != 14453) {
@@ -3322,6 +3336,11 @@ public interface LocationNodeInterface {
     suspend fun `isDesynced`(`peerEndpointHex`: kotlin.String): kotlin.Boolean
     
     /**
+     * Who the latest fix envelope was sealed for and who it left out. `None` before the first.
+     */
+    suspend fun `lastSealReport`(): SealReport?
+    
+    /**
      * List all known pairing sessions.
      */
     suspend fun `listPairSessions`(): List<PairStateRecord>
@@ -3613,6 +3632,15 @@ public interface LocationNodeInterface {
      * pairing is always allowed. This is an app-level acceptance gate, not a radio control.
      */
     fun `setPairingReady`(`ready`: kotlin.Boolean)
+    
+    /**
+     * Mirror each friend's X25519 receiving key, so the native drain can run §4.6 recovery.
+     *
+     * Push next to [`Self::set_sharing_recipients`], every friend (sharing and watch-only). The
+     * resync record is sealed to these keys, and a headless wake has no pool to read them from;
+     * a friend with no key here falls back to their verified profile.
+     */
+    suspend fun `setRecipientKeys`(`keys`: List<RecipientKey>)
     
     /**
      * Replace the set of friends this device seals location envelopes for.
@@ -4759,6 +4787,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Who the latest fix envelope was sealed for and who it left out. `None` before the first.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `lastSealReport`() : SealReport? {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_last_seal_report(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeSealReport.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * List all known pairing sessions.
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -5642,6 +5694,35 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     }
     
     
+
+    
+    /**
+     * Mirror each friend's X25519 receiving key, so the native drain can run §4.6 recovery.
+     *
+     * Push next to [`Self::set_sharing_recipients`], every friend (sharing and watch-only). The
+     * resync record is sealed to these keys, and a headless wake has no pool to read them from;
+     * a friend with no key here falls back to their verified profile.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setRecipientKeys`(`keys`: List<RecipientKey>) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_set_recipient_keys(
+                uniffiHandle,
+                FfiConverterSequenceTypeRecipientKey.lower(`keys`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
 
     
     /**
@@ -7526,6 +7607,13 @@ data class IngestOutcome (
     var `published`: kotlin.UInt
     , 
     /**
+     * Of those, envelopes at least one friend can open. `published` without `reached` is every
+     * recipient dropped from the wrap set — a lapsed or missing session — and nothing left the
+     * device that anyone can read.
+     */
+    var `reached`: kotlin.UInt
+    , 
+    /**
      * Depth of the queue afterwards.
      */
     var `pending`: kotlin.UInt
@@ -7567,6 +7655,7 @@ public object FfiConverterTypeIngestOutcome: FfiConverterRustBuffer<IngestOutcom
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
             FfiConverterBoolean.read(buf),
         )
     }
@@ -7576,6 +7665,7 @@ public object FfiConverterTypeIngestOutcome: FfiConverterRustBuffer<IngestOutcom
             FfiConverterOptionalTypeFixRejection.allocationSize(value.`rejection`) +
             FfiConverterUInt.allocationSize(value.`enqueued`) +
             FfiConverterUInt.allocationSize(value.`published`) +
+            FfiConverterUInt.allocationSize(value.`reached`) +
             FfiConverterUInt.allocationSize(value.`pending`) +
             FfiConverterUInt.allocationSize(value.`slotsSkipped`) +
             FfiConverterUInt.allocationSize(value.`overflowDropped`) +
@@ -7587,6 +7677,7 @@ public object FfiConverterTypeIngestOutcome: FfiConverterRustBuffer<IngestOutcom
             FfiConverterOptionalTypeFixRejection.write(value.`rejection`, buf)
             FfiConverterUInt.write(value.`enqueued`, buf)
             FfiConverterUInt.write(value.`published`, buf)
+            FfiConverterUInt.write(value.`reached`, buf)
             FfiConverterUInt.write(value.`pending`, buf)
             FfiConverterUInt.write(value.`slotsSkipped`, buf)
             FfiConverterUInt.write(value.`overflowDropped`, buf)
@@ -8662,6 +8753,48 @@ public object FfiConverterTypeRatchetEvent: FfiConverterRustBuffer<RatchetEvent>
 
 
 /**
+ * A friend's endpoint id and X25519 receiving public key, both hex. See
+ * [`LocationNode::set_recipient_keys`].
+ */
+data class RecipientKey (
+    var `endpointId`: kotlin.String
+    , 
+    var `recvPublic`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRecipientKey: FfiConverterRustBuffer<RecipientKey> {
+    override fun read(buf: ByteBuffer): RecipientKey {
+        return RecipientKey(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RecipientKey) = (
+            FfiConverterString.allocationSize(value.`endpointId`) +
+            FfiConverterString.allocationSize(value.`recvPublic`)
+    )
+
+    override fun write(value: RecipientKey, buf: ByteBuffer) {
+            FfiConverterString.write(value.`endpointId`, buf)
+            FfiConverterString.write(value.`recvPublic`, buf)
+    }
+}
+
+
+
+/**
  * The per-session Short Authentication String challenge shown while a pair is `Verifying`.
  */
 data class SasChallenge (
@@ -8716,6 +8849,78 @@ public object FfiConverterTypeSasChallenge: FfiConverterRustBuffer<SasChallenge>
             FfiConverterUInt.write(value.`targetIndex`, buf)
             FfiConverterSequenceUInt.write(value.`optionIndices`, buf)
             FfiConverterULong.write(value.`deadlineMs`, buf)
+    }
+}
+
+
+
+/**
+ * Who the most recent fix envelope was sealed for and who it had to leave out, and why.
+ *
+ * `device.health` used to get this from a JS-side row that only the JS publish path wrote. The
+ * native drain replaced that path and the row stopped moving — so through a week-long mutual
+ * lapse the one attribute built to show "publishing to nobody" was simply absent. This is the same
+ * fact, recorded where the sealing happens.
+ */
+data class SealReport (
+    /**
+     * When the envelope was sealed (ms since epoch).
+     */
+    var `at`: kotlin.ULong
+    , 
+    var `recipients`: kotlin.UInt
+    , 
+    var `dropped`: kotlin.UInt
+    , 
+    var `lapsed`: kotlin.UInt
+    , 
+    var `noSession`: kotlin.UInt
+    , 
+    /**
+     * `state_unavailable` + `no_sending_chain`: transient, telemetered, never shown to a human.
+     */
+    var `other`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSealReport: FfiConverterRustBuffer<SealReport> {
+    override fun read(buf: ByteBuffer): SealReport {
+        return SealReport(
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: SealReport) = (
+            FfiConverterULong.allocationSize(value.`at`) +
+            FfiConverterUInt.allocationSize(value.`recipients`) +
+            FfiConverterUInt.allocationSize(value.`dropped`) +
+            FfiConverterUInt.allocationSize(value.`lapsed`) +
+            FfiConverterUInt.allocationSize(value.`noSession`) +
+            FfiConverterUInt.allocationSize(value.`other`)
+    )
+
+    override fun write(value: SealReport, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`at`, buf)
+            FfiConverterUInt.write(value.`recipients`, buf)
+            FfiConverterUInt.write(value.`dropped`, buf)
+            FfiConverterUInt.write(value.`lapsed`, buf)
+            FfiConverterUInt.write(value.`noSession`, buf)
+            FfiConverterUInt.write(value.`other`, buf)
     }
 }
 
@@ -9639,6 +9844,38 @@ public object FfiConverterOptionalTypeSasChallenge: FfiConverterRustBuffer<SasCh
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeSealReport: FfiConverterRustBuffer<SealReport?> {
+    override fun read(buf: ByteBuffer): SealReport? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeSealReport.read(buf)
+    }
+
+    override fun allocationSize(value: SealReport?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeSealReport.allocationSize(value)
+        }
+    }
+
+    override fun write(value: SealReport?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeSealReport.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeFixRejection: FfiConverterRustBuffer<FixRejection?> {
     override fun read(buf: ByteBuffer): FixRejection? {
         if (buf.get().toInt() == 0) {
@@ -10109,6 +10346,34 @@ public object FfiConverterSequenceTypeRatchetEvent: FfiConverterRustBuffer<List<
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeRatchetEvent.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeRecipientKey: FfiConverterRustBuffer<List<RecipientKey>> {
+    override fun read(buf: ByteBuffer): List<RecipientKey> {
+        val len = buf.getInt()
+        return List<RecipientKey>(len) {
+            FfiConverterTypeRecipientKey.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<RecipientKey>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeRecipientKey.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<RecipientKey>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeRecipientKey.write(it, buf)
         }
     }
 }
