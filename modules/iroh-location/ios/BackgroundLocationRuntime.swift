@@ -881,9 +881,30 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // Re-tier from the speed this fix reports. Cheap, and it is what keeps a walk from being
       // sampled like a motorway.
       applyMovingCadence(speedMps: location.speed)
-      let fix = Self.fix(from: location)
-      Task { await self.ingest(fix: fix, battery: battery) }
+      // Decide whether this delivery is the one that confirms a stop BEFORE deciding what to
+      // publish, because if it is, the envelope it seals has to SAY so.
+      //
+      // `FIX_STATE_PARKED` is stamped only by `heartbeat`, and until 2026-09-29 the first heartbeat
+      // after a stop came from the next tick of the parked coarse stream. That tick never comes to
+      // a process iOS has suspended — which is every process relaunched in the background, since
+      // those never get continuous background execution — so the last envelope before the silence
+      // went out `live`: on 2026-09-29 an iPhone arrived somewhere, sealed its 17:51:10 slot
+      // `fix_state=1` on a wake five minutes after the last (long enough to satisfy the dwell),
+      // was suspended nine seconds later and never heard from again, and its friend's map had no way to tell a
+      // parked phone from a dead one, which is the entire reason the stamp exists. The confirming
+      // delivery is the last one we are sure to get, so it carries the declaration.
+      //
+      // Nothing is lost by not ingesting it: a stop is only confirmed inside `stopJitterRadiusM` of
+      // a candidate whose fixes were already ingested, and the heartbeat republishes the last of
+      // those. It also saves the stamp when this slot is already covered, so whatever wake comes
+      // next — SLC, BGProcessing, the app opening — seals `parked` too.
       considerStopping(at: location)
+      if state == .stopped {
+        Task { await self.heartbeat(battery: battery) }
+      } else {
+        let fix = Self.fix(from: location)
+        Task { await self.ingest(fix: fix, battery: battery) }
+      }
 
     case .stopped:
       // Deliberately NOT ingested. This is a three-kilometre Wi-Fi fix; the gate would refuse it as

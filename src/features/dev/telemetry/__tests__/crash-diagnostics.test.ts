@@ -59,6 +59,19 @@ describe('OS crash/hang diagnostics', () => {
     });
   });
 
+  // A sampled tree's frames are its hottest path, and that is only the answer if the path holds
+  // most of the samples. Without the two counts a 5% branch reads exactly like a 95% one.
+  it('says how much of a CPU exception the frames account for', () => {
+    const attributes = diagnosticAttributes({
+      kind: 'cpu',
+      cpu_time_ms: 48_000,
+      path_samples: 412,
+      total_samples: 480,
+      frames: ['hermes+0x10'],
+    });
+    expect(attributes).toMatchObject({ kind: 'cpu', path_samples: 412, total_samples: 480 });
+  });
+
   it('carries the fields that name how a crash ended', () => {
     const attributes = diagnosticAttributes({
       kind: 'crash',

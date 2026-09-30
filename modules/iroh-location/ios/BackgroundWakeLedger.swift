@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import UIKit
 
@@ -49,11 +50,19 @@ enum BackgroundWakeLedger {
   private static let lastWake = "sc.bg.last_wake_ms"
   private static let syncs = "sc.bg.syncs"
   private static let dropped = "sc.bg.dropped_captures"
+  /// Wall time of the window that set `cpuMax`, so the worst window reads as a RATE. 88 s of CPU is
+  /// an exception inside a minute and background noise across twenty; without this, a record from
+  /// 2026-09-29 could not say which it was.
+  private static let wallAtCpuMax = "sc.bg.wall_ms_at_cpu_max"
 
   /// Marks of an open window. Absent means nothing is being timed, which is the ordinary state of a
   /// foregrounded app.
   private static let openCpu = "sc.bg.open_cpu_ms"
   private static let openWall = "sc.bg.open_wall_ms"
+
+  /// Per-thread-group CPU, so a figure says WHERE the time went. Keyed `<prefix><group>`.
+  private static let groupTotalPrefix = "sc.bg.cpu_ms."
+  private static let groupOpenPrefix = "sc.bg.open_cpu_ms."
 
   private static var defaults: UserDefaults { .standard }
 
@@ -74,6 +83,74 @@ enum BackgroundWakeLedger {
     return Double(ts.tv_sec) * 1000 + Double(ts.tv_nsec) / 1_000_000
   }
 
+  // MARK: - Where the CPU went
+
+  /// The thread groups a window's CPU is split into.
+  ///
+  /// `cpu_ms_total` said HOW MUCH, and on 2026-09-29 that was 108 s across a backgrounded iPhone's
+  /// twenty minutes with nothing able to say whose. The process runs a small, fixed set of
+  /// long-lived threads, and their names identify them:
+  ///
+  /// - `js`   — React Native's JavaScript thread (Hermes runs on it).
+  /// - `rust` — every async task in the Rust core, iroh's endpoint included: UniFFI's
+  ///            `async_runtime = "tokio"` runs them all on async-compat's single current-thread
+  ///            runtime, `async-compat/tokio-1`, plus tokio's blocking pool.
+  /// - `otel` — the OpenTelemetry batch processors, i.e. what exporting telemetry itself costs.
+  /// - `main` — UIKit, Core Location's delegate callbacks, and the Expo event emitter.
+  ///
+  /// Everything else, including every thread that exited during the window, is the process total
+  /// minus these, reported as `other` — so the groups always sum to `cpu_ms_total`.
+  enum ThreadGroup: String, CaseIterable {
+    case js, rust, otel, main
+  }
+
+  /// The main thread, captured on it. `pthread_main_np` only answers for the calling thread.
+  private static var mainThread: pthread_t?
+
+  /// CPU milliseconds each group's LIVE threads have consumed so far.
+  static func groupCpuMs() -> [ThreadGroup: Double] {
+    var out: [ThreadGroup: Double] = [:]
+    var threads: thread_act_array_t?
+    var count: mach_msg_type_number_t = 0
+    guard task_threads(mach_task_self_, &threads, &count) == KERN_SUCCESS, let threads else {
+      return out
+    }
+    defer {
+      for i in 0..<Int(count) { mach_port_deallocate(mach_task_self_, threads[i]) }
+      vm_deallocate(
+        mach_task_self_, vm_address_t(UInt(bitPattern: threads)),
+        vm_size_t(Int(count) * MemoryLayout<thread_t>.stride))
+    }
+    for i in 0..<Int(count) {
+      var info = thread_basic_info()
+      var size = mach_msg_type_number_t(
+        MemoryLayout<thread_basic_info_data_t>.size / MemoryLayout<integer_t>.size)
+      let result = withUnsafeMutablePointer(to: &info) {
+        $0.withMemoryRebound(to: integer_t.self, capacity: Int(size)) {
+          thread_info(threads[i], thread_flavor_t(THREAD_BASIC_INFO), $0, &size)
+        }
+      }
+      guard result == KERN_SUCCESS, let group = group(of: threads[i]) else { continue }
+      let ms =
+        Double(info.user_time.seconds + info.system_time.seconds) * 1000
+        + Double(info.user_time.microseconds + info.system_time.microseconds) / 1000
+      out[group, default: 0] += ms
+    }
+    return out
+  }
+
+  private static func group(of thread: thread_act_t) -> ThreadGroup? {
+    guard let pthread = pthread_from_mach_thread_np(thread) else { return nil }
+    if let mainThread, pthread_equal(pthread, mainThread) != 0 { return .main }
+    var buffer = [CChar](repeating: 0, count: 128)
+    guard pthread_getname_np(pthread, &buffer, buffer.count) == 0 else { return nil }
+    let name = String(cString: buffer)
+    if name.contains("JavaScript") { return .js }
+    if name.hasPrefix("async-compat") || name.hasPrefix("tokio") { return .rust }
+    if name.hasPrefix("OpenTelemetry") { return .otel }
+    return nil
+  }
+
   // MARK: - Recording
 
   /// Record that the process launched, and whether it launched into the background.
@@ -82,6 +159,8 @@ enum BackgroundWakeLedger {
   /// separately by whoever actually starts React, so `bg_launches` climbing while `js_boots`
   /// tracks it is the signal that a background launch is still paying for the whole bundle.
   static func noteLaunch(background: Bool) {
+    // The app-delegate subscriber calls this on the main thread, before anything else runs.
+    mainThread = pthread_self()
     backgrounded = background
     if background {
       defaults.set(defaults.integer(forKey: bgLaunches) + 1, forKey: bgLaunches)
@@ -150,6 +229,10 @@ enum BackgroundWakeLedger {
   static func openWindow() {
     defaults.set(cpuMs(), forKey: openCpu)
     defaults.set(wallMs(), forKey: openWall)
+    let groups = groupCpuMs()
+    for group in ThreadGroup.allCases {
+      defaults.set(groups[group] ?? 0, forKey: groupOpenPrefix + group.rawValue)
+    }
   }
 
   /// Close the open window and fold its cost into the totals. Idempotent: a window that was never
@@ -162,7 +245,20 @@ enum BackgroundWakeLedger {
     defaults.removeObject(forKey: openWall)
     defaults.set(defaults.double(forKey: cpuTotal) + cpu, forKey: cpuTotal)
     defaults.set(defaults.double(forKey: wallTotal) + wall, forKey: wallTotal)
-    if cpu > defaults.double(forKey: cpuMax) { defaults.set(cpu, forKey: cpuMax) }
+    if cpu > defaults.double(forKey: cpuMax) {
+      defaults.set(cpu, forKey: cpuMax)
+      defaults.set(wall, forKey: wallAtCpuMax)
+    }
+    // Clamped at zero per group: a thread that exited during the window takes its CPU out of the
+    // live sum, and that time is then correctly reported under `other` rather than as a negative.
+    let groups = groupCpuMs()
+    for group in ThreadGroup.allCases {
+      let opened = groupOpenPrefix + group.rawValue
+      let delta = max(0, (groups[group] ?? 0) - defaults.double(forKey: opened))
+      defaults.removeObject(forKey: opened)
+      let total = groupTotalPrefix + group.rawValue
+      defaults.set(defaults.double(forKey: total) + delta, forKey: total)
+    }
   }
 
   // MARK: - Reading
@@ -186,6 +282,16 @@ enum BackgroundWakeLedger {
     if let last = defaults.object(forKey: lastWake) as? Double {
       out["last_wake_age_ms"] = Int(Date().timeIntervalSince1970 * 1000 - last)
     }
+    out["wall_ms_at_cpu_max"] = Int(defaults.double(forKey: wallAtCpuMax))
+    // `cpu_ms_js` / `_rust` / `_otel` / `_main`, and `_other` as the remainder, so they sum to
+    // `cpu_ms_total`. Floored at zero: the groups are sampled a moment after the process total.
+    var attributed = 0.0
+    for group in ThreadGroup.allCases {
+      let ms = defaults.double(forKey: groupTotalPrefix + group.rawValue)
+      attributed += ms
+      out["cpu_ms_\(group.rawValue)"] = Int(ms)
+    }
+    out["cpu_ms_other"] = Int(max(0, defaults.double(forKey: cpuTotal) - attributed))
     return out
   }
 
@@ -196,7 +302,10 @@ enum BackgroundWakeLedger {
   /// half the counts and neither would be a true reading. The caller that OWNS the reporting
   /// cadence resets; everything else reads.
   static func reset() {
-    for key in [wakes, bgLaunches, jsBoots, cpuTotal, cpuMax, wallTotal, syncs, dropped] {
+    let groups = ThreadGroup.allCases.map { groupTotalPrefix + $0.rawValue }
+    for key in [wakes, bgLaunches, jsBoots, cpuTotal, cpuMax, wallTotal, wallAtCpuMax, syncs, dropped]
+      + groups
+    {
       defaults.removeObject(forKey: key)
     }
   }

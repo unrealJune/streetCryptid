@@ -33,11 +33,28 @@ pub(crate) fn envelope_hash(envelope: &[u8]) -> String {
 }
 
 /// Default `RUST_LOG`-style filter: sync-focused iroh internals + our own spans.
+///
+/// `iroh::socket::transports` is held to `warn` because of ONE span. iroh's `Transports::poll_send`
+/// is `#[instrument(name = "poll_send")]`, which is INFO by default, so it is opened for every
+/// datagram the endpoint sends — no `iroh=info` would have removed it. Every one of them became an
+/// OpenTelemetry span parented under the endpoint's lifetime span, which is how a single phone's
+/// trace reached 0.5-0.9 GB and was refused by Tempo as `TRACE_TOO_LARGE`, taking every later span
+/// on that trace with it. On 2026-09-29 it was 6,206 of the 8,235 spans an iPhone exported in a
+/// twenty-minute backgrounded window. The module's only other non-trace event is a single `debug!`;
+/// its children (`ip`, `relay`, `custom`) are re-enabled explicitly, because a more specific
+/// directive is the only thing that outranks this one. Note that `iroh=` is a string PREFIX, so it
+/// also reaches `iroh_blobs`, `iroh_ble_transport` and `iroh_util`.
 // Only referenced by the Android logcat pipe when `otel` is off, hence dead on a host no-default
 // build.
 #[cfg_attr(not(any(feature = "otel", target_os = "android")), allow(dead_code))]
-const DEFAULT_FILTER: &str =
-    "warn,iroh=debug,iroh_relay=info,iroh_gossip=info,iroh_docs=info,iroh_location=debug";
+const DEFAULT_FILTER: &str = concat!(
+    "warn,iroh=debug,",
+    "iroh::socket::transports=warn,",
+    "iroh::socket::transports::ip=debug,",
+    "iroh::socket::transports::relay=debug,",
+    "iroh::socket::transports::custom=debug,",
+    "iroh_relay=info,iroh_gossip=info,iroh_docs=info,iroh_location=debug",
+);
 
 #[cfg(feature = "otel")]
 mod imp {
@@ -285,6 +302,78 @@ mod tests {
             "ab12cd34ef"
         );
         assert_eq!(short_hex(&[0x01]), "01");
+    }
+
+    /// The per-datagram `poll_send` span is filtered out, and nothing around it is.
+    ///
+    /// Emits through a real `EnvFilter` built from `DEFAULT_FILTER`, with the exact targets the
+    /// iroh callsites have, so this breaks if a directive is reordered, mistyped, or outranked.
+    #[test]
+    fn default_filter_drops_the_per_datagram_span_and_keeps_its_neighbours() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct Seen(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Seen {
+            fn on_new_span(
+                &self,
+                attrs: &tracing::span::Attributes<'_>,
+                _: &tracing::span::Id,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let meta = attrs.metadata();
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}:{}", meta.target(), meta.name()));
+            }
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(event.metadata().target().to_string());
+            }
+        }
+
+        let seen = Seen::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new(DEFAULT_FILTER))
+            .with(seen.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            let _send = tracing::info_span!(target: "iroh::socket::transports", "poll_send");
+            tracing::debug!(target: "iroh::socket::transports::relay::actor", "relay");
+            tracing::debug!(target: "iroh::socket::transports::ip", "ip");
+            tracing::warn!(target: "iroh::socket::transports", "rebind failed");
+            let _connect = tracing::info_span!(target: "iroh::endpoint", "connect");
+            tracing::debug!(target: "iroh::net_report", "net report");
+            tracing::debug!(target: "iroh_location", "ours");
+            tracing::debug!(target: "iroh_docs::engine::live", "docs noise");
+        });
+
+        let seen = seen.0.lock().unwrap().clone();
+        assert!(!seen.iter().any(|s| s.ends_with(":poll_send")), "{seen:?}");
+        for kept in [
+            "iroh::socket::transports::relay::actor",
+            "iroh::socket::transports::ip",
+            "iroh::socket::transports",
+            "iroh::endpoint:connect",
+            "iroh::net_report",
+            "iroh_location",
+        ] {
+            assert!(
+                seen.iter().any(|s| s == kept),
+                "{kept} was filtered: {seen:?}"
+            );
+        }
+        assert!(
+            !seen.iter().any(|s| s == "iroh_docs::engine::live"),
+            "{seen:?}"
+        );
     }
 
     #[test]

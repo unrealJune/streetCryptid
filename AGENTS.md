@@ -107,6 +107,11 @@ Conventions when changing that code:
   `wake.cpu_ms_max` near 48000 is the exception threshold, not a high reading. `bg.refresh.expired`
   covers the other half: `BGTask.expirationHandler` is the only notice iOS gives, and nothing
   listened to it, so a refresh cut short and one never scheduled both left a span that never ends.
+  **Read `wake.cpu_ms_max` against `wake.wall_ms_at_cpu_max`, and the total by thread group.**
+  `cpu_ms_js` / `_rust` / `_otel` / `_main` / `_other` sum to `cpu_ms_total`; they exist because
+  on 2026-09-29 an iPhone reported 88 s in one window and nothing could say whether that was 88 s
+  in a minute (an exception) or across twenty (7%), or whose it was. `rust` is ONE thread: UniFFI's
+  tokio runtime is async-compat's current-thread `async-compat/tokio-1`, iroh's endpoint included.
 - **`bg.wake` and `bg.backfill` do not exist.** They went dead when capture moved into Rust — the
   location wake is native and emits no JS span at all. Six e2e scenarios asserted them,
   `background-location-e2e.sh` gated its PASS on `bg.wake > 0` so it could never pass, and two
@@ -210,6 +215,10 @@ Conventions when changing that code:
   — a parked friend is rendered at full opacity with a dashed marker, not dimmed. Do NOT infer
   liveness from contact continuing: on iOS parked publishing rides on `BGProcessing` wakes, measured
   at p50 5 min / p90 92 min / max 17 h between contacts on a phone that was working throughout.
+  **The declaration goes out on the delivery that CONFIRMS the stop**, not on a later tick: a
+  background-relaunched iOS process is suspended between deliveries, so the parked coarse stream's
+  next tick may never come, and on 2026-09-29 waiting for it made the last envelope before the
+  silence read `live`.
 - **The wire is append-only, `Option`-only, and end-only.** `decode_fix_payload` decodes across the
   padding's zero fill, so appended `Option` fields read as `None` on a payload from an older sender
   (postcard writes `None` as `0x00`, and `unpad` has already proven the fill is zero). That is what
