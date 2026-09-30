@@ -1082,15 +1082,17 @@ async fn two_sides_that_only_poll_still_complete_the_resync() {
     let a_recv = hex(&a.recv_public());
     let b_recv = hex(&b.recv_public());
 
-    // Neither has seen the other's record yet — both answer "not yet", and both must have offered.
+    // a goes first, so b has offered nothing yet: "not yet" — but a must have offered while asking.
     assert!(!a
         .poll_resync(b_id.clone(), b_recv.clone())
         .await
         .expect("a polls"));
-    assert!(!b
+    // b may already hold a's half: nodes that share a namespace live-sync, so it can have arrived
+    // before any explicit reconciliation. Applying it immediately is correct; either way b offers.
+    let b_applied_early = b
         .poll_resync(a_id.clone(), a_recv.clone())
         .await
-        .expect("b polls"));
+        .expect("b polls");
 
     replicate(&a, &stash, &b).await;
     replicate(&b, &stash, &a).await;
@@ -1099,10 +1101,12 @@ async fn two_sides_that_only_poll_still_complete_the_resync() {
         a.poll_resync(b_id, b_recv).await.expect("a polls again"),
         "a must find the half b offered while polling"
     );
-    assert!(
-        b.poll_resync(a_id, a_recv).await.expect("b polls again"),
-        "b must find the half a offered while polling"
-    );
+    if !b_applied_early {
+        assert!(
+            b.poll_resync(a_id, a_recv).await.expect("b polls again"),
+            "b must find the half a offered while polling"
+        );
+    }
 
     for node in [a, b, stash] {
         node.shutdown().await.expect("shutdown");
@@ -1151,38 +1155,51 @@ async fn a_mutual_lapse_heals_through_the_native_recovery_driver() {
         .expect("publish into the lapse");
     assert_eq!(dropped, vec![format!("{b_id}:lapsed")], "the lapse is real");
 
-    // First drain on each side: nobody has the other's half yet, so both offer and wait.
-    let first_a = a.recover_sessions(std::slice::from_ref(&b_id)).await;
-    let first_b = b.recover_sessions(std::slice::from_ref(&a_id)).await;
+    // Drain on each side until both have healed. Nodes that already share a namespace live-sync,
+    // so a half can land before any explicit reconciliation and either side may heal on its first
+    // pass — what matters is that each heals exactly once, within a couple of drains. A side that
+    // has healed gets the real lapse bound back at once: with the test's 1 ms bound it would
+    // otherwise lapse again immediately, which no real pair does.
+    let default_lapse = iroh_location::ratchet::DEFAULT_T_LAPSE_MS;
+    let (mut a_restored, mut b_restored) = (0u32, 0u32);
+    for _ in 0..3 {
+        if a_restored == 0 {
+            a_restored += a
+                .recover_sessions(std::slice::from_ref(&b_id))
+                .await
+                .restored;
+            if a_restored > 0 {
+                a.set_t_lapse_ms_for_tests(default_lapse)
+                    .await
+                    .expect("heal a");
+            }
+        }
+        if b_restored == 0 {
+            b_restored += b
+                .recover_sessions(std::slice::from_ref(&a_id))
+                .await
+                .restored;
+            if b_restored > 0 {
+                b.set_t_lapse_ms_for_tests(default_lapse)
+                    .await
+                    .expect("heal b");
+            }
+        }
+        if a_restored > 0 && b_restored > 0 {
+            break;
+        }
+        // The drain's push carries each half out and the other in.
+        replicate(&a, &stash, &b).await;
+        replicate(&b, &stash, &a).await;
+    }
+    assert_eq!(a_restored, 1, "a restarts the session from b's record");
+    assert_eq!(b_restored, 1, "b restarts the session from a's record");
+    let settled_a = a.recover_sessions(std::slice::from_ref(&b_id)).await;
+    let settled_b = b.recover_sessions(std::slice::from_ref(&a_id)).await;
     assert!(
-        first_a.in_progress && first_b.in_progress,
-        "both sides offered and are waiting"
+        !settled_a.in_progress && !settled_b.in_progress,
+        "nothing left to recover once both have healed"
     );
-    assert_eq!(first_a.restored + first_b.restored, 0);
-
-    // The drain's push carries each half out and the other in.
-    replicate(&a, &stash, &b).await;
-    replicate(&b, &stash, &a).await;
-
-    let second_a = a.recover_sessions(std::slice::from_ref(&b_id)).await;
-    let second_b = b.recover_sessions(std::slice::from_ref(&a_id)).await;
-    assert_eq!(
-        second_a.restored, 1,
-        "a restarts the session from b's record"
-    );
-    assert_eq!(
-        second_b.restored, 1,
-        "b restarts the session from a's record"
-    );
-    assert!(!second_a.in_progress && !second_b.in_progress);
-
-    // Back to a real lapse bound: the restarted session must carry traffic again.
-    a.set_t_lapse_ms_for_tests(iroh_location::ratchet::DEFAULT_T_LAPSE_MS)
-        .await
-        .expect("restore a");
-    b.set_t_lapse_ms_for_tests(iroh_location::ratchet::DEFAULT_T_LAPSE_MS)
-        .await
-        .expect("restore b");
 
     let (first, second) = initiator_first(&a, &b);
     first
