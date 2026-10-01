@@ -6,8 +6,8 @@
 //! read (FORWARD-SECRECY.md §4.1).
 
 use iroh_location::gate::{
-    assess_fix, critically_low, due_slots, BatteryState, FixQualityConfig, FixRejection, GateStore,
-    MAX_BACKFILL_MS,
+    assess_fix, critically_low, due_slots, regrid, BatteryState, FixQualityConfig, FixRejection,
+    GateState, GateStore, MAX_BACKFILL_MS,
 };
 use iroh_location::LocationFix;
 
@@ -341,4 +341,107 @@ fn gate_state_round_trips_through_the_store() {
     let reopened = GateStore::open(&scratch.0).unwrap().get();
     assert_eq!(reopened.last_state, Some(iroh_location::FIX_STATE_PARKED));
     assert_eq!(reopened.last_published_slot, Some(42));
+}
+
+/// Counts the gate's "could not persist" warnings, from every thread.
+struct PersistFailures(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PersistFailures {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        struct Message(bool);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 |= format!("{value:?}").contains("could not persist");
+                }
+            }
+        }
+        let mut message = Message(false);
+        event.record(&mut message);
+        if message.0 {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// A burst of concurrent writers persists every state, and leaves the newest one on disk.
+///
+/// A relaunch delivers several positions within milliseconds and each reaches the gate on its own
+/// task. `write_atomic` stages through one fixed temp file, so unserialised writers truncated each
+/// other's staging file and lost renames ("gate: could not persist state", in pairs, on an iPhone
+/// on 2026-09-29) — and the renames that did land could land out of order, leaving an OLDER state
+/// on disk than the one in memory, which is the one a relaunch reads back as `last_known_fix`.
+#[test]
+fn concurrent_writers_all_persist_and_the_newest_state_wins() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let failures = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Global, because the writers are other threads. This is the only test in the binary that
+    // installs one.
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry().with(PersistFailures(failures.clone())),
+    )
+    .expect("no other test installs a subscriber");
+
+    let scratch = Scratch::new("concurrent-writers");
+    let store = std::sync::Arc::new(GateStore::open(&scratch.0).unwrap());
+    let writers: Vec<_> = (0..8u64)
+        .map(|writer| {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                for i in 0..50u64 {
+                    let mut next = store.get();
+                    next.last_published_slot = Some(writer * 1_000 + i);
+                    store.set(next);
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().unwrap();
+    }
+
+    assert_eq!(
+        failures.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "concurrent writers collided on the staging file"
+    );
+    let in_memory = store.get().last_published_slot;
+    let on_disk = GateStore::open(&scratch.0)
+        .unwrap()
+        .get()
+        .last_published_slot;
+    assert_eq!(on_disk, in_memory);
+}
+
+#[test]
+fn a_stored_slot_ahead_of_the_clock_owes_the_current_slot() {
+    // A clock set back, or an index from a different grid. Waiting for the clock to catch up can
+    // mean forever, and calling the slot covered would never be persisted — so it is owed now.
+    let plan = due_slots(5 * MINUTE * 3 + 1_000, 5 * MINUTE, Some(900));
+    assert_eq!(plan.due, 1);
+    assert_eq!(plan.current_slot, 3);
+}
+
+#[test]
+fn regrid_translates_through_time() {
+    let wall = 1_790_740_000_000u64;
+    let mut state = GateState {
+        last_published_slot: Some(wall / MINUTE),
+        slot_interval_ms: Some(MINUTE),
+        ..GateState::default()
+    };
+    regrid(&mut state, 5 * MINUTE);
+    // The minute that went out ends inside exactly one 5-minute slot.
+    assert_eq!(
+        state.last_published_slot,
+        Some(((wall / MINUTE + 1) * MINUTE - 1) / (5 * MINUTE))
+    );
+    assert_eq!(state.slot_interval_ms, Some(5 * MINUTE));
+
+    let before = state.clone();
+    regrid(&mut state, 5 * MINUTE);
+    assert_eq!(
+        state.last_published_slot, before.last_published_slot,
+        "idempotent"
+    );
 }

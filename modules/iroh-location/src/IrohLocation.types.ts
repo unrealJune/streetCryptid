@@ -15,6 +15,11 @@ export interface NativeIngestOutcome {
   enqueued: number;
   /** Envelopes that actually reached the wire; fewer means the wake ran out of time or network. */
   published: number;
+  /**
+   * Of those, envelopes at least one friend can open. Fewer than `published` means recipients were
+   * dropped from the wrap set (a lapsed or missing session). OPTIONAL: absent on older binaries.
+   */
+  reached?: number;
   /** Depth of the native queue afterwards. */
   pending: number;
   /** Slots the backfill cap declined to fill. */
@@ -654,6 +659,40 @@ export interface IrohLocationApi {
    * reporting `access=foreground` for an evening. OPTIONAL.
    */
   nativeBackgroundAuthorized?(): boolean;
+  /**
+   * How much of its iOS background execution budget this app has been spending.
+   *
+   * The denominator every other claim about the background budget was missing. Until this existed,
+   * "iOS took our execution away" could only be inferred from silence — a gap between
+   * `device.health` records, a MetricKit CPU exception delivered on the launch AFTER the one that
+   * offended. `cpu_ms_max` approaching 48000 is not "high": it is `MXCPUExceptionDiagnostic`'s
+   * threshold, the constant every one of the 41 diagnostics in that 7-day window reported.
+   *
+   * `bg_launches` climbing while `js_boots` tracks it means a background launch is still paying
+   * for the whole React Native bundle.
+   *
+   * Read-only — {@link resetBackgroundWakeStats} is separate so two health records in the same
+   * minute cannot each take half the counts. iOS only. OPTIONAL.
+   */
+  takeBackgroundWakeStats?(): Record<string, unknown>;
+  /** Clear the wake counters. Called by whoever owns the reporting cadence, nothing else. OPTIONAL. */
+  resetBackgroundWakeStats?(): void;
+  /**
+   * Take the Rust stores back from the native background runtime, bounded.
+   *
+   * Not {@link releaseNativeBackground}: that drops the Swift references and returns, while
+   * `Subscription` and the spawned receive task each still hold an `Arc<LocationNode>` — only
+   * `shutdown` frees the process-wide writer claims. Without this, opening the app after a
+   * background launch that armed the native runtime meets `AlreadyOpen` and fails `init()` before
+   * the map can mount.
+   *
+   * Bounded on the native side so it always settles whatever Rust does. Resolves `true` when the
+   * shutdown completed; `false` still hands ownership over, because leaving it with the runtime
+   * would mean nothing could ever claim the stores again. iOS only. OPTIONAL.
+   */
+  handOverNativeBackground?(timeoutMs: number): Promise<boolean>;
+  /** Which half of the process owns the Rust stores: `app` or `native`. iOS only. OPTIONAL. */
+  nativeNodeOwner?(): string;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**
@@ -694,6 +733,12 @@ export interface IrohLocationApi {
    * {@link saveDeviceSecrets} is unconditional. OPTIONAL.
    */
   deviceSecretsProvisioned?(): boolean;
+  /**
+   * Every position envelope the native drain published since the last call, oldest first, with the
+   * `seq` that went on the wire — and forget them. How a stretch published with no JS alive reaches
+   * the own trail; the replica keeps only the latest fix per author. OPTIONAL: older binaries.
+   */
+  takeOwnPublished?(): Promise<{ seq: number; fix: NativeLocationFix }[]>;
   /** Fixes captured but not yet sealed, in the native queue. OPTIONAL. */
   outboxPending?(): Promise<number>;
   /** Drop every queued fix (sign-out, or sharing off for good). OPTIONAL. */
@@ -716,6 +761,32 @@ export interface IrohLocationApi {
     recipientEndpointsHex: string[],
     watcherEndpointsHex: string[]
   ): Promise<void>;
+  /**
+   * Mirror each friend's X25519 receiving key (parallel lists, same order), so the native drain
+   * can run §4.6 session recovery on a wake with no JS alive. The resync record is sealed to these
+   * keys and the ratchet session does not carry them. Push alongside {@link setSharingRecipients},
+   * for every friend, sharing and watch-only alike.
+   *
+   * OPTIONAL: absent on binaries built before native session recovery.
+   */
+  setRecipientKeys?(endpointsHex: string[], recvPublicsHex: string[]): Promise<void>;
+  /**
+   * Who the latest fix envelope was sealed for and who it left out, and why — recorded where the
+   * sealing happens. `null` before this install has sealed anything. `device.health` reports it
+   * as `ratchet.dropped*`; the JS row it replaces was only written by the JS publish path.
+   *
+   * OPTIONAL: absent on binaries built before native session recovery.
+   */
+  lastSealReport?(): Promise<{
+    at: number;
+    recipients: number;
+    dropped: number;
+    lapsed: number;
+    noSession: number;
+    other: number;
+    /** `<endpoint hex>:<reason>` per friend left out. Absent on binaries that predate it. */
+    droppedPeers?: string[];
+  } | null>;
   /**
    * Who the native drain path will seal for RIGHT NOW, read back from its durable store.
    *

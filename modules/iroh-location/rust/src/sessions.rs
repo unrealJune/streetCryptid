@@ -147,7 +147,7 @@ pub struct SessionManager {
     /// receive path, and it will do so intermittently rather than in tests.
     critical: Mutex<()>,
     window: u32,
-    t_lapse_ms: u64,
+    t_lapse_ms: std::sync::atomic::AtomicU64,
     /// Consecutive unopenable envelopes per peer, and how many resyncs we have driven with them.
     ///
     /// In memory only. A restart forgets both, which merely delays detection by `R` envelopes —
@@ -189,7 +189,7 @@ impl std::fmt::Debug for SessionManager {
         f.debug_struct("SessionManager")
             .field("store", &self.store)
             .field("window", &self.window)
-            .field("t_lapse_ms", &self.t_lapse_ms)
+            .field("t_lapse_ms", &self.t_lapse_ms())
             .finish()
     }
 }
@@ -200,16 +200,27 @@ impl SessionManager {
             store,
             critical: Mutex::new(()),
             window: DEFAULT_ACCEPT_WINDOW,
-            t_lapse_ms: DEFAULT_T_LAPSE_MS,
+            t_lapse_ms: std::sync::atomic::AtomicU64::new(DEFAULT_T_LAPSE_MS),
             health: Mutex::new(HashMap::new()),
             desync_threshold: DEFAULT_DESYNC_THRESHOLD,
         }
     }
 
     /// Override the §4.5 lapse bound. Tests drive it; §8.4 leaves the production value open.
-    pub fn with_t_lapse_ms(mut self, t_lapse_ms: u64) -> Self {
-        self.t_lapse_ms = t_lapse_ms;
+    pub fn with_t_lapse_ms(self, t_lapse_ms: u64) -> Self {
+        self.set_t_lapse_ms(t_lapse_ms);
         self
+    }
+
+    /// Change the §4.5 lapse bound on a live manager. Tests only: a node's manager is shared, so
+    /// lapsing a real pair on demand means changing it in place.
+    pub fn set_t_lapse_ms(&self, t_lapse_ms: u64) {
+        self.t_lapse_ms
+            .store(t_lapse_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn t_lapse_ms(&self) -> u64 {
+        self.t_lapse_ms.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn has_session(&self, peer: &[u8]) -> bool {
@@ -342,7 +353,7 @@ impl SessionManager {
             // exactly like a revoked one. This is what bounds how long we publish into a
             // one-sided session, and it is why a seized device must keep actively emitting
             // signed envelopes to keep tracking (§1.1).
-            if state.is_lapsed(now_ms, self.t_lapse_ms) {
+            if state.is_lapsed(now_ms, self.t_lapse_ms()) {
                 dropped.push((peer.clone(), DropReason::Lapsed));
                 continue;
             }
@@ -502,7 +513,7 @@ impl SessionManager {
             SessionPresence::Damaged => true,
             SessionPresence::Present { peer_advanced_ms } => {
                 misses >= self.desync_threshold
-                    || now_ms.saturating_sub(peer_advanced_ms) >= self.t_lapse_ms
+                    || now_ms.saturating_sub(peer_advanced_ms) >= self.t_lapse_ms()
             }
             SessionPresence::Absent => false,
         }

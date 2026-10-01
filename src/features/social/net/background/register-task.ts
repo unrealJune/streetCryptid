@@ -42,7 +42,26 @@ export function getActiveRefreshHandler(): ((parent?: SpanContext) => Promise<vo
   return activeRefreshHandler;
 }
 
-if (Platform.OS !== 'web' && isBackgroundRefreshAvailable()) {
+/**
+ * Whether this platform still needs a JS context woken in the background.
+ *
+ * iOS no longer does. `BackgroundLocationRuntime` captures, gates, seals and sends with no JS in
+ * the loop, pulls friends' fixes itself (`pullFriendFixes`), and owns a strictly better
+ * resurrection ladder than either task below: significant-location-change monitoring, which is the
+ * only mechanism that relaunches a TERMINATED app, plus a 100 m stop-anchor exit fence against the
+ * revive fence's 200 m. Keeping the tasks registered would mean iOS launching this app into the
+ * background specifically to run JavaScript that has nothing left to do — and after the React
+ * deferral, servicing one means booting the whole bundle, which is the cost the deferral exists to
+ * remove.
+ *
+ * Android is untouched and must stay that way. There, the geofence is the documented exemption to
+ * the Android 12+ ban on starting a foreground service from the background — the only legal window
+ * `ensureSharingArmedHeadless` has — and the periodic refresh is still how a phone whose
+ * `LocationTaskService` was killed gets itself back.
+ */
+const NEEDS_JS_BACKGROUND_TASKS = Platform.OS === 'android';
+
+if (NEEDS_JS_BACKGROUND_TASKS && isBackgroundRefreshAvailable()) {
   // The periodic refresh task. Defined at module scope (like the location task) so a
   // fresh headless launch can run it; scheduling on/off is driven by startBackground/stopBackground.
   // The runner is lazily imported so this module's load stays light and headless-safe.
@@ -52,7 +71,7 @@ if (Platform.OS !== 'web' && isBackgroundRefreshAvailable()) {
   });
 }
 
-if (isReviveFenceAvailable()) {
+if (NEEDS_JS_BACKGROUND_TASKS && isReviveFenceAvailable()) {
   // The iOS revive tripwire. Also defined at module scope — more so than the others, since the whole
   // point is to be serviceable from a COLD launch that Core Location triggered, where nothing else
   // in the app has run yet. Crossing the fence means the phone moved a couple of blocks since we

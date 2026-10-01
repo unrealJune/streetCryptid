@@ -57,6 +57,7 @@ jest.mock('@/features/account/storage/profile-store', () => ({
 
 // The self-heal restarts the NATIVE runtime now — no iroh node built on this side — so it is
 // mocked at the module seam instead of the old OS-task one.
+const mockNodeOwner = jest.fn(() => 'app');
 const mockIsRunning = jest.fn(() => false);
 const mockStartNativeBackground = jest.fn(() => {});
 const mockSetBackgroundCadence = jest.fn((_i: number, _d: number, _a: string) => {});
@@ -66,6 +67,7 @@ jest.mock('iroh-location', () => ({
     nativeBackgroundRunning: () => mockIsRunning(),
     startNativeBackground: () => mockStartNativeBackground(),
     setBackgroundCadence: (i: number, d: number, a: string) => mockSetBackgroundCadence(i, d, a),
+    nativeNodeOwner: () => mockNodeOwner(),
   }),
 }));
 
@@ -122,6 +124,7 @@ describe('headless-runtime', () => {
 
   beforeEach(() => {
     resetNativeRuntimeOwnerForTesting();
+    mockNodeOwner.mockReturnValue('app');
     calls.length = 0;
     mockSyncTrail.mockImplementation(async () => {
       calls.push('syncTrail');
@@ -218,6 +221,32 @@ describe('headless-runtime', () => {
 
       expect(published).toBe(0);
       expect(mockServiceCtor).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The NATIVE runtime can own the Rust stores too, and `refusalReason` only ever knew about the
+     * JS-side claim. On iOS a background launch can arm `BackgroundLocationRuntime` with no React
+     * at all; a headless session that then builds its own node meets `AlreadyOpen` — or wins the
+     * race and leaves the runtime that WAS publishing unable to.
+     */
+    it('is a no-op while the native runtime owns the Rust stores', async () => {
+      setAppState('background');
+      mockNodeOwner.mockReturnValue('native');
+
+      const published = await ingestFixesHeadless(fixes(1));
+
+      expect(published).toBe(0);
+      expect(mockServiceCtor).not.toHaveBeenCalled();
+    });
+
+    /** Guarded on the export: absent on Android and on any binary older than this bundle. */
+    it('runs normally on a binary that does not report an owner', async () => {
+      setAppState('background');
+      mockNodeOwner.mockReturnValue(undefined as unknown as string);
+
+      await ingestFixesHeadless(fixes(1));
+
+      expect(mockServiceCtor).toHaveBeenCalled();
     });
 
     it('is a no-op while a mounted runtime holds the native-runtime claim', async () => {

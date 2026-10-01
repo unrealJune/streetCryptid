@@ -174,10 +174,19 @@ pub struct SlotPlan {
 /// `last_published_slot` is `None` before the first publish of a session, which anchors the first
 /// envelope to the *current* slot rather than deferring it a full interval — a user who just
 /// enabled sharing should appear on their friends' maps now, not in five minutes.
+///
+/// A `last_published_slot` AHEAD of the current slot is treated as no record at all: the current
+/// slot is owed, and the caller then stores it, which is what makes this self-healing. That state is
+/// reachable — a wall clock set back, or an index minted on a different grid (see [`regrid`]) — and
+/// without this `current_slot <= last` held until the clock caught up with the stored index, which
+/// on a grid three times coarser is never. Clamping to "covered" instead would not heal: a plan with
+/// nothing due is a plan the caller does not persist, so the bad index would be clamped forever.
 pub fn due_slots(now: u64, interval_ms: u64, last_published_slot: Option<u64>) -> SlotPlan {
     let interval_ms = interval_ms.max(1);
     let current_slot = now / interval_ms;
-    let last = last_published_slot.unwrap_or_else(|| current_slot.saturating_sub(1));
+    let last = last_published_slot
+        .filter(|&slot| slot <= current_slot)
+        .unwrap_or_else(|| current_slot.saturating_sub(1));
     if current_slot <= last {
         return SlotPlan {
             due: 0,
@@ -194,6 +203,41 @@ pub fn due_slots(now: u64, interval_ms: u64, last_published_slot: Option<u64>) -
         skipped: (from - uncapped_from) as u32,
         current_slot,
     }
+}
+
+/// Move `last_published_slot` onto the grid of `interval_ms`.
+///
+/// A slot is an INDEX, `now / interval`, so it means nothing on any other interval — and the index
+/// outlives the interval it was minted on, because it is persisted and the interval is not part of
+/// it. Until 2026-09-30 nothing translated it: lengthening the interval left a stored index about
+/// three times larger than any the new grid would produce this side of the year 2100, so
+/// `due_slots` found every slot already covered and a phone stopped publishing for good, fixes and
+/// heartbeats alike, while every watermark but `last_publish_age_ms` read healthy. The JS engine this
+/// replaced re-anchored in `setIntervalMs`; the native gate lost that step.
+///
+/// Translated through TIME, not by scaling the index: whatever wall-clock span the last published
+/// slot covered on the old grid counts as covered on the new one, so a change neither republishes a
+/// stretch that already went out nor leaves a gap. A state written before the interval was
+/// recorded falls back to `last_published_at`, which is the same question asked of a timestamp.
+///
+/// Idempotent, and a no-op once the state records `interval_ms`.
+pub fn regrid(state: &mut GateState, interval_ms: u64) {
+    let interval_ms = interval_ms.max(1);
+    if state.slot_interval_ms == Some(interval_ms) {
+        return;
+    }
+    if let Some(last) = state.last_published_slot {
+        let covered_until = match state.slot_interval_ms {
+            Some(old) => Some(
+                last.saturating_add(1)
+                    .saturating_mul(old.max(1))
+                    .saturating_sub(1),
+            ),
+            None => state.last_published_at,
+        };
+        state.last_published_slot = covered_until.map(|at| at / interval_ms);
+    }
+    state.slot_interval_ms = Some(interval_ms);
 }
 
 /// The gate's state across wakes.
@@ -238,10 +282,14 @@ pub struct GateState {
     /// six slots at one wake is six envelopes minted under one set of circumstances, and stamping
     /// them all with the state at drain time is the honest reading of that.
     ///
-    /// MUST STAY LAST. [`GateStore::open`] zero-extends short reads so state written before this
-    /// field existed still decodes, and that only works for fields appended at the very end — a
-    /// field inserted above shifts everything after it and reads as garbage.
+    ///
+    /// Fields are only ever APPENDED below this one. [`GateStore::open`] zero-extends short reads so
+    /// state written before a field existed still decodes, and that only works for fields at the
+    /// very end — a field inserted above shifts everything after it and reads as garbage.
     pub last_state: Option<u8>,
+    /// The interval `last_published_slot` was minted on. `None` in state written before
+    /// 2026-09-30. See [`regrid`], which is the only reader. MUST STAY LAST (append after it).
+    pub slot_interval_ms: Option<u64>,
 }
 
 /// Durable home for [`GateState`], next to the outbox it feeds.
@@ -305,9 +353,17 @@ impl GateStore {
     /// Replace the state and persist it. Best-effort on the write: the in-memory copy is updated
     /// either way, because refusing to advance the slot after a failed save would republish the
     /// same slot on every fix for as long as the disk stayed unhappy.
+    ///
+    /// The write happens UNDER the lock, as the outbox's does. `write_atomic` stages through one
+    /// fixed `state.tmp`, so two unserialised writers truncate each other's staging file and the
+    /// loser's rename finds nothing — "could not persist state", logged in pairs on an iPhone on
+    /// 2026-09-29 when a burst of deliveries reached the gate together. Worse than the log line,
+    /// the two renames can land in either order, and the one that lands last is what a relaunch
+    /// reads back as `last_known_fix`.
     pub fn set(&self, next: GateState) {
         let bytes = postcard::to_allocvec(&next).ok();
-        *self.current.lock().unwrap_or_else(|e| e.into_inner()) = next;
+        let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        *current = next;
         if let Some(bytes) = bytes {
             if let Err(err) = crate::durable::write_atomic(&self.dir, &self.path, &bytes) {
                 tracing::warn!(error = %err, "gate: could not persist state");

@@ -1,4 +1,5 @@
 import { recordEventLog, resetEventLogForTesting, unshippedCount } from '../event-log';
+import { isPermanentRejection, OtlpRejectedError } from '../exporter';
 import { createShipper } from '../shipper';
 import { createTelemetry } from '../telemetry';
 import type { Attributes } from '../types';
@@ -230,5 +231,44 @@ describe('journal shipper — failure containment', () => {
     await expect(shipper.drain()).resolves.toBeUndefined();
     // And the entry survives, because nothing confirmed it was delivered.
     expect(await unshippedCount()).toBe(1);
+  });
+});
+
+describe('journal shipper — a batch the collector will never accept', () => {
+  beforeEach(() => resetEventLogForTesting());
+
+  it('drops a permanently rejected batch instead of letting it block every row behind it', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const sent: string[] = [];
+    let calls = 0;
+    const shipper = createShipper({
+      endpoint: 'http://collector:4318',
+      resource: () => ({ 'service.name': 'streetcryptid-app' }),
+      now: () => 1_000_000,
+      batchSize: 1,
+      maxBatches: 3,
+      transport: async (url, body) => {
+        calls += 1;
+        if (calls === 1) throw new OtlpRejectedError(url, 400);
+        sent.push(JSON.parse(body).resourceSpans[0].scopeSpans[0].spans[0].name);
+      },
+    });
+    const telemetry = createTelemetry({ now: () => 5_000 });
+    telemetry.startSpan('poison').end();
+    telemetry.startSpan('behind.it').end();
+
+    await shipper.drain();
+
+    expect(sent).toEqual(['behind.it']);
+    expect(await unshippedCount()).toBe(0);
+    warn.mockRestore();
+  });
+
+  it('still retries a rate limit, which is about timing and not the payload', async () => {
+    expect(isPermanentRejection(429)).toBe(false);
+    expect(isPermanentRejection(408)).toBe(false);
+    expect(isPermanentRejection(503)).toBe(false);
+    expect(isPermanentRejection(400)).toBe(true);
+    expect(isPermanentRejection(413)).toBe(true);
   });
 });

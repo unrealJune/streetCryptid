@@ -66,11 +66,34 @@ export function startUiLivenessProbe(options: UiLivenessOptions = {}): () => voi
   let hangStartedAt: number | null = null;
   let lastReportAt = 0;
 
-  const onFrame = (): void => {
-    lastFrameAt = now();
-    if (alive) requestFrame(onFrame);
+  // The frame loop runs only while the app is active, and that is not an optimisation. In
+  // bridgeless React Native `requestAnimationFrame` IS `setTimeout(0)` (TimerManager), and once
+  // iOS reports the app backgrounded RCTTiming drops its display link and services every due timer
+  // from an NSTimer instead — so a self-rearming frame callback stops being paced by the screen and
+  // becomes a busy loop: fire, re-arm for "now", fire. With the location background mode keeping
+  // the process alive, that is what spent 48 s of every 60 s on the JS thread of an iPhone that
+  // had been put down (cpu_resource report 2026-09-29 20:38, build 85; the stack is
+  // `-[RCTTiming timerDidFire]` → `callTimers` → JS → `requestAnimationFrame` → `scheduleSleepTimer`).
+  // Off screen there are no frames to measure anyway: the interval below already ignores them.
+  let armed = false;
+  const arm = (): void => {
+    if (armed || !alive) return;
+    armed = true;
+    requestFrame(onFrame);
   };
-  requestFrame(onFrame);
+  const onFrame = (): void => {
+    armed = false;
+    lastFrameAt = now();
+    if (AppState.currentState === 'active') arm();
+  };
+  if (AppState.currentState === 'active') arm();
+  const subscription = AppState.addEventListener('change', (state) => {
+    if (state !== 'active') return;
+    // Coming back is a fresh start, not the tail of an off-screen "hang".
+    lastFrameAt = now();
+    hangStartedAt = null;
+    arm();
+  });
 
   const report = (durationMs: number, ongoing: boolean): void => {
     const telemetry = getTelemetry();
@@ -110,6 +133,7 @@ export function startUiLivenessProbe(options: UiLivenessOptions = {}): () => voi
   running = () => {
     alive = false;
     clearInterval(timer);
+    subscription.remove();
     running = null;
   };
   return running;

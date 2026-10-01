@@ -80,6 +80,104 @@ Conventions when changing that code:
   forwarded (binary+offset, attributed thread first, 48 frames) — a full call-stack tree is
   hundreds of kilobytes and would make telemetry the reason a phone stops shipping telemetry.
   `diag.*` attributes describe the build that DIED, which is routinely not the build reporting it.
+- **A backgrounded iOS app is not a suspended one, and that is where the CPU went.**
+  `UIBackgroundModes: ["location"]` plus `allowsBackgroundLocationUpdates` means iOS does not
+  suspend this process while sharing is on, so a swiped-away app keeps every JS timer it had
+  running indefinitely. MetricKit recorded **41 CPU exceptions in 7 days** across three iPhones on
+  builds 78-83, each reporting `cpu_time_ms = 48000` over a 49-60 s window — that constant is iOS's
+  `MXCPUExceptionDiagnostic` threshold, not a measurement — and the flattened stack is the
+  `NSThread`/`CFRunLoop` React Native runs JS on. `onBackground` now stops the pairing poll, and
+  `pollingSuspended` is a SECOND guard because `onPairReady`, `rebindNodeInner` and `armBump` all
+  re-arm the loop and none of them knows the app is in a pocket. The Skia loops pause through
+  `useIsAppActive()`. Note `event-log.ts` stamps a row `background` from `AppState` alone, so
+  "background entries" in the journal conflate a cold wake with a mounted app in a pocket — the
+  latter was most of them. **Do NOT also stop the heartbeat timer**: it is what fills slots for a
+  parked phone while the app is mounted. Android grew a native parked heartbeat of its own in
+  v2.15.0 (idempotent per slot, so the overlap is free), but iOS's only runs on the coarse stream
+  once the native runtime owns the node — which a mounted app does not. The bump loop needs no guard
+  either; it bounds itself against `isBumpActive()` inside a two-minute window a human opened.
+- **The background budget is measured now, not inferred.** Every earlier claim about it —
+  `SHIP_MAX_BATCHES = 3`, `HEADLESS_TEARDOWN_TIMEOUT_MS`, "throttled into silence" — came from
+  reading silence after the fact. `BackgroundWakeLedger.swift` samples `CLOCK_PROCESS_CPUTIME_ID`
+  and `CLOCK_MONOTONIC` around each wake into durable UserDefaults counters, surfaced as `wake.*`
+  on the next `device.health`. Counters and not spans, for the reason `init-watermark.ts` exists: a
+  wake that ends before it can ship cannot describe itself, and on a JS-free wake there is no
+  journal to write to. `recordDeviceHealth` is the ONLY caller allowed to reset them — a
+  take-and-reset inside the read lets two records in one minute take half the counts each.
+  `wake.cpu_ms_max` near 48000 is the exception threshold, not a high reading. `bg.refresh.expired`
+  covers the other half: `BGTask.expirationHandler` is the only notice iOS gives, and nothing
+  listened to it, so a refresh cut short and one never scheduled both left a span that never ends.
+  **Read `wake.cpu_ms_max` against `wake.wall_ms_at_cpu_max`, and the total by thread group.**
+  `cpu_ms_js` / `_rust` / `_otel` / `_main` / `_other` sum to `cpu_ms_total`; they exist because
+  on 2026-09-29 an iPhone reported 88 s in one window and nothing could say whether that was 88 s
+  in a minute (an exception) or across twenty (7%), or whose it was. `rust` is ONE thread: UniFFI's
+  tokio runtime is async-compat's current-thread `async-compat/tokio-1`, iroh's endpoint included.
+- **`bg.wake` and `bg.backfill` do not exist.** They went dead when capture moved into Rust — the
+  location wake is native and emits no JS span at all. Six e2e scenarios asserted them,
+  `background-location-e2e.sh` gated its PASS on `bg.wake > 0` so it could never pass, and two
+  Grafana panels counted them behind `or vector(0)`, which renders a reassuring **0** forever. Use
+  `device.health` (with its `wake.*`) and `bg.refresh`. Check for this shape before trusting any
+  tile: a span name nothing emits looks exactly like a fleet that is fine.
+- **The native drain lost four things the JS engine did, and each now has an owner.** Audited
+  2026-09-30 against v1.6.1. (1) `GateState.last_published_slot` is a slot INDEX; `gate::regrid`
+  translates it through time when the interval changes (`slot_interval_ms` records the grid it was
+  minted on) and `due_slots` treats an index ahead of the clock as unrecorded — without both,
+  lengthening the interval stopped publishing for good. The interval is no longer a setting at all
+  (`SHARE_INTERVAL_MS`). (2) The replica keeps one slot per author, so `own_log.rs` records every
+  published position and JS drains it (`takeOwnPublished`) into the own trail; without it a stretch
+  published with no JS alive reached the trail and the exploration map as one point.
+  (3) `lastSealReport().droppedPeers` + `isDesynced`/`resyncCount` feed the per-friend health
+  badges (`refreshSessionHealth`); they were written only by the JS publish path. (4)
+  `engine.ingest` / `engine.heartbeat` are emitted by `DrainEngine` itself, with the JS
+  `sc.drop_reason` spellings (`publish::drop_reason`), so JS-free wakes are observable.
+- **A background-relaunched iOS process needs a `CLBackgroundActivitySession`, and a parked one needs
+  `NativeRefreshTask`.** On 2026-09-30 a relaunched iPhone ran ~90 s per wake and was suspended mid
+  stop-dwell (180 s), so it never declared `parked`. `holdActivitySession` runs on every `start()`
+  and foreground entry. `NativeRefreshTask` is the `BGProcessingTask` the retired JS refresh used
+  to be: it confirms a dwell the wake windows starved (`confirmDwelledCandidate`), heartbeats and
+  pulls. Its identifier must stay in `BGTaskSchedulerPermittedIdentifiers` (`app.json`).
+  Android's `NativeBackgroundRuntime` pulls friends too (`pullFriendFixes`), floored at 5 min.
+- **Who owns the Rust stores is now stated, not raced.** `BackgroundLocationRuntime.owner` defaults
+  to `.app`, and `ensureStarted()` returns on its first line unless it is `.native` — which removes
+  the reason for the 2026-09-16 construction storm rather than merely bounding it, since the
+  refusal path no longer builds a whole `LocationNode` to have it refused. Only a launch that does
+  not start React calls `adoptNodeOwnership()`. **`releaseNativeBackground` does NOT free the
+  claims**: `WriterClaim` releases on the last `Arc` drop, and `Subscription` and the spawned
+  receive task each hold their own `Arc<LocationNode>` — only `shutdown` nils them all and detaches
+  the pair runtime. `yieldNode` races that shutdown against a Swift-side timeout so the promise
+  always settles (AGENTS.md's rule is about a promise that never _settles_), JS bounds it again,
+  and `startNativeBounded` retries once — once, not in a loop.
+- **`IrohBackgroundBootstrap.swift` runs before React, and must return `true`.**
+  `ExpoAppDelegateSubscriberManager` reduces `willFinishLaunchingWithOptions` with
+  `?? false || result` and short-circuits to `true` only when NO subscriber implements it; once ours
+  does, returning anything else breaks universal-link cold launches, and `applinks:streetcrypt.id`
+  is live. `willFinishLaunching` is the only usable hook — `subscriberDidRegister` runs from `+load`
+  before `main()`, and a subscriber's `didFinishLaunching` runs after the app delegate's own, which
+  is where `startReactNative` already happened. It arms the Core Location ladder but deliberately
+  does NOT take ownership, so a foreground launch is byte-for-byte unchanged.
+- **`BackgroundLocationRuntime.shared` is built by the launch bootstrap, on main, on every launch.**
+  Core Location delivers to the run loop of the thread that created the manager, and a thread
+  without one receives nothing and says nothing. Left to JS, the first touch was
+  `handOverNativeBackground` — an `AsyncFunction`, so a Swift concurrency worker — and every
+  foreground-launched process was armed, authorised, `running` and deaf: on 2026-09-29 an iPhone
+  drove for twenty minutes with the app in the background, took zero deliveries, and heartbeated
+  its launch position. Its SLC wakes went to the same dead thread, so iOS had no reason to relaunch
+  it until the process was reclaimed. `location.delegate_on_main` in `device.health` must read
+  `true`; `location.wake_reason` stuck on `seed` with `last_wake_age_ms` climbing on a moving phone
+  is what `false` looks like.
+- **`start()` claims every durable store before it touches the network, and must keep doing so.**
+  Until 2026-09-28 the native runtime's node had never started on either platform: `start_stored`
+  read its config from a store only `start` opens, so it was `NotStarted` on every fresh node and
+  a JS-free wake dropped everything it captured. Fixing that alone was not enough — with the claims
+  taken after the endpoint bind, a refused native start (the app holding the stores) bound a second
+  endpoint on our identity and then HUNG on the app's open blob/docs stores. `tests/native_start.rs`
+  covers both, and bounds the refusal so that regression fails instead of hanging.
+- **A local simulator build needs `just bindgen-ios` when the XCFramework is older than the
+  bindings.** CI regenerates `modules/iroh-location/ios/generated/*` on every Rust API change but
+  cannot build the XCFramework, so a checkout can carry today's bindings against a weeks-old
+  binary. The symptom is not obvious: two `iroh_locationFFI.h` headers disagree and the Swift fails
+  with "missing argument for parameter 'onSync'" inside generated code you did not touch.
+
 - **Do not add a battery-optimisation prompt to "fix" Android background reliability without
   re-checking this first.** Android already restores sharing on its own: expo-task-manager's
   `TaskBroadcastReceiver` is registered for `BOOT_COMPLETED` (and `RECEIVE_BOOT_COMPLETED` is
@@ -99,6 +197,28 @@ Conventions when changing that code:
   bounded by `HEADLESS_TEARDOWN_TIMEOUT_MS`, the chain by
   `NATIVE_RUNTIME_SESSION_WATCHDOG_MS`, and a stranded teardown is reported by the _next_ session
   as `bg.session.stranded` (the hung one cannot report on itself — it never flushes).
+- **The same rule binds `init()`, and the latch in front of it.** `sharedServiceInit` in
+  `use-location-sharing.tsx` is a module-scope, process-lifetime promise, and it used to be cleared
+  on _rejection_ only — the identical "absorbs failures, not hangs" hole, at the other end of the
+  lifecycle. On 2026-09-18 iOS **froze** an iPhone 128 ms into a BACKGROUND launch, mid-`init()`
+  (frozen, not killed: no `cpu_resource`, no `JetsamEvent`, and the app container's newest write
+  stayed at 00:36 all night, so there was no crash report either). Nine hours later the user opened
+  the app and the SAME JS context resumed — `app.previous_run` never fired because nothing
+  relaunched — into a latch that could never settle. `hydrateFromStore()` runs BEFORE it, so the
+  chrome and the friend marker drew from disk and looked like an app, while `setServiceReady(true)`
+  was never reached: no map, no working controls, no telemetry. Only a force-quit cleared it.
+  The wait is now bounded by `INIT_WATCHDOG_MS` (`init-watchdog.ts`), an overrun emits
+  `app.init.timeout`, and coming back to the foreground after one discards the wedged service and
+  retries rather than waiting again — the in-process equivalent of the force-quit.
+- **A stalled `init` names its own step, and only from disk.** `saveInitWatermark` stamps the phase
+  (`create-node`, `native-start`, `tickets`, …) before each step that can block, and a later
+  context reports it as `app.init.stranded` with `init.phase`. This exists because on 2026-09-18
+  the journal simply stopped after `node.create` and NOTHING said what came next: every span the
+  launch would have emitted was downstream of the call that never returned, and an in-memory phase
+  would have died in exactly the freeze it needed to describe. It is the init-path twin of the
+  teardown watermark, and the two are read at the same places. Note the watermark only fires for a
+  NEW context, which is why `app.init.timeout` exists alongside it — a suspension that resumes the
+  same context keeps its `sc.run_id` and is invisible to the durable record.
 - **UniFFI bindings are regenerated by CI, not by hand.** The `native` job runs
   `scripts/generate-uniffi-bindings.sh all` on Linux and pushes refreshed Kotlin _and_ Swift
   sources back to the pull-request branch, so a Rust API change no longer waits on someone with a
@@ -114,6 +234,10 @@ Conventions when changing that code:
   — a parked friend is rendered at full opacity with a dashed marker, not dimmed. Do NOT infer
   liveness from contact continuing: on iOS parked publishing rides on `BGProcessing` wakes, measured
   at p50 5 min / p90 92 min / max 17 h between contacts on a phone that was working throughout.
+  **The declaration goes out on the delivery that CONFIRMS the stop**, not on a later tick: a
+  background-relaunched iOS process is suspended between deliveries, so the parked coarse stream's
+  next tick may never come, and on 2026-09-29 waiting for it made the last envelope before the
+  silence read `live`.
 - **The wire is append-only, `Option`-only, and end-only.** `decode_fix_payload` decodes across the
   padding's zero fill, so appended `Option` fields read as `None` on a payload from an older sender
   (postcard writes `None` as `0x00`, and `unpad` has already proven the fill is zero). That is what
@@ -141,6 +265,17 @@ Conventions when changing that code:
   refused the pair". v4 carries the sender's signed `ProfileRecord` on the `Accept`, which is why a
   persona now arrives WITH the pair instead of after a separate iroh-docs dial; the profile ticket
   still rides along, and is now only how later edits arrive.
+- **Session recovery runs in the native drain, not in JS.** A pair that exchanges nothing for
+  `T_lapse` (24 h) lapses on BOTH sides; each then drops the other from its wrap set, so neither
+  can deliver the fresh ratchet key that would un-lapse it, and only §4.6 resync breaks it.
+  `DrainEngine::drain` calls `PublishSink::recover` once per drain (after the fixes, every friend,
+  watchers included) and pushes while `in_progress` because the push is also the pull that brings
+  the peer's half in. It used to be `runResyncDriver` on the JS publish tick, which the native
+  drain replaced — and a Pixel 9 then spent 2026-09-22..29 publishing 785 envelopes sealed for
+  nobody while `last_publish_age_ms` read 30 s. The resync record is sealed to receiving keys JS
+  mirrors with `setRecipientKeys`; `poll_resync` offers our half BEFORE looking for theirs (it
+  did not, so two polling sides waited on each other forever). An envelope with every recipient
+  dropped is not a publish: it does not stamp `last_published_at` or count as `reached`.
 - **A pair is complete when `finalize` says so, not when the decision bits agree.** `is_complete()`
   goes true the instant a local accept latches; `finalize` — which installs the ratchet, ingests the
   handed profile record and raises `Ready` — runs after, and can still decline, because a wire

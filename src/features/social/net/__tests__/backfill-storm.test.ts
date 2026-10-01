@@ -1,5 +1,9 @@
 import type { ContactCard } from '../../core/types';
-import { setTelemetryForTesting } from '@/features/dev/telemetry';
+import {
+  getEventLog,
+  resetEventLogForTesting,
+  setTelemetryForTesting,
+} from '@/features/dev/telemetry';
 
 /**
  * Regression tests for the "app freezes after pairing with a friend" storm.
@@ -265,5 +269,77 @@ describe('backfill storm', () => {
     // Every snapshot above is structurally identical — only the key order differs — so exactly one
     // "changed" record may be written (the first, from null).
     expect(svc.transportDiagnosticsChangeCountForTesting).toBe(1);
+  });
+
+  /**
+   * What an unchanged poll is allowed to cost.
+   *
+   * `recordEventLog` persists every level unconditionally — there is no level filter anywhere in
+   * the write path — so an unchanged `debug` row still costs a SQLite write, and this one carried
+   * every peer and local address, v4 and v6, at ~1.5 KB a tick. On a backgrounded phone that was
+   * 568 KB of journal writes in a single six-hour window, describing a transport that had not
+   * moved. The count is worth keeping; the payload is not.
+   */
+  describe('transport poll payload', () => {
+    function transportRows() {
+      return getEventLog().filter(
+        (entry) => entry.action === 'transport.poll' || entry.action === 'transport.status.changed'
+      );
+    }
+
+    beforeEach(() => resetEventLogForTesting());
+
+    it('writes nothing for an unchanged poll', async () => {
+      const svc = makeService();
+      // `init` polls once itself, and that first poll is the one real change (from null).
+      await svc.init('@me', 'mothman');
+      const afterInit = transportRows().length;
+
+      await svc.refreshTransportDiagnostics();
+      await svc.refreshTransportDiagnostics();
+      await svc.refreshTransportDiagnostics();
+
+      expect(afterInit).toBe(1);
+      expect(transportRows()).toHaveLength(1);
+    });
+
+    /**
+     * A long quiet run must still leave a trace, or a loop that DIED is indistinguishable from a
+     * transport that simply held still — the same reason `device.health` is emitted at all.
+     */
+    it('writes one rollup carrying how many polls it stands for', async () => {
+      const svc = makeService();
+      await svc.init('@me', 'mothman');
+
+      // One changed poll, then enough unchanged ones to cross the rollup threshold.
+      for (let i = 0; i < 61; i += 1) await svc.refreshTransportDiagnostics();
+
+      // Two rows for sixty-one polls: the one real change, and one rollup standing for the rest.
+      const rows = transportRows();
+      expect(rows).toHaveLength(2);
+      const rollup = rows.find((row) => row.action === 'transport.poll');
+      expect(rollup).toBeDefined();
+      expect(rollup?.details).toMatchObject({ polls_since_change: 60, changed: false });
+      // The expensive half is exactly what the rollup leaves out.
+      expect((rollup?.details as Record<string, unknown>).diagnostics).toBeUndefined();
+    });
+
+    it('carries short peer ids and no previous snapshot on a changed poll', async () => {
+      const svc = makeService();
+      await svc.init('@me', 'mothman');
+      await svc.addFriend(friend);
+
+      await svc.refreshTransportDiagnostics();
+
+      const row = transportRows().find((entry) => entry.action === 'transport.status.changed');
+      expect(row).toBeDefined();
+      const details = row?.details as Record<string, unknown>;
+      // `sc.author`'s 10 characters, not the full 64-char hex, per friend, per tick.
+      for (const id of details.requested_peers as string[])
+        expect(id.length).toBeLessThanOrEqual(10);
+      // Recoverable from the prior row, which by construction exists whenever this one says so.
+      expect(details.previous).toBeUndefined();
+      expect(details.diagnostics).toBeDefined();
+    });
   });
 });

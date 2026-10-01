@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use iroh_location::gate::{BatteryState, FixQualityConfig, GateState};
 use iroh_location::publish::{
     DrainEngine, EnqueueOutcome, FixQueue, FlushOutcome, GateStateStore, PublishError, PublishSink,
-    Recipients, SeqCounter, StoreError,
+    Recipients, RecoveryOutcome, Sealed, SeqCounter, StoreError,
 };
 use iroh_location::LocationFix;
 
@@ -158,6 +158,29 @@ struct FakeSink {
     fail_flush: Mutex<bool>,
     /// Nowhere to send — stash opted out and an empty pool. A successful call that pushed nothing.
     no_targets: Mutex<bool>,
+    /// Every recipient is dropped from the wrap set — a mutual lapse. The call succeeds and the
+    /// envelope reaches nobody, which is exactly what a phone did for a week on 2026-09-29.
+    drop_all: Mutex<bool>,
+    /// The peer sets each recovery pass was asked about.
+    recoveries: Mutex<Vec<Vec<String>>>,
+    /// What recovery reports: a peer mid-exchange.
+    recovering: Mutex<bool>,
+}
+
+impl FakeSink {
+    fn sealed(&self, recipients: usize) -> Sealed {
+        if *self.drop_all.lock().unwrap() {
+            Sealed {
+                wrapped: 0,
+                dropped: recipients as u32,
+            }
+        } else {
+            Sealed {
+                wrapped: recipients as u32,
+                dropped: 0,
+            }
+        }
+    }
 }
 
 impl PublishSink for FakeSink {
@@ -166,19 +189,20 @@ impl PublishSink for FakeSink {
         seq: u64,
         fix: LocationFix,
         recipients: Vec<String>,
-    ) -> Result<(), PublishError> {
+    ) -> Result<Sealed, PublishError> {
         let mut sent = self.sent.lock().unwrap();
         if let Some(limit) = *self.fail_after.lock().unwrap() {
             if sent.len() >= limit {
                 return Err(PublishError::Send("network gone".into()));
             }
         }
+        let sealed = self.sealed(recipients.len());
         sent.push((seq, fix.ts, recipients));
         self.stamps
             .lock()
             .unwrap()
             .push((fix.state, fix.published_delta_s));
-        Ok(())
+        Ok(sealed)
     }
 
     async fn publish_null(
@@ -186,12 +210,21 @@ impl PublishSink for FakeSink {
         seq: u64,
         ts: u64,
         watchers: Vec<String>,
-    ) -> Result<(), PublishError> {
+    ) -> Result<Sealed, PublishError> {
         if *self.fail_nulls.lock().unwrap() {
             return Err(PublishError::Send("watcher lane down".into()));
         }
+        let sealed = self.sealed(watchers.len());
         self.nulls.lock().unwrap().push((seq, ts, watchers));
-        Ok(())
+        Ok(sealed)
+    }
+
+    async fn recover(&self, peers: Vec<String>) -> RecoveryOutcome {
+        self.recoveries.lock().unwrap().push(peers);
+        RecoveryOutcome {
+            in_progress: *self.recovering.lock().unwrap(),
+            restored: 0,
+        }
     }
 
     async fn flush(&self) -> Result<FlushOutcome, PublishError> {
@@ -1188,4 +1221,290 @@ async fn an_introduction_is_not_suspended_by_a_critical_battery() {
     let out = h.engine().publish_introduction(base + 1_000).await.unwrap();
     assert!(!out.suspended);
     assert_eq!(out.published, 1);
+}
+
+// ── Sealed for nobody, and recovery ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn an_envelope_sealed_for_nobody_is_not_a_publish() {
+    // 2026-09-29: a Pixel 9 published 785 envelopes in a week with its only recipient dropped as
+    // lapsed every time. None were written, none left the phone, and `last_publish_age_ms` read
+    // thirty seconds throughout. Committed (retrying would seal under the same dead session) but
+    // neither reached nor stamped.
+    let h = Harness::new();
+    *h.sink.drop_all.lock().unwrap() = true;
+    let now = INTERVAL * 10;
+
+    let out = h
+        .engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert_eq!(out.published, 1, "sealed and committed");
+    assert_eq!(out.reached, 0, "but nobody can open it");
+    assert_eq!(
+        out.pending, 0,
+        "not retained behind a condition only recovery clears"
+    );
+    assert_eq!(
+        h.gate.get().last_published_at,
+        None,
+        "the watermark must not lie"
+    );
+    assert_eq!(
+        *h.sink.flushes.lock().unwrap(),
+        0,
+        "nothing was written to push"
+    );
+}
+
+#[tokio::test]
+async fn a_reached_envelope_counts_and_stamps() {
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+
+    let out = h
+        .engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert_eq!(out.reached, 1);
+    assert_eq!(h.gate.get().last_published_at, Some(now));
+}
+
+#[tokio::test]
+async fn every_drain_runs_recovery_over_sharing_and_watch_only_friends() {
+    // The JS publish tick used to drive §4.6 recovery; the native drain replaced it and nothing
+    // took the step over, so a lapsed session stayed lapsed forever. A watch-only edge is a
+    // session like any other and needs it too.
+    let mut h = Harness::new();
+    h.recipients.watching = vec!["cc33".into()];
+    let now = INTERVAL * 10;
+
+    h.engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    let recoveries = h.sink.recoveries.lock().unwrap().clone();
+    assert_eq!(
+        recoveries,
+        vec![vec!["aa11".to_string(), "bb22".into(), "cc33".into()]]
+    );
+}
+
+#[tokio::test]
+async fn recovery_runs_even_when_nothing_was_due() {
+    // A parked phone's heartbeat is usually "slot already covered". Recovery must not wait for a
+    // publish, or a lapsed phone that has stopped moving never heals.
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    h.engine()
+        .heartbeat(healthy_battery(), INTERVAL, now + 1_000)
+        .await
+        .unwrap();
+
+    assert_eq!(h.sink.recoveries.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_recovery_in_progress_pushes_even_when_nothing_reached() {
+    // The push is also the pull: it is how the peer's half of the resync arrives. A phone that
+    // only reconciled after a successful publish would never receive the record that makes its
+    // next publish succeed.
+    let h = Harness::new();
+    *h.sink.drop_all.lock().unwrap() = true;
+    *h.sink.recovering.lock().unwrap() = true;
+    let now = INTERVAL * 10;
+
+    h.engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert_eq!(*h.sink.flushes.lock().unwrap(), 1);
+    assert_eq!(h.gate.get().last_published_at, None);
+}
+
+#[tokio::test]
+async fn no_friends_means_no_recovery_pass() {
+    let mut h = Harness::new();
+    h.recipients.sharing = vec![];
+    let now = INTERVAL * 10;
+
+    h.engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert!(h.sink.recoveries.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_null_envelope_a_watcher_can_open_counts_as_reached() {
+    // A watch-only friend receives no position but does receive our ratchet contribution, which is
+    // the only thing keeping their edge from lapsing. That is a real delivery.
+    let mut h = Harness::new();
+    h.recipients.sharing = vec![];
+    h.recipients.watching = vec!["cc33".into()];
+    let now = INTERVAL * 10;
+
+    let out = h
+        .engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert_eq!(out.reached, 1);
+    assert_eq!(*h.sink.flushes.lock().unwrap(), 1);
+}
+
+/// A realistic wall clock, so slot indices are the size a phone actually persists. The stall this
+/// guards against only exists because an index minted on one grid is enormous on a coarser one.
+const WALL: u64 = 1_790_740_000_000;
+
+#[tokio::test]
+async fn lengthening_the_interval_does_not_stop_publishing() {
+    // 2026-09-30: a phone whose gate had last published on a 1-minute grid was moved to 5 minutes.
+    // The stored index was ~5x anything the new grid produces, so every slot read as covered and
+    // the phone stopped publishing — fixes and heartbeats alike — for good.
+    let h = Harness::new();
+    let engine = h.engine();
+    engine
+        .ingest(fix(WALL, 20.0), healthy_battery(), MINUTE, WALL)
+        .await
+        .unwrap();
+    assert_eq!(h.sink.sent.lock().unwrap().len(), 1);
+
+    let later = WALL + 7 * MINUTE;
+    let out = engine
+        .heartbeat(healthy_battery(), INTERVAL, later)
+        .await
+        .unwrap();
+    assert!(
+        out.published >= 1,
+        "the coarser grid still owes slots once the old one's coverage has passed"
+    );
+
+    // And it keeps going on the new grid rather than publishing once and stalling again.
+    let much_later = later + 2 * INTERVAL;
+    let out = engine
+        .heartbeat(healthy_battery(), INTERVAL, much_later)
+        .await
+        .unwrap();
+    assert!(out.published >= 1);
+}
+
+#[tokio::test]
+async fn shortening_the_interval_does_not_republish_what_already_went_out() {
+    // 15 → 5 minutes. The slot published on the 15-minute grid covered a quarter hour; the 5-minute
+    // slots inside it are covered too, so the change costs no burst.
+    let h = Harness::new();
+    let engine = h.engine();
+    let fifteen = 15 * MINUTE;
+    let start = (WALL / fifteen) * fifteen;
+    engine
+        .ingest(fix(start, 20.0), healthy_battery(), fifteen, start)
+        .await
+        .unwrap();
+
+    let inside = start + 11 * MINUTE;
+    let out = engine
+        .heartbeat(healthy_battery(), INTERVAL, inside)
+        .await
+        .unwrap();
+    assert_eq!(
+        out.enqueued, 0,
+        "still inside the quarter hour that went out"
+    );
+
+    let after = start + fifteen + MINUTE;
+    let out = engine
+        .heartbeat(healthy_battery(), INTERVAL, after)
+        .await
+        .unwrap();
+    assert_eq!(out.enqueued, 1, "exactly the one new 5-minute slot");
+}
+
+#[tokio::test]
+async fn a_gate_written_before_the_interval_was_recorded_regrids_from_its_last_publish() {
+    // State from a build that did not store the interval: a 1-minute-grid index with no interval,
+    // but a `last_published_at`. The translation falls back to the timestamp.
+    let h = Harness::new();
+    *h.gate.0.lock().unwrap() = GateState {
+        last_known_fix: Some((&fix(WALL, 20.0)).into()),
+        last_accepted_at: Some(WALL),
+        last_published_slot: Some(WALL / MINUTE),
+        last_published_at: Some(WALL),
+        ..GateState::default()
+    };
+    let out = h
+        .engine()
+        .heartbeat(healthy_battery(), INTERVAL, WALL + 2 * INTERVAL)
+        .await
+        .unwrap();
+    assert!(out.published >= 1, "a legacy index must not wedge the grid");
+}
+
+#[test]
+fn drop_reasons_use_the_js_spellings() {
+    use iroh_location::gate::FixRejection;
+    use iroh_location::publish::{drop_reason, IngestOutcome};
+    let base = IngestOutcome {
+        accepted: true,
+        rejection: None,
+        enqueued: 1,
+        published: 1,
+        reached: 1,
+        pending: 0,
+        slots_skipped: 0,
+        overflow_dropped: 0,
+        suspended: false,
+    };
+    assert_eq!(
+        drop_reason(&base),
+        None,
+        "a slot that went out is not a drop"
+    );
+    let absorbed = IngestOutcome {
+        enqueued: 0,
+        published: 0,
+        reached: 0,
+        ..base.clone()
+    };
+    assert_eq!(
+        drop_reason(&absorbed),
+        None,
+        "absorbed is not a drop either"
+    );
+    let refused = IngestOutcome {
+        accepted: false,
+        rejection: Some(FixRejection::Inaccurate),
+        ..absorbed.clone()
+    };
+    assert_eq!(drop_reason(&refused), Some("fix-inaccurate"));
+    let nobody = IngestOutcome {
+        reached: 0,
+        ..base.clone()
+    };
+    assert_eq!(drop_reason(&nobody), Some("no-recipient-reached"));
+    let stuck = IngestOutcome {
+        published: 0,
+        reached: 0,
+        pending: 1,
+        ..base.clone()
+    };
+    assert_eq!(drop_reason(&stuck), Some("publish-incomplete"));
+    let low = IngestOutcome {
+        suspended: true,
+        ..absorbed
+    };
+    assert_eq!(drop_reason(&low), Some("sampling-suspended"));
 }

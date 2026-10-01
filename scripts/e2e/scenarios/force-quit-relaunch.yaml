@@ -10,5 +10,5 @@ thrash: false
 require_stash_observer: false
 simulator_limited: true
 assertions:
-  - action: bg.wake
+  - action: device.health
     min_count: 2

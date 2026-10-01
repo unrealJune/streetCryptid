@@ -42,7 +42,7 @@ export type ActivityKind = 'other' | 'fitness' | 'automotive' | 'navigation';
  * {@link lowBatteryAccuracy} or, below {@link suspendBelowLevel}, stop sampling entirely.
  */
 export interface SamplingConfig {
-  /** The fixed cadence. User-selectable; see `loadShareIntervalMs` in `../persistence.ts`. */
+  /** The fixed cadence, `SHARE_INTERVAL_MS`. Overridable only for tests and the dev benchmark. */
   intervalMs: number;
   /** Ambient OS movement filter in metres. */
   ambientDistanceM: number;

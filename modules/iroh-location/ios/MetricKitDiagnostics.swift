@@ -24,8 +24,8 @@ import MetricKit
 /// journal, for the same reason.
 ///
 /// ## What is and is not forwarded
-/// The structured fields, plus a BOUNDED, flattened call stack (binary name + offset per frame,
-/// attributed thread first) — the form you paste into a symbolicator. Not the whole call-stack
+/// The structured fields, plus a BOUNDED, flattened call stack (binary name + offset per frame:
+/// the attributed thread's hottest path, both ends kept — see `flatten`) — the form you paste into a symbolicator. Not the whole call-stack
 /// tree: a crash tree runs to hundreds of kilobytes of subframes, and the frames past the first
 /// few dozen have never been the ones that answer the question. Nothing here is user data; it is
 /// addresses, offsets and Apple's own reason strings.
@@ -83,7 +83,7 @@ final class MetricKitDiagnostics: NSObject, MXMetricManagerSubscriber {
         if let code = diagnostic.exceptionCode { row["exception_code"] = code.intValue }
         if let signal = diagnostic.signal { row["signal"] = signal.intValue }
         if let vm = diagnostic.virtualMemoryRegionInfo { row["vm_region"] = vm }
-        row["frames"] = Self.flatten(diagnostic.callStackTree)
+        Self.attach(Self.flatten(diagnostic.callStackTree), to: &row)
         rows.append(row)
       }
 
@@ -91,7 +91,7 @@ final class MetricKitDiagnostics: NSObject, MXMetricManagerSubscriber {
         var row = Self.base(diagnostic, kind: "hang", begin: begin, end: end, received: received)
         // The number this whole file was added for: how long the app was unresponsive.
         row["duration_ms"] = diagnostic.hangDuration.converted(to: .milliseconds).value
-        row["frames"] = Self.flatten(diagnostic.callStackTree)
+        Self.attach(Self.flatten(diagnostic.callStackTree), to: &row)
         rows.append(row)
       }
 
@@ -99,7 +99,7 @@ final class MetricKitDiagnostics: NSObject, MXMetricManagerSubscriber {
         var row = Self.base(diagnostic, kind: "cpu", begin: begin, end: end, received: received)
         row["cpu_time_ms"] = diagnostic.totalCPUTime.converted(to: .milliseconds).value
         row["sampled_time_ms"] = diagnostic.totalSampledTime.converted(to: .milliseconds).value
-        row["frames"] = Self.flatten(diagnostic.callStackTree)
+        Self.attach(Self.flatten(diagnostic.callStackTree), to: &row)
         rows.append(row)
       }
 
@@ -107,7 +107,7 @@ final class MetricKitDiagnostics: NSObject, MXMetricManagerSubscriber {
         var row = Self.base(
           diagnostic, kind: "disk_write", begin: begin, end: end, received: received)
         row["writes_bytes"] = diagnostic.totalWritesCaused.converted(to: .bytes).value
-        row["frames"] = Self.flatten(diagnostic.callStackTree)
+        Self.attach(Self.flatten(diagnostic.callStackTree), to: &row)
         rows.append(row)
       }
 
@@ -115,7 +115,7 @@ final class MetricKitDiagnostics: NSObject, MXMetricManagerSubscriber {
         for diagnostic in payload.appLaunchDiagnostics ?? [] {
           var row = Self.base(diagnostic, kind: "launch", begin: begin, end: end, received: received)
           row["duration_ms"] = diagnostic.launchDuration.converted(to: .milliseconds).value
-          row["frames"] = Self.flatten(diagnostic.callStackTree)
+          Self.attach(Self.flatten(diagnostic.callStackTree), to: &row)
           rows.append(row)
         }
       }
@@ -198,39 +198,87 @@ final class MetricKitDiagnostics: NSObject, MXMetricManagerSubscriber {
     return row
   }
 
-  /// Flatten a call stack tree into `binaryName+0xoffset` frames, attributed thread first.
+  /// A bounded frame list, and how much of the diagnostic it actually accounts for.
+  struct Flattened {
+    var frames: [String]
+    /// Samples on the path the frames describe. `nil` for an unsampled (crash) stack.
+    var pathSamples: Int?
+    /// Samples in the whole attributed tree, so `pathSamples / totalSamples` says whether the frames
+    /// are THE answer or merely the largest of many small ones.
+    var totalSamples: Int?
+  }
+
+  private static func attach(_ flat: Flattened, to row: inout [String: Any]) {
+    row["frames"] = flat.frames
+    if let path = flat.pathSamples, path > 0 { row["path_samples"] = path }
+    if let total = flat.totalSamples, total > 0 { row["total_samples"] = total }
+  }
+
+  /// Flatten a call stack tree into `binaryName+0xoffset` frames: the attributed thread's HOTTEST
+  /// path, whole, with both of its ends kept when it is too long.
   ///
   /// Goes through `jsonRepresentation()` rather than the object graph because MetricKit exposes
   /// the tree only as JSON — there is no public frame type to walk.
-  private static func flatten(_ tree: MXCallStackTree) -> [String] {
+  ///
+  /// ## Why both ends, and why the hottest branch
+  ///
+  /// A CPU-exception or hang tree is SAMPLED: its roots are the thread entry points
+  /// (`thread_start` → `NSThread` → the run loop), each frame's `subFrames` are its callees, and
+  /// every frame carries a `sampleCount`. The frame that answers "what was burning the CPU" is at
+  /// the far end of that — the leaf. Until 2026-09-29 this walked depth-first from the root and
+  /// stopped after 48 frames, which on React Native's JavaScript thread (a run loop nested inside a
+  /// run loop) is exactly the entry point, both run loops, and nothing else: two build-85 CPU
+  /// exceptions arrived reading `thread_start … CFRunLoopRun … React+0x2ae697` and could say WHICH
+  /// thread and never what it was doing. Depth-first also followed the FIRST callee at each level
+  /// rather than the one holding the samples.
+  ///
+  /// A crash tree is the other way up — one unsampled chain per thread, crashing frame first — so
+  /// the same walk is simply that chain, and keeping both ends of it costs nothing.
+  private static func flatten(_ tree: MXCallStackTree) -> Flattened {
+    let empty = Flattened(frames: [], pathSamples: nil, totalSamples: nil)
     guard
       let root = try? JSONSerialization.jsonObject(with: tree.jsonRepresentation())
         as? [String: Any],
       let stacks = root["callStacks"] as? [[String: Any]]
-    else { return [] }
+    else { return empty }
 
-    // The attributed thread is the one that crashed or hung; anything else is context.
-    let ordered = stacks.sorted { lhs, rhs in
-      ((lhs["threadAttributed"] as? Bool) ?? false) && !((rhs["threadAttributed"] as? Bool) ?? false)
+    // The attributed thread is the one that crashed, hung or burned the CPU; the rest is context
+    // that a 48-frame budget cannot afford.
+    let attributed =
+      stacks.first { ($0["threadAttributed"] as? Bool) ?? false } ?? stacks.first
+    guard let roots = attributed?["callStackRootFrames"] as? [[String: Any]], !roots.isEmpty
+    else { return empty }
+
+    var path: [[String: Any]] = []
+    var level = roots
+    // Bounded against a malformed tree; a real stack is a few hundred frames at the very most.
+    while path.count < 1024, let hottest = level.max(by: { samples($0) < samples($1) }) {
+      path.append(hottest)
+      level = (hottest["subFrames"] as? [[String: Any]]) ?? []
     }
 
-    var frames: [String] = []
-    for stack in ordered {
-      guard let roots = stack["callStackRootFrames"] as? [[String: Any]] else { continue }
-      var pending = roots
-      while let frame = pending.first, frames.count < maxFrames {
-        pending.removeFirst()
-        let binary = (frame["binaryName"] as? String) ?? "?"
-        let offset = (frame["offsetIntoBinaryTextSegment"] as? NSNumber)?.uint64Value ?? 0
-        frames.append("\(binary)+0x\(String(offset, radix: 16))")
-        // Depth-first: a MetricKit subframe is the callee, so this walks down the stack in the
-        // order a symbolicated report would print it.
-        if let sub = frame["subFrames"] as? [[String: Any]] {
-          pending.insert(contentsOf: sub, at: 0)
-        }
-      }
-      if frames.count >= maxFrames { break }
+    var frames = path.map(label)
+    if frames.count > maxFrames {
+      // Enough of the root to name the thread, the rest spent on the end that did the work.
+      let head = 8
+      let tail = maxFrames - head - 1
+      let elided = frames.count - head - tail
+      frames = Array(frames.prefix(head)) + ["...\(elided) frames..."] + Array(frames.suffix(tail))
     }
-    return frames
+    let total = roots.reduce(0) { $0 + samples($1) }
+    return Flattened(
+      frames: frames,
+      pathSamples: path.last.map(samples),
+      totalSamples: total > 0 ? total : nil)
+  }
+
+  private static func samples(_ frame: [String: Any]) -> Int {
+    (frame["sampleCount"] as? NSNumber)?.intValue ?? 0
+  }
+
+  private static func label(_ frame: [String: Any]) -> String {
+    let binary = (frame["binaryName"] as? String) ?? "?"
+    let offset = (frame["offsetIntoBinaryTextSegment"] as? NSNumber)?.uint64Value ?? 0
+    return "\(binary)+0x\(String(offset, radix: 16))"
   }
 }

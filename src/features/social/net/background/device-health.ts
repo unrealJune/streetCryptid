@@ -9,7 +9,13 @@ import {
   type SpanContext,
 } from '@/features/dev/telemetry';
 import { tryGetIrohLocation } from 'iroh-location';
-import { createPersistentKV, loadPool, loadRatchetDrops, loadSharingEnabled } from '../persistence';
+import {
+  createPersistentKV,
+  loadPool,
+  loadRatchetDrops,
+  loadSharingEnabled,
+  type RatchetDropCounts,
+} from '../persistence';
 import { getStorageBackend, getStorageDegradationCount } from '../storage-health';
 import { BACKGROUND_REFRESH_TASK } from './refresh-task';
 import { loadReviveFenceArmedAt, REVIVE_FENCE_TASK } from './revive-task';
@@ -41,6 +47,23 @@ async function nativeWatermarks(): Promise<Watermarks> {
   } catch {
     // A node that has never started has no gate state to read. Omitted rather than guessed.
     return {};
+  }
+}
+
+/**
+ * What the latest native seal left out, in the shape of the JS drop row. `null` when the binary
+ * predates the export, no node is running, or nothing has been sealed yet — all of which fall back
+ * to the JS row rather than reporting zero, which would read as "all fine".
+ */
+async function nativeSealDrops(): Promise<RatchetDropCounts | null> {
+  try {
+    const read = tryGetIrohLocation()?.lastSealReport;
+    if (!read) return null;
+    const report = await read();
+    if (!report) return null;
+    return { total: report.dropped, lapsed: report.lapsed, noSession: report.noSession };
+  } catch {
+    return null;
   }
 }
 
@@ -202,6 +225,30 @@ async function taskAttributes(): Promise<Attributes> {
     // rather than guessed — see the note on `outbox.pending` about the two different answers.
   }
 
+  // What the background wakes since the last record actually COST.
+  //
+  // Everything else here describes the phone at the instant of reporting. These describe the
+  // interval between records, which is where the failure lives: a phone that has stopped being
+  // woken emits nothing by construction, and until this existed the budget it was being denied
+  // could only be inferred from the silence. `wake.cpu_ms_max` near 48000 is not "high" — it is
+  // the `MXCPUExceptionDiagnostic` threshold. `wake.bg_launches` climbing while `wake.js_boots`
+  // tracks it means background launches are still booting the whole JS bundle.
+  //
+  // Absent on Android and on any binary older than the export — absent, never zero, because a
+  // zero here would read as "nothing happened" when the truth is "nobody was counting".
+  try {
+    const wake = iroh?.takeBackgroundWakeStats?.();
+    if (wake) {
+      for (const [key, value] of Object.entries(wake)) {
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+          attrs[`wake.${key}`] = value;
+        }
+      }
+    }
+  } catch {
+    // Same bargain as the block above.
+  }
+
   const backgroundTask = tryBackgroundTask();
   if (backgroundTask) {
     try {
@@ -266,7 +313,10 @@ async function intentAttributes(): Promise<Attributes> {
     // `sharing.recipients`, this is the difference between "publishing to two friends" and
     // "publishing to nobody, twice" — states that are otherwise identical in every other span the
     // device emits, and which stayed indistinguishable through a day-long mutual lapse.
-    const drops = await loadRatchetDrops(kv);
+    // Native first: the drain is the only publish path now, and the JS row below is written only
+    // by the JS path it replaced — through the 2026-09-29 week-long mutual lapse it was simply
+    // absent. The row stays as the fallback for a binary that predates the export.
+    const drops = (await nativeSealDrops()) ?? (await loadRatchetDrops(kv));
     if (drops) {
       attrs['ratchet.dropped'] = drops.total;
       attrs['ratchet.dropped_lapsed'] = drops.lapsed;
@@ -377,6 +427,18 @@ export async function recordDeviceHealth(
         },
       })
       .end();
+
+    // Reset the wake counters only now, and only here. `recordDeviceHealth` owns the reporting
+    // cadence, so it is the one caller allowed to clear them — a take-and-reset inside the read
+    // would let a `foreground` record and a `refresh` record in the same minute take half the
+    // counts each, and neither would be a true reading. Reached only past the throttle above, so
+    // a refused record never discards an interval nothing reported.
+    try {
+      tryGetIrohLocation()?.resetBackgroundWakeStats?.();
+    } catch {
+      // A binary older than the JS bundle. The counters keep accumulating, which over-reports the
+      // next interval rather than losing it — the right way round.
+    }
 
     await stampWatermark(kv, 'health', now);
     return true;

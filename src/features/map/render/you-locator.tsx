@@ -12,6 +12,7 @@ import Animated, {
 } from 'react-native-reanimated';
 
 import type { Rgb } from '../core/types';
+import { useIsAppActive } from '@/hooks/use-is-app-active';
 
 interface YouLocatorProps {
   readonly x: number;
@@ -38,6 +39,9 @@ export function YouLocator({
   onPress,
 }: YouLocatorProps) {
   const reducedMotion = useReducedMotion();
+  // Off screen is the same answer as reduced motion: stop moving. See `useIsAppActive`.
+  const appActive = useIsAppActive();
+  const animate = !reducedMotion && appActive;
   const pulse = useSharedValue(0);
   const color = `rgb(${accent[0]}, ${accent[1]}, ${accent[2]})`;
   const rgba = (alpha: number) => `rgba(${accent[0]}, ${accent[1]}, ${accent[2]}, ${alpha})`;
@@ -56,7 +60,8 @@ export function YouLocator({
   }));
 
   useEffect(() => {
-    if (reducedMotion) {
+    if (!animate) {
+      cancelAnimation(pulse);
       pulse.value = 0;
       return;
     }
@@ -66,7 +71,7 @@ export function YouLocator({
       false
     );
     return () => cancelAnimation(pulse);
-  }, [pulse, reducedMotion]);
+  }, [pulse, animate]);
 
   return (
     <Animated.View pointerEvents="box-none" style={[styles.anchor, positionStyle]}>

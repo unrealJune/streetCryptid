@@ -38,8 +38,12 @@ export interface SamplingPolicy {
   readonly config: SamplingConfig;
 }
 
-/** The default cadence, and the middle option offered in settings. */
-export const DEFAULT_SHARE_INTERVAL_MS = 5 * 60_000;
+/**
+ * The publish cadence. Fixed for everyone: the interval is the one property of a sealed envelope the
+ * trail-stash can read, so a per-user choice was a few bits of identifier on the wire, and changing it
+ * was also how a phone stopped publishing altogether (see `gate::regrid`). The setting is gone.
+ */
+export const SHARE_INTERVAL_MS = 5 * 60_000;
 export const AMBIENT_DISTANCE_INTERVAL_M = 50;
 export const AMBIENT_DELIVERY_INTERVAL_MS = 60_000;
 
@@ -71,7 +75,7 @@ export function benchmarkProfileOverrides(
  * {@link SamplingInputs.live}) covers the real-time case without paying its battery cost 24/7.
  */
 export const DEFAULT_SAMPLING_CONFIG: SamplingConfig = {
-  intervalMs: DEFAULT_SHARE_INTERVAL_MS,
+  intervalMs: SHARE_INTERVAL_MS,
   ambientDistanceM: AMBIENT_DISTANCE_INTERVAL_M,
   ambientDeliveryIntervalMs: AMBIENT_DELIVERY_INTERVAL_MS,
   lowBatteryThreshold: 0.2,

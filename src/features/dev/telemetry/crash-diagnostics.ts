@@ -35,6 +35,10 @@ export interface OsDiagnostic {
   window_end_ms?: number;
   received_ms?: number;
   frames?: string[];
+  /** Samples on the path `frames` describes, for a sampled (CPU / hang) tree. */
+  path_samples?: number;
+  /** Samples in the whole attributed tree: `path_samples / total_samples` is how much of it `frames` explains. */
+  total_samples?: number;
 }
 
 /** The minimal shape this module is willing to act on. */
@@ -73,6 +77,8 @@ export function diagnosticAttributes(diagnostic: OsDiagnostic): Record<string, s
   copyNumber('cpu_time_ms', 'cpu_time_ms');
   copyNumber('sampled_time_ms', 'sampled_time_ms');
   copyNumber('writes_bytes', 'writes_bytes');
+  copyNumber('path_samples', 'path_samples');
+  copyNumber('total_samples', 'total_samples');
   copyString('termination_reason', 'termination_reason');
   copyString('vm_region', 'vm_region');
   // The build that died, which is NOT necessarily the build reporting it — a diagnostic survives

@@ -179,4 +179,120 @@ describe('telemetry run lifecycle', () => {
     await beginTelemetryRun(() => 20_000);
     expect(runSpans()).toHaveLength(0);
   });
+
+  /**
+   * A BACKGROUND launch is not a foreground run.
+   *
+   * `_layout.tsx` calls `beginTelemetryRun` at module scope, and iOS reaches module scope on a
+   * background launch too — which is the `app.previous_run` recorded at 00:36 on 2026-09-18 from a
+   * launch nobody was looking at. Claiming there overwrites the record the real foreground run
+   * left with `lastState: 'background'`, so the NEXT launch reports the wrong ending for it: a
+   * crash that happened while someone was watching reads as routine OS reclamation.
+   */
+  describe('a launch into the background', () => {
+    /** Replace `addEventListener` so a state transition can actually be delivered. */
+    function appStateHarness() {
+      const listeners: ((state: string) => void)[] = [];
+      const original = AppState.addEventListener;
+      (AppState as unknown as { addEventListener: unknown }).addEventListener = (
+        _event: string,
+        listener: (state: string) => void
+      ) => {
+        listeners.push(listener);
+        return {
+          remove: () => {
+            const at = listeners.indexOf(listener);
+            if (at >= 0) listeners.splice(at, 1);
+          },
+        };
+      };
+      return {
+        listenerCount: () => listeners.length,
+        go(state: string) {
+          (AppState as unknown as { currentState: string }).currentState = state;
+          for (const listener of [...listeners]) listener(state);
+        },
+        restore: () => {
+          (AppState as unknown as { addEventListener: unknown }).addEventListener = original;
+        },
+      };
+    }
+
+    let harness: ReturnType<typeof appStateHarness>;
+
+    beforeEach(() => {
+      harness = appStateHarness();
+      (AppState as unknown as { currentState: string }).currentState = 'background';
+    });
+    afterEach(() => harness.restore());
+
+    it('claims nothing and reports nothing', async () => {
+      mockMeta.set(
+        'run.foreground',
+        JSON.stringify({
+          runId: 'oldrun',
+          startedAt: 1_000,
+          lastState: 'active',
+          lastStateAt: 4_000,
+        })
+      );
+
+      await beginTelemetryRun(() => 10_000);
+
+      expect(runSpans()).toHaveLength(0);
+      // The previous run's record is untouched — still `active`, still reportable.
+      expect(JSON.parse(mockMeta.get('run.foreground') as string)).toMatchObject({
+        runId: 'oldrun',
+        lastState: 'active',
+      });
+    });
+
+    it('claims the run on the first foreground, and reports the previous one then', async () => {
+      mockMeta.set(
+        'run.foreground',
+        JSON.stringify({
+          runId: 'oldrun',
+          startedAt: 1_000,
+          lastState: 'active',
+          lastStateAt: 4_000,
+        })
+      );
+      mockLastEntry.value = 4_500;
+
+      await beginTelemetryRun(() => 10_000);
+      expect(runSpans()).toHaveLength(0);
+
+      harness.go('active');
+      // The deferred claim re-enters `beginTelemetryRun`, which awaits the meta store three times
+      // over; drain the microtask queue rather than counting ticks.
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(runSpans()).toHaveLength(1);
+      expect(runSpans()[0].details).toMatchObject({
+        attributes: expect.objectContaining({ 'prev.ended_in_foreground': true }),
+      });
+    });
+
+    /**
+     * The deferral must not itself leak. A background launch that is woken repeatedly would
+     * otherwise stack one listener per call for the life of the process.
+     */
+    it('waits with exactly one listener however many times it is called', async () => {
+      await beginTelemetryRun(() => 10_000);
+      await beginTelemetryRun(() => 11_000);
+      await beginTelemetryRun(() => 12_000);
+      expect(harness.listenerCount()).toBe(1);
+    });
+
+    /**
+     * `'inactive'` is NOT background. iOS reports it during a cold foreground launch and while a
+     * permission alert is up, so deferring on it would defer every normal launch — the lesson
+     * `native-runtime-owner.ts` records about trusting `AppState.currentState` as a guard.
+     */
+    it('treats an inactive launch as a foreground one', async () => {
+      (AppState as unknown as { currentState: string }).currentState = 'inactive';
+      await beginTelemetryRun(() => 10_000);
+      expect(mockMeta.get('run.foreground')).toBeDefined();
+    });
+  });
 });

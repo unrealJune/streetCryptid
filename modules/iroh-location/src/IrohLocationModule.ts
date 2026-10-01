@@ -164,6 +164,10 @@ export declare class IrohLocationNativeModule
    * reporting `access=foreground` for an evening. OPTIONAL.
    */
   nativeBackgroundAuthorized?(): boolean;
+  takeBackgroundWakeStats?(): Record<string, unknown>;
+  resetBackgroundWakeStats?(): void;
+  handOverNativeBackground?(timeoutMs: number): Promise<boolean>;
+  nativeNodeOwner?(): string;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**
@@ -204,6 +208,12 @@ export declare class IrohLocationNativeModule
    * {@link saveDeviceSecrets} is unconditional. OPTIONAL.
    */
   deviceSecretsProvisioned?(): boolean;
+  /**
+   * Every position envelope the native drain published since the last call, oldest first, with the
+   * `seq` that went on the wire — and forget them. How a stretch published with no JS alive reaches
+   * the own trail; the replica keeps only the latest fix per author. OPTIONAL: older binaries.
+   */
+  takeOwnPublished?(): Promise<{ seq: number; fix: NativeLocationFix }[]>;
   /** Fixes captured but not yet sealed, in the native queue. OPTIONAL. */
   outboxPending?(): Promise<number>;
   /** Drop every queued fix (sign-out, or sharing off for good). OPTIONAL. */
@@ -226,6 +236,32 @@ export declare class IrohLocationNativeModule
     recipientEndpointsHex: string[],
     watcherEndpointsHex: string[]
   ): Promise<void>;
+  /**
+   * Mirror each friend's X25519 receiving key (parallel lists, same order), so the native drain
+   * can run §4.6 session recovery on a wake with no JS alive. The resync record is sealed to these
+   * keys and the ratchet session does not carry them. Push alongside {@link setSharingRecipients},
+   * for every friend, sharing and watch-only alike.
+   *
+   * OPTIONAL: absent on binaries built before native session recovery.
+   */
+  setRecipientKeys?(endpointsHex: string[], recvPublicsHex: string[]): Promise<void>;
+  /**
+   * Who the latest fix envelope was sealed for and who it left out, and why — recorded where the
+   * sealing happens. `null` before this install has sealed anything. `device.health` reports it
+   * as `ratchet.dropped*`; the JS row it replaces was only written by the JS publish path.
+   *
+   * OPTIONAL: absent on binaries built before native session recovery.
+   */
+  lastSealReport?(): Promise<{
+    at: number;
+    recipients: number;
+    dropped: number;
+    lapsed: number;
+    noSession: number;
+    other: number;
+    /** `<endpoint hex>:<reason>` per friend left out. Absent on binaries that predate it. */
+    droppedPeers?: string[];
+  } | null>;
   /**
    * Who the native drain path will seal for RIGHT NOW, read back from its durable store.
    *

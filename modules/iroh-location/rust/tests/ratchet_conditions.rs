@@ -1059,3 +1059,170 @@ async fn a_watch_only_friend_feeds_the_ratchet_with_null_fixes() {
         node.shutdown().await.expect("shutdown");
     }
 }
+
+// ── a mutual lapse, healed by the native driver ──────────────────────────────────────────────
+
+/// **Both sides only poll.** The exchange must complete with neither side publishing its half by
+/// hand — that is the shape every real driver has, because the side that notices the desync and the
+/// side that caused it are usually not the same one.
+///
+/// `poll_resync` used to return early on "no record from them yet" BEFORE offering its own half,
+/// so two phones that both only polled would each wait for the other forever. The only test of the
+/// exchange (`resync_pair`) published both halves explicitly and never saw it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_sides_that_only_poll_still_complete_the_resync() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
+    let a = start_node().await;
+    let b = start_node().await;
+    let stash = start_node().await;
+
+    bootstrap_and_prime(&a, &b, &stash).await;
+    let a_id = hex(&a.endpoint_id());
+    let b_id = hex(&b.endpoint_id());
+    let a_recv = hex(&a.recv_public());
+    let b_recv = hex(&b.recv_public());
+
+    // a goes first, so b has offered nothing yet: "not yet" — but a must have offered while asking.
+    assert!(!a
+        .poll_resync(b_id.clone(), b_recv.clone())
+        .await
+        .expect("a polls"));
+    // b may already hold a's half: nodes that share a namespace live-sync, so it can have arrived
+    // before any explicit reconciliation. Applying it immediately is correct; either way b offers.
+    let b_applied_early = b
+        .poll_resync(a_id.clone(), a_recv.clone())
+        .await
+        .expect("b polls");
+
+    replicate(&a, &stash, &b).await;
+    replicate(&b, &stash, &a).await;
+
+    assert!(
+        a.poll_resync(b_id, b_recv).await.expect("a polls again"),
+        "a must find the half b offered while polling"
+    );
+    if !b_applied_early {
+        assert!(
+            b.poll_resync(a_id, a_recv).await.expect("b polls again"),
+            "b must find the half a offered while polling"
+        );
+    }
+
+    for node in [a, b, stash] {
+        node.shutdown().await.expect("shutdown");
+    }
+}
+
+/// **The 2026-09-29 Pixel 9.** A pair that went a day without exchanging anything lapses on both
+/// sides at once; each drops the other from its wrap set, so neither can deliver the fresh ratchet
+/// key that would un-lapse it. Only §4.6 recovery breaks that, and since the native drain replaced
+/// the JS publish tick, only the native driver runs it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_mutual_lapse_heals_through_the_native_recovery_driver() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
+    let a = start_node().await;
+    let b = start_node().await;
+    let stash = start_node().await;
+
+    bootstrap_and_prime(&a, &b, &stash).await;
+    let a_id = hex(&a.endpoint_id());
+    let b_id = hex(&b.endpoint_id());
+    let a_author = a.endpoint_id();
+
+    // The driver reads receiving keys from what JS mirrors; one side uses it, the other relies on
+    // the profile fallback being absent and the mirrored key being present too.
+    a.set_recipient_keys(vec![iroh_location::RecipientKey {
+        endpoint_id: b_id.clone(),
+        recv_public: hex(&b.recv_public()),
+    }])
+    .await
+    .expect("a mirrors keys");
+    b.set_recipient_keys(vec![iroh_location::RecipientKey {
+        endpoint_id: a_id.clone(),
+        recv_public: hex(&a.recv_public()),
+    }])
+    .await
+    .expect("b mirrors keys");
+
+    // A day passes with nothing exchanged.
+    a.set_t_lapse_ms_for_tests(1).await.expect("lapse a");
+    b.set_t_lapse_ms_for_tests(1).await.expect("lapse b");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let dropped = a
+        .docs_write_ratcheted("t".into(), 1, fix_at(1000), vec![b_id.clone()])
+        .await
+        .expect("publish into the lapse");
+    assert_eq!(dropped, vec![format!("{b_id}:lapsed")], "the lapse is real");
+
+    // Drain on each side until both have healed. Nodes that already share a namespace live-sync,
+    // so a half can land before any explicit reconciliation and either side may heal on its first
+    // pass — what matters is that each heals exactly once, within a couple of drains. A side that
+    // has healed gets the real lapse bound back at once: with the test's 1 ms bound it would
+    // otherwise lapse again immediately, which no real pair does.
+    let default_lapse = iroh_location::ratchet::DEFAULT_T_LAPSE_MS;
+    let (mut a_restored, mut b_restored) = (0u32, 0u32);
+    for _ in 0..3 {
+        if a_restored == 0 {
+            a_restored += a
+                .recover_sessions(std::slice::from_ref(&b_id))
+                .await
+                .restored;
+            if a_restored > 0 {
+                a.set_t_lapse_ms_for_tests(default_lapse)
+                    .await
+                    .expect("heal a");
+            }
+        }
+        if b_restored == 0 {
+            b_restored += b
+                .recover_sessions(std::slice::from_ref(&a_id))
+                .await
+                .restored;
+            if b_restored > 0 {
+                b.set_t_lapse_ms_for_tests(default_lapse)
+                    .await
+                    .expect("heal b");
+            }
+        }
+        if a_restored > 0 && b_restored > 0 {
+            break;
+        }
+        // The drain's push carries each half out and the other in.
+        replicate(&a, &stash, &b).await;
+        replicate(&b, &stash, &a).await;
+    }
+    assert_eq!(a_restored, 1, "a restarts the session from b's record");
+    assert_eq!(b_restored, 1, "b restarts the session from a's record");
+    let settled_a = a.recover_sessions(std::slice::from_ref(&b_id)).await;
+    let settled_b = b.recover_sessions(std::slice::from_ref(&a_id)).await;
+    assert!(
+        !settled_a.in_progress && !settled_b.in_progress,
+        "nothing left to recover once both have healed"
+    );
+
+    let (first, second) = initiator_first(&a, &b);
+    first
+        .docs_write_ratcheted(
+            "prime".into(),
+            2,
+            fix_at(2),
+            vec![hex(&second.endpoint_id())],
+        )
+        .await
+        .expect("priming publish after recovery");
+    replicate(first, &stash, second).await;
+    second.read_latest_ratcheted().await.expect("prime read");
+
+    assert!(
+        publish_and_deliver(&a, &b, &stash, 3, 3000)
+            .await
+            .iter()
+            .any(|e| e.author == a_author && e.fix.ts == 3000),
+        "fixes must flow again after the lapse heals"
+    );
+
+    for node in [a, b, stash] {
+        node.shutdown().await.expect("shutdown");
+    }
+}

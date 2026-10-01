@@ -32,6 +32,7 @@ import uniffi.iroh_location.ControlMsg
 import uniffi.iroh_location.DeliveryConfig
 import uniffi.iroh_location.FixListener
 import uniffi.iroh_location.RatchetEvent
+import uniffi.iroh_location.RecipientKey
 import uniffi.iroh_location.LocationFix
 import uniffi.iroh_location.LocationNode
 import uniffi.iroh_location.PairEvent
@@ -292,6 +293,7 @@ private fun ingestOutcomeToMap(o: IngestOutcome): Map<String, Any?> =
     "rejection" to o.rejection?.name?.lowercase(),
     "enqueued" to o.enqueued.toLong(),
     "published" to o.published.toLong(),
+    "reached" to o.reached.toLong(),
     "pending" to o.pending.toLong(),
     "slotsSkipped" to o.slotsSkipped.toLong(),
     "overflowDropped" to o.overflowDropped.toLong(),
@@ -767,6 +769,34 @@ class IrohLocationModule : Module() {
         Unit
       }
 
+    /// Mirror each friend's receiving key so the native drain can run session recovery (§4.6) on a
+    /// wake with no JS alive. Two parallel lists rather than records: the bridge carries lists of
+    /// strings without a converter, and JS builds both from the same pool in one pass.
+    AsyncFunction("setRecipientKeys") Coroutine
+      { endpointsHex: List<String>, recvPublicsHex: List<String> ->
+        requireNode().setRecipientKeys(
+          endpointsHex.zip(recvPublicsHex).map { (e, k) -> RecipientKey(e, k) }
+        )
+        Unit
+      }
+
+    /// Who the latest fix envelope was sealed for and who it left out, and why. `null` before the
+    /// first seal. `device.health` reports it as `ratchet.dropped*`.
+    AsyncFunction("lastSealReport") Coroutine
+      { ->
+        requireNode().lastSealReport()?.let { r ->
+          mapOf(
+            "at" to r.at.toLong(),
+            "recipients" to r.recipients.toLong(),
+            "dropped" to r.dropped.toLong(),
+            "lapsed" to r.lapsed.toLong(),
+            "noSession" to r.noSession.toLong(),
+            "other" to r.other.toLong(),
+            "droppedPeers" to r.droppedPeers,
+          )
+        }
+      }
+
     /// Read the durable sharing set back. `device.health` reports its size next to the pool's, so a
     /// phone whose JS pool and native list have diverged says so instead of reading healthy.
     AsyncFunction("sharingRecipients") Coroutine
@@ -791,6 +821,15 @@ class IrohLocationModule : Module() {
           "lastPublishedAt" to w.lastPublishedAt?.toLong(),
           "lastPushedAt" to w.lastPushedAt?.toLong(),
         )
+      }
+
+    // Every position the drain published since the app last asked — how a stretch published with
+    // no JS alive reaches the own trail and the exploration map. See `own_log.rs`.
+    AsyncFunction("takeOwnPublished") Coroutine
+      { ->
+        requireNode().takeOwnPublished().map {
+          mapOf("seq" to it.seq.toDouble(), "fix" to fixToMap(it.fix))
+        }
       }
 
     AsyncFunction("outboxPending") Coroutine

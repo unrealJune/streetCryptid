@@ -9,7 +9,7 @@ force_quit_after_seconds: 0
 thrash: true
 require_stash_observer: true
 assertions:
-  - action: bg.wake
+  - action: device.health
     min_count: 1
   - action: publish.fix
     status: ok

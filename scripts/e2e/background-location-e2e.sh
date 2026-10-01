@@ -73,7 +73,10 @@ device_drive_route "$SPEC" "$ROUTE"
 
 deadline="$(($(date +%s) + TIMEOUT_SECONDS))"
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  wake_count="$(device_event_log_count "$SPEC" "$start_ms" bg.wake)"
+  # `bg.wake` has not existed since capture moved into Rust — the location wake is native and
+  # emits no JS span, so this gate could never pass. `device.health` is the liveness record that
+  # does exist, and its `wake.*` attributes carry the wake counts themselves.
+  wake_count="$(device_event_log_count "$SPEC" "$start_ms" device.health)"
   publish_count="$(device_event_log_count "$SPEC" "$start_ms" publish.fix ok)"
   push_count="$(device_event_log_count "$SPEC" "$start_ms" trail.push.app ok)"
   if [ "$wake_count" -gt 0 ] && [ "$publish_count" -gt 0 ] && [ "$push_count" -gt 0 ]; then

@@ -25,10 +25,14 @@ const mockNativeHolder: {
       }>)
     | undefined;
   sharingRecipients: (() => Promise<string[]>) | undefined;
+  wake: (() => Record<string, unknown>) | undefined;
+  resets: number;
 } = {
   state: undefined,
   watermarks: undefined,
   sharingRecipients: undefined,
+  wake: undefined,
+  resets: 0,
 };
 
 jest.mock('iroh-location', () => ({
@@ -38,6 +42,10 @@ jest.mock('iroh-location', () => ({
     nativeBackgroundState: mockNativeHolder.state,
     publishWatermarks: mockNativeHolder.watermarks,
     sharingRecipients: mockNativeHolder.sharingRecipients,
+    takeBackgroundWakeStats: mockNativeHolder.wake,
+    resetBackgroundWakeStats: () => {
+      mockNativeHolder.resets += 1;
+    },
   }),
 }));
 
@@ -56,6 +64,8 @@ describe('device.health — native runtime state', () => {
     mockNativeHolder.state = undefined;
     mockNativeHolder.watermarks = undefined;
     mockNativeHolder.sharingRecipients = undefined;
+    mockNativeHolder.wake = undefined;
+    mockNativeHolder.resets = 0;
   });
 
   afterEach(() => setTelemetryForTesting(undefined));
@@ -118,6 +128,79 @@ describe('device.health — native runtime state', () => {
     await expect(recordDeviceHealth('refresh')).resolves.not.toThrow();
     expect(attributes()['location.state']).toBeUndefined();
   });
+
+  /**
+   * What the background wakes since the last record COST.
+   *
+   * Every other attribute here describes the phone at the instant of reporting. These describe the
+   * interval between records, which is where the failure lives: a phone that has stopped being
+   * woken emits nothing by construction, and until these existed the budget it was being denied
+   * could only be inferred from the silence — or learned from a MetricKit exception delivered on
+   * the launch after the one that offended.
+   */
+  describe('wake budget counters', () => {
+    it('flattens the wake ledger under wake.*', async () => {
+      mockNativeHolder.wake = () => ({
+        wakes: 12,
+        bg_launches: 4,
+        js_boots: 0,
+        cpu_ms_total: 900,
+        cpu_ms_max: 310,
+        wall_ms_total: 5_400,
+        window_open: false,
+      });
+
+      await recordDeviceHealth('refresh');
+
+      expect(attributes()).toMatchObject({
+        'wake.wakes': 12,
+        'wake.bg_launches': 4,
+        // The number this whole project is judged by: background launches that still boot JS.
+        'wake.js_boots': 0,
+        'wake.cpu_ms_max': 310,
+        'wake.window_open': false,
+      });
+    });
+
+    /**
+     * Absent, never zero. A zero would read as "nothing happened" when the truth is "nobody was
+     * counting" — Android has no ledger, and neither does a binary older than the JS bundle.
+     */
+    it('omits them entirely on a build without the export', async () => {
+      mockNativeHolder.wake = undefined;
+      await recordDeviceHealth('refresh');
+      expect(attributes()['wake.wakes']).toBeUndefined();
+      expect(attributes()['wake.cpu_ms_max']).toBeUndefined();
+    });
+
+    it('omits the section rather than failing the record when the read throws', async () => {
+      mockNativeHolder.wake = () => {
+        throw new Error('binary is older than the JS bundle');
+      };
+      await expect(recordDeviceHealth('refresh')).resolves.not.toThrow();
+      expect(attributes()['wake.wakes']).toBeUndefined();
+      expect(attributes()['task.location_running']).toBe(true);
+    });
+
+    /**
+     * The reset belongs to whoever owns the reporting cadence, and to nobody else. A combined
+     * take-and-reset inside the read would let a `foreground` record and a `refresh` record in the
+     * same minute take half the counts each, and neither would be a true reading.
+     */
+    it('clears the counters once, after the record is emitted', async () => {
+      mockNativeHolder.wake = () => ({ wakes: 3 });
+      await recordDeviceHealth('refresh');
+      expect(mockNativeHolder.resets).toBe(1);
+    });
+
+    /**
+     * A throttled record reports nothing, so it must not discard the interval either. That is
+     * structural rather than asserted here: the reset sits after the span is emitted, which is
+     * past the `return false` the throttle takes. This suite cannot reach that path — every
+     * `createPersistentKV()` hands back a fresh in-memory store, so the health watermark never
+     * survives between calls.
+     */
+  });
 });
 
 describe('device.health — publish watermarks come from native', () => {
@@ -130,6 +213,8 @@ describe('device.health — publish watermarks come from native', () => {
     mockNativeHolder.state = undefined;
     mockNativeHolder.watermarks = undefined;
     mockNativeHolder.sharingRecipients = undefined;
+    mockNativeHolder.wake = undefined;
+    mockNativeHolder.resets = 0;
   });
 
   afterEach(() => setTelemetryForTesting(undefined));
@@ -194,6 +279,8 @@ describe('device.health — the native sharing set', () => {
     resetEventLogForTesting();
     setTelemetryForTesting(createTelemetry({ now: () => 1_000 }));
     mockNativeHolder.sharingRecipients = undefined;
+    mockNativeHolder.wake = undefined;
+    mockNativeHolder.resets = 0;
   });
 
   afterEach(() => setTelemetryForTesting(undefined));
@@ -221,6 +308,8 @@ describe('device.health — the native sharing set', () => {
 
   it('omits it on a binary that predates the getter, rather than reporting zero', async () => {
     mockNativeHolder.sharingRecipients = undefined;
+    mockNativeHolder.wake = undefined;
+    mockNativeHolder.resets = 0;
 
     await recordDeviceHealth('refresh');
 

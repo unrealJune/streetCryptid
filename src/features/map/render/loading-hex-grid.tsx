@@ -12,6 +12,7 @@ import {
 import type { ScreenHexLattice } from '../core/hex-lattice';
 import type { Rgb } from '../core/types';
 import { LOADING_HEX_SKSL } from './loading-hex-shader';
+import { useIsAppActive } from '@/hooks/use-is-app-active';
 
 /** One full traverse of the sweep's wavelength. */
 const SWEEP_MS = 2600;
@@ -93,7 +94,9 @@ export function LoadingHexGrid({
   ink: Rgb;
 }) {
   const phase = useSharedValue(0.5);
-  const animate = loading && !reducedMotion;
+  // Off screen is the same answer as reduced motion: stop moving. See `useIsAppActive`.
+  const appActive = useIsAppActive();
+  const animate = loading && !reducedMotion && appActive;
   // Plain render-time state, not a shared value: how bright the sweep is follows props, and only
   // its POSITION is animated. Reduced motion still says "loading" — with a crest that sits still,
   // which is the same bargain the old grid struck.

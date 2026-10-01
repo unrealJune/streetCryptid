@@ -171,6 +171,29 @@ class FakeNativeModule {
     ];
   }
   async pruneTrail() {}
+
+  /** What the native drain has published and not yet handed over — see `own_log.rs`. */
+  ownPublished: {
+    seq: number;
+    fix: { lat: number; lon: number; accuracyM: number; headingDeg: number; ts: number };
+  }[] = [];
+  async takeOwnPublished() {
+    return this.ownPublished.splice(0);
+  }
+  /** Who the last natively-sealed envelope left out, as `<endpoint>:<reason>`. */
+  sealDroppedPeers: string[] | null = null;
+  async lastSealReport() {
+    if (this.sealDroppedPeers === null) return null;
+    return {
+      at: 1,
+      recipients: 1,
+      dropped: this.sealDroppedPeers.length,
+      lapsed: 0,
+      noSession: 0,
+      other: 0,
+      droppedPeers: this.sealDroppedPeers,
+    };
+  }
   addListener(name: string, cb: (e: unknown) => void) {
     this.handlers[name] = cb;
     return {
@@ -677,46 +700,6 @@ describe('LocationSharingService — durable trail wiring', () => {
       source: 'durable',
     });
   });
-
-  describe('share interval', () => {
-    /** Latest snapshot seen by an observer — `snapshot()` itself is private to the service. */
-    function observe(svc: LocationSharingService): () => SharingSnapshot | undefined {
-      const snapshots: SharingSnapshot[] = [];
-      svc.onChange((snapshot) => snapshots.push(snapshot));
-      return () => snapshots.at(-1);
-    }
-
-    it('defaults to 5 minutes and surfaces it on the snapshot', async () => {
-      const svc = makeService();
-      const latest = observe(svc);
-      await svc.init('@me', 'mothman');
-
-      expect(latest()?.shareIntervalMs).toBe(300_000);
-    });
-
-    it('persists a chosen interval and emits the change', async () => {
-      const svc = makeService();
-      await svc.init('@me', 'mothman');
-      const latest = observe(svc);
-
-      await svc.setShareInterval(60_000);
-
-      expect(latest()?.shareIntervalMs).toBe(60_000);
-      // Surviving a restart is covered in share-interval.test.ts against the KV directly: under
-      // jest each service builds its own InMemoryKV (no SQLite), so two instances here cannot
-      // share a store.
-    });
-
-    it('ignores an off-grid interval, which would break slot alignment', async () => {
-      const svc = makeService();
-      await svc.init('@me', 'mothman');
-      const latest = observe(svc);
-
-      await svc.setShareInterval(37_000);
-
-      expect(latest()?.shareIntervalMs).toBe(300_000);
-    });
-  });
 });
 
 describe('LocationSharingService — native delivery targets', () => {
@@ -1219,5 +1202,69 @@ describe('LocationSharingService — native node adoption', () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
     expect(mockHolder.mod.createNodeCalls).toBe(1);
+  });
+});
+
+describe('LocationSharingService — what the native drain did while JS was away', () => {
+  beforeEach(() => {
+    mockHolder.mod = new FakeNativeModule();
+    mockHolder.stashConfig = null;
+  });
+
+  // The replica keeps one slot per author, so reading it back gave the own trail — and the
+  // exploration map drawn from it — one point for a whole stretch published with no JS alive.
+  it('fills our own trail with every position native published, not just the latest', async () => {
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    const at = (ts: number) => ({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts });
+    mockHolder.mod.ownPublished = [
+      { seq: 41, fix: at(1_000) },
+      { seq: 42, fix: at(2_000) },
+      { seq: 43, fix: at(3_000) },
+    ];
+
+    await svc.syncTrail(0);
+
+    const own = await svc.selfTrail(0);
+    expect(own.map((p) => p.seq)).toEqual(expect.arrayContaining([41, 42, 43]));
+    expect(mockHolder.mod.ownPublished).toHaveLength(0);
+  });
+
+  // Session health used to be written only by the JS publish path, which native replaced — so a
+  // friend dropped from every envelope for a week looked healthy in the app.
+  it('reads per-friend drops from the native seal report', async () => {
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+    await svc.shareWith(friend.endpointId);
+    let latest: Record<string, string> = {};
+    svc.onChange((s) => {
+      latest = s.sessions.byFriend;
+    });
+
+    mockHolder.mod.sealDroppedPeers = [`${friend.endpointId}:lapsed`];
+    await svc.syncTrail(0);
+    expect(latest[friend.endpointId]).toBe('lapsed');
+
+    mockHolder.mod.sealDroppedPeers = [];
+    await svc.syncTrail(0);
+    expect(latest[friend.endpointId]).toBeUndefined();
+  });
+
+  it('reports a recovery native has given up on', async () => {
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+    let latest: Record<string, string> = {};
+    svc.onChange((s) => {
+      latest = s.sessions.byFriend;
+    });
+
+    mockHolder.mod.desynced.add(friend.endpointId);
+    mockHolder.mod.resyncCounts.set(friend.endpointId, 3);
+    await svc.syncTrail(0);
+
+    expect(latest[friend.endpointId]).toBe('recovery-failed');
+    expect(mockHolder.mod.calls.pollResync).toHaveLength(0);
   });
 });
