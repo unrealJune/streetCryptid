@@ -1190,6 +1190,10 @@ pub struct LocationNode {
     /// `plugins/withBackupExclusion.js`. Never point this at `data_dir` on a device.
     state_dir: PathBuf,
     inner: Mutex<Option<Started>>,
+    /// Serializes the drain path (`ingest_fix`, `heartbeat_fix`, `publish_introduction`) over the
+    /// gate and outbox. See [`publish::DrainLock`]. Never taken by anything else, so holding it
+    /// across the publish awaits stalls only another drain, which would have duplicated the work.
+    drain_lock: publish::DrainLock,
     /// Serializes `start`, so building the endpoint does not have to hold [`inner`].
     ///
     /// `start` awaits the BLE radio coming up and the endpoint binding, neither of which is fast
@@ -1976,6 +1980,7 @@ fn new_location_node_at(
         state_dir,
         inner: Mutex::new(None),
         starting: Mutex::new(()),
+        drain_lock: publish::DrainLock::default(),
         listener: Mutex::new(None),
         pair: PairCore::new(identity_seed, author, recv_public),
         profile_events: ProfileEventQueue::default(),
@@ -5115,6 +5120,7 @@ impl Subscription {
             gate: gate_store.as_ref(),
             sink: &sink,
             quality: gate::FixQualityConfig::default(),
+            lock: &self.node.drain_lock,
         };
         engine
             .publish_introduction(now_ms)
@@ -5150,6 +5156,7 @@ impl Subscription {
             gate: gate_store.as_ref(),
             sink: &sink,
             quality: gate::FixQualityConfig::default(),
+            lock: &self.node.drain_lock,
         };
         engine
             .heartbeat(battery, interval_ms, now_ms)
@@ -5191,6 +5198,7 @@ impl Subscription {
             gate: gate_store.as_ref(),
             sink: &sink,
             quality: gate::FixQualityConfig::default(),
+            lock: &self.node.drain_lock,
         };
         engine
             .ingest(fix, battery, interval_ms, now_ms)

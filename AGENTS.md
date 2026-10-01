@@ -144,6 +144,13 @@ Conventions when changing that code:
   `BGTaskSchedulerPermittedIdentifiers` (`app.json`). `location.stop_via` (`dwell` / `visit` /
   `refresh`) says which one parked a phone. Android's `NativeBackgroundRuntime` pulls friends too
   (`pullFriendFixes`), floored at 5 min.
+- **One drain run at a time, per node (`publish::DrainLock`).** "Idempotent per slot" held only for
+  SEQUENTIAL callers: UniFFI polls each foreign call on the host's thread, so concurrent
+  `heartbeat_fix`/`ingest_fix` calls both found the slot due, and two drains peeked the same outbox
+  head while the first was on the wire. On 2026-10-01 a parked iPhone (kept alive by the since-removed activity
+  session, coarse deliveries arriving in clusters, one `Task` heartbeat each) sealed 3-4 envelopes
+  per slot. The lock waits at most `DRAIN_LOCK_WAIT` and then runs unserialized, because a duplicate
+  is cheaper than a hung push silencing the phone. `tests/drain.rs` "Concurrent runs" covers it.
 - **Who owns the Rust stores is now stated, not raced.** `BackgroundLocationRuntime.owner` defaults
   to `.app`, and `ensureStarted()` returns on its first line unless it is `.native` — which removes
   the reason for the 2026-09-16 construction storm rather than merely bounding it, since the

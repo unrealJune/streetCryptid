@@ -262,6 +262,30 @@ pub struct Drained {
     pub reached: u32,
 }
 
+/// Serializes every run of a [`DrainEngine`] over the same stores. One per node.
+///
+/// The engine is built per call and holds no state, but the stores behind it are shared, and two
+/// runs interleaving over them publish the same slot twice. Both halves race:
+///
+/// * the gate: `get` → decide → `set` has no await in it, but UniFFI polls a foreign call's future
+///   on whichever thread the host's continuation runs, so two calls from Swift can be inside that
+///   block at once and both find the slot due;
+/// * the drain: `peek` → `publish().await` → `commit`, so a second drain peeks the same head while
+///   the first is on the wire and seals it again under a new seq.
+///
+/// On 2026-10-01 a parked iPhone, kept running by its `CLBackgroundActivitySession`, took its
+/// coarse deliveries in clusters, each spawning a heartbeat: it sealed 3-4 envelopes per slot,
+/// ~27 an hour against a cadence of 12, every extra one a `trail.push` and a `session.recover`.
+pub type DrainLock = tokio::sync::Mutex<()>;
+
+/// How long a run waits for the one before it before going ahead anyway.
+///
+/// Longer than any bounded run (the push budget is the long pole), so in practice a waiter always
+/// gets the lock and then finds its slot already covered. The bound exists for the case where a
+/// run never finishes: waiting forever behind it would turn one hung push into a phone that has
+/// stopped publishing, and a duplicate envelope is a far cheaper failure than silence.
+pub const DRAIN_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// Ties the gate, the queue and the sink together. Holds no state of its own — everything durable
 /// lives behind a port, so an engine is cheap to build per wake and impossible to leave stale.
 pub struct DrainEngine<'a, S: PublishSink> {
@@ -271,9 +295,25 @@ pub struct DrainEngine<'a, S: PublishSink> {
     pub gate: &'a dyn GateStateStore,
     pub sink: &'a S,
     pub quality: FixQualityConfig,
+    /// Shared by every engine over these stores. See [`DrainLock`].
+    pub lock: &'a DrainLock,
 }
 
 impl<S: PublishSink> DrainEngine<'_, S> {
+    /// Take the run lock, or give up waiting after [`DRAIN_LOCK_WAIT`] and run unserialized.
+    async fn serialize(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        match tokio::time::timeout(DRAIN_LOCK_WAIT, self.lock.lock()).await {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                tracing::warn!(
+                    wait_ms = DRAIN_LOCK_WAIT.as_millis() as u64,
+                    "drain run still held by an earlier one; proceeding unserialized"
+                );
+                None
+            }
+        }
+    }
+
     /// Take one captured location as far towards the wire as this wake allows.
     ///
     /// The order is deliberately the one `location-sharing.ts` runs, because the two must agree: a
@@ -287,6 +327,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         interval_ms: u64,
         now_ms: u64,
     ) -> Result<IngestOutcome, PublishError> {
+        let _run = self.serialize().await;
         let outcome = self
             .ingest_untraced(fix, battery, interval_ms, now_ms)
             .await?;
@@ -357,7 +398,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // half-way, and re-running these slots on the next wake would double-publish them.
         self.gate.set(state);
 
-        let drained = self.drain(now_ms).await?;
+        let drained = self.drain_held(now_ms).await?;
         Ok(self.outcome(
             rejection,
             plan.due,
@@ -388,6 +429,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         interval_ms: u64,
         now_ms: u64,
     ) -> Result<IngestOutcome, PublishError> {
+        let _run = self.serialize().await;
         let outcome = self
             .heartbeat_untraced(battery, interval_ms, now_ms)
             .await?;
@@ -437,7 +479,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // earlier failed drain would then go out stamped `live` from a phone that is parked.
         self.gate.set(state);
 
-        let drained = self.drain(now_ms).await?;
+        let drained = self.drain_held(now_ms).await?;
         Ok(self.outcome(
             None,
             plan.due,
@@ -476,12 +518,13 @@ impl<S: PublishSink> DrainEngine<'_, S> {
     /// `enqueued: 0` means this device has never had a position to share — a fresh install that
     /// has not captured yet. There is nothing to introduce and the first capture will do it.
     pub async fn publish_introduction(&self, now_ms: u64) -> Result<IngestOutcome, PublishError> {
+        let _run = self.serialize().await;
         let state = self.gate.get();
         let Some(known) = state.last_known_fix.as_ref().map(LocationFix::from) else {
             return Ok(self.outcome(None, 0, Drained::default(), 0, 0, false));
         };
         let overflow_dropped = self.queue.enqueue(known)?.overflow_dropped;
-        let drained = self.drain(now_ms).await?;
+        let drained = self.drain_held(now_ms).await?;
         Ok(self.outcome(None, 1, drained, 0, overflow_dropped, false))
     }
 
@@ -495,6 +538,12 @@ impl<S: PublishSink> DrainEngine<'_, S> {
     /// Returns how many reached the wire. A send failure is **not** an error here — a wake that
     /// published three of five envelopes did useful work, and the remainder is still queued.
     pub async fn drain(&self, now_ms: u64) -> Result<Drained, PublishError> {
+        let _run = self.serialize().await;
+        self.drain_held(now_ms).await
+    }
+
+    /// [`drain`](Self::drain) for a caller that already holds the run lock.
+    async fn drain_held(&self, now_ms: u64) -> Result<Drained, PublishError> {
         let recipients = self.recipients.get();
         let watchers = self.recipients.watchers();
         let mut published = 0u32;

@@ -9,8 +9,8 @@ use std::sync::Mutex;
 
 use iroh_location::gate::{BatteryState, FixQualityConfig, GateState};
 use iroh_location::publish::{
-    DrainEngine, EnqueueOutcome, FixQueue, FlushOutcome, GateStateStore, PublishError, PublishSink,
-    Recipients, RecoveryOutcome, Sealed, SeqCounter, StoreError,
+    DrainEngine, DrainLock, EnqueueOutcome, FixQueue, FlushOutcome, GateStateStore, PublishError,
+    PublishSink, Recipients, RecoveryOutcome, Sealed, SeqCounter, StoreError,
 };
 use iroh_location::LocationFix;
 
@@ -190,6 +190,9 @@ impl PublishSink for FakeSink {
         fix: LocationFix,
         recipients: Vec<String>,
     ) -> Result<Sealed, PublishError> {
+        // A real send is an await, and that await is the window two concurrent drains race
+        // through. Without a suspension point here the fake could never show it.
+        tokio::task::yield_now().await;
         let mut sent = self.sent.lock().unwrap();
         if let Some(limit) = *self.fail_after.lock().unwrap() {
             if sent.len() >= limit {
@@ -245,6 +248,7 @@ struct Harness {
     recipients: FakeRecipients,
     gate: FakeGate,
     sink: FakeSink,
+    lock: DrainLock,
 }
 
 impl Harness {
@@ -258,6 +262,7 @@ impl Harness {
             },
             gate: FakeGate::default(),
             sink: FakeSink::default(),
+            lock: DrainLock::default(),
         }
     }
 
@@ -269,6 +274,7 @@ impl Harness {
             gate: &self.gate,
             sink: &self.sink,
             quality: FixQualityConfig::default(),
+            lock: &self.lock,
         }
     }
 }
@@ -1507,4 +1513,55 @@ fn drop_reasons_use_the_js_spellings() {
         ..absorbed
     };
     assert_eq!(drop_reason(&low), Some("sampling-suspended"));
+}
+
+// --- Concurrent runs -----------------------------------------------------------------------------
+//
+// 2026-10-01: a parked iPhone sealed 3-4 envelopes per slot because each coarse delivery spawned
+// its own heartbeat and the runs interleaved over the shared gate and outbox. One slot is one
+// envelope however many callers arrive for it.
+
+#[tokio::test]
+async fn concurrent_heartbeats_fill_a_slot_once() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+
+    let later = base + INTERVAL;
+    // One engine per caller, as each FFI call builds its own.
+    let engines = [h.engine(), h.engine(), h.engine(), h.engine()];
+    let (a, b, c, d) = tokio::join!(
+        engines[0].heartbeat(healthy_battery(), INTERVAL, later),
+        engines[1].heartbeat(healthy_battery(), INTERVAL, later),
+        engines[2].heartbeat(healthy_battery(), INTERVAL, later),
+        engines[3].heartbeat(healthy_battery(), INTERVAL, later),
+    );
+    let published: u32 = [a, b, c, d].into_iter().map(|o| o.unwrap().published).sum();
+
+    assert_eq!(
+        published, 1,
+        "one envelope for the new slot, not one per caller"
+    );
+    assert_eq!(
+        h.sink.sent.lock().unwrap().len(),
+        2,
+        "the anchor and the heartbeat"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_drains_never_seal_the_same_entry_twice() {
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+    h.queue.enqueue(fix(now, 20.0)).unwrap();
+
+    let (first, second) = (h.engine(), h.engine());
+    let (a, b) = tokio::join!(first.drain(now), second.drain(now));
+
+    assert_eq!(a.unwrap().published + b.unwrap().published, 1);
+    let sent = h.sink.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1, "one queued fix, one envelope: {sent:?}");
 }
