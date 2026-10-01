@@ -318,6 +318,14 @@ Conventions when changing that code:
   `pair.accept`, `pair.finalize`, `pair.build_msg` and `pair.endpoint_ticket` are spans; the JS half
   adds `pair.initiate`, `pair.acknowledge` and `pair.connect_friend`. The span map is in
   `infra/otel/README.md`. Anything new on this path goes in as a span.
+- **`peer.contact` is the only span that says two PHONES talked, and it must stay honest.** Every
+  other delivery span says an envelope moved; a friend's dot updating via the stash hours later
+  looks identical to two phones awake at once. `contact.rs` emits one per exchange with a named peer
+  at the four places one is visible (gossip send to a recipient neighbour, gossip receive, a FINISHED
+  push, a pull that DELIVERED entries), tagged `contact.role` (`friend`/`stash`/`other`) and, on
+  receive, `contact.from_author`. Do not emit it for a peer that was merely dialled, or for a
+  neighbour dropped from the seal — a contact we cannot observe is how the dashboard row starts
+  lying. Its dimensions are in `collector-config.yaml`; see `infra/otel/README.md`.
 - **One poll driver.** `pollPairingOnce` is driven by exactly one re-armed timer whose cadence comes
   from `pairingPollDelay()`; Bump's interval only watches for its own window closing. Two 300 ms
   drivers running the same drain produced 6-7 `pairing.poll` per second on 2026-09-17, each one six

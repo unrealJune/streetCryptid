@@ -98,6 +98,7 @@ bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cu
     └ outbox.drain   (published/retained, publish.failed reason)
       └ publish.fix        (sc.seq)
         ├ gossip.publish*  (sc.entry_hash)  ─ live path ───────►  gossip.receive (sc.entry_hash, sc.via_peer, outcome)
+        │                   ├ peer.contact (send, per recipient neighbour)          └ peer.contact (recv, from_author?)
         └ docs.write*      (sc.entry_hash, dropped, sc.drop_reason?, dropped_peers?)  ─ LOCAL replica only
       └ session.recover*   (desynced, gave_up, no_key, restored, remaining)  ─ §4.6, once per drain
     └ trail.push.app                        ─ durable path ─►  stash.entry.received (sc.entry_hash)
@@ -376,6 +377,66 @@ phones land here — this is the network-state view when sync dies after a wifi�
 ```
 
 From any span, "Logs for this span" (trace→logs) jumps to that instance's logs around the span.
+
+## Did the phones actually talk? (`peer.contact`)
+
+Every span above answers "did the ENVELOPE move?". None of them answered "did the two PHONES talk?",
+and for background delivery that is the real question: a friend's dot can update because the stash
+relayed it hours later, because a third friend reconciled it on, or because both phones were awake
+and connected at the same moment and handed it over themselves. Those three look identical on the
+map and in `fix.received.app`.
+
+`peer.contact` (`streetcryptid-core`, Rust — so it fires on JS-free wakes too) is emitted once per
+exchange with a specific peer, at the four places a peer is named while data crosses:
+
+| `contact.dir` / `contact.lane` | Fires when                                                                                              |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| `send` / `gossip`              | a publish was broadcast while a recipient was a **gossip neighbour** (one span per such recipient)      |
+| `recv` / `gossip`              | a gossip envelope addressed to us was delivered by a neighbour                                          |
+| `send` / `docs`                | a `trail.push` peer **finished** reconciling (the same peer as its `trail.push.peer{outcome=finished}`) |
+| `recv` / `docs`                | a `trail.sync` peer **delivered** at least one entry — one span per peer per pass, `entries` = how many |
+
+Attributes, all spanmetrics dimensions (so they keep for 90 days, not 7):
+
+- `contact.role` — `friend` | `stash` | `other`. Friends come from the native recipient store
+  (sharing + watching); the stash is the first delivery ticket when the stash is opted into. A
+  friend is checked first, so it can never be filed as the stash.
+- `contact.from_author` (receive only) — the peer handed over **its own** envelope. `friend` +
+  `from_author=true` is the strongest statement there is: the author's phone was on the other end.
+- `contact.path` — `ble` | `lan` | `direct` | `relay` | `live`, the closest open path to that peer
+  (same labelling, and the same caveat, as `fix.received.app`'s `via`).
+- `sc.peer` — the other device's short endpoint id, the same 10-hex form as `service.instance.id`,
+  so `service_instance_id` x `sc_peer` is a device pair.
+
+`gossip.publish` also gains `neighbors` and `recipients_direct`, and `trail.sync` gains
+`sync.peers_delivered`, so a single trace shows how many of its recipients a wake actually reached.
+
+**What it does not claim.** A pull from a peer that had nothing new is not a contact — it is
+indistinguishable here from one that never answered, and counting it would make the tile lie. A
+gossip neighbour that receives an envelope it cannot open (dropped from the seal) is not a contact
+either. Contacts are counted from each side independently, so a healthy pair shows a `send` on one
+phone and a `recv` on the other; seeing only one half is itself a finding.
+
+The **phone-to-phone contact** row of the device-health dashboard reads these. Native spans carry no
+`device.id`, so the `device` filter does not apply there.
+
+```promql
+# Contacts per hour between each device pair (friend phones only).
+sum by (service_instance_id, sc_peer) (
+  rate(traces_span_metrics_calls_total{span_name="peer.contact", contact_role="friend"}[1h])) * 3600
+
+# How friends' fixes reach us: the author directly, another friend, or the stash.
+sum by (contact_role, contact_from_author) (
+  rate(traces_span_metrics_calls_total{span_name="peer.contact", contact_dir="recv"}[1h])) * 3600
+```
+
+```traceql
+# Every direct handover between two phones (swap in real short ids).
+{ name = "peer.contact" && resource.service.instance.id = "6942d8b97f" && span.sc.peer = "84f86b144a" }
+
+# Publishes that reached no recipient phone-to-phone — the stash is the only way out.
+{ name = "gossip.publish" && span.recipients_direct = 0 }
+```
 
 ## Tuning the per-peer dial budget
 

@@ -16,6 +16,7 @@
 //! trail recovery) is added in the `docs-recovery` milestone.
 
 mod ble;
+mod contact;
 mod crypto;
 pub mod delivery;
 mod docs;
@@ -52,7 +53,7 @@ pub const DOCS_MESH_EPOCH: u32 = 0;
 mod relay;
 mod telemetry;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1457,6 +1458,38 @@ impl LocationNode {
             .ok_or(LocationError::NotStarted)
     }
 
+    /// Who each peer is, for `peer.contact` (see [`contact::PeerRoles`]).
+    ///
+    /// Reads the recipient and delivery stores, each behind its own small mutex — NOT the node-wide
+    /// `inner` lock — so it is safe on the gossip receive loop. A store that is not open yet yields
+    /// an empty answer (every peer `other`) rather than an error: this only labels telemetry.
+    async fn peer_roles(&self) -> contact::PeerRoles {
+        let friends: Vec<[u8; 32]> = match self.recipient_store().await {
+            Ok(store) => store
+                .get()
+                .iter()
+                .chain(store.watchers().iter())
+                .filter_map(|hex| decode_endpoint(hex).ok())
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        // The stash goes FIRST in the delivery list when it is opted into (`DeliveryConfig`), and
+        // only then; `PeerRoles::new` still lets a friend's recipient record win that position.
+        let stash = match self.delivery_store().await {
+            Ok(store) => {
+                let config = store.get();
+                config
+                    .stash_base_url
+                    .as_ref()
+                    .and(config.peer_tickets.first())
+                    .and_then(|ticket| ticket.parse::<EndpointTicket>().ok())
+                    .map(|ticket| *ticket.endpoint_addr().id.as_bytes())
+            }
+            Err(_) => None,
+        };
+        contact::PeerRoles::new(friends, stash)
+    }
+
     async fn gate_store(&self) -> Result<Arc<gate::GateStore>, LocationError> {
         self.gate
             .lock()
@@ -2485,6 +2518,11 @@ impl LocationNode {
         // Kept for the receive loop: classifying the path an envelope arrived over needs the
         // endpoint's remote-address table, and the loop must not take the node lock per message.
         let delivery_endpoint = started.endpoint.clone();
+        // The live neighbour set, shared with `publish_inner`: a broadcast reaches a recipient
+        // phone-to-phone only if it is one of these at that moment. Maintained from the receive
+        // loop's NeighborUp/Down because the receiver half owns the only view of it.
+        let neighbors: Arc<StdMutex<HashSet<EndpointId>>> = Arc::default();
+        let loop_neighbors = neighbors.clone();
 
         // The node itself, not a snapshot of its session manager: `shutdown` replaces that handle,
         // and a task holding the old one would keep opening envelopes against a store whose writer
@@ -2530,7 +2568,29 @@ impl LocationNode {
                         // WHO handed it over, as opposed to over which kind of path. Unlike `via`
                         // this is exact: gossip tells us the neighbour it came from.
                         let via_peer = encode_hex(msg.delivered_from.as_bytes());
+                        // A delivered envelope is a phone-to-neighbour contact; record it whether
+                        // or not the payload then decodes, because the two phones DID talk. Roles
+                        // are looked up outside the span guard for the same reason as `via` above,
+                        // and the span itself is emitted inside it so it lands in this trace.
+                        let peer = *msg.delivered_from.as_bytes();
+                        let contact_roles = match &opened {
+                            GossipOpen::Delivered { .. } => Some(node.peer_roles().await),
+                            _ => None,
+                        };
                         let _guard = span.enter();
+                        if let (Some(roles), GossipOpen::Delivered { author, .. }) =
+                            (&contact_roles, &opened)
+                        {
+                            contact::record(contact::Contact {
+                                dir: contact::Dir::Recv,
+                                lane: contact::Lane::Gossip,
+                                peer: &peer,
+                                role: roles.role(&peer),
+                                path: &via,
+                                from_author: Some(author.as_slice() == peer.as_slice()),
+                                entries: 1,
+                            });
+                        }
                         match opened {
                             GossipOpen::Delivered {
                                 author,
@@ -2598,10 +2658,16 @@ impl LocationNode {
                         }
                     }
                     Ok(Event::NeighborUp(id)) => {
+                        if let Ok(mut set) = loop_neighbors.lock() {
+                            set.insert(id);
+                        }
                         tracing::info!(peer = %telemetry::short_hex(id.as_bytes()), "gossip neighbor up");
                         cb.on_status("peer-up".to_string());
                     }
                     Ok(Event::NeighborDown(id)) => {
+                        if let Ok(mut set) = loop_neighbors.lock() {
+                            set.remove(&id);
+                        }
                         tracing::info!(peer = %telemetry::short_hex(id.as_bytes()), "gossip neighbor down");
                         cb.on_status("peer-down".to_string());
                     }
@@ -2614,6 +2680,8 @@ impl LocationNode {
 
         Ok(Arc::new(Subscription {
             node: self.clone(),
+            endpoint: started.endpoint.clone(),
+            neighbors,
             sender: Mutex::new(sender),
             receive_task: StdMutex::new(Some(receive_task)),
         }))
@@ -2861,6 +2929,8 @@ impl LocationNode {
             sc.author = %telemetry::short_hex(&self.author),
             sync.peers_requested = requested,
             sync.peers_dialed = peers.len(),
+            // Peers that delivered at least one entry this pass — each is a `peer.contact`.
+            sync.peers_delivered = tracing::field::Empty,
         );
         telemetry::set_parent(&span, traceparent.as_deref());
         async move {
@@ -2877,10 +2947,34 @@ impl LocationNode {
             // there is no back-catalogue to stream, so a sync just reconciles and the app reads the
             // current fixes afterwards. The `recovered` span attribute is recorded app-side instead
             // (see `refreshTrailFromReplica`), which keeps the infra/otel `sc.*` join keys intact.
-            trail.sync_all(peers).await.map_err(|e| {
+            let delivered = trail.sync_all(peers).await.map_err(|e| {
                 tracing::warn!(error = %e, "trail sync failed");
                 LocationError::Network(e.to_string())
             })?;
+
+            // One `peer.contact` per peer that actually delivered something. A peer that was
+            // dialled and had nothing new is not counted: it is indistinguishable here from one
+            // that never answered, and claiming a contact we cannot see is how a tile starts lying.
+            let tallies = contact::tally_pull(&delivered);
+            tracing::Span::current().record("sync.peers_delivered", tallies.len());
+            if !tallies.is_empty() {
+                let roles = self.peer_roles().await;
+                for (peer, tally) in tallies {
+                    let path = match EndpointId::from_bytes(&peer) {
+                        Ok(id) => delivery_label(&started.endpoint, id).await,
+                        Err(_) => "live".to_string(),
+                    };
+                    contact::record(contact::Contact {
+                        dir: contact::Dir::Recv,
+                        lane: contact::Lane::Docs,
+                        peer: &peer,
+                        role: roles.role(&peer),
+                        path: &path,
+                        from_author: Some(tally.from_author),
+                        entries: tally.entries,
+                    });
+                }
+            }
             Ok(())
         }
         .instrument(span)
@@ -3038,18 +3132,39 @@ impl LocationNode {
             // The span's own duration is meaningless (it is opened and closed here, after the
             // fact); `peer.latency_ms` is the measurement. That is deliberate: a duration that
             // looked plausible but meant something else would be worse than an obvious zero.
+            //
+            // `peer.role` says whether the peer was the stash or a friend's phone, and a FINISHED
+            // push is also a `peer.contact`: the two devices reconciled with each other.
+            let roles = self.peer_roles().await;
             for peer in &report.per_peer {
                 let latency = peer.latency_ms;
+                let role = roles.role(&peer.peer);
                 tracing::info_span!(
                     "trail.push.peer",
                     sc.peer = %telemetry::short_hex(&peer.peer),
                     peer.outcome = peer.outcome.as_str(),
+                    peer.role = role,
                     peer.budget_ms = peer.budget_ms,
                     peer.latency_ms = latency.unwrap_or_default(),
                     peer.answered = latency.is_some(),
                     entries_sent = peer.entries_sent,
                 )
                 .in_scope(|| {});
+                if peer.outcome == docs::PeerOutcome::Finished {
+                    let path = match EndpointId::from_bytes(&peer.peer) {
+                        Ok(id) => delivery_label(&started.endpoint, id).await,
+                        Err(_) => "live".to_string(),
+                    };
+                    contact::record(contact::Contact {
+                        dir: contact::Dir::Send,
+                        lane: contact::Lane::Docs,
+                        peer: &peer.peer,
+                        role,
+                        path: &path,
+                        from_author: None,
+                        entries: peer.entries_sent,
+                    });
+                }
             }
 
             Ok(report
@@ -4730,6 +4845,10 @@ fn derive_recv_public(recv_secret: &[u8]) -> Result<Vec<u8>, LocationError> {
 #[derive(uniffi::Object)]
 pub struct Subscription {
     node: Arc<LocationNode>,
+    /// For labelling the path to a neighbour (`delivery_label`) without the node lock.
+    endpoint: Endpoint,
+    /// Gossip neighbours right now — see where `subscribe` builds it.
+    neighbors: Arc<StdMutex<HashSet<EndpointId>>>,
     sender: Mutex<iroh_gossip::api::GossipSender>,
     receive_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -4916,6 +5035,44 @@ impl publish::PublishSink for SubscriptionSink<'_> {
             }
         }
         Ok(publish::FlushOutcome::Pushed)
+    }
+}
+
+impl Subscription {
+    /// After a successful broadcast: one `peer.contact` for each recipient that is a gossip
+    /// neighbour, and the two counts on `gossip.publish`. Runs inside that span.
+    async fn record_direct_sends(&self, wrapped: &[EndpointId]) {
+        let (neighbor_count, direct): (usize, Vec<EndpointId>) = match self.neighbors.lock() {
+            Ok(set) => (
+                set.len(),
+                wrapped
+                    .iter()
+                    .filter(|id| set.contains(*id))
+                    .copied()
+                    .collect(),
+            ),
+            Err(_) => return,
+        };
+        let current = tracing::Span::current();
+        current.record("neighbors", neighbor_count);
+        current.record("recipients_direct", direct.len());
+        if direct.is_empty() {
+            return;
+        }
+        let roles = self.node.peer_roles().await;
+        for id in direct {
+            let peer = *id.as_bytes();
+            let path = delivery_label(&self.endpoint, id).await;
+            contact::record(contact::Contact {
+                dir: contact::Dir::Send,
+                lane: contact::Lane::Gossip,
+                peer: &peer,
+                role: roles.role(&peer),
+                path: &path,
+                from_author: None,
+                entries: 1,
+            });
+        }
     }
 }
 
@@ -5115,6 +5272,12 @@ impl Subscription {
             dropped = tracing::field::Empty,
             sc.drop_reason = tracing::field::Empty,
             dropped_peers = tracing::field::Empty,
+            // How many gossip neighbours the broadcast went to, and how many of them were
+            // recipients — i.e. how many friends got this envelope phone-to-phone rather than
+            // having to catch it later from the stash or a mirror. One `peer.contact` per such
+            // recipient as well.
+            neighbors = tracing::field::Empty,
+            recipients_direct = tracing::field::Empty,
         );
         telemetry::set_parent(&span, traceparent.as_deref());
         async move {
@@ -5139,6 +5302,14 @@ impl Subscription {
             if set.wraps.is_empty() {
                 return Ok(dropped);
             }
+            // The recipients this envelope can actually be opened by: a dropped one is not a
+            // contact even if it is a neighbour, because it receives bytes it cannot read.
+            let wrapped: Vec<EndpointId> = peers
+                .iter()
+                .filter(|peer| !set.dropped.iter().any(|(gone, _)| gone == *peer))
+                .filter_map(|peer| <[u8; 32]>::try_from(peer.as_slice()).ok())
+                .filter_map(|peer| EndpointId::from_bytes(&peer).ok())
+                .collect();
 
             let envelope = crypto::seal_v3(
                 &self.node.identity_seed,
@@ -5153,11 +5324,14 @@ impl Subscription {
                 "sc.entry_hash",
                 tracing::field::display(telemetry::envelope_hash(&envelope)),
             );
-            let sender = self.sender.lock().await;
-            sender.broadcast(envelope.into()).await.map_err(|e| {
-                tracing::warn!(error = %e, "gossip broadcast failed");
-                LocationError::Network(e.to_string())
-            })?;
+            {
+                let sender = self.sender.lock().await;
+                sender.broadcast(envelope.into()).await.map_err(|e| {
+                    tracing::warn!(error = %e, "gossip broadcast failed");
+                    LocationError::Network(e.to_string())
+                })?;
+            }
+            self.record_direct_sends(&wrapped).await;
             Ok(dropped)
         }
         .instrument(span)

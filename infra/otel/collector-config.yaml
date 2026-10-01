@@ -48,6 +48,17 @@ connectors:
       - name: service.version
       - name: sc.drop_reason
       - name: trigger
+      # `peer.contact` — did two phones actually exchange data, over which lane and path, and was
+      # it the author's phone itself? See `modules/iroh-location/rust/src/contact.rs`.
+      - name: contact.dir
+      - name: contact.lane
+      - name: contact.role
+      - name: contact.path
+      - name: contact.from_author
+      # Short endpoint id of the OTHER device. Bounded by the friend count (plus the stash), and
+      # the same 10-hex form as `service.instance.id`, so `service_instance_id` x `sc_peer` is a
+      # device pair. Also splits `trail.push.peer` per peer, which is the point of that span.
+      - name: sc.peer
     # Deliberately NOT `sc.author`, `sc.seq` or `sc.entry_hash`: those are per-envelope and would
     # make a new time series for every ping. Follow one envelope in Tempo; count them here.
     histogram:
