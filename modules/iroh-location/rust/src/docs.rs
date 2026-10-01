@@ -235,24 +235,23 @@ pub fn decode_nul_key(key: &[u8]) -> Option<Vec<u8>> {
 /// Non-fix keys (control, resync, pre-LWW) are ignored: those lanes are not what "delivered a
 /// friend's location" means, and attributing a fix to the peer that happened to hand over a live
 /// mode request would be a plausible-looking lie.
+/// Returns the author the key named, when it was a fix-lane slot (`None` for control, resync and
+/// anything else, which are not recorded).
 fn record_serving_peer(
     peers: &mut HashMap<[u8; 32], ServingPeer>,
     key: &[u8],
     peer: [u8; 32],
     entry_ts: u64,
-) {
-    let Some(author) = decode_key(key).or_else(|| decode_nul_key(key)) else {
-        return;
-    };
-    let Ok(author): Result<[u8; 32], _> = author.as_slice().try_into() else {
-        return;
-    };
+) -> Option<[u8; 32]> {
+    let author = decode_key(key).or_else(|| decode_nul_key(key))?;
+    let author: [u8; 32] = author.as_slice().try_into().ok()?;
     let entry = peers
         .entry(author)
         .or_insert(ServingPeer { peer, entry_ts });
     if entry_ts >= entry.entry_ts {
         *entry = ServingPeer { peer, entry_ts };
     }
+    Some(author)
 }
 
 /// Literal leading segment marking a **resync record** (FORWARD-SECRECY.md §4.6).
@@ -966,7 +965,14 @@ impl TrailDocs {
     /// Reconcile `ns` with `peers` and wait (bounded) for the exchange + content transfer to
     /// settle. Pull-only plumbing: decrypt/read happens afterwards via [`Self::read_latest`],
     /// so there is no per-entry surfacing and no sink.
-    async fn sync_ns(&self, ns: NamespaceId, peers: Vec<EndpointAddr>) -> Result<()> {
+    ///
+    /// Returns every `(serving peer, author)` delivered into the replica during the pass, for
+    /// `peer.contact` (see [`crate::contact::tally_pull`]).
+    async fn sync_ns(
+        &self,
+        ns: NamespaceId,
+        peers: Vec<EndpointAddr>,
+    ) -> Result<Vec<([u8; 32], [u8; 32])>> {
         let doc = self.doc_for(ns).await?;
         let mut events = doc.subscribe().await?;
         doc.start_sync(peers).await?;
@@ -975,6 +981,7 @@ impl TrailDocs {
         // would hang this call forever. The first event gets a longer grace period — a cold node's
         // dial (net_report + hole-punch or relay fallback) routinely outlasts the idle gap.
         let mut saw_event = false;
+        let mut delivered: Vec<([u8; 32], [u8; 32])> = Vec::new();
         loop {
             let wait = if saw_event {
                 SYNC_IDLE_TIMEOUT_SECS
@@ -990,19 +997,21 @@ impl TrailDocs {
                 Ok(Some(Ok(LiveEvent::InsertRemote { from, entry, .. }))) => {
                     saw_event = true;
                     let mut peers = self.serving_peers.lock().await;
-                    record_serving_peer(
+                    if let Some(author) = record_serving_peer(
                         &mut peers,
                         entry.key(),
                         *from.as_bytes(),
                         entry.timestamp(),
-                    );
+                    ) {
+                        delivered.push((*from.as_bytes(), author));
+                    }
                 }
                 Ok(Some(Ok(_))) => saw_event = true,
                 Ok(Some(Err(_))) | Ok(None) => break,
                 Err(_) => break, // idle timeout — settle for what transferred
             }
         }
-        Ok(())
+        Ok(delivered)
     }
 
     /// Put `ns` into the iroh-docs live engine with `peers` and wait for one reconciliation to
@@ -1265,7 +1274,9 @@ impl TrailDocs {
     /// A namespace that fails is logged and skipped rather than aborting the run: these are
     /// independent replicas, and short-circuiting on the first error meant one friend whose doc
     /// couldn't be opened silently blocked the refresh for everyone after them in the map.
-    pub async fn sync_all(&self, peers: Vec<EndpointAddr>) -> Result<()> {
+    ///
+    /// Returns every `(serving peer, author)` delivered across all namespaces, for `peer.contact`.
+    pub async fn sync_all(&self, peers: Vec<EndpointAddr>) -> Result<Vec<([u8; 32], [u8; 32])>> {
         let namespaces = self.namespaces().await;
         // CONCURRENTLY, not one after another. Every namespace that nobody answers for costs the
         // full `SYNC_FIRST_EVENT_TIMEOUT_SECS`, and a serial loop multiplied that by the friend
@@ -1280,7 +1291,11 @@ impl TrailDocs {
         .await;
 
         let mut failed = 0usize;
+        let mut delivered = Vec::new();
         for (ns, result) in &results {
+            if let Ok(from_ns) = result {
+                delivered.extend_from_slice(from_ns);
+            }
             if let Err(err) = result {
                 failed += 1;
                 tracing::warn!(
@@ -1295,7 +1310,7 @@ impl TrailDocs {
         if failed > 0 && failed == namespaces.len() {
             return Err(anyhow!("all {failed} trail namespaces failed to sync"));
         }
-        Ok(())
+        Ok(delivered)
     }
 }
 

@@ -675,6 +675,169 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "type": "row",
+      "title": "Phone-to-phone contact — did two phones' wakes actually overlap?",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Phone-to-phone contacts /h — by device pair",
+      "description": "One `peer.contact` per exchange between this device (`service_instance_id`) and a FRIEND's phone (`sc_peer`), either direction, either lane. A pair that only ever reaches each other through the stash shows nothing here, which is the point. Native-core spans carry no `device.id`, so the device filter above does not apply; pairs are named by short endpoint id.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "drawStyle": "bars"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (service_instance_id, sc_peer) (rate(traces_span_metrics_calls_total{span_name=\"peer.contact\", contact_role=\"friend\"}[1h])) * 3600",
+          "legendFormat": "{{service_instance_id}} ↔ {{sc_peer}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "How friends' fixes reach us /h — who handed them over",
+      "description": "Receive-side contacts only. `friend / from_author=true` is the author's own phone handing over its own fix: the two phones were connected at the same moment. `friend / false` is a third friend relaying it; `stash` is the durable mirror. A fleet that is mostly `stash` is one whose background wakes rarely line up.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "drawStyle": "bars"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (contact_role, contact_from_author, contact_lane) (rate(traces_span_metrics_calls_total{span_name=\"peer.contact\", contact_dir=\"recv\"}[1h])) * 3600",
+          "legendFormat": "{{contact_lane}} via {{contact_role}} (from_author={{contact_from_author}})",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Friend contacts by lane and path /h",
+      "description": "`gossip` is the live path (both phones subscribed at once); `docs` is trail reconciliation (a push a friend finished, or a pull a friend served). `path` is the closest open path to that peer: `ble` / `lan` / `direct` (hole-punched) / `relay`.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "drawStyle": "bars"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (contact_dir, contact_lane, contact_path) (rate(traces_span_metrics_calls_total{span_name=\"peer.contact\", contact_role=\"friend\"}[1h])) * 3600",
+          "legendFormat": "{{contact_dir}} {{contact_lane}} over {{contact_path}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Contacts per device pair — over the dashboard range",
+      "description": "Rows are (this device, friend, direction). Zero rows for a pair you expected means their wakes never overlapped in the range: everything that moved between them went through the stash.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (service_instance_id, sc_peer, contact_dir) (increase(traces_span_metrics_calls_total{span_name=\"peer.contact\", contact_role=\"friend\"}[$__range]))",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }
