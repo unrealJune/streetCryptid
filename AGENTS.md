@@ -130,13 +130,20 @@ Conventions when changing that code:
   badges (`refreshSessionHealth`); they were written only by the JS publish path. (4)
   `engine.ingest` / `engine.heartbeat` are emitted by `DrainEngine` itself, with the JS
   `sc.drop_reason` spellings (`publish::drop_reason`), so JS-free wakes are observable.
-- **A background-relaunched iOS process needs a `CLBackgroundActivitySession`, and a parked one needs
-  `NativeRefreshTask`.** On 2026-09-30 a relaunched iPhone ran ~90 s per wake and was suspended mid
-  stop-dwell (180 s), so it never declared `parked`. `holdActivitySession` runs on every `start()`
-  and foreground entry. `NativeRefreshTask` is the `BGProcessingTask` the retired JS refresh used
-  to be: it confirms a dwell the wake windows starved (`confirmDwelledCandidate`), heartbeats and
-  pulls. Its identifier must stay in `BGTaskSchedulerPermittedIdentifiers` (`app.json`).
-  Android's `NativeBackgroundRuntime` pulls friends too (`pullFriendFixes`), floored at 5 min.
+- **Never hold a `CLBackgroundActivitySession`.** Apple documents it as "an object that manages a
+  visual indicator", and on our `Always`-authorized iPhones it still put a persistent location
+  indicator on screen: v2.16.0/v2.17.0 held one for as long as sharing ran and brought back what
+  7550186 had removed in July, while keeping every background process resident (the CPU the native
+  rewrite existed to give back). It was added because on 2026-09-30 a background-RELAUNCHED iPhone
+  ran ~90 s per wake and was suspended mid stop-dwell (180 s), so it never declared `parked` —
+  `allowsBackgroundLocationUpdates` keeps a process running only for updates started in the
+  foreground. A relaunched process now finishes the stop through events instead: a `CLVisit`
+  arrival (`didVisit`, which also relaunches a terminated app) and `NativeRefreshTask`, the
+  `BGProcessingTask` the retired JS refresh used to be, which confirms a dwell the wake windows
+  starved (`confirmDwelledCandidate`), heartbeats and pulls. Its identifier must stay in
+  `BGTaskSchedulerPermittedIdentifiers` (`app.json`). `location.stop_via` (`dwell` / `visit` /
+  `refresh`) says which one parked a phone. Android's `NativeBackgroundRuntime` pulls friends too
+  (`pullFriendFixes`), floored at 5 min.
 - **Who owns the Rust stores is now stated, not raced.** `BackgroundLocationRuntime.owner` defaults
   to `.app`, and `ensureStarted()` returns on its first line unless it is `.native` — which removes
   the reason for the 2026-09-16 construction storm rather than merely bounding it, since the
