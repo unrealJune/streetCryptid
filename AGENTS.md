@@ -130,13 +130,48 @@ Conventions when changing that code:
   badges (`refreshSessionHealth`); they were written only by the JS publish path. (4)
   `engine.ingest` / `engine.heartbeat` are emitted by `DrainEngine` itself, with the JS
   `sc.drop_reason` spellings (`publish::drop_reason`), so JS-free wakes are observable.
-- **A background-relaunched iOS process needs a `CLBackgroundActivitySession`, and a parked one needs
-  `NativeRefreshTask`.** On 2026-09-30 a relaunched iPhone ran ~90 s per wake and was suspended mid
-  stop-dwell (180 s), so it never declared `parked`. `holdActivitySession` runs on every `start()`
-  and foreground entry. `NativeRefreshTask` is the `BGProcessingTask` the retired JS refresh used
-  to be: it confirms a dwell the wake windows starved (`confirmDwelledCandidate`), heartbeats and
-  pulls. Its identifier must stay in `BGTaskSchedulerPermittedIdentifiers` (`app.json`).
-  Android's `NativeBackgroundRuntime` pulls friends too (`pullFriendFixes`), floored at 5 min.
+- **Never hold a `CLBackgroundActivitySession`.** Apple documents it as "an object that manages a
+  visual indicator", and on our `Always`-authorized iPhones it still put a persistent location
+  indicator on screen: v2.16.0/v2.17.0 held one for as long as sharing ran and brought back what
+  7550186 had removed in July, while keeping every background process resident (the CPU the native
+  rewrite existed to give back). It was added because on 2026-09-30 a background-RELAUNCHED iPhone
+  ran ~90 s per wake and was suspended mid stop-dwell (180 s), so it never declared `parked` —
+  `allowsBackgroundLocationUpdates` keeps a process running only for updates started in the
+  foreground. A relaunched process now finishes the stop through events instead: a `CLVisit`
+  arrival (`didVisit`, which also relaunches a terminated app) and `NativeRefreshTask`, the
+  `BGProcessingTask` the retired JS refresh used to be, which confirms a dwell the wake windows
+  starved (`confirmDwelledCandidate`), heartbeats and pulls. Its identifier must stay in
+  `BGTaskSchedulerPermittedIdentifiers` (`app.json`). `location.stop_via` (`dwell` / `visit` /
+  `refresh`) says which one parked a phone. Android's `NativeBackgroundRuntime` pulls friends too
+  (`pullFriendFixes`), floored at 5 min.
+- **One drain run at a time, per node (`publish::DrainLock`).** "Idempotent per slot" held only for
+  SEQUENTIAL callers: UniFFI polls each foreign call on the host's thread, so concurrent
+  `heartbeat_fix`/`ingest_fix` calls both found the slot due, and two drains peeked the same outbox
+  head while the first was on the wire. On 2026-10-01 a parked iPhone (kept alive by the since-removed activity
+  session, coarse deliveries arriving in clusters, one `Task` heartbeat each) sealed 3-4 envelopes
+  per slot. The lock waits at most `DRAIN_LOCK_WAIT` and then runs unserialized, because a duplicate
+  is cheaper than a hung push silencing the phone. `tests/drain.rs` "Concurrent runs" covers it.
+- **The iOS location runtime reports itself as `location.runtime`, because nothing else can.** On
+  2026-10-01 an iPhone drove 88 minutes with its process alive (Loki) and no location reaching Rust
+  (zero `engine.*` spans), and nothing could say why: the Swift state machine wrote only `NSLog`,
+  and `device.health` is JS-emitted, which a background-relaunched process never boots.
+  `LocationRuntimeReporter` emits a `pulse` every 5 min from a background timer — deliberately not
+  from the delivery path, which falls silent exactly when it matters — probing the main thread
+  first (`main_stalled` when it cannot answer), plus a span per transition, visit, fence exit and
+  Core Location error. Anything new the runtime decides goes on it; see `infra/otel/README.md`.
+- **A heartbeat states what it knows about motion, and only a proven stop says `parked`.**
+  `heartbeat_fix` takes `parked: Option<bool>` (`publish::Motion`): `Some(true)` from a confirmed
+  dwell, a visit arrival, a parked coarse tick or Android's no-delivery ticker; `Some(false)` from a
+  stop just left (retracts a standing `parked` to `no-fix`); `None` from any clock — the mounted
+  JS timer, a refresh while moving — which keeps whatever the last evidence stamped. It used to stamp
+  `parked` unconditionally, and on 2026-10-02 the JS timer published four hours of "parked here"
+  from an iPhone whose runtime was in `moving`.
+- **A position Core Location hands back is not a capture.** `didUpdateLocations` drops a location
+  whose timestamp is not newer than the last one delivered: on 2026-10-02 one fix came back every
+  30 s for 73 minutes, the first two went out `live` 5-9 minutes stale, and the rest read as a
+  phone receiving fixes. A redelivery may still confirm a pending dwell, and otherwise drives a
+  no-claim heartbeat at most once a minute, since on a JS-free process nothing else ticks while
+  `moving`.
 - **Who owns the Rust stores is now stated, not raced.** `BackgroundLocationRuntime.owner` defaults
   to `.app`, and `ensureStarted()` returns on its first line unless it is `.native` — which removes
   the reason for the 2026-09-16 construction storm rather than merely bounding it, since the
@@ -276,6 +311,15 @@ Conventions when changing that code:
   mirrors with `setRecipientKeys`; `poll_resync` offers our half BEFORE looking for theirs (it
   did not, so two polling sides waited on each other forever). An envelope with every recipient
   dropped is not a publish: it does not stamp `last_published_at` or count as `reached`.
+  **Two rules keep recovery from splitting a pair that worked.** (1) A miss is a NEW envelope we
+  cannot open: `readLatest` re-opens every author's one LWW slot on every sync, and once that slot
+  counted as a miss per read, three syncs "desynced" a healthy session (`SessionError::Replayed`,
+  judged from the chain on disk and the author's monotonic `seq`). (2) Applying a resync record is
+  unilateral, so the side that offered one keeps polling every peer it is wrapped for for as long
+  as the record is acceptable — even after its own verdict clears — and keeps its ephemeral that
+  long rather than dropping it on restore. On 2026-10-02 an iPhone offered on launch, recovered by
+  itself a minute later and stopped; its Pixel applied the offer, and both phones spent hours
+  unable to open each other's envelopes.
 - **A pair is complete when `finalize` says so, not when the decision bits agree.** `is_complete()`
   goes true the instant a local accept latches; `finalize` — which installs the ratchet, ingests the
   handed profile record and raises `Ready` — runs after, and can still decline, because a wire

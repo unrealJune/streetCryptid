@@ -690,8 +690,9 @@ class IrohLocationModule : Module() {
     /// Publish the slots that have come due without a new fix, reusing the last known position.
     /// Driven on a timer by the mounted app — neither platform gives a background process a
     /// reliable one, and the cadence has to stay uniform whether or not the phone is moving.
+    /// `parked` is the caller's motion claim (`null` for none) — see `publish::Motion`.
     AsyncFunction("heartbeatFix") Coroutine
-      { subscriptionId: String, battery: Map<String, Any>, intervalMs: Double ->
+      { subscriptionId: String, battery: Map<String, Any>, intervalMs: Double, parked: Boolean? ->
         val sub = subs[subscriptionId] ?: throw IllegalStateException("no such subscription")
         ingestOutcomeToMap(
           sub.heartbeatFix(
@@ -699,6 +700,7 @@ class IrohLocationModule : Module() {
             batteryStateOf(battery),
             intervalMs.coerceAtLeast(1.0).toULong(),
             System.currentTimeMillis().toULong(),
+            parked,
           )
         )
       }
@@ -1345,6 +1347,8 @@ class IrohLocationModule : Module() {
       reason: String,
       kind: String = "fix",
       state: String = "moving",
+      /** On a heartbeat, the motion claim forwarded to `heartbeatFix`; `null` makes none. */
+      parked: Boolean? = null,
     ): Boolean {
       val module = sink?.get() ?: return false
       val payload =
@@ -1364,6 +1368,7 @@ class IrohLocationModule : Module() {
             ),
         )
       if (fix != null) payload["fix"] = fixToMap(fix)
+      if (parked != null) payload["parked"] = parked
       module.sendEvent("onNativeFix", payload)
       return true
     }

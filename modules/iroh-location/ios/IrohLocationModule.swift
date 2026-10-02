@@ -566,9 +566,10 @@ public final class IrohLocationModule: Module {
     /// Publish the slots that have come due without a new fix, reusing the last known position.
     /// Driven on a timer by the mounted app — neither platform gives a background process a
     /// reliable one, and the cadence has to stay uniform whether or not the phone is moving.
+    /// `parked` is the caller's motion claim (`nil` for none) — see `publish::Motion`.
     AsyncFunction("heartbeatFix") {
-      (subscriptionId: String, battery: [String: Any], intervalMs: Double) async throws
-        -> [String: Any?] in
+      (subscriptionId: String, battery: [String: Any], intervalMs: Double, parked: Bool?)
+        async throws -> [String: Any?] in
       guard let sub = self.subscriptions[subscriptionId] else {
         throw Exception(name: "NoSubscription", description: "no such subscription")
       }
@@ -577,7 +578,8 @@ public final class IrohLocationModule: Module {
           subscriptionId: subscriptionId,
           battery: batteryState(from: battery),
           intervalMs: UInt64(max(1, intervalMs)),
-          nowMs: UInt64(Date().timeIntervalSince1970 * 1000)))
+          nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+          parked: parked))
     }
 
     /// Start/stop the native background runtime. The app calls these when the user turns sharing on

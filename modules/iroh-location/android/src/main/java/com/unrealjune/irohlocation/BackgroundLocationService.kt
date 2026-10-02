@@ -210,6 +210,7 @@ class BackgroundLocationService : Service() {
           reason = "periodic",
           kind = "heartbeat",
           state = "stopped",
+          parked = true,
         )
       NativeBackgroundRuntime.Capture.Unavailable -> Unit
     }

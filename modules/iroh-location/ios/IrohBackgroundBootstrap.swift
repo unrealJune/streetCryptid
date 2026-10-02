@@ -138,6 +138,5 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
 
   public func applicationWillEnterForeground(_ application: UIApplication) {
     BackgroundWakeLedger.enterForeground()
-    BackgroundLocationRuntime.shared.appWillEnterForeground()
   }
 }

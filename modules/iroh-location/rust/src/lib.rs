@@ -23,6 +23,8 @@ mod docs;
 mod durable;
 pub mod gate;
 mod h3;
+/// `location.runtime` spans: the native location runtime reporting itself (see the module docs).
+pub mod location_runtime;
 /// Festival-mesh radio capsules: the outer wrapper that carries an envelope over open
 /// radio without a linkable identity (pure; see `mesh.rs` and `docs/mesh/DESIGN.md`).
 pub mod mesh;
@@ -1190,6 +1192,10 @@ pub struct LocationNode {
     /// `plugins/withBackupExclusion.js`. Never point this at `data_dir` on a device.
     state_dir: PathBuf,
     inner: Mutex<Option<Started>>,
+    /// Serializes the drain path (`ingest_fix`, `heartbeat_fix`, `publish_introduction`) over the
+    /// gate and outbox. See [`publish::DrainLock`]. Never taken by anything else, so holding it
+    /// across the publish awaits stalls only another drain, which would have duplicated the work.
+    drain_lock: publish::DrainLock,
     /// Serializes `start`, so building the endpoint does not have to hold [`inner`].
     ///
     /// `start` awaits the BLE radio coming up and the endpoint binding, neither of which is fast
@@ -1241,8 +1247,10 @@ pub struct LocationNode {
     /// The ephemeral behind our currently published resync record (§4.6), if any.
     ///
     /// One, not one per peer: a single fresh ephemeral serves every peer we are restarting with,
-    /// because the transcript separates the roots. Dropped once every peer has been resynced, and
-    /// on restart — a resync whose ephemeral is gone is simply re-offered.
+    /// because the transcript separates the roots. Held for as long as the published record is
+    /// acceptable (`RESYNC_FRESHNESS_MS`), NOT until everyone is restored: a peer can apply the
+    /// record after we stop needing it, and only this secret lets us join the root it moved to.
+    /// Lost on restart — a resync whose ephemeral is gone is simply re-offered.
     pending_resync: Mutex<Option<PendingResync>>,
 }
 
@@ -1292,6 +1300,7 @@ impl LocationNode {
             no_key = tracing::field::Empty,
             restored = tracing::field::Empty,
             remaining = tracing::field::Empty,
+            following = tracing::field::Empty,
             error = tracing::field::Empty,
         );
         async move {
@@ -1305,26 +1314,62 @@ impl LocationNode {
             unique.sort();
             unique.dedup();
 
-            let (mut desynced, mut gave_up, mut no_key) = (0u32, 0u32, 0u32);
-            let mut todo: Vec<(String, String)> = Vec::new();
+            // The exchange we already have out, while a peer can still accept it. Every peer it is
+            // wrapped for may have applied it — and a peer that applied it has ALREADY moved to the
+            // new root, whether or not we still think anything is wrong. See `following` below.
+            let (offered_to, offer_expired) = {
+                let pending = self.pending_resync.lock().await;
+                match pending.as_ref() {
+                    Some(p) if now.saturating_sub(p.ts) < sessions::RESYNC_FRESHNESS_MS => {
+                        (p.wrapped_for.clone(), false)
+                    }
+                    Some(_) => (Vec::new(), true),
+                    None => (Vec::new(), false),
+                }
+            };
+
+            let (mut desynced, mut gave_up, mut no_key, mut following) = (0u32, 0u32, 0u32, 0u32);
+            // (peer, receiving key, whether WE see the session as broken)
+            let mut todo: Vec<(String, String, bool)> = Vec::new();
             for peer_hex in unique {
                 let Ok(peer) = decode_endpoint(peer_hex) else {
                     continue;
                 };
-                if !manager.is_desynced(&peer, now) {
+                let is_desynced = manager.is_desynced(&peer, now);
+                if !is_desynced && offered_to.is_empty() {
                     continue;
                 }
-                desynced += 1;
-                if manager.resync_count(&peer) >= RESYNC_ATTEMPT_LIMIT {
-                    gave_up += 1;
-                    continue;
-                }
+                let past_limit = manager.resync_count(&peer) >= RESYNC_ATTEMPT_LIMIT;
                 let key = match store.as_ref().and_then(|s| s.key_for(peer_hex)) {
                     Some(key) => Some(key),
                     None => self.profile_recv_key(&peer).await,
                 };
+
+                if !is_desynced {
+                    // Following through. Applying a resync record is unilateral: the peer that finds
+                    // ours restarts its session on the spot. If our own verdict has cleared since we
+                    // offered — one envelope under the old session opened, which is all it takes --
+                    // stopping here strands that peer on a root we never join. On 2026-10-02 that
+                    // split an iPhone from a Pixel for three hours: the iPhone offered, recovered on
+                    // its own a minute later and stopped polling, and the Pixel applied the offer.
+                    // So poll every peer the live offer is wrapped for, not only the broken ones.
+                    let offered = key
+                        .as_deref()
+                        .and_then(decode_hex)
+                        .is_some_and(|raw| offered_to.contains(&raw));
+                    if offered && !past_limit {
+                        following += 1;
+                        todo.push((peer_hex.clone(), key.unwrap_or_default(), false));
+                    }
+                    continue;
+                }
+                desynced += 1;
+                if past_limit {
+                    gave_up += 1;
+                    continue;
+                }
                 match key {
-                    Some(key) => todo.push((peer_hex.clone(), key)),
+                    Some(key) => todo.push((peer_hex.clone(), key, true)),
                     None => no_key += 1,
                 }
             }
@@ -1333,32 +1378,45 @@ impl LocationNode {
             span.record("desynced", desynced);
             span.record("gave_up", gave_up);
             span.record("no_key", no_key);
+            span.record("following", following);
             if todo.is_empty() {
-                // The common case — nobody desynced — costs one state load per friend and nothing
-                // else. A desynced peer with no key or past the limit is on the span, not retried.
+                // The common case — nobody desynced, nothing offered — costs one state load per
+                // friend and nothing else. An offer no peer can accept any more is a private key
+                // held for nothing, so it goes now rather than on the next desync.
+                if offer_expired {
+                    self.clear_resync().await;
+                }
                 return publish::RecoveryOutcome::default();
             }
 
-            if let Err(err) = self
-                .publish_resync(todo.iter().map(|(_, key)| key.clone()).collect())
-                .await
-            {
-                span.record("error", tracing::field::display(&err));
-                // Still in progress: the push this triggers may bring the peer's half in, and the
-                // next drain retries ours.
-                return publish::RecoveryOutcome {
-                    in_progress: true,
-                    restored: 0,
-                };
+            // Only a broken session is a reason to (re)publish. Following peers are already in the
+            // record, and offering on their behalf would re-mint a stale offer for a session that
+            // works — the one thing that could strand a peer who applied the old one.
+            if todo.iter().any(|(_, _, broken)| *broken) {
+                if let Err(err) = self
+                    .publish_resync(todo.iter().map(|(_, key, _)| key.clone()).collect())
+                    .await
+                {
+                    span.record("error", tracing::field::display(&err));
+                    // Still in progress: the push this triggers may bring the peer's half in, and
+                    // the next drain retries ours.
+                    return publish::RecoveryOutcome {
+                        in_progress: true,
+                        restored: 0,
+                    };
+                }
             }
 
             let (mut restored, mut remaining) = (0u32, 0u32);
-            for (peer_hex, key) in &todo {
+            for (peer_hex, key, broken) in &todo {
                 match self.poll_resync(peer_hex.clone(), key.clone()).await {
                     Ok(true) => restored += 1,
-                    Ok(false) => remaining += 1,
+                    // A following peer that has not answered is not waiting on anything: the
+                    // session works. It does not hold the drain's push open — its half, if it ever
+                    // comes, rides in on the next ordinary pull.
+                    Ok(false) => remaining += u32::from(*broken),
                     Err(err) => {
-                        remaining += 1;
+                        remaining += u32::from(*broken);
                         span.record("error", tracing::field::display(&err));
                     }
                 }
@@ -1366,11 +1424,10 @@ impl LocationNode {
             span.record("restored", restored);
             span.record("remaining", remaining);
 
-            // Drop our ephemeral once nobody is mid-exchange: a private key held for no reason.
-            // The record stays in the slot, so a peer that has not pulled it yet still can.
-            if restored > 0 && remaining == 0 {
-                self.clear_resync().await;
-            }
+            // The ephemeral is deliberately NOT dropped once everyone is restored. A peer that
+            // applies our record later still lands on a root derived from it, and we can only
+            // join them while we hold it — so it lives exactly as long as the record is
+            // acceptable, and the expiry above is what drops it.
             publish::RecoveryOutcome {
                 in_progress: remaining > 0,
                 restored,
@@ -1532,9 +1589,9 @@ impl LocationNode {
                 seq: verified.seq,
                 payload,
             },
-            Err(sessions::SessionError::NotForUs) | Err(sessions::SessionError::NoSession) => {
-                GossipOpen::NotForUs
-            }
+            Err(sessions::SessionError::NotForUs)
+            | Err(sessions::SessionError::Replayed)
+            | Err(sessions::SessionError::NoSession) => GossipOpen::NotForUs,
             Err(_) => GossipOpen::Failed,
         }
     }
@@ -1620,7 +1677,7 @@ enum GossipOpen {
         seq: u64,
         payload: zeroize::Zeroizing<Vec<u8>>,
     },
-    /// Addressed to someone else, or from a peer we hold no session with. Ordinary.
+    /// Addressed to someone else, already seen, or from a peer we hold no session with. Ordinary.
     NotForUs,
     /// Not a v3 envelope, signature invalid, or the schedule refused the position.
     Failed,
@@ -1976,6 +2033,7 @@ fn new_location_node_at(
         state_dir,
         inner: Mutex::new(None),
         starting: Mutex::new(()),
+        drain_lock: publish::DrainLock::default(),
         listener: Mutex::new(None),
         pair: PairCore::new(identity_seed, author, recv_public),
         profile_events: ProfileEventQueue::default(),
@@ -4378,7 +4436,7 @@ impl LocationNode {
                 let author = envelope.author.to_vec();
                 let payload = match manager.open(&author, &envelope, now_ms()) {
                     Ok(payload) => payload,
-                    Err(sessions::SessionError::NotForUs) => {
+                    Err(sessions::SessionError::NotForUs | sessions::SessionError::Replayed) => {
                         not_for_us += 1;
                         not_for_us_seqs.push(envelope.seq);
                         continue;
@@ -5115,6 +5173,7 @@ impl Subscription {
             gate: gate_store.as_ref(),
             sink: &sink,
             quality: gate::FixQualityConfig::default(),
+            lock: &self.node.drain_lock,
         };
         engine
             .publish_introduction(now_ms)
@@ -5128,12 +5187,17 @@ impl Subscription {
     /// platform gives a background process a reliable one. `ingest_fix` only runs when the OS
     /// delivers a location, and on a stationary phone that can be never; the cadence still has to
     /// be uniform, because it is the one property of a sealed envelope the stash can read.
+    ///
+    /// `parked` is what the caller can prove about motion: `Some(true)` a confirmed stop,
+    /// `Some(false)` a stop just left, `None` a clock with no evidence either way (the JS timer).
+    /// Only the first stamps `parked` — see [`publish::Motion`] for the day it was unconditional.
     pub async fn heartbeat_fix(
         &self,
         subscription_id: String,
         battery: gate::BatteryState,
         interval_ms: u64,
         now_ms: u64,
+        parked: Option<bool>,
     ) -> Result<publish::IngestOutcome, LocationError> {
         let sink = SubscriptionSink {
             subscription: self,
@@ -5150,9 +5214,15 @@ impl Subscription {
             gate: gate_store.as_ref(),
             sink: &sink,
             quality: gate::FixQualityConfig::default(),
+            lock: &self.node.drain_lock,
         };
         engine
-            .heartbeat(battery, interval_ms, now_ms)
+            .heartbeat(
+                publish::Motion::from_parked(parked),
+                battery,
+                interval_ms,
+                now_ms,
+            )
             .await
             .map_err(|e| LocationError::Network(e.to_string()))
     }
@@ -5191,6 +5261,7 @@ impl Subscription {
             gate: gate_store.as_ref(),
             sink: &sink,
             quality: gate::FixQualityConfig::default(),
+            lock: &self.node.drain_lock,
         };
         engine
             .ingest(fix, battery, interval_ms, now_ms)

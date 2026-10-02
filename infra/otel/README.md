@@ -100,7 +100,7 @@ bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cu
         ├ gossip.publish*  (sc.entry_hash)  ─ live path ───────►  gossip.receive (sc.entry_hash, sc.via_peer, outcome)
         │                   ├ peer.contact (send, per recipient neighbour)          └ peer.contact (recv, from_author?)
         └ docs.write*      (sc.entry_hash, dropped, sc.drop_reason?, dropped_peers?)  ─ LOCAL replica only
-      └ session.recover*   (desynced, gave_up, no_key, restored, remaining)  ─ §4.6, once per drain
+      └ session.recover*   (desynced, gave_up, no_key, restored, remaining, following)  ─ §4.6, once per drain
     └ trail.push.app                        ─ durable path ─►  stash.entry.received (sc.entry_hash)
       └ trail.push*        (entries_sent, finished)
                                                                   └ trail.sync.app (recovered)
@@ -161,6 +161,7 @@ them describe a ping; all of them describe why there wasn't one.
 | `bg.session` (`precheck-empty`)                        | a headless wake found an empty outbox — distinct from no wake at all                                                                                  |
 | `revive.arm` (`outcome`)                               | whether the iOS tripwire is actually armed, rather than only believed to be — `armed` \| `throttled` \| `task-undefined` \| `unavailable` \| `failed` |
 | `device.health` (`sharing.muted`)                      | this phone believes it is sharing and cannot — `foreground-permission` \| `background-permission` \| `location-task-stopped` \| `no-recipients`       |
+| `location.runtime` (`location.event`)                  | the iOS native location runtime describing itself, JS or no JS — see [below](#is-core-location-delivering-locationruntime)                            |
 
 ### Spans that say what the phone and its human were doing
 
@@ -438,6 +439,49 @@ sum by (contact_role, contact_from_author) (
 { name = "gossip.publish" && span.recipients_direct = 0 }
 ```
 
+## Is Core Location delivering? (`location.runtime`)
+
+On 2026-10-01 an iPhone drove home for 88 minutes and published nothing. Loki proved the process was
+alive throughout (`net_report` every ~25 s), and not one `engine.*` span exists for the window, so
+no location reached Rust. Whether Core Location had stopped delivering, the main thread had stopped
+servicing it, or the deliveries arrived and the work they spawned never ran was unanswerable: the
+Swift state machine logged to `NSLog`, and `device.health` is emitted by JS, which a
+background-relaunched process never boots. That process ran nineteen hours with its motion state
+invisible.
+
+`location.runtime` (`streetcryptid-core`, so it ships from a JS-free process) is that state machine
+reporting itself, from `LocationRuntimeReporter.swift` through `location_runtime.rs`:
+
+| `location.event`                                                           | Fires                                                                                   |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `pulse`                                                                    | every 5 min from a background timer while the process runs — NOT from the delivery path |
+| `main_stalled`                                                             | the pulse's main-thread probe went unanswered for 10 s (once per stall)                 |
+| `started`                                                                  | `start()` armed the runtime; `location.reason` is the wake reason                       |
+| `transition`                                                               | `moving` ⇄ `stopped`; `location.reason` is the stop evidence or the wake reason         |
+| `visit` / `fence_exit`                                                     | a `CLVisit` (`arrival` / `departure`) or a stop-anchor exit                             |
+| `paused` / `resumed` / `location_error` / `fence_failed` / `authorization` | the Core Location callbacks that used to reach only `NSLog`                             |
+
+Read a pulse like this:
+
+- `location.deliveries = 0` with `location.main_latency_ms` small: Core Location delivered nothing.
+  If `location.state = moving` and the phone was moving, that is the failure — the manager's
+  programming is on the span (`desired_accuracy_m`, `distance_filter_m`).
+- `main_stalled`: the main thread, where Core Location delivers, is wedged. Deliveries cannot
+  arrive whatever the OS is doing.
+- `work_started - work_finished` climbing across pulses (both are process totals): deliveries
+  arrive and the publish work they spawn never runs or never returns.
+- `location.redeliveries` close to `location.deliveries`: Core Location is handing back a position
+  it already gave us. Those are no longer ingested (they went out `live` with a stale position on
+  2026-10-02); a non-zero `fix_age_at_delivery_ms` on a fresh delivery says the same thing.
+
+```traceql
+# A phone's runtime over a gap (swap in its short id).
+{ name = "location.runtime" && resource.service.instance.id = "84f86b144a" }
+
+# Moving and deaf: pulses that saw no delivery at all.
+{ name = "location.runtime" && span.location.event = "pulse" && span.location.state = "moving" && span.location.deliveries = 0 }
+```
+
 ## Tuning the per-peer dial budget
 
 Every durable push now grants each peer its **own** deadline, predicted by
@@ -519,6 +563,15 @@ to whatever child you searched for — which is exactly how an early pass at thi
    not mirrored that friend's receiving key and their profile is not in the replica. A Pixel 9
    spent a week (2026-09-22..29) at `dropped == recipients` because recovery only ran on the JS
    publish path the native drain had replaced.
+   **The opposite failure is a pair split by a resync**: `dropped=0`, envelopes go out, and the
+   friend's Loki shows `ratcheted envelope not opened` for exactly our `sc_seq` with
+   `sc_drop_reason="no wrap in this envelope belongs to us"`, right after one side logged
+   `restarted the session from a resync record`. Applying a record is unilateral, so the side that
+   OFFERED must join the root the other moved to; `following>0` on its `session.recover` is that
+   follow-through, and `restored>0` with `desynced=0` is it landing. On 2026-10-02 neither existed:
+   re-reading an already-opened replica slot counted as a miss, three reads made a working session
+   "desynced", and the offering iPhone stopped polling a minute before its Pixel applied the offer.
+   Re-reads now open as `Replayed` (`envelope already seen`) and never count.
    4b. **Did it get OFF the phone?** `docs.write` is local-only. Look for `trail.push.app` /
    `trail.push` in the same wake: absent means nothing pushed it, `finished=false` means the
    stash was unreachable. Hour-long gaps in a friend's trail with healthy `publish.fix` spans
@@ -579,32 +632,34 @@ produced the same permanent hole, because the old exporter discarded any batch i
 **2. Liveness is asserted, not inferred.** `device.health` is emitted every periodic refresh and on
 foreground resume. Its value is in the _mismatches_:
 
-| Read                                                                                                | Means                                                                                                                                                                                                     |
-| --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sharing.enabled=true` + `task.location_running=false`                                              | the OS is not delivering location — the core background failure                                                                                                                                           |
-| `perm.background` not `granted`                                                                     | "Always" was refused or revoked; iOS can downgrade it silently                                                                                                                                            |
-| `perm.accuracy=reduced`                                                                             | precise location off; every fix will fail the quality gate                                                                                                                                                |
-| `task.refresh_status=restricted`                                                                    | Background App Refresh is off — the periodic task will never run                                                                                                                                          |
-| `task.refresh_registered=true`, `last_refresh_age_ms` huge or absent                                | the task is registered AND permitted, and the OS is simply not running it                                                                                                                                 |
-| `storage.backend=memory`                                                                            | outbox, friend pool and sharing intent are lost on every restart                                                                                                                                          |
-| `sharing.recipients` >= 1 while `sharing.native_recipients` is 0                                    | the JS pool and the native seal list have diverged. Every publish from the native drain path is sealed for nobody, and every other reading on this record looks healthy. Cost a full day on 2026-09-03    |
-| `ratchet.dropped` equal to `sharing.recipients`, `ratchet.dropped_lapsed` > 0                       | every recipient lapsed: publishing to nobody. Should heal within a couple of drains on both phones via `session.recover`; if it does not, check that span. Now read from the native seal, not the JS path |
-| `telemetry.queued` large and growing                                                                | the device is fine; it cannot reach **us**                                                                                                                                                                |
-| `last_wake_age_ms` much larger than the publish age                                                 | it is being woken and choosing not to publish — read the drop spans                                                                                                                                       |
-| `location.state=stopped` + `location.fence_registered=false`                                        | parked with no way out — it will not wake until something else relaunches it                                                                                                                              |
-| `location.state=moving` + `location.candidate_pending=true`, `candidate_age_ms` climbing past 180 s | a stop that is not converting: the dwell is being starved of deliveries, so `stopped` — and the fence and coarse clock it installs — is never reached. Cost an iPhone two hours on 2026-09-02             |
-| `location.candidate_fence_armed=true` while `anchor_armed=false`                                    | the tripwire under a phone that only _looks_ settled. Speculative and correct; it is what answers a departure too short for SLC                                                                           |
-| `location.state=moving` + a large `last_publish_age_ms`                                             | Core Location is delivering and nothing is anchoring — check the gate                                                                                                                                     |
-| `last_publish_age_ms` small, `last_push_age_ms` large                                               | publishing into its own replica and reaching nobody — the delivery targets                                                                                                                                |
-| `location.wake_reason=periodic` and never anything else                                             | iOS: parked, ticking on the coarse stream. Publishing, and healthy                                                                                                                                        |
-| `location.state=stopped` + `location.anchor_distance_m` in the km                                   | parked, and nowhere near the anchor: the stop fence is not firing                                                                                                                                         |
-| `location.wake_reason=coarse_departure`                                                             | the fence missed a departure and the parked clock caught it — count these                                                                                                                                 |
-| `location.auth_status` not `always` while `perm.background=granted`                                 | the two disagree; Core Location's own read is the one that governs                                                                                                                                        |
-| `wake.bg_launches` climbing while `wake.js_boots` tracks it                                         | background launches are still booting the whole React Native bundle — the deferral is not working                                                                                                         |
-| `wake.cpu_ms_max` approaching 48000                                                                 | not "high": that is `MXCPUExceptionDiagnostic`'s threshold, the constant all 41 exceptions in the 2026-09 window reported                                                                                 |
-| `wake.window_open=true` on a record that is not mid-wake                                            | a previous wake never closed its window — the process was frozen or killed inside it                                                                                                                      |
-| `wake.wakes` large with `wake.syncs` at 0                                                           | the phone is being woken and publishing, but never pulling — friends' fixes only arrive on foreground                                                                                                     |
-| `bg.refresh.expired` present at all                                                                 | iOS is cutting the periodic refresh short. Invisible before this span existed: a terminated refresh and one that was never scheduled both leave a span that never ends                                    |
+| Read                                                                                                | Means                                                                                                                                                                                                      |
+| --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sharing.enabled=true` + `task.location_running=false`                                              | the OS is not delivering location — the core background failure                                                                                                                                            |
+| `perm.background` not `granted`                                                                     | "Always" was refused or revoked; iOS can downgrade it silently                                                                                                                                             |
+| `perm.accuracy=reduced`                                                                             | precise location off; every fix will fail the quality gate                                                                                                                                                 |
+| `task.refresh_status=restricted`                                                                    | Background App Refresh is off — the periodic task will never run                                                                                                                                           |
+| `task.refresh_registered=true`, `last_refresh_age_ms` huge or absent                                | the task is registered AND permitted, and the OS is simply not running it                                                                                                                                  |
+| `storage.backend=memory`                                                                            | outbox, friend pool and sharing intent are lost on every restart                                                                                                                                           |
+| `sharing.recipients` >= 1 while `sharing.native_recipients` is 0                                    | the JS pool and the native seal list have diverged. Every publish from the native drain path is sealed for nobody, and every other reading on this record looks healthy. Cost a full day on 2026-09-03     |
+| `ratchet.dropped` equal to `sharing.recipients`, `ratchet.dropped_lapsed` > 0                       | every recipient lapsed: publishing to nobody. Should heal within a couple of drains on both phones via `session.recover`; if it does not, check that span. Now read from the native seal, not the JS path  |
+| `telemetry.queued` large and growing                                                                | the device is fine; it cannot reach **us**                                                                                                                                                                 |
+| `last_wake_age_ms` much larger than the publish age                                                 | it is being woken and choosing not to publish — read the drop spans                                                                                                                                        |
+| `location.state=stopped` + `location.fence_registered=false`                                        | parked with no way out — it will not wake until something else relaunches it                                                                                                                               |
+| `location.state=moving` + `location.candidate_pending=true`, `candidate_age_ms` climbing past 180 s | a stop that is not converting: the dwell is being starved of deliveries, so `stopped` — and the fence and coarse clock it installs — is never reached. Cost an iPhone two hours on 2026-09-02              |
+| `location.candidate_fence_armed=true` while `anchor_armed=false`                                    | the tripwire under a phone that only _looks_ settled. Speculative and correct; it is what answers a departure too short for SLC                                                                            |
+| `location.state=moving` + a large `last_publish_age_ms`                                             | Core Location is delivering and nothing is anchoring — check the gate                                                                                                                                      |
+| `last_publish_age_ms` small, `last_push_age_ms` large                                               | publishing into its own replica and reaching nobody — the delivery targets                                                                                                                                 |
+| `location.wake_reason=periodic` and never anything else                                             | iOS: parked, ticking on the coarse stream. Publishing, and healthy                                                                                                                                         |
+| `location.state=stopped` + `location.anchor_distance_m` in the km                                   | parked, and nowhere near the anchor: the stop fence is not firing                                                                                                                                          |
+| `location.wake_reason=coarse_departure`                                                             | the fence missed a departure and the parked clock caught it — count these                                                                                                                                  |
+| `location.stop_via=visit` or `refresh`                                                              | the phone was parked by a `CLVisit` arrival or a `BGProcessing` wake, not the ordinary dwell: its process was relaunched in the background and suspended mid-dwell. Expected, and the share is the measure |
+| `location.last_visit_age_ms` absent on a phone that has been out and come home                      | the visit service is not delivering on that device, so a background-relaunched process there can only park on a `refresh` wake                                                                             |
+| `location.auth_status` not `always` while `perm.background=granted`                                 | the two disagree; Core Location's own read is the one that governs                                                                                                                                         |
+| `wake.bg_launches` climbing while `wake.js_boots` tracks it                                         | background launches are still booting the whole React Native bundle — the deferral is not working                                                                                                          |
+| `wake.cpu_ms_max` approaching 48000                                                                 | not "high": that is `MXCPUExceptionDiagnostic`'s threshold, the constant all 41 exceptions in the 2026-09 window reported                                                                                  |
+| `wake.window_open=true` on a record that is not mid-wake                                            | a previous wake never closed its window — the process was frozen or killed inside it                                                                                                                       |
+| `wake.wakes` large with `wake.syncs` at 0                                                           | the phone is being woken and publishing, but never pulling — friends' fixes only arrive on foreground                                                                                                      |
+| `bg.refresh.expired` present at all                                                                 | iOS is cutting the periodic refresh short. Invisible before this span existed: a terminated refresh and one that was never scheduled both leave a span that never ends                                     |
 
 `location.*` comes from the native runtime's `nativeBackgroundState()` (`BackgroundLocationRuntime`
 on iOS). It exists because `task.location_running=true` is true of a parked phone and of a broken
