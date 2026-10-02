@@ -286,6 +286,47 @@ pub type DrainLock = tokio::sync::Mutex<()>;
 /// stopped publishing, and a duplicate envelope is a far cheaper failure than silence.
 pub const DRAIN_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// What the caller of [`DrainEngine::heartbeat`] knows about whether the phone has settled.
+///
+/// A heartbeat used to mean "parked" by definition, on the reasoning that it was only reached from
+/// a phone that had stopped. It is not. The mounted app's five-minute timer runs whatever the motion
+/// state, and so does a wake that has just LEFT a stop; on 2026-10-02 an iPhone whose own state
+/// machine read `moving` (no anchor, no fence) published four hours of `parked` on that timer's
+/// exact 5:00 grid, so a friend's map showed a confident "parked here" at a stale spot. Only the
+/// caller knows which of these it is, so it says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    /// The phone has stopped and the caller can prove it: a confirmed dwell, a visit arrival, a tick
+    /// of the parked coarse stream, Android's no-delivery ticker. Stamps `FIX_STATE_PARKED`.
+    Parked,
+    /// The phone has just left a stop and no fix has placed it yet: a fence exit, a coarse
+    /// departure, a visit departure. A `parked` stamp still standing is now false, so it becomes
+    /// `FIX_STATE_NO_FIX` — "moving, no fix yet" is exactly what is true.
+    Moving,
+    /// A clock with no motion evidence at all: the JS timer, a refresh while still moving. The
+    /// stamp the last real evidence left is kept as it is.
+    Unknown,
+}
+
+impl Motion {
+    /// The foreign-call spelling: `Some(true)` parked, `Some(false)` moving, `None` no claim.
+    pub fn from_parked(parked: Option<bool>) -> Self {
+        match parked {
+            Some(true) => Motion::Parked,
+            Some(false) => Motion::Moving,
+            None => Motion::Unknown,
+        }
+    }
+
+    fn stamp(self, previous: Option<u8>) -> Option<u8> {
+        match self {
+            Motion::Parked => Some(FIX_STATE_PARKED),
+            Motion::Moving if previous == Some(FIX_STATE_PARKED) => Some(FIX_STATE_NO_FIX),
+            Motion::Moving | Motion::Unknown => previous,
+        }
+    }
+}
+
 /// Ties the gate, the queue and the sink together. Holds no state of its own — everything durable
 /// lives behind a port, so an engine is cheap to build per wake and impossible to leave stale.
 pub struct DrainEngine<'a, S: PublishSink> {
@@ -423,15 +464,19 @@ impl<S: PublishSink> DrainEngine<'_, S> {
     /// current.
     ///
     /// Returns `enqueued: 0` when the current slot is already covered, which is the common case.
+    ///
+    /// `motion` decides the `fix_state` the envelopes carry — see [`Motion`] for why the caller,
+    /// and not this function, is the one that knows.
     pub async fn heartbeat(
         &self,
+        motion: Motion,
         battery: BatteryState,
         interval_ms: u64,
         now_ms: u64,
     ) -> Result<IngestOutcome, PublishError> {
         let _run = self.serialize().await;
         let outcome = self
-            .heartbeat_untraced(battery, interval_ms, now_ms)
+            .heartbeat_untraced(motion, battery, interval_ms, now_ms)
             .await?;
         trace_outcome("engine.heartbeat", &outcome);
         Ok(outcome)
@@ -439,6 +484,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
 
     async fn heartbeat_untraced(
         &self,
+        motion: Motion,
         battery: BatteryState,
         interval_ms: u64,
         now_ms: u64,
@@ -454,13 +500,12 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             return Ok(self.outcome(None, 0, Drained::default(), 0, 0, false));
         };
 
-        // The declaration this whole field exists for. `heartbeat` is only reached from a phone
-        // that has settled — iOS's parked coarse stream, Android's no-delivery tick — so the
-        // envelopes this wake produces are the ones that should say so. Whichever of them turns
-        // out to be the last before a silence is then self-describing, which matters because the
-        // silence is not bounded: parked publishing rides on OS wakes, and p90 between contacts on
-        // iOS is 92 minutes with a 17-hour tail.
-        state.last_state = Some(FIX_STATE_PARKED);
+        // The declaration this whole field exists for, when the caller can make it. A parked
+        // phone's envelopes say so, and whichever of them turns out to be the last before a
+        // silence is then self-describing — which matters because the silence is not bounded:
+        // parked publishing rides on OS wakes, and p90 between contacts on iOS is 92 minutes with
+        // a 17-hour tail. A caller that cannot prove a stop leaves the last real evidence standing.
+        state.last_state = motion.stamp(state.last_state);
 
         gate::regrid(&mut state, interval_ms);
         let plan = gate::due_slots(now_ms, interval_ms, state.last_published_slot);
@@ -472,8 +517,8 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             state.last_published_slot = Some(plan.current_slot);
         }
         // Saved unconditionally, unlike the slot index it carries. `plan.due == 0` — the current
-        // slot is already covered — is the COMMON case on a parked phone, and the parked
-        // declaration is the whole point of this call: a wake that had no slot to fill has still
+        // slot is already covered — is the COMMON case on a parked phone, and the declaration is
+        // the whole point of a parked tick: a wake that had no slot to fill has still
         // learned that the device has settled. Gating the write on `due` would leave the stamp
         // unsaved through exactly the ticks that prove it, and any envelope left over from an
         // earlier failed drain would then go out stamped `live` from a phone that is parked.

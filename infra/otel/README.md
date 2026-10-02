@@ -161,6 +161,7 @@ them describe a ping; all of them describe why there wasn't one.
 | `bg.session` (`precheck-empty`)                        | a headless wake found an empty outbox — distinct from no wake at all                                                                                  |
 | `revive.arm` (`outcome`)                               | whether the iOS tripwire is actually armed, rather than only believed to be — `armed` \| `throttled` \| `task-undefined` \| `unavailable` \| `failed` |
 | `device.health` (`sharing.muted`)                      | this phone believes it is sharing and cannot — `foreground-permission` \| `background-permission` \| `location-task-stopped` \| `no-recipients`       |
+| `location.runtime` (`location.event`)                  | the iOS native location runtime describing itself, JS or no JS — see [below](#is-core-location-delivering-locationruntime)                            |
 
 ### Spans that say what the phone and its human were doing
 
@@ -436,6 +437,49 @@ sum by (contact_role, contact_from_author) (
 
 # Publishes that reached no recipient phone-to-phone — the stash is the only way out.
 { name = "gossip.publish" && span.recipients_direct = 0 }
+```
+
+## Is Core Location delivering? (`location.runtime`)
+
+On 2026-10-01 an iPhone drove home for 88 minutes and published nothing. Loki proved the process was
+alive throughout (`net_report` every ~25 s), and not one `engine.*` span exists for the window, so
+no location reached Rust. Whether Core Location had stopped delivering, the main thread had stopped
+servicing it, or the deliveries arrived and the work they spawned never ran was unanswerable: the
+Swift state machine logged to `NSLog`, and `device.health` is emitted by JS, which a
+background-relaunched process never boots. That process ran nineteen hours with its motion state
+invisible.
+
+`location.runtime` (`streetcryptid-core`, so it ships from a JS-free process) is that state machine
+reporting itself, from `LocationRuntimeReporter.swift` through `location_runtime.rs`:
+
+| `location.event`                                                           | Fires                                                                                   |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `pulse`                                                                    | every 5 min from a background timer while the process runs — NOT from the delivery path |
+| `main_stalled`                                                             | the pulse's main-thread probe went unanswered for 10 s (once per stall)                 |
+| `started`                                                                  | `start()` armed the runtime; `location.reason` is the wake reason                       |
+| `transition`                                                               | `moving` ⇄ `stopped`; `location.reason` is the stop evidence or the wake reason         |
+| `visit` / `fence_exit`                                                     | a `CLVisit` (`arrival` / `departure`) or a stop-anchor exit                             |
+| `paused` / `resumed` / `location_error` / `fence_failed` / `authorization` | the Core Location callbacks that used to reach only `NSLog`                             |
+
+Read a pulse like this:
+
+- `location.deliveries = 0` with `location.main_latency_ms` small: Core Location delivered nothing.
+  If `location.state = moving` and the phone was moving, that is the failure — the manager's
+  programming is on the span (`desired_accuracy_m`, `distance_filter_m`).
+- `main_stalled`: the main thread, where Core Location delivers, is wedged. Deliveries cannot
+  arrive whatever the OS is doing.
+- `work_started - work_finished` climbing across pulses (both are process totals): deliveries
+  arrive and the publish work they spawn never runs or never returns.
+- `location.redeliveries` close to `location.deliveries`: Core Location is handing back a position
+  it already gave us. Those are no longer ingested (they went out `live` with a stale position on
+  2026-10-02); a non-zero `fix_age_at_delivery_ms` on a fresh delivery says the same thing.
+
+```traceql
+# A phone's runtime over a gap (swap in its short id).
+{ name = "location.runtime" && resource.service.instance.id = "84f86b144a" }
+
+# Moving and deaf: pulses that saw no delivery at all.
+{ name = "location.runtime" && span.location.event = "pulse" && span.location.state = "moving" && span.location.deliveries = 0 }
 ```
 
 ## Tuning the per-peer dial budget

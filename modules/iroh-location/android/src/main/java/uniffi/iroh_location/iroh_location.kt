@@ -737,6 +737,8 @@ external fun uniffi_iroh_location_checksum_func_mesh_open_fix(
 ): Int
 external fun uniffi_iroh_location_checksum_func_mesh_seal_fix(
 ): Int
+external fun uniffi_iroh_location_checksum_func_record_location_runtime(
+): Int
 external fun uniffi_iroh_location_checksum_func_configure_telemetry(
 ): Int
 external fun uniffi_iroh_location_checksum_func_flush_telemetry(
@@ -1201,7 +1203,7 @@ external fun uniffi_iroh_location_fn_clone_subscription(`handle`: Long,uniffi_ou
 ): Long
 external fun uniffi_iroh_location_fn_free_subscription(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_iroh_location_fn_method_subscription_heartbeat_fix(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,
+external fun uniffi_iroh_location_fn_method_subscription_heartbeat_fix(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,`parked`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_subscription_ingest_fix(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`fix`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,
 ): Long
@@ -1249,6 +1251,8 @@ external fun uniffi_iroh_location_fn_func_mesh_open_fix(`recvSecret`: RustBuffer
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_mesh_seal_fix(`identitySecret`: RustBuffer.ByValue,`recvSecret`: RustBuffer.ByValue,`authorEndpointId`: RustBuffer.ByValue,`seq`: Long,`meshEpoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_record_location_runtime(`event`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_iroh_location_fn_func_configure_telemetry(`endpoint`: RustBuffer.ByValue,`instanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_iroh_location_fn_func_flush_telemetry(
@@ -1418,6 +1422,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_mesh_seal_fix() != 60001) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_record_location_runtime() != 22013) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {
@@ -1714,7 +1721,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_subscription_heartbeat_fix() != 34732) {
+    if (lib.uniffi_iroh_location_checksum_method_subscription_heartbeat_fix() != 26170) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_subscription_ingest_fix() != 22084) {
@@ -6764,8 +6771,12 @@ public interface SubscriptionInterface {
      * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
      * delivers a location, and on a stationary phone that can be never; the cadence still has to
      * be uniform, because it is the one property of a sealed envelope the stash can read.
+     *
+     * `parked` is what the caller can prove about motion: `Some(true)` a confirmed stop,
+     * `Some(false)` a stop just left, `None` a clock with no evidence either way (the JS timer).
+     * Only the first stamps `parked` — see [`publish::Motion`] for the day it was unconditional.
      */
-    suspend fun `heartbeatFix`(`subscriptionId`: kotlin.String, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong): IngestOutcome
+    suspend fun `heartbeatFix`(`subscriptionId`: kotlin.String, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong, `parked`: kotlin.Boolean?): IngestOutcome
     
     /**
      * Take one captured location all the way to the wire, with no JS involved.
@@ -6925,15 +6936,19 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
      * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
      * delivers a location, and on a stationary phone that can be never; the cadence still has to
      * be uniform, because it is the one property of a sealed envelope the stash can read.
+     *
+     * `parked` is what the caller can prove about motion: `Some(true)` a confirmed stop,
+     * `Some(false)` a stop just left, `None` a clock with no evidence either way (the JS timer).
+     * Only the first stamps `parked` — see [`publish::Motion`] for the day it was unconditional.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `heartbeatFix`(`subscriptionId`: kotlin.String, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong) : IngestOutcome {
+    override suspend fun `heartbeatFix`(`subscriptionId`: kotlin.String, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong, `parked`: kotlin.Boolean?) : IngestOutcome {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_subscription_heartbeat_fix(
                 uniffiHandle,
-                FfiConverterString.lower(`subscriptionId`),FfiConverterTypeBatteryState.lower(`battery`),FfiConverterULong.lower(`intervalMs`),FfiConverterULong.lower(`nowMs`),
+                FfiConverterString.lower(`subscriptionId`),FfiConverterTypeBatteryState.lower(`battery`),FfiConverterULong.lower(`intervalMs`),FfiConverterULong.lower(`nowMs`),FfiConverterOptionalBoolean.lower(`parked`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -7852,6 +7867,181 @@ public object FfiConverterTypeLocationFix: FfiConverterRustBuffer<LocationFix> {
             FfiConverterULong.write(value.`ts`, buf)
             FfiConverterOptionalUByte.write(value.`state`, buf)
             FfiConverterOptionalUInt.write(value.`publishedDeltaS`, buf)
+    }
+}
+
+
+
+/**
+ * One `location.runtime` span. `deliveries`, `redeliveries` and `handed_off` count since the
+ * previous pulse; `work_started` / `work_finished` are totals for the life of the process.
+ */
+data class LocationRuntimeEvent (
+    var `kind`: LocationRuntimeKind
+    , 
+    /**
+     * `moving` / `stopped`.
+     */
+    var `state`: kotlin.String
+    , 
+    /**
+     * The wake reason, stop evidence, visit direction or authorization status, by kind.
+     */
+    var `reason`: kotlin.String?
+    , 
+    /**
+     * `didUpdateLocations` calls.
+     */
+    var `deliveries`: kotlin.UInt
+    , 
+    /**
+     * Of those, deliveries whose newest location was NOT newer than the previous one — Core
+     * Location handing back a position it already gave us. On 2026-10-02 one 22:51 fix came back
+     * every 30 s for 73 minutes, and the first two went out as `live`.
+     */
+    var `redeliveries`: kotlin.UInt
+    , 
+    /**
+     * Publish-path calls (ingest + heartbeat) started and finished in this process. The difference
+     * is the work in flight; one that keeps growing is work spawned that never ran or never
+     * returned, which is what deliveries arriving and no `engine.*` span following would look like.
+     */
+    var `workStarted`: kotlin.UInt
+    , 
+    var `workFinished`: kotlin.UInt
+    , 
+    /**
+     * Captures handed to a mounted JS runtime instead of published here.
+     */
+    var `handedOff`: kotlin.UInt
+    , 
+    /**
+     * Since the last `didUpdateLocations`, at emission time.
+     */
+    var `lastDeliveryAgeMs`: kotlin.ULong?
+    , 
+    /**
+     * How old the newest delivered position was when it arrived (`now - location.timestamp`).
+     */
+    var `fixAgeAtDeliveryMs`: kotlin.ULong?
+    , 
+    var `accuracyM`: kotlin.Double?
+    , 
+    /**
+     * Negative is Core Location's "unknown", passed through.
+     */
+    var `speedMps`: kotlin.Double?
+    , 
+    /**
+     * What the manager is programmed with right now.
+     */
+    var `desiredAccuracyM`: kotlin.Double
+    , 
+    var `distanceFilterM`: kotlin.Double
+    , 
+    /**
+     * Round trip of the main-thread probe that preceded this event, when one ran.
+     */
+    var `mainLatencyMs`: kotlin.ULong?
+    , 
+    /**
+     * Whether this runtime holds the node (`native`) or hands captures to the app (`app`).
+     */
+    var `nodeOwner`: kotlin.String
+    , 
+    var `candidatePending`: kotlin.Boolean
+    , 
+    var `anchorArmed`: kotlin.Boolean
+    , 
+    var `fenceRegistered`: kotlin.Boolean
+    , 
+    /**
+     * An OS error description, for the error kinds only.
+     */
+    var `detail`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLocationRuntimeEvent: FfiConverterRustBuffer<LocationRuntimeEvent> {
+    override fun read(buf: ByteBuffer): LocationRuntimeEvent {
+        return LocationRuntimeEvent(
+            FfiConverterTypeLocationRuntimeKind.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalDouble.read(buf),
+            FfiConverterOptionalDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: LocationRuntimeEvent) = (
+            FfiConverterTypeLocationRuntimeKind.allocationSize(value.`kind`) +
+            FfiConverterString.allocationSize(value.`state`) +
+            FfiConverterOptionalString.allocationSize(value.`reason`) +
+            FfiConverterUInt.allocationSize(value.`deliveries`) +
+            FfiConverterUInt.allocationSize(value.`redeliveries`) +
+            FfiConverterUInt.allocationSize(value.`workStarted`) +
+            FfiConverterUInt.allocationSize(value.`workFinished`) +
+            FfiConverterUInt.allocationSize(value.`handedOff`) +
+            FfiConverterOptionalULong.allocationSize(value.`lastDeliveryAgeMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`fixAgeAtDeliveryMs`) +
+            FfiConverterOptionalDouble.allocationSize(value.`accuracyM`) +
+            FfiConverterOptionalDouble.allocationSize(value.`speedMps`) +
+            FfiConverterDouble.allocationSize(value.`desiredAccuracyM`) +
+            FfiConverterDouble.allocationSize(value.`distanceFilterM`) +
+            FfiConverterOptionalULong.allocationSize(value.`mainLatencyMs`) +
+            FfiConverterString.allocationSize(value.`nodeOwner`) +
+            FfiConverterBoolean.allocationSize(value.`candidatePending`) +
+            FfiConverterBoolean.allocationSize(value.`anchorArmed`) +
+            FfiConverterBoolean.allocationSize(value.`fenceRegistered`) +
+            FfiConverterOptionalString.allocationSize(value.`detail`)
+    )
+
+    override fun write(value: LocationRuntimeEvent, buf: ByteBuffer) {
+            FfiConverterTypeLocationRuntimeKind.write(value.`kind`, buf)
+            FfiConverterString.write(value.`state`, buf)
+            FfiConverterOptionalString.write(value.`reason`, buf)
+            FfiConverterUInt.write(value.`deliveries`, buf)
+            FfiConverterUInt.write(value.`redeliveries`, buf)
+            FfiConverterUInt.write(value.`workStarted`, buf)
+            FfiConverterUInt.write(value.`workFinished`, buf)
+            FfiConverterUInt.write(value.`handedOff`, buf)
+            FfiConverterOptionalULong.write(value.`lastDeliveryAgeMs`, buf)
+            FfiConverterOptionalULong.write(value.`fixAgeAtDeliveryMs`, buf)
+            FfiConverterOptionalDouble.write(value.`accuracyM`, buf)
+            FfiConverterOptionalDouble.write(value.`speedMps`, buf)
+            FfiConverterDouble.write(value.`desiredAccuracyM`, buf)
+            FfiConverterDouble.write(value.`distanceFilterM`, buf)
+            FfiConverterOptionalULong.write(value.`mainLatencyMs`, buf)
+            FfiConverterString.write(value.`nodeOwner`, buf)
+            FfiConverterBoolean.write(value.`candidatePending`, buf)
+            FfiConverterBoolean.write(value.`anchorArmed`, buf)
+            FfiConverterBoolean.write(value.`fenceRegistered`, buf)
+            FfiConverterOptionalString.write(value.`detail`, buf)
     }
 }
 
@@ -9437,6 +9627,88 @@ public object FfiConverterTypeLocationError : FfiConverterRustBuffer<LocationExc
 
 
 /**
+ * What happened. Each kind is either a discrete Core Location event or the periodic pulse.
+ */
+
+enum class LocationRuntimeKind {
+    
+    /**
+     * The runtime armed itself (`start()`): a launch, foreground or background.
+     */
+    STARTED,
+    /**
+     * Periodic summary of what Core Location delivered since the previous pulse. Emitted from a
+     * background timer, NOT from the delivery path, so it still fires when deliveries stop —
+     * which is the case it exists for.
+     */
+    PULSE,
+    /**
+     * The main thread did not run a probe within the stall threshold. Core Location delivers on
+     * main, so this is the "alive and deaf" state reported while it is happening.
+     */
+    MAIN_STALLED,
+    /**
+     * `moving` ⇄ `stopped`. `reason` names what caused it.
+     */
+    TRANSITION,
+    /**
+     * A `CLVisit`. `reason` is `arrival` or `departure`.
+     */
+    VISIT,
+    /**
+     * The stop-anchor fence reported an exit.
+     */
+    FENCE_EXIT,
+    /**
+     * Core Location paused updates (it should not, with auto-pause off).
+     */
+    PAUSED,
+    /**
+     * Core Location resumed updates.
+     */
+    RESUMED,
+    /**
+     * `didFailWithError`.
+     */
+    LOCATION_ERROR,
+    /**
+     * `monitoringDidFailFor` — a fence we believed armed is not.
+     */
+    FENCE_FAILED,
+    /**
+     * Authorization changed. `reason` is the new status.
+     */
+    AUTHORIZATION;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLocationRuntimeKind: FfiConverterRustBuffer<LocationRuntimeKind> {
+    override fun read(buf: ByteBuffer) = try {
+        LocationRuntimeKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: LocationRuntimeKind) = 4UL
+
+    override fun write(value: LocationRuntimeKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
  * The kind of a polled pairing event.
  */
 
@@ -9707,6 +9979,38 @@ public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
         } else {
             buf.put(1)
             FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalDouble: FfiConverterRustBuffer<kotlin.Double?> {
+    override fun read(buf: ByteBuffer): kotlin.Double? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterDouble.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Double?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterDouble.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Double?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterDouble.write(value, buf)
         }
     }
 }
@@ -10827,6 +11131,22 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
 }
     )
     }
+    
+
+        /**
+         * Record one runtime event as a `location.runtime` span.
+         *
+         * Synchronous and cheap: it opens and closes a span, and the batch exporter does the rest on its
+         * own thread. Safe to call from the main thread — and from a background queue while the main
+         * thread is wedged, which is when `MainStalled` is emitted.
+         */ fun `recordLocationRuntime`(`event`: LocationRuntimeEvent)
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_record_location_runtime(
+    
+        FfiConverterTypeLocationRuntimeEvent.lower(`event`),_status)
+}
+    
     
 
         /**

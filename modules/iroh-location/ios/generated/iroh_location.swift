@@ -4247,8 +4247,12 @@ public protocol SubscriptionProtocol: AnyObject, Sendable {
      * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
      * delivers a location, and on a stationary phone that can be never; the cadence still has to
      * be uniform, because it is the one property of a sealed envelope the stash can read.
+     *
+     * `parked` is what the caller can prove about motion: `Some(true)` a confirmed stop,
+     * `Some(false)` a stop just left, `None` a clock with no evidence either way (the JS timer).
+     * Only the first stamps `parked` — see [`publish::Motion`] for the day it was unconditional.
      */
-    func heartbeatFix(subscriptionId: String, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64) async throws  -> IngestOutcome
+    func heartbeatFix(subscriptionId: String, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64, parked: Bool?) async throws  -> IngestOutcome
     
     /**
      * Take one captured location all the way to the wire, with no JS involved.
@@ -4362,14 +4366,18 @@ open class Subscription: SubscriptionProtocol, @unchecked Sendable {
      * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
      * delivers a location, and on a stationary phone that can be never; the cadence still has to
      * be uniform, because it is the one property of a sealed envelope the stash can read.
+     *
+     * `parked` is what the caller can prove about motion: `Some(true)` a confirmed stop,
+     * `Some(false)` a stop just left, `None` a clock with no evidence either way (the JS timer).
+     * Only the first stamps `parked` — see [`publish::Motion`] for the day it was unconditional.
      */
-open func heartbeatFix(subscriptionId: String, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64)async throws  -> IngestOutcome  {
+open func heartbeatFix(subscriptionId: String, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64, parked: Bool?)async throws  -> IngestOutcome  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_iroh_location_fn_method_subscription_heartbeat_fix(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs)
+                    FfiConverterString.lower(subscriptionId),FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs),FfiConverterOptionBool.lower(parked)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
@@ -5504,6 +5512,222 @@ public func FfiConverterTypeLocationFix_lift(_ buf: RustBuffer) throws -> Locati
 #endif
 public func FfiConverterTypeLocationFix_lower(_ value: LocationFix) -> RustBuffer {
     return FfiConverterTypeLocationFix.lower(value)
+}
+
+
+/**
+ * One `location.runtime` span. `deliveries`, `redeliveries` and `handed_off` count since the
+ * previous pulse; `work_started` / `work_finished` are totals for the life of the process.
+ */
+public struct LocationRuntimeEvent: Equatable, Hashable {
+    public var kind: LocationRuntimeKind
+    /**
+     * `moving` / `stopped`.
+     */
+    public var state: String
+    /**
+     * The wake reason, stop evidence, visit direction or authorization status, by kind.
+     */
+    public var reason: String?
+    /**
+     * `didUpdateLocations` calls.
+     */
+    public var deliveries: UInt32
+    /**
+     * Of those, deliveries whose newest location was NOT newer than the previous one — Core
+     * Location handing back a position it already gave us. On 2026-10-02 one 22:51 fix came back
+     * every 30 s for 73 minutes, and the first two went out as `live`.
+     */
+    public var redeliveries: UInt32
+    /**
+     * Publish-path calls (ingest + heartbeat) started and finished in this process. The difference
+     * is the work in flight; one that keeps growing is work spawned that never ran or never
+     * returned, which is what deliveries arriving and no `engine.*` span following would look like.
+     */
+    public var workStarted: UInt32
+    public var workFinished: UInt32
+    /**
+     * Captures handed to a mounted JS runtime instead of published here.
+     */
+    public var handedOff: UInt32
+    /**
+     * Since the last `didUpdateLocations`, at emission time.
+     */
+    public var lastDeliveryAgeMs: UInt64?
+    /**
+     * How old the newest delivered position was when it arrived (`now - location.timestamp`).
+     */
+    public var fixAgeAtDeliveryMs: UInt64?
+    public var accuracyM: Double?
+    /**
+     * Negative is Core Location's "unknown", passed through.
+     */
+    public var speedMps: Double?
+    /**
+     * What the manager is programmed with right now.
+     */
+    public var desiredAccuracyM: Double
+    public var distanceFilterM: Double
+    /**
+     * Round trip of the main-thread probe that preceded this event, when one ran.
+     */
+    public var mainLatencyMs: UInt64?
+    /**
+     * Whether this runtime holds the node (`native`) or hands captures to the app (`app`).
+     */
+    public var nodeOwner: String
+    public var candidatePending: Bool
+    public var anchorArmed: Bool
+    public var fenceRegistered: Bool
+    /**
+     * An OS error description, for the error kinds only.
+     */
+    public var detail: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: LocationRuntimeKind, 
+        /**
+         * `moving` / `stopped`.
+         */state: String, 
+        /**
+         * The wake reason, stop evidence, visit direction or authorization status, by kind.
+         */reason: String?, 
+        /**
+         * `didUpdateLocations` calls.
+         */deliveries: UInt32, 
+        /**
+         * Of those, deliveries whose newest location was NOT newer than the previous one — Core
+         * Location handing back a position it already gave us. On 2026-10-02 one 22:51 fix came back
+         * every 30 s for 73 minutes, and the first two went out as `live`.
+         */redeliveries: UInt32, 
+        /**
+         * Publish-path calls (ingest + heartbeat) started and finished in this process. The difference
+         * is the work in flight; one that keeps growing is work spawned that never ran or never
+         * returned, which is what deliveries arriving and no `engine.*` span following would look like.
+         */workStarted: UInt32, workFinished: UInt32, 
+        /**
+         * Captures handed to a mounted JS runtime instead of published here.
+         */handedOff: UInt32, 
+        /**
+         * Since the last `didUpdateLocations`, at emission time.
+         */lastDeliveryAgeMs: UInt64?, 
+        /**
+         * How old the newest delivered position was when it arrived (`now - location.timestamp`).
+         */fixAgeAtDeliveryMs: UInt64?, accuracyM: Double?, 
+        /**
+         * Negative is Core Location's "unknown", passed through.
+         */speedMps: Double?, 
+        /**
+         * What the manager is programmed with right now.
+         */desiredAccuracyM: Double, distanceFilterM: Double, 
+        /**
+         * Round trip of the main-thread probe that preceded this event, when one ran.
+         */mainLatencyMs: UInt64?, 
+        /**
+         * Whether this runtime holds the node (`native`) or hands captures to the app (`app`).
+         */nodeOwner: String, candidatePending: Bool, anchorArmed: Bool, fenceRegistered: Bool, 
+        /**
+         * An OS error description, for the error kinds only.
+         */detail: String?) {
+        self.kind = kind
+        self.state = state
+        self.reason = reason
+        self.deliveries = deliveries
+        self.redeliveries = redeliveries
+        self.workStarted = workStarted
+        self.workFinished = workFinished
+        self.handedOff = handedOff
+        self.lastDeliveryAgeMs = lastDeliveryAgeMs
+        self.fixAgeAtDeliveryMs = fixAgeAtDeliveryMs
+        self.accuracyM = accuracyM
+        self.speedMps = speedMps
+        self.desiredAccuracyM = desiredAccuracyM
+        self.distanceFilterM = distanceFilterM
+        self.mainLatencyMs = mainLatencyMs
+        self.nodeOwner = nodeOwner
+        self.candidatePending = candidatePending
+        self.anchorArmed = anchorArmed
+        self.fenceRegistered = fenceRegistered
+        self.detail = detail
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LocationRuntimeEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLocationRuntimeEvent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LocationRuntimeEvent {
+        return
+            try LocationRuntimeEvent(
+                kind: FfiConverterTypeLocationRuntimeKind.read(from: &buf), 
+                state: FfiConverterString.read(from: &buf), 
+                reason: FfiConverterOptionString.read(from: &buf), 
+                deliveries: FfiConverterUInt32.read(from: &buf), 
+                redeliveries: FfiConverterUInt32.read(from: &buf), 
+                workStarted: FfiConverterUInt32.read(from: &buf), 
+                workFinished: FfiConverterUInt32.read(from: &buf), 
+                handedOff: FfiConverterUInt32.read(from: &buf), 
+                lastDeliveryAgeMs: FfiConverterOptionUInt64.read(from: &buf), 
+                fixAgeAtDeliveryMs: FfiConverterOptionUInt64.read(from: &buf), 
+                accuracyM: FfiConverterOptionDouble.read(from: &buf), 
+                speedMps: FfiConverterOptionDouble.read(from: &buf), 
+                desiredAccuracyM: FfiConverterDouble.read(from: &buf), 
+                distanceFilterM: FfiConverterDouble.read(from: &buf), 
+                mainLatencyMs: FfiConverterOptionUInt64.read(from: &buf), 
+                nodeOwner: FfiConverterString.read(from: &buf), 
+                candidatePending: FfiConverterBool.read(from: &buf), 
+                anchorArmed: FfiConverterBool.read(from: &buf), 
+                fenceRegistered: FfiConverterBool.read(from: &buf), 
+                detail: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LocationRuntimeEvent, into buf: inout [UInt8]) {
+        FfiConverterTypeLocationRuntimeKind.write(value.kind, into: &buf)
+        FfiConverterString.write(value.state, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+        FfiConverterUInt32.write(value.deliveries, into: &buf)
+        FfiConverterUInt32.write(value.redeliveries, into: &buf)
+        FfiConverterUInt32.write(value.workStarted, into: &buf)
+        FfiConverterUInt32.write(value.workFinished, into: &buf)
+        FfiConverterUInt32.write(value.handedOff, into: &buf)
+        FfiConverterOptionUInt64.write(value.lastDeliveryAgeMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.fixAgeAtDeliveryMs, into: &buf)
+        FfiConverterOptionDouble.write(value.accuracyM, into: &buf)
+        FfiConverterOptionDouble.write(value.speedMps, into: &buf)
+        FfiConverterDouble.write(value.desiredAccuracyM, into: &buf)
+        FfiConverterDouble.write(value.distanceFilterM, into: &buf)
+        FfiConverterOptionUInt64.write(value.mainLatencyMs, into: &buf)
+        FfiConverterString.write(value.nodeOwner, into: &buf)
+        FfiConverterBool.write(value.candidatePending, into: &buf)
+        FfiConverterBool.write(value.anchorArmed, into: &buf)
+        FfiConverterBool.write(value.fenceRegistered, into: &buf)
+        FfiConverterOptionString.write(value.detail, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocationRuntimeEvent_lift(_ buf: RustBuffer) throws -> LocationRuntimeEvent {
+    return try FfiConverterTypeLocationRuntimeEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocationRuntimeEvent_lower(_ value: LocationRuntimeEvent) -> RustBuffer {
+    return FfiConverterTypeLocationRuntimeEvent.lower(value)
 }
 
 
@@ -7566,6 +7790,175 @@ public func FfiConverterTypeLocationError_lower(_ value: LocationError) -> RustB
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * What happened. Each kind is either a discrete Core Location event or the periodic pulse.
+ */
+
+public enum LocationRuntimeKind: Equatable, Hashable {
+    
+    /**
+     * The runtime armed itself (`start()`): a launch, foreground or background.
+     */
+    case started
+    /**
+     * Periodic summary of what Core Location delivered since the previous pulse. Emitted from a
+     * background timer, NOT from the delivery path, so it still fires when deliveries stop —
+     * which is the case it exists for.
+     */
+    case pulse
+    /**
+     * The main thread did not run a probe within the stall threshold. Core Location delivers on
+     * main, so this is the "alive and deaf" state reported while it is happening.
+     */
+    case mainStalled
+    /**
+     * `moving` ⇄ `stopped`. `reason` names what caused it.
+     */
+    case transition
+    /**
+     * A `CLVisit`. `reason` is `arrival` or `departure`.
+     */
+    case visit
+    /**
+     * The stop-anchor fence reported an exit.
+     */
+    case fenceExit
+    /**
+     * Core Location paused updates (it should not, with auto-pause off).
+     */
+    case paused
+    /**
+     * Core Location resumed updates.
+     */
+    case resumed
+    /**
+     * `didFailWithError`.
+     */
+    case locationError
+    /**
+     * `monitoringDidFailFor` — a fence we believed armed is not.
+     */
+    case fenceFailed
+    /**
+     * Authorization changed. `reason` is the new status.
+     */
+    case authorization
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension LocationRuntimeKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLocationRuntimeKind: FfiConverterRustBuffer {
+    typealias SwiftType = LocationRuntimeKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LocationRuntimeKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .started
+        
+        case 2: return .pulse
+        
+        case 3: return .mainStalled
+        
+        case 4: return .transition
+        
+        case 5: return .visit
+        
+        case 6: return .fenceExit
+        
+        case 7: return .paused
+        
+        case 8: return .resumed
+        
+        case 9: return .locationError
+        
+        case 10: return .fenceFailed
+        
+        case 11: return .authorization
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: LocationRuntimeKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .started:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .pulse:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .mainStalled:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .transition:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .visit:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .fenceExit:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .paused:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .resumed:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .locationError:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .fenceFailed:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .authorization:
+            writeInt(&buf, Int32(11))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocationRuntimeKind_lift(_ buf: RustBuffer) throws -> LocationRuntimeKind {
+    return try FfiConverterTypeLocationRuntimeKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocationRuntimeKind_lower(_ value: LocationRuntimeKind) -> RustBuffer {
+    return FfiConverterTypeLocationRuntimeKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * The kind of a polled pairing event.
  */
 
@@ -7962,6 +8355,30 @@ fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionDouble: FfiConverterRustBuffer {
+    typealias SwiftType = Double?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterDouble.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterDouble.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -8946,6 +9363,19 @@ public func meshSealFix(identitySecret: Data, recvSecret: Data, authorEndpointId
 })
 }
 /**
+ * Record one runtime event as a `location.runtime` span.
+ *
+ * Synchronous and cheap: it opens and closes a span, and the batch exporter does the rest on its
+ * own thread. Safe to call from the main thread — and from a background queue while the main
+ * thread is wedged, which is when `MainStalled` is emitted.
+ */
+public func recordLocationRuntime(event: LocationRuntimeEvent)  {try! rustCall() {
+    uniffi_iroh_location_fn_func_record_location_runtime(
+        FfiConverterTypeLocationRuntimeEvent_lower(event),$0
+    )
+}
+}
+/**
  * Point developer telemetry at an OTLP/HTTP collector (`http://<lan-ip>:4318`), or disable it by
  * passing an empty endpoint. Returns whether export is active — always `false` when the crate was
  * built without the `otel` feature (store builds), so the uniffi surface is identical either way
@@ -9043,6 +9473,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_mesh_seal_fix() != 60001) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_record_location_runtime() != 22013) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {
@@ -9339,7 +9772,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_subscription_heartbeat_fix() != 34732) {
+    if (uniffi_iroh_location_checksum_method_subscription_heartbeat_fix() != 26170) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_subscription_ingest_fix() != 22084) {

@@ -114,12 +114,18 @@ export declare class IrohLocationNativeModule
    * The counterpart to {@link ingestFix}, driven on a timer by the mounted app: neither platform
    * gives a background process a reliable one, and the cadence has to stay uniform whether or not
    * the phone is moving — it is the one property of a sealed envelope the stash can read. Resolves
-   * with `enqueued: 0` when the current slot is already covered, which is the common case. OPTIONAL.
+   * with `enqueued: 0` when the current slot is already covered, which is the common case.
+   *
+   * `parked` is what the caller can prove about motion, and decides the envelope's `fix_state`:
+   * `true` a confirmed stop, `false` a stop just left, `null` no evidence either way — which is
+   * what the mounted timer has, and why it must not claim `parked` (see `publish::Motion`).
+   * OPTIONAL.
    */
   heartbeatFix?(
     subscriptionId: string,
     battery: { level: number; charging: boolean; lowPower: boolean },
-    intervalMs: number
+    intervalMs: number,
+    parked: boolean | null
   ): Promise<NativeIngestOutcome>;
   /**
    * Seal the last known position once, because the recipient set has just grown.

@@ -861,7 +861,7 @@ void uniffi_iroh_location_fn_free_subscription(uint64_t handle, RustCallStatus *
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_HEARTBEAT_FIX
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_HEARTBEAT_FIX
-uint64_t uniffi_iroh_location_fn_method_subscription_heartbeat_fix(uint64_t ptr, RustBuffer subscription_id, RustBuffer battery, uint64_t interval_ms, uint64_t now_ms
+uint64_t uniffi_iroh_location_fn_method_subscription_heartbeat_fix(uint64_t ptr, RustBuffer subscription_id, RustBuffer battery, uint64_t interval_ms, uint64_t now_ms, RustBuffer parked
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_SUBSCRIPTION_INGEST_FIX
@@ -979,6 +979,11 @@ RustBuffer uniffi_iroh_location_fn_func_mesh_open_fix(RustBuffer recv_secret, Ru
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_SEAL_FIX
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_SEAL_FIX
 RustBuffer uniffi_iroh_location_fn_func_mesh_seal_fix(RustBuffer identity_secret, RustBuffer recv_secret, RustBuffer author_endpoint_id, uint64_t seq, uint32_t mesh_epoch, RustBuffer fix, RustBuffer recipients, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_RECORD_LOCATION_RUNTIME
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_RECORD_LOCATION_RUNTIME
+void uniffi_iroh_location_fn_func_record_location_runtime(RustBuffer event, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_CONFIGURE_TELEMETRY
@@ -1345,6 +1350,12 @@ uint16_t uniffi_iroh_location_checksum_func_mesh_open_fix(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_SEAL_FIX
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_SEAL_FIX
 uint16_t uniffi_iroh_location_checksum_func_mesh_seal_fix(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_RECORD_LOCATION_RUNTIME
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_RECORD_LOCATION_RUNTIME
+uint16_t uniffi_iroh_location_checksum_func_record_location_runtime(void
     
 );
 #endif

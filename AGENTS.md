@@ -151,6 +151,27 @@ Conventions when changing that code:
   session, coarse deliveries arriving in clusters, one `Task` heartbeat each) sealed 3-4 envelopes
   per slot. The lock waits at most `DRAIN_LOCK_WAIT` and then runs unserialized, because a duplicate
   is cheaper than a hung push silencing the phone. `tests/drain.rs` "Concurrent runs" covers it.
+- **The iOS location runtime reports itself as `location.runtime`, because nothing else can.** On
+  2026-10-01 an iPhone drove 88 minutes with its process alive (Loki) and no location reaching Rust
+  (zero `engine.*` spans), and nothing could say why: the Swift state machine wrote only `NSLog`,
+  and `device.health` is JS-emitted, which a background-relaunched process never boots.
+  `LocationRuntimeReporter` emits a `pulse` every 5 min from a background timer — deliberately not
+  from the delivery path, which falls silent exactly when it matters — probing the main thread
+  first (`main_stalled` when it cannot answer), plus a span per transition, visit, fence exit and
+  Core Location error. Anything new the runtime decides goes on it; see `infra/otel/README.md`.
+- **A heartbeat states what it knows about motion, and only a proven stop says `parked`.**
+  `heartbeat_fix` takes `parked: Option<bool>` (`publish::Motion`): `Some(true)` from a confirmed
+  dwell, a visit arrival, a parked coarse tick or Android's no-delivery ticker; `Some(false)` from a
+  stop just left (retracts a standing `parked` to `no-fix`); `None` from any clock — the mounted
+  JS timer, a refresh while moving — which keeps whatever the last evidence stamped. It used to stamp
+  `parked` unconditionally, and on 2026-10-02 the JS timer published four hours of "parked here"
+  from an iPhone whose runtime was in `moving`.
+- **A position Core Location hands back is not a capture.** `didUpdateLocations` drops a location
+  whose timestamp is not newer than the last one delivered: on 2026-10-02 one fix came back every
+  30 s for 73 minutes, the first two went out `live` 5-9 minutes stale, and the rest read as a
+  phone receiving fixes. A redelivery may still confirm a pending dwell, and otherwise drives a
+  no-claim heartbeat at most once a minute, since on a JS-free process nothing else ticks while
+  `moving`.
 - **Who owns the Rust stores is now stated, not raced.** `BackgroundLocationRuntime.owner` defaults
   to `.app`, and `ensureStarted()` returns on its first line unless it is `.native` — which removes
   the reason for the 2026-09-16 construction storm rather than merely bounding it, since the

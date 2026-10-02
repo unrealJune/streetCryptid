@@ -2442,14 +2442,14 @@ export class LocationSharingService {
         if (!this.mySubId) throw new Error('ingestFix: no active subscription');
         return outcomeOf(await mod.ingestFix(this.mySubId, toNativeFix(fix), battery, intervalMs));
       },
-      heartbeat: async (battery, intervalMs) => {
+      heartbeat: async (battery, intervalMs, parked) => {
         const mod = this.mod;
         if (!mod?.heartbeatFix) throw new Error('heartbeatFix: native module not bound');
         // Same reason as `ingest` above: the heartbeat is the only thing publishing on a phone that
         // is not moving, so it is the last place that should give up on a missing subscription.
         await this.ensureMySubscription();
         if (!this.mySubId) throw new Error('heartbeatFix: no active subscription');
-        return outcomeOf(await mod.heartbeatFix(this.mySubId, battery, intervalMs));
+        return outcomeOf(await mod.heartbeatFix(this.mySubId, battery, intervalMs, parked));
       },
     };
   }
@@ -2466,10 +2466,13 @@ export class LocationSharingService {
     return outcome.published;
   }
 
-  /** Fill the slots that elapsed while this phone was frozen, and drain. */
+  /**
+   * Fill the slots that elapsed while this phone was frozen, and drain. A headless wake has no
+   * motion evidence of its own, so it makes no parked claim — see `LocationEngine.heartbeat`.
+   */
   async heartbeatNativeFix(_parent?: SpanContext): Promise<number> {
     const battery = await readBatteryForNative();
-    const outcome = await this.nativeDrain().heartbeat(battery, SHARE_INTERVAL_MS);
+    const outcome = await this.nativeDrain().heartbeat(battery, SHARE_INTERVAL_MS, null);
     return outcome.published;
   }
 
@@ -4598,6 +4601,7 @@ export class LocationSharingService {
                 ts: event.fix.ts,
               }
             : undefined,
+          parked: event.parked,
         },
         engine
       );

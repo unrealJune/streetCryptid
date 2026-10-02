@@ -239,6 +239,9 @@ internal object NativeBackgroundRuntime {
           battery,
           intervalMs,
           System.currentTimeMillis().toULong(),
+          // Only reached from the stationary ticker, which fires because nothing has been
+          // delivered for a whole slot — the Android proof of a stop.
+          true,
         )
       pullFriendFixes(context)
       Capture.Ingested(outcome)

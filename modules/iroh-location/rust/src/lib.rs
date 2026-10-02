@@ -23,6 +23,8 @@ mod docs;
 mod durable;
 pub mod gate;
 mod h3;
+/// `location.runtime` spans: the native location runtime reporting itself (see the module docs).
+pub mod location_runtime;
 /// Festival-mesh radio capsules: the outer wrapper that carries an envelope over open
 /// radio without a linkable identity (pure; see `mesh.rs` and `docs/mesh/DESIGN.md`).
 pub mod mesh;
@@ -5134,12 +5136,17 @@ impl Subscription {
     /// platform gives a background process a reliable one. `ingest_fix` only runs when the OS
     /// delivers a location, and on a stationary phone that can be never; the cadence still has to
     /// be uniform, because it is the one property of a sealed envelope the stash can read.
+    ///
+    /// `parked` is what the caller can prove about motion: `Some(true)` a confirmed stop,
+    /// `Some(false)` a stop just left, `None` a clock with no evidence either way (the JS timer).
+    /// Only the first stamps `parked` — see [`publish::Motion`] for the day it was unconditional.
     pub async fn heartbeat_fix(
         &self,
         subscription_id: String,
         battery: gate::BatteryState,
         interval_ms: u64,
         now_ms: u64,
+        parked: Option<bool>,
     ) -> Result<publish::IngestOutcome, LocationError> {
         let sink = SubscriptionSink {
             subscription: self,
@@ -5159,7 +5166,12 @@ impl Subscription {
             lock: &self.node.drain_lock,
         };
         engine
-            .heartbeat(battery, interval_ms, now_ms)
+            .heartbeat(
+                publish::Motion::from_parked(parked),
+                battery,
+                interval_ms,
+                now_ms,
+            )
             .await
             .map_err(|e| LocationError::Network(e.to_string()))
     }

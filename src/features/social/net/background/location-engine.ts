@@ -59,11 +59,13 @@ function reportEngineFailure(stage: string, message: string): void {
  * establish one (a heartbeat, or a fix the gate refused with nothing accepted before it).
  */
 export async function routeNativeCapture(
-  event: { kind: 'fix' | 'heartbeat'; fix?: LocationFix },
+  event: { kind: 'fix' | 'heartbeat'; fix?: LocationFix; parked?: boolean },
   engine: Pick<LocationEngine, 'ingest' | 'heartbeat' | 'getState'>
 ): Promise<LocationFix | null> {
   if (event.kind === 'heartbeat' || !event.fix) {
-    await engine.heartbeat();
+    // The native runtime knows whether this tick follows a proven stop; pass its claim through
+    // untouched, and make none of our own when it made none.
+    await engine.heartbeat(undefined, event.parked ?? null);
     return null;
   }
   await engine.ingest(event.fix);
@@ -80,8 +82,15 @@ export interface NativeDrain {
   /**
    * Publish the slots that have come due with no new fix, reusing the last accepted position.
    * Also drains anything already queued, so it doubles as the flush.
+   *
+   * `parked`: `true` a proven stop, `false` a stop just left, `null` no evidence — see
+   * {@link LocationEngine.heartbeat}.
    */
-  heartbeat(battery: BatteryState, intervalMs: number): Promise<DrainOutcome>;
+  heartbeat(
+    battery: BatteryState,
+    intervalMs: number,
+    parked: boolean | null
+  ): Promise<DrainOutcome>;
 }
 
 /** The subset of the native `IngestOutcome` this side acts on. */
@@ -132,8 +141,15 @@ export interface LocationEngine {
   stop(): Promise<void>;
   /** Hand one captured fix to the native pipeline. */
   ingest(fix: LocationFix, parent?: SpanContext): Promise<SamplingDecision>;
-  /** Publish the slots that have come due without a new fix. Returns how many went out. */
-  heartbeat(parent?: SpanContext): Promise<number>;
+  /**
+   * Publish the slots that have come due without a new fix. Returns how many went out.
+   *
+   * `parked` is the motion claim the envelopes carry, and the default is NO claim. A timer is not
+   * evidence that the phone has stopped: on 2026-10-02 this one stamped four hours of `parked` on
+   * an iPhone whose own state machine said `moving`, and a friend's map read "parked here" at a
+   * spot she had left. Only the native runtime, which saw the dwell or the visit, passes `true`.
+   */
+  heartbeat(parent?: SpanContext, parked?: boolean | null): Promise<number>;
   /** Drain whatever is queued. The native heartbeat does both, so this is the same call. */
   flush(parent?: SpanContext): Promise<number>;
   /** Re-run the policy against current power, without a new fix. */
@@ -261,15 +277,15 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
       return decision;
     },
 
-    async heartbeat(parent?: SpanContext): Promise<number> {
-      return runHeartbeat('heartbeat', parent);
+    async heartbeat(parent?: SpanContext, parked: boolean | null = null): Promise<number> {
+      return runHeartbeat('heartbeat', parent, parked);
     },
 
     async flush(parent?: SpanContext): Promise<number> {
       // The native heartbeat drains whatever is queued whether or not a slot came due, so a flush
       // and a heartbeat are the same call. Kept as two names because the callers mean different
       // things by them.
-      return runHeartbeat('flush', parent);
+      return runHeartbeat('flush', parent, null);
     },
 
     async reevaluate(): Promise<SamplingDecision> {
@@ -287,7 +303,11 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
     getState,
   };
 
-  async function runHeartbeat(stage: string, parent?: SpanContext): Promise<number> {
+  async function runHeartbeat(
+    stage: string,
+    parent: SpanContext | undefined,
+    parked: boolean | null
+  ): Promise<number> {
     if (state.status === 'idle') {
       // Said out loud, for the same reason `ingest` says it: the heartbeat is the ONLY thing
       // publishing on a phone that is not moving, so an engine that silently refuses it produces a
@@ -304,7 +324,7 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
     const batt = await battery();
     const outcome = await exclusive(async () => {
       try {
-        return await drain.heartbeat(batt, policy.config.intervalMs);
+        return await drain.heartbeat(batt, policy.config.intervalMs, parked);
       } catch (err) {
         fail(stage, err);
         return null;

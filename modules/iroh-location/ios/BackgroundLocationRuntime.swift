@@ -243,8 +243,22 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// stopped; the next fix from after it is where. See `didVisit` and `considerStopping`.
   private var visitArrival: CLLocation?
 
+  /// The timestamp of the newest location Core Location has delivered, to recognise one it hands
+  /// back again. See `didUpdateLocations`.
+  private var lastDeliveredAt: Date?
+
+  /// When a redelivery last stood in for a clock. See `didUpdateLocations`.
+  private var lastRedeliveryHeartbeatAt: Date?
+
+  /// Floor between heartbeats driven by redeliveries — a clock, not a reason to spin.
+  private static let redeliveryHeartbeatFloor: TimeInterval = 60
+
+  /// `location.runtime` spans. See `LocationRuntimeReporter`.
+  private var reporter: LocationRuntimeReporter!
+
   private override init() {
     super.init()
+    reporter = LocationRuntimeReporter { [unowned self] in self.reportSnapshot() }
     if !delegateOnMain {
       NSLog(
         "[iroh-location] runtime created OFF the main thread: Core Location will deliver nothing "
@@ -327,6 +341,11 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     }
     if let lastWakeAt {
       snapshot["last_wake_age_ms"] = Int(Date().timeIntervalSince(lastWakeAt) * 1000)
+    }
+    // Wake and delivery are different clocks: a parked tick or a fence exit is a wake with no new
+    // position in it. This says how old the newest position Core Location has given us is.
+    if let lastDeliveredAt {
+      snapshot["last_delivered_fix_age_ms"] = Int(Date().timeIntervalSince(lastDeliveredAt) * 1000)
     }
     // Absent, never zero, until a visit has arrived at all: absence on a phone that has been
     // somewhere and come home says the visit service is not delivering on that device.
@@ -411,6 +430,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
 
     manager.startUpdatingLocation()
     NativeRefreshTask.schedule()
+    reporter.startPulse()
+    reporter.event(.started, reason: lastWakeReason.rawValue)
   }
 
   // MARK: - Why there is no CLBackgroundActivitySession
@@ -448,14 +469,16 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// and no evidence the phone has left it, takes the stop — and the heartbeat that follows then
   /// seals `parked`, which is what the friend's map was waiting to be told.
   func serviceRefresh() async {
-    let proceed = await MainActor.run { () -> Bool in
-      guard self.running else { return false }
+    let proceed = await MainActor.run { () -> (run: Bool, parked: Bool?) in
+      guard self.running else { return (false, nil) }
       self.note(.refresh)
       self.confirmDwelledCandidate()
-      return true
+      // A refresh is a clock. It may declare `parked` only when the state machine has a stop to
+      // back it — confirmed just now or earlier — and otherwise says nothing about motion.
+      return (true, self.state == .stopped ? true : nil)
     }
-    guard proceed else { return }
-    await heartbeat(battery: Self.battery())
+    guard proceed.run else { return }
+    await heartbeat(battery: Self.battery(), parked: proceed.parked)
   }
 
   /// Take a stop whose dwell has elapsed without a delivery to confirm it. Returns whether we
@@ -628,6 +651,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     manager.stopMonitoringVisits()
     manager.allowsBackgroundLocationUpdates = false
     NativeRefreshTask.cancel()
+    reporter.stopPulse()
     running = false
     state = .moving
     stopAnchor = nil
@@ -753,6 +777,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     manager.startUpdatingLocation()
     persistState()
     note(.stateChange)
+    reporter.event(.transition, reason: evidence.rawValue)
     NSLog(
       "[iroh-location] stopped: via=\(evidence.rawValue) anchor=(\(anchor.coordinate.latitude), "
         + "\(anchor.coordinate.longitude)) fence=\(Self.stopAnchorRadiusM)m")
@@ -769,6 +794,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     manager.startUpdatingLocation()
     persistState()
     note(reason)
+    reporter.event(.transition, reason: reason.rawValue)
     NSLog("[iroh-location] moving: reason=\(reason.rawValue)")
   }
 
@@ -1015,8 +1041,39 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     guard let location = locations.last else { return }
     let battery = Self.battery()
     lastSeenLocation = location
+    // Core Location hands back positions it has already given us — after a re-request, and on
+    // 2026-10-02 every 30 s for 73 minutes while the phone could get nothing newer. A repeated
+    // position carries no new information, and treating it as a capture did harm twice: the first
+    // ones passed the gate and went out `live` with a position 5-9 minutes old, and the rest were
+    // refused as stale while looking, to every counter, like a phone receiving fixes.
+    let redelivery = lastDeliveredAt.map { location.timestamp <= $0 } ?? false
+    if !redelivery { lastDeliveredAt = location.timestamp }
+    reporter.noteDelivery(location, redelivery: redelivery)
 
     switch state {
+    case .moving where redelivery:
+      // It can still finish a dwell. A candidate is waiting on a second delivery inside its radius
+      // `stopDwellSeconds` after the first, and a phone that can produce nothing newer than the
+      // position it opened on is exactly a phone that has not gone anywhere. It is never ingested.
+      if stopCandidate != nil {
+        considerStopping(at: location)
+        if state == .stopped {
+          Task { await self.heartbeat(battery: battery, parked: true) }
+          return
+        }
+      }
+      // Otherwise it is worth something as a clock: it proves the process is running, and on a
+      // JS-free process nothing else ticks while `moving`. Fill a due slot from the last ACCEPTED
+      // fix, claiming nothing about motion, and no more than once a minute.
+      let now = Date()
+      if let last = lastRedeliveryHeartbeatAt,
+        now.timeIntervalSince(last) < Self.redeliveryHeartbeatFloor
+      {
+        return
+      }
+      lastRedeliveryHeartbeatAt = now
+      Task { await self.heartbeat(battery: battery, parked: nil) }
+
     case .moving:
       note(.movement)
       // Re-tier from the speed this fix reports. Cheap, and it is what keeps a walk from being
@@ -1041,7 +1098,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // next — SLC, BGProcessing, the app opening — seals `parked` too.
       considerStopping(at: location)
       if state == .stopped {
-        Task { await self.heartbeat(battery: battery) }
+        Task { await self.heartbeat(battery: battery, parked: true) }
       } else {
         let fix = Self.fix(from: location)
         Task { await self.ingest(fix: fix, battery: battery) }
@@ -1057,7 +1114,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // fix too coarse to publish can still be good enough to prove we are nowhere near the anchor.
       if considerDeparture(from: location) { return }
       note(.periodic)
-      Task { await self.heartbeat(battery: battery) }
+      Task { await self.heartbeat(battery: battery, parked: true) }
     }
   }
 
@@ -1093,7 +1150,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         + "(threshold \(Int(threshold))m); the fence did not fire")
     enterMoving(reason: .coarseDeparture)
     let battery = Self.battery()
-    Task { await self.heartbeat(battery: battery) }
+    Task { await self.heartbeat(battery: battery, parked: false) }
     return true
   }
 
@@ -1101,6 +1158,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     _ manager: CLLocationManager, didExitRegion region: CLRegion
   ) {
     guard region.identifier == Self.stopAnchorRegionId else { return }
+    reporter.event(.fenceExit)
     // The whole point of the stopped state: exit is event-driven, so we are responsive to movement
     // and cost nothing while parked, which normally trade off against each other.
     //
@@ -1109,7 +1167,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // covers the gap until that lands, so a crossing is never a silent slot.
     enterMoving(reason: .geofenceExit)
     let battery = Self.battery()
-    Task { await self.heartbeat(battery: battery) }
+    Task { await self.heartbeat(battery: battery, parked: false) }
   }
 
   /// Core Location's own verdict that the phone has arrived somewhere, or left.
@@ -1163,6 +1221,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       timestamp: at == .distantPast ? Date() : at)
     let reach = visit.horizontalAccuracy + Self.stopAnchorRadiusM
     let newest = newestLocation()
+    reporter.event(.visit, reason: arrival ? "arrival" : "departure")
     NSLog(
       "[iroh-location] visit: \(arrival ? "arrival" : "departure") state=\(state.rawValue) "
         + "accuracy=\(Int(visit.horizontalAccuracy))m")
@@ -1174,7 +1233,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       else { return }
       enterMoving(reason: .visit)
       let battery = Self.battery()
-      Task { await self.heartbeat(battery: battery) }
+      Task { await self.heartbeat(battery: battery, parked: false) }
       return
     }
 
@@ -1220,7 +1279,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // the arrival is the OS saying the phone has stopped, so the `parked` stamp a heartbeat
     // carries is honest before a fix has placed it, and a fix showing otherwise re-stamps `live`.
     let battery = Self.battery()
-    Task { await self.heartbeat(battery: battery) }
+    Task { await self.heartbeat(battery: battery, parked: true) }
   }
 
   /// Whichever of Core Location's cached position and the last one delivered to us is newer.
@@ -1240,6 +1299,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
     let status = manager.authorizationStatus
     NSLog("[iroh-location] authorization -> \(Self.authorizationName(status))")
+    if running { reporter.event(.authorization, reason: Self.authorizationName(status)) }
     switch status {
     case .authorizedAlways:
       guard running else { return }
@@ -1270,11 +1330,13 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// watermark, and a phone indistinguishable from one whose owner simply had not moved.
   func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
     NSLog("[iroh-location] Core Location paused updates; restarting")
+    reporter.event(.paused)
     manager.startUpdatingLocation()
   }
 
   func locationManagerDidResumeLocationUpdates(_ manager: CLLocationManager) {
     NSLog("[iroh-location] Core Location resumed updates")
+    reporter.event(.resumed)
   }
 
   func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
@@ -1282,6 +1344,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // here. `requestLocation` in particular fails outright when it cannot get a fix in time, and
     // the running stream is unaffected, so this must not tear anything down.
     NSLog("[iroh-location] background location error: \(error.localizedDescription)")
+    reporter.event(.locationError, detail: error.localizedDescription)
   }
 
   func locationManager(
@@ -1290,6 +1353,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // A fence we could not arm is a resurrection rung we do not have. SLC still covers us, but this
     // is worth saying out loud rather than inferring later from an absence.
     NSLog("[iroh-location] stop-anchor fence failed to arm: \(error.localizedDescription)")
+    reporter.event(.fenceFailed, detail: error.localizedDescription)
   }
 
   // MARK: - Node lifecycle
@@ -1300,7 +1364,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// a tick from the parked coarse stream, which has no position worth gating — see the two call
   /// sites. Dropping to the main queue because that is where the Expo event emitter expects to be
   /// called from, and Core Location has already delivered us there anyway.
-  private func handOff(kind: String, fix: LocationFix?, battery: BatteryState) {
+  private func handOff(
+    kind: String, fix: LocationFix?, battery: BatteryState, parked: Bool? = nil
+  ) {
     var payload: [String: Any] = [
       "kind": kind,
       "reason": lastWakeReason.rawValue,
@@ -1309,6 +1375,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         "level": battery.level, "charging": battery.charging, "lowPower": battery.lowPower,
       ],
     ]
+    // The heartbeat's motion claim, forwarded to `heartbeatFix` by `routeNativeCapture`. Omitted
+    // rather than null when there is none, which reads the same as a binary that predates it.
+    if let parked { payload["parked"] = parked }
     if let fix {
       payload["fix"] = [
         "lat": fix.lat, "lon": fix.lon, "accuracyM": fix.accuracyM,
@@ -1327,11 +1396,14 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       NSLog("[iroh-location] DROPPED \(kind): no node and no JS sink — nothing will publish this")
       return
     }
+    reporter.noteHandOff()
     DispatchQueue.main.async { sink.sendEvent("onNativeFix", payload) }
   }
 
   /// Run one captured fix through gate → outbox → seal → send.
   private func ingest(fix: LocationFix, battery: BatteryState) async {
+    reporter.noteWorkStarted()
+    defer { reporter.noteWorkFinished() }
     guard let subscription = await ensureStarted() else {
       handOff(kind: "fix", fix: fix, battery: battery)
       return
@@ -1359,9 +1431,16 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// Not an optimisation. The cadence is the one property of a sealed envelope the stash can read,
   /// so it has to be uniform whether or not the phone is moving — a series that stops when its
   /// owner sits still is a series that leaks when its owner sits still.
-  private func heartbeat(battery: BatteryState) async {
+  ///
+  /// `parked` is the motion claim the envelopes carry: `true` only from a proven stop (a confirmed
+  /// dwell, a visit arrival, a parked coarse tick), `false` from a stop just left, `nil` from a
+  /// clock that proves neither. Until 2026-10-02 every heartbeat stamped `parked`, and the mounted
+  /// timer published four hours of it from an iPhone this file had in `moving`.
+  private func heartbeat(battery: BatteryState, parked: Bool?) async {
+    reporter.noteWorkStarted()
+    defer { reporter.noteWorkFinished() }
     guard let subscription = await ensureStarted() else {
-      handOff(kind: "heartbeat", fix: nil, battery: battery)
+      handOff(kind: "heartbeat", fix: nil, battery: battery, parked: parked)
       return
     }
     do {
@@ -1369,7 +1448,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         subscriptionId: Self.subscriptionId,
         battery: battery,
         intervalMs: slotIntervalMs,
-        nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+        nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+        parked: parked)
       report("heartbeat", outcome)
       await pullFriendFixes()
       BackgroundWakeLedger.closeWindow()
@@ -1586,6 +1666,21 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     dropNodeHandles()
     // JS is handing the stores back; the next delivery must be able to claim them immediately.
     clearClaimBackoff()
+  }
+
+  /// What `location.runtime` spans say about the state machine. See `LocationRuntimeReporter`.
+  private func reportSnapshot() -> LocationRuntimeReporter.Snapshot {
+    LocationRuntimeReporter.Snapshot(
+      state: state.rawValue,
+      reason: lastWakeReason.rawValue,
+      desiredAccuracyM: manager.desiredAccuracy,
+      distanceFilterM: manager.distanceFilter,
+      nodeOwner: (subscription != nil ? NodeOwner.native : .app).rawValue,
+      candidatePending: stopCandidate != nil,
+      anchorArmed: stopAnchor != nil,
+      fenceRegistered: manager.monitoredRegions.contains {
+        $0.identifier == Self.stopAnchorRegionId
+      })
   }
 
   // MARK: - Conversions
