@@ -100,7 +100,7 @@ bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cu
         ├ gossip.publish*  (sc.entry_hash)  ─ live path ───────►  gossip.receive (sc.entry_hash, sc.via_peer, outcome)
         │                   ├ peer.contact (send, per recipient neighbour)          └ peer.contact (recv, from_author?)
         └ docs.write*      (sc.entry_hash, dropped, sc.drop_reason?, dropped_peers?)  ─ LOCAL replica only
-      └ session.recover*   (desynced, gave_up, no_key, restored, remaining)  ─ §4.6, once per drain
+      └ session.recover*   (desynced, gave_up, no_key, restored, remaining, following)  ─ §4.6, once per drain
     └ trail.push.app                        ─ durable path ─►  stash.entry.received (sc.entry_hash)
       └ trail.push*        (entries_sent, finished)
                                                                   └ trail.sync.app (recovered)
@@ -563,6 +563,15 @@ to whatever child you searched for — which is exactly how an early pass at thi
    not mirrored that friend's receiving key and their profile is not in the replica. A Pixel 9
    spent a week (2026-09-22..29) at `dropped == recipients` because recovery only ran on the JS
    publish path the native drain had replaced.
+   **The opposite failure is a pair split by a resync**: `dropped=0`, envelopes go out, and the
+   friend's Loki shows `ratcheted envelope not opened` for exactly our `sc_seq` with
+   `sc_drop_reason="no wrap in this envelope belongs to us"`, right after one side logged
+   `restarted the session from a resync record`. Applying a record is unilateral, so the side that
+   OFFERED must join the root the other moved to; `following>0` on its `session.recover` is that
+   follow-through, and `restored>0` with `desynced=0` is it landing. On 2026-10-02 neither existed:
+   re-reading an already-opened replica slot counted as a miss, three reads made a working session
+   "desynced", and the offering iPhone stopped polling a minute before its Pixel applied the offer.
+   Re-reads now open as `Replayed` (`envelope already seen`) and never count.
    4b. **Did it get OFF the phone?** `docs.write` is local-only. Look for `trail.push.app` /
    `trail.push` in the same wake: absent means nothing pushed it, `finished=false` means the
    stash was unreachable. Hour-long gaps in a friend's trail with healthy `publish.fix` spans

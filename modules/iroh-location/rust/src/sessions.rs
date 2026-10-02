@@ -74,6 +74,17 @@ pub enum SessionError {
     /// addressed to somebody else, a replay from the archive, or beyond the acceptance window.
     #[error("no wrap in this envelope belongs to us")]
     NotForUs,
+    /// An envelope we have already been handed: one on the receiving chain we hold, at a position
+    /// we have passed, or one whose `seq` is not newer than the last this peer showed us.
+    ///
+    /// Split from [`Self::NotForUs`] because the two mean opposite things for §4.6. A miss is
+    /// evidence the peer is talking past us; a replay is evidence of nothing. The durable path is
+    /// one overwritten slot per author and every read opens the whole replica, so the envelope a
+    /// quiet friend left there is re-read on every sync — and when that counted as a miss, three
+    /// reads in one second were a "desync" (2026-10-02: an iPhone resynced a working session on
+    /// launch, its friend applied the record, and the pair split for hours).
+    #[error("envelope already seen")]
+    Replayed,
     /// The schedule refused the position after it matched — a desync (§4.6).
     #[error("ratchet refused the position: {0}")]
     Ratchet(#[from] crate::ratchet::RatchetError),
@@ -176,7 +187,17 @@ enum SessionPresence {
 #[derive(Debug, Default, Clone)]
 struct PeerHealth {
     /// Consecutive signature-valid envelopes from this peer we could not open.
+    ///
+    /// Counted once per envelope, by `seq` — see [`PeerHealth::seen_seq`].
     misses: u32,
+    /// The highest envelope `seq` from this peer we have opened or counted as a miss.
+    ///
+    /// `seq` is the author's single monotonic publish counter (`seq_store.rs`), signed into the
+    /// envelope, so an envelope at or below this is one this process has already accounted for.
+    /// Without it a re-read is a fresh miss, and "a run of failures" measured how often we read
+    /// rather than how often the peer talked past us. In memory like the rest of this struct; the
+    /// durable half is [`RatchetState::has_passed`](crate::ratchet::RatchetState::has_passed).
+    seen_seq: u64,
     /// Resyncs driven with this peer. A climbing count is the "re-pair with this friend" signal:
     /// recovery that keeps recovering is not recovering.
     resyncs: u32,
@@ -277,6 +298,7 @@ impl SessionManager {
             &mut keys,
         )?;
         self.store.save(peer, &state)?;
+        self.reset_seen_seq(peer);
         Ok(())
     }
 
@@ -293,12 +315,14 @@ impl SessionManager {
         let _guard = self.critical.lock().map_err(|_| SessionError::Poisoned)?;
         let state = RatchetState::bootstrap_responder(session_id, rk0, our_ratchet, now_ms);
         self.store.save(peer, &state)?;
+        self.reset_seen_seq(peer);
         Ok(())
     }
 
     pub fn remove(&self, peer: &[u8]) -> Result<(), SessionError> {
         let _guard = self.critical.lock().map_err(|_| SessionError::Poisoned)?;
         self.store.remove(peer)?;
+        self.reset_seen_seq(peer);
         Ok(())
     }
 
@@ -420,9 +444,18 @@ impl SessionManager {
             .enumerate()
             .find(|(_, loc)| state.matches(&loc.header, &loc.kid, self.window));
         let Some((index, loc)) = located else {
-            // Signature-valid, but nothing here is ours. Ordinary in a pool — but a *run* of
+            // An envelope we already passed is not a miss, however often it is re-read. The chain
+            // test survives a restart (it reads the state on disk); the seq test catches what the
+            // chain cannot — an envelope from a chain we have since ratcheted off.
+            let on_our_chain = verified
+                .locators()
+                .iter()
+                .any(|loc| state.has_passed(&loc.header));
+            if on_our_chain || !self.note_miss(author, verified.seq) {
+                return Err(SessionError::Replayed);
+            }
+            // Signature-valid, new, and nothing here is ours. Ordinary in a pool — but a *run* of
             // these from one peer is what §4.6 calls a desync.
-            self.note_miss(author);
             return Err(SessionError::NotForUs);
         };
 
@@ -446,21 +479,41 @@ impl SessionManager {
         let opened = verified
             .open_wrap(index, &session_id, key)
             .map_err(|_| SessionError::NotForUs)?;
-        self.clear_misses(author);
+        self.clear_misses(author, verified.seq);
         Ok(opened.payload)
     }
 
     // ── desync detection and resync (§4.6) ────────────────────────────────────────────────
 
-    fn note_miss(&self, peer: &[u8]) {
+    /// Count `seq` as a miss, unless it is not newer than what this peer has already shown us.
+    /// Returns whether it counted.
+    fn note_miss(&self, peer: &[u8], seq: u64) -> bool {
+        let Ok(mut health) = self.health.lock() else {
+            return false;
+        };
+        let entry = health.entry(peer.to_vec()).or_default();
+        if seq <= entry.seen_seq {
+            return false;
+        }
+        entry.seen_seq = seq;
+        entry.misses += 1;
+        true
+    }
+
+    fn clear_misses(&self, peer: &[u8], seq: u64) {
         if let Ok(mut health) = self.health.lock() {
-            health.entry(peer.to_vec()).or_default().misses += 1;
+            let entry = health.entry(peer.to_vec()).or_default();
+            entry.misses = 0;
+            entry.seen_seq = entry.seen_seq.max(seq);
         }
     }
 
-    fn clear_misses(&self, peer: &[u8]) {
+    /// A new session may come with a peer whose counter started over (a reinstall that lost its
+    /// keychain), so nothing it says about seq ordering carries across a re-pair.
+    fn reset_seen_seq(&self, peer: &[u8]) {
         if let Ok(mut health) = self.health.lock() {
             if let Some(entry) = health.get_mut(peer) {
+                entry.seen_seq = 0;
                 entry.misses = 0;
             }
         }
