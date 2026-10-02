@@ -1226,3 +1226,140 @@ async fn a_mutual_lapse_heals_through_the_native_recovery_driver() {
         node.shutdown().await.expect("shutdown");
     }
 }
+
+// ── false desyncs and one-sided resyncs (2026-10-02) ─────────────────────────────────────────
+
+/// **A quiet friend is not a broken one.** The durable path is one overwritten slot per author and
+/// every read opens the whole replica, so the envelope a parked friend left there is re-read on
+/// every sync. Each re-read used to count as a miss, so three syncs — on 2026-10-02, three reads in
+/// the same second of an app launch — declared a working session desynced and offered a resync.
+/// Checked again across a restart, where everything held in memory about that envelope is gone and
+/// only the ratchet state on disk can say it was already opened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rereading_a_quiet_friends_slot_is_not_a_desync() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
+    let a = start_node().await;
+    let b = start_node().await;
+    let stash = start_node().await;
+
+    bootstrap_and_prime(&a, &b, &stash).await;
+    let a_id = hex(&a.endpoint_id());
+    let a_author = a.endpoint_id();
+    assert!(
+        publish_and_deliver(&a, &b, &stash, 2, 2000)
+            .await
+            .iter()
+            .any(|e| e.author == a_author && e.fix.ts == 2000),
+        "the fix must arrive once"
+    );
+
+    for _ in 0..5 {
+        b.read_latest_ratcheted().await.expect("re-read");
+    }
+    assert!(
+        !b.is_desynced(a_id.clone()).await.expect("verdict"),
+        "re-reading an envelope we already opened is not evidence of anything"
+    );
+
+    let b = restart(b).await;
+    for _ in 0..5 {
+        b.read_latest_ratcheted()
+            .await
+            .expect("re-read after restart");
+    }
+    assert!(
+        !b.is_desynced(a_id).await.expect("verdict after restart"),
+        "a restart forgets what was seen, but the chain on disk still knows it was opened"
+    );
+
+    for node in [a, b, stash] {
+        node.shutdown().await.expect("shutdown");
+    }
+}
+
+/// **The 2026-10-02 split.** An iPhone offered a resync, then opened one more envelope under the
+/// old session, decided it was fine and stopped polling. Its friend found the offer and restarted
+/// its own session from it — applying a record is unilateral — so the two were on different roots
+/// and every envelope after that was unopenable in both directions. The side that offered must
+/// follow its offer through for as long as anyone can still accept it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_offer_a_peer_applied_is_followed_through_after_we_recover() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
+    let a = start_node().await;
+    let b = start_node().await;
+    let stash = start_node().await;
+
+    bootstrap_and_prime(&a, &b, &stash).await;
+    let a_id = hex(&a.endpoint_id());
+    let b_id = hex(&b.endpoint_id());
+    let a_recv = hex(&a.recv_public());
+    let b_recv = hex(&b.recv_public());
+    a.set_recipient_keys(vec![iroh_location::RecipientKey {
+        endpoint_id: b_id.clone(),
+        recv_public: b_recv.clone(),
+    }])
+    .await
+    .expect("a mirrors keys");
+
+    // a offers, and by the time b acts on it a no longer sees anything wrong.
+    a.publish_resync(vec![b_recv]).await.expect("a offers");
+    assert!(
+        !a.is_desynced(b_id.clone()).await.expect("verdict"),
+        "the shape under test: the offering side's own verdict has cleared"
+    );
+    replicate(&a, &stash, &b).await;
+    assert!(
+        b.poll_resync(a_id.clone(), a_recv).await.expect("b polls"),
+        "b restarts its session from a's offer"
+    );
+    replicate(&b, &stash, &a).await;
+
+    let followed = a.recover_sessions(std::slice::from_ref(&b_id)).await;
+    assert_eq!(
+        followed.restored, 1,
+        "a must join the root b moved to, though a is not desynced"
+    );
+    assert!(
+        !followed.in_progress,
+        "following through does not hold the drain's push open"
+    );
+    let settled = a.recover_sessions(std::slice::from_ref(&b_id)).await;
+    assert_eq!(
+        (settled.restored, settled.in_progress),
+        (0, false),
+        "an offer already followed through is not applied twice"
+    );
+
+    let (first, second) = initiator_first(&a, &b);
+    first
+        .docs_write_ratcheted(
+            "prime".into(),
+            10,
+            fix_at(10),
+            vec![hex(&second.endpoint_id())],
+        )
+        .await
+        .expect("priming publish after the resync");
+    replicate(first, &stash, second).await;
+    second.read_latest_ratcheted().await.expect("prime read");
+
+    let (a_author, b_author) = (a.endpoint_id(), b.endpoint_id());
+    assert!(
+        publish_and_deliver(&a, &b, &stash, 11, 11_000)
+            .await
+            .iter()
+            .any(|e| e.author == a_author && e.fix.ts == 11_000),
+        "a → b on one root"
+    );
+    assert!(
+        publish_and_deliver(&b, &a, &stash, 12, 12_000)
+            .await
+            .iter()
+            .any(|e| e.author == b_author && e.fix.ts == 12_000),
+        "b → a on one root"
+    );
+
+    for node in [a, b, stash] {
+        node.shutdown().await.expect("shutdown");
+    }
+}

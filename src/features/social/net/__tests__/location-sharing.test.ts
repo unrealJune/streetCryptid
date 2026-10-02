@@ -1052,8 +1052,9 @@ describe('LocationSharingService — session health and resync', () => {
       { peer: friend.endpointId, recvPub: friend.recvPublic },
     ]);
     expect(health()).toEqual({});
-    // The ephemeral is dropped once nobody is mid-exchange — a private key held for no reason.
-    expect(mockHolder.mod.calls.clearResync).toBe(1);
+    // The ephemeral outlives the restore: a peer may still apply our record, and only that secret
+    // lets us join the root it moved to. The native driver drops it once the record expires.
+    expect(mockHolder.mod.calls.clearResync).toBe(0);
   });
 
   it('leaves a friend marked desynced while the exchange is still in flight', async () => {

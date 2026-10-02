@@ -514,6 +514,20 @@ impl RatchetState {
         }
     }
 
+    /// Whether `header` sits on the receiving chain we hold, at a position we have already passed.
+    ///
+    /// Definitive rather than a guess: sender ratchet keys are fresh per session and per DH step,
+    /// so a wrap carrying the key our receiving chain was built from can only be this peer's, to
+    /// us. Such an envelope is one we opened (or skipped) — the peer is demonstrably still on our
+    /// chain, which is the opposite of a desync. Read from the persisted state, so it holds across
+    /// a restart that forgot everything in memory.
+    pub fn has_passed(&self, header: &RatchetHeader) -> bool {
+        self.ckr.is_some()
+            && self.dh_peer == Some(header.sender_ratchet_pub)
+            && header.epoch == self.recv_epoch
+            && header.counter < self.nr
+    }
+
     /// Accept an authenticated header and derive the key that opens its wrap.
     ///
     /// Signature verification and AAD binding happen **before** this is called, preserving the

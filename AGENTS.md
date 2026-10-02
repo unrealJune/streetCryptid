@@ -276,6 +276,15 @@ Conventions when changing that code:
   mirrors with `setRecipientKeys`; `poll_resync` offers our half BEFORE looking for theirs (it
   did not, so two polling sides waited on each other forever). An envelope with every recipient
   dropped is not a publish: it does not stamp `last_published_at` or count as `reached`.
+  **Two rules keep recovery from splitting a pair that worked.** (1) A miss is a NEW envelope we
+  cannot open: `readLatest` re-opens every author's one LWW slot on every sync, and once that slot
+  counted as a miss per read, three syncs "desynced" a healthy session (`SessionError::Replayed`,
+  judged from the chain on disk and the author's monotonic `seq`). (2) Applying a resync record is
+  unilateral, so the side that offered one keeps polling every peer it is wrapped for for as long
+  as the record is acceptable — even after its own verdict clears — and keeps its ephemeral that
+  long rather than dropping it on restore. On 2026-10-02 an iPhone offered on launch, recovered by
+  itself a minute later and stopped; its Pixel applied the offer, and both phones spent hours
+  unable to open each other's envelopes.
 - **A pair is complete when `finalize` says so, not when the decision bits agree.** `is_complete()`
   goes true the instant a local accept latches; `finalize` — which installs the ratchet, ingests the
   handed profile record and raises `Ready` — runs after, and can still decline, because a wire

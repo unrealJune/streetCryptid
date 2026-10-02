@@ -2589,7 +2589,6 @@ export class LocationSharingService {
 
     this.resyncInFlight = true;
     const verdicts = new Map<string, SessionHealth>();
-    let anyRecovered = false;
     try {
       for (const friend of pool.friendList(this.state)) {
         const desynced = await mod.isDesynced(friend.endpointId).catch(() => false);
@@ -2619,19 +2618,16 @@ export class LocationSharingService {
           .catch(() => false);
         verdicts.set(friend.endpointId, applied ? 'ok' : 'desynced');
         if (applied) {
-          anyRecovered = true;
           getTelemetry().log('info', `resynced with ${friend.endpointId.slice(0, 10)}`, {
             'sc.peer': friend.endpointId.slice(0, 10),
           });
         }
       }
 
-      // Drop our resync ephemeral once nobody is still mid-exchange. Holding it costs a private
-      // key sitting in memory for no reason, and the next desync mints a fresh one anyway.
-      const stillRecovering = [...verdicts.values()].some((v) => v === 'desynced');
-      if (anyRecovered && !stillRecovering && typeof mod.clearResync === 'function') {
-        await mod.clearResync().catch(() => {});
-      }
+      // The resync ephemeral is NOT dropped here. A peer can apply our record after we stop
+      // needing it, and only that secret lets us join the root it moved to — so the native
+      // driver keeps it for as long as the record is acceptable and drops it itself
+      // (`recover_sessions`). Clearing it on restore is how a pair split on 2026-10-02.
     } finally {
       this.resyncInFlight = false;
       this.sessionVerdicts = verdicts;
