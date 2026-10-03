@@ -570,6 +570,14 @@ class IrohLocationModule : Module() {
       IrohAndroidBootstrap.install(context)
     }
 
+    // A sink is a promise that someone will publish the capture, so it must not outlive the module
+    // that made it. `appIsWired()` gates the service's own node on it, and a dead module left in the
+    // sink would hand every capture to nobody while forbidding the service to publish them itself.
+    // `WeakReference` only covers a module that has also been collected.
+    OnDestroy {
+      if (sink?.get() === this@IrohLocationModule) sink = null
+    }
+
     /**
      * Whether this binary refcounts the node instead of clobbering it on a second `createNode`.
      *
@@ -751,6 +759,18 @@ class IrohLocationModule : Module() {
     Function("releaseNativeBackground") {
       sink = null
     }
+
+    /// Take the Rust stores back from the foreground service's node, bounded on this side so the
+    /// promise always settles. What `init()` calls before `start()`; without it a service that
+    /// built a node while no JS context was alive refused the app its claim. See
+    /// `NativeBackgroundRuntime.yieldToApp`.
+    AsyncFunction("handOverNativeBackground") Coroutine
+      { timeoutMs: Double ->
+        // Same as `releaseNativeBackground`, which this replaces on the launch path: the sink is
+        // re-taken by `startNativeBackground` once the app is ready to receive captures.
+        sink = null
+        NativeBackgroundRuntime.yieldToApp(timeoutMs.toLong().coerceAtLeast(0L))
+      }
 
     // Native publish state.
 
@@ -1332,6 +1352,14 @@ class IrohLocationModule : Module() {
      * sharing is off, which is the one time there is legitimately nobody to tell.
      */
     private var sink: WeakReference<IrohLocationModule>? = null
+
+    /**
+     * Whether a mounted app has wired the hand-off, i.e. will publish what the service captures.
+     *
+     * The gate `NativeBackgroundRuntime.ensureStarted` checks before building a node of its own —
+     * the Android counterpart of iOS's `eventSink != nil`.
+     */
+    internal fun appIsWired(): Boolean = sink?.get() != null
 
     /**
      * Hand one capture to the mounted app. Returns whether anything was listening.

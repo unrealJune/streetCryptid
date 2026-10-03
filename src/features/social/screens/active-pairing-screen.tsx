@@ -454,6 +454,21 @@ export default function ActivePairingScreen() {
           tone: 'steel',
         };
       case 'bump-failed':
+        // Two different things reach this stage and only one of them is a miss. An arm that threw
+        // never opened the radio at all, so "No phone replied" is false — and it used to be all
+        // this screen would say, which is how a service that never finished starting read as
+        // Bluetooth failing to find anyone, retry after retry, until a force-quit.
+        if (bump.error) {
+          return {
+            mode: 'BUMP PAUSED',
+            status: 'BUMP COULD NOT START',
+            detail: bump.error,
+            caption: 'NOT STARTED',
+            readout: '',
+            fieldMode: 'scatter',
+            tone: 'amber',
+          };
+        }
         return {
           mode: 'BUMP MISSED',
           status: 'NOTHING FOUND',
@@ -495,6 +510,7 @@ export default function ActivePairingScreen() {
         };
     }
   }, [
+    bump.error,
     failure,
     inputError,
     inviteRemaining,

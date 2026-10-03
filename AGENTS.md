@@ -137,16 +137,26 @@ Conventions when changing that code:
   to be: it confirms a dwell the wake windows starved (`confirmDwelledCandidate`), heartbeats and
   pulls. Its identifier must stay in `BGTaskSchedulerPermittedIdentifiers` (`app.json`).
   Android's `NativeBackgroundRuntime` pulls friends too (`pullFriendFixes`), floored at 5 min.
-- **Who owns the Rust stores is now stated, not raced.** `BackgroundLocationRuntime.owner` defaults
-  to `.app`, and `ensureStarted()` returns on its first line unless it is `.native` — which removes
-  the reason for the 2026-09-16 construction storm rather than merely bounding it, since the
-  refusal path no longer builds a whole `LocationNode` to have it refused. Only a launch that does
-  not start React calls `adoptNodeOwnership()`. **`releaseNativeBackground` does NOT free the
-  claims**: `WriterClaim` releases on the last `Arc` drop, and `Subscription` and the spawned
-  receive task each hold their own `Arc<LocationNode>` — only `shutdown` nils them all and detaches
-  the pair runtime. `yieldNode` races that shutdown against a Swift-side timeout so the promise
-  always settles (AGENTS.md's rule is about a promise that never _settles_), JS bounds it again,
-  and `startNativeBounded` retries once — once, not in a loop.
+- **Who owns the Rust stores: the mounted app, and the native runtime only when nothing is wired.**
+  iOS `startNode` refuses to build while `eventSink` is set — a mounted app has wired the hand-off,
+  so a rival node would only earn a refused claim (the 2026-09-16 construction storm). It was
+  briefly gated on `owner == .native` instead, which is a DECLARATION, not a fact: on a debug build
+  nothing declared `.native`, and every capture before JS wired the sink was dropped. `owner` is
+  now intent only, reported beside the observed owner in `device.health`. Android got the same
+  gate (`IrohLocationModule.appIsWired()`) on 2026-10-03; before it, the service built a node to be
+  refused every 1-5 minutes while the app was open, and could take the stores during the app's own
+  launch. The module clears the sink in `OnDestroy` so a dead module cannot hold the gate shut.
+  **`releaseNativeBackground` does NOT free the claims**: `WriterClaim` releases on the last `Arc`
+  drop, and `Subscription` and the spawned receive task each hold their own `Arc<LocationNode>` —
+  only `shutdown` nils them all and detaches the pair runtime. `handOverNativeBackground` (iOS
+  `yieldNode`, Android `yieldToApp`) races that shutdown against a native-side timeout so the
+  promise always settles and clears the claim backoff; JS bounds it again, and
+  `startNativeBounded` retries once — once, not in a loop. **Android had no handover until
+  2026-10-03**: once its service held the stores, the app's `start()` met `AlreadyOpen`, the JS
+  fallback only dropped the sink, and `init()` rejected — five times on a Pixel 10 in five days,
+  once for 13.7 h, read by its owner as pairing showing "NOTHING FOUND". Any Android release path
+  must `shutdown`, not `close` (a never-started node is the one exception), and must not be
+  `launch`ed on a scope cancelled on the next line, which is how `onDestroy` never released at all.
 - **`IrohBackgroundBootstrap.swift` runs before React, and must return `true`.**
   `ExpoAppDelegateSubscriberManager` reduces `willFinishLaunchingWithOptions` with
   `?? false || result` and short-circuits to `true` only when NO subscriber implements it; once ours
@@ -209,7 +219,9 @@ Conventions when changing that code:
   was never reached: no map, no working controls, no telemetry. Only a force-quit cleared it.
   The wait is now bounded by `INIT_WATCHDOG_MS` (`init-watchdog.ts`), an overrun emits
   `app.init.timeout`, and coming back to the foreground after one discards the wedged service and
-  retries rather than waiting again — the in-process equivalent of the force-quit.
+  retries rather than waiting again — the in-process equivalent of the force-quit. A REJECTED init
+  (`app.init.failed`) gets the same retry: clearing the latch was never enough, because the
+  provider does not remount and so nothing ever asked again.
 - **A stalled `init` names its own step, and only from disk.** `saveInitWatermark` stamps the phase
   (`create-node`, `native-start`, `tickets`, …) before each step that can block, and a later
   context reports it as `app.init.stranded` with `init.phase`. This exists because on 2026-09-18

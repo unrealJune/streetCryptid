@@ -112,7 +112,10 @@ class BackgroundLocationService : Service() {
     locationManager = null
     // Release the directory claims so a mounted app can take them back immediately, rather than
     // failing its first `createNode` until this process happens to be reaped.
-    scope.launch { NativeBackgroundRuntime.stop() }
+    //
+    // NOT `scope.launch`: the very next line cancels `scope`, and a coroutine cancelled before it is
+    // dispatched never runs — which is what this did until 2026-10-03, so the release never happened.
+    NativeBackgroundRuntime.stopDetached()
     scope.cancel()
     super.onDestroy()
   }

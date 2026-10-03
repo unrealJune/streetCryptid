@@ -1129,10 +1129,11 @@ export class LocationSharingService {
         await this.awaitRuntimeIdleBounded();
       }
       // And take the stores back from the NATIVE runtime, which on iOS may have been publishing
-      // without us since a background launch armed it.
+      // without us since a background launch armed it — and on Android since the foreground
+      // service outlived the last JS context and built a node of its own.
       //
       // This is not the JS-side claim above. The Rust writer claim is process-wide and held by
-      // whichever half built a node first; if that was `BackgroundLocationRuntime`, `createNode` /
+      // whichever half built a node first; if that was the native runtime, `createNode` /
       // `start` below throw `AlreadyOpen` and `init` fails before `setServiceReady(true)` — an app
       // that draws its chrome from `hydrateFromStore()` and then never finishes, which is exactly
       // the 2026-09-18 shape arriving from the other end of the lifecycle.
@@ -4181,15 +4182,16 @@ export class LocationSharingService {
   /**
    * Ask the native runtime to give the Rust stores back, bounded on both sides.
    *
-   * Bounded twice on purpose. The Swift side races the shutdown against its own timeout so the
+   * Bounded twice on purpose. The native side races the shutdown against its own timeout so the
    * promise always settles whatever Rust does — AGENTS.md's rule is about a promise that never
    * settles, as distinct from one that rejects. This side bounds it again because a native call
    * that never returns is still a native call that never returns.
    *
    * Never throws. A handover we could not complete is reported and then proceeded past: the claim
-   * may well be free anyway, and `startNativeBounded` retries once on `AlreadyOpen`. Inert on
-   * Android and on any binary older than the export, where `releaseNativeBackground` is the older,
-   * weaker equivalent and the best that binary can do.
+   * may well be free anyway, and `startNativeBounded` retries once on `AlreadyOpen`. Inert on any
+   * binary older than the export, where `releaseNativeBackground` is the older, weaker equivalent
+   * and the best that binary can do — and on Android that equivalent frees nothing at all, which is
+   * why an Android binary without the export can be refused its own stores (2026-10-03).
    */
   private async handOverNativeBackground(): Promise<void> {
     const mod = this.mod;

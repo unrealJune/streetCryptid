@@ -176,8 +176,17 @@ function profileSignature(
 let sharedService: LocationSharingService | null = null;
 let sharedServiceInit: Promise<void> | null = null;
 
-/** Set when the last init attempt overran {@link INIT_WATCHDOG_MS}, so a resume can retry it. */
-let sharedServiceInitTimedOut = false;
+/**
+ * Why the last init attempt did not reach `ready`, so a foreground resume can retry it.
+ *
+ * `timeout` is an init that overran {@link INIT_WATCHDOG_MS} and may still be running; `failed` is
+ * one that rejected. Both used to need a force-quit: the latch was cleared on rejection "so a later
+ * mount can retry", but the provider never remounts, so nothing ever did. On 2026-10-03 a Pixel 10
+ * spent 13.7 hours like that after its store claim was refused at `native-start` — the map drawn
+ * from disk, and every pairing attempt answered "NOTHING FOUND" because Bump cannot arm on a
+ * service that is not ready.
+ */
+let sharedServiceInitStall: 'timeout' | 'failed' | null = null;
 
 function getSharedService(): LocationSharingService {
   if (!sharedService) sharedService = new LocationSharingService();
@@ -197,7 +206,7 @@ function discardWedgedService(): void {
   const wedged = sharedService;
   sharedService = null;
   sharedServiceInit = null;
-  sharedServiceInitTimedOut = false;
+  sharedServiceInitStall = null;
   if (wedged) {
     try {
       wedged.shutdown();
@@ -397,7 +406,26 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
         // A `failed` outcome re-awaits the original promise so the catch below still reports the
         // error exactly as it used to; only `timeout` is new behaviour.
         const outcome = await awaitInitBounded(pending, INIT_WATCHDOG_MS);
-        if (outcome === 'failed') await pending;
+        if (outcome === 'failed') {
+          sharedServiceInitStall = 'failed';
+          try {
+            await pending;
+          } catch (initError: unknown) {
+            // The live-process record of a rejected init. The durable watermark names the same phase,
+            // but only to a LATER launch — and the process that failed may run for hours first.
+            getTelemetry()
+              .startSpan('app.init.failed', {
+                attributes: {
+                  'init.phase': service.currentInitPhase() ?? 'unknown',
+                  'init.elapsed_ms': service.initElapsedMs(),
+                  error: errorMessage(initError),
+                  'sc.drop_reason': 'init-failed',
+                },
+              })
+              .end();
+            throw initError;
+          }
+        }
         if (outcome === 'timeout') {
           // The span carries the phase because that is the question the data could not answer on
           // 2026-09-18: the journal stopped after `node.create` and nothing said what came next.
@@ -415,7 +443,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
             .end();
           // Let the stalled init keep running — it may still land — but stop holding the latch, and
           // remember that it overran so a foreground resume can rebuild rather than wait again.
-          sharedServiceInitTimedOut = true;
+          sharedServiceInitStall = 'timeout';
           if (!active) return;
           setLocationStatus('error');
           setServiceError(
@@ -461,17 +489,20 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
    * it is next made active is both the first moment it can do anything about it and the moment a
    * user is looking at the broken screen. Before this, the only cure was a force-quit.
    *
-   * Gated on the watchdog having actually fired, not merely on `!serviceReady` — an init that is
-   * still legitimately in flight (a slow node build, an unanswered permission prompt) must be left
-   * alone, or resuming the app would restart a healthy launch out from under itself.
+   * Gated on the watchdog having actually fired or the init having rejected, not merely on
+   * `!serviceReady` — an init that is still legitimately in flight (a slow node build, an
+   * unanswered permission prompt) must be left alone, or resuming the app would restart a healthy
+   * launch out from under itself. A rejected one is retried for the same reason a hung one is:
+   * otherwise it stays rejected for the life of the process.
    */
   useEffect(() => {
     const sub = AppState.addEventListener('change', (next) => {
       if (next !== 'active') return;
-      if (!sharedServiceInitTimedOut) return;
+      const stall = sharedServiceInitStall;
+      if (!stall) return;
       getTelemetry()
         .startSpan('app.init.recover', {
-          attributes: { trigger: 'foreground', 'sc.drop_reason': 'init-timeout' },
+          attributes: { trigger: 'foreground', 'sc.drop_reason': `init-${stall}` },
         })
         .end();
       discardWedgedService();
