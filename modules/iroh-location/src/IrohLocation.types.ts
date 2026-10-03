@@ -688,7 +688,8 @@ export interface IrohLocationApi {
    *
    * Bounded on the native side so it always settles whatever Rust does. Resolves `true` when the
    * shutdown completed; `false` still hands ownership over, because leaving it with the runtime
-   * would mean nothing could ever claim the stores again. iOS only. OPTIONAL.
+   * would mean nothing could ever claim the stores again. On Android it shuts down the node the
+   * foreground service built while no JS context was alive. OPTIONAL: absent on older binaries.
    */
   handOverNativeBackground?(timeoutMs: number): Promise<boolean>;
   /** Which half of the process owns the Rust stores: `app` or `native`. iOS only. OPTIONAL. */

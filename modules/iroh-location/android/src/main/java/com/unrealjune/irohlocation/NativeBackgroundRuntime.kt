@@ -3,7 +3,12 @@ package com.unrealjune.irohlocation
 import android.content.Context
 import android.util.Log
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.withLock
 import uniffi.iroh_location.BatteryState
 import uniffi.iroh_location.FixListener
@@ -30,6 +35,12 @@ import uniffi.iroh_location.deriveTopic
  * app is already running the same pipeline in JS, so the correct response is to stand down. That
  * the claim is structural rather than a flag two components agree to check is what makes this safe;
  * `native-runtime-owner.ts` documents what the flag version cost.
+ *
+ * Safe is not the same as fair, though: the claim goes to whoever asks first, and "the app is
+ * always first" was never guaranteed. Two things now make it so in practice — [ensureStarted] does
+ * not build while the app has wired the hand-off ([IrohLocationModule.appIsWired]), and a launching
+ * app takes the stores back with [yieldToApp]. Without them, a node this runtime built at the wrong
+ * moment cost the app its own start for the rest of the process (2026-10-03).
  */
 internal object NativeBackgroundRuntime {
   private const val TAG = "IrohBgRuntime"
@@ -79,6 +90,15 @@ internal object NativeBackgroundRuntime {
   suspend fun ensureStarted(context: Context): Boolean =
     lock.withLock {
       if (subscription != null) return@withLock true
+      // "Is anyone ELSE going to publish this?" — the iOS `startNode` gate, which this runtime did
+      // not have. A wired sink means a mounted app will take the capture, so building a rival node
+      // can only take the stores out from under it: on 2026-10-03 this runtime bound an endpoint
+      // on the still-free stores in the seven seconds between the app's `createNode` and its
+      // `start()` — with a JS self-heal having just called `startNativeBackground`, which wires the
+      // sink — and the app's own start was refused for the next 13.7 hours. It is also what stops
+      // the build-to-be-refused loop the backoff below only throttles (one construction every 1-5
+      // minutes for as long as the app is open, per `node.construct` in Loki).
+      if (IrohLocationModule.appIsWired()) return@withLock false
       if (System.currentTimeMillis() < claimRetryAfterMs) return@withLock false
       val app = context.applicationContext
       IrohAndroidBootstrap.install(app)
@@ -128,7 +148,7 @@ internal object NativeBackgroundRuntime {
    */
   private const val CLAIM_RETRY_CEILING_MS = 60_000L
 
-  /** Consecutive refused store claims. Reset by a success or by [stop]. */
+  /** Consecutive refused store claims. Reset by a success, by [stop] or by [yieldToApp]. */
   private var claimRefusals = 0
 
   /** Wall clock before which [ensureStarted] will not attempt a build. */
@@ -294,21 +314,111 @@ internal object NativeBackgroundRuntime {
       false
     }
 
-  /** Release the node and, with it, every directory claim, so the app can take them back. */
-  suspend fun stop() = lock.withLock { stopLocked() }
-
-  private fun stopLocked() {
-    // Before the early return below: after a refused claim there is no node to close, and that is
-    // precisely the state whose suppression has to be lifted.
-    clearClaimBackoff()
-    dropNodeHandlesLocked()
+  /**
+   * Give the stores back to the mounted app, and wait — bounded — until they are actually free.
+   *
+   * The Android half of iOS's `yieldNode`, and it was missing for as long as this runtime could
+   * hold a node. The class docs assume the app always gets to the claim first; it does not when
+   * the service built a node while no app was wired — after the JS context died, or inside the
+   * app's own launch before its `start()`. The app then met `AlreadyOpen`, the JS side's fallback
+   * (`releaseNativeBackground`) only dropped the hand-off sink, its single retry was refused
+   * identically, and `init()` rejected: a process that drew its map from disk and could not pair,
+   * arm Bump or publish from the app until it was killed. A Pixel 10 did this five times between
+   * 2026-09-29 and 2026-10-03, once for 13.7 hours (`node.start.claim_refused`, then
+   * `app.init.stranded` at `native-start` on the next launch).
+   *
+   * Clears the claim backoff, as `yieldNode` does. A capture landing between this and the app's
+   * own `start()` can take the stores straight back; the app's single retry hands over again and
+   * starts immediately, which is the window iOS has always relied on that retry to close.
+   *
+   * @return whether the shutdown completed inside [timeoutMs]. Ownership moves either way.
+   */
+  suspend fun yieldToApp(timeoutMs: Long): Boolean {
+    val completed = release(timeoutMs)
+    if (completed) {
+      Log.i(TAG, "background node handed to the app")
+    } else {
+      Log.w(TAG, "handover timed out after ${timeoutMs}ms; the app may still be refused")
+    }
+    return completed
   }
+
+  /**
+   * Release the node and, with it, every directory claim, WITHOUT suspending the caller.
+   *
+   * For `BackgroundLocationService.onDestroy`, which used to `launch` [stop] on its own scope and
+   * cancel that scope on the next line — so the stop was cancelled before it was ever dispatched,
+   * and turning sharing off left the stores held until the process died. This scope is never
+   * cancelled, and the work it runs is bounded by [STOP_TIMEOUT_MS].
+   */
+  fun stopDetached() {
+    releaseScope.launch { stop() }
+  }
+
+  /** Release the node and, with it, every directory claim, so the app can take them back. */
+  suspend fun stop() {
+    release(STOP_TIMEOUT_MS)
+  }
+
+  /**
+   * Detach the handles under the lock, then shut the node down OUTSIDE it, bounded.
+   *
+   * `shutdown` rather than [dropNodeHandlesLocked]'s `close`: the subscription and the spawned
+   * receive task each hold their own `Arc<LocationNode>`, so closing this handle does not release
+   * the writer claims — only `LocationNode::shutdown` does that deterministically. Swift frees the
+   * subscription the moment its last reference goes; Kotlin's handle waits for the GC, so it is
+   * destroyed explicitly here to the same effect.
+   *
+   * Outside the lock so a shutdown that hangs cannot also wedge every capture queued on
+   * [ensureStarted]. The backoff is cleared because the whole contract of releasing is that the
+   * stores are free to take.
+   */
+  private suspend fun release(timeoutMs: Long): Boolean {
+    val (sub, held) =
+      lock.withLock {
+        clearClaimBackoff()
+        val handles = subscription to node
+        subscription = null
+        node = null
+        handles
+      }
+    try {
+      sub?.destroy()
+    } catch (e: Exception) {
+      Log.w(TAG, "background subscription teardown failed", e)
+    }
+    if (held == null) return true
+    val completed =
+      withTimeoutOrNull(timeoutMs) {
+        try {
+          held.shutdown()
+        } catch (e: Exception) {
+          // A shutdown that FAILED still finished — the claims are released either way. Only one
+          // that never returns is a problem, and that is what the timeout is for.
+          Log.w(TAG, "background node shutdown failed", e)
+        }
+        true
+      } ?: false
+    try {
+      held.destroy()
+    } catch (e: Exception) {
+      Log.w(TAG, "background node teardown failed", e)
+    }
+    return completed
+  }
+
+  /** Bounds a [stop] nobody is waiting on; matches the app's own handover budget. */
+  private const val STOP_TIMEOUT_MS = 5_000L
+
+  /** Process-lifetime, never cancelled: see [stopDetached]. */
+  private val releaseScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
   /**
    * Drop the node handles WITHOUT touching the backoff.
    *
-   * Split from [stopLocked] deliberately: the refusal path must not clear the very suppression it
-   * is setting. Collapsing these two back together restores the rebuild-per-capture loop.
+   * Split from [release] deliberately: the refusal path must not clear the very suppression it is
+   * setting. Collapsing these two back together restores the rebuild-per-capture loop. `close` is
+   * enough here because a refused node never started, so it holds no claims to give back.
    */
   private fun dropNodeHandlesLocked() {
     subscription = null
