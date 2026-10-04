@@ -300,26 +300,30 @@ Conventions when changing that code:
   refused the pair". v4 carries the sender's signed `ProfileRecord` on the `Accept`, which is why a
   persona now arrives WITH the pair instead of after a separate iroh-docs dial; the profile ticket
   still rides along, and is now only how later edits arrive.
-- **Session recovery runs in the native drain, not in JS.** A pair that exchanges nothing for
-  `T_lapse` (24 h) lapses on BOTH sides; each then drops the other from its wrap set, so neither
-  can deliver the fresh ratchet key that would un-lapse it, and only §4.6 resync breaks it.
-  `DrainEngine::drain` calls `PublishSink::recover` once per drain (after the fixes, every friend,
-  watchers included) and pushes while `in_progress` because the push is also the pull that brings
-  the peer's half in. It used to be `runResyncDriver` on the JS publish tick, which the native
-  drain replaced — and a Pixel 9 then spent 2026-09-22..29 publishing 785 envelopes sealed for
-  nobody while `last_publish_age_ms` read 30 s. The resync record is sealed to receiving keys JS
-  mirrors with `setRecipientKeys`; `poll_resync` offers our half BEFORE looking for theirs (it
-  did not, so two polling sides waited on each other forever). An envelope with every recipient
-  dropped is not a publish: it does not stamp `last_published_at` or count as `reached`.
-  **Two rules keep recovery from splitting a pair that worked.** (1) A miss is a NEW envelope we
-  cannot open: `readLatest` re-opens every author's one LWW slot on every sync, and once that slot
-  counted as a miss per read, three syncs "desynced" a healthy session (`SessionError::Replayed`,
-  judged from the chain on disk and the author's monotonic `seq`). (2) Applying a resync record is
-  unilateral, so the side that offered one keeps polling every peer it is wrapped for for as long
-  as the record is acceptable — even after its own verdict clears — and keeps its ephemeral that
-  long rather than dropping it on restore. On 2026-10-02 an iPhone offered on launch, recovered by
-  itself a minute later and stopped; its Pixel applied the offer, and both phones spent hours
-  unable to open each other's envelopes.
+- **Session recovery runs in the native drain, not in JS, and only the leader restarts.**
+  `DrainEngine::drain` calls `PublishSink::recover` → `recover_sessions` once per drain (every
+  friend, watchers included); its policy is `restart::run_pass`, which `tests/restart_protocol.rs`
+  runs verbatim. FORWARD-SECRECY.md §4.6 (revision 4) is the design: the lower endpoint id is the
+  pair's **leader** and is the only side that ever restarts a session — against the follower's
+  newest signed **prekey** (published in the follower's control record in its `rsy/<author>`
+  slot, rotated daily, never used if older than 72 h) — and the restart header rides every wrap
+  for that follower (envelope v4) until the leader opens something under the new session. The
+  follower adopts it from any one envelope, or **primes** it natively without consuming the fix
+  (`SessionManager::prime`), and asks for a restart by putting a request in its control record.
+  Records keep the last two replaced sessions for decryption only. This replaced a two-sided
+  resync exchange that had no convergence guarantee: on 2026-10-02 it split a working
+  iPhone/Pixel pair (one side applied, the other had stopped looking), and on 2026-10-03 the
+  follower's process died holding the ephemeral the leader then applied against, after which only
+  a re-pair helped. Rules that keep it convergent, each with a test: a miss is a NEW envelope we
+  cannot open (re-reads are `SessionError::Replayed`); a follower adopts only a restart newer than
+  the session it is on, and the leader makes each one strictly newer; a lapse alone never makes
+  the leader restart (§4.5 — a seized phone must not keep tracking by doing nothing), only a
+  request does; nothing about a restart lives only in memory. A pair that exchanges nothing for
+  `T_lapse` lapses on both sides and heals through the follower's request — a Pixel 9 spent
+  2026-09-22..29 publishing 785 envelopes sealed for nobody before recovery ran natively at all.
+  An envelope with every recipient dropped is not a publish: it does not stamp
+  `last_published_at` or count as `reached`. `publishResync`/`pollResync`/`clearResync` survive
+  only as binding-compatible shims.
 - **A pair is complete when `finalize` says so, not when the decision bits agree.** `is_complete()`
   goes true the instant a local accept latches; `finalize` — which installs the ratchet, ingests the
   handed profile record and raises `Ready` — runs after, and can still decline, because a wire

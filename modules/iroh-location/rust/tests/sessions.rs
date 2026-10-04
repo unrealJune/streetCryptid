@@ -1,28 +1,30 @@
-//! Tests for the recovery half of `SessionManager` — §4.6's detection and resync rules.
+//! Tests for `SessionManager`'s verdicts — §4.6's ways into "this session needs a restart" — on
+//! one device, with no peer.
 //!
-//! `ratchet_integration.rs` and `ratchet_conditions.rs` drive whole nodes over real transport;
-//! this file drives the manager directly, because the properties here are about what happens when
-//! storage or the stash misbehaves, and neither is reachable by being a well-behaved peer.
+//! `restart_protocol.rs` drives the whole restart exchange between participants; this file pins
+//! what one device concludes from what is on its own disk, because those are the cases a
+//! well-behaved peer cannot produce:
 //!
-//! The cases:
-//!
-//! * a state file that will not decrypt must report **desynced**, not "no session" — it is the one
+//! * a state file that will not decrypt must report **broken**, not "no session" — it is the one
 //!   cause of desync that miss-counting structurally cannot see;
-//! * a peer lapsed past `T_lapse` must report **desynced** for the same structural reason, because
+//! * a peer lapsed past `T_lapse` must report **broken** for the same structural reason, because
 //!   a mutual lapse produces no envelopes to miss and sustains itself indefinitely;
-//! * a resync record may only replace a session **older than itself**, so a record replayed out of
-//!   the stash after a restart cannot restart a working session;
-//! * the freshness bound and the re-mint interval must stay in the relationship that keeps a
-//!   published record usable.
+//! * a follower with no sending chain for an hour must report **broken** — the state a Pixel sat
+//!   in for a day on 2026-10-02/03 while nothing called it anything;
+//! * nothing on disk is **not** broken: the fix for that is a pairing, not a restart.
 
 use std::path::PathBuf;
 
 use iroh_location::ratchet::{KEY_LEN, SESSION_ID_LEN};
 use iroh_location::session_store::SessionStore;
-use iroh_location::sessions::{SessionManager, RESYNC_FRESHNESS_MS, RESYNC_REMINT_MS};
+use iroh_location::sessions::{Broken, Health, Role, SessionManager, STUCK_NO_SEND_MS};
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
 
 const IDENTITY: &[u8] = b"an identity secret, 32 bytes ok!";
+/// Lower than every peer below, so this device leads them all...
+const LEADER_SELF: [u8; 32] = [0x01; 32];
+/// ...and higher than every peer below, so this device follows them all.
+const FOLLOWER_SELF: [u8; 32] = [0xfe; 32];
 const PEER: &[u8] = &[0xbb; 32];
 
 /// A unique scratch directory per test — `SessionStore` holds a process-wide writer claim, so two
@@ -31,14 +33,14 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("sc-sessions-{name}"));
+        let dir = std::env::temp_dir().join(format!("sc-sessions-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
 
-    fn manager(&self) -> SessionManager {
-        SessionManager::new(SessionStore::open(&self.0, IDENTITY).unwrap())
+    fn manager(&self, self_id: [u8; 32]) -> SessionManager {
+        SessionManager::new(SessionStore::open(&self.0, IDENTITY).unwrap(), self_id)
     }
 
     fn blob_path(&self) -> PathBuf {
@@ -55,45 +57,53 @@ impl Drop for Scratch {
     }
 }
 
-/// A peer ephemeral public key, as a resync record would carry.
-fn peer_ephemeral(tag: u8) -> [u8; KEY_LEN] {
-    XPublicKey::from(&XStaticSecret::from([tag; KEY_LEN])).to_bytes()
-}
-
-/// Install a session the way an accepted resync record would.
-fn apply(manager: &SessionManager, nonce: u8, ts: u64, now_ms: u64) -> bool {
+/// Install a paired session as the leader (initiator): it can send at once.
+fn pair_as_leader(manager: &SessionManager, now_ms: u64) {
+    let eph = XStaticSecret::from([7u8; KEY_LEN]);
     manager
-        .apply_resync(
+        .bootstrap(
             PEER,
-            [nonce; 16],
-            ts,
-            [nonce; SESSION_ID_LEN],
-            [nonce; KEY_LEN],
-            peer_ephemeral(nonce),
-            None, // initiator side: we mint our own ratchet key
+            [1; SESSION_ID_LEN],
+            [2; KEY_LEN],
+            XPublicKey::from(&eph).to_bytes(),
             now_ms,
         )
-        .unwrap()
+        .unwrap();
+}
+
+/// Install a paired session as the follower (responder): no sending chain until the leader's
+/// first envelope lands.
+fn pair_as_follower(manager: &SessionManager, now_ms: u64) {
+    manager
+        .bootstrap_responder(
+            PEER,
+            [1; SESSION_ID_LEN],
+            [2; KEY_LEN],
+            XStaticSecret::from([7u8; KEY_LEN]),
+            now_ms,
+        )
+        .unwrap();
 }
 
 #[test]
-fn an_unreadable_state_file_reports_desynced_rather_than_unbootstrapped() {
+fn roles_follow_endpoint_order() {
+    let scratch = Scratch::new("roles");
+    assert_eq!(scratch.manager(LEADER_SELF).role(PEER), Role::Leader);
+    drop(scratch);
+    let scratch = Scratch::new("roles-2");
+    assert_eq!(scratch.manager(FOLLOWER_SELF).role(PEER), Role::Follower);
+}
+
+#[test]
+fn an_unreadable_state_file_reports_broken_rather_than_unpaired() {
     // §4.6 names storage corruption as an expected cause of desync, and it is the one cause miss
-    // counting cannot reach: every `open` fails at the load, so no miss is ever recorded and the
-    // threshold is never crossed. Collapsing the load error into "no session" would report a
-    // broken session as one waiting for a bump — the opposite of the truth, and the difference
-    // between "resync this" and "go and meet your friend again".
-    let scratch = Scratch::new("corrupt-desync");
-    let manager = scratch.manager();
+    // counting cannot reach: every `open` fails at the load, so no miss is ever recorded. Calling
+    // it "no session" would send the humans back to an in-person bump for a fault a restart fixes.
+    let scratch = Scratch::new("corrupt");
+    let manager = scratch.manager(LEADER_SELF);
+    pair_as_leader(&manager, 1_000);
+    assert_eq!(manager.assess(PEER, 1_000).health, Health::Healthy);
 
-    assert!(apply(&manager, 1, 1_000, 1_000), "record should apply");
-    assert!(manager.has_session(PEER));
-    assert!(
-        !manager.is_desynced(PEER, 1_000),
-        "a freshly installed session is healthy"
-    );
-
-    // Corrupt the blob behind the manager's back, as storage failure or a partial restore would.
     let path = scratch.blob_path();
     let mut raw = std::fs::read(&path).unwrap();
     let last = raw.len() - 1;
@@ -104,153 +114,80 @@ fn an_unreadable_state_file_reports_desynced_rather_than_unbootstrapped() {
         !manager.has_session(PEER),
         "a blob that will not decrypt is not a usable session"
     );
-    assert!(
-        manager.is_desynced(PEER, 1_000),
-        "...but it IS a desync, and must be visible as one so recovery can run"
+    assert_eq!(
+        manager.assess(PEER, 1_000).health,
+        Health::Broken(Broken::Damaged),
+        "...but it IS broken, and must be visible as such so recovery can run"
+    );
+    assert!(manager.is_desynced(PEER, 1_000));
+}
+
+#[test]
+fn a_lapsed_peer_reports_broken_so_recovery_can_break_a_mutual_lapse() {
+    // Observed in the field: two paired phones each past `T_lapse` for the other, both publishing
+    // every few minutes, every fix sealed for zero recipients, for ~22 hours. Nothing arrives, so
+    // no miss is recorded; the file is readable, so the damaged route does not fire either.
+    let scratch = Scratch::new("lapsed");
+    let manager = scratch.manager(LEADER_SELF).with_t_lapse_ms(10_000);
+    pair_as_leader(&manager, 1_000);
+    assert_eq!(manager.assess(PEER, 5_000).health, Health::Healthy);
+    assert!(manager.has_session(PEER), "the file is intact");
+    assert_eq!(
+        manager.assess(PEER, 11_000).health,
+        Health::Broken(Broken::Lapsed)
     );
 }
 
 #[test]
-fn a_lapsed_peer_reports_desynced_so_recovery_can_break_a_mutual_lapse() {
-    // The failure this exists to prevent, observed in the field: two paired phones each past
-    // `T_lapse` for the other, both publishing fixes every few minutes, every fix sealed for zero
-    // recipients, for ~22 hours.
-    //
-    // It sustains itself by construction. `next_wraps` drops a lapsed recipient before deriving a
-    // slot, so they receive nothing; `peer_advanced_ms` only moves when an envelope from them is
-    // accepted. Nothing arrives, so no miss is recorded and the miss threshold is never crossed —
-    // and the state file is perfectly readable, so the damaged-file route does not fire either.
-    // Both existing routes into §4.6 are structurally unreachable, which is exactly why lapse
-    // needs its own.
-    let scratch = Scratch::new("lapsed-desync");
-    let manager = scratch.manager().with_t_lapse_ms(10_000);
-
-    assert!(apply(&manager, 1, 1_000, 1_000), "record should apply");
-    assert!(
-        !manager.is_desynced(PEER, 5_000),
-        "inside T_lapse the session is healthy"
+fn a_follower_without_a_sending_chain_for_an_hour_reports_broken() {
+    let scratch = Scratch::new("stuck");
+    let manager = scratch.manager(FOLLOWER_SELF);
+    let t = 1_790_000_000_000;
+    pair_as_follower(&manager, t);
+    assert_eq!(
+        manager.assess(PEER, t + STUCK_NO_SEND_MS - 1).health,
+        Health::Healthy,
+        "waiting for the leader's first envelope is a moment, not a fault"
     );
-
-    assert!(
-        manager.has_session(PEER),
-        "the state file is intact — this is not the damaged-file case"
-    );
-    assert!(
-        manager.is_desynced(PEER, 11_000),
-        "past T_lapse the session must be visible to the resync driver, or nothing ever clears it"
-    );
-
-    // And recovery genuinely resolves it: a fresh record re-roots the session and stamps
-    // `peer_advanced_ms` at the bootstrap, so the lapse is gone rather than merely reported.
-    assert!(
-        apply(&manager, 2, 11_000, 11_000),
-        "recovery record applies"
-    );
-    assert!(
-        !manager.is_desynced(PEER, 11_500),
-        "a resync must actually clear the lapse, not just re-report it next tick"
+    assert_eq!(
+        manager.assess(PEER, t + STUCK_NO_SEND_MS).health,
+        Health::Broken(Broken::StuckNoSend)
     );
 }
 
 #[test]
-fn a_peer_we_never_bootstrapped_is_not_desynced() {
-    // The other side of the distinction above: nothing on disk means there is no session to be
-    // out of step with. Reporting desynced here would send the resync driver after a peer whose
-    // actual problem is that the two humans have not met yet.
-    let scratch = Scratch::new("absent-not-desynced");
-    let manager = scratch.manager();
+fn a_leader_without_a_sending_chain_is_not_stuck() {
+    // Only a follower waits for the other side. A leader always holds a sending chain; the
+    // verdict is about the follower's state and must not leak onto the leader's.
+    let scratch = Scratch::new("leader-not-stuck");
+    let manager = scratch.manager(LEADER_SELF);
+    let t = 1_790_000_000_000;
+    pair_as_leader(&manager, t);
+    assert_eq!(
+        manager.assess(PEER, t + 10 * STUCK_NO_SEND_MS).health,
+        Health::Healthy
+    );
+}
 
+#[test]
+fn a_peer_we_never_paired_is_not_broken() {
+    // Nothing on disk means there is no session to be out of step with. Reporting broken here
+    // would send recovery after a peer whose actual problem is that the two humans have not met.
+    let scratch = Scratch::new("absent");
+    let manager = scratch.manager(LEADER_SELF);
     assert!(!manager.has_session(PEER));
+    assert_eq!(manager.assess(PEER, 1_000).health, Health::NoSession);
     assert!(!manager.is_desynced(PEER, 1_000));
 }
 
 #[test]
-fn a_replayed_resync_record_cannot_restart_a_working_session() {
-    // The stash is modelled as hostile, keeps whatever versions of the `rsy` slot it likes, and
-    // `seen_nonces` lives in memory by design — so after a restart every record inside the
-    // freshness window looks new again. Without a durable bound this is a free denial of service
-    // against any pair the stash chooses: replay, and a healthy session restarts.
-    let scratch = Scratch::new("resync-replay");
-    let now = 10_000_000;
-
-    let first_session = {
-        let manager = scratch.manager();
-        assert!(apply(&manager, 1, now - 5_000, now), "first resync applies");
-        assert!(
-            !apply(&manager, 1, now - 5_000, now),
-            "the same record twice is a no-op within one process (in-memory nonce dedup)"
-        );
-        session_fingerprint(&scratch)
-    }; // manager dropped: the process-restart boundary, and with it the nonce set
-
-    let manager = scratch.manager();
-    assert!(
-        !apply(&manager, 1, now - 5_000, now),
-        "a record replayed after a restart must NOT restart the session — it is not newer than \
-         the one that created it"
-    );
-    assert_eq!(
-        session_fingerprint(&scratch),
-        first_session,
-        "the working session must be untouched by the replay"
-    );
-
-    // A genuinely newer record is still accepted, or the bound would break recovery instead of
-    // protecting it.
-    assert!(
-        apply(&manager, 2, now - 1_000, now),
-        "a newer record must still be able to restart the session"
-    );
-    assert_ne!(
-        session_fingerprint(&scratch),
-        first_session,
-        "a newer record installs a different session"
-    );
-}
-
-#[test]
-fn a_stale_record_is_refused_without_being_an_error() {
-    // Refusal is ordinary, not alarming: the stash can serve an old record from the overwritten
-    // slot at any time.
-    let scratch = Scratch::new("resync-stale");
-    let manager = scratch.manager();
-    let now = 10_000_000;
-
-    assert!(
-        !apply(&manager, 1, now - RESYNC_FRESHNESS_MS - 1, now),
-        "a record older than the freshness window is refused"
-    );
-    assert!(
-        !manager.has_session(PEER),
-        "and installs nothing while refusing"
-    );
-}
-
-#[test]
-fn the_remint_interval_stays_inside_the_freshness_window() {
-    // These two constants only mean anything in relation to each other. If the re-mint interval
-    // ever reached the freshness window, a record would expire before it was replaced and
-    // `publish_resync` would be back to republishing bytes the peer refuses — the permanent
-    // resync deadlock, reintroduced by a constant edit.
-    // `const` blocks, so a constant edit that breaks the relationship fails to *compile* rather
-    // than waiting for someone to run the suite.
-    const {
-        assert!(
-            RESYNC_REMINT_MS < RESYNC_FRESHNESS_MS,
-            "a re-minted record must be published while the previous one is still acceptable"
-        )
-    };
-    const {
-        assert!(
-            RESYNC_REMINT_MS <= RESYNC_FRESHNESS_MS / 2,
-            "and with at least half the window of validity ahead of it, so there is no gap \
-             where what we have published is already unusable"
-        )
-    };
-}
-
-/// The on-disk session blob, as an opaque identity. Enough to tell "this session was replaced"
-/// from "this session was left alone" without reaching into `RatchetState`'s private fields.
-fn session_fingerprint(scratch: &Scratch) -> Vec<u8> {
-    std::fs::read(scratch.blob_path()).unwrap()
+fn a_re_pair_resets_what_the_leader_has_answered() {
+    // A follower's request counter is its own clock, and nothing it asked for under an old
+    // relationship is owed under a new one — nor may an old answer swallow a new request.
+    let scratch = Scratch::new("repair-answered");
+    let manager = scratch.manager(LEADER_SELF);
+    pair_as_leader(&manager, 1_000);
+    assert_eq!(manager.assess(PEER, 1_000).answered_request_ts, 0);
+    pair_as_leader(&manager, 2_000);
+    assert_eq!(manager.assess(PEER, 2_000).answered_request_ts, 0);
 }

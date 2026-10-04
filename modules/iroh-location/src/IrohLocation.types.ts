@@ -1032,34 +1032,30 @@ export interface IrohLocationApi {
   // regenerate on macOS), so callers must guard with `typeof mod.<name> === 'function'`.
 
   /**
-   * Whether this peer's session needs §4.6 recovery — a run of signature-valid envelopes we could
-   * not open, or state we cannot read at all. `false` for a peer we simply have no session with:
-   * that is un-bootstrapped, which a resync cannot fix and a re-pair can.
+   * Whether this peer's session needs a §4.6 restart: a run of distinct envelopes we could not
+   * open, a record we cannot read, a lapsed peer, or — when we follow — no sending chain for an
+   * hour. `false` for a peer we simply have no session with: that is unpaired, which a restart
+   * cannot fix and a re-pair can.
    */
   isDesynced?(peerEndpointHex: string): Promise<boolean>;
   /**
-   * How many resyncs we have driven with this peer. Recovery that keeps recovering is not
-   * recovering — past a small number, surface "re-pair with this friend" instead of retrying.
+   * How many restarts have been installed with this peer in this process. Recovery that keeps
+   * recovering is not recovering — past a small number, surface "re-pair with this friend".
    */
   resyncCount?(peerEndpointHex: string): Promise<number>;
   /**
-   * Publish our half of a resync exchange, addressed to these friends' **receiving keys**.
-   *
-   * HPKE-sealed rather than ratcheted, necessarily: this is the message that re-establishes a
-   * ratchet, so it cannot depend on one already working. Idempotent while the record is fresh,
-   * re-minted once it ages past half its acceptance window. Returns our ephemeral's public half.
+   * Publish our restart control record (prekeys + outstanding requests) now, sealed to these
+   * friends' **receiving keys**. The native drain publishes it on its own; this only forces it.
+   * Returns our newest prekey's public half.
    */
   publishResync?(recipientRecvPubsHex: string[]): Promise<string>;
   /**
-   * Look for this peer's resync record and restart the session from it, publishing our own half
-   * first if we have not — so one call from each side completes the exchange without either
-   * having to go first.
-   *
-   * Returns whether a session was installed. `false` covers "no record yet", "stale record", and
-   * "already applied": all ordinary, none an error.
+   * Run one native recovery pass for this peer (FORWARD-SECRECY.md §4.6): restart it if we lead
+   * the pair and it is due, adopt a waiting restart if we follow. Returns whether a session was
+   * installed. The receiving key argument is unused and kept for binding compatibility.
    */
   pollResync?(peerEndpointHex: string, peerRecvPubHex: string): Promise<boolean>;
-  /** Drop our in-flight resync ephemeral once every peer has been restarted. */
+  /** A no-op kept for binding compatibility: nothing about a restart is held in memory. */
   clearResync?(): Promise<void>;
   /** Forget a peer's ratchet session entirely — unfriend, or revoke. */
   forgetSession?(peerEndpointHex: string): Promise<void>;
