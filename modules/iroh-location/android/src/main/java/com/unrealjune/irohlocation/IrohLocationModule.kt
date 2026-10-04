@@ -36,6 +36,7 @@ import uniffi.iroh_location.LocationFix
 import uniffi.iroh_location.LocationNode
 import uniffi.iroh_location.NodeHolder
 import uniffi.iroh_location.PairEvent
+import uniffi.iroh_location.PeerDial
 import uniffi.iroh_location.PairEventKind
 import uniffi.iroh_location.PairInvite
 import uniffi.iroh_location.PairResult
@@ -759,6 +760,18 @@ class IrohLocationModule : Module() {
         )
       }
 
+    /// Seal the last known position once for a recipient set that has just grown — a new friend's
+    /// first dot (AGENTS.md: "A new friend's first dot comes from an INTRODUCTION"). Declared in
+    /// the TS contract and called by `connectNewFriend` since it existed, and exported by neither
+    /// platform until the export-parity test found it: every new friend waited for the next slot.
+    AsyncFunction("publishIntroduction") Coroutine
+      { subscriptionId: String ->
+        val sub = subs[subscriptionId] ?: throw IllegalStateException("no such subscription")
+        ingestOutcomeToMap(
+          sub.publishIntroduction(subscriptionId, System.currentTimeMillis().toULong())
+        )
+      }
+
     /// Start/stop the native foreground service. The app calls these when the user turns sharing
     /// on and off; nothing else should, because a service the user did not ask for is a persistent
     /// notification they cannot explain.
@@ -1110,6 +1123,31 @@ class IrohLocationModule : Module() {
       { peerTickets: List<String>, traceparent: String? ->
         val n = node ?: throw IllegalStateException("call createNode first")
         n.pushTrail(peerTickets, traceparent)
+      }
+
+    /// The per-peer-deadline push, which breaks on the stash instead of waiting 30 s on phones that
+    /// are asleep. Like `publishIntroduction`, declared in TS and called (guarded) for as long as it
+    /// existed in Rust, and exported by neither platform — so every push took the flat-budget
+    /// fallback. Found by the export-parity test.
+    AsyncFunction("pushTrailBudgeted") Coroutine
+      { peers: List<Map<String, Any>>, traceparent: String? ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        val dials =
+          peers.map {
+            PeerDial(
+              ticket = it["ticket"] as String,
+              budgetMs = ((it["budgetMs"] as? Number)?.toLong() ?: 0L).coerceAtLeast(0L).toULong(),
+            )
+          }
+        n.pushTrailBudgeted(dials, traceparent).map {
+          mapOf(
+            "peer" to it.peer,
+            "outcome" to it.outcome,
+            "latencyMs" to it.latencyMs?.toDouble(),
+            "entriesSent" to it.entriesSent.toDouble(),
+            "budgetMs" to it.budgetMs.toDouble(),
+          )
+        }
       }
 
     AsyncFunction("uploadTrailContent") Coroutine

@@ -654,6 +654,19 @@ public final class IrohLocationModule: Module {
           nowMs: UInt64(Date().timeIntervalSince1970 * 1000)))
     }
 
+    /// Seal the last known position once for a recipient set that has just grown — a new friend's
+    /// first dot. Declared in the TS contract and called by `connectNewFriend` since it existed,
+    /// and exported by neither platform until the export-parity test found it.
+    AsyncFunction("publishIntroduction") { (subscriptionId: String) async throws -> [String: Any?] in
+      guard let sub = self.subscriptions[subscriptionId] else {
+        throw Exception(name: "NoSubscription", description: "no such subscription")
+      }
+      return ingestOutcomeToDict(
+        try await sub.publishIntroduction(
+          subscriptionId: subscriptionId,
+          nowMs: UInt64(Date().timeIntervalSince1970 * 1000)))
+    }
+
     /// Start/stop the native background runtime. The app calls these when the user turns sharing on
     /// and off; nothing else should.
     Function("startNativeBackground") {
@@ -993,6 +1006,28 @@ public final class IrohLocationModule: Module {
     AsyncFunction("pushTrail") { (peerTickets: [String], traceparent: String?) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       try await node.pushTrail(peerTickets: peerTickets, traceparent: traceparent)
+    }
+
+    /// The per-peer-deadline push. Declared in TS and called (guarded) for as long as it existed in
+    /// Rust, and exported by neither platform — so every push took the flat-budget fallback.
+    AsyncFunction("pushTrailBudgeted") {
+      (peers: [[String: Any]], traceparent: String?) async throws -> [[String: Any?]] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      let dials = peers.compactMap { dial -> PeerDial? in
+        guard let ticket = dial["ticket"] as? String else { return nil }
+        let budget = (dial["budgetMs"] as? NSNumber)?.doubleValue ?? 0
+        return PeerDial(ticket: ticket, budgetMs: UInt64(max(0, budget)))
+      }
+      let reports = try await node.pushTrailBudgeted(peers: dials, traceparent: traceparent)
+      return reports.map { report in
+        [
+          "peer": report.peer,
+          "outcome": report.outcome,
+          "latencyMs": report.latencyMs.map { Double($0) },
+          "entriesSent": Double(report.entriesSent),
+          "budgetMs": Double(report.budgetMs),
+        ]
+      }
     }
 
     AsyncFunction("uploadTrailContent") { (baseUrl: String, psk: String?) async throws -> UInt64 in
