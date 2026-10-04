@@ -100,7 +100,7 @@ bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cu
         ├ gossip.publish*  (sc.entry_hash)  ─ live path ───────►  gossip.receive (sc.entry_hash, sc.via_peer, outcome)
         │                   ├ peer.contact (send, per recipient neighbour)          └ peer.contact (recv, from_author?)
         └ docs.write*      (sc.entry_hash, dropped, sc.drop_reason?, dropped_peers?)  ─ LOCAL replica only
-      └ session.recover*   (desynced, gave_up, no_key, restored, remaining, following)  ─ §4.6, once per drain
+      └ session.recover*   (desynced, primed, restarted, requested, withdrawn, await_prekey, no_key, control_written)  ─ §4.6, once per drain
     └ trail.push.app                        ─ durable path ─►  stash.entry.received (sc.entry_hash)
       └ trail.push*        (entries_sent, finished)
                                                                   └ trail.sync.app (recovered)
@@ -514,20 +514,24 @@ to whatever child you searched for — which is exactly how an early pass at thi
    equal nothing was written at all — the envelope reached nobody. `sc.drop_reason` says why
    (`lapsed`, `no_session`, `no_sending_chain`, `state_unavailable`) and `dropped_peers` says for
    whom (`short_id:reason`). `lapsed` on both sides of a pair is a mutual lapse, which only
-   `session.recover` can heal: look for `desynced>0` there, then `restored>0` a drain or two later
-   on BOTH phones. `gave_up>0` means the pair needs an in-person re-pair; `no_key>0` means JS has
-   not mirrored that friend's receiving key and their profile is not in the replica. A Pixel 9
-   spent a week (2026-09-22..29) at `dropped == recipients` because recovery only ran on the JS
-   publish path the native drain had replaced.
-   **The opposite failure is a pair split by a resync**: `dropped=0`, envelopes go out, and the
-   friend's Loki shows `ratcheted envelope not opened` for exactly our `sc_seq` with
-   `sc_drop_reason="no wrap in this envelope belongs to us"`, right after one side logged
-   `restarted the session from a resync record`. Applying a record is unilateral, so the side that
-   OFFERED must join the root the other moved to; `following>0` on its `session.recover` is that
-   follow-through, and `restored>0` with `desynced=0` is it landing. On 2026-10-02 neither existed:
-   re-reading an already-opened replica slot counted as a miss, three reads made a working session
-   "desynced", and the offering iPhone stopped polling a minute before its Pixel applied the offer.
-   Re-reads now open as `Replayed` (`envelope already seen`) and never count.
+   `session.recover` heals: the follower's pass shows `requested=1`, the leader's a drain later
+   `restarted=1`, the follower's after that `primed=1` (or an `adopted the leader's restarted
+   session` line on a read). `await_prekey>0` on the leader means the follower has published no
+   prekey fresh enough to restart against (its control record is not reaching the leader, or the
+   follower has not run for three days); `no_key>0` means JS has not mirrored that friend's
+   receiving key and their profile is not in the replica, so our control record cannot be sealed
+   to them. A Pixel 9 spent a week (2026-09-22..29) at `dropped == recipients` because recovery
+   only ran on the JS publish path the native drain had replaced.
+   `no_sending_chain` that persists is a **stuck follower**: it never received the leader's first
+   envelope on its session. After an hour it reports `desynced` and requests a restart; on
+   2026-10-02/03 a Pixel sat in exactly that state for a day with nothing calling it broken.
+   **A split pair** — `dropped=0`, envelopes going out, and the friend's Loki showing `ratcheted
+   envelope not opened` for exactly our `sc_seq` with `sc_drop_reason="no wrap in this envelope
+   belongs to us"` — is what revision 3's two-sided resync produced (2026-10-02, 10-03). With the
+   leader-decided restart it should heal by itself; if it does not, read both sides'
+   `session.recover` and the Loki lines `restarted the session as leader` / `adopted the leader's
+   restarted session` / `asked the leader to restart our session` (`sc_restart` label). Re-reads
+   open as `Replayed` (`envelope already seen`) and never count as misses.
    4b. **Did it get OFF the phone?** `docs.write` is local-only. Look for `trail.push.app` /
    `trail.push` in the same wake: absent means nothing pushed it, `finished=false` means the
    stash was unreachable. Hour-long gaps in a friend's trail with healthy `publish.fix` spans

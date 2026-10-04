@@ -50,19 +50,23 @@ fn no_session_root_derives_from_static_static_dh() {
         "ratchet.rs",
         "pairing.rs",
         "crypto.rs",
+        "restart.rs",
     ] {
         let text = std::fs::read_to_string(src.join(file)).expect("read source");
-        // The body of the derivation itself necessarily binds a root; it is the one place
-        // allowed to, so it is skipped rather than special-cased in the assertion below.
+        let lines: Vec<&str> = text.lines().collect();
+        // The bodies of the two derivations necessarily bind a root; they are the only places
+        // allowed to, so they are skipped rather than special-cased in the assertion below.
         let mut inside_derivation = false;
-        for (i, line) in text.lines().enumerate() {
+        for (i, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
-            if trimmed.starts_with("fn derive_boot_root(") {
+            if trimmed.starts_with("fn derive_boot_root(")
+                || trimmed.starts_with("pub fn restart_root(")
+            {
                 inside_derivation = true;
                 continue;
             }
             if inside_derivation {
-                if line == "}" {
+                if *line == "}" {
                     inside_derivation = false;
                 }
                 continue;
@@ -73,44 +77,55 @@ fn no_session_root_derives_from_static_static_dh() {
             let at = format!("{file}:{}", i + 1);
             // A *binding* of a root, not a use of one: `rk0` must appear on the left of the `=`.
             // `let state = bootstrap_responder(.., rk0, ..)` passes a root along; only
-            // `let (rk0, ..) = ..` creates one.
+            // `let (rk0, ..) = ..` creates one. rustfmt may put the right-hand side on the next
+            // line, so the binding is read with it.
             if trimmed.starts_with("let ") {
                 if let Some((lhs, _)) = trimmed.split_once('=') {
                     if lhs.contains("rk0") {
-                        root_bindings.push((at.clone(), trimmed.to_string()));
+                        let next = lines.get(i + 1).map(|l| l.trim()).unwrap_or("");
+                        root_bindings.push((at.clone(), format!("{trimmed} {next}")));
                     }
                 }
             }
-            if trimmed.contains("derive_boot_root(") && !trimmed.starts_with("fn ") {
-                derive_callers.push((at, trimmed.to_string()));
+            if (trimmed.contains("derive_boot_root(") || trimmed.contains("restart_root("))
+                && !trimmed.starts_with("fn ")
+                && !trimmed.starts_with("pub fn ")
+            {
+                let prev = if i > 0 { lines[i - 1].trim() } else { "" };
+                derive_callers.push((at, format!("{prev} {trimmed}")));
             }
         }
     }
 
-    // Every root binding — bootstrap and resync alike — comes from the ephemeral-ephemeral
-    // derivation. Two call sites is correct and expected; a third that did NOT go through
-    // `derive_boot_root` is the thing this exists to catch.
+    // Every root binding — pairing and restart alike — comes from one of the two derivations:
+    // ephemeral × ephemeral at pairing (`derive_boot_root`), and single-use base key × rotating
+    // signed prekey on a §4.6 restart (`sessions::restart_root`). Neither has a static-static
+    // input. A binding that goes through neither is the thing this exists to catch.
     assert!(
         !root_bindings.is_empty(),
         "no root binding found at all — has the derivation been renamed out from under this test?"
     );
     for (at, binding) in &root_bindings {
         assert!(
-            binding.contains("derive_boot_root("),
-            "a session root must only ever come from derive_boot_root, but {at} binds one from \
-             something else: {binding}"
+            binding.contains("derive_boot_root(") || binding.contains("restart_root("),
+            "a session root must only ever come from derive_boot_root or restart_root, but {at}              binds one from something else: {binding}"
         );
     }
 
-    // And every caller of it is a bootstrap or a resync — never a fallback on some other path.
+    // And every caller of them is a pairing or a restart — never a fallback on some other path.
     assert!(
-        !derive_callers.is_empty(),
-        "derive_boot_root must actually be used"
+        derive_callers
+            .iter()
+            .any(|(_, l)| l.contains("derive_boot_root("))
+            && derive_callers
+                .iter()
+                .any(|(_, l)| l.contains("restart_root(")),
+        "both derivations must actually be used"
     );
     for (at, line) in &derive_callers {
         assert!(
             line.contains("rk0"),
-            "derive_boot_root's output must be used as a root at {at}: {line}"
+            "a root derivation's output must be used as a root at {at}: {line}"
         );
     }
 }
@@ -268,22 +283,6 @@ async fn publish_and_deliver(
         DELIVERY_DEADLINE
     );
 }
-/// One delivery attempt, for assertions that expect **nothing** to arrive — retrying there would
-/// only spend five reconciliation timeouts proving the same negative.
-async fn publish_and_deliver_once(
-    from: &Arc<LocationNode>,
-    to: &Arc<LocationNode>,
-    stash: &Arc<LocationNode>,
-    seq: u64,
-    ts: u64,
-) -> Vec<iroh_location::IncomingFix> {
-    from.docs_write_ratcheted("t".into(), seq, fix_at(ts), vec![hex(&to.endpoint_id())])
-        .await
-        .expect("publish");
-    replicate(from, stash, to).await;
-    to.read_latest_ratcheted().await.expect("read")
-}
-
 /// Stop a node and bring it back as a **new process would**: same identity and receiving secret,
 /// therefore the same data directory, therefore the same on-disk session store.
 ///
@@ -596,13 +595,13 @@ async fn a_friend_offline_for_many_intervals_catches_up_to_the_current_fix() {
 
 /// **Offline past the acceptance window.** Beyond it the receiver refuses to walk the chain at
 /// all (§4.2 bounds the work an unauthenticated counter can demand), so the friend cannot open
-/// the fix and the session needs §4.6 resync rather than patience.
+/// the fix and the session needs a §4.6 restart rather than patience.
 ///
 /// This is the case that decides whether `T_lapse` and the window are tuned sanely (§8.4): the
 /// window is 512 positions, so at the 5-minute cold cadence a friend has ~42 hours before their
 /// session stops being recoverable by fast-forward alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn beyond_the_acceptance_window_the_friend_needs_a_resync_not_patience() {
+async fn beyond_the_acceptance_window_the_friend_needs_a_restart_not_patience() {
     let _network_test = NETWORK_TEST_LOCK.lock().await;
     let author = start_node().await;
     let friend = start_node().await;
@@ -755,150 +754,7 @@ async fn heavily_asymmetric_traffic_keeps_both_directions_alive() {
     }
 }
 
-// ── desync and recovery (§4.6) ────────────────────────────────────────────────────────────
-
-/// Run the §4.6 exchange between two nodes that have both lost step, and prime the new session.
-async fn resync_pair(a: &Arc<LocationNode>, b: &Arc<LocationNode>, stash: &Arc<LocationNode>) {
-    let a_id = hex(&a.endpoint_id());
-    let b_id = hex(&b.endpoint_id());
-    let a_recv = hex(&a.recv_public());
-    let b_recv = hex(&b.recv_public());
-
-    a.publish_resync(vec![b_recv.clone()])
-        .await
-        .expect("a offers its half");
-    b.publish_resync(vec![a_recv.clone()])
-        .await
-        .expect("b offers its half");
-
-    replicate(a, stash, b).await;
-    replicate(b, stash, a).await;
-
-    assert!(
-        a.poll_resync(b_id, b_recv).await.expect("a polls"),
-        "a must adopt b's resync record"
-    );
-    assert!(
-        b.poll_resync(a_id, a_recv).await.expect("b polls"),
-        "b must adopt a's resync record"
-    );
-
-    // A restarted session is a fresh bootstrap, so the responder window is open again.
-    let (first, second) = initiator_first(a, b);
-    first
-        .docs_write_ratcheted(
-            "prime".into(),
-            0,
-            fix_at(2),
-            vec![hex(&second.endpoint_id())],
-        )
-        .await
-        .expect("priming publish after resync");
-    replicate(first, stash, second).await;
-    second.read_latest_ratcheted().await.expect("prime read");
-}
-
-/// **A reinstalled phone.** One side loses its session state entirely — the case §4.6 exists for
-/// — and the pair recovers by restarting the session, never by falling back to something weaker.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_device_that_lost_its_state_recovers_through_resync() {
-    let _network_test = NETWORK_TEST_LOCK.lock().await;
-    let a = start_node().await;
-    let b = start_node().await;
-    let stash = start_node().await;
-
-    bootstrap_and_prime(&a, &b, &stash).await;
-    let a_id = a.endpoint_id();
-
-    assert!(
-        publish_and_deliver(&a, &b, &stash, 1, 1000)
-            .await
-            .iter()
-            .any(|e| e.author == a_id),
-        "traffic flows before the loss"
-    );
-
-    // b reinstalls: session gone, identity and friendships intact.
-    b.forget_session(hex(&a_id)).await.expect("b loses state");
-    assert!(
-        !b.has_session(hex(&a_id)).await.expect("b checks"),
-        "the session must actually be gone"
-    );
-    assert!(
-        publish_and_deliver_once(&a, &b, &stash, 2, 2000)
-            .await
-            .iter()
-            .all(|e| e.author != a_id),
-        "with no session b must open nothing"
-    );
-
-    resync_pair(&a, &b, &stash).await;
-
-    assert!(
-        publish_and_deliver(&a, &b, &stash, 3, 3000)
-            .await
-            .iter()
-            .any(|e| e.author == a_id && e.fix.ts == 3000),
-        "traffic must flow again after the resync"
-    );
-    assert_eq!(
-        b.resync_count(hex(&a_id)).await.expect("count"),
-        1,
-        "one resync should be recorded, for the re-pair prompt to reason about"
-    );
-
-    for node in [a, b, stash] {
-        node.shutdown().await.expect("shutdown");
-    }
-}
-
-/// A replayed resync record must not restart the session a second time.
-///
-/// The slot is overwritten in place and the stash controls what it serves, so re-serving an old
-/// record is the cheapest attack available to it. Nonce dedup makes the second application a
-/// no-op — the session stays where it is rather than being walked backwards onto a root the peer
-/// has already moved off.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_replayed_resync_record_is_refused() {
-    let _network_test = NETWORK_TEST_LOCK.lock().await;
-    let a = start_node().await;
-    let b = start_node().await;
-    let stash = start_node().await;
-
-    bootstrap_and_prime(&a, &b, &stash).await;
-    let a_id = hex(&a.endpoint_id());
-    let a_recv = hex(&a.recv_public());
-    let author_id = a.endpoint_id();
-
-    b.forget_session(a_id.clone()).await.expect("b loses state");
-    resync_pair(&a, &b, &stash).await;
-
-    // The stash re-serves a's record, unchanged. b has already applied it.
-    assert!(
-        !b.poll_resync(a_id.clone(), a_recv)
-            .await
-            .expect("b polls again"),
-        "a replayed resync record must be a no-op"
-    );
-    assert_eq!(
-        b.resync_count(a_id).await.expect("count"),
-        1,
-        "the replay must not count as a second resync"
-    );
-
-    // And the session it already established still works.
-    assert!(
-        publish_and_deliver(&a, &b, &stash, 9, 9000)
-            .await
-            .iter()
-            .any(|e| e.author == author_id && e.fix.ts == 9000),
-        "the replay must not have disturbed the live session"
-    );
-
-    for node in [a, b, stash] {
-        node.shutdown().await.expect("shutdown");
-    }
-}
+// ── desync detection (§4.6) ───────────────────────────────────────────────────────────────
 
 /// Desync is detected from a *run* of failures, not a single one (§4.6's `R`).
 ///
@@ -1060,63 +916,258 @@ async fn a_watch_only_friend_feeds_the_ratchet_with_null_fixes() {
     }
 }
 
-// ── a mutual lapse, healed by the native driver ──────────────────────────────────────────────
+// ── session restarts (§4.6) ─────────────────────────────────────────────────────────────────
 
-/// **Both sides only poll.** The exchange must complete with neither side publishing its half by
-/// hand — that is the shape every real driver has, because the side that notices the desync and the
-/// side that caused it are usually not the same one.
+/// Mirror each side's receiving key to the other, as JS does with `setRecipientKeys` — the control
+/// record is sealed to these.
+async fn mirror_keys(a: &Arc<LocationNode>, b: &Arc<LocationNode>) {
+    a.set_recipient_keys(vec![iroh_location::RecipientKey {
+        endpoint_id: hex(&b.endpoint_id()),
+        recv_public: hex(&b.recv_public()),
+    }])
+    .await
+    .expect("a mirrors keys");
+    b.set_recipient_keys(vec![iroh_location::RecipientKey {
+        endpoint_id: hex(&a.endpoint_id()),
+        recv_public: hex(&a.recv_public()),
+    }])
+    .await
+    .expect("b mirrors keys");
+}
+
+/// Whether `reader` currently holds `author`'s fix at `ts`, read from its replica.
+async fn reads(reader: &Arc<LocationNode>, author: &Arc<LocationNode>, ts: u64) -> bool {
+    let author_id = author.endpoint_id();
+    reader
+        .read_latest_ratcheted()
+        .await
+        .expect("read")
+        .iter()
+        .any(|e| e.author == author_id && e.fix.ts == ts)
+}
+
+/// What the native drain does on each phone, round after round, until both read each other: run
+/// recovery, publish, reconcile, read. Returns the number of rounds it took, or panics.
 ///
-/// `poll_resync` used to return early on "no record from them yet" BEFORE offering its own half,
-/// so two phones that both only polled would each wait for the other forever. The only test of the
-/// exchange (`resync_pair`) published both halves explicitly and never saw it.
+/// Rounds rather than a fixed script because that is what the product guarantees — convergence
+/// under its normal cadence — and because docs reconciliation is bounded by timeouts, so a single
+/// pass landing is not something to assert on.
+async fn converge(
+    a: &Arc<LocationNode>,
+    b: &Arc<LocationNode>,
+    stash: &Arc<LocationNode>,
+    seq_base: u64,
+) -> u64 {
+    let a_id = hex(&a.endpoint_id());
+    let b_id = hex(&b.endpoint_id());
+    for round in 0..8u64 {
+        a.recover_sessions(std::slice::from_ref(&b_id)).await;
+        b.recover_sessions(std::slice::from_ref(&a_id)).await;
+        let ts = 100_000 + seq_base + round;
+        let _ = a
+            .docs_write_ratcheted(
+                "t".into(),
+                seq_base + 2 * round,
+                fix_at(ts),
+                vec![b_id.clone()],
+            )
+            .await;
+        let _ = b
+            .docs_write_ratcheted(
+                "t".into(),
+                seq_base + 2 * round + 1,
+                fix_at(ts),
+                vec![a_id.clone()],
+            )
+            .await;
+        replicate(a, stash, b).await;
+        replicate(b, stash, a).await;
+        if reads(b, a, ts).await && reads(a, b, ts).await {
+            return round + 1;
+        }
+    }
+    panic!("the pair did not converge within eight rounds of normal operation");
+}
+
+/// **Damaged state.** One side's session record will not decrypt — storage failure, a partial
+/// restore — while the friendship itself is intact. That is a restart, never a re-pair, and never
+/// a fallback to something weaker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_sides_that_only_poll_still_complete_the_resync() {
+async fn a_device_whose_session_was_damaged_recovers_through_a_restart() {
     let _network_test = NETWORK_TEST_LOCK.lock().await;
     let a = start_node().await;
     let b = start_node().await;
     let stash = start_node().await;
 
     bootstrap_and_prime(&a, &b, &stash).await;
-    let a_id = hex(&a.endpoint_id());
-    let b_id = hex(&b.endpoint_id());
-    let a_recv = hex(&a.recv_public());
-    let b_recv = hex(&b.recv_public());
-
-    // a goes first, so b has offered nothing yet: "not yet" — but a must have offered while asking.
-    assert!(!a
-        .poll_resync(b_id.clone(), b_recv.clone())
-        .await
-        .expect("a polls"));
-    // b may already hold a's half: nodes that share a namespace live-sync, so it can have arrived
-    // before any explicit reconciliation. Applying it immediately is correct; either way b offers.
-    let b_applied_early = b
-        .poll_resync(a_id.clone(), a_recv.clone())
-        .await
-        .expect("b polls");
-
-    replicate(&a, &stash, &b).await;
-    replicate(&b, &stash, &a).await;
-
+    mirror_keys(&a, &b).await;
+    let a_id = a.endpoint_id();
     assert!(
-        a.poll_resync(b_id, b_recv).await.expect("a polls again"),
-        "a must find the half b offered while polling"
+        publish_and_deliver(&a, &b, &stash, 1, 1000)
+            .await
+            .iter()
+            .any(|e| e.author == a_id),
+        "traffic flows before the damage"
     );
-    if !b_applied_early {
-        assert!(
-            b.poll_resync(a_id, a_recv).await.expect("b polls again"),
-            "b must find the half a offered while polling"
-        );
+
+    // Damage b's record for a, behind its back.
+    let record = b
+        .state_dir_for_tests()
+        .join("sessions")
+        .join(format!("{}.bin", hex(&a_id)));
+    std::fs::write(&record, b"not a session").expect("damage");
+    assert!(
+        b.is_desynced(hex(&a_id)).await.expect("verdict"),
+        "a damaged record is broken, not unpaired"
+    );
+
+    converge(&a, &b, &stash, 10).await;
+    assert!(
+        !b.is_desynced(hex(&a_id)).await.expect("verdict"),
+        "healthy once restarted"
+    );
+
+    // Settled: further passes restart nothing.
+    let restarts = (
+        a.resync_count(hex(&b.endpoint_id())).await.unwrap(),
+        b.resync_count(hex(&a_id)).await.unwrap(),
+    );
+    for _ in 0..3 {
+        a.recover_sessions(&[hex(&b.endpoint_id())]).await;
+        b.recover_sessions(&[hex(&a_id)]).await;
     }
+    assert_eq!(
+        (
+            a.resync_count(hex(&b.endpoint_id())).await.unwrap(),
+            b.resync_count(hex(&a_id)).await.unwrap(),
+        ),
+        restarts,
+        "a converged pair restarts nothing"
+    );
 
     for node in [a, b, stash] {
         node.shutdown().await.expect("shutdown");
     }
 }
 
+/// **A request travels through the replica.** The follower's verdict reaches the leader only as a
+/// line in its control record, and the leader's answer reaches the follower only as a header on
+/// envelopes it already receives — no dial between the two phones, no shared moment online.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_follower_request_reaches_the_leader_through_the_replica() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
+    let a = start_node().await;
+    let b = start_node().await;
+    let stash = start_node().await;
+
+    bootstrap_and_prime(&a, &b, &stash).await;
+    mirror_keys(&a, &b).await;
+    let (leader, follower) = initiator_first(&a, &b);
+    let leader_id = hex(&leader.endpoint_id());
+    let follower_id = hex(&follower.endpoint_id());
+
+    // Only the follower sees a problem: it has not heard the leader advance in a day.
+    follower
+        .set_t_lapse_ms_for_tests(1)
+        .await
+        .expect("lapse follower");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert!(follower.is_desynced(leader_id.clone()).await.unwrap());
+    follower
+        .recover_sessions(std::slice::from_ref(&leader_id))
+        .await;
+    follower
+        .set_t_lapse_ms_for_tests(iroh_location::ratchet::DEFAULT_T_LAPSE_MS)
+        .await
+        .unwrap();
+
+    // The leader, healthy by its own lights, restarts only because it was asked.
+    replicate(follower, &stash, leader).await;
+    let outcome = leader
+        .recover_sessions(std::slice::from_ref(&follower_id))
+        .await;
+    assert_eq!(outcome.restored, 1, "the leader answered the request");
+
+    converge(&a, &b, &stash, 40).await;
+
+    for node in [a, b, stash] {
+        node.shutdown().await.expect("shutdown");
+    }
+}
+
+/// **The 2026-10-03 dead end, on real nodes.** A follower whose pairing never got its first
+/// envelope sat without a sending chain; its process later died and came back with nothing in
+/// memory, and on that phone only the native runtime runs — no reader at all. Recovery must still
+/// close the loop: ask, be restarted, join natively, send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stuck_follower_with_no_reader_is_restarted_and_joins_natively() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
+    let a = start_node().await;
+    let b = start_node().await;
+    let stash = start_node().await;
+
+    // Paired, but the leader's first envelope never reaches the follower.
+    bootstrap_pair(&a, &b).await;
+    mirror_keys(&a, &b).await;
+    let (leader, follower) = initiator_first(&a, &b);
+    let (leader, follower) = (leader.clone(), follower.clone());
+    let leader_id = hex(&leader.endpoint_id());
+    let follower_id = hex(&follower.endpoint_id());
+
+    // An hour later the follower still cannot send: that is broken, and it asks.
+    follower.advance_clock_for_tests(iroh_location::sessions::STUCK_NO_SEND_MS as i64);
+    assert!(follower.is_desynced(leader_id.clone()).await.unwrap());
+    follower
+        .recover_sessions(std::slice::from_ref(&leader_id))
+        .await;
+
+    // The follower's process dies; the leader answers and publishes into the void.
+    let follower = restart(follower).await;
+    mirror_keys(&leader, &follower).await;
+    replicate(&follower, &stash, &leader).await;
+    let outcome = leader
+        .recover_sessions(std::slice::from_ref(&follower_id))
+        .await;
+    assert_eq!(outcome.restored, 1, "the leader restarted on the request");
+    leader
+        .docs_write_ratcheted("t".into(), 50, fix_at(50_000), vec![follower_id.clone()])
+        .await
+        .expect("leader publishes with the restart header");
+    replicate(&leader, &stash, &follower).await;
+
+    // No reader on the follower: only its recovery pass runs. It joins without consuming the fix.
+    let outcome = follower
+        .recover_sessions(std::slice::from_ref(&leader_id))
+        .await;
+    assert_eq!(outcome.restored, 1, "joined natively");
+    let dropped = follower
+        .docs_write_ratcheted("t".into(), 60, fix_at(60_000), vec![leader_id.clone()])
+        .await
+        .expect("follower publishes");
+    assert!(
+        dropped.is_empty(),
+        "the follower can send at once: {dropped:?}"
+    );
+    replicate(&follower, &stash, &leader).await;
+    assert!(
+        reads(&leader, &follower, 60_000).await,
+        "the leader reads it"
+    );
+    // And the fix that carried the restart was not eaten by joining.
+    assert!(
+        reads(&follower, &leader, 50_000).await,
+        "the follower still reads it later"
+    );
+
+    for node in [leader, follower, stash] {
+        node.shutdown().await.expect("shutdown");
+    }
+}
+
 /// **The 2026-09-29 Pixel 9.** A pair that went a day without exchanging anything lapses on both
 /// sides at once; each drops the other from its wrap set, so neither can deliver the fresh ratchet
-/// key that would un-lapse it. Only §4.6 recovery breaks that, and since the native drain replaced
-/// the JS publish tick, only the native driver runs it.
+/// key that would un-lapse it. The follower notices and asks; the leader restarts; the native
+/// driver alone heals it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_mutual_lapse_heals_through_the_native_recovery_driver() {
     let _network_test = NETWORK_TEST_LOCK.lock().await;
@@ -1125,116 +1176,42 @@ async fn a_mutual_lapse_heals_through_the_native_recovery_driver() {
     let stash = start_node().await;
 
     bootstrap_and_prime(&a, &b, &stash).await;
-    let a_id = hex(&a.endpoint_id());
+    mirror_keys(&a, &b).await;
     let b_id = hex(&b.endpoint_id());
-    let a_author = a.endpoint_id();
 
-    // The driver reads receiving keys from what JS mirrors; one side uses it, the other relies on
-    // the profile fallback being absent and the mirrored key being present too.
-    a.set_recipient_keys(vec![iroh_location::RecipientKey {
-        endpoint_id: b_id.clone(),
-        recv_public: hex(&b.recv_public()),
-    }])
-    .await
-    .expect("a mirrors keys");
-    b.set_recipient_keys(vec![iroh_location::RecipientKey {
-        endpoint_id: a_id.clone(),
-        recv_public: hex(&a.recv_public()),
-    }])
-    .await
-    .expect("b mirrors keys");
-
-    // A day passes with nothing exchanged.
     a.set_t_lapse_ms_for_tests(1).await.expect("lapse a");
     b.set_t_lapse_ms_for_tests(1).await.expect("lapse b");
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-
     let dropped = a
         .docs_write_ratcheted("t".into(), 1, fix_at(1000), vec![b_id.clone()])
         .await
         .expect("publish into the lapse");
     assert_eq!(dropped, vec![format!("{b_id}:lapsed")], "the lapse is real");
 
-    // Drain on each side until both have healed. Nodes that already share a namespace live-sync,
-    // so a half can land before any explicit reconciliation and either side may heal on its first
-    // pass — what matters is that each heals exactly once, within a couple of drains. A side that
-    // has healed gets the real lapse bound back at once: with the test's 1 ms bound it would
-    // otherwise lapse again immediately, which no real pair does.
+    // One pass on each side records the verdicts (the follower's request); then the real bound
+    // comes back, as it would for any pair a day later, and normal operation must heal it.
+    let a_id = hex(&a.endpoint_id());
+    a.recover_sessions(std::slice::from_ref(&b_id)).await;
+    b.recover_sessions(std::slice::from_ref(&a_id)).await;
     let default_lapse = iroh_location::ratchet::DEFAULT_T_LAPSE_MS;
-    let (mut a_restored, mut b_restored) = (0u32, 0u32);
-    for _ in 0..3 {
-        if a_restored == 0 {
-            a_restored += a
-                .recover_sessions(std::slice::from_ref(&b_id))
-                .await
-                .restored;
-            if a_restored > 0 {
-                a.set_t_lapse_ms_for_tests(default_lapse)
-                    .await
-                    .expect("heal a");
-            }
-        }
-        if b_restored == 0 {
-            b_restored += b
-                .recover_sessions(std::slice::from_ref(&a_id))
-                .await
-                .restored;
-            if b_restored > 0 {
-                b.set_t_lapse_ms_for_tests(default_lapse)
-                    .await
-                    .expect("heal b");
-            }
-        }
-        if a_restored > 0 && b_restored > 0 {
-            break;
-        }
-        // The drain's push carries each half out and the other in.
-        replicate(&a, &stash, &b).await;
-        replicate(&b, &stash, &a).await;
-    }
-    assert_eq!(a_restored, 1, "a restarts the session from b's record");
-    assert_eq!(b_restored, 1, "b restarts the session from a's record");
-    let settled_a = a.recover_sessions(std::slice::from_ref(&b_id)).await;
-    let settled_b = b.recover_sessions(std::slice::from_ref(&a_id)).await;
-    assert!(
-        !settled_a.in_progress && !settled_b.in_progress,
-        "nothing left to recover once both have healed"
-    );
+    a.set_t_lapse_ms_for_tests(default_lapse).await.unwrap();
+    b.set_t_lapse_ms_for_tests(default_lapse).await.unwrap();
 
-    let (first, second) = initiator_first(&a, &b);
-    first
-        .docs_write_ratcheted(
-            "prime".into(),
-            2,
-            fix_at(2),
-            vec![hex(&second.endpoint_id())],
-        )
-        .await
-        .expect("priming publish after recovery");
-    replicate(first, &stash, second).await;
-    second.read_latest_ratcheted().await.expect("prime read");
-
-    assert!(
-        publish_and_deliver(&a, &b, &stash, 3, 3000)
-            .await
-            .iter()
-            .any(|e| e.author == a_author && e.fix.ts == 3000),
-        "fixes must flow again after the lapse heals"
-    );
+    converge(&a, &b, &stash, 70).await;
 
     for node in [a, b, stash] {
         node.shutdown().await.expect("shutdown");
     }
 }
 
-// ── false desyncs and one-sided resyncs (2026-10-02) ─────────────────────────────────────────
+// ── false desyncs (2026-10-02) ──────────────────────────────────────────────────────────────
 
 /// **A quiet friend is not a broken one.** The durable path is one overwritten slot per author and
 /// every read opens the whole replica, so the envelope a parked friend left there is re-read on
 /// every sync. Each re-read used to count as a miss, so three syncs — on 2026-10-02, three reads in
-/// the same second of an app launch — declared a working session desynced and offered a resync.
-/// Checked again across a restart, where everything held in memory about that envelope is gone and
-/// only the ratchet state on disk can say it was already opened.
+/// the same second of an app launch — declared a working session desynced. Checked again across a
+/// restart, where everything held in memory about that envelope is gone and only the ratchet state
+/// on disk can say it was already opened.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rereading_a_quiet_friends_slot_is_not_a_desync() {
     let _network_test = NETWORK_TEST_LOCK.lock().await;
@@ -1270,93 +1247,6 @@ async fn rereading_a_quiet_friends_slot_is_not_a_desync() {
     assert!(
         !b.is_desynced(a_id).await.expect("verdict after restart"),
         "a restart forgets what was seen, but the chain on disk still knows it was opened"
-    );
-
-    for node in [a, b, stash] {
-        node.shutdown().await.expect("shutdown");
-    }
-}
-
-/// **The 2026-10-02 split.** An iPhone offered a resync, then opened one more envelope under the
-/// old session, decided it was fine and stopped polling. Its friend found the offer and restarted
-/// its own session from it — applying a record is unilateral — so the two were on different roots
-/// and every envelope after that was unopenable in both directions. The side that offered must
-/// follow its offer through for as long as anyone can still accept it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_offer_a_peer_applied_is_followed_through_after_we_recover() {
-    let _network_test = NETWORK_TEST_LOCK.lock().await;
-    let a = start_node().await;
-    let b = start_node().await;
-    let stash = start_node().await;
-
-    bootstrap_and_prime(&a, &b, &stash).await;
-    let a_id = hex(&a.endpoint_id());
-    let b_id = hex(&b.endpoint_id());
-    let a_recv = hex(&a.recv_public());
-    let b_recv = hex(&b.recv_public());
-    a.set_recipient_keys(vec![iroh_location::RecipientKey {
-        endpoint_id: b_id.clone(),
-        recv_public: b_recv.clone(),
-    }])
-    .await
-    .expect("a mirrors keys");
-
-    // a offers, and by the time b acts on it a no longer sees anything wrong.
-    a.publish_resync(vec![b_recv]).await.expect("a offers");
-    assert!(
-        !a.is_desynced(b_id.clone()).await.expect("verdict"),
-        "the shape under test: the offering side's own verdict has cleared"
-    );
-    replicate(&a, &stash, &b).await;
-    assert!(
-        b.poll_resync(a_id.clone(), a_recv).await.expect("b polls"),
-        "b restarts its session from a's offer"
-    );
-    replicate(&b, &stash, &a).await;
-
-    let followed = a.recover_sessions(std::slice::from_ref(&b_id)).await;
-    assert_eq!(
-        followed.restored, 1,
-        "a must join the root b moved to, though a is not desynced"
-    );
-    assert!(
-        !followed.in_progress,
-        "following through does not hold the drain's push open"
-    );
-    let settled = a.recover_sessions(std::slice::from_ref(&b_id)).await;
-    assert_eq!(
-        (settled.restored, settled.in_progress),
-        (0, false),
-        "an offer already followed through is not applied twice"
-    );
-
-    let (first, second) = initiator_first(&a, &b);
-    first
-        .docs_write_ratcheted(
-            "prime".into(),
-            10,
-            fix_at(10),
-            vec![hex(&second.endpoint_id())],
-        )
-        .await
-        .expect("priming publish after the resync");
-    replicate(first, &stash, second).await;
-    second.read_latest_ratcheted().await.expect("prime read");
-
-    let (a_author, b_author) = (a.endpoint_id(), b.endpoint_id());
-    assert!(
-        publish_and_deliver(&a, &b, &stash, 11, 11_000)
-            .await
-            .iter()
-            .any(|e| e.author == a_author && e.fix.ts == 11_000),
-        "a → b on one root"
-    );
-    assert!(
-        publish_and_deliver(&b, &a, &stash, 12, 12_000)
-            .await
-            .iter()
-            .any(|e| e.author == b_author && e.fix.ts == 12_000),
-        "b → a on one root"
     );
 
     for node in [a, b, stash] {

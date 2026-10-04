@@ -4,9 +4,9 @@
 > envelope v3 live in `modules/iroh-location/rust`, and every **fix** lane now uses them:
 > durable, null, and live/gossip. Sessions are bootstrapped by the SAS bump itself
 > (`pairing.rs`), so there is no manual seam and no JS-callable way to root one from
-> anything weaker; the app drives §4.6 recovery from `location-sharing.ts`. Still v2 by
-> construction, deliberately: the control lane, the resync record (it re-establishes the
-> ratchet, so it cannot depend on one), the BLE mesh path (§8.1), and the web/WASM build,
+> anything weaker; the native drain drives §4.6 recovery (`recover_sessions`). Still v2 by
+> construction, deliberately: the control lane, the restart control record (it is what
+> re-establishes a ratchet, so it cannot depend on one), the BLE mesh path (§8.1), and the web/WASM build,
 > which has no durable store to keep sequential state in. This document
 > supersedes the forward-secrecy line in [`ARCHITECTURE.md`](./ARCHITECTURE.md) §11
 > ("full ratcheting … is out of scope for this phase") and **changes two of that
@@ -46,6 +46,14 @@
 > pairs run the identical handshake and both bootstrap a session (§4.2). What the SAS gate
 > needs is an out-of-band channel for the two humans to compare their figure on — see the
 > note in §4.2 on what "out-of-band" has to mean for a link pair.
+>
+> **Revision 4 (2026-10-04), after two field failures of recovery.** §4.6's two-sided resync
+> is replaced by a leader-decided restart against published, signed prekeys, carried on every
+> envelope until answered, with the replaced sessions kept for decryption — Signal's X3DH +
+> `PreKeySignalMessage` + Sesame, adapted to a store-and-forward channel. Detection now counts
+> only distinct envelopes and adds a "stuck" verdict for a follower with no sending chain. The
+> `rsy` slot now holds the control record (prekeys + restart requests). The schedule is
+> unchanged. See "Why revision 3's resync was replaced" in §4.6.
 >
 > Claims below are marked **[verified]** where checked against the tree at the time of
 > writing, and **[MUST VERIFY]** where they are assumptions that gate the plan.
@@ -333,56 +341,125 @@ now."
 
 ### 4.6 Desync detection and recovery
 
-Any ratchet deployment's real risk is the recovery path becoming the bypass. So:
+Any ratchet deployment's real risk is the recovery path becoming the bypass. The second-order
+risk, learned in the field, is a recovery path that does not converge: revision 3's two-sided
+resync split a working pair on 2026-10-02 and left one needing an in-person re-pair on
+2026-10-03 (see "Why revision 3's resync was replaced" below). Revision 4 replaces it with the
+shape Signal uses for the same problem — X3DH's prekeys, `PreKeySignalMessage`'s
+carry-until-answered, and Sesame's archived sessions — adapted to a channel with no server and
+no simultaneous presence.
 
-**Detection.** An envelope that is signature-valid but whose wrap cannot be located or
-opened after fast-forwarding the receiving chain through its full acceptance window
-(§4.7), persisting across R consecutive envelopes, marks the session desynced. Expected
-causes: state loss on one side (reinstall without backup, storage corruption), or an
-active adversary tampering with ratchet headers — which the envelope signature confines
-to the peer's identity key or the archive replaying (already rejected by monotonicity).
+**Detection.** A session counts as broken when any of these holds; each is reported by
+`SessionManager::assess` as a distinct reason (`sc.restart` reasons in telemetry):
 
-**Storage corruption is a second, separate entry point**, because miss-counting cannot
-reach it: a state blob that will not decrypt fails every `open` at the load, so no miss is
-ever recorded and R is never crossed. A peer whose state is unreadable therefore reports
-desynced immediately. This also means "damaged" must stay distinguishable from "absent" —
-nothing on disk is an un-bootstrapped peer waiting for a bump, not a session to recover.
+- **Misses.** `R` (= 3) *distinct* signature-valid envelopes from the peer that no session we
+  hold can open. Distinct by the author's monotonic `seq`: the durable path is one overwritten
+  slot per author and every read opens the whole replica, so the same envelope is re-read
+  constantly, and a re-read is evidence of nothing. An envelope on a chain we hold at a position
+  we passed is likewise a replay (judged from the state on disk, so it survives a restart).
+- **Damaged.** The record will not decrypt or parse. Miss counting cannot reach this — every
+  `open` fails at the load — so it is a verdict on its own. "Damaged" stays distinguishable from
+  "absent": nothing on disk is an unpaired peer waiting for a bump, not a session to restart.
+- **Lapsed** (§4.5): the peer has not moved the ratchet within `T_lapse`. A mutual lapse produces
+  no envelopes to miss and sustains itself, so it needs its own entry.
+- **Stuck** (follower only): no sending chain for an hour since the session was installed. The
+  responder side of a pairing waits for the initiator's first envelope; if that never arrives or
+  never opens, nothing else ever called it broken.
 
-**Recovery is a session restart via the resync primitive — never a static fallback.**
-Each side publishes on its control key a resync record: `{new session_id, fresh ephemeral
-X25519 pub, peer id, ts}`, signed with its ed25519 identity key, transcript-bound (both
-identities and both ephemerals under the signature once known). On seeing the peer's
-record, derive `RK₀' = KDF(DH(eph_ours, eph_peer), transcript)`, delete the ephemeral
-private per the bootstrap rule, and resume at epoch 0 of the new session. This is the
-same primitive as the SAS-bump bootstrap (§4.2), run over the async channel; it works
-without liveness because each side's half rides the existing publish lanes.
+**Roles.** Each pair has a fixed **leader** — the lower endpoint id, the same side that is the
+ratchet initiator at pairing — and a **follower**. Only the leader restarts a session. The
+follower can only ask. This asymmetry is the convergence argument: two sides that may each
+restart unilaterally can restart past each other forever, and with sparse, crossing,
+last-write-wins delivery they systematically do; one side that decides and one that follows
+cannot.
 
-**Normative:** there is no code path that roots a session in static-static DH alone, and
-no automatic downgrade of any kind. An adversary who can force desync (the stash operator
-can try, by withholding or replaying) gains a DoS that recovery heals — never a weaker
-root. Resyncs are telemetered (`sc.resync` counter with reason); they should be rare, and
-a resync loop surfaces a "re-pair with this friend" prompt rather than retrying forever.
+**Prekeys.** Every device keeps a short list of X25519 **restart prekeys**, rotated every 24 h,
+and publishes the newest two in its **control record**: an HPKE (v2) envelope in the device's
+own `rsy/<author>` slot, sealed to every friend's receiving key and ed25519-signed by the
+author. A prekey's private half is persisted before the record that names it is written, and is
+deleted 7 days after it is superseded (the newest is always kept).
 
-**Replay of a resync record is bounded by two rules, one of which must be durable.**
-Freshness (a record older than `RESYNC_FRESHNESS_MS` is refused) and nonce dedup together
-cover a running process, but the nonce set is deliberately in memory — so a restart
-forgets every record it has applied, and the stash, which keeps whatever versions of the
-slot it likes, could replay one and restart a working session for free. The durable half
-is **monotonic acceptance**: a session records the timestamp of the record that created
-it, and only a strictly newer record may replace it. Every replay fails that test. A
-session with no record behind it (created by a bump) carries zero, so a genuine first
-resync always applies; a peer whose state is absent or damaged accepts any fresh record,
-since there is no working session to protect and refusing would lock out the case recovery
-exists for.
+**Restart.** The leader restarts on its own:
 
-**Our own published record is re-minted as it ages**, at half the freshness window. The
-naive idempotent version — mint once, republish forever — puts the exchange in a permanent
-deadlock: once the original `ts` passes the freshness bound, the peer refuses our record
-while we keep republishing the same stale bytes, and the normal reason to be resyncing at
-all is a peer who is offline for longer than that. Re-minting discards the ephemeral that
-every conclusion we have already drawn was based on, so it also clears which of the peer's
-records we have applied — otherwise the peer re-derives against our new ephemeral while we
-sit on a session rooted in the old one, and the two never converge.
+```text
+base      ← fresh X25519 keypair                       (private half dropped at once)
+ts        ← max(now, origin of the session it replaces + 1)
+RK₀, sid  ← restart_root(DH(base, prekey_F), leader ‖ follower ‖ base_pub ‖ prekey_pub ‖ id ‖ ts)
+state     ← bootstrap_initiator(sid, RK₀, prekey_F)     (sends at once)
+```
+
+`restart_root` is ephemeral × semi-static: no long-term key a seized device holds forever can
+recompute it, and its authentication is the envelope signature over the header on one side and
+the control-record signature over the prekey on the other — the same signed-lane argument as
+§4.1. **Normative:** a session root comes only from `derive_boot_root` (pairing, ephemeral ×
+ephemeral) or `restart_root` (restart); no code path roots a session in static-static DH, and
+there is no automatic downgrade of any kind. `no_session_root_derives_from_static_static_dh`
+checks this against the source.
+
+**Carried until answered.** The new session is in use from the leader's next publish, and every
+wrap for that follower carries a restart header `{base_pub, prekey_id, ts}` (envelope v4, §4.7)
+until the leader opens anything from the follower under it. The follower derives the session
+from **any one** of those envelopes, whenever it next reads — hours later is fine, and nothing
+about it waits in memory on either side. A process with no reader (the native background
+runtime) **primes** instead: it performs the DH ratchet a read would, gaining a sending chain,
+but does not consume the position, so the fix inside is still there for the reader that runs
+later.
+
+**When the leader restarts.** On a follower request newer than the last it answered (the
+answered timestamp is persisted in the same write as the restart, so a request is never answered
+twice); or on its own evidence — damaged, or misses — but not on top of its own unanswered
+restart until 30 minutes have passed. **A lapse alone never makes the leader restart.** §4.5
+drops a peer who has stopped contributing ratchet keys so that a device in someone else's hands
+cannot keep tracking by doing nothing; a lapsed follower that is alive will ask.
+
+**Prekey freshness is the §4.5 bound restated.** The leader restarts only against a prekey at
+most 72 h old. A follower that is running rotates daily; a prekey older than that belongs to a
+device that has stopped, possibly one in an evidence locker whose disk still holds the private
+half.
+
+**Requests.** A broken follower adds `{to, ts}` to its control record, where `to` is a tag
+derived from both endpoint ids rather than the leader's id, so friends who read the record learn
+nothing about who else it is talking to. It repeats an unanswered request after 30 minutes and
+withdraws it once the session is healthy. `ts` is the follower's clock and the leader compares it
+only with the follower's previous requests, so no agreement between clocks is needed.
+
+**Replay is bounded by one durable rule.** A follower adopts a restart only if its `ts` is newer
+than the origin of the session it is on, and the leader makes each restart strictly newer than
+the last. Every replayed header — out of the stash, or re-read from the replica — is therefore
+inert, across process restarts, with no nonce set to forget. A paired session's origin is the
+pairing time minus a 10-minute skew allowance, so a restart from before a re-pair is old.
+
+**Archived sessions.** A record keeps the two sessions most recently replaced, for decryption
+only. Whatever the peer sealed before it learned of a restart — on last-write-wins, its current
+position — still opens. Chain keys only move forward, so an archived session exposes nothing
+already received; nothing is ever sealed under one.
+
+**Failed decryption changes nothing.** State is persisted only after the payload opens, so an
+envelope that matches a session but fails to decrypt leaves the store untouched.
+
+**The driver.** `recover_sessions` runs on every native drain: prime any waiting restart, decide
+per peer (`restart::plan_leader` / `plan_follower`), and republish the control record when its
+content or recipients change (that write holds the drain's push open, because a request nobody
+can read is not a request). The policy is pure and is the same function the test harness runs.
+Restarts are telemetered on `session.recover` and counted per peer; a count that keeps climbing
+is the "re-pair with this friend" signal.
+
+**Residual risk, stated.** A restart is as forward-secret as Signal's without a one-time prekey:
+an adversary who seizes the follower before it deletes a prekey, and also holds the stash
+archive, can derive a restarted session until its first DH step — which happens on the
+follower's first reply. Daily rotation and 7-day deletion bound the window; one-time prekeys
+would close it but do not fit a one-slot-per-author store.
+
+**Why revision 3's resync was replaced.** Each side published a fresh ephemeral and, on seeing
+the other's, derived a root from *whatever ephemeral it held at that instant*. Records expired
+after an hour and were re-minted every thirty minutes; ephemerals lived in memory. Convergence
+needed both sides to hold the same pair of ephemerals at the same time, and nothing guaranteed
+it: on 2026-10-02 one side applied while the other had already stopped looking (a false miss
+count started the exchange), and on 2026-10-03 the follower's process died holding the ephemeral
+the leader then applied against, after which neither side could ever reach the other's session.
+Revision 4 removes every one of those dependencies: one side decides, the follower's half is
+published in advance and persisted, the restart rides traffic that already flows, and nothing
+expires on a timescale shorter than a phone can be asleep.
 
 ### 4.7 Wire format — envelope v3
 
@@ -410,6 +487,12 @@ Changes from v2 (`crypto.rs`):
   `mesh.rs` convention.
 - The overloaded envelope `epoch` field is left to the mesh path; the docs-path key epoch
   is the per-wrap `i` (this completes §7 step 4's split).
+- **Envelope v4** is v3 with one optional field per wrap: the §4.6 restart header
+  `{base_pub, prekey_id, ts}`, bound into that wrap's AAD as well as signed. It is written only
+  while a leader has a restart its follower has not answered, so ordinary traffic stays v3 and a
+  peer on an older build keeps reading it. A version and not an appended field because the
+  signature covers a re-encode of the decoded struct: a reader that drops an unknown field
+  re-encodes different bytes and fails the signature.
 
 ## 5. Retention surfaces
 
@@ -577,12 +660,16 @@ round-trip, no deadlock), fast-forward with skip-deletion (asserting skipped key
 unrecoverable afterwards), lapse and un-lapse, rotating-kid lookup across the acceptance
 window; a global assertion that no `MK` is ever derived twice.
 
-**7. Resync + bootstrap.** The §4.6 primitive, used for both the SAS-bump bootstrap and
-desync recovery; desync detection; `sc.resync` telemetry; the re-pair prompt on resync
-loops.
-_Test:_ forced state loss on one side converges to a working new session; a replayed old
-resync record is rejected; grep-level assertion that no session root derives from
-static-static DH alone.
+**7. Bootstrap + restart.** The bootstrap primitive for the SAS bump; the §4.6 restart
+(prekeys, leader-decided restart, carried-until-answered header, archived sessions); desync
+detection; restart telemetry; the re-pair prompt on restart loops.
+_Test:_ `tests/restart_protocol.rs` — libsignal's session suite adapted (repeated and replayed
+restart messages, failed decryption leaves stores untouched, a header lifted into another
+author's envelope is inert, simultaneous detection, archive bounds, damaged state on either
+side) plus a seeded randomized model of sends, drops, reordering, re-reads, process restarts,
+corruption and clock jumps that must always converge (libsignal's `proptest_session_resets`);
+`tests/ratchet_conditions.rs` replays both field failures on real nodes; a grep-level assertion
+that no session root derives from static-static DH alone.
 
 Gate on steps 6–7: the schedule is now the standard Double Ratchet, so first evaluate
 whether a vetted implementation binds cleanly with skipped-key storage capped at zero

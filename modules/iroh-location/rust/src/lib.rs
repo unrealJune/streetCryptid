@@ -17,7 +17,7 @@
 
 mod ble;
 mod contact;
-mod crypto;
+pub mod crypto;
 pub mod delivery;
 mod docs;
 mod durable;
@@ -36,6 +36,7 @@ mod profile;
 pub mod publish;
 pub mod ratchet;
 pub mod recipients;
+pub mod restart;
 pub mod seq_store;
 pub mod session_store;
 pub mod sessions;
@@ -1238,51 +1239,39 @@ pub struct LocationNode {
     /// bootstrap the user simply repeats, whereas one persisted to disk is a private key sitting
     /// in storage for no reason.
     pending_bootstrap: Mutex<HashMap<Vec<u8>, x25519_dalek::StaticSecret>>,
-    /// The ephemeral behind our currently published resync record (§4.6), if any.
-    ///
-    /// One, not one per peer: a single fresh ephemeral serves every peer we are restarting with,
-    /// because the transcript separates the roots. Held for as long as the published record is
-    /// acceptable (`RESYNC_FRESHNESS_MS`), NOT until everyone is restored: a peer can apply the
-    /// record after we stop needing it, and only this secret lets us join the root it moved to.
-    /// Lost on restart — a resync whose ephemeral is gone is simply re-offered.
-    pending_resync: Mutex<Option<PendingResync>>,
-}
-
-/// Our half of an in-flight resync exchange.
-struct PendingResync {
-    secret: x25519_dalek::StaticSecret,
-    public: [u8; 32],
-    nonce: [u8; 16],
-    ts: u64,
-    /// The receiving keys the record currently in our `rsy` slot is wrapped for, sorted. Lets the
-    /// native driver — which calls on every drain — skip rewriting an identical record, which would
-    /// otherwise put a fresh docs entry on the wire every few minutes for as long as a friend is
-    /// away.
-    wrapped_for: Vec<Vec<u8>>,
+    /// Digest of the control record (§4.6) this process last wrote to our `rsy` slot, so the
+    /// recovery pass — which runs on every drain — rewrites it only when its content or its
+    /// recipients change. Lost on restart, which costs one rewrite.
+    last_control: Mutex<Option<[u8; 32]>>,
+    /// Test-only offset applied to the session clock (see `advance_clock_for_tests`).
+    clock_offset_ms: std::sync::atomic::AtomicI64,
 }
 
 /// Internals kept out of the `#[uniffi::export]` block above — UniFFI exports every method in an
 /// exported impl, including private ones, and `SessionManager` is not an FFI type.
 impl LocationNode {
-    /// Drive §4.6 recovery for every one of `peers` whose session has stopped working.
+    /// Drive §4.6 session restarts with every one of `peers` — recipients and watchers alike.
     ///
-    /// The native counterpart of what `runResyncDriver` in `location-sharing.ts` used to do on
-    /// every JS publish tick, and the reason it exists is that the JS tick no longer happens: the
-    /// native drain became the only publish path and nothing took recovery over. A session that
-    /// lapses (§4.5) cannot heal itself — each side drops the other from its wrap set, so neither
-    /// ever delivers the fresh ratchet key that would un-lapse it — so without this a lapse is
-    /// permanent. On 2026-09-29 that had cost a week of fixes from a Pixel 9, and it held three of
-    /// the four sessions on the phone that noticed.
+    /// Runs on every native drain, so a phone with no JS context alive still recovers; its common
+    /// case (nothing wrong) costs one state load per friend and one local replica scan. Three
+    /// steps, the policy for each living in [`restart`] so it can be tested without any of this:
     ///
-    /// One record, wrapped for every desynced peer at once. The `rsy` slot holds a single record,
-    /// so offering it peer-by-peer would leave it wrapped for whoever came last. The poll per peer
-    /// then finds theirs and restarts the session; the exchange completes across two drains on
-    /// each side, and the push the drain makes while [`publish::RecoveryOutcome::in_progress`] is
-    /// set is what carries our half out and brings theirs in.
+    /// 1. **Follower: adopt.** A leader's restart header rides on the envelopes already in our
+    ///    replica. [`SessionManager::prime`](sessions::SessionManager::prime) joins the restarted
+    ///    session from it without consuming the fix inside — this process may be the native
+    ///    runtime, which has nobody to hand a fix to, and opening the envelope would spend the only
+    ///    key that decrypts it. On 2026-10-03 a Pixel whose app was not running sat on a broken
+    ///    session for hours because only a JS read ever looked at what arrived.
+    /// 2. **Decide.** A leader restarts on a request from the follower or on its own evidence; a
+    ///    follower asks, repeats, or withdraws ([`restart::plan_leader`],
+    ///    [`restart::plan_follower`]).
+    /// 3. **Publish our control record** — our prekeys, for our leaders to restart against, and
+    ///    our requests — when it has changed. A changed record holds the drain's push open
+    ///    ([`publish::RecoveryOutcome::in_progress`]), because a request nobody can read is not a
+    ///    request.
     ///
-    /// Past [`RESYNC_ATTEMPT_LIMIT`] a peer is left alone: recovery that keeps recovering is not
-    /// recovering, and that pair needs an in-person bump. `no_session` peers are never touched —
-    /// there is no session to restart, and only pairing roots one.
+    /// `no_session` peers are never touched: there is no session to restart, and only pairing
+    /// roots one.
     pub async fn recover_sessions(&self, peers: &[String]) -> publish::RecoveryOutcome {
         use tracing::Instrument;
         let span = tracing::info_span!(
@@ -1290,145 +1279,209 @@ impl LocationNode {
             sc.author = %telemetry::short_hex(&self.author),
             peers = peers.len(),
             desynced = tracing::field::Empty,
-            gave_up = tracing::field::Empty,
+            primed = tracing::field::Empty,
+            restarted = tracing::field::Empty,
+            requested = tracing::field::Empty,
+            withdrawn = tracing::field::Empty,
+            await_prekey = tracing::field::Empty,
             no_key = tracing::field::Empty,
-            restored = tracing::field::Empty,
-            remaining = tracing::field::Empty,
-            following = tracing::field::Empty,
+            control_written = tracing::field::Empty,
             error = tracing::field::Empty,
         );
         async move {
             let Ok(manager) = self.session_manager().await else {
                 return publish::RecoveryOutcome::default();
             };
-            let store = self.recipient_store().await.ok();
-            let now = now_ms();
-
-            let mut unique: Vec<&String> = peers.iter().collect();
-            unique.sort();
-            unique.dedup();
-
-            // The exchange we already have out, while a peer can still accept it. Every peer it is
-            // wrapped for may have applied it — and a peer that applied it has ALREADY moved to the
-            // new root, whether or not we still think anything is wrong. See `following` below.
-            let (offered_to, offer_expired) = {
-                let pending = self.pending_resync.lock().await;
-                match pending.as_ref() {
-                    Some(p) if now.saturating_sub(p.ts) < sessions::RESYNC_FRESHNESS_MS => {
-                        (p.wrapped_for.clone(), false)
-                    }
-                    Some(_) => (Vec::new(), true),
-                    None => (Vec::new(), false),
-                }
-            };
-
-            let (mut desynced, mut gave_up, mut no_key, mut following) = (0u32, 0u32, 0u32, 0u32);
-            // (peer, receiving key, whether WE see the session as broken)
-            let mut todo: Vec<(String, String, bool)> = Vec::new();
-            for peer_hex in unique {
-                let Ok(peer) = decode_endpoint(peer_hex) else {
-                    continue;
-                };
-                let is_desynced = manager.is_desynced(&peer, now);
-                if !is_desynced && offered_to.is_empty() {
-                    continue;
-                }
-                let past_limit = manager.resync_count(&peer) >= RESYNC_ATTEMPT_LIMIT;
-                let key = match store.as_ref().and_then(|s| s.key_for(peer_hex)) {
-                    Some(key) => Some(key),
-                    None => self.profile_recv_key(&peer).await,
-                };
-
-                if !is_desynced {
-                    // Following through. Applying a resync record is unilateral: the peer that finds
-                    // ours restarts its session on the spot. If our own verdict has cleared since we
-                    // offered — one envelope under the old session opened, which is all it takes --
-                    // stopping here strands that peer on a root we never join. On 2026-10-02 that
-                    // split an iPhone from a Pixel for three hours: the iPhone offered, recovered on
-                    // its own a minute later and stopped polling, and the Pixel applied the offer.
-                    // So poll every peer the live offer is wrapped for, not only the broken ones.
-                    let offered = key
-                        .as_deref()
-                        .and_then(decode_hex)
-                        .is_some_and(|raw| offered_to.contains(&raw));
-                    if offered && !past_limit {
-                        following += 1;
-                        todo.push((peer_hex.clone(), key.unwrap_or_default(), false));
-                    }
-                    continue;
-                }
-                desynced += 1;
-                if past_limit {
-                    gave_up += 1;
-                    continue;
-                }
-                match key {
-                    Some(key) => todo.push((peer_hex.clone(), key, true)),
-                    None => no_key += 1,
-                }
-            }
-
+            let now = self.now();
             let span = tracing::Span::current();
-            span.record("desynced", desynced);
-            span.record("gave_up", gave_up);
-            span.record("no_key", no_key);
-            span.record("following", following);
-            if todo.is_empty() {
-                // The common case — nobody desynced, nothing offered — costs one state load per
-                // friend and nothing else. An offer no peer can accept any more is a private key
-                // held for nothing, so it goes now rather than on the next desync.
-                if offer_expired {
-                    self.clear_resync().await;
-                }
-                return publish::RecoveryOutcome::default();
-            }
+            let mut friends: Vec<[u8; 32]> = peers
+                .iter()
+                .filter_map(|hex| decode_endpoint(hex).ok())
+                .collect();
+            friends.sort();
+            friends.dedup();
+            let live = self.live().await.ok();
 
-            // Only a broken session is a reason to (re)publish. Following peers are already in the
-            // record, and offering on their behalf would re-mint a stale offer for a session that
-            // works — the one thing that could strand a peer who applied the old one.
-            if todo.iter().any(|(_, _, broken)| *broken) {
-                if let Err(err) = self
-                    .publish_resync(todo.iter().map(|(_, key, _)| key.clone()).collect())
-                    .await
-                {
-                    span.record("error", tracing::field::display(&err));
-                    // Still in progress: the push this triggers may bring the peer's half in, and
-                    // the next drain retries ours.
-                    return publish::RecoveryOutcome {
-                        in_progress: true,
-                        restored: 0,
-                    };
+            // What the replica holds: our leaders' latest envelopes (a restart may ride on them),
+            // and the control records of the friends we lead.
+            let mut leader_envelopes = Vec::new();
+            let mut peer_controls = HashMap::new();
+            if let Some(live) = live.as_ref() {
+                let leads_us = |peer: &[u8; 32]| manager.role(peer) == sessions::Role::Follower;
+                if friends.iter().any(leads_us) {
+                    match live.trail.read_latest_sealed().await {
+                        Ok(sealed) => {
+                            leader_envelopes = sealed
+                                .iter()
+                                .filter_map(|bytes| crypto::verify_v3(bytes).ok())
+                                .filter(|verified| {
+                                    friends.contains(&verified.author) && leads_us(&verified.author)
+                                })
+                                .collect();
+                        }
+                        Err(err) => {
+                            span.record("error", tracing::field::display(&err));
+                        }
+                    }
                 }
-            }
-
-            let (mut restored, mut remaining) = (0u32, 0u32);
-            for (peer_hex, key, broken) in &todo {
-                match self.poll_resync(peer_hex.clone(), key.clone()).await {
-                    Ok(true) => restored += 1,
-                    // A following peer that has not answered is not waiting on anything: the
-                    // session works. It does not hold the drain's push open — its half, if it ever
-                    // comes, rides in on the next ordinary pull.
-                    Ok(false) => remaining += u32::from(*broken),
-                    Err(err) => {
-                        remaining += u32::from(*broken);
-                        span.record("error", tracing::field::display(&err));
+                for peer in friends.iter().filter(|peer| !leads_us(peer)) {
+                    if let Some(control) = self.read_control_record(live, peer).await {
+                        peer_controls.insert(*peer, control);
                     }
                 }
             }
-            span.record("restored", restored);
-            span.record("remaining", remaining);
 
-            // The ephemeral is deliberately NOT dropped once everyone is restored. A peer that
-            // applies our record later still lands on a root derived from it, and we can only
-            // join them while we hold it — so it lives exactly as long as the record is
-            // acceptable, and the expiry above is what drops it.
+            let report =
+                restart::run_pass(&manager, &friends, &leader_envelopes, &peer_controls, now);
+            if let Some(err) = report.errors.first() {
+                span.record("error", tracing::field::display(err));
+            }
+
+            // Our control record.
+            let (control_written, no_key) =
+                match self.publish_control(&manager, &friends, now).await {
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        span.record("error", tracing::field::display(&err));
+                        (false, 0)
+                    }
+                };
+
+            span.record("desynced", report.desynced);
+            span.record("primed", report.primed);
+            span.record("restarted", report.restarted);
+            span.record("requested", report.requested);
+            span.record("withdrawn", report.withdrawn);
+            span.record("await_prekey", report.await_prekey);
+            span.record("no_key", no_key);
+            span.record("control_written", control_written);
             publish::RecoveryOutcome {
-                in_progress: remaining > 0,
-                restored,
+                in_progress: control_written,
+                restored: report.primed + report.restarted,
             }
         }
         .instrument(span)
         .await
+    }
+
+    /// Wall-clock milliseconds as this node's session logic sees them. Production: `now_ms()`.
+    fn now(&self) -> u64 {
+        let offset = self.clock_offset_ms.load(Ordering::Relaxed);
+        now_ms().saturating_add_signed(offset)
+    }
+
+    /// Move this node's session clock (recovery and health verdicts). Tests only — it is how an
+    /// integration test reaches a state measured in hours, like a follower stuck without a
+    /// sending chain, without waiting for it.
+    #[doc(hidden)]
+    pub fn advance_clock_for_tests(&self, by_ms: i64) {
+        self.clock_offset_ms.fetch_add(by_ms, Ordering::Relaxed);
+    }
+
+    /// Where this node keeps state that cannot be re-fetched. Tests only — it is how an
+    /// integration test damages a session record the way storage failure would.
+    #[doc(hidden)]
+    pub fn state_dir_for_tests(&self) -> PathBuf {
+        self.state_dir.clone()
+    }
+
+    /// `peer`'s newest control record from our replica, if we can read one.
+    async fn read_control_record(
+        &self,
+        live: &Live,
+        peer: &[u8; 32],
+    ) -> Option<restart::ControlRecord> {
+        let payloads = live.trail.read_rsy(peer, &self.recv_secret).await.ok()?;
+        payloads
+            .iter()
+            .filter_map(|payload| restart::ControlRecord::decode(payload))
+            .max_by_key(|record| record.ts)
+    }
+
+    /// Seal our control record to every friend whose receiving key we know and write it to our
+    /// `rsy` slot, unless what we would write is what we last wrote. Returns whether it was
+    /// written, and how many friends had no key to seal to.
+    async fn publish_control(
+        &self,
+        manager: &sessions::SessionManager,
+        friends: &[[u8; 32]],
+        now: u64,
+    ) -> Result<(bool, u32), LocationError> {
+        let store = self.recipient_store().await.ok();
+        let mut keys = Vec::with_capacity(friends.len());
+        let mut no_key = 0u32;
+        for peer in friends {
+            let hex = encode_hex(peer);
+            let key = match store.as_ref().and_then(|s| s.key_for(&hex)) {
+                Some(key) => Some(key),
+                None => self.profile_recv_key(peer).await,
+            };
+            match key.as_deref().and_then(decode_hex) {
+                Some(raw) if raw.len() == 32 => keys.push(raw),
+                _ => no_key += 1,
+            }
+        }
+        Ok((self.write_control(manager, keys, now, false).await?, no_key))
+    }
+
+    /// Write our control record sealed to `keys`. `force` rewrites even an unchanged record.
+    async fn write_control(
+        &self,
+        manager: &sessions::SessionManager,
+        mut keys: Vec<Vec<u8>>,
+        now: u64,
+        force: bool,
+    ) -> Result<bool, LocationError> {
+        keys.sort();
+        keys.dedup();
+        if keys.is_empty() {
+            return Ok(false);
+        }
+        let record = restart::our_control_record(manager, now)
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+
+        // What the record says and who can read it — not when it was written.
+        let mut unstamped = record.clone();
+        unstamped.ts = 0;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&unstamped.encode().unwrap_or_default());
+        for key in &keys {
+            hasher.update(key);
+        }
+        let digest = *hasher.finalize().as_bytes();
+        let mut last = self.last_control.lock().await;
+        if !force && *last == Some(digest) {
+            return Ok(false);
+        }
+
+        let payload = record
+            .encode()
+            .ok_or_else(|| LocationError::Decode("encode control record".into()))?;
+        let envelope = crypto::seal(
+            &self.identity_seed,
+            &self.author,
+            0,
+            now,
+            0,
+            &payload,
+            &keys,
+        )?;
+        let live = self.live().await?;
+        let ns = live.trail.own_namespace();
+        live.trail
+            .write_rsy(ns, &self.author, envelope)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        *last = Some(digest);
+        tracing::info!(
+            sc.author = %telemetry::short_hex(&self.author),
+            sc.restart = "control",
+            recipients = keys.len(),
+            prekeys = record.prekeys.len(),
+            requests = record.requests.len(),
+            "published our restart control record"
+        );
+        Ok(true)
     }
 
     /// Shorten or restore the §4.5 lapse bound on this node's live sessions. Tests only — it is
@@ -1677,19 +1730,22 @@ enum GossipOpen {
     Failed,
 }
 
-/// Desync detection and the §4.6 resync primitive.
+/// Session health and §4.6 restarts, as JS sees them. Recovery itself runs in the native drain
+/// ([`LocationNode::recover_sessions`]); these exist for the per-friend health badges and for the
+/// debug publish path.
 #[uniffi::export(async_runtime = "tokio")]
 impl LocationNode {
-    /// Whether this peer's session needs §4.6 recovery: `R` consecutive missed envelopes, an
-    /// unreadable state file, or a peer lapsed past `T_lapse` (§4.5).
+    /// Whether this peer's session needs §4.6 recovery: a damaged record, `R` distinct envelopes
+    /// we cannot open, a peer lapsed past `T_lapse` (§4.5), or — following — no sending chain for
+    /// an hour.
     pub async fn is_desynced(&self, peer_endpoint_hex: String) -> Result<bool, LocationError> {
         let peer = decode_endpoint(&peer_endpoint_hex)?;
-        Ok(self.session_manager().await?.is_desynced(&peer, now_ms()))
+        Ok(self.session_manager().await?.is_desynced(&peer, self.now()))
     }
 
-    /// How many resyncs we have driven with this peer.
+    /// How many restarts have been installed with this peer in this process.
     ///
-    /// §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+    /// §4.6 wants a restart *loop* to surface a "re-pair with this friend" prompt rather than
     /// retrying forever, so this is deliberately a count rather than a boolean: the UI decides
     /// where patience runs out, and the crypto layer does not pretend to know.
     pub async fn resync_count(&self, peer_endpoint_hex: String) -> Result<u32, LocationError> {
@@ -1697,246 +1753,49 @@ impl LocationNode {
         Ok(self.session_manager().await?.resync_count(&peer))
     }
 
-    /// Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+    /// Publish our control record (§4.6) now, sealed to `recipient_recv_pubs`, whether or not it
+    /// changed. Returns our newest prekey's public half as hex.
     ///
-    /// Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
-    /// re-establishes a ratchet, so it cannot require one. That is also why it is the one place
-    /// the design has to be most careful: **recovery must never become the bypass**. The record
-    /// carries only an ephemeral public key. It cannot downgrade anything, because a root is
-    /// only ever derived when *both* ephemerals are in hand.
-    ///
-    /// Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
-    /// than minting a new one, so a peer that already saw our half does not have to see a second.
+    /// The native drain publishes it on its own; this is for a caller that wants it out now.
     pub async fn publish_resync(
         &self,
         recipient_recv_pubs: Vec<String>,
     ) -> Result<String, LocationError> {
-        let mut recipients = recipient_recv_pubs
+        let keys = recipient_recv_pubs
             .iter()
             .map(|h| decode_hex(h).ok_or_else(|| LocationError::Decode("bad recv key hex".into())))
             .collect::<Result<Vec<_>, _>>()?;
-        recipients.sort();
-        recipients.dedup();
-
-        let (public, nonce, ts, reminted, unchanged) = {
-            let mut pending = self.pending_resync.lock().await;
-            let now = now_ms();
-            // Idempotent while the record is still usable, re-minted once it is not.
-            //
-            // Without the age check this is idempotent *forever*: it would re-publish the original
-            // `ts` on every call, and once that passed `RESYNC_FRESHNESS_MS` the peer would refuse
-            // our record permanently while we kept republishing the same stale bytes. The session
-            // would sit desynced, refusing to heal, reporting no error — and the normal reason you
-            // are resyncing at all is a peer who is offline, i.e. exactly the case that takes
-            // longer than an hour.
-            //
-            // Re-minting at half the window leaves the fresh record a full half-window of validity
-            // before it too needs replacing, so there is no gap where our published record is
-            // unusable.
-            let stale = pending
-                .as_ref()
-                .is_some_and(|p| now.saturating_sub(p.ts) >= sessions::RESYNC_REMINT_MS);
-            match pending.as_mut() {
-                Some(p) if !stale => {
-                    let unchanged = p.wrapped_for == recipients;
-                    p.wrapped_for = recipients.clone();
-                    (p.public, p.nonce, p.ts, false, unchanged)
-                }
-                _ => {
-                    let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
-                    let public = x25519_dalek::PublicKey::from(&secret).to_bytes();
-                    let mut nonce = [0u8; 16];
-                    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
-                    let was_pending = pending.is_some();
-                    *pending = Some(PendingResync {
-                        secret,
-                        public,
-                        nonce,
-                        ts: now,
-                        wrapped_for: recipients.clone(),
-                    });
-                    (public, nonce, now, was_pending, false)
-                }
-            }
-        };
-
-        // Re-minting discards the ephemeral behind every conclusion we have already drawn, so
-        // those conclusions have to go with it. Concretely: we may have already applied the peer's
-        // record against the *old* ephemeral and installed a session from it. The peer will see
-        // our new record and re-apply against the new one, landing on a different root — while we,
-        // having already marked their nonce as seen, would never re-apply and would sit on the old
-        // session forever. Forgetting the applied nonces lets us re-apply their current record
-        // against the new ephemeral, so both sides converge on the same root again.
-        if reminted {
-            if let Ok(manager) = self.session_manager().await {
-                manager.forget_applied_resyncs();
-            }
-        }
-        // Same ephemeral, same recipients: the record already in our slot is byte-for-byte what
-        // we would write, bar a fresh signature. Nothing to do.
-        if unchanged {
-            return Ok(encode_hex(&public));
-        }
-
-        let record = ResyncRecord {
-            v: RESYNC_V,
-            ephemeral: public.to_vec(),
-            ts,
-            nonce: nonce.to_vec(),
-        };
-        let payload =
-            postcard::to_allocvec(&record).map_err(|_| LocationError::Decode("encode".into()))?;
-        let envelope = crypto::seal(
-            &self.identity_seed,
-            &self.author,
-            0,
-            ts,
-            0,
-            &payload,
-            &recipients,
-        )?;
-        tracing::info!(
-            sc.author = %telemetry::short_hex(&self.author),
-            sc.resync = "published",
-            recipients = recipients.len(),
-            "published a resync record"
-        );
-
-        let started = self.live().await?;
-        let ns = started.trail.own_namespace();
-        started
-            .trail
-            .write_rsy(ns, &self.author, envelope)
-            .await
+        let manager = self.session_manager().await?;
+        let now = self.now();
+        self.write_control(&manager, keys, now, true).await?;
+        let newest = manager
+            .prekeys_for_publication(now)
             .map_err(|e| LocationError::Network(e.to_string()))?;
-        Ok(encode_hex(&public))
+        Ok(newest
+            .first()
+            .map(|p| encode_hex(&p.public))
+            .unwrap_or_default())
     }
 
-    /// Look for `peer`'s resync record and, if one is there, restart the session from it.
-    ///
-    /// Publishes our own half first when we have not already, so a single call from each side
-    /// completes the exchange without either having to go first — which matters because the
-    /// side that noticed the desync and the side that caused it are usually not the same one.
-    ///
-    /// Returns whether a session was installed. `false` covers "no record yet", "stale record",
-    /// and "already applied" — all ordinary, none an error.
+    /// Run one recovery pass for this peer alone. Returns whether a session was installed —
+    /// restarted (leader) or adopted (follower).
     pub async fn poll_resync(
         &self,
         peer_endpoint_hex: String,
-        peer_recv_pub_hex: String,
+        _peer_recv_pub_hex: String,
     ) -> Result<bool, LocationError> {
-        let peer = decode_endpoint(&peer_endpoint_hex)?;
-
-        // Offer our half if we have not — BEFORE looking for theirs. This used to sit below the
-        // early return for "no record from them yet", so a side that only ever polled never
-        // published: two phones that both noticed a lapse would each wait for the other forever,
-        // and the only test of the exchange published both halves by hand. Without this the
-        // exchange needs the two sides to independently decide to start one, and only one of them
-        // can see the failure.
-        if self.pending_resync.lock().await.is_none() {
-            self.publish_resync(vec![peer_recv_pub_hex]).await?;
-        }
-
-        let payloads = {
-            let started = self.live().await?;
-            started
-                .trail
-                .read_rsy(&peer, &self.recv_secret)
-                .await
-                .map_err(|e| LocationError::Network(e.to_string()))?
-        };
-        let Some(record) = payloads
-            .iter()
-            .filter_map(|p| postcard::from_bytes::<ResyncRecord>(p).ok())
-            .find(|r| r.v == RESYNC_V && r.ephemeral.len() == 32 && r.nonce.len() == 16)
-        else {
-            return Ok(false);
-        };
-        let (our_secret, our_public) = {
-            let pending = self.pending_resync.lock().await;
-            let p = pending.as_ref().ok_or(LocationError::NotStarted)?;
-            (p.secret.clone(), p.public)
-        };
-
-        let peer_eph: [u8; 32] = record.ephemeral[..]
-            .try_into()
-            .map_err(|_| LocationError::Decode("bad ephemeral".into()))?;
-        let nonce: [u8; 16] = record.nonce[..]
-            .try_into()
-            .map_err(|_| LocationError::Decode("bad nonce".into()))?;
-
-        let shared = our_secret.diffie_hellman(&x25519_dalek::PublicKey::from(peer_eph));
-        if !shared.was_contributory() {
-            return Err(LocationError::Decode("degenerate ephemeral key".into()));
-        }
-        let transcript = boot_transcript(&self.author, &peer, &our_public, &peer_eph);
-        let (rk0, session_id) = derive_boot_root(shared.as_bytes(), &transcript);
-
-        let manager = self.session_manager().await?;
-        let initiator = ratchet::initiator_by_endpoint(&self.author, &peer);
-        let applied = manager
-            .apply_resync(
-                &peer,
-                nonce,
-                record.ts,
-                session_id,
-                rk0,
-                peer_eph,
-                if initiator { None } else { Some(our_secret) },
-                now_ms(),
-            )
-            .map_err(|e| LocationError::Network(e.to_string()))?;
-
-        if applied {
-            tracing::info!(
-                sc.author = %telemetry::short_hex(&self.author),
-                sc.peer = %telemetry::short_hex(&peer),
-                sc.resync = "applied",
-                sc.resync_count = manager.resync_count(&peer),
-                "restarted the session from a resync record"
-            );
-        }
-        Ok(applied)
+        decode_endpoint(&peer_endpoint_hex)?;
+        Ok(self
+            .recover_sessions(std::slice::from_ref(&peer_endpoint_hex))
+            .await
+            .restored
+            > 0)
     }
 
-    /// Drop our in-flight resync ephemeral once every peer has been restarted.
-    pub async fn clear_resync(&self) {
-        *self.pending_resync.lock().await = None;
-    }
+    /// Retained for binding compatibility. Nothing about a restart is held in memory any more,
+    /// so there is nothing to clear.
+    pub async fn clear_resync(&self) {}
 }
-
-/// The §4.6 resync record: one fresh ephemeral, offered to every peer we need to restart with.
-///
-/// Two deliberate departures from §4.6's field list, both of which remove a way to disagree:
-///
-/// * **no session id.** §4.6 lists one, but both sides can derive it from the transcript, and a
-///   transmitted id is an id the two sides can differ on. Derived, they cannot.
-/// * **no peer id.** The wrap set already addresses the record, and the transcript binds both
-///   identities into the root, so a record replayed at a third party derives a root its supposed
-///   author never computes. Naming the peer in the payload would add nothing except a second
-///   place for the answer to live.
-///
-/// Authentication is inherited, not added: the record rides inside a v2 envelope, which is
-/// ed25519-signed over the whole thing by the author's identity key. That is the same argument
-/// §4.1 makes for the ratchet header — one signed lane rather than a second one to get wrong.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct ResyncRecord {
-    v: u8,
-    /// Our fresh ephemeral X25519 public key. One serves every peer: each peer's root is
-    /// `KDF(DH(eph_ours, eph_theirs), transcript)`, so the transcript separates them.
-    ephemeral: Vec<u8>,
-    ts: u64,
-    /// 16 random bytes, so a record replayed out of the overwritten slot is a recognisable
-    /// no-op rather than a second session restart.
-    nonce: Vec<u8>,
-}
-
-const RESYNC_V: u8 = 1;
-
-/// How many resyncs with one peer before recovery stops and the pair needs an in-person bump.
-/// Matches `RESYNC_ATTEMPT_LIMIT` in `location-sharing.ts`, which drove this before the native
-/// drain did.
-const RESYNC_ATTEMPT_LIMIT: u32 = 3;
 
 /// How a caller wants the node's two on-disk roots resolved.
 ///
@@ -2039,7 +1898,8 @@ fn new_location_node_at(
         transport: Mutex::new(None),
         delivery: Mutex::new(None),
         pending_bootstrap: Mutex::new(HashMap::new()),
-        pending_resync: Mutex::new(None),
+        last_control: Mutex::new(None),
+        clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
         ordinal,
     });
     tracing::info!(
@@ -2179,7 +2039,7 @@ impl LocationNode {
                     .map_err(|e| LocationError::Network(e.to_string()))?;
                 let store = session_store::SessionStore::open(&self.state_dir, &self.identity_seed)
                     .map_err(|e| LocationError::Network(e.to_string()))?;
-                *slot = Some(Arc::new(sessions::SessionManager::new(store)));
+                *slot = Some(Arc::new(sessions::SessionManager::new(store, self.author)));
             }
         }
         // The publish counter, claimed in the same breath and under the same rule. It shares the
@@ -2452,8 +2312,8 @@ impl LocationNode {
         // turns every lifecycle stop/start into a permanent `AlreadyOpen`.
         //
         // The ratchet state itself is on disk and unaffected; this drops only the claim and the
-        // in-memory desync counters. `pending_resync` deliberately survives — a stop/start in the
-        // same process should not abandon an in-flight resync exchange and force a second one.
+        // in-memory miss counters. Nothing about a restart in flight lives in memory: the leader's
+        // unanswered restart header and the follower's request are both on disk (§4.6).
         //
         // The pair runtime holds a handle too (it bootstraps sessions on a completed bump), and
         // the claim is released only when the *last* `Arc` drops — so clearing our slot alone
