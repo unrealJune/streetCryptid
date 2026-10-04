@@ -40,7 +40,8 @@ function recordingTelemetry(): Telemetry {
         end: () => {},
       };
     },
-    withSpan: async (_name, _options, fn) => fn(undefined as never),
+    withSpan: async (_name: string, _options: unknown, fn: (span: never) => unknown) =>
+      fn(undefined as never),
     log: (_level: string, message: string) => {
       logs.push(message);
     },
@@ -57,13 +58,20 @@ function refusal(): Error {
   );
 }
 
-function fakeModule(overrides: Record<string, unknown> = {}) {
+interface FakeModule {
+  start: jest.Mock;
+  stopNativeBackground: jest.Mock;
+  releaseNativeBackground?: jest.Mock;
+  handOverNativeBackground?: jest.Mock;
+}
+
+function fakeModule(overrides: Partial<Record<keyof FakeModule, jest.Mock | undefined>> = {}) {
   return {
     start: jest.fn(async () => {}),
     releaseNativeBackground: jest.fn(),
     stopNativeBackground: jest.fn(),
     ...overrides,
-  };
+  } as FakeModule;
 }
 
 function deps() {
