@@ -137,26 +137,30 @@ Conventions when changing that code:
   to be: it confirms a dwell the wake windows starved (`confirmDwelledCandidate`), heartbeats and
   pulls. Its identifier must stay in `BGTaskSchedulerPermittedIdentifiers` (`app.json`).
   Android's `NativeBackgroundRuntime` pulls friends too (`pullFriendFixes`), floored at 5 min.
-- **Who owns the Rust stores: the mounted app, and the native runtime only when nothing is wired.**
-  iOS `startNode` refuses to build while `eventSink` is set — a mounted app has wired the hand-off,
-  so a rival node would only earn a refused claim (the 2026-09-16 construction storm). It was
-  briefly gated on `owner == .native` instead, which is a DECLARATION, not a fact: on a debug build
-  nothing declared `.native`, and every capture before JS wired the sink was dropped. `owner` is
-  now intent only, reported beside the observed owner in `device.health`. Android got the same
-  gate (`IrohLocationModule.appIsWired()`) on 2026-10-03; before it, the service built a node to be
-  refused every 1-5 minutes while the app was open, and could take the stores during the app's own
-  launch. The module clears the sink in `OnDestroy` so a dead module cannot hold the gate shut.
-  **`releaseNativeBackground` does NOT free the claims**: `WriterClaim` releases on the last `Arc`
-  drop, and `Subscription` and the spawned receive task each hold their own `Arc<LocationNode>` —
-  only `shutdown` nils them all and detaches the pair runtime. `handOverNativeBackground` (iOS
-  `yieldNode`, Android `yieldToApp`) races that shutdown against a native-side timeout so the
-  promise always settles and clears the claim backoff; JS bounds it again, and
-  `startNativeBounded` retries once — once, not in a loop. **Android had no handover until
-  2026-10-03**: once its service held the stores, the app's `start()` met `AlreadyOpen`, the JS
-  fallback only dropped the sink, and `init()` rejected — five times on a Pixel 10 in five days,
-  once for 13.7 h, read by its owner as pairing showing "NOTHING FOUND". Any Android release path
-  must `shutdown`, not `close` (a never-started node is the one exception), and must not be
-  `launch`ed on a scope cancelled on the next line, which is how `onDestroy` never released at all.
+- **There is ONE node per process, and only `NodeHost` builds it** (`rust/src/host.rs`). The
+  mounted app (every JS context, through the module's `createNode`/`shutdown`) and the native
+  background runtime (`acquireBackground`) take LEASES on it; the last one out shuts it down,
+  bounded, on its own task. This replaced two nodes racing for the process-wide store claim and
+  every rule that grew up around that race — an iOS owner flag, a claim backoff on both platforms,
+  a sink gate, a bounded `handOverNativeBackground` — which existed in three hand-written copies
+  with no tests on the two platform copies, and Android was missing one: on 2026-10-03 its service built a
+  node in the seconds between the app's `createNode` and `start()`, the app's start met
+  `AlreadyOpen`, and a Pixel 10 spent 13.7 h unable to pair ("NOTHING FOUND"). The contract is in
+  the module docs and every rule is a test (`src/host/tests.rs` against fakes, including every
+  five-operation sequence against a reference model; `tests/node_host.rs` against real claims).
+  Rules that matter at the call sites: the app always gets a node (adopt, or REPLACE a different
+  identity — never refused); the background runtime never builds over anyone and never mints an
+  identity; a settings change is `restartNode`, never `shutdown` + `createNode` (that would only
+  return your own lease and adopt the same node back); and platform code caches the node by
+  `generation()` and must not `destroy()` a superseded handle (another call may be inside it).
+  The own topic is a SLOT on the node (`own_subscription`): a second `subscribe` adopts the live
+  one rather than opening a second receive loop, and listeners are swappable so a departing app's
+  are detached without stopping what the background runtime publishes through. Every drain on a
+  node is serialized (`drain_lock`), because two holders can now both drive one. The sink
+  (`eventSink` / `appIsWired()`) is ROUTING, not ownership: a wired app gets the capture because it
+  runs the sampling policy and draws the own marker, and both paths end in `ingestFix` on the same
+  node. `LocationNode::shutdown` releases every store even when the router fails to close — it
+  used to return early with all of them still claimed.
 - **`IrohBackgroundBootstrap.swift` runs before React, and must return `true`.**
   `ExpoAppDelegateSubscriberManager` reduces `willFinishLaunchingWithOptions` with
   `?? false || result` and short-circuits to `true` only when NO subscriber implements it; once ours

@@ -37,9 +37,11 @@ import UIKit
 ///
 /// ## Relationship to the JS pipeline
 ///
-/// They cannot both run: the Rust stores take a process-wide directory claim, so whichever starts
-/// first owns the counter and the queue and the other stands down. That needs no agreement between
-/// them — see `durable.rs`, and `native-runtime-owner.ts` for what the coordinated version cost.
+/// They share ONE node. `NodeHost` (Rust, `host.rs`) builds it, the mounted app and this runtime
+/// each hold a lease on it, and it is shut down when the last lease goes. This runtime used to
+/// build a node of its own and race the app for the process-wide store claim; every ownership rule
+/// that grew up around that race — an owner flag, a claim backoff, a bounded handover — is gone,
+/// because there is nothing left to race for.
 final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// The one runtime. **It must first be touched on the main thread**, and
   /// `IrohBackgroundAppDelegateSubscriber` does exactly that on every launch, before React exists.
@@ -79,24 +81,6 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// a significant-location-change delivery arrives through `didUpdateLocations` looking exactly
   /// like any other, so claiming to distinguish it would be a field that lies. What separates an SLC
   /// relaunch from a running app is `relaunch`, which is what a cold start reports.
-  /// Who owns the Rust stores right now.
-  ///
-  /// Until this existed, "who holds the process-wide writer claim" was an emergent property of
-  /// whoever called `start_stored()` first, and it was discovered only as a thrown exception. That
-  /// is the same shape of problem `native-runtime-owner.ts` records on the JS side, and it wants
-  /// the same answer: one explicit, single-valued, observable state.
-  ///
-  /// It becomes load-bearing the moment this runtime can start itself on a background launch. Then
-  /// `.native` is the ordinary state of a phone in a pocket, and the app opening has to take the
-  /// stores back — see `yieldNode`. Without the guard it adds to `ensureStarted`, arming the
-  /// runtime at launch would invert the claim race onto the most common path in the app.
-  enum NodeOwner: String {
-    /// The mounted JS app holds the claim. The default, and what a foreground launch means.
-    case app
-    /// This runtime holds it, or may take it. Set only on a launch that never starts React.
-    case native
-  }
-
   enum WakeReason: String {
     /// A delivery on the precise stream, i.e. the phone is going somewhere.
     case movement
@@ -162,28 +146,19 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
 
   private let manager = CLLocationManager()
   private let queue = DispatchQueue(label: "com.unrealjune.irohlocation.background-runtime")
-  private var node: LocationNode?
-  private var subscription: Subscription?
   private var running = false
 
   private var state: MotionState = .moving
-  /// Defaults to `.app`, so nothing changes until something deliberately hands ownership over.
-  private(set) var owner: NodeOwner = .app
   private var lastWakeReason: WakeReason = .relaunch
   private var lastWakeAt: Date?
 
-  /// Where a captured fix goes when this runtime cannot own the node.
+  /// Where a captured fix goes while the app is mounted.
   ///
-  /// The writer claim in `durable.rs` is **process-wide**, and on iOS the mounted app and this
-  /// runtime are the same process using the same `nodeStorageRoots()`. So whenever the app is open
-  /// it has already claimed the stores and `ensureStarted()` returns nil here — always, not
-  /// occasionally. That was survivable while a JS `watchPositionAsync` covered the mounted case;
-  /// once capture moved into Rust and that watcher was deleted, it meant a foregrounded app
-  /// captured fixes and dropped every one of them on the floor. A fresh install could pair, sit
-  /// there with the map open, and never publish anything at all.
-  ///
-  /// Handing the fix to JS is not a fallback path, it is the mounted path. The mounted runtime
-  /// owns the node, so it is the only thing that *can* publish; this side is the sensor.
+  /// Routing, not ownership: the node is shared, and both paths end in the same `ingestFix` on it.
+  /// A mounted app takes the capture because it runs the sampling policy and draws the user's own
+  /// marker from what the gate accepted. Before the node was shared this was the ONLY path that
+  /// could publish while the app was open — a fresh install could pair, sit there with the map
+  /// open, and publish nothing, because nothing handed the captures over.
   weak var eventSink: IrohLocationModule?
 
   /// The coordinate the stop fence is centred on. Persisted, because a cold launch has to be able
@@ -245,11 +220,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     restorePersistedState()
   }
 
-  /// Whether this runtime is actually holding the Rust node right now.
-  ///
-  /// The observed counterpart to `owner`, which is only ever an intent. Everything that gates on
-  /// "does native own the stores" reads this.
-  var holdsNode: Bool { subscription != nil }
+  /// Whether this runtime holds a lease on the process's node right now.
+  var holdsNode: Bool { nodeHost().snapshot().background }
 
   /// Whether this runtime is the one currently receiving locations.
   ///
@@ -276,11 +248,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       "delegate_on_main": delegateOnMain,
       "precise": manager.accuracyAuthorization == .fullAccuracy,
       "anchor_armed": stopAnchor != nil,
-      // Which half of the process is actually publishing — OBSERVED, not declared. `owner` records
-      // what a launch intended; holding a subscription is what makes it true, and the two came
-      // apart badly enough once to silence a moving phone for an hour. Report the fact.
-      "node_owner": (subscription != nil ? NodeOwner.native : .app).rawValue,
-      "node_owner_intent": owner.rawValue,
+      // Who holds the process's node, from the host itself — `app`, `native`, `shared`, or
+      // `none`. Observed, never declared: a declared owner came apart from the real one badly
+      // enough once to silence a moving phone for an hour.
+      "node_owner": Self.nodeOwnerLabel(nodeHost().snapshot()),
       "js_sink_wired": eventSink != nil,
       "fence_registered": manager.monitoredRegions.contains {
         $0.identifier == Self.stopAnchorRegionId
@@ -493,107 +464,14 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     }
   }
 
-  /// Give up the node this runtime holds, and change nothing else.
-  ///
-  /// The counterpart to `stop()`, and the distinction is the same one `teardownBackground` draws on
-  /// the JS side and then did not honour here: "the user switched sharing off" tears the ladder
-  /// down, "this process is going away" must leave every rung of it standing. `stop()` unmonitors
-  /// SLC, clears the stop fence and un-persists the anchor — on iOS those are the only three things
-  /// that can bring a terminated app back, and a teardown that removes them leaves a phone that
-  /// cannot wake until its owner opens the app.
-  ///
-  /// Deliberately does NOT touch `running`, the location stream, the fence, or the anchor. All it
-  /// does is drop the node handle, because the JS session that is going away is about to close the
-  /// stores it was built on; `ensureStarted` rebuilds against the freed stores on the next delivery,
-  /// which is what lets the native path take over publishing exactly when JS stops being able to.
-  func release() {
-    guard running else { return }
-    NSLog("[iroh-location] releasing the node; ladder stays armed")
-    // Ownership moves WITH the release, and this is the whole point of the call: the JS runtime is
-    // going away and is about to close the stores it built on, so from here this runtime is the
-    // only thing that can publish. `ensureStarted` refuses unless it owns the node, so without this
-    // the promise in the doc comment above — "rebuilds against the freed stores on the next
-    // delivery" — could never be kept, and a phone whose app was torn down would publish nothing
-    // until someone opened it again.
-    owner = .native
-    queue.async { self.teardown() }
-  }
-
-  /// Take ownership of the stores, so this runtime may build its own node.
-  ///
-  /// Called only from a launch that is NOT starting React. Everything else leaves ownership with
-  /// the app, which is the default and the common case.
-  func adoptNodeOwnership() {
-    owner = .native
-    clearClaimBackoff()
-  }
-
-  /// Hand ownership back without tearing anything down — what a mounted app asserts on start.
-  ///
-  /// Distinct from `yieldNode`, which also shuts the node down and waits for the claims. This one
-  /// is for the ordinary foreground case where this runtime never built a node at all, so there is
-  /// nothing to release and nothing to wait for.
-  func yieldOwnershipToApp() {
-    owner = .app
-  }
-
-  /// Give the stores back to the mounted app, and wait — bounded — until they are actually free.
-  ///
-  /// ## Why `release()` is not enough
-  ///
-  /// `release()` drops two Swift references and returns. It does not free the Rust writer claims:
-  /// `WriterClaim` releases on the last `Arc` drop, and `Subscription` holds its own
-  /// `Arc<LocationNode>`, as does the spawned receive task. Only `LocationNode::shutdown`
-  /// deterministically nils sessions/seq/outbox/recipients/gate/transport AND detaches the pair
-  /// runtime, which holds an `Arc<SessionManager>` of its own.
-  ///
-  /// That was survivable while this runtime essentially never held the claim. Once it can start
-  /// itself on a background launch, `.native` is the ordinary state of a phone in a pocket — and a
-  /// user opening the app would meet `AlreadyOpen`, which fails `init()` before
-  /// `setServiceReady(true)`: the 2026-09-18 dead-app shape, arriving from the other end of the
-  /// lifecycle.
-  ///
-  /// ## Why the bound is here and not only in JS
-  ///
-  /// AGENTS.md's rule is about a promise that never *settles*, as distinct from one that rejects.
-  /// A race decided in Swift guarantees this settles whatever Rust does, so the JS side can bound
-  /// it again on the outside without either bound being the only one. Ownership moves either way:
-  /// a shutdown we could not confirm still hands the app its turn, because leaving it `.native`
-  /// would mean nothing could ever claim the stores again.
-  ///
-  /// - Returns: whether the shutdown actually completed inside the timeout.
-  func yieldNode(timeoutMs: UInt64) async -> Bool {
-    eventSink = nil
-    let node = self.node
-    dropNodeHandles()
-    owner = .app
-    clearClaimBackoff()
-    guard let node else { return true }
-
-    let completed = await withTaskGroup(of: Bool.self) { group -> Bool in
-      group.addTask {
-        do {
-          try await node.shutdown()
-          return true
-        } catch {
-          // A shutdown that FAILED still finished — the claims are released either way. Only one
-          // that never returns is a problem, and that is what the timeout is for.
-          NSLog("[iroh-location] handover shutdown failed: \(error.localizedDescription)")
-          return true
-        }
-      }
-      group.addTask {
-        try? await Task.sleep(nanoseconds: timeoutMs * 1_000_000)
-        return false
-      }
-      let first = await group.next() ?? false
-      group.cancelAll()
-      return first
+  /// The `node_owner` health label for a host snapshot.
+  static func nodeOwnerLabel(_ snapshot: HostSnapshot) -> String {
+    switch (snapshot.appLeases > 0, snapshot.background) {
+    case (true, true): return "shared"
+    case (true, false): return "app"
+    case (false, true): return "native"
+    case (false, false): return "none"
     }
-    if !completed {
-      NSLog("[iroh-location] handover timed out after \(timeoutMs)ms; app may still be refused")
-    }
-    return completed
   }
 
   func stop() {
@@ -610,8 +488,15 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     stopCandidate = nil
     candidateFence = nil
     persistState()
-    queue.async { self.teardown() }
+    // Sharing is off: return the background lease. If the app still holds the node it keeps
+    // running; if not, the host shuts it down, bounded, and the stores are free.
+    Task {
+      _ = await nodeHost().release(holder: .background, timeoutMs: Self.releaseBudgetMs)
+    }
   }
+
+  /// Bounds the release of the background lease; matches the app's own teardown budget.
+  private static let releaseBudgetMs: UInt64 = 5_000
 
   /// Re-program the OS from the sampling policy's decision.
   ///
@@ -1238,7 +1123,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     guard now - last >= Self.syncFloorMs else { return }
     UserDefaults.standard.set(now, forKey: Self.lastSyncKey)
 
-    guard let node else { return }
+    guard let node = nodeHost().current() else { return }
     do {
       let config = try await node.deliveryConfig()
       guard !config.peerTickets.isEmpty else { return }
@@ -1265,156 +1150,38 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         + "pending=\(outcome.pending) suspended=\(outcome.suspended)")
   }
 
-  /// Build and start a node from Keychain-held state, unless one is already running.
+  /// The own-topic subscription on the process's node, taking the background lease if needed —
+  /// or `nil` when a mounted app should get the capture instead.
   ///
-  /// `nil` means this process should not have a background node — the app owns the stores, or the
-  /// device has no identity yet. Both are ordinary.
+  /// `nil` has three causes and only the first is routine: a mounted app is wired (`eventSink`)
+  /// and runs the pipeline's front half itself; the device has no identity yet (a fresh install
+  /// whose app has never run, where minting one would orphan the identity the app makes later);
+  /// or the node could not be started. The last two are retried by the next delivery.
   ///
-  /// ## The refusal is the steady state, so it has to be remembered
-  ///
-  /// While the app is mounted, `startStored()` throws on **every** call — the store claim is
-  /// process-wide and JS holds it (see `eventSink`). That is by design. What was not by design is
-  /// that the failure path memoised nothing: `ingest` and `heartbeat` call this on every delivery,
-  /// so each one built a fresh `LocationNode` — a keygen, a `derive_recv_public` KDF, fifteen
-  /// mutexes and a `telemetry::init_tracing` — purely to have the claim refused again, and
-  /// `node.construct` counts every one of them in a process-wide ordinal it then WARNs about.
-  ///
-  /// On 2026-09-16 that reached **187 constructions in one minute** on an iPhone 16 Pro Max, which
-  /// MetricKit reported as a CPU exception (48 s of CPU in a 55 s window) and which locked the UI
-  /// hard enough that the app never flushed another span. A second phone ran the same loop at
-  /// 20–29/min for hours; iOS answered by taking its background execution away, and its dot stopped
-  /// moving — the failure looked exactly like a parked phone, which is the one thing the whole
-  /// `fix_state` design exists to tell apart.
-  ///
-  /// So a refusal now suppresses the next few attempts, backing off to `claimRetryCeiling`
-  /// below. The one property that must survive is the handover: `release()`
-  /// promises the native path takes over "on the next delivery" once JS closes the stores, so it
-  /// clears the suppression outright rather than waiting it out. The ceiling is bounded rather than
-  /// a latch for the case `release()` never comes at all — a JS teardown that throws before it, say
-  /// — because a latch there would be a phone that never publishes again and never says why.
-  ///
-  /// ## One start at a time
-  ///
-  /// Every delivery runs `ingest` in its own unstructured `Task`, and a relaunch delivers a burst:
-  /// the cache seed plus the first few stream positions, within milliseconds. Each one used to find
-  /// no subscription and build its own node. On 2026-09-29 a background launch built three in one
-  /// second; the first took the stores, the other two were refused and armed the claim backoff,
-  /// and any capture that landed inside that backoff went to `handOff` with no sink — the likeliest
-  /// source of that wake's `dropped_captures = 4`. Concurrent callers now wait on the one start in
-  /// flight and share its answer.
+  /// There is no backoff, no owner flag and no in-flight dedupe any more. Each existed because
+  /// this runtime used to BUILD a node, and a build could be refused by the app's claim (187
+  /// constructions in a minute on 2026-09-16) or race a sibling delivery (three in a second on
+  /// 2026-09-29). Now `NodeHost` builds at most one node per process and hands every caller the
+  /// same one; concurrent deliveries simply queue on its transition lock.
   private func ensureStarted() async -> Subscription? {
-    startLock.lock()
-    let pending: Task<Subscription?, Never>
-    if let startInFlight {
-      pending = startInFlight
-    } else {
-      pending = Task { await self.startNode() }
-      startInFlight = pending
-    }
-    startLock.unlock()
-
-    let result = await pending.value
-    startLock.lock()
-    if startInFlight == pending { startInFlight = nil }
-    startLock.unlock()
-    return result
-  }
-
-  private let startLock = NSLock()
-  private var startInFlight: Task<Subscription?, Never>?
-
-  private func startNode() async -> Subscription? {
-    if let subscription { return subscription }
-    // "Is anyone ELSE going to publish this?" — and the only honest answer is whether a sink is
-    // wired. A mounted JS runtime sets `eventSink` and publishes what we hand it, so building a
-    // rival node would only earn a refused claim; nobody wired means nobody else will send this
-    // fix, so we must take the node ourselves.
-    //
-    // This gate was `owner == .native` for one day and that was a serious mistake. `owner` says
-    // what a launch DECLARED, not what is true: on a debug build `decideReactNativeDeferral`
-    // always returns false, so nothing ever declared `.native`, and every process in which JS had
-    // not yet reached `startNativeBackground` refused here, fell through to `handOff`, and dropped
-    // the fix into a nil sink. Silently, forever, on a phone that was moving. It reproduced within
-    // an hour on an iPhone 16 Pro.
-    //
-    // The cost this gate exists to avoid — 187 node constructions in a minute on 2026-09-16 — is
-    // still avoided, and better: a mounted app has a sink, so it returns here without building
-    // anything. The claim backoff below covers the genuine race, where JS holds the stores but has
-    // not wired the sink yet.
     if eventSink != nil { return nil }
-    if let until = claimRetryAfter, Date() < until { return nil }
-    guard KeychainDeviceSecrets.shared.identitySecret() != nil else {
-      // A fresh install whose app has never run. Minting an identity here would create one no
-      // friend has paired with and orphan the one the app makes later.
-      return nil
-    }
     do {
       let roots = nodeStorageRoots()
-      let built = try LocationNode.fromDeviceSecrets(
-        secrets: KeychainDeviceSecrets.shared,
-        dataRoot: roots.data.path,
-        stateRoot: roots.state.path)
-      try await built.startStored()
-      let sub = try await built.subscribe(
-        topic: deriveTopic(authorEndpointId: built.endpointId()),
-        bootstrap: [],
-        listener: SilentFixListener())
-      node = built
-      subscription = sub
-      if claimRefusals > 0 {
-        NSLog("[iroh-location] background node started after \(claimRefusals) refused claim(s)")
+      guard
+        let node = try await nodeHost().acquireBackground(
+          secrets: KeychainDeviceSecrets.shared,
+          dataRoot: roots.data.path,
+          stateRoot: roots.state.path)
+      else {
+        return nil
       }
-      clearClaimBackoff()
-      return sub
+      // `nil` listener: never silence a mounted app's own-topic listener, and stay silent when
+      // there is none. Inbound envelopes land in the replica either way.
+      return try await node.ownSubscription(bootstrap: [], listener: nil)
     } catch {
-      // The store claim refusing is the common case and means the app is mounted and already
-      // publishing — expected, not a fault. Log the first one of a run and then fall silent: at one
-      // line per delivery this was itself a meaningful share of the load it is reporting.
-      if claimRefusals == 0 {
-        NSLog("[iroh-location] background node not started: \(error.localizedDescription)")
-      }
-      dropNodeHandles()
-      backOffFromRefusedClaim()
+      NSLog("[iroh-location] background node unavailable: \(error.localizedDescription)")
       return nil
     }
-  }
-
-  /// How long to wait after the first refused claim before trying to build a node again.
-  private static let claimRetryFloor: TimeInterval = 5
-  /// The longest a refusal may suppress a rebuild. See `ensureStarted` for why this is not a latch.
-  private static let claimRetryCeiling: TimeInterval = 60
-
-  /// Consecutive refused store claims. Reset by a success or by `release()`.
-  private var claimRefusals = 0
-  /// When `ensureStarted` may next attempt a build. `nil` means "now".
-  private var claimRetryAfter: Date?
-
-  private func backOffFromRefusedClaim() {
-    claimRefusals += 1
-    let delay = min(
-      Self.claimRetryCeiling,
-      Self.claimRetryFloor * pow(2, Double(claimRefusals - 1)))
-    claimRetryAfter = Date().addingTimeInterval(delay)
-  }
-
-  private func clearClaimBackoff() {
-    claimRefusals = 0
-    claimRetryAfter = nil
-  }
-
-  /// Drop the node handles WITHOUT touching the backoff.
-  ///
-  /// Split from `teardown` deliberately: the refusal path must not clear the very suppression it is
-  /// setting, and `release()` must clear it. Collapsing these two back together restores the loop.
-  private func dropNodeHandles() {
-    subscription = nil
-    node = nil
-  }
-
-  private func teardown() {
-    dropNodeHandles()
-    // JS is handing the stores back; the next delivery must be able to claim them immediately.
-    clearClaimBackoff()
   }
 
   // MARK: - Conversions

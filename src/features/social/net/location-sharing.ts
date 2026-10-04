@@ -1704,9 +1704,18 @@ export class LocationSharingService {
     this.inviteRedeemed = false;
     this.pairingFailure = null;
 
-    await mod.shutdown();
-    this.keys = await mod.createNode(keys.identitySecret, keys.recvSecret);
-    await this.startNativeBounded(mod);
+    if (typeof mod.restartNode === 'function') {
+      // A node host: the node is shared with the native background runtime, so `shutdown` +
+      // `createNode` would only return OUR lease and adopt the same node straight back (the
+      // runtime's lease keeps it up) — the new settings would never apply. The host rebuilds it in
+      // place, keeps every lease, and starts it before the runtime can with the stored, old ones.
+      span.setAttribute('restart', 'host');
+      await mod.restartNode(this.transportPreferences);
+    } else {
+      await mod.shutdown();
+      this.keys = await mod.createNode(keys.identitySecret, keys.recvSecret);
+      await this.startNativeBounded(mod);
+    }
     this.ticketStr = await mod.ticket();
     this.docTicketStr = await this.safeDocTicket();
     this.profileEpoch = await this.safePublishProfile();

@@ -1502,6 +1502,15 @@ pub struct LocationNode {
     /// receive loops on one topic: every inbound envelope opened twice against the ratchet and
     /// delivered twice. So the own topic is a slot, not a call — see [`Self::own_subscription`].
     own_subscription: Mutex<Option<Arc<Subscription>>>,
+    /// Serializes every drain on this node — `ingest_fix`, `heartbeat_fix`, `publish_introduction`.
+    ///
+    /// A drain reads the outbox, takes sequence numbers, seals and commits; two interleaved would
+    /// seal the same queued slot twice. That could not happen while each process half had a node of
+    /// its own (the claim refused the second), and it can now: the mounted app and the background
+    /// runtime share one node through [`host`], and a headless JS session can drive it too. Held
+    /// across the whole drain on purpose — the drains are short, and a second one finding the work
+    /// already done is the correct outcome.
+    drain_lock: Mutex<()>,
     /// Bilateral pairing core (`streetcryptid/pair/1`). Created at construction so its ALPN
     /// handler can be registered on the router in `start`; its live handles are attached there.
     pair: Arc<PairCore>,
@@ -2277,6 +2286,7 @@ fn new_location_node_at(
         starting: Mutex::new(()),
         listener: Mutex::new(None),
         own_subscription: Mutex::new(None),
+        drain_lock: Mutex::new(()),
         pair: PairCore::new(identity_seed, author, recv_public),
         profile_events: ProfileEventQueue::default(),
         sessions: Mutex::new(None),
@@ -5315,6 +5325,7 @@ impl Subscription {
         subscription_id: String,
         now_ms: u64,
     ) -> Result<publish::IngestOutcome, LocationError> {
+        let _drain = self.node.drain_lock.lock().await;
         let sink = SubscriptionSink {
             subscription: self,
             subscription_id,
@@ -5350,6 +5361,7 @@ impl Subscription {
         interval_ms: u64,
         now_ms: u64,
     ) -> Result<publish::IngestOutcome, LocationError> {
+        let _drain = self.node.drain_lock.lock().await;
         let sink = SubscriptionSink {
             subscription: self,
             subscription_id,
@@ -5391,6 +5403,7 @@ impl Subscription {
         interval_ms: u64,
         now_ms: u64,
     ) -> Result<publish::IngestOutcome, LocationError> {
+        let _drain = self.node.drain_lock.lock().await;
         let sink = SubscriptionSink {
             subscription: self,
             subscription_id,

@@ -563,3 +563,77 @@ async fn the_app_leaving_silences_its_listener_but_not_the_subscription() {
     let still = node.clone().own_subscription(vec![], None).await.unwrap();
     assert!(Arc::ptr_eq(&own, &still), "the background runtime's subscription is untouched");
 }
+
+// ── Two holders driving one node ─────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drains_from_both_holders_on_one_node_serialize_and_all_finish() {
+    // Before the host, the second of two holders could not even open the stores. Now both can
+    // drive the same node at once — the app ingesting a handed-off capture while the background
+    // runtime heartbeats — and every drain must finish rather than interleave or deadlock.
+    use iroh_location::gate::BatteryState;
+
+    let roots = roots("drains");
+    let keystore = previous_launch(&roots).await;
+    let host = NodeHost::isolated();
+    let node = host
+        .acquire_app(
+            keystore.identity.clone(),
+            keystore.recv.clone(),
+            roots.data.clone(),
+            roots.state.clone(),
+        )
+        .await
+        .unwrap();
+    start(&node, offline()).await;
+    let background = host
+        .acquire_background(keystore.clone(), roots.data.clone(), roots.state.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let app_sub = node.clone().own_subscription(vec![], None).await.unwrap();
+    let background_sub = background.clone().own_subscription(vec![], None).await.unwrap();
+    assert!(Arc::ptr_eq(&app_sub, &background_sub));
+
+    let battery = BatteryState {
+        level: 1.0,
+        charging: false,
+        low_power: false,
+    };
+    let base = 1_780_000_000_000u64;
+    let mut drains = Vec::new();
+    for i in 0..6u64 {
+        let ingest = app_sub.clone();
+        drains.push(tokio::spawn(async move {
+            let ts = base + i * 60_000;
+            let fix = LocationFix {
+                lat: 47.6 + i as f64 * 0.001,
+                lon: -122.3,
+                accuracy_m: 5.0,
+                heading_deg: 0.0,
+                ts,
+                state: None,
+                published_delta_s: None,
+            };
+            ingest
+                .ingest_fix("app".into(), fix, battery, 60_000, ts)
+                .await
+                .map(|_| ())
+        }));
+        let heartbeat = background_sub.clone();
+        drains.push(tokio::spawn(async move {
+            let ts = base + i * 60_000 + 30_000;
+            heartbeat
+                .heartbeat_fix("background".into(), battery, 60_000, ts)
+                .await
+                .map(|_| ())
+        }));
+    }
+    for drain in drains {
+        tokio::time::timeout(Duration::from_secs(60), drain)
+            .await
+            .expect("a drain must finish, not wait forever on another")
+            .unwrap()
+            .expect("drain");
+    }
+}

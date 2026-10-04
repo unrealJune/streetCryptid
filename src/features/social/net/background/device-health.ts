@@ -108,6 +108,11 @@ type LocationModule = typeof import('expo-location');
 type TaskManagerModule = typeof import('expo-task-manager');
 type BackgroundTaskModule = typeof import('expo-background-task');
 
+/** `appLeases` → `app_leases`: native exports speak camelCase, attributes speak snake_case. */
+export function snakeCase(key: string): string {
+  return key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+}
+
 // Static string literals, individually guarded — the `snapshot.ts` / `resource.ts` pattern. This
 // runs inside headless background tasks, where a missing native module must cost an attribute,
 // never a throw.
@@ -223,6 +228,24 @@ async function taskAttributes(): Promise<Attributes> {
   } catch {
     // A build whose binary predates the export, or a runtime that has never started. Omitted
     // rather than guessed — see the note on `outbox.pending` about the two different answers.
+  }
+
+  // Who holds the process's node, from the Rust host that builds it. `node.host.app_leases` and
+  // `node.host.background` say which halves hold a lease right now; `builds` climbing faster than
+  // `shutdowns` + `restarts` + `replacements` would mean a node left alive, and any
+  // `shutdown_timeouts` means a shutdown outlived its budget, which is the one way two nodes can
+  // briefly coexist. Absent on a binary from before the host, like the blocks around it.
+  try {
+    const host = iroh?.nodeHostSnapshot?.();
+    if (host) {
+      for (const [key, value] of Object.entries(host)) {
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+          attrs[`node.host.${snakeCase(key)}`] = value;
+        }
+      }
+    }
+  } catch {
+    // Same bargain as the block above.
   }
 
   // What the background wakes since the last record actually COST.

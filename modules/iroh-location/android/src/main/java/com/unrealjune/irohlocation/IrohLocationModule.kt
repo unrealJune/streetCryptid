@@ -12,7 +12,6 @@ import expo.modules.interfaces.permissions.PermissionsStatus
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import java.io.File
 import java.lang.ref.WeakReference
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
@@ -35,6 +34,7 @@ import uniffi.iroh_location.RatchetEvent
 import uniffi.iroh_location.RecipientKey
 import uniffi.iroh_location.LocationFix
 import uniffi.iroh_location.LocationNode
+import uniffi.iroh_location.NodeHolder
 import uniffi.iroh_location.PairEvent
 import uniffi.iroh_location.PairEventKind
 import uniffi.iroh_location.PairInvite
@@ -301,27 +301,41 @@ private fun ingestOutcomeToMap(o: IngestOutcome): Map<String, Any?> =
   )
 
 class IrohLocationModule : Module() {
-  private var node: LocationNode? = null
+  /**
+   * App leases THIS module instance holds on the process's node: one per `createNode` not yet
+   * matched by a `shutdown`.
+   *
+   * The node is no longer this module's. `NodeHost` (Rust, `host.rs`) builds it, hands the SAME
+   * one to every JS context and to `NativeBackgroundRuntime`, and shuts it down when the last lease
+   * is returned. That replaced a per-instance node with a refcount (`nodeRefs`), which made two JS
+   * contexts share a node but left the foreground service building a rival one — the gap the
+   * 2026-10-03 `AlreadyOpen` came through.
+   */
+  private var leases: Int = 0
+  private var cachedNode: LocationNode? = null
+  private var cachedGeneration: ULong = ULong.MAX_VALUE
+  private val nodeLock = Any()
 
   /**
-   * How many callers currently hold the node.
+   * The process's node while this module holds a lease, else null.
    *
-   * The node is process-wide (one `LocationNode` per process) but its callers are not: a mounted
-   * app and a headless task session can both want it, and expo-task-manager restores its persisted
-   * tasks at module scope, *before* React mounts, so the overlap is routine rather than exotic.
-   * `createNode` used to `clearRuntime()` unconditionally, which meant the second caller destroyed
-   * the first one's node — and silently, because JS kept a non-null handle: `readTrail` resolved
-   * `[]`, `safeDocTicket` returned null, and every button that reached native threw. The app
-   * rendered, the map panned, and nothing worked until relaunch.
-   *
-   * JS bounded that race with a 5s wait before creating the node. Measured over 7 days that wait
-   * timed out on **11 of 11** launches that hit it — it never once resolved in time — so the
-   * mitigation was reliably paying 5s of splash and then clobbering anyway.
-   *
-   * Refcounting removes the race instead of timing it: a second `createNode` for the same identity
-   * adopts the live node, and `shutdown` only tears down when the last holder releases.
+   * Cached by `NodeHost.generation()`, which moves exactly when the host's answer does (a restart,
+   * a replacement, the last release). A superseded handle is dropped, never `destroy()`ed: another
+   * coroutine may be inside a call on it, and a destroyed UniFFI handle throws rather than waits.
    */
-  private var nodeRefs: Int = 0
+  private val node: LocationNode?
+    get() {
+      synchronized(nodeLock) {
+        if (leases <= 0) return null
+        val generation = NodeStorage.host.generation()
+        if (generation != cachedGeneration) {
+          cachedNode = NodeStorage.host.current()
+          cachedGeneration = generation
+        }
+        return cachedNode
+      }
+    }
+
   private val subs = mutableMapOf<String, Subscription>()
   private var multicastLock: WifiManager.MulticastLock? = null
   private var secretsStore: KeystoreDeviceSecrets? = null
@@ -453,7 +467,7 @@ class IrohLocationModule : Module() {
 
   // mDNS local discovery (the Rust `MdnsAddressLookup`) needs to receive multicast, which Android
   // gates behind a held MulticastLock + the CHANGE_WIFI_MULTICAST_STATE permission. We hold it for
-  // the node's lifetime and release it in clearRuntime. Best-effort: if the lock can't be acquired
+  // the node's lifetime and release it in clearModuleRuntime. Best-effort: if the lock can't be acquired
   // the node still connects over relay/DNS, just without the same-Wi-Fi mDNS fast path.
   private fun acquireMulticastLock() {
     if (multicastLock?.isHeld == true) return
@@ -475,39 +489,29 @@ class IrohLocationModule : Module() {
   }
 
   /**
-   * Whether the live node was built for [identityHex], so it can be adopted rather than rebuilt.
+   * Undo what this module set up AROUND the node — never the node itself, which is the host's.
    *
-   * A null [identityHex] means "use whatever is stored", which is how the running node was built
-   * too, so it matches. A non-null one must equal the live node's secret: adopting across a real
-   * identity change would silently run the app as the wrong device.
+   * Destroying the subscription handles drops this module's references: a friend's topic then
+   * leaves the swarm, and the own-topic subscription stays alive in the node's slot for the
+   * background runtime, silenced by the host once no app holds the node.
    */
-  private fun nodeMatchesIdentity(identityHex: String?): Boolean {
-    val current = node ?: return false
-    if (identityHex.isNullOrEmpty()) return true
-    return identityHex.hexToBytes().contentEquals(current.identitySecret())
-  }
-
-  /**
-   * Tear the node down unconditionally, regardless of who still holds it.
-   *
-   * Only for the paths that genuinely must rebuild — a different identity, or the last release.
-   */
-  private suspend fun clearRuntime() {
-    nodeRefs = 0
-    subs.values.forEach { it.destroy() }
+  private fun clearModuleRuntime() {
+    subs.values.forEach { runCatching { it.destroy() } }
     subs.clear()
     unregisterNetworkCallback()
     releaseMulticastLock()
-    val current = node
-    node = null
-    if (current != null) {
-      try {
-        current.shutdown()
-      } finally {
-        current.destroy()
-      }
+    synchronized(nodeLock) {
+      cachedNode = null
+      cachedGeneration = ULong.MAX_VALUE
     }
   }
+
+  /** The application context, or the error every node export raises without one. */
+  private fun applicationContextOrThrow(): Context =
+    checkNotNull(
+      appContext.reactContext?.applicationContext
+        ?: appContext.currentActivity?.applicationContext
+    ) { "IrohLocation requires an Android application context" }
 
   // Bridges inbound Rust gossip events to the JS EventEmitter.
   private inner class EventBridge(private val subscriptionId: String) : FixListener {
@@ -555,9 +559,8 @@ class IrohLocationModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("IrohLocation")
-    // `onNativeFix` is the mounted-app handoff: the foreground service captures, but the store
-    // claim is process-wide, so while the app is alive the service cannot own the node and hands
-    // the capture here instead. See `IrohLocationModule.handOffCapture`.
+    // `onNativeFix` is the mounted-app handoff: while the app is wired the foreground service hands
+    // its captures here rather than running them itself. See `IrohLocationModule.handOffCapture`.
     Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix")
 
     OnCreate {
@@ -576,6 +579,15 @@ class IrohLocationModule : Module() {
     // `WeakReference` only covers a module that has also been collected.
     OnDestroy {
       if (sink?.get() === this@IrohLocationModule) sink = null
+      // A module torn down without its JS calling `shutdown` (a reload, a crashed context) would
+      // otherwise hold its leases for the life of the process: the node would never be shut down
+      // and, worse, never have this module's listeners detached. Return them, off this thread.
+      val held = synchronized(nodeLock) { leases.also { leases = 0 } }
+      if (held > 0) {
+        releaseScope.launch {
+          repeat(held) { NodeStorage.host.release(NodeHolder.APP, SHUTDOWN_BUDGET_MS) }
+        }
+      }
     }
 
     /**
@@ -589,37 +601,23 @@ class IrohLocationModule : Module() {
 
     AsyncFunction("createNode") Coroutine
       { identityHex: String?, recvHex: String? ->
-        // Adopt rather than rebuild. The node is process-wide; the callers are not. See `nodeRefs`.
-        val adopted = node?.takeIf { nodeMatchesIdentity(identityHex) }
-        if (adopted != null) {
-          nodeRefs += 1
-          return@Coroutine mapOf(
-            "endpointId" to adopted.endpointId().toHex(),
-            "identitySecret" to adopted.identitySecret().toHex(),
-            "recvSecret" to adopted.recvSecret().toHex(),
-            "recvPublic" to adopted.recvPublic().toHex(),
+        val context = applicationContextOrThrow()
+        val generationBefore = NodeStorage.host.generation()
+        // Adopts the live node when the identity matches — including one the foreground service
+        // built and started while no JS was alive — and builds otherwise. Never refused.
+        val n =
+          NodeStorage.host.acquireApp(
+            identityHex?.hexToBytes(),
+            recvHex?.hexToBytes(),
+            NodeStorage.dataRoot(context),
+            NodeStorage.stateRoot(context),
           )
+        val heldBefore = synchronized(nodeLock) { leases.also { leases += 1 } }
+        // A replacement (a different identity) invalidates every subscription made on the old node.
+        if (heldBefore > 0 && NodeStorage.host.generation() != generationBefore) {
+          subs.values.forEach { runCatching { it.destroy() } }
+          subs.clear()
         }
-        // Either there is no node, or it belongs to a different identity and must not be adopted.
-        clearRuntime()
-        val context = checkNotNull(
-          appContext.reactContext?.applicationContext
-            ?: appContext.currentActivity?.applicationContext
-        ) { "IrohLocation requires an Android application context to create a node" }
-        // Two roots, opposite requirements (FORWARD-SECRECY.md §4.2):
-        //   cacheDir — the trail replica. Big, re-fetchable, and never in Auto Backup.
-        //   filesDir — ratchet session state. Survives the cache being cleared under storage
-        //     pressure, which cacheDir explicitly does not, and is excluded from backup and
-        //     device-to-device transfer by withBackupExclusion.js. Restoring old session state
-        //     would rewind send counters, which is key reuse, so both halves are required.
-        val n = LocationNode.newAtDirs(
-          identityHex?.hexToBytes(),
-          recvHex?.hexToBytes(),
-          File(context.cacheDir, "streetcryptid").absolutePath,
-          File(context.filesDir, "streetcryptid").absolutePath,
-        )
-        node = n
-        nodeRefs = 1
         mapOf(
           "endpointId" to n.endpointId().toHex(),
           "identitySecret" to n.identitySecret().toHex(),
@@ -631,6 +629,8 @@ class IrohLocationModule : Module() {
     AsyncFunction("start") Coroutine
       { relayUrls: List<String>, relayAuthToken: String, relayEnabled: Boolean, ipEnabled: Boolean, bleEnabled: Boolean ->
         if (ipEnabled) acquireMulticastLock()
+        // Idempotent: if the background runtime already started this node from the stored
+        // settings, this is a no-op rather than the `AlreadyOpen` it used to be.
         node?.start(relayUrls, relayAuthToken, relayEnabled, ipEnabled, bleEnabled)
         registerNetworkCallback()
         Unit
@@ -638,15 +638,63 @@ class IrohLocationModule : Module() {
 
     AsyncFunction("shutdown") Coroutine
       { ->
-        // Release this caller's hold; only the last one out actually tears the node down. A
-        // headless session ending must not null the node the mounted app is using, which is the
-        // same clobber as before with the two sides swapped.
-        nodeRefs -= 1
-        if (nodeRefs <= 0) {
-          clearRuntime()
-        }
+        // Return one lease. The host shuts the node down only when nobody — no other JS context,
+        // not the background runtime — still holds it.
+        val last =
+          synchronized(nodeLock) {
+            if (leases <= 0) return@Coroutine Unit
+            leases -= 1
+            leases == 0
+          }
+        if (last) clearModuleRuntime()
+        NodeStorage.host.release(NodeHolder.APP, SHUTDOWN_BUDGET_MS)
         Unit
       }
+
+    /**
+     * Rebuild the node with new transport settings, keeping every holder's lease.
+     *
+     * What a settings change and a Bluetooth permission granted after construction both need. It
+     * used to be `shutdown` + `createNode` + `start` from JS, which with a shared node would only
+     * return this module's lease and adopt the same node back — the background runtime's lease
+     * keeps it alive. The host starts the new node before anyone else can, so it cannot come up
+     * on the stored (old) settings.
+     */
+    AsyncFunction("restartNode") Coroutine
+      { relayUrls: List<String>, relayAuthToken: String, relayEnabled: Boolean, ipEnabled: Boolean, bleEnabled: Boolean ->
+        if (synchronized(nodeLock) { leases } <= 0) {
+          throw IllegalStateException("call createNode first")
+        }
+        // Every subscription belongs to the node being replaced; JS resubscribes afterwards.
+        subs.values.forEach { runCatching { it.destroy() } }
+        subs.clear()
+        if (ipEnabled) acquireMulticastLock()
+        NodeStorage.host.restart(
+          TransportConfig(relayUrls, relayAuthToken, relayEnabled, ipEnabled, bleEnabled),
+          RESTART_BUDGET_MS,
+        )
+        registerNetworkCallback()
+        Unit
+      }
+
+    /** The host's view of who holds the node, for `device.health`. */
+    Function("nodeHostSnapshot") {
+      if (!IrohAndroidBootstrap.installed) return@Function null
+      val snapshot = NodeStorage.host.snapshot()
+      mapOf(
+        "generation" to snapshot.generation.toDouble(),
+        "hasNode" to snapshot.hasNode,
+        "appLeases" to snapshot.appLeases.toInt(),
+        "background" to snapshot.background,
+        "builds" to snapshot.builds.toDouble(),
+        "adoptions" to snapshot.adoptions.toDouble(),
+        "replacements" to snapshot.replacements.toDouble(),
+        "restarts" to snapshot.restarts.toDouble(),
+        "shutdowns" to snapshot.shutdowns.toDouble(),
+        "shutdownFailures" to snapshot.shutdownFailures.toDouble(),
+        "shutdownTimeouts" to snapshot.shutdownTimeouts.toDouble(),
+      )
+    }
 
     // Device identity — the background drain path's own copy. See DeviceSecretsStore.kt for why
     // this is our entry rather than a read of expo-secure-store's private envelope format.
@@ -759,18 +807,6 @@ class IrohLocationModule : Module() {
     Function("releaseNativeBackground") {
       sink = null
     }
-
-    /// Take the Rust stores back from the foreground service's node, bounded on this side so the
-    /// promise always settles. What `init()` calls before `start()`; without it a service that
-    /// built a node while no JS context was alive refused the app its claim. See
-    /// `NativeBackgroundRuntime.yieldToApp`.
-    AsyncFunction("handOverNativeBackground") Coroutine
-      { timeoutMs: Double ->
-        // Same as `releaseNativeBackground`, which this replaces on the launch path: the sink is
-        // re-taken by `startNativeBackground` once the app is ready to receive captures.
-        sink = null
-        NativeBackgroundRuntime.yieldToApp(timeoutMs.toLong().coerceAtLeast(0L))
-      }
 
     // Native publish state.
 
@@ -1332,21 +1368,16 @@ class IrohLocationModule : Module() {
 
   companion object {
     /**
-     * Where the foreground service sends a capture it could not publish itself.
+     * Where the foreground service sends a capture while the app is mounted.
      *
-     * The store claim in `durable.rs` is **process-wide**, and the service runs in the app process
-     * using the same storage roots. So whenever the app is alive it has already claimed the stores
-     * and `NativeBackgroundRuntime.ensureStarted` returns false there — always, not occasionally.
-     * That was survivable while a JS `watchPositionAsync` covered the mounted case; once capture
-     * moved into Rust and that watcher was deleted, it meant an app that was merely *running* —
-     * foreground or backgrounded with the service up — captured fixes and dropped every one. A
-     * Pixel spent 2026-08-31 in that state: service healthy, `location_running=true`, permissions
-     * granted, and `last_fix_age_ms` climbing past fifteen hours.
+     * Routing, not ownership: the node is shared (`NodeHost`), and both paths end in the same
+     * `ingestFix` on it. A wired app takes the capture because it runs the sampling policy and
+     * draws the user's own marker from what the gate accepted. Before the node was shared this
+     * was the ONLY path that could publish while the app was alive — a Pixel spent 2026-08-31
+     * with a healthy service dropping every capture because nothing handed them over.
      *
-     * Handing the fix to JS is not a fallback path, it is the mounted path. The mounted runtime
-     * owns the node, so it is the only thing that *can* publish; the service is the sensor. This is
-     * the Android counterpart of `BackgroundLocationRuntime.eventSink` on iOS, and it emits the
-     * same `onNativeFix` payload so one JS handler serves both platforms.
+     * This is the Android counterpart of `BackgroundLocationRuntime.eventSink` on iOS, and it emits
+     * the same `onNativeFix` payload so one JS handler serves both platforms.
      *
      * Weak so a torn-down module cannot be held alive by a service that outlives it; null when
      * sharing is off, which is the one time there is legitimately nobody to tell.
@@ -1356,10 +1387,19 @@ class IrohLocationModule : Module() {
     /**
      * Whether a mounted app has wired the hand-off, i.e. will publish what the service captures.
      *
-     * The gate `NativeBackgroundRuntime.ensureStarted` checks before building a node of its own —
-     * the Android counterpart of iOS's `eventSink != nil`.
+     * What `NativeBackgroundRuntime` checks before running a capture itself — the Android
+     * counterpart of iOS's `eventSink != nil`.
      */
     internal fun appIsWired(): Boolean = sink?.get() != null
+
+    /** Bounds a lease release; the JS side bounds its whole teardown again on the outside. */
+    private const val SHUTDOWN_BUDGET_MS: ULong = 5_000UL
+
+    /** Bounds the old node's shutdown inside a restart. */
+    private const val RESTART_BUDGET_MS: ULong = 5_000UL
+
+    /** Never cancelled: see `OnDestroy`. */
+    private val releaseScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Hand one capture to the mounted app. Returns whether anything was listening.

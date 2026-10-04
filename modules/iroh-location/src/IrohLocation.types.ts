@@ -68,6 +68,24 @@ export interface NodeKeys {
 }
 
 /** Native endpoint transports enabled for a debug session. */
+/**
+ * Who holds the process's node, as the Rust `NodeHost` sees it. Counters are since process start.
+ * See `modules/iroh-location/rust/src/host.rs` for what each one means.
+ */
+export interface NodeHostSnapshot {
+  generation: number;
+  hasNode: boolean;
+  appLeases: number;
+  background: boolean;
+  builds: number;
+  adoptions: number;
+  replacements: number;
+  restarts: number;
+  shutdowns: number;
+  shutdownFailures: number;
+  shutdownTimeouts: number;
+}
+
 export interface TransportConfig {
   relay: boolean;
   ip: boolean;
@@ -678,22 +696,26 @@ export interface IrohLocationApi {
   /** Clear the wake counters. Called by whoever owns the reporting cadence, nothing else. OPTIONAL. */
   resetBackgroundWakeStats?(): void;
   /**
-   * Take the Rust stores back from the native background runtime, bounded.
-   *
-   * Not {@link releaseNativeBackground}: that drops the Swift references and returns, while
-   * `Subscription` and the spawned receive task each still hold an `Arc<LocationNode>` — only
-   * `shutdown` frees the process-wide writer claims. Without this, opening the app after a
-   * background launch that armed the native runtime meets `AlreadyOpen` and fails `init()` before
-   * the map can mount.
-   *
-   * Bounded on the native side so it always settles whatever Rust does. Resolves `true` when the
-   * shutdown completed; `false` still hands ownership over, because leaving it with the runtime
-   * would mean nothing could ever claim the stores again. On Android it shuts down the node the
-   * foreground service built while no JS context was alive. OPTIONAL: absent on older binaries.
+   * Take the Rust stores back from the native background runtime, bounded. LEGACY: only binaries
+   * from before the shared node (`restartNode` absent) export it — on those the background runtime
+   * built a node of its own, and opening the app after a background launch met `AlreadyOpen`.
+   * Binaries with a node host have nothing to hand over: both halves hold leases on ONE node.
    */
   handOverNativeBackground?(timeoutMs: number): Promise<boolean>;
-  /** Which half of the process owns the Rust stores: `app` or `native`. iOS only. OPTIONAL. */
+  /** LEGACY, iOS only: which half of the process owned the Rust stores before they were shared. */
   nativeNodeOwner?(): string;
+  /**
+   * Rebuild the node with new transport settings, keeping every holder's lease.
+   *
+   * Present exactly when the binary has a node host — so it doubles as that capability probe. A
+   * rebind on such a binary MUST use it: `shutdown` + `createNode` there only returns this
+   * context's lease and adopts the same node back (the background runtime's lease keeps it up),
+   * so the new settings would never apply. The host also starts the new node before the
+   * background runtime can start it from the stored (old) settings. OPTIONAL.
+   */
+  restartNode?(config?: TransportConfig): Promise<void>;
+  /** The node host's view of who holds the node, for `device.health`. OPTIONAL. */
+  nodeHostSnapshot?(): NodeHostSnapshot | null;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**

@@ -221,7 +221,28 @@ The native core's own log lines, in Loki rather than Tempo (`{service_name="stre
 | `node.construct`      | a `LocationNode` was built, with `node.ordinal` — how many this PROCESS has built. **Above 1 is the alarm**                                                                    |
 | `node.start`          | the endpoint came up, stamped with the same `node.ordinal`, plus `ble_attached` (fixed at construction and never changeable after)                                             |
 
+### Who holds the node
+
+Since the node host (`modules/iroh-location/rust/src/host.rs`) there is exactly one node per
+process, and these spans say who holds it and why it changed. They replace every earlier way of
+reading ownership off the log — `node.start.claim_refused`, `node.handover`, the background
+runtime's claim backoff — none of which a host binary emits.
+
+| Span                | Says                                                                                                                                                                                |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `node.host.acquire` | a holder (`holder=app` / `background`) took a lease: `outcome` is `adopted` (nothing built), `built`, `replaced` (app only: the live node had another identity) or `no-identity`    |
+| `node.host.release` | a lease returned: `outcome` is `still-held`, `shut-down`, `shutdown-failed`, `shutdown-timed-out`, `released` (no node left) or `not-held`; `waited_ms` is the shutdown's wait      |
+| `node.host.restart` | a settings change rebuilt the node in place, keeping every lease; `shutdown` is how the old one went                                                                                |
+| `subscribe.own`     | a caller asked for the own-topic subscription: `outcome` is `created`, `adopted` (joined its peers, and took its events if `listener=true`) or `recreated` (the old loop had ended) |
+
+Every one carries `generation`, `app_leases` and `background` after the change. `device.health`
+carries the same under `node.host.*`, plus counters since process start; `builds` outrunning
+`shutdowns + restarts + replacements` means a node was left alive, and any `shutdown_timeouts` is
+the one way two nodes can briefly coexist.
+
 ### Telling a rebuild from a clobber from a duplicate
+
+Before the node host — still the right table for a phone on an older build:
 
 Three different bugs look identical in the log — a node appearing with nothing explaining it. Read
 them together:

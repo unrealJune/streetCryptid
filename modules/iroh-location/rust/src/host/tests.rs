@@ -90,6 +90,13 @@ struct FakeNode {
     behaviour: Arc<Behaviour>,
 }
 
+impl fmt::Debug for FakeNode {
+    // `expect_err` prints the `Ok` side when it fails; the id is all that is worth reading.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FakeNode").field("id", &self.id).finish()
+    }
+}
+
 impl FakeNode {
     fn started(&self) -> Option<String> {
         self.started.lock().unwrap().clone()

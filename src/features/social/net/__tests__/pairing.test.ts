@@ -98,6 +98,17 @@ class FakeNativeModule {
   endpointId = 'aa11';
   initiateByTokenPromise: Promise<string> | null = null;
   bleAvailableAfterRestart = false;
+  /** True stands for a binary with a node host, which exports `restartNode`. */
+  hostRestart = false;
+  restarts: unknown[] = [];
+
+  get restartNode(): ((config?: unknown) => Promise<void>) | undefined {
+    if (!this.hostRestart) return undefined;
+    return async (config?: unknown) => {
+      this.restarts.push(config);
+      if (this.bleAvailableAfterRestart) this.caps = { ...this.caps, available: true };
+    };
+  }
 
   private handlers: Record<string, (e: unknown) => void> = {};
 
@@ -2100,6 +2111,40 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(mockHolder.mod.calls.createNode).toBe(2);
     expect(mockHolder.mod.calls.start).toBe(2);
     expect(await mockHolder.mod.bleAvailable()).toBe(true);
+  });
+
+  /**
+   * With a node host the node is shared with the native background runtime, whose lease keeps it
+   * alive through our `shutdown` — so `shutdown` + `createNode` would adopt the SAME node back and
+   * the rebuild that attaches BLE would never happen. It must be a restart in place.
+   */
+  it('restarts a host-shared node in place instead of releasing it and adopting it back', async () => {
+    const svc = newService();
+    mockHolder.mod.caps = { ...mockHolder.mod.caps, available: false };
+    mockHolder.mod.bleAvailableAfterRestart = true;
+    mockHolder.mod.hostRestart = true;
+    await svc.init('@me', 'mothman');
+
+    await svc.ensureBleReady();
+
+    expect(mockHolder.mod.restarts).toHaveLength(1);
+    expect(mockHolder.mod.calls.shutdown).toBe(0);
+    expect(mockHolder.mod.calls.createNode).toBe(1);
+    expect(mockHolder.mod.calls.start).toBe(1);
+    expect(await mockHolder.mod.bleAvailable()).toBe(true);
+  });
+
+  it('resubscribes after a host restart, because every subscription died with the old node', async () => {
+    const svc = newService();
+    mockHolder.mod.caps = { ...mockHolder.mod.caps, available: false };
+    mockHolder.mod.bleAvailableAfterRestart = true;
+    mockHolder.mod.hostRestart = true;
+    await svc.init('@me', 'mothman');
+    const subscribesBefore = mockHolder.mod.calls.subscribe.length;
+
+    await svc.ensureBleReady();
+
+    expect(mockHolder.mod.calls.subscribe.length).toBeGreaterThan(subscribesBefore);
   });
 
   it('does not rebuild BLE while another pairing session is active', async () => {
