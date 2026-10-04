@@ -98,6 +98,8 @@ export default function ActivePairingScreen() {
     refreshPairing,
     acknowledgeDiscoveredFriend,
     rejectDiscoveredFriend,
+    service,
+    retryService,
   } = useLocationSharing();
   const [intent, setIntent] = useState<PairingRouteIntent>(token ? 'redeem' : 'bump');
   const [redeeming, setRedeeming] = useState(Boolean(token));
@@ -239,7 +241,11 @@ export default function ActivePairingScreen() {
   const failure = pairing?.failure ?? null;
   const effectiveIntent: PairingRouteIntent =
     !token && intent === 'bump' && inviteLive ? 'link' : intent;
-  const bump = useArmedBump(effectiveIntent === 'bump' && !token && !redeeming && !leaving);
+  // Never arm against a service that is not up: the arm would throw, and that throw is exactly
+  // what the screen used to render as a Bump that found nobody.
+  const bump = useArmedBump(
+    service.phase === 'ready' && effectiveIntent === 'bump' && !token && !redeeming && !leaving
+  );
   // Every pairing channel, not just Bump — this hook used to hang off `useArmedBump`, which is
   // armed for nearby pairing only, so a link or QR pair had no haptics of any kind. Gated on
   // focus AND foreground, not merely on being mounted: this screen survives backgrounding, and a
@@ -252,6 +258,7 @@ export default function ActivePairingScreen() {
   const signal = friend ? resolveSignalColor(friend.color, chrome.green) : chrome.green;
 
   const stage: ActivePairingStage = deriveActivePairingStage({
+    servicePhase: service.phase,
     intent: effectiveIntent,
     pairingLoaded: pairing !== null,
     available: pairing?.available ?? false,
@@ -410,6 +417,18 @@ export default function ActivePairingScreen() {
           fieldMode: 'scatter',
           tone: 'amber',
         };
+      case 'service-failed':
+        return {
+          mode: 'PAIRING',
+          status: 'PAIRING IS NOT READY',
+          detail: service.error
+            ? `Location sync did not start: ${service.error}`
+            : 'Location sync is taking longer than it should to start.',
+          caption: 'NOT STARTED',
+          readout: '',
+          fieldMode: 'scatter',
+          tone: 'amber',
+        };
       case 'loading':
         return {
           mode: 'BUMP',
@@ -511,6 +530,7 @@ export default function ActivePairingScreen() {
     }
   }, [
     bump.error,
+    service.error,
     failure,
     inputError,
     inviteRemaining,
@@ -1033,6 +1053,8 @@ export default function ActivePairingScreen() {
               <Action color={chrome.steel} label="BACK TO BUMP" onPress={returnToBump} outline />
               <Action color={signal} label="NEW LINK" onPress={() => void createAndShareLink()} />
             </>
+          ) : stage === 'service-failed' ? (
+            <Action color={signal} label="TRY AGAIN" onPress={retryService} />
           ) : stage === 'bump-failed' ? (
             <>
               <Action
