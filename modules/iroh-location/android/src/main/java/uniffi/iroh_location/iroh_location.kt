@@ -1466,7 +1466,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_clear_outbox() != 61861) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_clear_resync() != 52312) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_clear_resync() != 23779) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_complete_session() != 30383) {
@@ -1550,7 +1550,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby() != 64589) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 27631) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 17624) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_last_seal_report() != 27654) {
@@ -1589,7 +1589,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_poll_profile_events() != 11150) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_poll_resync() != 5911) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_poll_resync() != 23719) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_profile_ticket() != 35099) {
@@ -1601,7 +1601,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_profile() != 57330) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 54563) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 6657) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_watermarks() != 59312) {
@@ -1643,7 +1643,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_respond_pair() != 4487) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_resync_count() != 62719) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_resync_count() != 21715) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_revoke_pair_invite() != 25847) {
@@ -3161,7 +3161,8 @@ public interface LocationNodeInterface {
     suspend fun `clearOutbox`()
     
     /**
-     * Drop our in-flight resync ephemeral once every peer has been restarted.
+     * Retained for binding compatibility. Nothing about a restart is held in memory any more,
+     * so there is nothing to clear.
      */
     suspend fun `clearResync`()
     
@@ -3351,8 +3352,9 @@ public interface LocationNodeInterface {
     suspend fun `initiatePairNearby`(`peerEndpointId`: kotlin.ByteArray): kotlin.ByteArray
     
     /**
-     * Whether this peer's session needs §4.6 recovery: `R` consecutive missed envelopes, an
-     * unreadable state file, or a peer lapsed past `T_lapse` (§4.5).
+     * Whether this peer's session needs §4.6 recovery: a damaged record, `R` distinct envelopes
+     * we cannot open, a peer lapsed past `T_lapse` (§4.5), or — following — no sending chain for
+     * an hour.
      */
     suspend fun `isDesynced`(`peerEndpointHex`: kotlin.String): kotlin.Boolean
     
@@ -3440,14 +3442,8 @@ public interface LocationNodeInterface {
     suspend fun `pollProfileEvents`(): List<ProfileView>
     
     /**
-     * Look for `peer`'s resync record and, if one is there, restart the session from it.
-     *
-     * Publishes our own half first when we have not already, so a single call from each side
-     * completes the exchange without either having to go first — which matters because the
-     * side that noticed the desync and the side that caused it are usually not the same one.
-     *
-     * Returns whether a session was installed. `false` covers "no record yet", "stale record",
-     * and "already applied" — all ordinary, none an error.
+     * Run one recovery pass for this peer alone. Returns whether a session was installed —
+     * restarted (leader) or adopted (follower).
      */
     suspend fun `pollResync`(`peerEndpointHex`: kotlin.String, `peerRecvPubHex`: kotlin.String): kotlin.Boolean
     
@@ -3471,16 +3467,10 @@ public interface LocationNodeInterface {
     suspend fun `publishProfile`(`handle`: kotlin.String, `cryptidName`: kotlin.String, `sigil`: kotlin.String, `color`: kotlin.String): kotlin.ULong
     
     /**
-     * Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+     * Publish our control record (§4.6) now, sealed to `recipient_recv_pubs`, whether or not it
+     * changed. Returns our newest prekey's public half as hex.
      *
-     * Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
-     * re-establishes a ratchet, so it cannot require one. That is also why it is the one place
-     * the design has to be most careful: **recovery must never become the bypass**. The record
-     * carries only an ephemeral public key. It cannot downgrade anything, because a root is
-     * only ever derived when *both* ephemerals are in hand.
-     *
-     * Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
-     * than minting a new one, so a peer that already saw our half does not have to see a second.
+     * The native drain publishes it on its own; this is for a caller that wants it out now.
      */
     suspend fun `publishResync`(`recipientRecvPubs`: List<kotlin.String>): kotlin.String
     
@@ -3614,9 +3604,9 @@ public interface LocationNodeInterface {
     suspend fun `respondPair`(`sessionId`: kotlin.ByteArray, `accept`: kotlin.Boolean)
     
     /**
-     * How many resyncs we have driven with this peer.
+     * How many restarts have been installed with this peer in this process.
      *
-     * §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+     * §4.6 wants a restart *loop* to surface a "re-pair with this friend" prompt rather than
      * retrying forever, so this is deliberately a count rather than a boolean: the UI decides
      * where patience runs out, and the crypto layer does not pretend to know.
      */
@@ -4078,7 +4068,8 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Drop our in-flight resync ephemeral once every peer has been restarted.
+     * Retained for binding compatibility. Nothing about a restart is held in memory any more,
+     * so there is nothing to clear.
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `clearResync`() {
@@ -4795,8 +4786,9 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Whether this peer's session needs §4.6 recovery: `R` consecutive missed envelopes, an
-     * unreadable state file, or a peer lapsed past `T_lapse` (§4.5).
+     * Whether this peer's session needs §4.6 recovery: a damaged record, `R` distinct envelopes
+     * we cannot open, a peer lapsed past `T_lapse` (§4.5), or — following — no sending chain for
+     * an hour.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -5119,14 +5111,8 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Look for `peer`'s resync record and, if one is there, restart the session from it.
-     *
-     * Publishes our own half first when we have not already, so a single call from each side
-     * completes the exchange without either having to go first — which matters because the
-     * side that noticed the desync and the side that caused it are usually not the same one.
-     *
-     * Returns whether a session was installed. `false` covers "no record yet", "stale record",
-     * and "already applied" — all ordinary, none an error.
+     * Run one recovery pass for this peer alone. Returns whether a session was installed —
+     * restarted (leader) or adopted (follower).
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -5227,16 +5213,10 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+     * Publish our control record (§4.6) now, sealed to `recipient_recv_pubs`, whether or not it
+     * changed. Returns our newest prekey's public half as hex.
      *
-     * Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
-     * re-establishes a ratchet, so it cannot require one. That is also why it is the one place
-     * the design has to be most careful: **recovery must never become the bypass**. The record
-     * carries only an ephemeral public key. It cannot downgrade anything, because a root is
-     * only ever derived when *both* ephemerals are in hand.
-     *
-     * Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
-     * than minting a new one, so a peer that already saw our half does not have to see a second.
+     * The native drain publishes it on its own; this is for a caller that wants it out now.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -5621,9 +5601,9 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * How many resyncs we have driven with this peer.
+     * How many restarts have been installed with this peer in this process.
      *
-     * §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+     * §4.6 wants a restart *loop* to surface a "re-pair with this friend" prompt rather than
      * retrying forever, so this is deliberately a count rather than a boolean: the UI decides
      * where patience runs out, and the crypto layer does not pretend to know.
      */
