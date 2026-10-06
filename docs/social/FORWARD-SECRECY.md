@@ -352,7 +352,7 @@ no simultaneous presence.
 **Detection.** A session counts as broken when any of these holds; each is reported by
 `SessionManager::assess` as a distinct reason (`sc.restart` reasons in telemetry):
 
-- **Misses.** `R` (= 3) *distinct* signature-valid envelopes from the peer that no session we
+- **Misses.** `R` (= 3) _distinct_ signature-valid envelopes from the peer that no session we
   hold can open. Distinct by the author's monotonic `seq`: the durable path is one overwritten
   slot per author and every read opens the whole replica, so the same envelope is re-read
   constantly, and a re-read is evidence of nothing. An envelope on a chain we hold at a position
@@ -451,7 +451,7 @@ follower's first reply. Daily rotation and 7-day deletion bound the window; one-
 would close it but do not fit a one-slot-per-author store.
 
 **Why revision 3's resync was replaced.** Each side published a fresh ephemeral and, on seeing
-the other's, derived a root from *whatever ephemeral it held at that instant*. Records expired
+the other's, derived a root from _whatever ephemeral it held at that instant_. Records expired
 after an hour and were re-minted every thirty minutes; ephemerals lived in memory. Convergence
 needed both sides to hold the same pair of ephemerals at the same time, and nothing guaranteed
 it: on 2026-10-02 one side applied while the other had already stopped looking (a false miss
