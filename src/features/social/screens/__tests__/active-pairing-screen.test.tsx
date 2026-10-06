@@ -59,7 +59,12 @@ jest.mock('@/features/social/hooks/use-armed-bump', () => ({
 jest.mock('@/features/social/hooks/use-pairing-haptics', () => ({
   usePairingHaptics: () => {},
 }));
-const mockRouter = { back: jest.fn(), setParams: jest.fn() };
+const mockRouter = {
+  back: jest.fn(),
+  replace: jest.fn(),
+  setParams: jest.fn(),
+  canGoBack: jest.fn(() => true),
+};
 jest.mock('expo-router', () => ({
   useIsFocused: () => true,
   useLocalSearchParams: () => ({}),
@@ -198,6 +203,14 @@ describe('ActivePairingScreen', () => {
     expect(action('acknowledge').props.disabled).toBe(true);
     await act(async () => action('reject').props.onPress());
     expect(mockRouter.back).toHaveBeenCalledTimes(1);
+  });
+
+  it('replaces onto the map when a link cold-launched the app and there is nothing to go back to', async () => {
+    mockRouter.canGoBack.mockReturnValueOnce(false);
+    await renderDiscovery();
+    await act(async () => action('acknowledge').props.onPress());
+    expect(mockRouter.back).not.toHaveBeenCalled();
+    expect(mockRouter.replace).toHaveBeenCalledWith('/');
   });
 
   it('waits for acknowledgement and reports persistence failures', async () => {
