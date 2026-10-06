@@ -507,10 +507,17 @@ impl SessionManager {
             created_ms: now_ms,
             pending_boot: None,
         });
-        // A new pairing starts the request ledger over: the follower's counter is its own clock,
-        // and nothing it asked for under the old relationship is owed under the new one.
-        record.answered_request_ts = 0;
+        // A new pairing starts the request ledger over: nothing the follower asked for under the
+        // old relationship is owed under the new one. As leader, a request stamped before this
+        // pairing is void — with the same skew allowance the origin gets, so a follower whose clock
+        // runs behind ours is not ignored when it asks about THIS session. Resetting to 0 instead
+        // let the follower's still-outstanding request from the broken session restart a pairing
+        // five seconds old (2026-10-06, 00:37:41).
+        record.answered_request_ts = now_ms.saturating_sub(PAIRING_ORIGIN_SKEW_MS);
         self.store.save_record(peer, &record)?;
+        // As follower, withdraw the request itself, or our next control record re-publishes it.
+        // Best-effort: a damaged control file must not fail the pairing it is incidental to.
+        self.drop_request_best_effort(peer);
         self.reset_seen_seq(peer);
         Ok(())
     }
@@ -518,8 +525,32 @@ impl SessionManager {
     pub fn remove(&self, peer: &[u8]) -> Result<(), SessionError> {
         let _guard = self.lock()?;
         self.store.remove(peer)?;
+        self.drop_request_best_effort(peer);
         self.reset_seen_seq(peer);
         Ok(())
+    }
+
+    fn drop_request_best_effort(&self, peer: &[u8]) {
+        if let Err(err) = self.drop_request_locked(peer) {
+            tracing::warn!(
+                sc.peer = %crate::telemetry::short_hex(peer),
+                error = %err,
+                "could not withdraw our restart request"
+            );
+        }
+    }
+
+    /// Withdraw our restart request to `peer`, with the lock already held. Returns whether there
+    /// was one.
+    fn drop_request_locked(&self, peer: &[u8]) -> Result<bool, SessionError> {
+        let mut control = self.store.load_control()?;
+        let before = control.requests.len();
+        control.requests.retain(|r| r.peer.as_slice() != peer);
+        if control.requests.len() == before {
+            return Ok(false);
+        }
+        self.store.save_control(&control)?;
+        Ok(true)
     }
 
     /// Withdraw only the ratchet installed by this pairing, never a later re-pair or restart.
@@ -1133,14 +1164,7 @@ impl SessionManager {
     /// Withdraw our request to `peer`. Returns whether there was one.
     pub fn clear_request(&self, peer: &[u8]) -> Result<bool, SessionError> {
         let _guard = self.lock()?;
-        let mut control = self.store.load_control()?;
-        let before = control.requests.len();
-        control.requests.retain(|r| r.peer.as_slice() != peer);
-        if control.requests.len() == before {
-            return Ok(false);
-        }
-        self.store.save_control(&control)?;
-        Ok(true)
+        self.drop_request_locked(peer)
     }
 
     // ── miss accounting ───────────────────────────────────────────────────────────────────

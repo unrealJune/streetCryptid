@@ -301,7 +301,11 @@ async fn an_app_acquire_on_an_empty_host_builds_and_does_not_start() {
     let (node, outcome) = rig.app("alice").await;
     assert_eq!(outcome, AcquireOutcome::Built);
     assert_eq!(node.identity, b"alice");
-    assert_eq!(node.started(), None, "the app starts the node itself, with its own settings");
+    assert_eq!(
+        node.started(),
+        None,
+        "the app starts the node itself, with its own settings"
+    );
     let snapshot = rig.host.snapshot();
     assert!(snapshot.has_node);
     assert_eq!(snapshot.app_leases, 1);
@@ -315,7 +319,10 @@ async fn a_second_app_acquire_for_the_same_identity_adopts() {
     let (first, _) = rig.app("alice").await;
     let (second, outcome) = rig.app("alice").await;
     assert_eq!(outcome, AcquireOutcome::Adopted);
-    assert!(Arc::ptr_eq(&first, &second), "adoption must hand over the SAME node");
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "adoption must hand over the SAME node"
+    );
     let snapshot = rig.host.snapshot();
     assert_eq!(snapshot.app_leases, 2);
     assert_eq!(snapshot.builds, 1);
@@ -371,8 +378,14 @@ async fn a_different_identity_replaces_the_live_node_after_it_has_shut_down() {
     );
     let events = rig.ledger.events();
     let shut = events.iter().position(|e| e == "shut:1").unwrap();
-    let built = events.iter().position(|e| e.starts_with("build:2")).unwrap();
-    assert!(shut < built, "shutdown must finish before the build: {events:?}");
+    let built = events
+        .iter()
+        .position(|e| e.starts_with("build:2"))
+        .unwrap();
+    assert!(
+        shut < built,
+        "shutdown must finish before the build: {events:?}"
+    );
 
     // The background lease was not the app's to take: it now refers to the new node.
     let snapshot = rig.host.snapshot();
@@ -399,7 +412,11 @@ async fn different_storage_roots_are_not_adoptable() {
     assert_eq!(outcome, AcquireOutcome::Replaced);
     assert!(old.is_shut());
     assert!(!Arc::ptr_eq(&old, &new));
-    assert_eq!(rig.host.snapshot().app_leases, 2, "both acquires hold a lease");
+    assert_eq!(
+        rig.host.snapshot().app_leases,
+        2,
+        "both acquires hold a lease"
+    );
 }
 
 #[tokio::test]
@@ -462,15 +479,17 @@ async fn the_background_runtime_reads_no_keys_when_a_node_is_live() {
 #[tokio::test]
 async fn the_background_runtime_never_mints_an_identity() {
     let rig = rig();
-    let acquired = rig
-        .host
-        .acquire_background(|| None, roots())
-        .await
-        .unwrap();
-    assert!(acquired.is_none(), "no keys and no node is `None`, not a new identity");
+    let acquired = rig.host.acquire_background(|| None, roots()).await.unwrap();
+    assert!(
+        acquired.is_none(),
+        "no keys and no node is `None`, not a new identity"
+    );
     let snapshot = rig.host.snapshot();
     assert_eq!(snapshot.builds, 0);
-    assert!(!snapshot.background, "no lease is taken when there is nothing to hold");
+    assert!(
+        !snapshot.background,
+        "no lease is taken when there is nothing to hold"
+    );
 }
 
 #[tokio::test]
@@ -493,8 +512,14 @@ async fn the_background_lease_is_a_flag_not_a_count() {
     }
     let snapshot = rig.host.snapshot();
     assert!(snapshot.background);
-    assert_eq!(snapshot.adoptions, 0, "re-acquiring its own lease is not an adoption");
-    assert_eq!(rig.release(NodeHolder::Background).await, ReleaseOutcome::ShutDown);
+    assert_eq!(
+        snapshot.adoptions, 0,
+        "re-acquiring its own lease is not an adoption"
+    );
+    assert_eq!(
+        rig.release(NodeHolder::Background).await,
+        ReleaseOutcome::ShutDown
+    );
 }
 
 // ── Rule 4: who starts the node, with which settings ─────────────────────────────────────────────
@@ -523,7 +548,9 @@ async fn the_background_runtime_leaves_a_started_app_node_alone() {
 #[tokio::test]
 async fn a_failed_stored_start_keeps_the_lease_and_the_next_acquire_retries_it() {
     let rig = rig();
-    rig.behaviour.start_stored_fails.store(true, Ordering::SeqCst);
+    rig.behaviour
+        .start_stored_fails
+        .store(true, Ordering::SeqCst);
     let err = rig
         .host
         .acquire_background(|| Some(keys("alice")), roots())
@@ -534,7 +561,9 @@ async fn a_failed_stored_start_keeps_the_lease_and_the_next_acquire_retries_it()
     assert!(snapshot.background, "the node exists and is ours to retry");
     assert!(snapshot.has_node);
 
-    rig.behaviour.start_stored_fails.store(false, Ordering::SeqCst);
+    rig.behaviour
+        .start_stored_fails
+        .store(false, Ordering::SeqCst);
     let (node, outcome) = rig.background("alice").await.unwrap();
     assert_eq!(outcome, AcquireOutcome::Adopted);
     assert_eq!(node.started().as_deref(), Some("stored"));
@@ -547,7 +576,10 @@ async fn a_failed_stored_start_keeps_the_lease_and_the_next_acquire_retries_it()
 async fn releasing_what_is_not_held_changes_nothing() {
     let rig = rig();
     assert_eq!(rig.release(NodeHolder::App).await, ReleaseOutcome::NotHeld);
-    assert_eq!(rig.release(NodeHolder::Background).await, ReleaseOutcome::NotHeld);
+    assert_eq!(
+        rig.release(NodeHolder::Background).await,
+        ReleaseOutcome::NotHeld
+    );
 
     rig.background("alice").await.unwrap();
     let before = rig.host.snapshot();
@@ -557,7 +589,10 @@ async fn releasing_what_is_not_held_changes_nothing() {
     let app_only = self::rig();
     app_only.app("alice").await;
     let before = app_only.host.snapshot();
-    assert_eq!(app_only.release(NodeHolder::Background).await, ReleaseOutcome::NotHeld);
+    assert_eq!(
+        app_only.release(NodeHolder::Background).await,
+        ReleaseOutcome::NotHeld
+    );
     assert_eq!(app_only.host.snapshot(), before);
 }
 
@@ -568,9 +603,16 @@ async fn the_last_holder_out_shuts_the_node_down() {
     rig.app("alice").await;
     let generation = rig.host.generation();
 
-    assert_eq!(rig.release(NodeHolder::App).await, ReleaseOutcome::StillHeld);
+    assert_eq!(
+        rig.release(NodeHolder::App).await,
+        ReleaseOutcome::StillHeld
+    );
     assert!(!node.is_shut());
-    assert_eq!(rig.host.generation(), generation, "nothing `current` answers changed");
+    assert_eq!(
+        rig.host.generation(),
+        generation,
+        "nothing `current` answers changed"
+    );
 
     assert_eq!(rig.release(NodeHolder::App).await, ReleaseOutcome::ShutDown);
     assert!(node.is_shut());
@@ -588,11 +630,24 @@ async fn an_app_letting_go_while_the_background_runtime_holds_detaches_and_keeps
     let (node, _) = rig.app("alice").await;
     rig.background("alice").await.unwrap();
 
-    assert_eq!(rig.release(NodeHolder::App).await, ReleaseOutcome::StillHeld);
-    assert!(!node.is_shut(), "the background runtime still publishes through it");
-    assert_eq!(node.detaches(), 1, "the app's listeners point into a dying JS context");
+    assert_eq!(
+        rig.release(NodeHolder::App).await,
+        ReleaseOutcome::StillHeld
+    );
+    assert!(
+        !node.is_shut(),
+        "the background runtime still publishes through it"
+    );
+    assert_eq!(
+        node.detaches(),
+        1,
+        "the app's listeners point into a dying JS context"
+    );
 
-    assert_eq!(rig.release(NodeHolder::Background).await, ReleaseOutcome::ShutDown);
+    assert_eq!(
+        rig.release(NodeHolder::Background).await,
+        ReleaseOutcome::ShutDown
+    );
     assert!(node.is_shut());
 }
 
@@ -602,7 +657,10 @@ async fn one_app_context_of_several_letting_go_does_not_detach() {
     let (node, _) = rig.app("alice").await;
     rig.app("alice").await;
     rig.background("alice").await.unwrap();
-    assert_eq!(rig.release(NodeHolder::App).await, ReleaseOutcome::StillHeld);
+    assert_eq!(
+        rig.release(NodeHolder::App).await,
+        ReleaseOutcome::StillHeld
+    );
     assert_eq!(node.detaches(), 0, "another JS context is still listening");
 }
 
@@ -611,7 +669,10 @@ async fn the_background_runtime_letting_go_never_detaches_the_app() {
     let rig = rig();
     let (node, _) = rig.app("alice").await;
     rig.background("alice").await.unwrap();
-    assert_eq!(rig.release(NodeHolder::Background).await, ReleaseOutcome::StillHeld);
+    assert_eq!(
+        rig.release(NodeHolder::Background).await,
+        ReleaseOutcome::StillHeld
+    );
     assert_eq!(node.detaches(), 0);
     assert!(!node.is_shut());
 }
@@ -621,7 +682,10 @@ async fn a_failed_shutdown_still_forgets_the_node_and_says_so() {
     let rig = rig();
     rig.behaviour.set_shutdown(ShutdownMode::Fails);
     rig.app("alice").await;
-    assert_eq!(rig.release(NodeHolder::App).await, ReleaseOutcome::ShutdownFailed);
+    assert_eq!(
+        rig.release(NodeHolder::App).await,
+        ReleaseOutcome::ShutdownFailed
+    );
     let snapshot = rig.host.snapshot();
     assert!(!snapshot.has_node);
     assert_eq!(snapshot.shutdown_failures, 1);
@@ -644,7 +708,10 @@ async fn a_shutdown_that_never_returns_is_bounded_and_counted() {
         "the release must return at its budget, not when the shutdown does"
     );
     let snapshot = rig.host.snapshot();
-    assert!(!snapshot.has_node, "a hung node is forgotten, not handed out again");
+    assert!(
+        !snapshot.has_node,
+        "a hung node is forgotten, not handed out again"
+    );
     assert_eq!(snapshot.shutdown_timeouts, 1);
 
     // The host is still usable. The one place two nodes can coexist is here, and it is counted.
@@ -684,7 +751,10 @@ async fn a_release_with_no_node_left_is_released() {
         .expect_err("the rebuild fails");
     let snapshot = rig.host.snapshot();
     assert!(!snapshot.has_node);
-    assert_eq!(snapshot.app_leases, 1, "the lease is not the restart's to drop");
+    assert_eq!(
+        snapshot.app_leases, 1,
+        "the lease is not the restart's to drop"
+    );
     assert_eq!(rig.release(NodeHolder::App).await, ReleaseOutcome::Released);
 }
 
@@ -724,7 +794,10 @@ async fn racing_acquires_on_an_empty_host_build_exactly_once() {
                 .0
         });
         let (app, background) = (app.await.unwrap(), background.await.unwrap());
-        assert!(Arc::ptr_eq(&app, &background), "both sides must get the same node");
+        assert!(
+            Arc::ptr_eq(&app, &background),
+            "both sides must get the same node"
+        );
         assert_eq!(rig.host.snapshot().builds, 1);
         assert_eq!(rig.ledger.max_live(), 1);
     }
@@ -788,7 +861,10 @@ async fn many_contexts_coming_and_going_never_leave_two_nodes() {
     assert!(!snapshot.has_node, "everyone left, so the node is gone");
     assert_eq!(rig.ledger.live(), 0);
     assert_eq!(rig.ledger.max_live(), 1, "{:?}", rig.ledger.events());
-    assert_eq!(snapshot.builds, snapshot.shutdowns, "every node built was shut down");
+    assert_eq!(
+        snapshot.builds, snapshot.shutdowns,
+        "every node built was shut down"
+    );
 }
 
 // ── Restart ──────────────────────────────────────────────────────────────────────────────────────
@@ -859,7 +935,10 @@ async fn the_background_runtime_cannot_start_a_restarted_node_with_the_old_setti
     let (during, _) = rig.background("alice").await.unwrap();
     let restarted = restart.await.unwrap().unwrap();
 
-    assert!(Arc::ptr_eq(&during, &restarted), "it waited for, then adopted, the new node");
+    assert!(
+        Arc::ptr_eq(&during, &restarted),
+        "it waited for, then adopted, the new node"
+    );
     assert_eq!(restarted.started().as_deref(), Some("explicit:new"));
 }
 
@@ -953,9 +1032,10 @@ impl Model {
 
     fn app(&mut self, identity: Option<&[u8]>) -> Expect {
         self.app += 1;
-        let adoptable = self.node.as_ref().map(|(_, live)| {
-            identity.map_or(true, |id| id == live.as_slice())
-        });
+        let adoptable = self
+            .node
+            .as_ref()
+            .map(|(_, live)| identity.map_or(true, |id| id == live.as_slice()));
         match adoptable {
             Some(true) => Expect::Acquired(AcquireOutcome::Adopted),
             Some(false) => {
@@ -1074,7 +1154,12 @@ async fn check_sequence(sequence: &[Op]) {
         let snapshot = rig.host.snapshot();
         let current = rig.host.current();
         assert_eq!(snapshot.app_leases, model.app, "app leases: {}", context());
-        assert_eq!(snapshot.background, model.background, "background: {}", context());
+        assert_eq!(
+            snapshot.background,
+            model.background,
+            "background: {}",
+            context()
+        );
         assert_eq!(snapshot.builds, model.builds, "builds: {}", context());
         assert_eq!(
             current.as_ref().map(|n| (n.id, n.identity.clone())),
@@ -1099,9 +1184,17 @@ async fn check_sequence(sequence: &[Op]) {
         let current_id = current.as_ref().map(|n| n.id);
         let generation = rig.host.generation();
         if current_id != last_current {
-            assert!(generation > last_generation, "node changed, generation did not: {}", context());
+            assert!(
+                generation > last_generation,
+                "node changed, generation did not: {}",
+                context()
+            );
         }
-        assert!(generation >= last_generation, "generation went backwards: {}", context());
+        assert!(
+            generation >= last_generation,
+            "generation went backwards: {}",
+            context()
+        );
         last_generation = generation;
         last_current = current_id;
         // A started node is started from the right place: a restart's from its explicit settings.

@@ -62,9 +62,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::RwLock as StdRwLock;
 #[cfg(target_os = "android")]
 use std::sync::OnceLock;
+use std::sync::RwLock as StdRwLock;
 
 use iroh::{
     address_lookup::MemoryLookup, protocol::Router, Endpoint, EndpointAddr, EndpointId, SecretKey,
@@ -1419,7 +1419,6 @@ impl LocationNode {
         }))
     }
 
-
     /// Clone this node's live handles and RELEASE the node lock. See [`Live`].
     ///
     /// Every method below that touches the endpoint, gossip or the docs engines starts here. The
@@ -2772,7 +2771,11 @@ impl LocationNode {
                 tracing::Span::current().record("outcome", "adopted");
                 return Ok(existing);
             }
-            let outcome = if slot.is_some() { "recreated" } else { "created" };
+            let outcome = if slot.is_some() {
+                "recreated"
+            } else {
+                "created"
+            };
             if let Some(listener) = &listener {
                 *node.listener.lock().await = Some(listener.clone());
             }

@@ -16,8 +16,10 @@
 use std::path::PathBuf;
 
 use iroh_location::ratchet::{KEY_LEN, SESSION_ID_LEN};
-use iroh_location::session_store::SessionStore;
-use iroh_location::sessions::{Broken, Health, Role, SessionManager, STUCK_NO_SEND_MS};
+use iroh_location::session_store::{RestartRequest, SessionStore};
+use iroh_location::sessions::{
+    Broken, Health, Role, SessionManager, PAIRING_ORIGIN_SKEW_MS, STUCK_NO_SEND_MS,
+};
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
 
 const IDENTITY: &[u8] = b"an identity secret, 32 bytes ok!";
@@ -182,12 +184,103 @@ fn a_peer_we_never_paired_is_not_broken() {
 
 #[test]
 fn a_re_pair_resets_what_the_leader_has_answered() {
-    // A follower's request counter is its own clock, and nothing it asked for under an old
-    // relationship is owed under a new one — nor may an old answer swallow a new request.
+    // Nothing the follower asked for under an old relationship is owed under a new one — nor may
+    // an old answer swallow a new request. The ledger restarts at the pairing, less the origin
+    // skew, so a follower whose clock runs behind ours can still be heard about THIS session.
     let scratch = Scratch::new("repair-answered");
     let manager = scratch.manager(LEADER_SELF);
-    pair_as_leader(&manager, 1_000);
-    assert_eq!(manager.assess(PEER, 1_000).answered_request_ts, 0);
-    pair_as_leader(&manager, 2_000);
-    assert_eq!(manager.assess(PEER, 2_000).answered_request_ts, 0);
+    let first = 20 * 60 * 1000;
+    pair_as_leader(&manager, first);
+    assert_eq!(
+        manager.assess(PEER, first).answered_request_ts,
+        first - PAIRING_ORIGIN_SKEW_MS
+    );
+    let second = first + 6 * 60 * 60 * 1000;
+    pair_as_leader(&manager, second);
+    assert_eq!(
+        manager.assess(PEER, second).answered_request_ts,
+        second - PAIRING_ORIGIN_SKEW_MS
+    );
+}
+
+#[test]
+fn a_re_pair_withdraws_the_followers_outstanding_request() {
+    // 2026-10-06: a Pixel asked for a restart at 16:23, the restart never reached it, and the two
+    // were re-paired at 00:37. The request survived the re-pair, rode the next control record,
+    // and restarted a session five seconds old. A pairing must take it back.
+    let scratch = Scratch::new("repair-request");
+    let manager = scratch.manager(FOLLOWER_SELF);
+    pair_as_follower(&manager, 1_000);
+    manager
+        .set_request(RestartRequest {
+            peer: [0xbb; 32],
+            ts: 2_000,
+            origin_at_request: 0,
+        })
+        .unwrap();
+    assert_eq!(manager.requests().unwrap().len(), 1);
+    pair_as_follower(&manager, 3_000);
+    assert!(manager.requests().unwrap().is_empty());
+}
+
+#[test]
+fn removing_a_friend_withdraws_our_request_to_them() {
+    let scratch = Scratch::new("remove-request");
+    let manager = scratch.manager(FOLLOWER_SELF);
+    pair_as_follower(&manager, 1_000);
+    manager
+        .set_request(RestartRequest {
+            peer: [0xbb; 32],
+            ts: 2_000,
+            origin_at_request: 0,
+        })
+        .unwrap();
+    manager.remove(PEER).unwrap();
+    assert!(manager.requests().unwrap().is_empty());
+}
+
+#[test]
+fn a_request_from_before_the_re_pair_does_not_restart_it() {
+    // The leader half of 2026-10-06: the follower's control record still carried a request from
+    // the broken session (8 h old) when the new pairing landed, and the leader answered it.
+    use iroh_location::restart::{plan_leader, Action, ControlRecord};
+    use iroh_location::sessions::PublishedPrekey;
+
+    let scratch = Scratch::new("repair-stale-request");
+    let manager = scratch.manager(LEADER_SELF);
+    let paired_at = 24 * 60 * 60 * 1000;
+    pair_as_leader(&manager, paired_at);
+    let follower: [u8; 32] = [0xbb; 32];
+    let prekey = PublishedPrekey {
+        id: 1,
+        public: [9; 32],
+        created_ms: paired_at - 60_000,
+    };
+    let record_with = |request_ts: u64| {
+        ControlRecord::new(
+            &follower,
+            paired_at,
+            &[prekey],
+            &[RestartRequest {
+                peer: LEADER_SELF,
+                ts: request_ts,
+                origin_at_request: 0,
+            }],
+        )
+    };
+    let now = paired_at + 5_000;
+    let assessment = manager.assess(PEER, now);
+
+    let stale = record_with(paired_at - 8 * 60 * 60 * 1000);
+    assert_eq!(
+        plan_leader(&assessment, Some(&stale), &LEADER_SELF, &follower, now),
+        Action::None
+    );
+
+    // A follower clock running a few minutes behind still reaches us about THIS session.
+    let behind = record_with(paired_at - 2 * 60 * 1000);
+    assert!(matches!(
+        plan_leader(&assessment, Some(&behind), &LEADER_SELF, &follower, now),
+        Action::Restart { .. }
+    ));
 }

@@ -272,7 +272,9 @@ impl<F: NodeFactory> Host<F> {
         // A panic while holding this lock leaves counters, not invariants, half-updated: every
         // write below is a single assignment or a `set_slot`. Recover rather than poison the node
         // for the rest of the process.
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// The node, if there is one. Platform code caches this by [`Self::generation`].
@@ -700,7 +702,11 @@ pub struct LocationNodeFactory;
 impl NodeFactory for LocationNodeFactory {
     type Node = LocationNode;
 
-    fn build(&self, keys: &NodeKeys, roots: &NodeRoots) -> Result<Arc<LocationNode>, LocationError> {
+    fn build(
+        &self,
+        keys: &NodeKeys,
+        roots: &NodeRoots,
+    ) -> Result<Arc<LocationNode>, LocationError> {
         crate::new_location_node_at(
             keys.identity.clone(),
             keys.recv.clone(),

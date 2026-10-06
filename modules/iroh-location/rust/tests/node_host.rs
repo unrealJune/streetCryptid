@@ -279,9 +279,14 @@ async fn the_app_leaving_keeps_the_node_running_for_the_background_runtime() {
         host.release(NodeHolder::App, BUDGET_MS).await,
         ReleaseOutcome::StillHeld
     );
-    let node = host.current().expect("the background runtime still holds it");
+    let node = host
+        .current()
+        .expect("the background runtime still holds it");
     assert!(node.is_started().await);
-    assert!(node.ticket().await.is_ok(), "and it is still a working node");
+    assert!(
+        node.ticket().await.is_ok(),
+        "and it is still a working node"
+    );
 
     assert_eq!(
         host.release(NodeHolder::Background, BUDGET_MS).await,
@@ -359,7 +364,10 @@ async fn a_restart_builds_a_new_node_on_freed_claims_and_keeps_the_identity() {
     let new = host.restart(offline(), BUDGET_MS).await.expect("restart");
     assert!(!Arc::ptr_eq(&old, &new));
     assert!(!old.is_started().await, "the old node is shut down");
-    assert!(new.is_started().await, "the new one started — so the claims were free");
+    assert!(
+        new.is_started().await,
+        "the new one started — so the claims were free"
+    );
     assert_eq!(new.identity_secret(), old.identity_secret());
     assert_eq!(new.endpoint_id(), old.endpoint_id());
     assert!(host.generation() > generation);
@@ -398,7 +406,10 @@ async fn a_different_identity_replaces_the_node_and_its_claims() {
         .await
         .unwrap();
     assert!(!Arc::ptr_eq(&a, &c));
-    assert!(!a.is_started().await, "the old identity's node was shut down first");
+    assert!(
+        !a.is_started().await,
+        "the old identity's node was shut down first"
+    );
     assert_eq!(c.identity_secret(), other.identity_secret());
     assert_eq!(host.snapshot().replacements, 1);
 }
@@ -428,7 +439,10 @@ async fn the_own_topic_has_one_subscription_however_many_callers_ask() {
         .unwrap();
     let background = node.clone().own_subscription(vec![], None).await.unwrap();
     assert!(Arc::ptr_eq(&app, &again), "a second subscribe adopts");
-    assert!(Arc::ptr_eq(&app, &background), "the background runtime adopts too");
+    assert!(
+        Arc::ptr_eq(&app, &background),
+        "the background runtime adopts too"
+    );
 
     // Every OTHER topic keeps its old behaviour: one subscription per call.
     let friend_topic = derive_topic(vec![7; 32]);
@@ -465,12 +479,20 @@ async fn the_own_subscription_outlives_a_dropped_handle_and_dies_with_the_node()
     // JS `unsubscribe` destroys its handle. The background runtime is still publishing through it.
     drop(first);
     let second = node.clone().own_subscription(vec![], None).await.unwrap();
-    assert_eq!(Arc::as_ptr(&second), first_ptr, "still the same subscription");
+    assert_eq!(
+        Arc::as_ptr(&second),
+        first_ptr,
+        "still the same subscription"
+    );
     drop(second);
 
     host.restart(offline(), BUDGET_MS).await.unwrap();
     let restarted = host.current().unwrap();
-    let after = restarted.clone().own_subscription(vec![], None).await.unwrap();
+    let after = restarted
+        .clone()
+        .own_subscription(vec![], None)
+        .await
+        .unwrap();
     assert_ne!(
         Arc::as_ptr(&after),
         first_ptr,
@@ -518,13 +540,20 @@ async fn adopting_the_own_subscription_with_a_listener_takes_over_its_events() {
         .await
         .unwrap();
     // A new JS context subscribes: the events are now its, not the old one's.
-    let _b = node.clone().subscribe(own, vec![], new.clone()).await.unwrap();
+    let _b = node
+        .clone()
+        .subscribe(own, vec![], new.clone())
+        .await
+        .unwrap();
     // The background runtime adopting with `None` must NOT silence the app.
     let _c = node.clone().own_subscription(vec![], None).await.unwrap();
 
     let _peer = peer_joins(&node, "listener-swap-peer").await;
     eventually("peer-up on the newest listener", || new.heard("peer-up")).await;
-    assert!(!old.heard("peer-up"), "a replaced listener must hear nothing more");
+    assert!(
+        !old.heard("peer-up"),
+        "a replaced listener must hear nothing more"
+    );
 }
 
 #[tokio::test]
@@ -548,7 +577,11 @@ async fn the_app_leaving_silences_its_listener_but_not_the_subscription() {
     let app_listener = Arc::new(Recorder::default());
     let own = node
         .clone()
-        .subscribe(derive_topic(node.endpoint_id()), vec![], app_listener.clone())
+        .subscribe(
+            derive_topic(node.endpoint_id()),
+            vec![],
+            app_listener.clone(),
+        )
         .await
         .unwrap();
 
@@ -561,7 +594,10 @@ async fn the_app_leaving_silences_its_listener_but_not_the_subscription() {
         "events must not flow into a JS context that has gone"
     );
     let still = node.clone().own_subscription(vec![], None).await.unwrap();
-    assert!(Arc::ptr_eq(&own, &still), "the background runtime's subscription is untouched");
+    assert!(
+        Arc::ptr_eq(&own, &still),
+        "the background runtime's subscription is untouched"
+    );
 }
 
 // ── Two holders driving one node ─────────────────────────────────────────────────────────────────
@@ -592,7 +628,11 @@ async fn drains_from_both_holders_on_one_node_serialize_and_all_finish() {
         .unwrap()
         .unwrap();
     let app_sub = node.clone().own_subscription(vec![], None).await.unwrap();
-    let background_sub = background.clone().own_subscription(vec![], None).await.unwrap();
+    let background_sub = background
+        .clone()
+        .own_subscription(vec![], None)
+        .await
+        .unwrap();
     assert!(Arc::ptr_eq(&app_sub, &background_sub));
 
     let battery = BatteryState {
