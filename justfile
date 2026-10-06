@@ -193,6 +193,12 @@ e2e-matrix *args:
 e2e-matrix-list:
     bash scripts/e2e/run-matrix.sh --list
 
+# Physical-iPhone field soak (scripts/field-soak/README.md): a real phone whose GPS this Mac
+# drives through simulated walks, graded against ground truth by a headless Sonnet every 2 h.
+# Example: `just field-soak status` / `just field-soak check --hours 6`
+field-soak *args:
+    scripts/field-soak/fs {{args}}
+
 # Long-running soak: repeatedly drives one or more single-device scenarios for `hours`, sampling
 # event_log every `sample-minutes` instead of asserting once at the end. Meant to be left running.
 # Example: `just e2e-soak auto background-walking 6`
