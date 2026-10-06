@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# One entry point for the field soak, for humans and for the Sonnet ticks alike.
+#
+#   fs status                      walker state: connected?, where, active outing, queue, app pid
+#   fs shot                        screenshot the phone -> prints the PNG path
+#   fs launch "<why>"              bring the app to the front (launching it if needed)
+#   fs background                  send it to the back (Settings comes forward)
+#   fs ax ["<text>"]               list on-screen elements / press the one whose caption has <text>
+#   fs conditions                  list network/thermal condition profiles the phone offers
+#   fs condition <profile> [min]   impose one for N minutes (default 30); fs condition clear
+#   fs geocode "<place>"           Nominatim lookup
+#   fs plan --name ... --stop ...  queue an outing (see plan_outing.py --help)
+#   fs dequeue <id|all>            drop queued outings (never the active one)
+#   fs check [--hours N]           grade the app against ground truth -> verdict JSON + summary
+#   fs tempo '<traceql>' [hours]   raw Tempo search (token handled here, never printed)
+#   fs trace <traceID>             one full trace
+#   fs discover [hours]            instance ids seen recently, with build info
+#   fs notify "<msg>"              Discord (webhook file) or macOS notification
+#   fs events [hours] / fs journal-tail
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="${FIELD_SOAK_PY:-$HOME/.local/share/streetcryptid-field/venv/bin/python}"
+STATE="${FIELD_SOAK_STATE:-$HOME/.local/state/streetcryptid-field}"
+PORT="${FIELD_SOAK_PORT:-47811}"
+ctl() { curl -sS -m 60 -X "$1" "http://127.0.0.1:$PORT$2"; echo; }
+
+cmd="${1:-status}"; shift || true
+case "$cmd" in
+  status) ctl GET /status ;;
+  shot) ctl POST /screenshot ;;
+  background) ctl POST /background ;;
+  # WebDriverAgent: fs type "text" | fs tap X Y | fs tapon "label" | fs swipe X1 Y1 X2 Y2 |
+  #               fs press home|lock|volumeup | fs ui (compact element tree) | fs wda-stop
+  # fs type [--clear N] 'text'   — backslash escapes are decoded: \n newline, \b backspace,
+  # \\ a literal backslash. --clear N sends N backspaces first.
+  type)
+    clear=0; if [ "${1:-}" = --clear ]; then clear="$2"; shift 2; fi
+    # 'text' may be @path to type a file verbatim (no escape decoding) — for ASCII art.
+    ctl GET "/wda/type?text=$("$PY" -c '
+import sys,codecs,urllib.parse,pathlib
+a=sys.argv[1]
+t=pathlib.Path(a[1:]).read_text().rstrip("\n") if a.startswith("@") else codecs.decode(a,"unicode_escape")
+print(urllib.parse.quote("\b"*int(sys.argv[2])+t))' "$1" "$clear")" ;;
+  tap) ctl GET "/wda/tap?x=$1&y=$2" ;;
+  tapon) ctl GET "/wda/tapon?text=$("$PY" -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$1")" ;;
+  swipe) ctl GET "/wda/swipe?x1=$1&y1=$2&x2=$3&y2=$4" ;;
+  press) ctl GET "/wda/press?button=$1" ;;
+  ui) ctl GET /wda/source ;;
+  pasteboard) ctl GET /wda/pasteboard ;;
+  wda-stop) ctl GET /wda/stop ;;
+  launch) ctl POST "/launch?why=$("$PY" -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "${1:-unspecified}")" ;;
+  conditions) ctl GET /conditions ;;
+  ax) # fs ax            list on-screen elements of the foreground app
+      # fs ax "<text>"   press the first element whose caption contains <text>
+    if [ -n "${1:-}" ]; then ctl GET "/ax?press=$("$PY" -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$1")"; else ctl GET /ax; fi ;;
+  condition)
+    if [ "${1:-}" = clear ]; then ctl POST /condition/clear; else ctl POST "/condition?profile=$1&minutes=${2:-30}"; fi ;;
+  geocode) exec "$PY" "$HERE/plan_outing.py" geocode "$@" ;;
+  plan) exec "$PY" "$HERE/plan_outing.py" plan "$@" ;;
+  dequeue)
+    if [ "${1:-}" = all ]; then rm -f "$STATE"/queue/*.json; else rm -f "$STATE/queue/$1.json"; fi
+    ls "$STATE/queue" ;;
+  # fs inbox [--peek]  new Discord messages since last read | fs say [--reply-to ID] "msg"|@file
+  check | tempo | trace | discover | notify | inbox | say) exec "$PY" "$HERE/check.py" "$cmd" "$@" ;;
+  events) exec "$PY" -c 'import sys,json,time;sys.path.insert(0,sys.argv[1]);import common as C
+for r in C.read_jsonl(C.EVENTS,time.time()-float(sys.argv[2])*3600):print(time.strftime("%m-%d %H:%M:%S",time.localtime(r["t"])),json.dumps({k:v for k,v in r.items() if k!="t"}))' "$HERE" "${1:-24}" ;;
+  journal-tail) tail -n "${1:-80}" "$STATE/journal.md" 2>/dev/null || echo "(no journal yet)" ;;
+  *) sed -n '2,19p' "$0"; exit 2 ;;
+esac
