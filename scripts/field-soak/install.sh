@@ -22,7 +22,13 @@ fi
 load() {
   local label="$1" plist="$AGENTS/$1.plist"
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$plist"
+  # bootout returns before the job is gone; bootstrapping over it fails with "5: Input/output
+  # error". Wait for it to disappear, and retry once for good measure.
+  for _ in $(seq 1 20); do
+    launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 || break
+    sleep 0.5
+  done
+  launchctl bootstrap "gui/$(id -u)" "$plist" || { sleep 3; launchctl bootstrap "gui/$(id -u)" "$plist"; }
   echo "loaded $label"
 }
 
