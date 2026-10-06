@@ -699,12 +699,20 @@ export default function ActivePairingScreen() {
    * for a screen the user had just dismissed. REJECT was worse — it awaits a native round trip
    * between clearing the friend and closing, so the radio stayed armed for the whole of it, and
    * nothing guaranteed `cancelBump` won the race at all.
+   *
+   * `router.back()` is only a way out when there is something to go back to. A pairing link that
+   * cold-launches the app makes this screen the ONLY route on the stack, and there `back()` is a
+   * silent no-op: the screen stays mounted with `leaving` latched, so Bump can never arm and the
+   * stage falls through to `bump-starting` — "STARTING NEARBY PAIRING" forever, after a pair that
+   * had completed. An iPhone did exactly that on 2026-10-05 (`pool.friend_added` at 22:18:17,
+   * then 300 ms `pairing.poll`s on a screen the user had acknowledged). Replace onto the map.
    */
   const close = useCallback((): void => {
     routeActive.current = false;
     setLeaving(true);
     void standDown();
-    router.back();
+    if (router.canGoBack()) router.back();
+    else router.replace('/');
   }, [router, standDown]);
 
   const decideFriend = useCallback(
