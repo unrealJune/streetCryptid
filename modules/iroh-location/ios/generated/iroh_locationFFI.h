@@ -554,6 +554,11 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_initiate_pair_nearby(uint64
 uint64_t uniffi_iroh_location_fn_method_locationnode_is_desynced(uint64_t ptr, RustBuffer peer_endpoint_hex
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_IS_STARTED
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_IS_STARTED
+uint64_t uniffi_iroh_location_fn_method_locationnode_is_started(uint64_t ptr
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_LAST_SEAL_REPORT
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_LAST_SEAL_REPORT
 uint64_t uniffi_iroh_location_fn_method_locationnode_last_seal_report(uint64_t ptr
@@ -582,6 +587,11 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_next_seq(uint64_t ptr
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_OUTBOX_PENDING
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_OUTBOX_PENDING
 uint64_t uniffi_iroh_location_fn_method_locationnode_outbox_pending(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_OWN_SUBSCRIPTION
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_OWN_SUBSCRIPTION
+uint64_t uniffi_iroh_location_fn_method_locationnode_own_subscription(uint64_t ptr, RustBuffer bootstrap, RustBuffer listener
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_PAIR_RESULT
@@ -899,6 +909,51 @@ uint64_t uniffi_iroh_location_fn_method_subscription_publish_null_traced(uint64_
 uint64_t uniffi_iroh_location_fn_method_subscription_publish_traced(uint64_t ptr, uint64_t seq, RustBuffer fix, RustBuffer recipient_endpoints, RustBuffer traceparent
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CLONE_NODEHOST
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_CLONE_NODEHOST
+uint64_t uniffi_iroh_location_fn_clone_nodehost(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FREE_NODEHOST
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FREE_NODEHOST
+void uniffi_iroh_location_fn_free_nodehost(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_ACQUIRE_APP
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_ACQUIRE_APP
+uint64_t uniffi_iroh_location_fn_method_nodehost_acquire_app(uint64_t ptr, RustBuffer identity_secret, RustBuffer recv_secret, RustBuffer data_root, RustBuffer state_root
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_ACQUIRE_BACKGROUND
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_ACQUIRE_BACKGROUND
+uint64_t uniffi_iroh_location_fn_method_nodehost_acquire_background(uint64_t ptr, uint64_t secrets, RustBuffer data_root, RustBuffer state_root
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_CURRENT
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_CURRENT
+RustBuffer uniffi_iroh_location_fn_method_nodehost_current(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_GENERATION
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_GENERATION
+uint64_t uniffi_iroh_location_fn_method_nodehost_generation(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_RELEASE
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_RELEASE
+uint64_t uniffi_iroh_location_fn_method_nodehost_release(uint64_t ptr, RustBuffer holder, uint64_t timeout_ms
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_RESTART
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_RESTART
+uint64_t uniffi_iroh_location_fn_method_nodehost_restart(uint64_t ptr, RustBuffer config, uint64_t timeout_ms
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_NODEHOST_SNAPSHOT
+RustBuffer uniffi_iroh_location_fn_method_nodehost_snapshot(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_DECODE_MVT_BUNDLE
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_DECODE_MVT_BUNDLE
 RustBuffer uniffi_iroh_location_fn_func_decode_mvt_bundle(RustBuffer bundle, RustCallStatus *_Nonnull out_status
@@ -979,6 +1034,12 @@ RustBuffer uniffi_iroh_location_fn_func_mesh_open_fix(RustBuffer recv_secret, Ru
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_SEAL_FIX
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_MESH_SEAL_FIX
 RustBuffer uniffi_iroh_location_fn_func_mesh_seal_fix(RustBuffer identity_secret, RustBuffer recv_secret, RustBuffer author_endpoint_id, uint64_t seq, uint32_t mesh_epoch, RustBuffer fix, RustBuffer recipients, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_NODE_HOST
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_NODE_HOST
+uint64_t uniffi_iroh_location_fn_func_node_host(RustCallStatus *_Nonnull out_status
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_RECORD_LOCATION_RUNTIME
@@ -1353,6 +1414,12 @@ uint16_t uniffi_iroh_location_checksum_func_mesh_seal_fix(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_NODE_HOST
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_NODE_HOST
+uint16_t uniffi_iroh_location_checksum_func_node_host(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_RECORD_LOCATION_RUNTIME
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_RECORD_LOCATION_RUNTIME
 uint16_t uniffi_iroh_location_checksum_func_record_location_runtime(void
@@ -1611,6 +1678,12 @@ uint16_t uniffi_iroh_location_checksum_method_locationnode_is_desynced(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_IS_STARTED
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_IS_STARTED
+uint16_t uniffi_iroh_location_checksum_method_locationnode_is_started(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_LAST_SEAL_REPORT
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_LAST_SEAL_REPORT
 uint16_t uniffi_iroh_location_checksum_method_locationnode_last_seal_report(void
@@ -1644,6 +1717,12 @@ uint16_t uniffi_iroh_location_checksum_method_locationnode_next_seq(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_OUTBOX_PENDING
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_OUTBOX_PENDING
 uint16_t uniffi_iroh_location_checksum_method_locationnode_outbox_pending(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_OWN_SUBSCRIPTION
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_OWN_SUBSCRIPTION
+uint16_t uniffi_iroh_location_checksum_method_locationnode_own_subscription(void
     
 );
 #endif
@@ -1992,6 +2071,48 @@ uint16_t uniffi_iroh_location_checksum_method_subscription_publish_null_traced(v
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH_TRACED
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_SUBSCRIPTION_PUBLISH_TRACED
 uint16_t uniffi_iroh_location_checksum_method_subscription_publish_traced(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_ACQUIRE_APP
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_ACQUIRE_APP
+uint16_t uniffi_iroh_location_checksum_method_nodehost_acquire_app(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_ACQUIRE_BACKGROUND
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_ACQUIRE_BACKGROUND
+uint16_t uniffi_iroh_location_checksum_method_nodehost_acquire_background(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_CURRENT
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_CURRENT
+uint16_t uniffi_iroh_location_checksum_method_nodehost_current(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_GENERATION
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_GENERATION
+uint16_t uniffi_iroh_location_checksum_method_nodehost_generation(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_RELEASE
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_RELEASE
+uint16_t uniffi_iroh_location_checksum_method_nodehost_release(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_RESTART
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_RESTART
+uint16_t uniffi_iroh_location_checksum_method_nodehost_restart(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_NODEHOST_SNAPSHOT
+uint16_t uniffi_iroh_location_checksum_method_nodehost_snapshot(void
     
 );
 #endif

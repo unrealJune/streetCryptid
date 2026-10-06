@@ -12,6 +12,7 @@ import type {
   NativeControlMsg,
   NativeRatchetEvent,
   NativeLocationFix,
+  NodeHostSnapshot,
   NodeKeys,
   PairEvent,
   PairInvite,
@@ -175,6 +176,8 @@ export declare class IrohLocationNativeModule
   resetBackgroundWakeStats?(): void;
   handOverNativeBackground?(timeoutMs: number): Promise<boolean>;
   nativeNodeOwner?(): string;
+  restartNode?(config?: TransportConfig): Promise<void>;
+  nodeHostSnapshot?(): NodeHostSnapshot | null;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**
@@ -472,7 +475,7 @@ export declare class IrohLocationNativeModule
  */
 type RawIrohLocationNativeModule = Omit<
   IrohLocationNativeModule,
-  'start' | 'setTransportConfig'
+  'start' | 'setTransportConfig' | 'restartNode'
 > & {
   start(
     relayUrls: string[],
@@ -482,6 +485,13 @@ type RawIrohLocationNativeModule = Omit<
     bleEnabled: boolean
   ): Promise<void>;
   setTransportConfig?(
+    relayUrls: string[],
+    relayAuthToken: string,
+    relayEnabled: boolean,
+    ipEnabled: boolean,
+    bleEnabled: boolean
+  ): Promise<void>;
+  restartNode?(
     relayUrls: string[],
     relayAuthToken: string,
     relayEnabled: boolean,
@@ -508,8 +518,8 @@ function withRelayConfig(raw: RawIrohLocationNativeModule): IrohLocationNativeMo
 
       // Same treatment, same reason: the relay URLs and token are this bundle's build-time
       // constants, so callers pass only the toggles and never have to know where the rest lives.
-      if (property === 'setTransportConfig') {
-        const native = target.setTransportConfig?.bind(target);
+      if (property === 'setTransportConfig' || property === 'restartNode') {
+        const native = target[property]?.bind(target);
         // Left undefined on a binary that predates the native drain path, so the callers'
         // `typeof mod.setTransportConfig === 'function'` guard still reports the truth rather than
         // finding this wrapper and failing inside it.

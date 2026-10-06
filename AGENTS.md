@@ -172,16 +172,30 @@ Conventions when changing that code:
   phone receiving fixes. A redelivery may still confirm a pending dwell, and otherwise drives a
   no-claim heartbeat at most once a minute, since on a JS-free process nothing else ticks while
   `moving`.
-- **Who owns the Rust stores is now stated, not raced.** `BackgroundLocationRuntime.owner` defaults
-  to `.app`, and `ensureStarted()` returns on its first line unless it is `.native` — which removes
-  the reason for the 2026-09-16 construction storm rather than merely bounding it, since the
-  refusal path no longer builds a whole `LocationNode` to have it refused. Only a launch that does
-  not start React calls `adoptNodeOwnership()`. **`releaseNativeBackground` does NOT free the
-  claims**: `WriterClaim` releases on the last `Arc` drop, and `Subscription` and the spawned
-  receive task each hold their own `Arc<LocationNode>` — only `shutdown` nils them all and detaches
-  the pair runtime. `yieldNode` races that shutdown against a Swift-side timeout so the promise
-  always settles (AGENTS.md's rule is about a promise that never _settles_), JS bounds it again,
-  and `startNativeBounded` retries once — once, not in a loop.
+- **There is ONE node per process, and only `NodeHost` builds it** (`rust/src/host.rs`). The
+  mounted app (every JS context, through the module's `createNode`/`shutdown`) and the native
+  background runtime (`acquireBackground`) take LEASES on it; the last one out shuts it down,
+  bounded, on its own task. This replaced two nodes racing for the process-wide store claim and
+  every rule that grew up around that race — an iOS owner flag, a claim backoff on both platforms,
+  a sink gate, a bounded `handOverNativeBackground` — which existed in three hand-written copies
+  with no tests on the two platform copies, and Android was missing one: on 2026-10-03 its service built a
+  node in the seconds between the app's `createNode` and `start()`, the app's start met
+  `AlreadyOpen`, and a Pixel 10 spent 13.7 h unable to pair ("NOTHING FOUND"). The contract is in
+  the module docs and every rule is a test (`src/host/tests.rs` against fakes, including every
+  five-operation sequence against a reference model; `tests/node_host.rs` against real claims).
+  Rules that matter at the call sites: the app always gets a node (adopt, or REPLACE a different
+  identity — never refused); the background runtime never builds over anyone and never mints an
+  identity; a settings change is `restartNode`, never `shutdown` + `createNode` (that would only
+  return your own lease and adopt the same node back); and platform code caches the node by
+  `generation()` and must not `destroy()` a superseded handle (another call may be inside it).
+  The own topic is a SLOT on the node (`own_subscription`): a second `subscribe` adopts the live
+  one rather than opening a second receive loop, and listeners are swappable so a departing app's
+  are detached without stopping what the background runtime publishes through. Every drain on a
+  node is serialized (`drain_lock`), because two holders can now both drive one. The sink
+  (`eventSink` / `appIsWired()`) is ROUTING, not ownership: a wired app gets the capture because it
+  runs the sampling policy and draws the own marker, and both paths end in `ingestFix` on the same
+  node. `LocationNode::shutdown` releases every store even when the router fails to close — it
+  used to return early with all of them still claimed.
 - **`IrohBackgroundBootstrap.swift` runs before React, and must return `true`.**
   `ExpoAppDelegateSubscriberManager` reduces `willFinishLaunchingWithOptions` with
   `?? false || result` and short-circuits to `true` only when NO subscriber implements it; once ours
@@ -244,7 +258,9 @@ Conventions when changing that code:
   was never reached: no map, no working controls, no telemetry. Only a force-quit cleared it.
   The wait is now bounded by `INIT_WATCHDOG_MS` (`init-watchdog.ts`), an overrun emits
   `app.init.timeout`, and coming back to the foreground after one discards the wedged service and
-  retries rather than waiting again — the in-process equivalent of the force-quit.
+  retries rather than waiting again — the in-process equivalent of the force-quit. A REJECTED init
+  (`app.init.failed`) gets the same retry: clearing the latch was never enough, because the
+  provider does not remount and so nothing ever asked again.
 - **A stalled `init` names its own step, and only from disk.** `saveInitWatermark` stamps the phase
   (`create-node`, `native-start`, `tickets`, …) before each step that can block, and a later
   context reports it as `app.init.stranded` with `init.phase`. This exists because on 2026-09-18

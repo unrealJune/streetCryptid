@@ -112,7 +112,10 @@ class BackgroundLocationService : Service() {
     locationManager = null
     // Release the directory claims so a mounted app can take them back immediately, rather than
     // failing its first `createNode` until this process happens to be reaped.
-    scope.launch { NativeBackgroundRuntime.stop() }
+    //
+    // NOT `scope.launch`: the very next line cancels `scope`, and a coroutine cancelled before it is
+    // dispatched never runs — which is what this did until 2026-10-03, so the release never happened.
+    NativeBackgroundRuntime.stopDetached()
     scope.cancel()
     super.onDestroy()
   }
@@ -200,10 +203,10 @@ class BackgroundLocationService : Service() {
     val battery = readBattery()
     when (NativeBackgroundRuntime.heartbeat(applicationContext, battery, slotIntervalMs)) {
       is NativeBackgroundRuntime.Capture.Ingested -> Unit
-      // Same handover as a capture, and for the same reason — while the app is mounted it holds the
-      // store claim and is the only thing that can publish. `null` fix: a parked tick has no
-      // position, and `routeNativeCapture` reads `kind` to know that.
-      NativeBackgroundRuntime.Capture.AppOwnsNode ->
+      // Same hand-off as a capture: while the app is mounted it runs the pipeline's front half
+      // (policy, own marker). `null` fix: a parked tick has no position, and `routeNativeCapture`
+      // reads `kind` to know that.
+      NativeBackgroundRuntime.Capture.HandToApp ->
         IrohLocationModule.handOffCapture(
           fix = null,
           battery = battery,
@@ -235,15 +238,14 @@ class BackgroundLocationService : Service() {
           )
         }
       }
-      // The ordinary outcome whenever the app is alive: the store claim is process-wide, so the
-      // mounted runtime owns the node and is the only thing that can publish this. Handing it over
-      // IS the mounted path — dropping here is what left a Pixel silent for fifteen hours with a
-      // perfectly healthy service running.
-      NativeBackgroundRuntime.Capture.AppOwnsNode ->
+      // The ordinary outcome whenever the app is alive. Handing it over IS the mounted path —
+      // dropping here is what left a Pixel silent for fifteen hours with a perfectly healthy
+      // service running.
+      NativeBackgroundRuntime.Capture.HandToApp ->
         if (!IrohLocationModule.handOffCapture(fix, battery, reason = "movement")) {
-          // Sharing is off, or the module was torn down without stopping the service. Unlike the
+          // The module was torn down between the routing decision and the hand-off. Unlike the
           // queued cases this fix is simply gone, so say so rather than letting it look routine.
-          Log.w(TAG, "capture dropped: the app owns the node but nothing is listening for handoff")
+          Log.w(TAG, "capture dropped: the app was wired a moment ago and is not any more")
         }
       // No identity, or the ingest threw. The fix stays in the native outbox for the next wake.
       NativeBackgroundRuntime.Capture.Unavailable -> Unit

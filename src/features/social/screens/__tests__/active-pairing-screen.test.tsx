@@ -42,13 +42,19 @@ jest.mock('@/features/haptics/haptics', () => ({
   tapHaptic: jest.fn(async () => {}),
   warningHaptic: jest.fn(async () => {}),
 }));
+const mockBump = {
+  arming: false,
+  error: null as string | null,
+  sensor: { status: 'ready' },
+  arm: jest.fn(async () => {}),
+  /** What the screen asked for: whether Bump may hold the radio open. */
+  lastActive: null as boolean | null,
+};
 jest.mock('@/features/social/hooks/use-armed-bump', () => ({
-  useArmedBump: () => ({
-    arming: false,
-    error: null,
-    sensor: { status: 'ready' },
-    arm: jest.fn(async () => {}),
-  }),
+  useArmedBump: (active: boolean) => {
+    mockBump.lastActive = active;
+    return mockBump;
+  },
 }));
 jest.mock('@/features/social/hooks/use-pairing-haptics', () => ({
   usePairingHaptics: () => {},
@@ -81,9 +87,17 @@ function pairing(): PairingSnapshot {
   };
 }
 
+type ServicePhase = 'idle' | 'initializing' | 'ready' | 'failed' | 'stalled';
+
+function service(phase: ServicePhase = 'ready', error: string | null = null) {
+  return { phase, attempt: 1, error, initPhase: null };
+}
+
 const mockSharing = {
   snapshot: { ready: true },
   pairing: pairing(),
+  service: service(),
+  retryService: jest.fn(),
   createPairInvite: jest.fn<Promise<string | undefined>, [number]>(),
   cancelPairInvite: jest.fn<Promise<'cancelled' | 'absent' | 'unsupported'>, []>(),
   pairFromInput: jest.fn(async () => {}),
@@ -110,6 +124,9 @@ describe('ActivePairingScreen', () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
     mockSharing.pairing = pairing();
+    mockSharing.service = service();
+    mockBump.error = null;
+    mockBump.lastActive = null;
     mockSharing.cancelPairInvite.mockResolvedValue('cancelled');
     mockSharing.createPairInvite.mockResolvedValue(LINK);
     mockSharing.acknowledgeDiscoveredFriend.mockResolvedValue(undefined);
@@ -225,6 +242,87 @@ describe('ActivePairingScreen', () => {
     await act(async () => action('Close pairing').props.onPress());
     expect(mockSharing.rejectDiscoveredFriend).toHaveBeenCalledTimes(1);
     expect(mockSharing.acknowledgeDiscoveredFriend).not.toHaveBeenCalled();
+  });
+
+  describe('a service that did not start', () => {
+    /**
+     * 2026-10-03: init rejected after the background runtime took the store claim, Bump's arm threw
+     * "Friend sync is not ready yet.", and this screen showed "NOTHING FOUND" — with a TRY AGAIN
+     * that re-ran the same arm — for 13.7 hours.
+     */
+    it('says so, with the reason, instead of a Bump that found nobody', async () => {
+      mockSharing.service = service('failed', 'session store is already open');
+      mockSharing.pairing = { ...pairing(), bump: { ...pairing().bump, stage: 'idle' } };
+      await act(async () => {
+        renderer = create(<ActivePairingScreen />);
+      });
+      const text = JSON.stringify(renderer.toJSON());
+      expect(text).toContain('PAIRING IS NOT READY');
+      expect(text).toContain('session store is already open');
+      expect(text).not.toContain('NOTHING FOUND');
+    });
+
+    it('retries the SERVICE, not the Bump, when TRY AGAIN is pressed', async () => {
+      mockSharing.service = service('failed', 'boom');
+      await act(async () => {
+        renderer = create(<ActivePairingScreen />);
+      });
+      await act(async () => action('try again').props.onPress());
+      expect(mockSharing.retryService).toHaveBeenCalledTimes(1);
+      expect(mockBump.arm).not.toHaveBeenCalled();
+    });
+
+    it('treats a stalled start the same way', async () => {
+      mockSharing.service = service('stalled');
+      await act(async () => {
+        renderer = create(<ActivePairingScreen />);
+      });
+      expect(JSON.stringify(renderer.toJSON())).toContain('taking longer than it should');
+    });
+
+    it('never lets Bump hold the radio open against a service that is not up', async () => {
+      for (const phase of ['initializing', 'failed', 'stalled'] as const) {
+        mockSharing.service = service(phase);
+        await act(async () => {
+          renderer = create(<ActivePairingScreen />);
+        });
+        expect({ phase, active: mockBump.lastActive }).toEqual({ phase, active: false });
+        await act(async () => renderer.unmount());
+      }
+      mockSharing.service = service('ready');
+      await act(async () => {
+        renderer = create(<ActivePairingScreen />);
+      });
+      expect(mockBump.lastActive).toBe(true);
+    });
+
+    it('waits out a start that is still in flight', async () => {
+      mockSharing.service = service('initializing');
+      await act(async () => {
+        renderer = create(<ActivePairingScreen />);
+      });
+      expect(JSON.stringify(renderer.toJSON())).toContain('PREPARING PAIRING');
+    });
+  });
+
+  it('names the reason when Bump could not start, rather than reporting a miss', async () => {
+    mockBump.error = 'Another pairing action is already in progress.';
+    mockSharing.pairing = { ...pairing(), bump: { ...pairing().bump, stage: 'idle' } };
+    await act(async () => {
+      renderer = create(<ActivePairingScreen />);
+    });
+    const text = JSON.stringify(renderer.toJSON());
+    expect(text).toContain('BUMP COULD NOT START');
+    expect(text).toContain('Another pairing action is already in progress.');
+    expect(text).not.toContain('NOTHING FOUND');
+  });
+
+  it('keeps the miss copy for a real miss', async () => {
+    mockSharing.pairing = { ...pairing(), bump: { ...pairing().bump, stage: 'failed' } };
+    await act(async () => {
+      renderer = create(<ActivePairingScreen />);
+    });
+    expect(JSON.stringify(renderer.toJSON())).toContain('NOTHING FOUND');
   });
 
   it('removes the top status and presents making a link as a secondary action', async () => {

@@ -53,6 +53,7 @@ pub mod transport;
 ///
 /// The docs-path key epoch is the per-wrap `i` in the v3 ratchet header (§4.7), not this.
 pub const DOCS_MESH_EPOCH: u32 = 0;
+pub mod host;
 mod relay;
 mod telemetry;
 
@@ -61,6 +62,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::RwLock as StdRwLock;
 #[cfg(target_os = "android")]
 use std::sync::OnceLock;
 
@@ -396,6 +398,60 @@ pub trait FixListener: Send + Sync + 'static {
     fn on_opaque(&self, author: Vec<u8>, seq: u64);
     /// Membership / connectivity status strings for the harness UI.
     fn on_status(&self, status: String);
+}
+
+/// Where a subscription's events go — swappable while it runs.
+///
+/// A subscription used to capture its listener for life, which was right while each one had a
+/// single owner. The own-topic subscription now has two (the mounted app and the native background
+/// runtime share one node through [`host`]), and the app's listener points into a JS context that
+/// can be torn down while the node keeps running for the background runtime. `None` is silence, not
+/// loss: an inbound envelope is still opened and still lands in the replica; nothing surfaces it.
+#[derive(Clone, Default)]
+pub(crate) struct ListenerCell(Arc<StdRwLock<Option<Arc<dyn FixListener>>>>);
+
+impl ListenerCell {
+    fn new(listener: Option<Arc<dyn FixListener>>) -> Self {
+        Self(Arc::new(StdRwLock::new(listener)))
+    }
+
+    /// The current listener. A poisoned lock reads as silence rather than a panic in the receive
+    /// loop: a listener that panicked once is not one worth delivering to again.
+    pub(crate) fn get(&self) -> Option<Arc<dyn FixListener>> {
+        self.0.read().ok().and_then(|slot| slot.clone())
+    }
+
+    pub(crate) fn set(&self, listener: Option<Arc<dyn FixListener>>) {
+        if let Ok(mut slot) = self.0.write() {
+            *slot = listener;
+        }
+    }
+
+    fn on_fix(
+        &self,
+        author: Vec<u8>,
+        seq: u64,
+        fix: LocationFix,
+        backfill: bool,
+        via: String,
+        via_peer: Option<String>,
+    ) {
+        if let Some(listener) = self.get() {
+            listener.on_fix(author, seq, fix, backfill, via, via_peer);
+        }
+    }
+
+    fn on_opaque(&self, author: Vec<u8>, seq: u64) {
+        if let Some(listener) = self.get() {
+            listener.on_opaque(author, seq);
+        }
+    }
+
+    fn on_status(&self, status: String) {
+        if let Some(listener) = self.get() {
+            listener.on_status(status);
+        }
+    }
 }
 
 /// Derive the gossip topic for a given author's location stream.
@@ -1117,6 +1173,28 @@ struct Started {
 /// (`Endpoint`, `Gossip` and `MemoryLookup` are handle types; the docs are `Arc`), and cloning a
 /// handle is exactly what makes the release safe — a `shutdown` that replaces `inner` cannot pull
 /// the engine out from under an in-flight call, it can only stop being the node the NEXT call sees.
+/// Parse peer tickets and seed each one's full address into the in-memory lookup.
+///
+/// Collect bootstrap peer ids AND seed each ticket's full node addr (id + LAN/direct socket addrs
+/// + relay) into our in-memory address lookup. This lets gossip dial the peer DIRECTLY on its
+/// known addresses — the same-wifi fast path — instead of waiting on relay/DNS resolution. The N0
+/// preset's pkarr/DNS discovery still resolves peers over the internet as a fallback. Seeding
+/// never fails, so it can't abort the subscribe; a malformed ticket still surfaces a parse error.
+fn seed_bootstrap(
+    memory: &MemoryLookup,
+    bootstrap: &[String],
+) -> Result<Vec<EndpointId>, LocationError> {
+    let mut ids = Vec::with_capacity(bootstrap.len());
+    for t in bootstrap {
+        let ticket: EndpointTicket = t
+            .parse()
+            .map_err(|_| LocationError::Decode("bad endpoint ticket".into()))?;
+        memory.add_endpoint_info(ticket.endpoint_addr().clone());
+        ids.push(ticket.endpoint_addr().id);
+    }
+    Ok(ids)
+}
+
 #[derive(Clone)]
 struct Live {
     endpoint: Endpoint,
@@ -1128,6 +1206,220 @@ struct Live {
 }
 
 impl LocationNode {
+    /// This node's own gossip topic — the one every friend subscribes to in order to hear us.
+    fn own_topic(&self) -> TopicId {
+        let bytes: [u8; 32] = derive_topic(self.author.to_vec())
+            .try_into()
+            .expect("blake3 output is 32 bytes");
+        TopicId::from_bytes(bytes)
+    }
+
+    /// Stop surfacing events into the app; keep the node, and every subscription, running.
+    ///
+    /// What [`host`] does when the last app holder lets go while the background runtime still
+    /// holds the node. The app's listeners point into a JS context that is going away; the receive
+    /// loops are still the ones the background runtime publishes through.
+    pub(crate) async fn detach_app_listeners(&self) {
+        if let Some(own) = self.own_subscription.lock().await.as_ref() {
+            own.listener.set(None);
+        }
+        *self.listener.lock().await = None;
+    }
+
+    /// Join `topic` and pump its inbound events into `listener` until the subscription is dropped.
+    async fn subscribe_topic(
+        self: Arc<Self>,
+        topic_id: TopicId,
+        bootstrap: Vec<String>,
+        listener: ListenerCell,
+    ) -> Result<Arc<Subscription>, LocationError> {
+        let started = self.live().await?;
+
+        // Collect bootstrap peer ids AND seed each ticket's full node addr (id + LAN/direct
+        // socket addrs + relay) into our in-memory address lookup. This lets gossip dial the peer
+        // DIRECTLY on its known addresses — the same-wifi fast path — instead of waiting on
+        // relay/DNS resolution. The N0 preset's pkarr/DNS discovery still resolves peers over the
+        // internet as a fallback. Seeding never fails, so it can't abort the subscribe; a
+        // malformed ticket still surfaces the existing parse error.
+        let bootstrap_ids = seed_bootstrap(&started.memory, &bootstrap)?;
+
+        let (sender, mut receiver) = started
+            .gossip
+            .subscribe(topic_id, bootstrap_ids)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?
+            .split();
+        // Kept for the receive loop: classifying the path an envelope arrived over needs the
+        // endpoint's remote-address table, and the loop must not take the node lock per message.
+        let delivery_endpoint = started.endpoint.clone();
+        // The live neighbour set, shared with `publish_inner`: a broadcast reaches a recipient
+        // phone-to-phone only if it is one of these at that moment. Maintained from the receive
+        // loop's NeighborUp/Down because the receiver half owns the only view of it.
+        let neighbors: Arc<StdMutex<HashSet<EndpointId>>> = Arc::default();
+        let loop_neighbors = neighbors.clone();
+
+        // The node itself, not a snapshot of its session manager: `shutdown` replaces that handle,
+        // and a task holding the old one would keep opening envelopes against a store whose writer
+        // claim has been released.
+        let node = self.clone();
+        let cb = listener.clone();
+
+        // Pump inbound gossip events -> decrypt -> callback.
+        let receive_task = tokio::spawn(async move {
+            cb.on_status("subscribed".to_string());
+            while let Some(event) = receiver.next().await {
+                match event {
+                    Ok(Event::Received(msg)) => {
+                        // Short sync span per inbound envelope: `sc.entry_hash` (blake3 of the
+                        // sealed bytes) is what joins this receive to the sender's publish and
+                        // the stash's entry — `outcome` says why a ping stopped here (decrypt
+                        // failure / not addressed to us / decode failure).
+                        let span = tracing::info_span!(
+                            "gossip.receive",
+                            sc.entry_hash = %telemetry::envelope_hash(&msg.content),
+                            sc.author = tracing::field::Empty,
+                            sc.seq = tracing::field::Empty,
+                            sc.via = tracing::field::Empty,
+                            sc.via_peer = %telemetry::short_hex(msg.delivered_from.as_bytes()),
+                            outcome = tracing::field::Empty,
+                        );
+                        // Signature first, then session state (§4.2): `verify_v3` hands back a
+                        // type the session manager is the only consumer of, so no unauthenticated
+                        // byte can reach the ratchet.
+                        let opened = node.open_ratcheted_envelope(&msg.content).await;
+                        // The path lookup is awaited OUTSIDE the span guard: holding a
+                        // `tracing` span entered across an await would leak it into whatever
+                        // task the executor polls next.
+                        let via = match &opened {
+                            GossipOpen::Delivered { .. } => {
+                                delivery_label(&delivery_endpoint, msg.delivered_from).await
+                            }
+                            _ => "live".to_string(),
+                        };
+                        // WHO handed it over, as opposed to over which kind of path. Unlike `via`
+                        // this is exact: gossip tells us the neighbour it came from.
+                        let via_peer = encode_hex(msg.delivered_from.as_bytes());
+                        // A delivered envelope is a phone-to-neighbour contact; record it whether
+                        // or not the payload then decodes, because the two phones DID talk. Roles
+                        // are looked up outside the span guard for the same reason as `via` above,
+                        // and the span itself is emitted inside it so it lands in this trace.
+                        let peer = *msg.delivered_from.as_bytes();
+                        let contact_roles = match &opened {
+                            GossipOpen::Delivered { .. } => Some(node.peer_roles().await),
+                            _ => None,
+                        };
+                        let _guard = span.enter();
+                        if let (Some(roles), GossipOpen::Delivered { author, .. }) =
+                            (&contact_roles, &opened)
+                        {
+                            contact::record(contact::Contact {
+                                dir: contact::Dir::Recv,
+                                lane: contact::Lane::Gossip,
+                                peer: &peer,
+                                role: roles.role(&peer),
+                                path: &via,
+                                from_author: Some(author.as_slice() == peer.as_slice()),
+                                entries: 1,
+                            });
+                        }
+                        match opened {
+                            GossipOpen::Delivered {
+                                author,
+                                seq,
+                                payload,
+                            } => {
+                                let opened = crypto::Opened {
+                                    author,
+                                    seq,
+                                    payload,
+                                };
+                                span.record(
+                                    "sc.author",
+                                    tracing::field::display(telemetry::short_hex(&opened.author)),
+                                );
+                                span.record("sc.seq", opened.seq);
+                                span.record("sc.via", via.as_str());
+                                match decode_fix_payload(&opened.payload) {
+                                    Ok(Some(fix)) => {
+                                        span.record("outcome", "delivered");
+                                        tracing::debug!(
+                                            sc.author = %telemetry::short_hex(&opened.author),
+                                            sc.seq = opened.seq,
+                                            sc.lane = "fix",
+                                            source = %via,
+                                            "ratchet response received"
+                                        );
+                                        cb.on_fix(
+                                            opened.author.to_vec(),
+                                            opened.seq,
+                                            fix,
+                                            false,
+                                            via,
+                                            Some(via_peer),
+                                        );
+                                    }
+                                    // A null fix is a watcher publishing on cadence so the
+                                    // ratchet has a return contribution (§4.1). It carries no
+                                    // position, so nothing is delivered — but it is a healthy
+                                    // envelope, not a failure.
+                                    Ok(None) => {
+                                        span.record("outcome", "null-fix");
+                                        tracing::debug!(
+                                            sc.author = %telemetry::short_hex(&opened.author),
+                                            sc.seq = opened.seq,
+                                            sc.lane = "null",
+                                            source = %via,
+                                            "ratchet response received"
+                                        );
+                                        cb.on_opaque(opened.author.to_vec(), opened.seq);
+                                    }
+                                    Err(_) => {
+                                        span.record("outcome", "payload-decode-failed");
+                                    }
+                                }
+                            }
+                            GossipOpen::NotForUs => {
+                                span.record("outcome", "opaque");
+                                // best-effort presence signal without content
+                                cb.on_opaque(Vec::new(), 0);
+                            }
+                            GossipOpen::Failed => {
+                                span.record("outcome", "open-failed");
+                            }
+                        }
+                    }
+                    Ok(Event::NeighborUp(id)) => {
+                        if let Ok(mut set) = loop_neighbors.lock() {
+                            set.insert(id);
+                        }
+                        tracing::info!(peer = %telemetry::short_hex(id.as_bytes()), "gossip neighbor up");
+                        cb.on_status("peer-up".to_string());
+                    }
+                    Ok(Event::NeighborDown(id)) => {
+                        if let Ok(mut set) = loop_neighbors.lock() {
+                            set.remove(&id);
+                        }
+                        tracing::info!(peer = %telemetry::short_hex(id.as_bytes()), "gossip neighbor down");
+                        cb.on_status("peer-down".to_string());
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            cb.on_status("unsubscribed".to_string());
+        });
+
+        Ok(Arc::new(Subscription {
+            node: self.clone(),
+            listener,
+            endpoint: started.endpoint.clone(),
+            neighbors,
+            sender: Mutex::new(sender),
+            receive_task: StdMutex::new(Some(receive_task)),
+        }))
+    }
+
+
     /// Clone this node's live handles and RELEASE the node lock. See [`Live`].
     ///
     /// Every method below that touches the endpoint, gossip or the docs engines starts here. The
@@ -1210,6 +1502,13 @@ pub struct LocationNode {
     /// The most recently attached listener, reused to surface durable-trail (backfill / sync)
     /// events from the node-level `sync_trail` call.
     listener: Mutex<Option<Arc<dyn FixListener>>>,
+    /// The ONE subscription to this node's own topic, however many callers ask for it.
+    ///
+    /// The mounted app and the native background runtime publish through the same node (see
+    /// [`host`]), and each used to `subscribe` to the own topic itself. Two subscriptions are two
+    /// receive loops on one topic: every inbound envelope opened twice against the ratchet and
+    /// delivered twice. So the own topic is a slot, not a call — see [`Self::own_subscription`].
+    own_subscription: Mutex<Option<Arc<Subscription>>>,
     /// Bilateral pairing core (`streetcryptid/pair/1`). Created at construction so its ALPN
     /// handler can be registered on the router in `start`; its live handles are attached there.
     pair: Arc<PairCore>,
@@ -1894,6 +2193,7 @@ fn new_location_node_at(
         starting: Mutex::new(()),
         drain_lock: publish::DrainLock::default(),
         listener: Mutex::new(None),
+        own_subscription: Mutex::new(None),
         pair: PairCore::new(identity_seed, author, recv_public),
         profile_events: ProfileEventQueue::default(),
         sessions: Mutex::new(None),
@@ -2302,17 +2602,28 @@ impl LocationNode {
         let _starting = self.starting.lock().await;
         tracing::info!("shutdown: taking inner lock");
         let started = self.inner.lock().await.take();
+        // A router that fails to close must not stop the rest of this function. It used to `?` out
+        // here, which returned with every store below still claimed: the node was neither running
+        // nor releasable, and every later `start` on this identity was refused with `AlreadyOpen`
+        // until the process died. The error is still returned — after the claims are released.
+        let mut router_error = None;
         if let Some(started) = started {
             tracing::info!("shutdown: closing router");
-            started
-                ._router
-                .shutdown()
-                .await
-                .map_err(|e| LocationError::Network(e.to_string()))?;
-            tracing::info!("shutdown: router closed");
+            match started._router.shutdown().await {
+                Ok(()) => tracing::info!("shutdown: router closed"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "shutdown: router did not close cleanly");
+                    router_error = Some(LocationError::Network(e.to_string()));
+                }
+            }
         }
         tracing::info!("shutdown: taking listener lock");
         *self.listener.lock().await = None;
+        // The own-topic slot holds an `Arc<Subscription>`, whose receive task holds the node. Left
+        // in place it would keep a dead topic's loop alive and hand the next caller a subscription
+        // on a closed router.
+        tracing::info!("shutdown: taking own subscription lock");
+        *self.own_subscription.lock().await = None;
         // Release the session-store writer claim, or `start` can never succeed again: the claim is
         // process-global (§4.2 requires that — a per-module flag cannot see across the fresh JS
         // context expo-task-manager hands each headless callback), so holding it past shutdown
@@ -2340,8 +2651,12 @@ impl LocationNode {
         *self.gate.lock().await = None;
         *self.own_log.lock().await = None;
         *self.transport.lock().await = None;
+        *self.delivery.lock().await = None;
         tracing::info!("shutdown: complete");
-        Ok(())
+        match router_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// Notify iroh that the device's network may have changed (wifi↔cellular roam, interface
@@ -2396,6 +2711,11 @@ impl LocationNode {
     ///
     /// `bootstrap` are peer EndpointTickets (e.g. from friends' contact cards) that are
     /// already in the topic. Returns a handle used to publish our own fixes.
+    ///
+    /// The node's OWN topic is the exception: it is routed to [`Self::own_subscription`], so a
+    /// second caller adopts the live subscription (joining its bootstrap peers and taking over its
+    /// events) instead of opening a second receive loop. Every other topic gets a fresh
+    /// subscription per call, as it always has.
     pub async fn subscribe(
         self: Arc<Self>,
         topic: Vec<u8>,
@@ -2407,202 +2727,70 @@ impl LocationNode {
                 .try_into()
                 .map_err(|_| LocationError::Decode("topic must be 32 bytes".into()))?,
         );
-
-        let started = self.live().await?;
-
-        // Collect bootstrap peer ids AND seed each ticket's full node addr (id + LAN/direct
-        // socket addrs + relay) into our in-memory address lookup. This lets gossip dial the peer
-        // DIRECTLY on its known addresses — the same-wifi fast path — instead of waiting on
-        // relay/DNS resolution. The N0 preset's pkarr/DNS discovery still resolves peers over the
-        // internet as a fallback. Seeding never fails, so it can't abort the subscribe; a
-        // malformed ticket still surfaces the existing parse error.
-        let mut bootstrap_ids: Vec<EndpointId> = Vec::new();
-        for t in &bootstrap {
-            let ticket: EndpointTicket = t
-                .parse()
-                .map_err(|_| LocationError::Decode("bad endpoint ticket".into()))?;
-            started
-                .memory
-                .add_endpoint_info(ticket.endpoint_addr().clone());
-            bootstrap_ids.push(ticket.endpoint_addr().id);
+        if topic_id == self.own_topic() {
+            return self.own_subscription(bootstrap, Some(listener)).await;
         }
-
-        let (sender, mut receiver) = started
-            .gossip
-            .subscribe(topic_id, bootstrap_ids)
-            .await
-            .map_err(|e| LocationError::Network(e.to_string()))?
-            .split();
-        // Kept for the receive loop: classifying the path an envelope arrived over needs the
-        // endpoint's remote-address table, and the loop must not take the node lock per message.
-        let delivery_endpoint = started.endpoint.clone();
-        // The live neighbour set, shared with `publish_inner`: a broadcast reaches a recipient
-        // phone-to-phone only if it is one of these at that moment. Maintained from the receive
-        // loop's NeighborUp/Down because the receiver half owns the only view of it.
-        let neighbors: Arc<StdMutex<HashSet<EndpointId>>> = Arc::default();
-        let loop_neighbors = neighbors.clone();
-
-        // The node itself, not a snapshot of its session manager: `shutdown` replaces that handle,
-        // and a task holding the old one would keep opening envelopes against a store whose writer
-        // claim has been released.
-        let node = self.clone();
-        let cb = listener.clone();
-
         // Remember the listener so node-level `sync_trail` can surface backfill / sync events.
         *self.listener.lock().await = Some(listener.clone());
+        self.subscribe_topic(topic_id, bootstrap, ListenerCell::new(Some(listener)))
+            .await
+    }
 
-        // Pump inbound gossip events -> decrypt -> callback.
-        let receive_task = tokio::spawn(async move {
-            cb.on_status("subscribed".to_string());
-            while let Some(event) = receiver.next().await {
-                match event {
-                    Ok(Event::Received(msg)) => {
-                        // Short sync span per inbound envelope: `sc.entry_hash` (blake3 of the
-                        // sealed bytes) is what joins this receive to the sender's publish and
-                        // the stash's entry — `outcome` says why a ping stopped here (decrypt
-                        // failure / not addressed to us / decode failure).
-                        let span = tracing::info_span!(
-                            "gossip.receive",
-                            sc.entry_hash = %telemetry::envelope_hash(&msg.content),
-                            sc.author = tracing::field::Empty,
-                            sc.seq = tracing::field::Empty,
-                            sc.via = tracing::field::Empty,
-                            sc.via_peer = %telemetry::short_hex(msg.delivered_from.as_bytes()),
-                            outcome = tracing::field::Empty,
-                        );
-                        // Signature first, then session state (§4.2): `verify_v3` hands back a
-                        // type the session manager is the only consumer of, so no unauthenticated
-                        // byte can reach the ratchet.
-                        let opened = node.open_ratcheted_envelope(&msg.content).await;
-                        // The path lookup is awaited OUTSIDE the span guard: holding a
-                        // `tracing` span entered across an await would leak it into whatever
-                        // task the executor polls next.
-                        let via = match &opened {
-                            GossipOpen::Delivered { .. } => {
-                                delivery_label(&delivery_endpoint, msg.delivered_from).await
-                            }
-                            _ => "live".to_string(),
-                        };
-                        // WHO handed it over, as opposed to over which kind of path. Unlike `via`
-                        // this is exact: gossip tells us the neighbour it came from.
-                        let via_peer = encode_hex(msg.delivered_from.as_bytes());
-                        // A delivered envelope is a phone-to-neighbour contact; record it whether
-                        // or not the payload then decodes, because the two phones DID talk. Roles
-                        // are looked up outside the span guard for the same reason as `via` above,
-                        // and the span itself is emitted inside it so it lands in this trace.
-                        let peer = *msg.delivered_from.as_bytes();
-                        let contact_roles = match &opened {
-                            GossipOpen::Delivered { .. } => Some(node.peer_roles().await),
-                            _ => None,
-                        };
-                        let _guard = span.enter();
-                        if let (Some(roles), GossipOpen::Delivered { author, .. }) =
-                            (&contact_roles, &opened)
-                        {
-                            contact::record(contact::Contact {
-                                dir: contact::Dir::Recv,
-                                lane: contact::Lane::Gossip,
-                                peer: &peer,
-                                role: roles.role(&peer),
-                                path: &via,
-                                from_author: Some(author.as_slice() == peer.as_slice()),
-                                entries: 1,
-                            });
-                        }
-                        match opened {
-                            GossipOpen::Delivered {
-                                author,
-                                seq,
-                                payload,
-                            } => {
-                                let opened = crypto::Opened {
-                                    author,
-                                    seq,
-                                    payload,
-                                };
-                                span.record(
-                                    "sc.author",
-                                    tracing::field::display(telemetry::short_hex(&opened.author)),
-                                );
-                                span.record("sc.seq", opened.seq);
-                                span.record("sc.via", via.as_str());
-                                match decode_fix_payload(&opened.payload) {
-                                    Ok(Some(fix)) => {
-                                        span.record("outcome", "delivered");
-                                        tracing::debug!(
-                                            sc.author = %telemetry::short_hex(&opened.author),
-                                            sc.seq = opened.seq,
-                                            sc.lane = "fix",
-                                            source = %via,
-                                            "ratchet response received"
-                                        );
-                                        cb.on_fix(
-                                            opened.author.to_vec(),
-                                            opened.seq,
-                                            fix,
-                                            false,
-                                            via,
-                                            Some(via_peer),
-                                        );
-                                    }
-                                    // A null fix is a watcher publishing on cadence so the
-                                    // ratchet has a return contribution (§4.1). It carries no
-                                    // position, so nothing is delivered — but it is a healthy
-                                    // envelope, not a failure.
-                                    Ok(None) => {
-                                        span.record("outcome", "null-fix");
-                                        tracing::debug!(
-                                            sc.author = %telemetry::short_hex(&opened.author),
-                                            sc.seq = opened.seq,
-                                            sc.lane = "null",
-                                            source = %via,
-                                            "ratchet response received"
-                                        );
-                                        cb.on_opaque(opened.author.to_vec(), opened.seq);
-                                    }
-                                    Err(_) => {
-                                        span.record("outcome", "payload-decode-failed");
-                                    }
-                                }
-                            }
-                            GossipOpen::NotForUs => {
-                                span.record("outcome", "opaque");
-                                // best-effort presence signal without content
-                                cb.on_opaque(Vec::new(), 0);
-                            }
-                            GossipOpen::Failed => {
-                                span.record("outcome", "open-failed");
-                            }
-                        }
-                    }
-                    Ok(Event::NeighborUp(id)) => {
-                        if let Ok(mut set) = loop_neighbors.lock() {
-                            set.insert(id);
-                        }
-                        tracing::info!(peer = %telemetry::short_hex(id.as_bytes()), "gossip neighbor up");
-                        cb.on_status("peer-up".to_string());
-                    }
-                    Ok(Event::NeighborDown(id)) => {
-                        if let Ok(mut set) = loop_neighbors.lock() {
-                            set.remove(&id);
-                        }
-                        tracing::info!(peer = %telemetry::short_hex(id.as_bytes()), "gossip neighbor down");
-                        cb.on_status("peer-down".to_string());
-                    }
-                    Ok(_) => {}
-                    Err(_) => break,
+    /// The single subscription to this node's own topic: create it, or adopt the live one.
+    ///
+    /// Adopting joins `bootstrap`'s peers on the existing subscription and, when `listener` is
+    /// given, makes it the one events go to. `None` keeps whoever is listening — the background
+    /// runtime's call, which must never silence a mounted app — and creates the subscription
+    /// silent if there is none yet. A subscription whose receive loop has ended is replaced rather
+    /// than handed out.
+    ///
+    /// Removing a friend therefore does not drop them from this topic's swarm until the node next
+    /// restarts. That costs nothing: everything published here is sealed per recipient, and they
+    /// are no longer one.
+    pub async fn own_subscription(
+        self: Arc<Self>,
+        bootstrap: Vec<String>,
+        listener: Option<Arc<dyn FixListener>>,
+    ) -> Result<Arc<Subscription>, LocationError> {
+        use tracing::Instrument;
+        let span = tracing::info_span!(
+            "subscribe.own",
+            sc.author = %telemetry::short_hex(&self.author),
+            bootstrap = bootstrap.len(),
+            listener = listener.is_some(),
+            outcome = tracing::field::Empty,
+        );
+        let node = self.clone();
+        async move {
+            let mut slot = node.own_subscription.lock().await;
+            if let Some(existing) = slot.as_ref().filter(|sub| sub.is_live()).cloned() {
+                if let Some(listener) = &listener {
+                    existing.listener.set(Some(listener.clone()));
+                    *node.listener.lock().await = Some(listener.clone());
                 }
+                existing.join(&bootstrap).await?;
+                tracing::Span::current().record("outcome", "adopted");
+                return Ok(existing);
             }
-            cb.on_status("unsubscribed".to_string());
-        });
+            let outcome = if slot.is_some() { "recreated" } else { "created" };
+            if let Some(listener) = &listener {
+                *node.listener.lock().await = Some(listener.clone());
+            }
+            let created = node
+                .clone()
+                .subscribe_topic(node.own_topic(), bootstrap, ListenerCell::new(listener))
+                .await?;
+            *slot = Some(created.clone());
+            tracing::Span::current().record("outcome", outcome);
+            Ok(created)
+        }
+        .instrument(span)
+        .await
+    }
 
-        Ok(Arc::new(Subscription {
-            node: self.clone(),
-            endpoint: started.endpoint.clone(),
-            neighbors,
-            sender: Mutex::new(sender),
-            receive_task: StdMutex::new(Some(receive_task)),
-        }))
+    /// Whether `start` has bound an endpoint that has not since been shut down.
+    pub async fn is_started(&self) -> bool {
+        self.live_opt().await.is_some()
     }
 
     // ── Durable trail (iroh-docs) — see docs/social/ARCHITECTURE.md §5–6 ──────────────────
@@ -4763,6 +4951,8 @@ fn derive_recv_public(recv_secret: &[u8]) -> Result<Vec<u8>, LocationError> {
 #[derive(uniffi::Object)]
 pub struct Subscription {
     node: Arc<LocationNode>,
+    /// Where inbound events go. Swappable — see [`ListenerCell`].
+    listener: ListenerCell,
     /// For labelling the path to a neighbour (`delivery_label`) without the node lock.
     endpoint: Endpoint,
     /// Gossip neighbours right now — see where `subscribe` builds it.
@@ -4957,6 +5147,31 @@ impl publish::PublishSink for SubscriptionSink<'_> {
 }
 
 impl Subscription {
+    /// Whether the receive loop is still running. One that has ended (its topic stream closed or
+    /// errored) can still be published through by nobody, so it must not be handed out again.
+    pub(crate) fn is_live(&self) -> bool {
+        self.receive_task
+            .lock()
+            .ok()
+            .and_then(|task| task.as_ref().map(|handle| !handle.is_finished()))
+            .unwrap_or(false)
+    }
+
+    /// Add `bootstrap`'s peers to this live subscription's swarm.
+    async fn join(&self, bootstrap: &[String]) -> Result<(), LocationError> {
+        if bootstrap.is_empty() {
+            return Ok(());
+        }
+        let live = self.node.live().await?;
+        let ids = seed_bootstrap(&live.memory, bootstrap)?;
+        self.sender
+            .lock()
+            .await
+            .join_peers(ids)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
     /// After a successful broadcast: one `peer.contact` for each recipient that is a gossip
     /// neighbour, and the two counts on `gossip.publish`. Runs inside that span.
     async fn record_direct_sends(&self, wrapped: &[EndpointId]) {

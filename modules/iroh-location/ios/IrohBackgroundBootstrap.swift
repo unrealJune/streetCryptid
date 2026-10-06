@@ -83,18 +83,14 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
     //    sink existed — see `seedGateFromCache`. Gating keeps a foreground launch's ladder exactly
     //    as JS arms it; the only thing this file does to such a launch is step 2a.
     //
-    //    Ownership follows the SAME decision, one line down: taking it is what lets this runtime
-    //    build its own node, and nothing may do that while React is still going to start. So a
-    //    launch that will boot JS arms the ladder and leaves the stores alone, exactly as before
-    //    this file existed; only the launch that skips React claims them.
+    //    There is no ownership decision here any more. The runtime used to have to be told it
+    //    could build a node (`adoptNodeOwnership`), and the app had to take the stores back if it
+    //    was opened later. Both now hold leases on ONE node through `NodeHost`, so a delivery on a
+    //    JS-free launch simply acquires it, and an app opened later adopts the same one.
     let locationLaunch = launchOptions?[.location] != nil
-    let jsFree = Self.decideReactNativeDeferral(background: background)
+    // Published on every launch, whatever this launch does with it — see the function.
+    _ = Self.decideReactNativeDeferral(background: background)
     if BackgroundLocationRuntime.wasArmed && (background || locationLaunch) {
-      // A launch with no JS coming is the one case this runtime must own the stores, because
-      // nothing else will ever claim them. `ensureStarted` returns on its first line until it
-      // does, so this is what turns the whole native path from scaffolding into the live one.
-      // The app takes them back through `handOverNativeBackground` if it is ever opened.
-      if jsFree { BackgroundLocationRuntime.shared.adoptNodeOwnership() }
       BackgroundLocationRuntime.shared.start()
     }
 

@@ -93,6 +93,11 @@ import type { CadenceProvider, CadenceTarget } from './background/cadence-contro
 import { createTrailStore, type TrailPoint, type TrailStore } from './background/trail-store';
 import type { PersistentKV } from './background/persistent-kv';
 import {
+  handOverNativeBackground as handOverNative,
+  releaseNativeBackground as releaseNative,
+  startNativeBounded as startNative,
+} from './native-node';
+import {
   clampMailboxTtlSeconds,
   createDefaultPairingMailbox,
   type PairingMailbox,
@@ -140,21 +145,6 @@ import { loadSeq, saveSeq, SEQ_RESERVATION_BLOCK, SEQ_RESERVATION_LOW_WATER } fr
  * See {@link LocationSharingService.awaitRuntimeIdleBounded}.
  */
 const RUNTIME_IDLE_WAIT_TIMEOUT_MS = 5_000;
-
-/**
- * How long a launch waits for the native node to start before giving up on it.
- *
- * Deliberately well above the native bounds it backstops (BLE attach 10 s + endpoint bind 30 s),
- * because it is not a competing deadline — it is the guard for a binary that does not have them.
- * A phone can be running an older `.so`/XCFramework than the JS bundle, and on 2026-09-13 exactly
- * that combination (unbounded `ble::attach`, awaited under the node lock) left an iPhone dark for
- * 13 h and then hung the splash screen on relaunch, with no span or log to say why.
- *
- * On expiry the launch FAILS rather than continuing: the native call is still running — JS cannot
- * cancel it — so there is no node, and a service that pretends otherwise publishes nothing while
- * reporting itself ready. An error the user can retry is the honest outcome.
- */
-const NATIVE_START_TIMEOUT_MS = 60_000;
 
 /**
  * A single live SAS verification the UI must resolve before a pair can complete. One entry per
@@ -420,17 +410,6 @@ export const BUMP_WINDOW_MS = 120_000;
  * writes one small row instead of sixty large ones.
  */
 const TRANSPORT_POLL_ROLLUP_EVERY = 60;
-
-/**
- * How long the native runtime may take to give the Rust stores back before the app stops waiting.
- *
- * Sized against the same measurements as `NATIVE_RUNTIME_SESSION_WATCHDOG_MS`: a healthy native
- * shutdown is well under a second, and a whole headless session including node build, sync and
- * teardown measured 6-15s. Five seconds is generous for a shutdown alone and short enough that a
- * user opening the app does not sit on a splash screen wondering. An overrun is not fatal — the
- * app tries to start anyway and `startNativeBounded` retries once.
- */
-const NATIVE_HANDOVER_TIMEOUT_MS = 5_000;
 
 /**
  * How often to check whether the bump window has closed.
@@ -1129,10 +1108,11 @@ export class LocationSharingService {
         await this.awaitRuntimeIdleBounded();
       }
       // And take the stores back from the NATIVE runtime, which on iOS may have been publishing
-      // without us since a background launch armed it.
+      // without us since a background launch armed it — and on Android since the foreground
+      // service outlived the last JS context and built a node of its own.
       //
       // This is not the JS-side claim above. The Rust writer claim is process-wide and held by
-      // whichever half built a node first; if that was `BackgroundLocationRuntime`, `createNode` /
+      // whichever half built a node first; if that was the native runtime, `createNode` /
       // `start` below throw `AlreadyOpen` and `init` fails before `setServiceReady(true)` — an app
       // that draws its chrome from `hydrateFromStore()` and then never finishes, which is exactly
       // the 2026-09-18 shape arriving from the other end of the lifecycle.
@@ -1703,9 +1683,18 @@ export class LocationSharingService {
     this.inviteRedeemed = false;
     this.pairingFailure = null;
 
-    await mod.shutdown();
-    this.keys = await mod.createNode(keys.identitySecret, keys.recvSecret);
-    await this.startNativeBounded(mod);
+    if (typeof mod.restartNode === 'function') {
+      // A node host: the node is shared with the native background runtime, so `shutdown` +
+      // `createNode` would only return OUR lease and adopt the same node straight back (the
+      // runtime's lease keeps it up) — the new settings would never apply. The host rebuilds it in
+      // place, keeps every lease, and starts it before the runtime can with the stored, old ones.
+      span.setAttribute('restart', 'host');
+      await mod.restartNode(this.transportPreferences);
+    } else {
+      await mod.shutdown();
+      this.keys = await mod.createNode(keys.identitySecret, keys.recvSecret);
+      await this.startNativeBounded(mod);
+    }
     this.ticketStr = await mod.ticket();
     this.docTicketStr = await this.safeDocTicket();
     this.profileEpoch = await this.safePublishProfile();
@@ -3700,69 +3689,12 @@ export class LocationSharingService {
     return this.nodeAdoptionSupported;
   }
 
-  /**
-   * `mod.start()`, bounded — see {@link NATIVE_START_TIMEOUT_MS}.
-   *
-   * Emits `node.start_timeout` on expiry. That span is the whole point of the bound: a native
-   * start that never returns is otherwise completely silent, because every span the launch would
-   * have emitted is downstream of the call that is stuck.
-   */
-  /**
-   * Whether a native `start` failure is the store claim being held by the other half of the process.
-   *
-   * Matched on the message because that is all `LocationError` gives us across the bridge. Kept
-   * deliberately loose: the exact wording comes from `durable.rs` and is not a contract.
-   */
-  private static isClaimRefusal(error: unknown): boolean {
-    const message = error instanceof Error ? error.message : String(error);
-    return /already open|already claimed|writer claim|AlreadyOpen/i.test(message);
-  }
-
-  private async startNativeBounded(mod: IrohLocationNativeModule, attempt = 0): Promise<void> {
-    const startedAt = Date.now();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<'timeout'>((resolve) => {
-      timer = setTimeout(() => resolve('timeout'), NATIVE_START_TIMEOUT_MS);
-      (timer as unknown as { unref?: () => void }).unref?.();
+  /** `mod.start()`, bounded, with one handover-and-retry on a refused claim. See `native-node.ts`. */
+  private startNativeBounded(mod: IrohLocationNativeModule): Promise<void> {
+    return startNative(mod, this.transportPreferences, {
+      flush: () => this.flushDevTelemetry(),
+      handOver: () => this.handOverNativeBackground(),
     });
-    try {
-      const outcome = await Promise.race([
-        mod.start(this.transportPreferences).then(() => 'started' as const),
-        deadline,
-      ]);
-      if (outcome === 'timeout') {
-        getTelemetry()
-          .startSpan('node.start_timeout', {
-            attributes: {
-              'node.start_wait_ms': Date.now() - startedAt,
-              'sc.drop_reason': 'native-start-timeout',
-            },
-          })
-          .end();
-        // Flush explicitly: on a headless wake the OS may freeze us the moment this rejects, and
-        // this span is the only record that the start is still stuck in native code.
-        await this.flushDevTelemetry().catch(() => undefined);
-        throw new Error(`native start did not return within ${NATIVE_START_TIMEOUT_MS}ms`);
-      }
-    } catch (error) {
-      // The store claim is still held by the native runtime. One retry, and only one: the handover
-      // in `init` has already run, so reaching here means either it timed out or the runtime armed
-      // itself between the two calls. A second handover is cheap; a loop would be the 2026-09-16
-      // construction storm in a different costume.
-      if (attempt === 0 && LocationSharingService.isClaimRefusal(error)) {
-        getTelemetry()
-          .startSpan('node.start.claim_refused', {
-            attributes: { attempt, 'sc.drop_reason': 'native-claim-refused' },
-          })
-          .end();
-        await this.handOverNativeBackground();
-        clearTimeout(timer);
-        return this.startNativeBounded(mod, attempt + 1);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timer);
-    }
   }
 
   private async awaitRuntimeIdleBounded(): Promise<void> {
@@ -4165,67 +4097,17 @@ export class LocationSharingService {
     }
   }
 
-  /**
-   * Hand the native runtime back for a teardown, WITHOUT telling it sharing is off.
-   *
-   * The native half of the distinction {@link teardownBackground} already draws. `stopNativeBackground`
-   * disarms iOS's whole resurrection ladder — SLC, the stop-anchor fence, the persisted anchor — and
-   * those are the only things that can relaunch a terminated app; a process teardown that removes
-   * them leaves a phone that cannot wake until someone opens it.
-   *
-   * Falls back to the full stop on a binary that predates `releaseNativeBackground`, because on
-   * Android leaving a foreground service running with no JS and no way to reach it is worse than
-   * disarming, and on iOS the old behaviour is what that binary has always done.
-   */
-  /**
-   * Ask the native runtime to give the Rust stores back, bounded on both sides.
-   *
-   * Bounded twice on purpose. The Swift side races the shutdown against its own timeout so the
-   * promise always settles whatever Rust does — AGENTS.md's rule is about a promise that never
-   * settles, as distinct from one that rejects. This side bounds it again because a native call
-   * that never returns is still a native call that never returns.
-   *
-   * Never throws. A handover we could not complete is reported and then proceeded past: the claim
-   * may well be free anyway, and `startNativeBounded` retries once on `AlreadyOpen`. Inert on
-   * Android and on any binary older than the export, where `releaseNativeBackground` is the older,
-   * weaker equivalent and the best that binary can do.
-   */
-  private async handOverNativeBackground(): Promise<void> {
-    const mod = this.mod;
-    if (typeof mod?.handOverNativeBackground !== 'function') {
-      this.releaseNativeBackground();
-      return;
-    }
-    const span = getTelemetry().startSpan('node.handover');
-    const started = Date.now();
-    try {
-      const completed = await Promise.race([
-        mod.handOverNativeBackground(NATIVE_HANDOVER_TIMEOUT_MS),
-        new Promise<boolean>((resolve) =>
-          setTimeout(() => resolve(false), NATIVE_HANDOVER_TIMEOUT_MS * 2)
-        ),
-      ]);
-      span.setAttributes({ completed, waited_ms: Date.now() - started });
-      if (!completed) span.setAttribute('sc.drop_reason', 'handover-timeout');
-      span.setStatus('ok');
-    } catch (error) {
-      // An older binary, or a native call that threw. Either way the app still has to try to start.
-      span.recordError(error);
-    } finally {
-      span.end();
-    }
+  /** Take the stores back from a pre-host native runtime. See `native-node.ts`. */
+  private handOverNativeBackground(): Promise<void> {
+    return handOverNative(this.mod);
   }
 
+  /**
+   * Hand the native runtime back for a teardown, WITHOUT telling it sharing is off. See
+   * `native-node.ts`, and {@link teardownBackground} for the distinction from a full stop.
+   */
   private releaseNativeBackground(): void {
-    const mod = this.mod;
-    try {
-      if (typeof mod?.releaseNativeBackground === 'function') mod.releaseNativeBackground();
-      else mod?.stopNativeBackground?.();
-    } catch (err) {
-      getTelemetry().log('warn', 'native background release failed', {
-        reason: err instanceof Error ? err.message : String(err),
-      });
-    }
+    releaseNative(this.mod);
   }
 
   /**
