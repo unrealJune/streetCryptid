@@ -24,6 +24,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use iroh::EndpointAddr;
@@ -45,6 +46,7 @@ use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use crate::crypto;
+use crate::ns_book::{self, NamespaceBook};
 
 #[cfg(feature = "cli")]
 use iroh_docs::{
@@ -475,6 +477,9 @@ pub struct TrailDocs {
     own_ns: NamespaceId,
     /// All docs we can read (own + imported friends), keyed by namespace bytes.
     handles: Mutex<HashMap<[u8; 32], Doc>>,
+    /// What to reopen on the next start: our secret and every imported friend namespace. `None`
+    /// on the web, whose store is in memory. See [`crate::ns_book`].
+    book: Option<Arc<NamespaceBook>>,
     /// Per envelope-author, the peer that last handed us their entry during a reconciliation.
     ///
     /// Keyed by author rather than by namespace because that is the question the UI asks — "who
@@ -490,36 +495,44 @@ pub struct TrailDocs {
 impl TrailDocs {
     /// Initialise from an already-spawned [`Docs`] protocol + its backing blobs store.
     ///
-    /// Reuses the persisted trail namespace under `data_dir` when possible (stable across
-    /// restarts), otherwise creating a new one and persisting its id. iroh-docs mints a fresh
-    /// namespace on every `create()`, so without this a restart would rotate our trail namespace
-    /// and orphan every friend's stored read-ticket (see [`TRAIL_NS_FILE`]). Mirrors
-    /// [`crate::profile::ProfileDocs::init`]. The caller is responsible for having registered the
+    /// With a `book` (every device build), our own namespace comes back from the secret it holds
+    /// and every friend namespace it lists is reopened — so a node started with no JS reconciles
+    /// friends too, and a wiped replica comes back as the SAME namespaces rather than orphaning
+    /// every friend's read ticket. See [`crate::ns_book`] for the 2026-10-05 incident.
+    ///
+    /// Without one (the web build's in-memory store) the namespace id file under `data_dir` is
+    /// the only memory, as before. The caller is responsible for having registered the
     /// `Docs`/`Blobs`/`Gossip` protocols on the iroh [`Router`](iroh::protocol::Router).
-    pub async fn init(docs: Docs, blobs: BlobsStore, data_dir: PathBuf) -> Result<Self> {
+    pub async fn init(
+        docs: Docs,
+        blobs: BlobsStore,
+        data_dir: PathBuf,
+        book: Option<Arc<NamespaceBook>>,
+    ) -> Result<Self> {
         let author = docs.author_default().await?;
         let ns_path = data_dir.join(TRAIL_NS_FILE);
+        let legacy = read_ns_file(&ns_path);
 
-        // Reopen the persisted namespace if we have one and it's still in the local store;
-        // otherwise fall through to minting + persisting a fresh one.
-        let doc = match read_ns_file(&ns_path) {
-            Some(id) => match docs.open(NamespaceId::from(id)).await {
-                Ok(Some(doc)) => Some(doc),
-                _ => None,
-            },
-            None => None,
-        };
-        let own = match doc {
-            Some(doc) => doc,
-            None => {
-                let doc = docs.create().await?;
-                // Best-effort persist; a failure just means we mint a fresh ns next boot.
-                let _ = write_ns_file(&ns_path, &doc.id().to_bytes());
-                doc
-            }
-        };
-        let own_ns = own.id();
         let mut handles = HashMap::new();
+        let own = match book.as_deref() {
+            Some(book) => {
+                let own = ns_book::open_own_namespace(&docs, book, legacy).await?;
+                for doc in ns_book::reopen_friends(&docs, book).await {
+                    handles.insert(doc.id().to_bytes(), doc);
+                }
+                own
+            }
+            None => match legacy {
+                Some(id) => match docs.open(NamespaceId::from(id)).await {
+                    Ok(Some(doc)) => doc,
+                    _ => docs.create().await?,
+                },
+                None => docs.create().await?,
+            },
+        };
+        // Kept for a downgrade to a binary that reads only this file. Best-effort.
+        let _ = write_ns_file(&ns_path, &own.id().to_bytes());
+        let own_ns = own.id();
         handles.insert(own_ns.to_bytes(), own);
         Ok(Self {
             docs,
@@ -527,6 +540,7 @@ impl TrailDocs {
             author,
             own_ns,
             handles: Mutex::new(handles),
+            book,
             serving_peers: Mutex::new(HashMap::new()),
         })
     }
@@ -691,12 +705,46 @@ impl TrailDocs {
     /// Import a friend's trail from their docs read-ticket and begin replicating it. Returns the
     /// imported namespace id. Wired to `LocationNode::import_doc_ticket`, called on friend add
     /// (the read side of a grant, ARCHITECTURE §6).
+    ///
+    /// Recorded in the book, so every later start reopens it whether or not JS runs.
     pub async fn import_ticket(&self, ticket: &str) -> Result<NamespaceId> {
-        let ticket: iroh_docs::DocTicket = ticket.parse().map_err(|e| anyhow!("{e}"))?;
-        let doc = self.docs.import(ticket).await?;
+        let parsed: iroh_docs::DocTicket = ticket.parse().map_err(|e| anyhow!("{e}"))?;
+        let doc = self.docs.import(parsed).await?;
         let ns = doc.id();
+        if ns != self.own_ns {
+            if let Some(book) = &self.book {
+                book.add_friend(ns.to_bytes(), ticket)?;
+            }
+        }
         self.handles.lock().await.insert(ns.to_bytes(), doc);
         Ok(ns)
+    }
+
+    /// Stop replicating a removed friend's namespace and drop it from the book, so no later start
+    /// reopens it. The local entries are left for iroh-docs to keep or collect; nothing reads them.
+    /// Returns whether we were replicating it.
+    pub async fn forget_ticket(&self, ticket: &str) -> Result<bool> {
+        let ns = NamespaceId::from(ns_book::ticket_namespace(ticket)?);
+        if ns == self.own_ns {
+            return Ok(false);
+        }
+        let in_book = match &self.book {
+            Some(book) => book.remove_friend(ns.to_bytes())?,
+            None => false,
+        };
+        let handle = self.handles.lock().await.remove(&ns.to_bytes());
+        if let Some(doc) = &handle {
+            let _ = doc.leave().await;
+        }
+        Ok(in_book || handle.is_some())
+    }
+
+    /// The read tickets of every friend namespace in the book — what the stash grant registers.
+    pub fn friend_tickets(&self) -> Vec<String> {
+        self.book
+            .as_deref()
+            .map(|book| book.friends().into_iter().map(|f| f.ticket).collect())
+            .unwrap_or_default()
     }
 
     /// Write a sealed envelope to `ns` under the author's single LWW key (FORWARD-SECRECY §4.4),
@@ -1670,7 +1718,7 @@ pub(crate) mod tests {
 
         let dir = scratch_dir("lww");
         let fx = spawn_docs(&dir).await;
-        let td = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone())
+        let td = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None)
             .await
             .unwrap();
         let ns = td.own_namespace();
@@ -1710,7 +1758,7 @@ pub(crate) mod tests {
         let dir = scratch_dir("stable");
         let fx = spawn_docs(&dir).await;
 
-        let first = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone())
+        let first = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None)
             .await
             .unwrap();
         let ns1 = first.own_namespace();
@@ -1722,7 +1770,7 @@ pub(crate) mod tests {
         );
 
         // A second init over the same data_dir (a restart) must REUSE the namespace, not mint one.
-        let second = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone())
+        let second = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None)
             .await
             .unwrap();
         assert_eq!(
@@ -1740,12 +1788,12 @@ pub(crate) mod tests {
         let d2 = scratch_dir("distinct-b");
 
         let fx1 = spawn_docs(&d1).await;
-        let ns_a = TrailDocs::init(fx1.docs.clone(), fx1.blobs.clone(), d1.clone())
+        let ns_a = TrailDocs::init(fx1.docs.clone(), fx1.blobs.clone(), d1.clone(), None)
             .await
             .unwrap()
             .own_namespace();
         let fx2 = spawn_docs(&d2).await;
-        let ns_b = TrailDocs::init(fx2.docs.clone(), fx2.blobs.clone(), d2.clone())
+        let ns_b = TrailDocs::init(fx2.docs.clone(), fx2.blobs.clone(), d2.clone(), None)
             .await
             .unwrap()
             .own_namespace();
@@ -1768,7 +1816,7 @@ pub(crate) mod tests {
         write_ns_file(&dir.join(TRAIL_NS_FILE), &stale).unwrap();
 
         let fx = spawn_docs(&dir).await;
-        let td = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone())
+        let td = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None)
             .await
             .unwrap();
         let ns = td.own_namespace();
@@ -1785,5 +1833,215 @@ pub(crate) mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── the namespace book: what a start reopens, kept out of the replica's directory ────────
+    //
+    // 2026-10-05: a Pixel's node, started by the native runtime with no JS, reconciled only its
+    // own namespace, and that same start rotated its own namespace — so neither side could reach
+    // the other until a re-pair. These pin the book that replaces both behaviours.
+
+    fn book(state_dir: &std::path::Path) -> Arc<NamespaceBook> {
+        Arc::new(NamespaceBook::open(state_dir, ns_book::TRAIL_BOOK_FILE).unwrap())
+    }
+
+    #[tokio::test]
+    async fn own_namespace_survives_a_wiped_replica() {
+        let state = scratch_dir("book-wipe-state");
+        let first_replica = scratch_dir("book-wipe-a");
+        let fx = spawn_docs(&first_replica).await;
+        let ns = TrailDocs::init(
+            fx.docs.clone(),
+            fx.blobs.clone(),
+            first_replica.clone(),
+            Some(book(&state)),
+        )
+        .await
+        .unwrap()
+        .own_namespace();
+
+        // The cache directory is purged: a brand-new replica, the same state_dir.
+        let wiped = scratch_dir("book-wipe-b");
+        let fx2 = spawn_docs(&wiped).await;
+        let td = TrailDocs::init(
+            fx2.docs.clone(),
+            fx2.blobs.clone(),
+            wiped.clone(),
+            Some(book(&state)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            td.own_namespace(),
+            ns,
+            "a wiped replica must come back as the SAME namespace"
+        );
+
+        // And it is writable, not a read-only shell: we still hold the secret.
+        let author = [7u8; 32];
+        td.write(ns, &author, b"after the wipe".to_vec())
+            .await
+            .expect("our own namespace must stay writable after a wipe");
+
+        for dir in [state, first_replica, wiped] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_legacy_install_keeps_its_namespace_and_saves_its_secret() {
+        let state = scratch_dir("book-legacy-state");
+        let replica = scratch_dir("book-legacy");
+        let fx = spawn_docs(&replica).await;
+        // An install from before the book: the id file is the only record.
+        let legacy = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), replica.clone(), None)
+            .await
+            .unwrap()
+            .own_namespace();
+
+        let book = book(&state);
+        let upgraded = TrailDocs::init(
+            fx.docs.clone(),
+            fx.blobs.clone(),
+            replica.clone(),
+            Some(book.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            upgraded.own_namespace(),
+            legacy,
+            "the upgrade must not rotate the namespace"
+        );
+        assert!(
+            book.own_secret().is_some(),
+            "the upgrade must copy the secret into the book"
+        );
+
+        // From then on even a wipe keeps it.
+        let wiped = scratch_dir("book-legacy-wiped");
+        let fx2 = spawn_docs(&wiped).await;
+        let after = TrailDocs::init(
+            fx2.docs.clone(),
+            fx2.blobs.clone(),
+            wiped.clone(),
+            Some(book),
+        )
+        .await
+        .unwrap();
+        assert_eq!(after.own_namespace(), legacy);
+
+        for dir in [state, replica, wiped] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn friend_namespaces_are_reopened_on_the_next_start() {
+        let friend_dir = scratch_dir("book-friend-theirs");
+        let friend_fx = spawn_docs(&friend_dir).await;
+        let friend = TrailDocs::init(
+            friend_fx.docs.clone(),
+            friend_fx.blobs.clone(),
+            friend_dir.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let ticket = friend.read_ticket(friend.own_namespace()).await.unwrap();
+
+        let state = scratch_dir("book-friend-state");
+        let replica = scratch_dir("book-friend-ours");
+        let fx = spawn_docs(&replica).await;
+        let ours = TrailDocs::init(
+            fx.docs.clone(),
+            fx.blobs.clone(),
+            replica.clone(),
+            Some(book(&state)),
+        )
+        .await
+        .unwrap();
+        let theirs = ours.import_ticket(&ticket).await.unwrap();
+        assert_eq!(ours.friend_tickets(), vec![ticket.clone()]);
+
+        // A start with nobody calling `import_ticket` — the native runtime's start.
+        let restarted = TrailDocs::init(
+            fx.docs.clone(),
+            fx.blobs.clone(),
+            replica.clone(),
+            Some(book(&state)),
+        )
+        .await
+        .unwrap();
+        assert!(
+            restarted.namespaces().await.contains(&theirs),
+            "a start must reconcile every friend it had, not only its own namespace"
+        );
+
+        // Even from a wiped replica: an empty read replica that the next sync refills.
+        let wiped = scratch_dir("book-friend-wiped");
+        let fx2 = spawn_docs(&wiped).await;
+        let rebuilt = TrailDocs::init(
+            fx2.docs.clone(),
+            fx2.blobs.clone(),
+            wiped.clone(),
+            Some(book(&state)),
+        )
+        .await
+        .unwrap();
+        assert!(rebuilt.namespaces().await.contains(&theirs));
+
+        // Forgetting a removed friend keeps every later start from reopening them.
+        assert!(rebuilt.forget_ticket(&ticket).await.unwrap());
+        assert!(!rebuilt.namespaces().await.contains(&theirs));
+        assert!(rebuilt.friend_tickets().is_empty());
+        let after_forget = TrailDocs::init(
+            fx2.docs.clone(),
+            fx2.blobs.clone(),
+            wiped.clone(),
+            Some(book(&state)),
+        )
+        .await
+        .unwrap();
+        assert!(!after_forget.namespaces().await.contains(&theirs));
+
+        for dir in [friend_dir, state, replica, wiped] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn our_own_ticket_is_never_booked_as_a_friend() {
+        let state = scratch_dir("book-self-state");
+        let replica = scratch_dir("book-self");
+        let fx = spawn_docs(&replica).await;
+        let td = TrailDocs::init(
+            fx.docs.clone(),
+            fx.blobs.clone(),
+            replica.clone(),
+            Some(book(&state)),
+        )
+        .await
+        .unwrap();
+        let own = td.read_ticket(td.own_namespace()).await.unwrap();
+        td.import_ticket(&own).await.unwrap();
+        assert!(td.friend_tickets().is_empty());
+        assert!(
+            !td.forget_ticket(&own).await.unwrap(),
+            "our own namespace is not forgettable"
+        );
+        assert!(td.namespaces().await.contains(&td.own_namespace()));
+        for dir in [state, replica] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn an_unreadable_book_refuses_rather_than_starting_over() {
+        // Treating it as empty would mint a new own namespace — the failure the book exists for.
+        let state = scratch_dir("book-corrupt");
+        std::fs::write(state.join(ns_book::TRAIL_BOOK_FILE), b"\xff\xff not a book").unwrap();
+        assert!(NamespaceBook::open(&state, ns_book::TRAIL_BOOK_FILE).is_err());
+        let _ = std::fs::remove_dir_all(&state);
     }
 }

@@ -1088,6 +1088,25 @@ public final class IrohLocationModule: Module {
       try await node.importDocTicket(ticket: ticket)
     }
 
+    // Stop replicating a removed friend's trail / profile namespace, and stop reopening it on
+    // every start (`ns_book.rs`). Returns whether we were replicating it.
+    AsyncFunction("forgetDocTicket") { (ticket: String) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.forgetDocTicket(ticket: ticket)
+    }
+
+    AsyncFunction("forgetProfileTicket") { (ticket: String) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.forgetProfileTicket(ticket: ticket)
+    }
+
+    // Grant the trail stash our namespaces now (`stash.rs`). Returns at once; the HTTP runs on its
+    // own task and reports as a `stash.grant` span.
+    AsyncFunction("grantStash") { () async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      await node.grantStashNow()
+    }
+
     Function("configureTelemetry") { (endpoint: String, instanceId: String) -> Bool in
       TelemetryConfigurator.apply(endpoint: endpoint, instanceId: instanceId, remember: true)
     }

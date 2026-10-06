@@ -1402,6 +1402,12 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func endpointId()  -> Data
     
     /**
+     * Stop replicating a removed friend's trail namespace, and stop reopening it on every start.
+     * Returns whether we were replicating it. Call with the docs ticket the friend was added with.
+     */
+    func forgetDocTicket(ticket: String) async throws  -> Bool
+    
+    /**
      * Drop every FINISHED pairing session with this peer. Returns how many were removed.
      *
      * The companion to [`forget_session`](Self::forget_session): that one erases the ratchet
@@ -1415,9 +1421,21 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func forgetPairSessions(peerEndpointHex: String) async throws  -> UInt32
     
     /**
+     * [`Self::forget_doc_ticket`] for the friend's profile namespace.
+     */
+    func forgetProfileTicket(ticket: String) async throws  -> Bool
+    
+    /**
      * Forget the session with this peer (un-friending, or a §4.6 restart).
      */
     func forgetSession(peerEndpointHex: String) async throws 
+    
+    /**
+     * Grant the stash our namespaces now — what `syncStashGrants` in `location-sharing.ts` did
+     * over HTTP from JS, which only ever ran on a foreground launch. Returns at once; the grant
+     * runs on its own task and reports as a `stash.grant` span.
+     */
+    func grantStashNow() async 
     
     /**
      * Whether a ratchet session exists for this peer.
@@ -1433,6 +1451,9 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * Import a friend's docs **read-ticket** (from their contact card) so we replicate their trail
      * namespace and can recover their missed fixes via [`sync_trail`]. This grants only
      * replication; reading still requires our per-recipient wrap in each envelope (ARCHITECTURE §6).
+     *
+     * The namespace is recorded so every later start reopens it, JS or not (see [`ns_book`]), and
+     * the stash is granted it at once.
      */
     func importDocTicket(ticket: String) async throws 
     
@@ -1768,6 +1789,10 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      *
      * An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
      * so this never fails for being empty — the drain simply has no push to make.
+     *
+     * Opting into a stash (or moving to another one) grants it our namespaces at once; any other
+     * write re-grants at most once per [`stash::REGRANT_FLOOR_MS`], which covers the app's call
+     * on every launch without repeating the grant this node's start already made.
      */
     func setDeliveryConfig(config: DeliveryConfig) async throws 
     
@@ -2596,6 +2621,27 @@ open func endpointId() -> Data  {
 }
     
     /**
+     * Stop replicating a removed friend's trail namespace, and stop reopening it on every start.
+     * Returns whether we were replicating it. Call with the docs ticket the friend was added with.
+     */
+open func forgetDocTicket(ticket: String)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_forget_doc_ticket(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(ticket)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_i8,
+            completeFunc: ffi_iroh_location_rust_future_complete_i8,
+            freeFunc: ffi_iroh_location_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Drop every FINISHED pairing session with this peer. Returns how many were removed.
      *
      * The companion to [`forget_session`](Self::forget_session): that one erases the ratchet
@@ -2624,6 +2670,26 @@ open func forgetPairSessions(peerEndpointHex: String)async throws  -> UInt32  {
 }
     
     /**
+     * [`Self::forget_doc_ticket`] for the friend's profile namespace.
+     */
+open func forgetProfileTicket(ticket: String)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_forget_profile_ticket(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(ticket)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_i8,
+            completeFunc: ffi_iroh_location_rust_future_complete_i8,
+            freeFunc: ffi_iroh_location_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Forget the session with this peer (un-friending, or a §4.6 restart).
      */
 open func forgetSession(peerEndpointHex: String)async throws   {
@@ -2640,6 +2706,29 @@ open func forgetSession(peerEndpointHex: String)async throws   {
             freeFunc: ffi_iroh_location_rust_future_free_void,
             liftFunc: { $0 },
             errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Grant the stash our namespaces now — what `syncStashGrants` in `location-sharing.ts` did
+     * over HTTP from JS, which only ever ran on a foreground launch. Returns at once; the grant
+     * runs on its own task and reports as a `stash.grant` span.
+     */
+open func grantStashNow()async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_grant_stash_now(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
         )
 }
     
@@ -2678,6 +2767,9 @@ open func identitySecret() -> Data  {
      * Import a friend's docs **read-ticket** (from their contact card) so we replicate their trail
      * namespace and can recover their missed fixes via [`sync_trail`]. This grants only
      * replication; reading still requires our per-recipient wrap in each envelope (ARCHITECTURE §6).
+     *
+     * The namespace is recorded so every later start reopens it, JS or not (see [`ns_book`]), and
+     * the stash is granted it at once.
      */
 open func importDocTicket(ticket: String)async throws   {
     return
@@ -3609,6 +3701,10 @@ open func seedSeq(floor: UInt64)async throws  -> Bool  {
      *
      * An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
      * so this never fails for being empty — the drain simply has no push to make.
+     *
+     * Opting into a stash (or moving to another one) grants it our namespaces at once; any other
+     * write re-grants at most once per [`stash::REGRANT_FLOOR_MS`], which covers the app's call
+     * on every launch without repeating the grant this node's start already made.
      */
 open func setDeliveryConfig(config: DeliveryConfig)async throws   {
     return
@@ -10298,10 +10394,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_endpoint_id() != 34847) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_forget_doc_ticket() != 38306) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_forget_pair_sessions() != 29011) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_forget_profile_ticket() != 24320) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_forget_session() != 58135) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_grant_stash_now() != 41760) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_has_session() != 16365) {
@@ -10310,7 +10415,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_identity_secret() != 6853) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_import_doc_ticket() != 57589) {
+    if (uniffi_iroh_location_checksum_method_locationnode_import_doc_ticket() != 43304) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_import_profile_ticket() != 16047) {
@@ -10433,7 +10538,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_seed_seq() != 19292) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_set_delivery_config() != 36860) {
+    if (uniffi_iroh_location_checksum_method_locationnode_set_delivery_config() != 59214) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {

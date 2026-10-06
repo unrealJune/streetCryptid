@@ -1253,3 +1253,67 @@ async fn rereading_a_quiet_friends_slot_is_not_a_desync() {
         node.shutdown().await.expect("shutdown");
     }
 }
+
+// ── what a start reopens ─────────────────────────────────────────────────────────────────────
+
+/// **A node started with no JS still receives.** 2026-10-05: a Pixel's node, started by the
+/// native runtime, reconciled only its own namespace, because a friend's namespace was opened only
+/// when JS called `import_doc_ticket` on that run. Its leader's restart reached the stash and never
+/// the Pixel, and the pair stayed broken until it was re-paired. The reader here is restarted as a
+/// new process and then only ever SYNCS — nothing re-imports the author's ticket into it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarted_reader_receives_without_anyone_reimporting_its_friends() {
+    let author = start_node().await;
+    let reader = start_node().await;
+    let stash = start_node().await;
+    bootstrap_and_prime(&author, &reader, &stash).await;
+    // The app imports a friend's ticket once, when they are added — the last time anything does.
+    reader
+        .import_doc_ticket(author.doc_ticket().await.expect("author trail ticket"))
+        .await
+        .expect("reader imports once, at pairing");
+
+    let reader = restart(reader).await;
+
+    let dropped = author
+        .docs_write_ratcheted(
+            "t".into(),
+            1,
+            fix_at(5_000),
+            vec![hex(&reader.endpoint_id())],
+        )
+        .await
+        .expect("publish");
+    assert!(dropped.is_empty(), "{dropped:?}");
+    let author_ticket = author.doc_ticket().await.expect("author trail ticket");
+    let author_id = author.endpoint_id();
+    let deadline = std::time::Instant::now() + DELIVERY_DEADLINE;
+    loop {
+        // The stash is a separate process with its own registration; only the reader is under test.
+        stash
+            .import_doc_ticket(author_ticket.clone())
+            .await
+            .expect("stash imports");
+        stash
+            .sync_latest(vec![author.ticket().await.expect("author ticket")], None)
+            .await
+            .expect("stash reconciles with author");
+        reader
+            .sync_latest(vec![stash.ticket().await.expect("stash ticket")], None)
+            .await
+            .expect("reader reconciles with stash");
+        let last = reader.read_latest_ratcheted().await.expect("read");
+        if last
+            .iter()
+            .any(|e| e.author == author_id && e.fix.ts == 5_000)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the restarted reader never received the author's fix: it is not reconciling the \
+             author's namespace, which only a JS import used to open"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}

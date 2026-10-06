@@ -805,9 +805,15 @@ external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_traced
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_endpoint_id(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_forget_doc_ticket(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_forget_pair_sessions(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_forget_profile_ticket(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_forget_session(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_grant_stash_now(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_has_session(
 ): Int
@@ -1081,9 +1087,15 @@ external fun uniffi_iroh_location_fn_method_locationnode_docs_write_traced(`ptr`
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_endpoint_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_locationnode_forget_doc_ticket(`ptr`: Long,`ticket`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_forget_pair_sessions(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_forget_profile_ticket(`ptr`: Long,`ticket`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_forget_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_grant_stash_now(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_has_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
@@ -1570,10 +1582,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_endpoint_id() != 34847) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_forget_doc_ticket() != 38306) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_forget_pair_sessions() != 29011) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_forget_profile_ticket() != 24320) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_forget_session() != 58135) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_grant_stash_now() != 41760) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_has_session() != 16365) {
@@ -1582,7 +1603,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_identity_secret() != 6853) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_import_doc_ticket() != 57589) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_import_doc_ticket() != 43304) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_import_profile_ticket() != 16047) {
@@ -1705,7 +1726,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_seed_seq() != 19292) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_delivery_config() != 36860) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_delivery_config() != 59214) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
@@ -3369,6 +3390,12 @@ public interface LocationNodeInterface {
     fun `endpointId`(): kotlin.ByteArray
     
     /**
+     * Stop replicating a removed friend's trail namespace, and stop reopening it on every start.
+     * Returns whether we were replicating it. Call with the docs ticket the friend was added with.
+     */
+    suspend fun `forgetDocTicket`(`ticket`: kotlin.String): kotlin.Boolean
+    
+    /**
      * Drop every FINISHED pairing session with this peer. Returns how many were removed.
      *
      * The companion to [`forget_session`](Self::forget_session): that one erases the ratchet
@@ -3382,9 +3409,21 @@ public interface LocationNodeInterface {
     suspend fun `forgetPairSessions`(`peerEndpointHex`: kotlin.String): kotlin.UInt
     
     /**
+     * [`Self::forget_doc_ticket`] for the friend's profile namespace.
+     */
+    suspend fun `forgetProfileTicket`(`ticket`: kotlin.String): kotlin.Boolean
+    
+    /**
      * Forget the session with this peer (un-friending, or a §4.6 restart).
      */
     suspend fun `forgetSession`(`peerEndpointHex`: kotlin.String)
+    
+    /**
+     * Grant the stash our namespaces now — what `syncStashGrants` in `location-sharing.ts` did
+     * over HTTP from JS, which only ever ran on a foreground launch. Returns at once; the grant
+     * runs on its own task and reports as a `stash.grant` span.
+     */
+    suspend fun `grantStashNow`()
     
     /**
      * Whether a ratchet session exists for this peer.
@@ -3400,6 +3439,9 @@ public interface LocationNodeInterface {
      * Import a friend's docs **read-ticket** (from their contact card) so we replicate their trail
      * namespace and can recover their missed fixes via [`sync_trail`]. This grants only
      * replication; reading still requires our per-recipient wrap in each envelope (ARCHITECTURE §6).
+     *
+     * The namespace is recorded so every later start reopens it, JS or not (see [`ns_book`]), and
+     * the stash is granted it at once.
      */
     suspend fun `importDocTicket`(`ticket`: kotlin.String)
     
@@ -3735,6 +3777,10 @@ public interface LocationNodeInterface {
      *
      * An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
      * so this never fails for being empty — the drain simply has no push to make.
+     *
+     * Opting into a stash (or moving to another one) grants it our namespaces at once; any other
+     * write re-grants at most once per [`stash::REGRANT_FLOOR_MS`], which covers the app's call
+     * on every launch without repeating the grant this node's start already made.
      */
     suspend fun `setDeliveryConfig`(`config`: DeliveryConfig)
     
@@ -4662,6 +4708,31 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Stop replicating a removed friend's trail namespace, and stop reopening it on every start.
+     * Returns whether we were replicating it. Call with the docs ticket the friend was added with.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `forgetDocTicket`(`ticket`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_forget_doc_ticket(
+                uniffiHandle,
+                FfiConverterString.lower(`ticket`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Drop every FINISHED pairing session with this peer. Returns how many were removed.
      *
      * The companion to [`forget_session`](Self::forget_session): that one erases the ratchet
@@ -4694,6 +4765,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * [`Self::forget_doc_ticket`] for the friend's profile namespace.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `forgetProfileTicket`(`ticket`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_forget_profile_ticket(
+                uniffiHandle,
+                FfiConverterString.lower(`ticket`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Forget the session with this peer (un-friending, or a §4.6 restart).
      */
     @Throws(LocationException::class)
@@ -4714,6 +4809,32 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         
         // Error FFI converter
         LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Grant the stash our namespaces now — what `syncStashGrants` in `location-sharing.ts` did
+     * over HTTP from JS, which only ever ran on a foreground launch. Returns at once; the grant
+     * runs on its own task and reports as a `stash.grant` span.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `grantStashNow`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_grant_stash_now(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
     )
     }
 
@@ -4762,6 +4883,9 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
      * Import a friend's docs **read-ticket** (from their contact card) so we replicate their trail
      * namespace and can recover their missed fixes via [`sync_trail`]. This grants only
      * replication; reading still requires our per-recipient wrap in each envelope (ARCHITECTURE §6).
+     *
+     * The namespace is recorded so every later start reopens it, JS or not (see [`ns_book`]), and
+     * the stash is granted it at once.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -5851,6 +5975,10 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
      *
      * An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
      * so this never fails for being empty — the drain simply has no push to make.
+     *
+     * Opting into a stash (or moving to another one) grants it our namespaces at once; any other
+     * write re-grants at most once per [`stash::REGRANT_FLOOR_MS`], which covers the app's call
+     * on every launch without repeating the grant this node's start already made.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")

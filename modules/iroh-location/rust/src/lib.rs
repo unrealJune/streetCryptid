@@ -30,6 +30,8 @@ pub mod location_runtime;
 pub mod mesh;
 /// Native MVT tile/bundle decoder for the map pipeline (pure; see `mvt.rs`).
 pub mod mvt;
+/// Which docs namespaces a node reopens on every start, in `state_dir` (see the module docs).
+pub mod ns_book;
 pub mod outbox;
 pub mod own_log;
 pub mod pad;
@@ -42,6 +44,7 @@ pub mod restart;
 pub mod seq_store;
 pub mod session_store;
 pub mod sessions;
+mod stash;
 pub mod transport;
 
 /// The `mesh_epoch` every DOCS-path envelope carries.
@@ -1139,6 +1142,14 @@ impl ProfileSink for ProfileEventQueue {
     }
 }
 
+/// What [`LocationNode::grant_stash`] registers.
+enum StashGrant {
+    /// One newly imported friend ticket.
+    One(String),
+    /// Our trail and every friend's; `floored` defers to [`stash::REGRANT_FLOOR_MS`].
+    All { floored: bool },
+}
+
 struct Started {
     endpoint: Endpoint,
     gossip: Gossip,
@@ -1419,6 +1430,65 @@ impl LocationNode {
         }))
     }
 
+    /// Grant the trail stash replication of our trail namespace and every friend's (see
+    /// [`stash`]). Does nothing when the stash is not opted into. The HTTP runs on its own task, so
+    /// no caller ever waits on the stash; what this awaits is local (the delivery store and one
+    /// docs ticket).
+    async fn grant_stash(&self, scope: StashGrant, reason: &'static str) {
+        use tracing::Instrument;
+        let Some(live) = self.live_opt().await else {
+            return;
+        };
+        let config = match self.delivery_store().await {
+            Ok(store) => store.get(),
+            Err(_) => return,
+        };
+        let Some((base_url, psk)) = config.stash() else {
+            return;
+        };
+        let base_url = base_url.to_string();
+        let tickets = match scope {
+            StashGrant::One(ticket) => vec![ticket],
+            StashGrant::All { floored } => {
+                let now = now_ms();
+                if floored && !stash::regrant_due(self.stash_grant_at.load(Ordering::Relaxed), now)
+                {
+                    return;
+                }
+                self.stash_grant_at.store(now, Ordering::Relaxed);
+                let mut tickets = Vec::new();
+                match live.trail.read_ticket(live.trail.own_namespace()).await {
+                    Ok(own) => tickets.push(own),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "stash grant: no ticket for our trail")
+                    }
+                }
+                tickets.extend(live.trail.friend_tickets());
+                tickets
+            }
+        };
+        if tickets.is_empty() {
+            return;
+        }
+        let span = tracing::info_span!(
+            "stash.grant",
+            sc.author = %telemetry::short_hex(&self.author),
+            reason,
+            namespaces = tickets.len(),
+            registered = tracing::field::Empty,
+            failed = tracing::field::Empty,
+        );
+        tokio::spawn(
+            async move {
+                let report = stash::register(&base_url, psk.as_deref(), &tickets).await;
+                let current = tracing::Span::current();
+                current.record("registered", report.registered);
+                current.record("failed", report.failed);
+            }
+            .instrument(span),
+        );
+    }
+
     /// Clone this node's live handles and RELEASE the node lock. See [`Live`].
     ///
     /// Every method below that touches the endpoint, gossip or the docs engines starts here. The
@@ -1459,6 +1529,9 @@ pub struct LocationNode {
     /// Which node this is within this process. See [`NODE_ORDINAL`]; carried here so later spans
     /// can say WHICH node they came from, not only that a node existed.
     ordinal: u64,
+    /// When the last full stash grant ran (ms), for the floor on the untracked-slots trigger.
+    /// In memory on purpose: every process grants once at start regardless. See [`stash`].
+    stash_grant_at: AtomicU64,
     /// On-disk root for the persistent docs replica + blobs store (durable trail). Derived from
     /// the identity so it stays stable across restarts.
     ///
@@ -2207,6 +2280,7 @@ fn new_location_node_at(
         last_control: Mutex::new(None),
         clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
         ordinal,
+        stash_grant_at: AtomicU64::new(0),
     });
     tracing::info!(
         node.ordinal = ordinal,
@@ -2416,6 +2490,17 @@ impl LocationNode {
                 ));
             }
         }
+        // The namespaces to reopen live in `state_dir`, not beside the replica: the replica is in
+        // the cache directory on Android, and losing it must cost a re-sync, never a new identity.
+        // Read here, with the other local state and before the endpoint binds, so a book that will
+        // refuse the start does so without having touched the network.
+        let open_book = |file: &str| {
+            ns_book::NamespaceBook::open(&self.state_dir, file)
+                .map(Arc::new)
+                .map_err(|e| LocationError::Network(e.to_string()))
+        };
+        let trail_book = open_book(ns_book::TRAIL_BOOK_FILE)?;
+        let profile_book = open_book(ns_book::PROFILE_BOOK_FILE)?;
 
         let relay_mode = if relay_enabled {
             relay::custom_relay_mode(&relay_urls, &relay_auth_token)
@@ -2517,14 +2602,24 @@ impl LocationNode {
             .spawn();
 
         let trail = Arc::new(
-            TrailDocs::init(docs.clone(), (*blobs).clone(), self.data_dir.clone())
-                .await
-                .map_err(|e| LocationError::Network(e.to_string()))?,
+            TrailDocs::init(
+                docs.clone(),
+                (*blobs).clone(),
+                self.data_dir.clone(),
+                Some(trail_book),
+            )
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?,
         );
         let profile = Arc::new(
-            ProfileDocs::init(docs, (*blobs).clone(), self.data_dir.clone())
-                .await
-                .map_err(|e| LocationError::Network(e.to_string()))?,
+            ProfileDocs::init(
+                docs,
+                (*blobs).clone(),
+                self.data_dir.clone(),
+                Some(profile_book),
+            )
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?,
         );
         // Arm the profile namespace as soon as the engine exists, not just on the next publish:
         // a friend who imported our read-ticket dials us to reconcile, and the live engine only
@@ -2574,6 +2669,10 @@ impl LocationNode {
             memory,
             _router: router,
         });
+        // Every start re-grants the stash, app or background: a stash restart forgets every
+        // namespace, and this is the only path that runs in a process with no JS. Spawned.
+        self.grant_stash(StashGrant::All { floored: false }, "start")
+            .await;
         Ok(())
     }
 
@@ -3399,14 +3498,35 @@ impl LocationNode {
     ///
     /// An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
     /// so this never fails for being empty — the drain simply has no push to make.
+    ///
+    /// Opting into a stash (or moving to another one) grants it our namespaces at once; any other
+    /// write re-grants at most once per [`stash::REGRANT_FLOOR_MS`], which covers the app's call
+    /// on every launch without repeating the grant this node's start already made.
     pub async fn set_delivery_config(
         &self,
         config: delivery::DeliveryConfig,
     ) -> Result<(), LocationError> {
-        self.delivery_store()
-            .await?
+        let store = self.delivery_store().await?;
+        let stash_changed = store.get().stash_base_url != config.stash_base_url;
+        store
             .set(config)
-            .map_err(|e| LocationError::Network(e.to_string()))
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        self.grant_stash(
+            StashGrant::All {
+                floored: !stash_changed,
+            },
+            "delivery-config",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Grant the stash our namespaces now — what `syncStashGrants` in `location-sharing.ts` did
+    /// over HTTP from JS, which only ever ran on a foreground launch. Returns at once; the grant
+    /// runs on its own task and reports as a `stash.grant` span.
+    pub async fn grant_stash_now(&self) {
+        self.grant_stash(StashGrant::All { floored: false }, "app")
+            .await;
     }
 
     /// Where the native drain path will push right now. For diagnostics and `device.health`.
@@ -3538,6 +3658,10 @@ impl LocationNode {
                     "trail content upload: the stash is not tracking some slots; their bytes are \
                      not available for offline friends yet"
                 );
+                // A stash that has restarted answers exactly like this, and keeps doing so until
+                // someone registers our namespaces again. Floored: it repeats on every upload.
+                self.grant_stash(StashGrant::All { floored: true }, "untracked")
+                    .await;
             }
             Ok(report.uploaded)
         }
@@ -3774,7 +3898,8 @@ impl LocationNode {
             sc.author = %telemetry::short_hex(&self.author),
             sc.seq = seq,
             sc.lane = if null { "null" } else { "fix" },
-            sc.envelope = 3,
+            // Recorded once sealed: v4 while a restart header rides along, v3 otherwise.
+            sc.envelope = tracing::field::Empty,
             recipients = recipient_endpoints.len(),
             dropped = tracing::field::Empty,
             sc.drop_reason = tracing::field::Empty,
@@ -3816,6 +3941,9 @@ impl LocationNode {
                 &payload,
                 set.wraps,
             )?;
+            if let Some(v) = crypto::envelope_version(&envelope) {
+                tracing::Span::current().record("sc.envelope", v);
+            }
 
             let started = self.live().await?;
             let ns = started.trail.own_namespace();
@@ -3884,13 +4012,37 @@ impl LocationNode {
     /// Import a friend's docs **read-ticket** (from their contact card) so we replicate their trail
     /// namespace and can recover their missed fixes via [`sync_trail`]. This grants only
     /// replication; reading still requires our per-recipient wrap in each envelope (ARCHITECTURE §6).
+    ///
+    /// The namespace is recorded so every later start reopens it, JS or not (see [`ns_book`]), and
+    /// the stash is granted it at once.
     pub async fn import_doc_ticket(&self, ticket: String) -> Result<(), LocationError> {
         let started = self.live().await?;
         started
             .trail
             .import_ticket(&ticket)
             .await
-            .map(|_| ())
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        self.grant_stash(StashGrant::One(ticket), "import").await;
+        Ok(())
+    }
+
+    /// Stop replicating a removed friend's trail namespace, and stop reopening it on every start.
+    /// Returns whether we were replicating it. Call with the docs ticket the friend was added with.
+    pub async fn forget_doc_ticket(&self, ticket: String) -> Result<bool, LocationError> {
+        let started = self.live().await?;
+        started
+            .trail
+            .forget_ticket(&ticket)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// [`Self::forget_doc_ticket`] for the friend's profile namespace.
+    pub async fn forget_profile_ticket(&self, ticket: String) -> Result<bool, LocationError> {
+        let profile = self.live().await?.profile;
+        profile
+            .forget_ticket(&ticket)
+            .await
             .map_err(|e| LocationError::Network(e.to_string()))
     }
 
@@ -5415,7 +5567,8 @@ impl Subscription {
             sc.author = %telemetry::short_hex(&self.node.author),
             sc.seq = seq,
             sc.lane = if fix.is_none() { "null" } else { "fix" },
-            sc.envelope = 3,
+            // Recorded once sealed: v4 while a restart header rides along, v3 otherwise.
+            sc.envelope = tracing::field::Empty,
             sc.entry_hash = tracing::field::Empty,
             recipients = recipient_endpoints.len(),
             dropped = tracing::field::Empty,
@@ -5469,6 +5622,9 @@ impl Subscription {
                 &payload,
                 set.wraps,
             )?;
+            if let Some(v) = crypto::envelope_version(&envelope) {
+                tracing::Span::current().record("sc.envelope", v);
+            }
             tracing::Span::current().record(
                 "sc.entry_hash",
                 tracing::field::display(telemetry::envelope_hash(&envelope)),

@@ -196,6 +196,24 @@ Conventions when changing that code:
   runs the sampling policy and draws the own marker, and both paths end in `ingestFix` on the same
   node. `LocationNode::shutdown` releases every store even when the router fails to close — it
   used to return early with all of them still claimed.
+- **A node reopens its namespaces from `state_dir`, never from memory or the cache directory**
+  (`rust/src/ns_book.rs`). Until 2026-10-06 a friend's docs namespace was open only if JS had called
+  `importDocTicket` on that run, and the own namespace was remembered by an id file beside the
+  replica. On 2026-10-05 a Pixel's node started by the native runtime hit both at once: it
+  reconciled only its own namespace (so its leader's session restart reached the stash and never
+  the Pixel), and the same start rotated its own namespace, because `Docs::open` reports a missing
+  namespace as an `Err` and `init` answered every `Err` by minting one — so the iPhone read a
+  namespace nobody wrote again. Only a re-pair recovered it. The book holds the own namespace
+  SECRET (a wiped replica comes back as the SAME namespace) and every imported friend namespace with
+  its read ticket. Rules: an unreadable book fails the start rather than starting over; a
+  namespace that is listed but fails to open fails the start rather than being replaced; removing a
+  friend must call `forgetDocTicket` / `forgetProfileTicket`, or every later start reopens them.
+- **The stash grant belongs to the node** (`rust/src/stash.rs`, span `stash.grant`). The stash keeps
+  its namespace list in memory and forgets it on every restart (2026-10-03 18:39, 2026-10-06 03:56);
+  JS re-registered only on a foreground launch, so a phone the native runtime drove stayed
+  unregistered. The node grants on every start, on a stash opt-in change, per imported friend, and
+  (floored, 10 min) when an upload reports `untracked` slots — what a stash that forgot us looks
+  like. JS's `syncStashGrants` calls `grantStash()` and keeps its HTTP only for older binaries.
 - **`IrohBackgroundBootstrap.swift` runs before React, and must return `true`.**
   `ExpoAppDelegateSubscriberManager` reduces `willFinishLaunchingWithOptions` with
   `?? false || result` and short-circuits to `true` only when NO subscriber implements it; once ours

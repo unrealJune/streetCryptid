@@ -1218,6 +1218,28 @@ class IrohLocationModule : Module() {
         n.importDocTicket(ticket)
       }
 
+    /// Stop replicating a removed friend's trail / profile namespace, and stop reopening it on
+    /// every start (`ns_book.rs`). Returns whether we were replicating it.
+    AsyncFunction("forgetDocTicket") Coroutine
+      { ticket: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.forgetDocTicket(ticket)
+      }
+
+    AsyncFunction("forgetProfileTicket") Coroutine
+      { ticket: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.forgetProfileTicket(ticket)
+      }
+
+    /// Grant the trail stash our namespaces now (`stash.rs`). Returns at once; the HTTP runs on
+    /// its own task and reports as a `stash.grant` span.
+    AsyncFunction("grantStash") Coroutine
+      { ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.grantStashNow()
+      }
+
     // ── Profiles — see docs/social/ARCHITECTURE.md §3 ─────────────────────────────────────
 
     AsyncFunction("publishProfile") Coroutine

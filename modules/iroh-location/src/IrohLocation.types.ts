@@ -1106,6 +1106,19 @@ export interface IrohLocationApi {
    * reading still needs our per-recipient wrap in each envelope. See ARCHITECTURE §6.
    */
   importDocTicket(ticket: string): Promise<void>;
+  /**
+   * Stop replicating a removed friend's trail (or profile) namespace, and stop reopening it on
+   * every start. Pass the ticket the friend was added with. Resolves whether it was replicated.
+   * Optional: absent on binaries built before the namespace book.
+   */
+  forgetDocTicket?(ticket: string): Promise<boolean>;
+  forgetProfileTicket?(ticket: string): Promise<boolean>;
+  /**
+   * Grant the trail stash replication of our trail and every friend's, from native. Resolves at
+   * once; the grant itself runs on a native task. Optional: absent on binaries that predate it,
+   * where the JS HTTP grant is still the only one.
+   */
+  grantStash?(): Promise<void>;
 
   // ── Developer telemetry (dev/preview builds; see src/features/dev/telemetry in the app) ─────
   /**

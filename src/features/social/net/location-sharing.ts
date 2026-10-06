@@ -1042,6 +1042,14 @@ export class LocationSharingService {
    */
   private async syncStashGrants(): Promise<void> {
     if (!this.stashEnabled()) return;
+    // The grant belongs to the node now (`stash.rs`): it runs on every node start, app or
+    // background, which this — a foreground launch only — never covered, so a stash restart left a
+    // phone driven by the native runtime unregistered indefinitely. The HTTP below is kept only for
+    // a binary that predates the native grant.
+    if (typeof this.mod?.grantStash === 'function') {
+      await this.mod.grantStash().catch(() => undefined);
+      return;
+    }
     const tasks: Promise<void>[] = [];
     const swallow = () => {
       /* best-effort */
@@ -1392,6 +1400,26 @@ export class LocationSharingService {
             }`
           );
         })
+      );
+    }
+    // And their namespaces, or every later start would reopen and keep reconciling them: the node
+    // now remembers each friend it imported (`ns_book.rs`), so forgetting has to be said too.
+    // Guarded for binaries that predate the book; they never reopened anything anyway.
+    const removed = previousState.friends[endpointId];
+    if (mod && removed?.docTicket && typeof mod.forgetDocTicket === 'function') {
+      cleanup.push(
+        mod
+          .forgetDocTicket(removed.docTicket)
+          .then(() => undefined)
+          .catch(() => undefined)
+      );
+    }
+    if (mod && removed?.profileTicket && typeof mod.forgetProfileTicket === 'function') {
+      cleanup.push(
+        mod
+          .forgetProfileTicket(removed.profileTicket)
+          .then(() => undefined)
+          .catch(() => undefined)
       );
     }
     // And the pairing record of how the friendship began, which the ratchet teardown above does
@@ -4280,8 +4308,9 @@ export class LocationSharingService {
         // Non-fatal: live gossip still works; only offline recovery of their trail is affected.
       }
       // Also grant the stash replication of their trail so we can catch up while both are offline.
-      // No push token — see `syncStashGrants`.
-      if (this.stashEnabled()) {
+      // No push token — see `syncStashGrants`. A binary with the native grant has already done
+      // this inside `importDocTicket`.
+      if (this.stashEnabled() && typeof this.mod.grantStash !== 'function') {
         void this.stash.registerNamespace({ readTicket: card.docTicket }).catch(() => {
           /* best-effort */
         });

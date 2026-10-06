@@ -41,6 +41,8 @@ use n0_future::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::ns_book::{self, NamespaceBook};
+
 /// Current profile schema version.
 pub const PROFILE_V: u8 = 1;
 
@@ -339,6 +341,8 @@ pub struct ProfileDocs {
     own_ns: NamespaceId,
     /// Docs we can read (own + imported friends), keyed by namespace bytes.
     handles: Mutex<HashMap<[u8; 32], Doc>>,
+    /// What to reopen on the next start. See [`crate::ns_book`]; same reasons as the trail's.
+    book: Option<Arc<NamespaceBook>>,
     /// Highest profile epoch accepted per endpoint id (rollback protection).
     epochs: Mutex<HashMap<[u8; 32], u64>>,
     /// Namespaces that already have a live watcher task, so re-importing a friend's ticket (the
@@ -356,34 +360,43 @@ pub struct ProfileDocs {
 }
 
 impl ProfileDocs {
-    /// Initialise from an already-spawned [`Docs`] protocol + blobs store, reusing the
-    /// persisted profile namespace under `data_dir` when possible (stable across restarts),
-    /// otherwise creating a new one and persisting its id.
-    pub async fn init(docs: Docs, blobs: BlobsStore, data_dir: PathBuf) -> Result<Self> {
+    /// Initialise from an already-spawned [`Docs`] protocol + blobs store.
+    ///
+    /// With a `book`, our own namespace comes back from the secret it holds — never minted over
+    /// one that merely failed to open — and friend namespaces it lists are reopened. Rotating this
+    /// namespace silently stops every friend receiving our profile edits, exactly as rotating the
+    /// trail one stops them receiving fixes. See [`crate::ns_book`]. Without a book, the id file
+    /// under `data_dir` is the only memory.
+    pub async fn init(
+        docs: Docs,
+        blobs: BlobsStore,
+        data_dir: PathBuf,
+        book: Option<Arc<NamespaceBook>>,
+    ) -> Result<Self> {
         let author = docs.author_default().await?;
         let ns_path = data_dir.join(PROFILE_NS_FILE);
+        let legacy = read_ns_file(&ns_path);
 
-        let doc = match read_ns_file(&ns_path) {
-            Some(id) => {
-                let ns = NamespaceId::from(id);
-                match docs.open(ns).await {
-                    Ok(Some(doc)) => Some(doc),
-                    _ => None,
-                }
-            }
-            None => None,
-        };
-        let doc = match doc {
-            Some(doc) => doc,
-            None => {
-                let doc = docs.create().await?;
-                // Best-effort persist; a failure just means we mint a fresh ns next boot.
-                let _ = write_ns_file(&ns_path, &doc.id().to_bytes());
-                doc
-            }
-        };
-        let own_ns = doc.id();
         let mut handles = HashMap::new();
+        let doc = match book.as_deref() {
+            Some(book) => {
+                let own = ns_book::open_own_namespace(&docs, book, legacy).await?;
+                for doc in ns_book::reopen_friends(&docs, book).await {
+                    handles.insert(doc.id().to_bytes(), doc);
+                }
+                own
+            }
+            None => match legacy {
+                Some(id) => match docs.open(NamespaceId::from(id)).await {
+                    Ok(Some(doc)) => doc,
+                    _ => docs.create().await?,
+                },
+                None => docs.create().await?,
+            },
+        };
+        // Kept for a downgrade to a binary that reads only this file. Best-effort.
+        let _ = write_ns_file(&ns_path, &doc.id().to_bytes());
+        let own_ns = doc.id();
         handles.insert(own_ns.to_bytes(), doc);
         Ok(Self {
             docs,
@@ -391,6 +404,7 @@ impl ProfileDocs {
             author,
             own_ns,
             handles: Mutex::new(handles),
+            book,
             epochs: Mutex::new(HashMap::new()),
             watched: Mutex::new(HashSet::new()),
             handed: Mutex::new(HashMap::new()),
@@ -475,12 +489,37 @@ impl ProfileDocs {
     }
 
     /// Import a friend's profile read-ticket, begin replicating, and return the namespace id.
+    ///
+    /// Recorded in the book, so every later start reopens it whether or not JS runs.
     pub async fn import_ticket(&self, ticket: &str) -> Result<NamespaceId> {
-        let ticket: iroh_docs::DocTicket = ticket.parse().map_err(|e| anyhow!("{e}"))?;
-        let doc = self.docs.import(ticket).await?;
+        let parsed: iroh_docs::DocTicket = ticket.parse().map_err(|e| anyhow!("{e}"))?;
+        let doc = self.docs.import(parsed).await?;
         let ns = doc.id();
+        if ns != self.own_ns {
+            if let Some(book) = &self.book {
+                book.add_friend(ns.to_bytes(), ticket)?;
+            }
+        }
         self.handles.lock().await.insert(ns.to_bytes(), doc);
         Ok(ns)
+    }
+
+    /// Stop replicating a removed friend's profile namespace and drop it from the book. Returns
+    /// whether we were replicating it.
+    pub async fn forget_ticket(&self, ticket: &str) -> Result<bool> {
+        let ns = NamespaceId::from(ns_book::ticket_namespace(ticket)?);
+        if ns == self.own_ns {
+            return Ok(false);
+        }
+        let in_book = match &self.book {
+            Some(book) => book.remove_friend(ns.to_bytes())?,
+            None => false,
+        };
+        let handle = self.handles.lock().await.remove(&ns.to_bytes());
+        if let Some(doc) = &handle {
+            let _ = doc.leave().await;
+        }
+        Ok(in_book || handle.is_some())
     }
 
     /// The raw signed bytes of the newest record in `ns`, or `None` if there is no entry yet or
@@ -815,7 +854,7 @@ mod tests {
     async fn live_profile(tag: &str) -> (ProfileDocs, PathBuf) {
         let dir = crate::docs::tests::scratch_dir(tag);
         let fx = crate::docs::tests::spawn_docs(&dir).await;
-        let docs = ProfileDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone())
+        let docs = ProfileDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None)
             .await
             .unwrap();
         // The fixture's endpoint/gossip must outlive the replica; leaking is the cheapest way to
@@ -835,6 +874,43 @@ mod tests {
             &good_fields(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn own_profile_namespace_survives_a_wiped_replica() {
+        // Rotating the profile namespace stops every friend receiving our profile edits, the same
+        // way rotating the trail one stops them receiving fixes. See `crate::ns_book`.
+        let state = crate::docs::tests::scratch_dir("profile-book-state");
+        let open_book = || {
+            Some(Arc::new(
+                NamespaceBook::open(&state, ns_book::PROFILE_BOOK_FILE).unwrap(),
+            ))
+        };
+        let first = crate::docs::tests::scratch_dir("profile-book-a");
+        let fx = crate::docs::tests::spawn_docs(&first).await;
+        let ns = ProfileDocs::init(
+            fx.docs.clone(),
+            fx.blobs.clone(),
+            first.clone(),
+            open_book(),
+        )
+        .await
+        .unwrap()
+        .own_ns;
+        let wiped = crate::docs::tests::scratch_dir("profile-book-b");
+        let fx2 = crate::docs::tests::spawn_docs(&wiped).await;
+        let again = ProfileDocs::init(
+            fx2.docs.clone(),
+            fx2.blobs.clone(),
+            wiped.clone(),
+            open_book(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.own_ns, ns);
+        for dir in [state, first, wiped] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[tokio::test]
