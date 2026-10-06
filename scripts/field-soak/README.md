@@ -86,3 +86,63 @@ scripts/field-soak/install.sh uninstall                 # stop everything (state
 
 To soak a branch, check it out and run `build-install.sh`. The account and pairings survive an
 in-place install.
+
+## Operations
+
+### Where it runs
+
+The rig runs from a **dedicated, permanent worktree** at `~/field-soak`, never from a session's
+`.claude/worktrees/*` (those get cleaned up, and the LaunchAgents would point at nothing). Its
+branch is a local `soak/<what>`: the code under test with `feat/field-soak` (or `main`, once
+merged) merged on top. One checkout then holds both the rig scripts and the app source it builds.
+
+Files git doesn't track have to be copied into a new worktree:
+`scripts/field-soak/.env`, the repo-root `.env.local` (`EXPO_PUBLIC_*` telemetry), and
+`modules/iroh-location/ios/IrohLocationFFI.xcframework` (or build it with `--rust`). Then run
+`bun install`.
+
+### Soaking a PR
+
+```
+cd ~/field-soak
+git fetch origin pull/<N>/head:refs/remotes/origin/pr-<N>
+git switch -c soak/pr-<N> origin/pr-<N> && git merge feat/field-soak   # a new PR
+git merge origin/pr-<N>                                                # or: update the current one
+scripts/field-soak/build-install.sh                                    # --rust if the crate changed
+```
+
+`--rust` refuses to continue if the regenerated bindings differ from the committed ones. If you
+skip it, check that `git diff --stat <old> HEAD -- modules/iroh-location/rust modules/iroh-location/ios`
+is empty. Changing the checked-out branch does NOT restart the LaunchAgents, and doesn't need to:
+the next tick picks up the new scripts, and the walker and listener only need a restart
+(`install.sh walker` / `install.sh listen`) if their own code changed.
+
+### What the Mac needs
+
+- **Plugged in, lid open, user logged in.** LaunchAgents run only in a login session. System
+  sleep should be off (`pmset -g custom`); a closed laptop lid sleeps regardless.
+- **The `claude` CLI logged in** (the ticks run `~/.local/bin/claude` as you), **Tailscale up**
+  (Grafana), and the secrets in `~/.config/streetcryptid/`.
+
+### When the phone reboots
+
+1. Unlock it with the passcode. Nothing on the Mac can do this.
+2. `~/.local/share/streetcryptid-field/venv/bin/pymobiledevice3 mounter auto-mount`, which
+   remounts the developer disk image that location simulation, screenshots and WDA all need.
+3. The walker reconnects by itself (launchd restarts it until it can). `fs status` shows
+   `connected_since`.
+
+Developer Mode, Auto-Lock = Never, the app, the WebDriverAgent runner and all pairings survive a
+reboot.
+
+### Health check
+
+```
+launchctl list | grep streetcryptid      # walker and listen show a PID; tick runs on schedule
+~/field-soak/scripts/field-soak/fs status
+ls -t ~/.local/state/streetcryptid-field/ticks | head -3
+tail ~/.local/state/streetcryptid-field/listen.log
+```
+
+If a tick log shows an auth error, the `claude` CLI login has lapsed. If `fs check` can't reach
+Grafana, check Tailscale.
