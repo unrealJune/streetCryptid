@@ -189,14 +189,22 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
 
   /// When the phone first entered the jitter radius of the current stop candidate. `nil` while
   /// moving or once the stop is confirmed.
-  private var stopCandidate: (centre: CLLocation, since: Date)?
+  ///
+  /// Persisted, because the dwell it times routinely outlives the process timing it. A process
+  /// relaunched in the background gets wakes of ~30 s against a 180 s dwell, and on 2026-10-06 an
+  /// iPhone opened a candidate at home at 17:17, was killed, was relaunched at 17:37 and opened a
+  /// NEW one from zero — and was killed again 32 s into that. Restored, the 17:37 seed would have
+  /// found a candidate twenty minutes old at the same spot and parked on the spot.
+  private var stopCandidate: (centre: CLLocation, since: Date)? {
+    didSet { candidateDirty = true }
+  }
 
   /// The centre of a fence armed *speculatively*, around a stop candidate, while still `moving`.
   ///
   /// Distinct from `stopAnchor`, which asserts "we are parked here". This one says only "we might
   /// be about to be", and it exists because the confirmation that would promote it cannot be
-  /// relied on to arrive — see `considerStopping`. Not persisted: a guess is not worth restoring
-  /// across a launch, and a stop that was real got promoted to `stopAnchor` before we died.
+  /// relied on to arrive — see `considerStopping`. Not persisted itself: the region outlives the
+  /// process in Core Location, and a restored `stopCandidate` re-adopts it.
   private var candidateFence: CLLocation?
 
   /// Whether `manager` was created on the main thread, i.e. whether its callbacks can arrive at all.
@@ -216,7 +224,21 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// An arrival Core Location has reported and no real fix has yet placed: its coordinate and
   /// accuracy, stamped with the arrival time. The visit is the evidence that the phone has
   /// stopped; the next fix from after it is where. See `didVisit` and `considerStopping`.
-  private var visitArrival: CLLocation?
+  ///
+  /// Persisted with the candidate, for the same reason: the fix that settles it may only ever
+  /// reach a LATER process — a relaunch's seed — and an arrival held in memory dies first.
+  private var visitArrival: CLLocation? {
+    didSet { candidateDirty = true }
+  }
+
+  /// Whether `stopCandidate` or `visitArrival` changed since they were last written to disk. They
+  /// change on deliveries, which are frequent, and are written only when they did.
+  private var candidateDirty = false
+
+  /// How long a persisted arrival may wait for its fix. A relaunch hours later has no business
+  /// parking on an arrival the phone has very likely left since — the departure visit that would
+  /// have cleared it is not guaranteed to be delivered.
+  private static let visitArrivalLifetime: TimeInterval = 6 * 60 * 60
 
   /// The timestamp of the newest location Core Location has delivered, to recognise one it hands
   /// back again. See `didUpdateLocations`.
@@ -305,6 +327,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // if `candidate_age_ms` keeps climbing past `stopDwellSeconds`, the dwell is being starved of
       // deliveries and `holdCandidateCadence` is not doing its job.
       "candidate_pending": stopCandidate != nil,
+      // An arrival Core Location reported that no fix has yet placed. Lingering `true` on a phone
+      // that is not moving is the 2026-10-06 shape: the OS said "arrived", and nothing delivered.
+      "visit_pending": visitArrival != nil,
       "candidate_fence_armed": candidateFence != nil,
     ]
     if let stopCandidate {
@@ -491,7 +516,6 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       note(.seed)
       let fix = Self.fix(from: cached)
       let battery = Self.battery()
-      Task { await self.ingest(fix: fix, battery: battery) }
       // And let the seed open a stop candidate, exactly as a delivery would.
       //
       // Without this, a runtime that comes up while the phone is ALREADY still can never leave
@@ -505,8 +529,19 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // The cached fix can be old, and arming on it anyway is the right trade. A stop fence in the
       // wrong place fires on the next delivery and costs one wake; no fence at all costs a day. If
       // the cached fix still reports real speed, `considerStopping` refuses it and we stay moving.
-      if state == .moving {
+      //
+      // Decided BEFORE ingesting, as `didUpdateLocations` does, because a seed can now complete a
+      // stop — a candidate or an arrival restored from an earlier process — and the envelope this
+      // wake seals then has to say `parked`. Ingesting first would fill the slot `live` and leave
+      // the declaration to a wake that, on a relaunched process, may not come.
+      let wasMoving = state == .moving
+      if wasMoving {
         considerStopping(at: cached)
+      }
+      if wasMoving && state == .stopped {
+        Task { await self.heartbeat(battery: battery, parked: true) }
+      } else {
+        Task { await self.ingest(fix: fix, battery: battery) }
       }
     }
   }
@@ -712,15 +747,20 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// phone turns out to have been moving after all. Guessing early and paying for the guess is the
   /// correct way to fail here; the other way is a day of silence.
   private func considerStopping(at location: CLLocation) {
-    let movingFast = location.speed >= 0 && location.speed > 1.0
-    // A reported arrival, waiting for a fix from after it. The first such fix settles it either
-    // way: here and slow takes the stop with no dwell, because the visit already IS the dwell —
-    // anywhere else means the phone has gone on, and the arrival is spent.
+    defer { persistCandidateIfChanged() }
+    let movingFast = Self.isMovingFast(location)
+    // A reported arrival, waiting for a fix from after it. Here and slow takes the stop with no
+    // dwell, because the visit already IS the dwell; anywhere else means the phone has gone on,
+    // and the arrival is spent. Here but still moving is the last few metres of the approach — the
+    // arrival waits, and the stream stays unfiltered so the fix that settles it still comes.
     if let arrival = visitArrival, location.timestamp >= arrival.timestamp {
-      visitArrival = nil
-      if !movingFast,
-        location.distance(from: arrival) <= arrival.horizontalAccuracy + Self.stopAnchorRadiusM
-      {
+      if location.distance(from: arrival) > arrival.horizontalAccuracy + Self.stopAnchorRadiusM {
+        visitArrival = nil
+      } else if movingFast {
+        holdCandidateCadence()
+        return
+      } else {
+        visitArrival = nil
         enterStopped(anchor: location, via: .visit)
         if state == .stopped { return }
       }
@@ -793,6 +833,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       candidateFence = nil
     }
     manager.startUpdatingLocation()
+    persistCandidateIfChanged()
   }
 
   // MARK: - The resurrection ladder
@@ -874,6 +915,72 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     if let lastVisitAt {
       defaults.set(lastVisitAt.timeIntervalSince1970, forKey: "sc.bg.last_visit_ts")
     }
+    writeCandidate(to: defaults)
+  }
+
+  /// Write the dwell-in-progress — `stopCandidate` and `visitArrival` — if it changed. See both.
+  private func persistCandidateIfChanged() {
+    guard candidateDirty else { return }
+    writeCandidate(to: UserDefaults.standard)
+  }
+
+  private func writeCandidate(to defaults: UserDefaults) {
+    candidateDirty = false
+    Self.write(stopCandidate?.centre, prefix: "sc.bg.candidate", to: defaults)
+    if let since = stopCandidate?.since {
+      defaults.set(since.timeIntervalSince1970, forKey: "sc.bg.candidate.since")
+    } else {
+      defaults.removeObject(forKey: "sc.bg.candidate.since")
+    }
+    Self.write(visitArrival, prefix: "sc.bg.visit_arrival", to: defaults)
+  }
+
+  private static func write(_ location: CLLocation?, prefix: String, to defaults: UserDefaults) {
+    guard let location else {
+      for key in ["lat", "lon", "acc", "ts"] { defaults.removeObject(forKey: "\(prefix).\(key)") }
+      return
+    }
+    defaults.set(location.coordinate.latitude, forKey: "\(prefix).lat")
+    defaults.set(location.coordinate.longitude, forKey: "\(prefix).lon")
+    defaults.set(location.horizontalAccuracy, forKey: "\(prefix).acc")
+    defaults.set(location.timestamp.timeIntervalSince1970, forKey: "\(prefix).ts")
+  }
+
+  private static func readLocation(prefix: String, from defaults: UserDefaults) -> CLLocation? {
+    guard defaults.object(forKey: "\(prefix).lat") != nil else { return nil }
+    return CLLocation(
+      coordinate: CLLocationCoordinate2D(
+        latitude: defaults.double(forKey: "\(prefix).lat"),
+        longitude: defaults.double(forKey: "\(prefix).lon")),
+      altitude: 0,
+      horizontalAccuracy: defaults.double(forKey: "\(prefix).acc"),
+      verticalAccuracy: -1,
+      timestamp: Date(timeIntervalSince1970: defaults.double(forKey: "\(prefix).ts")))
+  }
+
+  /// Bring back a dwell an earlier process started. Only while `moving` — a restored `stopped`
+  /// already has its anchor, and a candidate beside it would be a contradiction.
+  private func restoreCandidate(from defaults: UserDefaults) {
+    guard state == .moving else { return }
+    if let centre = Self.readLocation(prefix: "sc.bg.candidate", from: defaults),
+      defaults.object(forKey: "sc.bg.candidate.since") != nil
+    {
+      stopCandidate = (
+        centre: centre,
+        since: Date(timeIntervalSince1970: defaults.double(forKey: "sc.bg.candidate.since"))
+      )
+      // The speculative fence `openStopCandidate` armed is still held by Core Location; adopt it
+      // so `abandonStopCandidate` takes it down again if this turns out to be a departure.
+      if manager.monitoredRegions.contains(where: { $0.identifier == Self.stopAnchorRegionId }) {
+        candidateFence = centre
+      }
+    }
+    if let arrival = Self.readLocation(prefix: "sc.bg.visit_arrival", from: defaults),
+      Date().timeIntervalSince(arrival.timestamp) < Self.visitArrivalLifetime
+    {
+      visitArrival = arrival
+    }
+    candidateDirty = false
   }
 
   /// Whether sharing was on when this app was last running — readable with no JS and no SQLite.
@@ -899,6 +1006,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     if accuracy > 0 { movingAccuracy = accuracy }
     let visitTs = defaults.double(forKey: "sc.bg.last_visit_ts")
     if visitTs > 0 { lastVisitAt = Date(timeIntervalSince1970: visitTs) }
+    restoreCandidate(from: defaults)
     guard defaults.object(forKey: "sc.bg.anchor.lat") != nil else { return }
     stopVia = defaults.string(forKey: "sc.bg.anchor.via").flatMap(StopEvidence.init(rawValue:))
     let lat = defaults.double(forKey: "sc.bg.anchor.lat")
@@ -1080,9 +1188,11 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// reason.
   ///
   /// - An **arrival** while `moving` takes the stop, unless we hold a position from after the
-  ///   arrival that is elsewhere or still travelling (a late event about a place already left).
-  ///   The anchor is always a real fix from after the arrival — never the visit's own coordinate —
-  ///   so with none in hand yet the arrival waits in `visitArrival` for the next one.
+  ///   arrival that is elsewhere (a late event about a place already left). Speed alone does not
+  ///   veto it: the arrival is dated before the last fix of the approach, which is often still
+  ///   moving. The anchor is always a real, slow fix from after the arrival — never the visit's own
+  ///   coordinate — so with none in hand yet the arrival waits in `visitArrival`, persisted, with
+  ///   the stream unfiltered so the fix that settles it actually arrives.
   ///   An arrival somewhere other than the anchor while `stopped` re-parks there: the fence missed
   ///   the departure, and this is where the phone now is.
   /// - A **departure** from the anchor, dated after we parked, leaves `stopped` — a third way out
@@ -1095,7 +1205,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     persistState()
 
     // A negative accuracy means the coordinate is invalid, not that it is perfect.
-    guard visit.horizontalAccuracy >= 0 else { return }
+    guard visit.horizontalAccuracy >= 0 else {
+      reporter.event(.visit, reason: "invalid")
+      return
+    }
     let arrival = visit.departureDate == .distantFuture
     let at = arrival ? visit.arrivalDate : visit.departureDate
     let place = CLLocation(
@@ -1106,27 +1219,43 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       timestamp: at == .distantPast ? Date() : at)
     let reach = visit.horizontalAccuracy + Self.stopAnchorRadiusM
     let newest = newestLocation()
-    reporter.event(.visit, reason: arrival ? "arrival" : "departure")
-    NSLog(
-      "[iroh-location] visit: \(arrival ? "arrival" : "departure") state=\(state.rawValue) "
-        + "accuracy=\(Int(visit.horizontalAccuracy))m")
+    // What this visit DID, on the span. Until 2026-10-06 the span went out before the decision and
+    // the decision went to `NSLog`, which reaches no telemetry — so an arrival the phone threw away
+    // and one it was still waiting on read identically, and the one evening that needed telling
+    // apart had to be reconstructed from which code path the next fix could have taken.
+    var outcome = "ignored"
+    defer {
+      persistCandidateIfChanged()
+      reporter.event(.visit, reason: arrival ? "arrival" : "departure", detail: outcome)
+      NSLog(
+        "[iroh-location] visit: \(arrival ? "arrival" : "departure") -> \(outcome) "
+          + "state=\(state.rawValue) accuracy=\(Int(visit.horizontalAccuracy))m")
+    }
 
     if !arrival {
+      // Whatever arrival we were holding, the phone has now left it.
+      visitArrival = nil
       guard state == .stopped, let anchor = stopAnchor,
         visit.departureDate > anchor.timestamp,
         place.distance(from: anchor) <= reach
       else { return }
       enterMoving(reason: .visit)
+      outcome = "unparked"
       let battery = Self.battery()
       Task { await self.heartbeat(battery: battery, parked: false) }
       return
     }
 
-    // A position from after the arrival that is somewhere else, or moving, outranks the visit.
-    if let newest, newest.timestamp > visit.arrivalDate,
-      newest.distance(from: place) > reach || newest.speed > 1.0
-    {
-      NSLog("[iroh-location] visit: arrival is stale against a newer position; ignored")
+    // A position from after the arrival that is somewhere ELSE outranks the visit: the event is
+    // about a place already left.
+    //
+    // Distance only. Speed used to veto too, and that is what lost the 2026-10-06 arrival: iOS
+    // dates an arrival to when the phone entered the place, which is routinely before the last
+    // fix of the drive in, so the fix taken pulling up outside the house at 8.6 m/s was "newer and
+    // moving" and the visit was discarded. A fast fix INSIDE the place's reach is the approach,
+    // not a departure — it just cannot be the anchor, which is handled below.
+    if let newest, newest.timestamp > visit.arrivalDate, newest.distance(from: place) > reach {
+      outcome = "stale"
       return
     }
 
@@ -1139,25 +1268,35 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // spot, and the pending arrival below parks on its first fix.
       guard let anchor = stopAnchor, place.distance(from: anchor) > reach,
         visit.arrivalDate > anchor.timestamp
-      else { return }
+      else {
+        outcome = "already-parked"
+        return
+      }
       enterMoving(reason: .visit)
     }
 
-    // The fence is only ever centred on a REAL fix from after the arrival, never on the visit's
-    // own coordinate: a visit can be hundreds of metres coarse, and a fence armed around a spot
-    // the phone is already outside never reports an exit — a park with no way out.
-    if let newest, newest.timestamp >= visit.arrivalDate {
-      // Newer, here and slow: the stale check above has already ruled out the alternatives.
+    // The fence is only ever centred on a REAL, SLOW fix from after the arrival, never on the
+    // visit's own coordinate: a visit can be hundreds of metres coarse, and a fence armed around a
+    // spot the phone is already outside never reports an exit — a park with no way out.
+    if let newest, newest.timestamp >= visit.arrivalDate, !Self.isMovingFast(newest) {
       enterStopped(anchor: newest, via: .visit)
     } else if let candidate = stopCandidate, candidate.centre.timestamp >= visit.arrivalDate,
       candidate.centre.distance(from: place) <= reach
     {
       enterStopped(anchor: candidate.centre, via: .visit)
+    }
+    if state == .stopped {
+      outcome = "parked"
     } else {
-      // Nothing from after the arrival yet — the usual case on a relaunch, whose only position is
-      // the cache. The stream `start()` armed delivers within seconds; `considerStopping` parks on
-      // the first fix that agrees.
+      // Nothing usable from after the arrival yet — on a relaunch, the cache; on a process that
+      // was already running, the last fix of the drive in. `considerStopping` parks on the first
+      // fix that agrees, and that fix has to be made to come: a process on the moving cadence
+      // has a 20-50 m distance filter, and a phone that has arrived somewhere moves less than
+      // that, so it would wait forever. That wait is the second half of 2026-10-06. Unfiltering
+      // is what the candidate dwell does for the same reason, at the same accuracy.
       visitArrival = place
+      holdCandidateCadence()
+      outcome = "pending"
     }
     // Say so on the wire now, for the reason the confirming delivery does: this wake may be the
     // last this process gets before the phone is next moved. That holds in the pending case too:
@@ -1165,6 +1304,12 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // carries is honest before a fix has placed it, and a fix showing otherwise re-stamps `live`.
     let battery = Self.battery()
     Task { await self.heartbeat(battery: battery, parked: true) }
+  }
+
+  /// Faster than anyone standing somewhere. A negative speed is Core Location's "unknown", which
+  /// is not evidence of motion.
+  private static func isMovingFast(_ location: CLLocation) -> Bool {
+    location.speed >= 0 && location.speed > 1.0
   }
 
   /// Whichever of Core Location's cached position and the last one delivered to us is newer.

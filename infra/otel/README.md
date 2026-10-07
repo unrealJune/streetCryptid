@@ -495,14 +495,14 @@ invisible.
 `location.runtime` (`streetcryptid-core`, so it ships from a JS-free process) is that state machine
 reporting itself, from `LocationRuntimeReporter.swift` through `location_runtime.rs`:
 
-| `location.event`                                                           | Fires                                                                                   |
-| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `pulse`                                                                    | every 5 min from a background timer while the process runs — NOT from the delivery path |
-| `main_stalled`                                                             | the pulse's main-thread probe went unanswered for 10 s (once per stall)                 |
-| `started`                                                                  | `start()` armed the runtime; `location.reason` is the wake reason                       |
-| `transition`                                                               | `moving` ⇄ `stopped`; `location.reason` is the stop evidence or the wake reason         |
-| `visit` / `fence_exit`                                                     | a `CLVisit` (`arrival` / `departure`) or a stop-anchor exit                             |
-| `paused` / `resumed` / `location_error` / `fence_failed` / `authorization` | the Core Location callbacks that used to reach only `NSLog`                             |
+| `location.event`                                                           | Fires                                                                                                                                                                          |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pulse`                                                                    | every 5 min from a background timer while the process runs — NOT from the delivery path                                                                                        |
+| `main_stalled`                                                             | the pulse's main-thread probe went unanswered for 10 s (once per stall)                                                                                                        |
+| `started`                                                                  | `start()` armed the runtime; `location.reason` is the wake reason                                                                                                              |
+| `transition`                                                               | `moving` ⇄ `stopped`; `location.reason` is the stop evidence or the wake reason                                                                                                |
+| `visit` / `fence_exit`                                                     | a `CLVisit` (`arrival` / `departure`) or a stop-anchor exit. A visit's `location.detail` is what it did: `parked`, `pending`, `stale`, `already-parked`, `unparked`, `ignored` |
+| `paused` / `resumed` / `location_error` / `fence_failed` / `authorization` | the Core Location callbacks that used to reach only `NSLog`                                                                                                                    |
 
 Read a pulse like this:
 
@@ -701,6 +701,7 @@ foreground resume. Its value is in the _mismatches_:
 | `location.wake_reason=coarse_departure`                                                             | the fence missed a departure and the parked clock caught it — count these                                                                                                                                  |
 | `location.stop_via=visit` or `refresh`                                                              | the phone was parked by a `CLVisit` arrival or a `BGProcessing` wake, not the ordinary dwell: its process was relaunched in the background and suspended mid-dwell. Expected, and the share is the measure |
 | `location.last_visit_age_ms` absent on a phone that has been out and come home                      | the visit service is not delivering on that device, so a background-relaunched process there can only park on a `refresh` wake                                                                             |
+| `location.visit_pending=true` on a phone that is not moving                                         | the OS reported an arrival and no fix has placed it. It is persisted and the stream is unfiltered to fetch that fix, so this should clear within one wake; on 2026-10-06 it was the evening's silence      |
 | `location.auth_status` not `always` while `perm.background=granted`                                 | the two disagree; Core Location's own read is the one that governs                                                                                                                                         |
 | `wake.bg_launches` climbing while `wake.js_boots` tracks it                                         | background launches are still booting the whole React Native bundle — the deferral is not working                                                                                                          |
 | `wake.cpu_ms_max` approaching 48000                                                                 | not "high": that is `MXCPUExceptionDiagnostic`'s threshold, the constant all 41 exceptions in the 2026-09 window reported                                                                                  |
