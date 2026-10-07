@@ -577,6 +577,16 @@ fn decode_feature(bytes: &[u8]) -> RawFeature {
 }
 
 impl Layer {
+    /// English-first map-language policy; mirrors tiles/map-name.ts. Raw tile
+    /// caches keep all translations so future locales can re-decode them.
+    fn map_name<'b>(&'b self, f: &RawFeature) -> Option<&'b str> {
+        ["name:en", "name_en", "name:latin", "name_int", "name"]
+            .iter()
+            .filter_map(|key| self.prop(f, key).and_then(Value::as_str))
+            .map(str::trim)
+            .find(|name| is_latin_map_name(name))
+    }
+
     /// Look up a feature property value by key name via its tag pairs.
     fn prop<'b>(&'b self, f: &RawFeature, key: &str) -> Option<&'b Value> {
         let mut i = 0;
@@ -590,6 +600,21 @@ impl Layer {
         }
         None
     }
+}
+
+/// Conservative Latin typography, not transliteration. Keep the accepted ranges
+/// and letter/number check in sync with tiles/map-name.ts.
+fn is_latin_map_name(name: &str) -> bool {
+    name.chars().all(|c| {
+        matches!(c,
+            '\u{0020}'..='\u{007e}' | '\u{00a0}'..='\u{00b4}' |
+            '\u{00b6}'..='\u{024f}' | '\u{0300}'..='\u{036f}' |
+            '\u{1e00}'..='\u{1eff}' | '\u{2000}'..='\u{2027}')
+    }) && name.chars().any(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '\u{00c0}'..='\u{00d6}' | '\u{00d8}'..='\u{00f6}' |
+                '\u{00f8}'..='\u{024f}' | '\u{1e00}'..='\u{1eff}')
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -649,8 +674,7 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                     None
                 };
                 let name = layer
-                    .prop(f, "name")
-                    .and_then(|v| v.as_str())
+                    .map_name(f)
                     .map(|s| geo.strings.intern(s))
                     .unwrap_or(-1);
                 for line in decode_geometry(&f.geometry, proj) {
@@ -678,12 +702,9 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                 if f.geom_type != GEOM_LINE {
                     continue;
                 }
-                let Some(name) = layer.prop(f, "name").and_then(|v| v.as_str()) else {
+                let Some(name) = layer.map_name(f) else {
                     continue;
                 };
-                if name.is_empty() {
-                    continue;
-                }
                 let Some(road_class) = layer
                     .prop(f, "class")
                     .and_then(|v| v.as_str())
@@ -805,12 +826,9 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
         }
         "place" => {
             for f in &layer.features {
-                let Some(name) = layer.prop(f, "name").and_then(|v| v.as_str()) else {
+                let Some(name) = layer.map_name(f) else {
                     continue;
                 };
-                if name.is_empty() {
-                    continue;
-                }
                 let rings = decode_geometry(&f.geometry, proj);
                 let Some(first) = rings.first().and_then(|r| r.first()) else {
                     continue;
@@ -836,12 +854,9 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
         }
         "poi" => {
             for f in &layer.features {
-                let Some(name) = layer.prop(f, "name").and_then(|v| v.as_str()) else {
+                let Some(name) = layer.map_name(f) else {
                     continue;
                 };
-                if name.is_empty() {
-                    continue;
-                }
                 let rings = decode_geometry(&f.geometry, proj);
                 let Some(first) = rings.first().and_then(|r| r.first()) else {
                     continue;
@@ -902,8 +917,7 @@ fn push_park(layer: &Layer, f: &RawFeature, proj: &Proj, geo: &mut Geometry) {
         return;
     }
     let name = layer
-        .prop(f, "name")
-        .and_then(|v| v.as_str())
+        .map_name(f)
         .map(|s| geo.strings.intern(s))
         .unwrap_or(-1);
     geo.parks.push(Area { name, rings });
@@ -1441,6 +1455,145 @@ mod tests {
         assert_eq!(road_class_of("service"), Some(0));
         assert_eq!(road_class_of("rail"), None);
         assert_eq!(road_class_of("ferry"), None);
+    }
+
+    #[test]
+    fn map_name_policy_matches_ts() {
+        let cases: &[(&[(&str, &str)], Option<&str>)] = &[
+            (
+                &[
+                    ("name", "京都"),
+                    ("name:en", "Kyoto"),
+                    ("name_en", "Kyoto City"),
+                    ("name:latin", "Kyōto"),
+                ],
+                Some("Kyoto"),
+            ),
+            (
+                &[
+                    ("name", "京都"),
+                    ("name_en", "Kyoto"),
+                    ("name:latin", "Kyōto"),
+                ],
+                Some("Kyoto"),
+            ),
+            (
+                &[("name", "京都"), ("name:en", " "), ("name:latin", "Kyōto")],
+                Some("Kyōto"),
+            ),
+            (
+                &[
+                    ("name", "京都"),
+                    ("name:en", "京都"),
+                    ("name:latin", "Kyōto"),
+                ],
+                Some("Kyōto"),
+            ),
+            (&[("name", "京都"), ("name_int", "Kyoto")], Some("Kyoto")),
+            (&[("name:en", "  Kyoto  ")], Some("Kyoto")),
+            (&[("name", "München")], Some("München")),
+            (&[("name", "Łódź")], Some("Łódź")),
+            (&[("name", "Đà Nẵng")], Some("Đà Nẵng")),
+            (
+                &[("name", "Cafe\u{0301} — São Tomé")],
+                Some("Cafe\u{0301} — São Tomé"),
+            ),
+            (&[("name", "I-5 / Exit 42")], Some("I-5 / Exit 42")),
+            (&[("name", "京都")], None),
+            (&[("name", "Москва")], None),
+            (&[("name", "Αθήνα")], None),
+            (&[("name", "القاهرة")], None),
+            (&[("name", "กรุงเทพ")], None),
+            (&[("name", "Kyoto 京都")], None),
+            (&[("name", "Kyoto\u{202e}")], None),
+            (&[("name", "Kyoto\nStation")], None),
+            (&[("name", "---")], None),
+            (&[("name", "")], None),
+            (&[], None),
+        ];
+        for (props, expected) in cases {
+            let layer = Layer {
+                name: "place".into(),
+                extent: 4096,
+                keys: props.iter().map(|(k, _)| (*k).into()).collect(),
+                values: props.iter().map(|(_, v)| Value::Str((*v).into())).collect(),
+                features: Vec::new(),
+            };
+            let f = RawFeature {
+                geom_type: 1,
+                tags: (0..props.len() as u32).flat_map(|i| [i, i]).collect(),
+                geometry: Vec::new(),
+            };
+            assert_eq!(layer.map_name(&f), *expected, "{props:?}");
+        }
+        let layer = Layer {
+            name: "place".into(),
+            extent: 4096,
+            keys: vec!["name_en".into(), "name:latin".into()],
+            values: vec![Value::Num(123.0), Value::Str("Kyōto".into())],
+            features: Vec::new(),
+        };
+        let f = RawFeature {
+            geom_type: 1,
+            tags: vec![0, 0, 1, 1],
+            geometry: Vec::new(),
+        };
+        assert_eq!(layer.map_name(&f), Some("Kyōto"));
+    }
+
+    #[test]
+    fn all_named_layers_use_map_name_policy() {
+        for (layer_name, class, geom_type) in [
+            ("transportation", "primary", GEOM_LINE),
+            ("transportation", "rail", GEOM_LINE),
+            ("transportation_name", "minor", GEOM_LINE),
+            ("park", "park", GEOM_POLYGON),
+            ("landcover", "wood", GEOM_POLYGON),
+            ("landuse", "grass", GEOM_POLYGON),
+            ("place", "city", 1),
+            ("poi", "cafe", 1),
+        ] {
+            for (key, value, expected) in [
+                ("name:en", "Kyoto", Some("Kyoto")),
+                ("name_en", "Kyoto", Some("Kyoto")),
+                ("name:latin", "Kyōto", Some("Kyōto")),
+                ("name", "京都", None),
+            ] {
+                let tile = build_layer(
+                    layer_name,
+                    &["class", key],
+                    &[value_str(class), value_str(value)],
+                    &[(
+                        geom_type,
+                        vec![0, 0, 1, 1],
+                        geom_cmds(&[(0, 0), (100, 0), (100, 100)], geom_type == GEOM_POLYGON),
+                    )],
+                );
+                let mut geo = Geometry::default();
+                decode_tile_into(&tile, 0, 0, 0, (0.0, 0.0), &mut geo);
+                let names: Vec<i32> = match (layer_name, class) {
+                    ("transportation", "rail") => geo.transit.iter().map(|f| f.name).collect(),
+                    ("transportation", _) => geo.streets.iter().map(|f| f.name).collect(),
+                    ("transportation_name", _) => {
+                        geo.label_streets.iter().map(|f| f.name).collect()
+                    }
+                    ("place", _) => geo.places.iter().map(|f| f.name).collect(),
+                    ("poi", _) => geo.pois.iter().map(|f| f.name).collect(),
+                    _ => geo.parks.iter().map(|f| f.name).collect(),
+                };
+                if expected.is_none()
+                    && matches!(layer_name, "transportation_name" | "place" | "poi")
+                {
+                    assert!(names.is_empty());
+                } else {
+                    assert_eq!(names.len(), 1, "{layer_name}/{key}");
+                    assert_eq!(names[0] >= 0, expected.is_some());
+                    if let Some(expected) = expected {
+                        assert_eq!(geo.strings.list[names[0] as usize], expected);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
