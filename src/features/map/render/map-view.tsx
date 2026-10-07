@@ -1,16 +1,6 @@
 'use no memo'; // react-compiler: keep it away from Skia/Reanimated JSI objects
 
-import {
-  Canvas,
-  Circle,
-  Group,
-  Image as SkiaImage,
-  ImageShader,
-  Path,
-  Rect,
-  Shader,
-  Skia,
-} from '@shopify/react-native-skia';
+import { Canvas } from '@shopify/react-native-skia';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, StyleSheet, View, type LayoutChangeEvent } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
@@ -19,6 +9,7 @@ import {
   Easing,
   ReduceMotion,
   runOnJS,
+  runOnUI,
   useAnimatedReaction,
   useDerivedValue,
   useReducedMotion,
@@ -62,6 +53,7 @@ import { clusterMarkers } from '../core/marker-clusters';
 import { PLACED_OCEAN_CRYPTIDS } from '../core/ocean-cryptids';
 import type { MapRegion } from '../engine/map-engine';
 import { useMapEngine } from '../hooks/use-map-engine';
+import { useMapTransform } from './use-map-transform';
 import { latLonToWorld } from '../core/mercator';
 import { HIGHWAY_CLASS } from '../core/road-lod';
 import { placeNameInRegion } from '../core/readout';
@@ -85,7 +77,9 @@ import {
   renderRegionImage,
 } from './region-shader';
 import { getRevealMaskEffect } from './reveal-mask-shader';
-import { prevRectUniform, REVEAL_TARGET } from './reveal-mask';
+import { REVEAL_TARGET } from './reveal-mask';
+import { RegionLayer } from './region-layer';
+import { SelectedTrail } from './selected-trail';
 import { YouLocator } from './you-locator';
 import { LoadingHexGrid } from './loading-hex-grid';
 
@@ -201,8 +195,7 @@ export interface MapTrailLocation {
 
 /**
  * On-screen rect (logical px) of a world rect as seen from a fixed anchor camera.
- * All layers are drawn in this single anchor space, so the shared live transform
- * places every one of them consistently — no per-region re-anchoring.
+ * This stays in JS doubles. Each Skia layer removes its own origin before rendering.
  */
 function anchorRect(rect: WorldRect, anchor: CameraState, viewport: Viewport): ScreenRect {
   const [x, y] = worldToScreen(anchor, viewport, [rect.minX, rect.minY]);
@@ -214,7 +207,10 @@ function anchorRect(rect: WorldRect, anchor: CameraState, viewport: Viewport): S
  * The full-bleed interactive map.
  *
  * Rendering model: every region is rasterized ONCE (GPU dot-field shader) into a
- * static bitmap, drawn in one fixed session-anchor space. The whole visual state
+ * static bitmap, positioned in one fixed session-anchor space. Skia receives
+ * layer-local geometry and a translation with the session offsets already
+ * cancelled in doubles — never a matrix that subtracts two city-sized floats.
+ * The whole visual state
  * is a single anchor-space transform p′ = k·p + t held in Reanimated shared
  * values and mutated ONLY on the UI thread: gestures compose into it exactly
  * (see core/gesture.ts), flings decay it, and double-taps animate it. React
@@ -324,20 +320,14 @@ export function MapView({
   const selfInk = selfColor ?? theme.canvas.accent;
 
   // ── The one live view transform (anchor space → screen), UI-thread-owned ──
-  const k = useSharedValue(1);
-  const tx = useSharedValue(0);
-  const ty = useSharedValue(0);
-  const locateProgress = useSharedValue(1);
-  /** Outstanding fling decay animations (x + y); commit when the last ends. */
-  const decaysLeft = useSharedValue(0);
+  const { transform, k, tx, ty, read, set, stop, animate, decayX, decayY, decaysLeft, locating } =
+    useMapTransform();
   /** Transform at the last prefetch check, to gate by movement. */
   const lastPrefetch = useSharedValue<ViewTransform>({ k: 1, tx: 0, ty: 0 });
   /** Resets the pan stride origin on the first frame after scale motion ends. */
   const wasScaling = useSharedValue(false);
   /** UI-side backpressure: never enqueue a second JS prefetch behind a blocked build. */
   const prefetchInFlight = useSharedValue(false);
-  const trailStrokeWidth = useDerivedValue(() => 2.5 / Math.max(0.001, k.value));
-  const trailDotRadius = useDerivedValue(() => 2.8 / Math.max(0.001, k.value));
 
   const lutImage = useMemo(() => makeLutImage(theme.canvas), [theme]);
   const regionRenderCache = useMemo(
@@ -448,18 +438,22 @@ export function MapView({
       durationMs: number,
       onFinished: (finishedIndex: number) => void
     ) => {
-      const config = {
-        duration: durationMs,
-        easing: Easing.inOut(Easing.cubic),
-        reduceMotion: ReduceMotion.Never,
-      };
-      k.value = withTiming(to.k, config);
-      tx.value = withTiming(to.tx, config, (finished) => {
-        if (finished) runOnJS(onFinished)(index);
-      });
-      ty.value = withTiming(to.ty, config);
+      runOnUI(() => {
+        'worklet';
+        animate(
+          to,
+          {
+            duration: durationMs,
+            easing: Easing.inOut(Easing.cubic),
+            reduceMotion: ReduceMotion.Never,
+          },
+          (finished) => {
+            if (finished) runOnJS(onFinished)(index);
+          }
+        );
+      })();
     },
-    [k, tx, ty]
+    [animate]
   );
 
   useMapPerfRunner({
@@ -555,23 +549,10 @@ export function MapView({
     () => (track.cur && viewport ? anchorRect(track.cur.region.spec.rect, anchor, viewport) : null),
     [track.cur, anchor, viewport]
   );
-  // SkRect twin of curRect for the reveal's ImageShaders — placed at the same
-  // rect as the settled <Image>, so the wipe and the plain draw are pixel-aligned.
-  const curRectSk = useMemo(
-    () => (curRect ? Skia.XYWHRect(curRect.x, curRect.y, curRect.width, curRect.height) : null),
-    [curRect]
-  );
   const prevRect = useMemo(
     () =>
       track.prev && viewport ? anchorRect(track.prev.region.spec.rect, anchor, viewport) : null,
     [track.prev, anchor, viewport]
-  );
-  // The area the outgoing layer already covered — the reveal shader swaps these
-  // pixels in instantly and only hex-loads the newly-exposed ground around them.
-  const prevRectVec = useMemo(() => prevRectUniform(prevRect), [prevRect]);
-  const revealUniforms = useDerivedValue(
-    () => ({ uReveal: revealFront.value, uPrevRect: prevRectVec }),
-    [prevRectVec]
   );
 
   const selfAnchor = useMemo(
@@ -640,17 +621,6 @@ export function MapView({
         : [],
     [anchor, selfHistory, viewport]
   );
-  // Only our own trail is ever drawn: a friend is a single dot at their last known position with
-  // nothing behind it to draw (FORWARD-SECRECY.md §4.4), so selecting one highlights their locator.
-  const selectedTrail = useMemo(() => {
-    if (!viewport || !selfSelected) return null;
-    return buildTrail(selfTrailPoints, `rgb(${selfInk.join(', ')})`);
-  }, [selfInk, selfSelected, selfTrailPoints, viewport]);
-  useEffect(() => {
-    const path = selectedTrail?.path;
-    return () => path?.dispose();
-  }, [selectedTrail]);
-
   const friendPlace = useMemo(() => {
     const friend = friends.find((candidate) => candidate.id === selectedFriendId);
     if (!friend) return null;
@@ -668,70 +638,67 @@ export function MapView({
   }, [coverage, sectorsVisible, placeName, friendPlace, onReadout]);
 
   // Viewport resize (rotation, window resize): anchor-space px depend on the
-  // viewport, so re-express the current camera in the new space. The only place
-  // React ever writes the transform — gestures don't survive a resize anyway.
+  // viewport, so re-express the displayed camera in the new space on UI, in one
+  // transaction. Gestures don't survive a resize anyway.
   const prevViewportRef = useRef<Viewport | null>(null);
   useEffect(() => {
     if (!viewport) return;
     const prev = prevViewportRef.current;
     prevViewportRef.current = viewport;
     if (!prev) return;
-    const cam = applyViewTransform(anchor, prev, { k: k.value, tx: tx.value, ty: ty.value });
-    const t = viewTransformFor(anchor, viewport, cam);
-    k.value = t.k;
-    tx.value = t.tx;
-    ty.value = t.ty;
-    commit(t);
+    runOnUI(() => {
+      'worklet';
+      const cam = applyViewTransform(anchor, prev, stop());
+      const t = viewTransformFor(anchor, viewport, cam);
+      set(t);
+      runOnJS(commit)(t);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewport, anchor]);
 
   useEffect(() => {
     if (!viewport || !limits || !locateTarget) return;
-    cancelAnimation(k);
-    cancelAnimation(tx);
-    cancelAnimation(ty);
-    cancelAnimation(locateProgress);
-    decaysLeft.value = 0;
-
-    const current = applyViewTransform(anchor, viewport, {
-      k: k.value,
-      tx: tx.value,
-      ty: ty.value,
-    });
-    // A floor on the fly-to, never a snap: someone looking at the whole region is taken in to
-    // town-wide, and someone already closer than that keeps the zoom they chose. The dataset's
-    // own limits still win — `limits` carries them as k, so they come back as zooms here.
-    const zoomCeiling = anchor.zoom + Math.log2(limits.kMax);
-    const zoomFloor = anchor.zoom + Math.log2(limits.kMin);
-    const to = clampTranslation(
-      viewTransformFor(
-        anchor,
-        viewport,
-        locateCamera(
-          current,
-          latLonToWorld(locateTarget.location),
+    const destination = latLonToWorld(locateTarget.location);
+    const spec = region?.spec ?? null;
+    runOnUI(() => {
+      'worklet';
+      const current = applyViewTransform(anchor, viewport, stop());
+      // A floor on the fly-to, never a snap: someone looking at the whole region is taken in to
+      // town-wide, and someone already closer than that keeps the zoom they chose. The dataset's
+      // own limits still win — `limits` carries them as k, so they come back as zooms here.
+      const zoomCeiling = anchor.zoom + Math.log2(limits.kMax);
+      const zoomFloor = anchor.zoom + Math.log2(limits.kMin);
+      const to = clampTranslation(
+        viewTransformFor(
+          anchor,
           viewport,
-          region?.spec ?? null,
-          zoomFloor,
-          Math.max(zoomCeiling, zoomFloor)
-        )
-      ),
-      limits
-    );
-    const config = {
-      duration: reducedMotion ? 0 : LOCATE_ME_MS,
-      easing: Easing.out(Easing.cubic),
-    };
-    // Start destination demand now, not after an animation callback crosses the bridge.
-    commit(to);
-    lastPrefetch.value = to;
-    locateProgress.value = 0;
-    k.value = withTiming(to.k, config);
-    tx.value = withTiming(to.tx, config);
-    ty.value = withTiming(to.ty, config);
-    locateProgress.value = withTiming(1, config, (finished) => {
-      if (finished) runOnJS(commit)(to);
-    });
+          locateCamera(
+            current,
+            destination,
+            viewport,
+            spec,
+            zoomFloor,
+            Math.max(zoomCeiling, zoomFloor)
+          )
+        ),
+        limits
+      );
+      const config = {
+        duration: reducedMotion ? 0 : LOCATE_ME_MS,
+        easing: Easing.out(Easing.cubic),
+      };
+      // Start destination demand now, not after an animation callback crosses the bridge.
+      runOnJS(commit)(to);
+      lastPrefetch.value = to;
+      animate(
+        to,
+        config,
+        (finished) => {
+          if (finished) runOnJS(commit)(to);
+        },
+        true
+      );
+    })();
     // Shared values are stable references; requestId intentionally retriggers
     // when the user taps locate again at the same coordinates.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -748,13 +715,6 @@ export function MapView({
   const separateCluster = useCallback(
     (cluster: readonly { readonly anchor: ScreenPoint }[]) => {
       if (!limits) return;
-      cancelAnimation(k);
-      cancelAnimation(tx);
-      cancelAnimation(ty);
-      cancelAnimation(locateProgress);
-      locateProgress.value = 1;
-      decaysLeft.value = 0;
-
       let minX = Infinity;
       let minY = Infinity;
       let maxX = -Infinity;
@@ -767,27 +727,31 @@ export function MapView({
       }
       const spreadAnchor = Math.max(maxX - minX, maxY - minY);
 
-      const from: ViewTransform = { k: k.value, tx: tx.value, ty: ty.value };
-      const spreadScreen = spreadAnchor * from.k;
-      const wanted = CLUSTER_SEPARATION_FACTOR * CLUSTER_OVERLAP_PX;
-      const factor = Math.min(
-        CLUSTER_ZOOM_MAX_FACTOR,
-        Math.max(CLUSTER_ZOOM_MIN_FACTOR, wanted / Math.max(spreadScreen, 1))
-      );
-
-      // Pinch around where the puck actually sits on screen, so the group stays
-      // under the finger while the map opens up around it.
       const centerAnchor: ScreenPoint = [(minX + maxX) / 2, (minY + maxY) / 2];
-      const focalX = centerAnchor[0] * from.k + from.tx;
-      const focalY = centerAnchor[1] * from.k + from.ty;
-      const to = applyPinch(from, factor, focalX, focalY, limits);
+      runOnUI(() => {
+        'worklet';
+        const from = stop();
+        const spreadScreen = spreadAnchor * from.k;
+        const wanted = CLUSTER_SEPARATION_FACTOR * CLUSTER_OVERLAP_PX;
+        const factor = Math.min(
+          CLUSTER_ZOOM_MAX_FACTOR,
+          Math.max(CLUSTER_ZOOM_MIN_FACTOR, wanted / Math.max(spreadScreen, 1))
+        );
 
-      const cfg = { duration: reducedMotion ? 0 : DOUBLE_TAP_MS, easing: Easing.out(Easing.cubic) };
-      k.value = withTiming(to.k, cfg);
-      tx.value = withTiming(to.tx, cfg);
-      ty.value = withTiming(to.ty, cfg, (finished) => {
-        if (finished) runOnJS(commit)(to);
-      });
+        // Pinch around where the puck actually sits on screen, so the group stays
+        // under the finger while the map opens up around it.
+        const focalX = centerAnchor[0] * from.k + from.tx;
+        const focalY = centerAnchor[1] * from.k + from.ty;
+        const to = applyPinch(from, factor, focalX, focalY, limits);
+
+        const cfg = {
+          duration: reducedMotion ? 0 : DOUBLE_TAP_MS,
+          easing: Easing.out(Easing.cubic),
+        };
+        animate(to, cfg, (finished) => {
+          if (finished) runOnJS(commit)(to);
+        });
+      })();
     },
     // Shared values are stable refs; `limits`/`commit` are the real inputs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -808,9 +772,9 @@ export function MapView({
   // coalesces to one edge-coverage request plus the final commit; building at
   // every scale stride starved Hermes long after a pinch had visually ended.
   useAnimatedReaction(
-    () => ({ k: k.value, tx: tx.value, ty: ty.value }),
+    () => transform.value,
     (t, prev) => {
-      if (!limits || !prev || locateProgress.value < 1) return;
+      if (!limits || !prev || locating.value) return;
       if (hasScaleMotion(t, prev)) {
         wasScaling.value = true;
         if (shouldPrefetchScaleMotion(t, prev, lastPrefetch.value)) {
@@ -851,41 +815,25 @@ export function MapView({
   const composedGesture = useMemo(() => {
     if (!limits) return Gesture.Tap().enabled(false);
 
-    const stopFling = () => {
-      'worklet';
-      cancelAnimation(tx);
-      cancelAnimation(ty);
-      cancelAnimation(k);
-      cancelAnimation(locateProgress);
-      locateProgress.value = 1;
-      decaysLeft.value = 0;
-    };
-
     // Touch down, before activation: the map has not claimed the gesture yet, so a tap that only
     // dismisses a popover still reaches whatever it was meant for.
     const beginTouch = () => {
       'worklet';
-      stopFling();
+      stop();
       runOnJS(onInteraction)();
     };
 
     const commitNow = () => {
       'worklet';
-      runOnJS(commit)({ k: k.value, tx: tx.value, ty: ty.value });
+      runOnJS(commit)(read());
     };
 
     const pan = Gesture.Pan()
       .maxPointers(2)
       .onBegin(beginTouch)
       .onChange((e) => {
-        const t = applyPan(
-          { k: k.value, tx: tx.value, ty: ty.value },
-          e.changeX,
-          e.changeY,
-          limits
-        );
-        tx.value = t.tx;
-        ty.value = t.ty;
+        const t = applyPan(read(), e.changeX, e.changeY, limits);
+        set(t);
       })
       .onEnd((e) => {
         const speed = Math.hypot(e.velocityX, e.velocityY);
@@ -893,7 +841,7 @@ export function MapView({
           commitNow();
           return;
         }
-        const kNow = k.value;
+        const kNow = read().k;
         const [txLo, txHi] = translationRange(kNow, limits.boundsX, limits.boundsW, limits.viewW);
         const [tyLo, tyHi] = translationRange(kNow, limits.boundsY, limits.boundsH, limits.viewH);
         const onDecayEnd = (finished?: boolean) => {
@@ -902,23 +850,15 @@ export function MapView({
           if (finished && decaysLeft.value === 0) commitNow();
         };
         decaysLeft.value = 2;
-        tx.value = withDecay({ velocity: e.velocityX, clamp: [txLo, txHi] }, onDecayEnd);
-        ty.value = withDecay({ velocity: e.velocityY, clamp: [tyLo, tyHi] }, onDecayEnd);
+        decayX.value = withDecay({ velocity: e.velocityX, clamp: [txLo, txHi] }, onDecayEnd);
+        decayY.value = withDecay({ velocity: e.velocityY, clamp: [tyLo, tyHi] }, onDecayEnd);
       });
 
     const pinch = Gesture.Pinch()
       .onBegin(beginTouch)
       .onChange((e) => {
-        const t = applyPinch(
-          { k: k.value, tx: tx.value, ty: ty.value },
-          e.scaleChange,
-          e.focalX,
-          e.focalY,
-          limits
-        );
-        k.value = t.k;
-        tx.value = t.tx;
-        ty.value = t.ty;
+        const t = applyPinch(read(), e.scaleChange, e.focalX, e.focalY, limits);
+        set(t);
       })
       .onEnd(commitNow);
 
@@ -927,22 +867,22 @@ export function MapView({
       .maxDuration(260)
       .onEnd((e, success) => {
         if (!success) return;
-        stopFling();
-        const from: ViewTransform = { k: k.value, tx: tx.value, ty: ty.value };
+        const from = stop();
         const to = applyPinch(from, DOUBLE_TAP_FACTOR, e.x, e.y, limits);
         // Linear interpolation of (k, tx, ty) with one shared curve keeps the
         // tapped point exactly fixed for the whole animation.
-        const cfg = { duration: DOUBLE_TAP_MS, easing: Easing.out(Easing.cubic) };
-        k.value = withTiming(to.k, cfg);
-        tx.value = withTiming(to.tx, cfg);
-        ty.value = withTiming(to.ty, cfg, (finished) => {
+        const cfg = {
+          duration: reducedMotion ? 0 : DOUBLE_TAP_MS,
+          easing: Easing.out(Easing.cubic),
+        };
+        animate(to, cfg, (finished) => {
           if (finished) runOnJS(commit)(to);
         });
       });
 
     return Gesture.Race(doubleTap, Gesture.Simultaneous(pan, pinch));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [limits, commit, prefetchAt, onInteraction]);
+  }, [limits, commit, prefetchAt, onInteraction, reducedMotion]);
 
   // Desktop web: wheel / trackpad zoom at the cursor, like Google Maps. RN Web's
   // <View> doesn't forward an onWheel prop to the DOM node, so bind a non-passive
@@ -957,30 +897,29 @@ export function MapView({
       e.preventDefault();
       const rect = node.getBoundingClientRect();
       const factor = Math.pow(2, -e.deltaY / 480); // one notch (±100) ≈ ±15% scale
-      const t = applyPinch(
-        { k: k.value, tx: tx.value, ty: ty.value },
-        factor,
-        e.clientX - rect.left,
-        e.clientY - rect.top,
-        limits
-      );
-      k.value = t.k;
-      tx.value = t.tx;
-      ty.value = t.ty;
+      const focalX = e.clientX - rect.left;
+      const focalY = e.clientY - rect.top;
+      runOnUI(() => {
+        'worklet';
+        const t = applyPinch(stop(), factor, focalX, focalY, limits);
+        set(t);
+      })();
       if (wheelCommitTimer.current) clearTimeout(wheelCommitTimer.current);
-      wheelCommitTimer.current = setTimeout(() => commit(t), 180);
+      wheelCommitTimer.current = setTimeout(() => {
+        runOnUI(() => {
+          'worklet';
+          runOnJS(commit)(read());
+        })();
+      }, 180);
     };
     node.addEventListener('wheel', onWheel, { passive: false });
-    return () => node.removeEventListener('wheel', onWheel);
+    return () => {
+      node.removeEventListener('wheel', onWheel);
+      if (wheelCommitTimer.current) clearTimeout(wheelCommitTimer.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [limits, commit]);
 
-  // The live transform as Skia ops (p → scale then translate).
-  const transform = useDerivedValue(() => [
-    { translateX: tx.value },
-    { translateY: ty.value },
-    { scale: k.value },
-  ]);
   // Derived (not the raw shared value): Skia's prop binding tracks derived
   // values reliably on every platform, including web.
   const curOpacityValue = useDerivedValue(() => curOpacity.value);
@@ -1020,88 +959,53 @@ export function MapView({
           >
             {viewport && (
               <Canvas style={styles.fill}>
-                <Group transform={transform}>
-                  {/* Under the region layers, always: the grid only shows where the map has
+                {/* Under the region layers, always: the grid only shows where the map has
                       nothing yet — and the reveal wipe uncovers the real tiles over it rather
                       than flashing them onto bare background. The bitmaps are opaque, so it is
                       cut around the one that is currently covering, and draws no pixel that
                       something else is about to paint over. */}
-                  {explorationEnabled && loadingRect && loadingLattice && (
-                    <LoadingHexGrid
-                      rect={loadingRect}
-                      covered={revealing || !curImage ? null : curRect}
-                      lattice={loadingLattice}
-                      loading={Boolean(pending) || revealing}
-                      reducedMotion={reducedMotion}
-                      ink={theme.canvas.streetLabel}
-                    />
-                  )}
-                  {/* Retained coverage layer — stays under the reveal now: the wipe
+                {explorationEnabled && loadingRect && loadingLattice && (
+                  <LoadingHexGrid
+                    camera={transform}
+                    rect={loadingRect}
+                    covered={revealing || !curImage ? null : curRect}
+                    lattice={loadingLattice}
+                    loading={Boolean(pending) || revealing}
+                    reducedMotion={reducedMotion}
+                    ink={theme.canvas.streetLabel}
+                  />
+                )}
+                {/* Retained coverage layer — stays under the reveal now: the wipe
                     swaps its pixels in instantly where prev already covered
                     (uPrevRect), so only the newly-exposed ground hex-loads in. */}
-                  {prevImage && prevRect && (
-                    <SkiaImage
-                      image={prevImage}
-                      x={prevRect.x}
-                      y={prevRect.y}
-                      width={prevRect.width}
-                      height={prevRect.height}
-                      fit="fill"
-                    />
-                  )}
-                  {curImage &&
-                    curRect &&
-                    (revealing && revealEffect && curCellImage && curRectSk ? (
-                      // Hex load-in: paint the finished bitmap through the reveal
-                      // wipe (one cheap GPU pass). Pixels prev already covered swap
-                      // in instantly; only new ground animates. Bounded to curRect;
-                      // hands back to <Image> the instant the wipe completes.
-                      <Rect
-                        x={curRect.x}
-                        y={curRect.y}
-                        width={curRect.width}
-                        height={curRect.height}
-                      >
-                        <Shader source={revealEffect} uniforms={revealUniforms}>
-                          <ImageShader image={curImage} rect={curRectSk} fit="fill" />
-                          <ImageShader image={curCellImage} rect={curRectSk} fit="fill" />
-                        </Shader>
-                      </Rect>
-                    ) : (
-                      <SkiaImage
-                        image={curImage}
-                        x={curRect.x}
-                        y={curRect.y}
-                        width={curRect.width}
-                        height={curRect.height}
-                        fit="fill"
-                        opacity={curOpacityValue}
-                      />
-                    ))}
-                  {selectedTrail ? (
-                    <>
-                      <Path
-                        color={selectedTrail.color}
-                        opacity={0.72}
-                        path={selectedTrail.path}
-                        strokeCap="round"
-                        strokeJoin="round"
-                        strokeWidth={trailStrokeWidth}
-                        style="stroke"
-                      />
-                      {selectedTrail.points.map(({ id, screen }, index) => (
-                        <Circle
-                          color={selectedTrail.color}
-                          cx={screen[0]}
-                          cy={screen[1]}
-                          key={id}
-                          opacity={0.34 + (0.5 * (index + 1)) / selectedTrail.points.length}
-                          r={trailDotRadius}
-                        />
-                      ))}
-                    </>
-                  ) : null}
-                </Group>
+                {prevImage && prevRect && (
+                  <RegionLayer
+                    image={prevImage}
+                    rect={prevRect}
+                    camera={transform}
+                    revealFront={revealFront}
+                  />
+                )}
+                {curImage && curRect && (
+                  <RegionLayer
+                    image={curImage}
+                    rect={curRect}
+                    camera={transform}
+                    cellImage={curCellImage}
+                    revealEffect={revealing ? revealEffect : null}
+                    revealFront={revealFront}
+                    previous={prevRect}
+                    opacity={curOpacityValue}
+                  />
+                )}
+                {selfSelected && (
+                  <SelectedTrail
+                    points={selfTrailPoints}
+                    camera={transform}
+                    viewport={viewport}
+                    color={`rgb(${selfInk.join(', ')})`}
+                  />
+                )}
               </Canvas>
             )}
           </View>
@@ -1242,16 +1146,3 @@ export function MapView({
 const styles = StyleSheet.create({
   fill: { flex: 1 },
 });
-
-interface TrailScreenPoint {
-  readonly id: string;
-  readonly screen: ScreenPoint;
-}
-
-function buildTrail(points: readonly TrailScreenPoint[], color: string) {
-  if (points.length === 0) return null;
-  const path = Skia.Path.Make();
-  path.moveTo(points[0].screen[0], points[0].screen[1]);
-  for (const { screen } of points.slice(1)) path.lineTo(screen[0], screen[1]);
-  return { color, path, points };
-}

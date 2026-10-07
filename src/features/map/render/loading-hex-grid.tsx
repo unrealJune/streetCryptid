@@ -1,4 +1,4 @@
-import { Group, Rect, Shader, Skia } from '@shopify/react-native-skia';
+import { Rect, Shader, Skia } from '@shopify/react-native-skia';
 import { useEffect, useMemo } from 'react';
 import {
   cancelAnimation,
@@ -7,8 +7,11 @@ import {
   useSharedValue,
   withRepeat,
   withTiming,
+  type SharedValue,
 } from 'react-native-reanimated';
 
+import type { ViewTransform } from '../core/camera';
+import { LocalMapGroup } from './local-space';
 import type { ScreenHexLattice } from '../core/hex-lattice';
 import type { Rgb } from '../core/types';
 import { LOADING_HEX_SKSL } from './loading-hex-shader';
@@ -78,7 +81,9 @@ export function LoadingHexGrid({
   loading,
   reducedMotion,
   ink,
+  camera,
 }: {
+  camera: SharedValue<ViewTransform>;
   /** Where to draw, anchor-space px. Generously larger than the view: see `loadingRect`. */
   rect: Box;
   /**
@@ -141,12 +146,12 @@ export function LoadingHexGrid({
   if (!effect) return null;
 
   return (
-    <Group transform={[{ translateX: rect.x }, { translateY: rect.y }]}>
+    <LocalMapGroup origin={rect} camera={camera}>
       {pieces.map((piece, index) => (
         <Rect key={index} x={piece.x} y={piece.y} width={piece.width} height={piece.height}>
           <Shader source={effect} uniforms={uniforms} />
         </Rect>
       ))}
-    </Group>
+    </LocalMapGroup>
   );
 }

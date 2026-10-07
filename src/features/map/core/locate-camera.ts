@@ -13,6 +13,7 @@ export function locateCamera(
   minZoom: number,
   maxZoom: number
 ): CameraState {
+  'worklet';
   const zoom = Math.max(minZoom, Math.min(maxZoom, Math.max(current.zoom, LOCATE_MIN_ZOOM)));
   const target = { center, zoom };
   return region && coversView(region, target, viewport)

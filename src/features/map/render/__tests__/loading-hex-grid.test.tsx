@@ -48,6 +48,7 @@ function draw(options: {
   act(() => {
     renderer = create(
       <LoadingHexGrid
+        camera={{ value: { k: 1, tx: 0, ty: 0 } } as never}
         rect={RECT}
         covered={options.covered ?? null}
         lattice={lattice}

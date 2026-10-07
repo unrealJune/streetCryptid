@@ -141,6 +141,7 @@ export function needsNewRegion(
  * band — a zoom change only scales the bitmap, it doesn't uncover blank).
  */
 export function coversView(spec: RegionSpec, camera: CameraState, viewport: Viewport): boolean {
+  'worklet';
   const view = visibleWorldRect(camera, viewport);
   return (
     view.minX >= spec.rect.minX &&

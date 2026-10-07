@@ -87,7 +87,7 @@ export function revealEmphasis(order: number, reveal: number): number {
   return 4 * a * (1 - a);
 }
 
-/** A rect in the reveal's coordinate space (anchor px): x, y, width, height. */
+/** A rect in the reveal's layer-local coordinate space: x, y, width, height. */
 export interface RevealRect {
   readonly x: number;
   readonly y: number;

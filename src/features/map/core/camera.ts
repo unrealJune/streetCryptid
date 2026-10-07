@@ -7,6 +7,7 @@ export const TILE_SIZE = 256;
 
 /** Logical pixels per world unit at a zoom level. */
 export function scaleFor(zoom: number): number {
+  'worklet';
   return TILE_SIZE * Math.pow(2, zoom);
 }
 
@@ -43,6 +44,7 @@ export function screenToWorld(
 
 /** The world rectangle currently visible through the viewport. */
 export function visibleWorldRect(camera: CameraState, viewport: Viewport): WorldRect {
+  'worklet';
   const s = scaleFor(camera.zoom);
   const halfW = viewport.width / 2 / s;
   const halfH = viewport.height / 2 / s;
@@ -74,6 +76,7 @@ export function applyViewTransform(
   viewport: Viewport,
   t: ViewTransform
 ): CameraState {
+  'worklet';
   const s0 = scaleFor(base.zoom);
   const s = s0 * t.k;
   return {
@@ -91,6 +94,7 @@ export function viewTransformFor(
   viewport: Viewport,
   camera: CameraState
 ): ViewTransform {
+  'worklet';
   const k = Math.pow(2, camera.zoom - base.zoom);
   const s = scaleFor(base.zoom) * k;
   return {
