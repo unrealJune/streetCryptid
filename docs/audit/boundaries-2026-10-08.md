@@ -387,6 +387,88 @@ web` and the CDP tooling go with it. Do not do this half: a web target with no n
 
 The first size is a day and is pure deletion. It should go in step 1.
 
+## What the field does about this seam
+
+Surveyed 2026-10-08: projects with a Rust core under Swift, Kotlin and JavaScript clients, and
+what each did about the hand-mirrored-types problem.
+
+**Generate the JavaScript bindings from the same UniFFI annotations.**
+[uniffi-bindgen-react-native](https://github.com/jhugman/uniffi-bindgen-react-native) (Mozilla
+and Filament, [announced December 2024](https://hacks.mozilla.org/2024/12/introducing-uniffi-for-react-native-rust-powered-turbo-modules/))
+reads the `#[uniffi::export]` / `uniffi::Record` / `uniffi::Enum` this crate already has and emits
+TypeScript types, the C++ JSI glue, and a Turbo Module that installs them. Records cross by value,
+objects by reference, enums and tagged unions map to TS unions, errors to typed exceptions, and
+async works in both directions. The generated native glue is Objective-C++ and Java; no Swift or
+Kotlin is written for the node path at all. Listed adopters: `@unomed/react-native-matrix-sdk`,
+`@fressh/react-native-uniffi-russh`, ChessTiles; [Ferrostar](https://stadiamaps.github.io/ferrostar/architecture.html)
+(a navigation SDK with the same shape as this app: Rust state machine, Swift/Kotlin platform
+layer for sensors and UI, React Native on top) and [LiveKit](https://github.com/livekit/rust-sdks/pull/1374)
+use it. Current release 0.31.0-6 pins UniFFI 0.31, which is the version this crate is on. The same
+tool generates a `wasm-bindgen` crate from the same annotations, so a browser build would never
+again be a second hand-written crate. Caveats found: pre-1.0; the UniFFI 0.32 upgrade is
+[open](https://github.com/jhugman/uniffi-bindgen-react-native/issues/449); the Android turbo-module
+compatibility test is [disabled in CI](https://github.com/jhugman/uniffi-bindgen-react-native/issues/475);
+nothing documents Expo prebuild coexistence (it is ordinary autolinking, so it should, but nobody
+has written it down); and one project [declined it](https://github.com/remcostoeten/skriuw/pull/404)
+because synchronous Rust functions become blocking JSI calls, which does not apply to an async
+tokio API like this one.
+
+**Generate the types, hand-write the transport.** [1Password's typeshare](https://github.com/1Password/typeshare)
+emits Swift, Kotlin and TypeScript types from `#[typeshare]` Rust structs; the call layer stays
+theirs. [tauri-specta](https://github.com/specta-rs/tauri-specta) generates typed `invoke` wrappers
+and event types for Tauri's single IPC channel. [Bitwarden](https://contributing.bitwarden.com/architecture/sdk/)
+runs both patterns side by side: the Secrets Manager SDK uses a JSON `run_command` so each language
+binding is one method, while the Password Manager SDK that backs the real mobile apps uses typed
+UniFFI clients. The command-envelope pattern (one `dispatch(json)`) is real, and it is what teams
+choose when they need many thin bindings fast, not what the teams that own their mobile apps chose.
+
+**Discipline for a hand-written bridge, if one stays.** Mozilla's
+[ads-client architecture rules](https://searchfox.org/mozilla-mobile/source/application-services/components/ads-client/ARCHITECTURE.md):
+FFI-exposed types live in their own module with a prefix, convert to internal types through
+`From`, and a change to an FFI type is a breaking change with a deprecation plan, versioned as
+`V1`/`V2` types rather than optional methods. Mozilla's own
+[reason for UniFFI](https://hacks.mozilla.org/2023/08/autogenerating-rust-js-bindings-with-uniffi/)
+is that hand-written wrappers "were responsible for many serious bugs" and undermined the point of
+Rust. Skriuw's Expo module makes every native call an `AsyncFunction` and resolves a
+`{ ok, value | error }` envelope because a rejected Expo promise carries only a code and a message,
+which is a narrower, better-justified version of finding 7.
+
+**Where logic lives.** [Crux](https://redbadger.github.io/crux/) (Red Badger) is the framework
+version of finding 6: the core is side-effect free, the shell calls `process_event(Event) ->
+Vec<Request>`, `handle_response(id, Response) -> Vec<Request>` and `view() -> ViewModel`, and
+types for Swift, Kotlin and TypeScript are generated from the Rust definitions. Photoroom moved
+all editing logic, conflict resolution and the undo stack into such a core across iOS, Android
+and web ([their series](https://www.photoroom.com/inside-photoroom/building-live-collaboration-in-rust-for-millions-of-users-part-1));
+Proton is reported to use it. Photoroom's [part 3](https://www.photoroom.com/inside-photoroom/building-live-collaboration-in-rust-for-millions-of-users-part-3)
+is the relevant warning: replacing a whole view model per update makes reactivity hard, and they
+ended up diffing the view model in Rust and shipping patches. `SharingSnapshot` with
+`stableStringify` is the same problem one size smaller.
+
+### What this changes in the recommendation
+
+The command-envelope proposal is withdrawn. It solves the mirror problem by discarding the
+typed surface, and the field's answer is to keep the typed surface and generate the other side.
+
+- **Transport: UniFFI typed methods, with the TypeScript bindings generated.** Spike
+  `uniffi-bindgen-react-native` against this crate for one day: generate into a sibling package,
+  confirm `expo prebuild` links it, confirm the async methods and the `with_foreign` listener
+  traits come through, and measure `readLatest` / `pollPairEvents` round trips. If it holds, the
+  node API leaves the Expo module entirely: the 38 mappers, the TS mirror, the `declare class`
+  and the web stub are all generated or gone. The Expo module keeps only what is genuinely
+  platform-local (background runtime control, keychain, permissions, MetricKit, wake ledger),
+  which is the Ferrostar split.
+- **Fallback if the spike fails:** typeshare-style generated types, Mozilla's FFI-type module
+  discipline, and Skriuw's result envelope for the error channel only.
+- **Contract rules that hold either way**, all from the sources above: FFI types in one module
+  with `From` conversions; sum types as enums, never strings; one id type with one encoding;
+  errors as a flat enum with stable codes; versioned types instead of optional methods; every
+  cross-boundary call async.
+- **Architecture: take Crux's shape, not the crate.** This core owns a tokio runtime and an iroh
+  endpoint; it is an engine, not a side-effect-free reducer, and `DrainEngine` over a
+  `PublishSink` trait is already the right shape for that. Apply `step(state, event) ->
+(state, commands)` to the two machines that lack it (motion, pairing orchestration), and keep
+  the snapshot-plus-diff reactivity in mind when the view model grows.
+
 ## What is right, and should be the pattern
 
 - `pool.ts`: pure functions over an immutable friend-pool value. Every extraction in finding 5
@@ -419,8 +501,10 @@ Each step is its own PR and leaves `just check-all` green.
    This is the step that removes the most JS.
 4. **Version gate at `createNode`**, `IrohLocationApi` fully required, platform split, delete
    the 57 guards. Typed health records.
-5. **Generated TS types from the Rust records**, ids as hex strings in Rust, total decoders,
-   delete the 38 mappers and the `declare class`.
+5. **Spike `uniffi-bindgen-react-native`** (see "What the field does"). On success the node API
+   moves out of the Expo module and the 38 mappers, the TS mirror, the `declare class` and the
+   web stub are generated or deleted; on failure, generated types plus the FFI-type discipline.
+   Ids as hex strings in Rust and total decoders either way.
 6. **Typed errors** with codes; delete the regex classifiers.
 7. **Android background: native geofence receiver + native device health**, then delete
    `runRefresh`, `teardownBounded` and the `native-runtime-owner` chain. Fix the `revive-task.ts`
