@@ -12,6 +12,7 @@ import type {
   NativeControlMsg,
   NativeRatchetEvent,
   NativeLocationFix,
+  NodeHostSnapshot,
   NodeKeys,
   PairEvent,
   PairInvite,
@@ -114,12 +115,18 @@ export declare class IrohLocationNativeModule
    * The counterpart to {@link ingestFix}, driven on a timer by the mounted app: neither platform
    * gives a background process a reliable one, and the cadence has to stay uniform whether or not
    * the phone is moving — it is the one property of a sealed envelope the stash can read. Resolves
-   * with `enqueued: 0` when the current slot is already covered, which is the common case. OPTIONAL.
+   * with `enqueued: 0` when the current slot is already covered, which is the common case.
+   *
+   * `parked` is what the caller can prove about motion, and decides the envelope's `fix_state`:
+   * `true` a confirmed stop, `false` a stop just left, `null` no evidence either way — which is
+   * what the mounted timer has, and why it must not claim `parked` (see `publish::Motion`).
+   * OPTIONAL.
    */
   heartbeatFix?(
     subscriptionId: string,
     battery: { level: number; charging: boolean; lowPower: boolean },
-    intervalMs: number
+    intervalMs: number,
+    parked: boolean | null
   ): Promise<NativeIngestOutcome>;
   /**
    * Seal the last known position once, because the recipient set has just grown.
@@ -149,7 +156,8 @@ export declare class IrohLocationNativeModule
   /**
    * What the native runtime is doing and why — `{ running, state, wake_reason, auth_status,
    * precise, anchor_armed, fence_registered, slc_available, candidate_pending,
-   * candidate_fence_armed, last_wake_age_ms?, candidate_age_ms?, anchor_age_ms? }`.
+   * candidate_fence_armed, last_wake_age_ms?, candidate_age_ms?, anchor_age_ms?, stop_via?,
+   * last_visit_age_ms? }`.
    *
    * `device.health` flattens this under `location.*`. On iOS a parked phone emits nothing by
    * construction, so "which state is it in and when did it last run" is the only way to tell it
@@ -168,6 +176,8 @@ export declare class IrohLocationNativeModule
   resetBackgroundWakeStats?(): void;
   handOverNativeBackground?(timeoutMs: number): Promise<boolean>;
   nativeNodeOwner?(): string;
+  restartNode?(config?: TransportConfig): Promise<void>;
+  nodeHostSnapshot?(): NodeHostSnapshot | null;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**
@@ -388,6 +398,19 @@ export declare class IrohLocationNativeModule
   pruneTrail(olderThanTs: number): Promise<void>;
   docTicket(): Promise<string>;
   importDocTicket(ticket: string): Promise<void>;
+  /**
+   * Stop replicating a removed friend's trail (or profile) namespace, and stop reopening it on
+   * every start. Pass the ticket the friend was added with. Resolves whether it was replicated.
+   * Optional: absent on binaries built before the namespace book.
+   */
+  forgetDocTicket?(ticket: string): Promise<boolean>;
+  forgetProfileTicket?(ticket: string): Promise<boolean>;
+  /**
+   * Grant the trail stash replication of our trail and every friend's, from native. Resolves at
+   * once; the grant itself runs on a native task. Optional: absent on binaries that predate it,
+   * where the JS HTTP grant is still the only one.
+   */
+  grantStash?(): Promise<void>;
 
   // Optional for compatibility with installed iOS binaries built before the telemetry API.
   configureTelemetry?(endpoint: string, instanceId: string): Promise<boolean>;
@@ -465,7 +488,7 @@ export declare class IrohLocationNativeModule
  */
 type RawIrohLocationNativeModule = Omit<
   IrohLocationNativeModule,
-  'start' | 'setTransportConfig'
+  'start' | 'setTransportConfig' | 'restartNode'
 > & {
   start(
     relayUrls: string[],
@@ -475,6 +498,13 @@ type RawIrohLocationNativeModule = Omit<
     bleEnabled: boolean
   ): Promise<void>;
   setTransportConfig?(
+    relayUrls: string[],
+    relayAuthToken: string,
+    relayEnabled: boolean,
+    ipEnabled: boolean,
+    bleEnabled: boolean
+  ): Promise<void>;
+  restartNode?(
     relayUrls: string[],
     relayAuthToken: string,
     relayEnabled: boolean,
@@ -501,8 +531,8 @@ function withRelayConfig(raw: RawIrohLocationNativeModule): IrohLocationNativeMo
 
       // Same treatment, same reason: the relay URLs and token are this bundle's build-time
       // constants, so callers pass only the toggles and never have to know where the rest lives.
-      if (property === 'setTransportConfig') {
-        const native = target.setTransportConfig?.bind(target);
+      if (property === 'setTransportConfig' || property === 'restartNode') {
+        const native = target[property]?.bind(target);
         // Left undefined on a binary that predates the native drain path, so the callers'
         // `typeof mod.setTransportConfig === 'function'` guard still reports the truth rather than
         // finding this wrapper and failing inside it.

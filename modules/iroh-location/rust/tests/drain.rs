@@ -9,8 +9,8 @@ use std::sync::Mutex;
 
 use iroh_location::gate::{BatteryState, FixQualityConfig, GateState};
 use iroh_location::publish::{
-    DrainEngine, EnqueueOutcome, FixQueue, FlushOutcome, GateStateStore, PublishError, PublishSink,
-    Recipients, RecoveryOutcome, Sealed, SeqCounter, StoreError,
+    DrainEngine, DrainLock, EnqueueOutcome, FixQueue, FlushOutcome, GateStateStore, Motion,
+    PublishError, PublishSink, Recipients, RecoveryOutcome, Sealed, SeqCounter, StoreError,
 };
 use iroh_location::LocationFix;
 
@@ -190,6 +190,9 @@ impl PublishSink for FakeSink {
         fix: LocationFix,
         recipients: Vec<String>,
     ) -> Result<Sealed, PublishError> {
+        // A real send is an await, and that await is the window two concurrent drains race
+        // through. Without a suspension point here the fake could never show it.
+        tokio::task::yield_now().await;
         let mut sent = self.sent.lock().unwrap();
         if let Some(limit) = *self.fail_after.lock().unwrap() {
             if sent.len() >= limit {
@@ -245,6 +248,7 @@ struct Harness {
     recipients: FakeRecipients,
     gate: FakeGate,
     sink: FakeSink,
+    lock: DrainLock,
 }
 
 impl Harness {
@@ -258,6 +262,7 @@ impl Harness {
             },
             gate: FakeGate::default(),
             sink: FakeSink::default(),
+            lock: DrainLock::default(),
         }
     }
 
@@ -269,6 +274,7 @@ impl Harness {
             gate: &self.gate,
             sink: &self.sink,
             quality: FixQualityConfig::default(),
+            lock: &self.lock,
         }
     }
 }
@@ -698,7 +704,7 @@ async fn a_heartbeat_republishes_the_last_position_when_no_fix_arrives() {
 
     let later = base + INTERVAL * 2;
     let out = engine
-        .heartbeat(healthy_battery(), INTERVAL, later)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, later)
         .await
         .unwrap();
 
@@ -722,7 +728,7 @@ async fn a_heartbeat_inside_a_covered_slot_publishes_nothing() {
         .unwrap();
 
     let out = engine
-        .heartbeat(healthy_battery(), INTERVAL, now + 1_000)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, now + 1_000)
         .await
         .unwrap();
 
@@ -737,7 +743,7 @@ async fn a_heartbeat_before_the_first_fix_does_nothing() {
 
     let out = h
         .engine()
-        .heartbeat(healthy_battery(), INTERVAL, INTERVAL * 10)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, INTERVAL * 10)
         .await
         .unwrap();
 
@@ -762,7 +768,7 @@ async fn a_heartbeat_respects_the_battery_suspend() {
         low_power: false,
     };
     let out = engine
-        .heartbeat(flat, INTERVAL, base + INTERVAL * 3)
+        .heartbeat(Motion::Parked, flat, INTERVAL, base + INTERVAL * 3)
         .await
         .unwrap();
 
@@ -830,7 +836,7 @@ async fn a_drain_that_published_nothing_does_not_push() {
 
     let out = h
         .engine()
-        .heartbeat(healthy_battery(), INTERVAL, now)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, now)
         .await
         .unwrap();
 
@@ -903,7 +909,7 @@ async fn a_wake_that_published_nothing_moves_neither_stamp() {
     let now = INTERVAL * 10;
 
     h.engine()
-        .heartbeat(healthy_battery(), INTERVAL, now)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, now)
         .await
         .unwrap();
 
@@ -985,7 +991,7 @@ async fn a_heartbeat_goes_out_marked_parked_carrying_an_old_position() {
     // An hour later, still parked, no new fix has passed the gate.
     let later = base + 60 * 60_000;
     h.engine()
-        .heartbeat(healthy_battery(), INTERVAL, later)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, later)
         .await
         .unwrap();
 
@@ -1050,7 +1056,7 @@ async fn a_backfilled_burst_is_stamped_as_one_wake() {
     let woke = base + INTERVAL * 5;
     let out = h
         .engine()
-        .heartbeat(healthy_battery(), INTERVAL, woke)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, woke)
         .await
         .unwrap();
     assert!(out.enqueued > 1, "precondition: this wake backfilled slots");
@@ -1085,7 +1091,7 @@ async fn a_parked_tick_that_fills_no_slot_still_records_that_the_phone_parked() 
     // Same slot: nothing comes due.
     let out = h
         .engine()
-        .heartbeat(healthy_battery(), INTERVAL, base + 1_000)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, base + 1_000)
         .await
         .unwrap();
     assert_eq!(out.enqueued, 0, "precondition: this tick filled no slot");
@@ -1094,6 +1100,325 @@ async fn a_parked_tick_that_fills_no_slot_still_records_that_the_phone_parked() 
         h.gate.0.lock().unwrap().last_state,
         Some(iroh_location::FIX_STATE_PARKED),
         "the parked declaration is persisted by the tick that had nothing to send"
+    );
+}
+
+#[tokio::test]
+async fn a_clock_with_no_motion_evidence_does_not_declare_parked() {
+    // The mounted app's timer ticks whatever the phone is doing. On 2026-10-02 it stamped four
+    // hours of `parked` on an iPhone whose own state machine said `moving`, and a friend's map
+    // showed "parked here" at a spot she had left.
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+
+    let later = base + INTERVAL * 2;
+    h.engine()
+        .heartbeat(Motion::Unknown, healthy_battery(), INTERVAL, later)
+        .await
+        .unwrap();
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    let last = stamps.len() - 1;
+    assert_eq!(
+        stamps[last].0,
+        Some(iroh_location::FIX_STATE_LIVE),
+        "the stamp the last real fix left stands; the receiver ages it by `published_delta_s`"
+    );
+    assert_eq!(stamps[last].1, Some((INTERVAL * 2 / 1000) as u32));
+}
+
+#[tokio::test]
+async fn a_clock_with_no_motion_evidence_keeps_a_parked_declaration() {
+    // The converse: the timer must not UNDO a stop the native runtime proved.
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    h.engine()
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, base + INTERVAL)
+        .await
+        .unwrap();
+    h.engine()
+        .heartbeat(
+            Motion::Unknown,
+            healthy_battery(),
+            INTERVAL,
+            base + INTERVAL * 2,
+        )
+        .await
+        .unwrap();
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_PARKED)
+    );
+}
+
+#[tokio::test]
+async fn leaving_a_stop_retracts_the_parked_declaration() {
+    // A fence exit wakes the phone with no fix yet. Its envelope must not keep saying "parked
+    // here" about a place the OS has just told us it left.
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    h.engine()
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, base + INTERVAL)
+        .await
+        .unwrap();
+    h.engine()
+        .heartbeat(
+            Motion::Moving,
+            healthy_battery(),
+            INTERVAL,
+            base + INTERVAL * 2,
+        )
+        .await
+        .unwrap();
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_NO_FIX),
+        "moving, no fix yet"
+    );
+}
+
+/// [`fix`], `metres` due north of it.
+fn fix_north(ts: u64, accuracy_m: f64, metres: f64) -> LocationFix {
+    LocationFix {
+        lat: 47.6062 + metres / 111_195.0,
+        ..fix(ts, accuracy_m)
+    }
+}
+
+/// A phone parked by a visit: one fix, then the runtime's proof of a stop.
+async fn parked_harness(base: u64) -> Harness {
+    let h = Harness::new();
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    h.engine()
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, base + INTERVAL)
+        .await
+        .unwrap();
+    h
+}
+
+#[tokio::test]
+async fn opening_the_app_at_a_stop_does_not_retract_the_parked_declaration() {
+    // 2026-10-07: parked by a visit, the owner opened the app, the mounted app's fixes from the
+    // same spot went out `live`, the app was put away and iOS suspended the process. Nothing ever
+    // said `parked` again, so the friend's map read "out of contact" about a phone sitting still.
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+
+    let opened = base + INTERVAL * 2;
+    let out = h
+        .engine()
+        .ingest(
+            fix_north(opened, 12.0, 17.0),
+            healthy_battery(),
+            INTERVAL,
+            opened,
+        )
+        .await
+        .unwrap();
+    assert!(out.accepted, "precondition: a good fix, not a refused one");
+
+    let sent = h.sink.sent.lock().unwrap();
+    let stamps = h.sink.stamps.lock().unwrap();
+    let last = stamps.len() - 1;
+    assert_eq!(stamps[last].0, Some(iroh_location::FIX_STATE_PARKED));
+    assert_eq!(sent[last].1, opened, "and it carries the fresh position");
+    assert_eq!(stamps[last].1, Some(0));
+}
+
+#[tokio::test]
+async fn walking_out_of_the_stop_goes_back_to_live() {
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+
+    // 12 m accuracy + the 100 m fence: 150 m out has left.
+    let walked = base + INTERVAL * 2;
+    h.engine()
+        .ingest(
+            fix_north(walked, 12.0, 150.0),
+            healthy_battery(),
+            INTERVAL,
+            walked,
+        )
+        .await
+        .unwrap();
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_LIVE)
+    );
+    assert!(h.gate.0.lock().unwrap().parked_at.is_none());
+}
+
+#[tokio::test]
+async fn a_slow_walk_is_measured_from_the_stop_not_from_the_last_fix() {
+    // Each step is well inside the fence of the one before; the fourth is outside the stop's.
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+
+    for step in 1..=4u64 {
+        let at = base + INTERVAL + step * INTERVAL;
+        h.engine()
+            .ingest(
+                fix_north(at, 5.0, 40.0 * step as f64),
+                healthy_battery(),
+                INTERVAL,
+                at,
+            )
+            .await
+            .unwrap();
+    }
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    let tail: Vec<_> = stamps[stamps.len() - 4..].iter().map(|s| s.0).collect();
+    use iroh_location::{FIX_STATE_LIVE as LIVE, FIX_STATE_PARKED as PARKED};
+    assert_eq!(
+        tail,
+        vec![Some(PARKED), Some(PARKED), Some(LIVE), Some(LIVE)],
+        "40 and 80 m are the stop; 120 m (> 5 + 100) has left it"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_fix_at_a_stop_does_not_retract_the_parked_declaration() {
+    // An indoor Wi-Fi fix past the accuracy gate says nothing about motion either.
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+
+    let later = base + INTERVAL * 2;
+    let out = h
+        .engine()
+        .ingest(fix(later, 5_000.0), healthy_battery(), INTERVAL, later)
+        .await
+        .unwrap();
+    assert!(!out.accepted, "precondition: the gate refused this fix");
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_PARKED)
+    );
+}
+
+#[tokio::test]
+async fn a_stop_declared_before_the_anchor_existed_holds_from_the_last_known_position() {
+    // Gate state from a build that predates `parked_at`: the phone parked, then upgraded.
+    let base = INTERVAL * 10;
+    let h = Harness::new();
+    *h.gate.0.lock().unwrap() = GateState {
+        last_known_fix: Some((&fix(base, 20.0)).into()),
+        last_accepted_at: Some(base),
+        last_published_slot: Some(base / INTERVAL),
+        last_state: Some(iroh_location::FIX_STATE_PARKED),
+        slot_interval_ms: Some(INTERVAL),
+        ..GateState::default()
+    };
+
+    let at = base + INTERVAL;
+    h.engine()
+        .ingest(fix_north(at, 10.0, 30.0), healthy_battery(), INTERVAL, at)
+        .await
+        .unwrap();
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_PARKED)
+    );
+    let anchor = h.gate.0.lock().unwrap().parked_at.clone().unwrap();
+    assert_eq!(
+        anchor.ts, base,
+        "anchored on the position it parked at, once"
+    );
+}
+
+#[tokio::test]
+async fn a_parked_tick_does_not_move_the_stop() {
+    // Fixes at the stop refresh `last_known_fix`; a later parked tick must not re-anchor on it,
+    // or a stop could be walked away from one tick at a time.
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+    let at = base + INTERVAL * 2;
+    h.engine()
+        .ingest(fix_north(at, 5.0, 60.0), healthy_battery(), INTERVAL, at)
+        .await
+        .unwrap();
+    h.engine()
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, at + INTERVAL)
+        .await
+        .unwrap();
+
+    let anchor = h.gate.0.lock().unwrap().parked_at.clone().unwrap();
+    assert_eq!(
+        anchor.ts, base,
+        "still the position the stop was declared at"
+    );
+}
+
+#[tokio::test]
+async fn leaving_a_stop_clears_its_anchor() {
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+    h.engine()
+        .heartbeat(
+            Motion::Moving,
+            healthy_battery(),
+            INTERVAL,
+            base + INTERVAL * 2,
+        )
+        .await
+        .unwrap();
+    assert!(h.gate.0.lock().unwrap().parked_at.is_none());
+
+    // ...so a fix back at the old spot is a live fix, not a resumed stop.
+    let back = base + INTERVAL * 3;
+    h.engine()
+        .ingest(fix(back, 20.0), healthy_battery(), INTERVAL, back)
+        .await
+        .unwrap();
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_LIVE)
+    );
+}
+
+#[tokio::test]
+async fn leaving_a_stop_does_not_downgrade_a_live_stamp() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    h.engine()
+        .heartbeat(Motion::Moving, healthy_battery(), INTERVAL, base + INTERVAL)
+        .await
+        .unwrap();
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_LIVE)
     );
 }
 
@@ -1162,7 +1487,7 @@ async fn an_introduction_does_not_consume_a_slot() {
     let next = base + INTERVAL;
     let out = h
         .engine()
-        .heartbeat(healthy_battery(), INTERVAL, next)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, next)
         .await
         .unwrap();
     assert_eq!(out.enqueued, 1, "the heartbeat's own slot is untouched");
@@ -1307,7 +1632,7 @@ async fn recovery_runs_even_when_nothing_was_due() {
         .unwrap();
 
     h.engine()
-        .heartbeat(healthy_battery(), INTERVAL, now + 1_000)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, now + 1_000)
         .await
         .unwrap();
 
@@ -1385,7 +1710,7 @@ async fn lengthening_the_interval_does_not_stop_publishing() {
 
     let later = WALL + 7 * MINUTE;
     let out = engine
-        .heartbeat(healthy_battery(), INTERVAL, later)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, later)
         .await
         .unwrap();
     assert!(
@@ -1396,7 +1721,7 @@ async fn lengthening_the_interval_does_not_stop_publishing() {
     // And it keeps going on the new grid rather than publishing once and stalling again.
     let much_later = later + 2 * INTERVAL;
     let out = engine
-        .heartbeat(healthy_battery(), INTERVAL, much_later)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, much_later)
         .await
         .unwrap();
     assert!(out.published >= 1);
@@ -1417,7 +1742,7 @@ async fn shortening_the_interval_does_not_republish_what_already_went_out() {
 
     let inside = start + 11 * MINUTE;
     let out = engine
-        .heartbeat(healthy_battery(), INTERVAL, inside)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, inside)
         .await
         .unwrap();
     assert_eq!(
@@ -1427,7 +1752,7 @@ async fn shortening_the_interval_does_not_republish_what_already_went_out() {
 
     let after = start + fifteen + MINUTE;
     let out = engine
-        .heartbeat(healthy_battery(), INTERVAL, after)
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, after)
         .await
         .unwrap();
     assert_eq!(out.enqueued, 1, "exactly the one new 5-minute slot");
@@ -1447,7 +1772,12 @@ async fn a_gate_written_before_the_interval_was_recorded_regrids_from_its_last_p
     };
     let out = h
         .engine()
-        .heartbeat(healthy_battery(), INTERVAL, WALL + 2 * INTERVAL)
+        .heartbeat(
+            Motion::Parked,
+            healthy_battery(),
+            INTERVAL,
+            WALL + 2 * INTERVAL,
+        )
         .await
         .unwrap();
     assert!(out.published >= 1, "a legacy index must not wedge the grid");
@@ -1507,4 +1837,55 @@ fn drop_reasons_use_the_js_spellings() {
         ..absorbed
     };
     assert_eq!(drop_reason(&low), Some("sampling-suspended"));
+}
+
+// --- Concurrent runs -----------------------------------------------------------------------------
+//
+// 2026-10-01: a parked iPhone sealed 3-4 envelopes per slot because each coarse delivery spawned
+// its own heartbeat and the runs interleaved over the shared gate and outbox. One slot is one
+// envelope however many callers arrive for it.
+
+#[tokio::test]
+async fn concurrent_heartbeats_fill_a_slot_once() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+
+    let later = base + INTERVAL;
+    // One engine per caller, as each FFI call builds its own.
+    let engines = [h.engine(), h.engine(), h.engine(), h.engine()];
+    let (a, b, c, d) = tokio::join!(
+        engines[0].heartbeat(Motion::Parked, healthy_battery(), INTERVAL, later),
+        engines[1].heartbeat(Motion::Parked, healthy_battery(), INTERVAL, later),
+        engines[2].heartbeat(Motion::Parked, healthy_battery(), INTERVAL, later),
+        engines[3].heartbeat(Motion::Parked, healthy_battery(), INTERVAL, later),
+    );
+    let published: u32 = [a, b, c, d].into_iter().map(|o| o.unwrap().published).sum();
+
+    assert_eq!(
+        published, 1,
+        "one envelope for the new slot, not one per caller"
+    );
+    assert_eq!(
+        h.sink.sent.lock().unwrap().len(),
+        2,
+        "the anchor and the heartbeat"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_drains_never_seal_the_same_entry_twice() {
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+    h.queue.enqueue(fix(now, 20.0)).unwrap();
+
+    let (first, second) = (h.engine(), h.engine());
+    let (a, b) = tokio::join!(first.drain(now), second.drain(now));
+
+    assert_eq!(a.unwrap().published + b.unwrap().published, 1);
+    let sent = h.sink.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1, "one queued fix, one envelope: {sent:?}");
 }

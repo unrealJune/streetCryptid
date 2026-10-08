@@ -14,7 +14,8 @@ import UIKit
 /// other clock. A `Timer` does not survive suspension, a JS `setInterval` does not survive
 /// suspension, and `BGTaskScheduler` fires a handful of times a day. So the only things that can
 /// wake this app are: a location delivery, a geofence crossing, a significant-location-change
-/// relaunch, or a push. Anything designed around a cadence works on a desk and fails in a pocket.
+/// relaunch, a visit, or a push. Anything designed around a cadence works on a desk and fails in a
+/// pocket.
 ///
 /// ## What went wrong before this rewrite
 ///
@@ -37,9 +38,11 @@ import UIKit
 ///
 /// ## Relationship to the JS pipeline
 ///
-/// They cannot both run: the Rust stores take a process-wide directory claim, so whichever starts
-/// first owns the counter and the queue and the other stands down. That needs no agreement between
-/// them — see `durable.rs`, and `native-runtime-owner.ts` for what the coordinated version cost.
+/// They share ONE node. `NodeHost` (Rust, `host.rs`) builds it, the mounted app and this runtime
+/// each hold a lease on it, and it is shut down when the last lease goes. This runtime used to
+/// build a node of its own and race the app for the process-wide store claim; every ownership rule
+/// that grew up around that race — an owner flag, a claim backoff, a bounded handover — is gone,
+/// because there is nothing left to race for.
 final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// The one runtime. **It must first be touched on the main thread**, and
   /// `IrohBackgroundAppDelegateSubscriber` does exactly that on every launch, before React exists.
@@ -79,24 +82,6 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// a significant-location-change delivery arrives through `didUpdateLocations` looking exactly
   /// like any other, so claiming to distinguish it would be a field that lies. What separates an SLC
   /// relaunch from a running app is `relaunch`, which is what a cold start reports.
-  /// Who owns the Rust stores right now.
-  ///
-  /// Until this existed, "who holds the process-wide writer claim" was an emergent property of
-  /// whoever called `start_stored()` first, and it was discovered only as a thrown exception. That
-  /// is the same shape of problem `native-runtime-owner.ts` records on the JS side, and it wants
-  /// the same answer: one explicit, single-valued, observable state.
-  ///
-  /// It becomes load-bearing the moment this runtime can start itself on a background launch. Then
-  /// `.native` is the ordinary state of a phone in a pocket, and the app opening has to take the
-  /// stores back — see `yieldNode`. Without the guard it adds to `ensureStarted`, arming the
-  /// runtime at launch would invert the claim race onto the most common path in the app.
-  enum NodeOwner: String {
-    /// The mounted JS app holds the claim. The default, and what a foreground launch means.
-    case app
-    /// This runtime holds it, or may take it. Set only on a launch that never starts React.
-    case native
-  }
-
   enum WakeReason: String {
     /// A delivery on the precise stream, i.e. the phone is going somewhere.
     case movement
@@ -113,6 +98,22 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     /// A `BGProcessingTask` wake — `NativeRefreshTask`. A clock, like `periodic`, but a rare one
     /// the OS chose to give us, so it is allowed to pull as well as publish.
     case refresh
+    /// A `CLVisit` — Core Location's own arrival/departure detector. See `didVisit`.
+    case visit
+  }
+
+  /// Which mechanism confirmed a stop.
+  ///
+  /// `dwell` is the state machine working as designed: a second delivery inside the jitter radius,
+  /// `stopDwellSeconds` after the first. The other two exist for a process that never gets that
+  /// second delivery — one relaunched in the background, which iOS runs in short bursts and
+  /// suspends mid-dwell — and seeing them often says how much of the fleet lives that way.
+  enum StopEvidence: String {
+    case dwell
+    /// `NativeRefreshTask` found a candidate whose dwell had elapsed. See `confirmDwelledCandidate`.
+    case refresh
+    /// Core Location reported an arrival. See `didVisit`.
+    case visit
   }
 
   // MARK: - Tuning
@@ -162,28 +163,19 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
 
   private let manager = CLLocationManager()
   private let queue = DispatchQueue(label: "com.unrealjune.irohlocation.background-runtime")
-  private var node: LocationNode?
-  private var subscription: Subscription?
   private var running = false
 
   private var state: MotionState = .moving
-  /// Defaults to `.app`, so nothing changes until something deliberately hands ownership over.
-  private(set) var owner: NodeOwner = .app
   private var lastWakeReason: WakeReason = .relaunch
   private var lastWakeAt: Date?
 
-  /// Where a captured fix goes when this runtime cannot own the node.
+  /// Where a captured fix goes while the app is mounted.
   ///
-  /// The writer claim in `durable.rs` is **process-wide**, and on iOS the mounted app and this
-  /// runtime are the same process using the same `nodeStorageRoots()`. So whenever the app is open
-  /// it has already claimed the stores and `ensureStarted()` returns nil here — always, not
-  /// occasionally. That was survivable while a JS `watchPositionAsync` covered the mounted case;
-  /// once capture moved into Rust and that watcher was deleted, it meant a foregrounded app
-  /// captured fixes and dropped every one of them on the floor. A fresh install could pair, sit
-  /// there with the map open, and never publish anything at all.
-  ///
-  /// Handing the fix to JS is not a fallback path, it is the mounted path. The mounted runtime
-  /// owns the node, so it is the only thing that *can* publish; this side is the sensor.
+  /// Routing, not ownership: the node is shared, and both paths end in the same `ingestFix` on it.
+  /// A mounted app takes the capture because it runs the sampling policy and draws the user's own
+  /// marker from what the gate accepted. Before the node was shared this was the ONLY path that
+  /// could publish while the app was open — a fresh install could pair, sit there with the map
+  /// open, and publish nothing, because nothing handed the captures over.
   weak var eventSink: IrohLocationModule?
 
   /// The coordinate the stop fence is centred on. Persisted, because a cold launch has to be able
@@ -197,26 +189,73 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
 
   /// When the phone first entered the jitter radius of the current stop candidate. `nil` while
   /// moving or once the stop is confirmed.
-  private var stopCandidate: (centre: CLLocation, since: Date)?
+  ///
+  /// Persisted, because the dwell it times routinely outlives the process timing it. A process
+  /// relaunched in the background gets wakes of ~30 s against a 180 s dwell, and on 2026-10-06 an
+  /// iPhone opened a candidate at home at 17:17, was killed, was relaunched at 17:37 and opened a
+  /// NEW one from zero — and was killed again 32 s into that. Restored, the 17:37 seed would have
+  /// found a candidate twenty minutes old at the same spot and parked on the spot.
+  private var stopCandidate: (centre: CLLocation, since: Date)? {
+    didSet { candidateDirty = true }
+  }
 
   /// The centre of a fence armed *speculatively*, around a stop candidate, while still `moving`.
   ///
   /// Distinct from `stopAnchor`, which asserts "we are parked here". This one says only "we might
   /// be about to be", and it exists because the confirmation that would promote it cannot be
-  /// relied on to arrive — see `considerStopping`. Not persisted: a guess is not worth restoring
-  /// across a launch, and a stop that was real got promoted to `stopAnchor` before we died.
+  /// relied on to arrive — see `considerStopping`. Not persisted itself: the region outlives the
+  /// process in Core Location, and a restored `stopCandidate` re-adopts it.
   private var candidateFence: CLLocation?
 
   /// Whether `manager` was created on the main thread, i.e. whether its callbacks can arrive at all.
   /// See `shared`.
   private let delegateOnMain = Thread.isMainThread
 
-  /// A `CLBackgroundActivitySession`, held for as long as sharing runs. `AnyObject` so the stored
-  /// property compiles below iOS 17; see `holdActivitySession`.
-  private var activitySession: AnyObject?
+  /// What confirmed the current stop. Persisted with the anchor, and reported, because three
+  /// different mechanisms can take a stop and only one of them is the ordinary one — see
+  /// `StopEvidence`.
+  private var stopVia: StopEvidence?
+
+  /// When Core Location last delivered a visit, of either kind. Persisted: a visit is precisely
+  /// the event that relaunches a terminated app, so an in-memory stamp would die with the only
+  /// process that could have reported it.
+  private var lastVisitAt: Date?
+
+  /// An arrival Core Location has reported and no real fix has yet placed: its coordinate and
+  /// accuracy, stamped with the arrival time. The visit is the evidence that the phone has
+  /// stopped; the next fix from after it is where. See `didVisit` and `considerStopping`.
+  ///
+  /// Persisted with the candidate, for the same reason: the fix that settles it may only ever
+  /// reach a LATER process — a relaunch's seed — and an arrival held in memory dies first.
+  private var visitArrival: CLLocation? {
+    didSet { candidateDirty = true }
+  }
+
+  /// Whether `stopCandidate` or `visitArrival` changed since they were last written to disk. They
+  /// change on deliveries, which are frequent, and are written only when they did.
+  private var candidateDirty = false
+
+  /// How long a persisted arrival may wait for its fix. A relaunch hours later has no business
+  /// parking on an arrival the phone has very likely left since — the departure visit that would
+  /// have cleared it is not guaranteed to be delivered.
+  private static let visitArrivalLifetime: TimeInterval = 6 * 60 * 60
+
+  /// The timestamp of the newest location Core Location has delivered, to recognise one it hands
+  /// back again. See `didUpdateLocations`.
+  private var lastDeliveredAt: Date?
+
+  /// When a redelivery last stood in for a clock. See `didUpdateLocations`.
+  private var lastRedeliveryHeartbeatAt: Date?
+
+  /// Floor between heartbeats driven by redeliveries — a clock, not a reason to spin.
+  private static let redeliveryHeartbeatFloor: TimeInterval = 60
+
+  /// `location.runtime` spans. See `LocationRuntimeReporter`.
+  private var reporter: LocationRuntimeReporter!
 
   private override init() {
     super.init()
+    reporter = LocationRuntimeReporter { [unowned self] in self.reportSnapshot() }
     if !delegateOnMain {
       NSLog(
         "[iroh-location] runtime created OFF the main thread: Core Location will deliver nothing "
@@ -245,11 +284,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     restorePersistedState()
   }
 
-  /// Whether this runtime is actually holding the Rust node right now.
-  ///
-  /// The observed counterpart to `owner`, which is only ever an intent. Everything that gates on
-  /// "does native own the stores" reads this.
-  var holdsNode: Bool { subscription != nil }
+  /// Whether this runtime holds a lease on the process's node right now.
+  var holdsNode: Bool { nodeHost().snapshot().background }
 
   /// Whether this runtime is the one currently receiving locations.
   ///
@@ -276,11 +312,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       "delegate_on_main": delegateOnMain,
       "precise": manager.accuracyAuthorization == .fullAccuracy,
       "anchor_armed": stopAnchor != nil,
-      // Which half of the process is actually publishing — OBSERVED, not declared. `owner` records
-      // what a launch intended; holding a subscription is what makes it true, and the two came
-      // apart badly enough once to silence a moving phone for an hour. Report the fact.
-      "node_owner": (subscription != nil ? NodeOwner.native : .app).rawValue,
-      "node_owner_intent": owner.rawValue,
+      // Who holds the process's node, from the host itself — `app`, `native`, `shared`, or
+      // `none`. Observed, never declared: a declared owner came apart from the real one badly
+      // enough once to silence a moving phone for an hour.
+      "node_owner": Self.nodeOwnerLabel(nodeHost().snapshot()),
       "js_sink_wired": eventSink != nil,
       "fence_registered": manager.monitoredRegions.contains {
         $0.identifier == Self.stopAnchorRegionId
@@ -292,6 +327,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // if `candidate_age_ms` keeps climbing past `stopDwellSeconds`, the dwell is being starved of
       // deliveries and `holdCandidateCadence` is not doing its job.
       "candidate_pending": stopCandidate != nil,
+      // An arrival Core Location reported that no fix has yet placed. Lingering `true` on a phone
+      // that is not moving is the 2026-10-06 shape: the OS said "arrived", and nothing delivered.
+      "visit_pending": visitArrival != nil,
       "candidate_fence_armed": candidateFence != nil,
     ]
     if let stopCandidate {
@@ -300,8 +338,19 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     if let lastWakeAt {
       snapshot["last_wake_age_ms"] = Int(Date().timeIntervalSince(lastWakeAt) * 1000)
     }
+    // Wake and delivery are different clocks: a parked tick or a fence exit is a wake with no new
+    // position in it. This says how old the newest position Core Location has given us is.
+    if let lastDeliveredAt {
+      snapshot["last_delivered_fix_age_ms"] = Int(Date().timeIntervalSince(lastDeliveredAt) * 1000)
+    }
+    // Absent, never zero, until a visit has arrived at all: absence on a phone that has been
+    // somewhere and come home says the visit service is not delivering on that device.
+    if let lastVisitAt {
+      snapshot["last_visit_age_ms"] = Int(Date().timeIntervalSince(lastVisitAt) * 1000)
+    }
     if let stopAnchor {
       snapshot["anchor_age_ms"] = Int(Date().timeIntervalSince(stopAnchor.timestamp) * 1000)
+      if let stopVia { snapshot["stop_via"] = stopVia.rawValue }
       // How far the last position we saw was from the fence we are parked behind.
       //
       // The field that would have ended the 2026-08-31 investigation in one query. Every other
@@ -341,9 +390,12 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     manager.startMonitoringSignificantLocationChanges()
     // Rung 2. If we were stopped when we died, the fence we died holding is what brings us back.
     rearmStopAnchorFence()
+    // Rung 3. Arrival and departure, detected by the OS. Like SLC it relaunches a terminated app,
+    // and unlike SLC it fires on a phone that has STOPPED, which is the one event a suspended
+    // process mid-dwell has no other way to hear about. See `didVisit`.
+    manager.startMonitoringVisits()
 
     manager.allowsBackgroundLocationUpdates = true
-    holdActivitySession()
     running = true
     // Record the intent NOW, before anything below can throw or hang. A launch that dies here must
     // still come back armed — the same argument as arming the resurrection ladder first.
@@ -374,46 +426,35 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
 
     manager.startUpdatingLocation()
     NativeRefreshTask.schedule()
+    reporter.startPulse()
+    reporter.event(.started, reason: lastWakeReason.rawValue)
   }
 
-  /// Keep this process eligible to run in the background while location updates flow.
-  ///
-  /// ## What it fixes
-  ///
-  /// On 2026-09-30 an iPhone 16 Pro Max arrived somewhere with a friend and never declared itself
-  /// parked. Its process had been relaunched in the background by Core Location, and from then on
-  /// it lived in bursts: 16:29:26 to 16:31:09, suspended, 16:36:44 to 16:38:13, suspended for good —
-  /// about ninety seconds of execution per wake, each ended by iOS while the unfiltered candidate
-  /// stream was still delivering every few seconds. Confirming a stop takes `stopDwellSeconds`
-  /// (180 s) inside one candidate, so it could not complete inside any single burst, and the last
-  /// envelope before the silence went out `live`.
-  ///
-  /// Since iOS 17, standard location updates alone do not keep a background-LAUNCHED app running;
-  /// that takes a `CLBackgroundActivitySession`. One created in the foreground is honoured in the
-  /// background, and a process the system relaunches because of it may recreate it — which is what
-  /// `start()` does on every launch. Recreated on each foreground entry too, so the session a
-  /// terminated process is later relaunched to resume is one the user established.
-  ///
-  /// With `Always` authorization this shows no indicator; the pill is for `When In Use`.
-  func holdActivitySession() {
-    guard #available(iOS 17.0, *) else { return }
-    (activitySession as? CLBackgroundActivitySession)?.invalidate()
-    activitySession = CLBackgroundActivitySession()
-  }
-
-  private func dropActivitySession() {
-    if #available(iOS 17.0, *) {
-      (activitySession as? CLBackgroundActivitySession)?.invalidate()
-    }
-    activitySession = nil
-  }
-
-  /// The app came to the foreground: re-establish the activity session from there. See
-  /// `holdActivitySession`. No-op when sharing is off.
-  func appWillEnterForeground() {
-    guard running else { return }
-    holdActivitySession()
-  }
+  // MARK: - Why there is no CLBackgroundActivitySession
+  //
+  // There was one, for a day, and it must not come back.
+  //
+  // On 2026-09-30 an iPhone 16 Pro Max arrived somewhere with a friend and never declared itself
+  // parked. Its process had been relaunched in the background by Core Location, and from then on it
+  // lived in bursts: 16:29:26 to 16:31:09, suspended, 16:36:44 to 16:38:13, suspended for good —
+  // about ninety seconds per wake, each ended by iOS while the unfiltered candidate stream was still
+  // delivering. `allowsBackgroundLocationUpdates` keeps a process running only for updates started
+  // while it was in the FOREGROUND (Apple's own wording), so a relaunched one never qualifies, and
+  // the 180 s dwell could not complete inside any single burst.
+  //
+  // 70afb94 answered that with a `CLBackgroundActivitySession`, held for as long as sharing ran, on
+  // the belief that "with `Always` authorization this shows no indicator". That belief was wrong.
+  // Apple documents the class as "an object that manages a visual indicator that keeps your app in
+  // use in the background", and v2.16.0/v2.17.0 brought back the persistent location indicator on
+  // sharing iPhones that report `perm.ios_scope=always` — the same complaint 7550186 had closed in
+  // July. It also kept every background process resident, which is the CPU the native rewrite
+  // existed to give back.
+  //
+  // A relaunched process now finishes its stop through events that need no indicator and no
+  // residency: a `CLVisit` arrival (`didVisit`), which the OS raises on exactly the phone that has
+  // stopped and will relaunch us to deliver, and `NativeRefreshTask` (`confirmDwelledCandidate`) as
+  // the backstop. A process started from the foreground — the mounted app, and the one it leaves
+  // behind in a pocket — never needed either: it is kept running, and the ordinary dwell parks it.
 
   /// Service a `NativeRefreshTask` wake: confirm a stop the wake windows starved, then publish and
   /// pull.
@@ -424,14 +465,16 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// and no evidence the phone has left it, takes the stop — and the heartbeat that follows then
   /// seals `parked`, which is what the friend's map was waiting to be told.
   func serviceRefresh() async {
-    let proceed = await MainActor.run { () -> Bool in
-      guard self.running else { return false }
+    let proceed = await MainActor.run { () -> (run: Bool, parked: Bool?) in
+      guard self.running else { return (false, nil) }
       self.note(.refresh)
       self.confirmDwelledCandidate()
-      return true
+      // A refresh is a clock. It may declare `parked` only when the state machine has a stop to
+      // back it — confirmed just now or earlier — and otherwise says nothing about motion.
+      return (true, self.state == .stopped ? true : nil)
     }
-    guard proceed else { return }
-    await heartbeat(battery: Self.battery())
+    guard proceed.run else { return }
+    await heartbeat(battery: Self.battery(), parked: proceed.parked)
   }
 
   /// Take a stop whose dwell has elapsed without a delivery to confirm it. Returns whether we
@@ -452,7 +495,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       return false
     }
     NSLog("[iroh-location] confirming a stop the wake windows starved of its second delivery")
-    enterStopped(anchor: candidate.centre)
+    enterStopped(anchor: candidate.centre, via: .refresh)
     return state == .stopped
   }
 
@@ -473,7 +516,6 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       note(.seed)
       let fix = Self.fix(from: cached)
       let battery = Self.battery()
-      Task { await self.ingest(fix: fix, battery: battery) }
       // And let the seed open a stop candidate, exactly as a delivery would.
       //
       // Without this, a runtime that comes up while the phone is ALREADY still can never leave
@@ -487,113 +529,31 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // The cached fix can be old, and arming on it anyway is the right trade. A stop fence in the
       // wrong place fires on the next delivery and costs one wake; no fence at all costs a day. If
       // the cached fix still reports real speed, `considerStopping` refuses it and we stay moving.
-      if state == .moving {
+      //
+      // Decided BEFORE ingesting, as `didUpdateLocations` does, because a seed can now complete a
+      // stop — a candidate or an arrival restored from an earlier process — and the envelope this
+      // wake seals then has to say `parked`. Ingesting first would fill the slot `live` and leave
+      // the declaration to a wake that, on a relaunched process, may not come.
+      let wasMoving = state == .moving
+      if wasMoving {
         considerStopping(at: cached)
       }
-    }
-  }
-
-  /// Give up the node this runtime holds, and change nothing else.
-  ///
-  /// The counterpart to `stop()`, and the distinction is the same one `teardownBackground` draws on
-  /// the JS side and then did not honour here: "the user switched sharing off" tears the ladder
-  /// down, "this process is going away" must leave every rung of it standing. `stop()` unmonitors
-  /// SLC, clears the stop fence and un-persists the anchor — on iOS those are the only three things
-  /// that can bring a terminated app back, and a teardown that removes them leaves a phone that
-  /// cannot wake until its owner opens the app.
-  ///
-  /// Deliberately does NOT touch `running`, the location stream, the fence, or the anchor. All it
-  /// does is drop the node handle, because the JS session that is going away is about to close the
-  /// stores it was built on; `ensureStarted` rebuilds against the freed stores on the next delivery,
-  /// which is what lets the native path take over publishing exactly when JS stops being able to.
-  func release() {
-    guard running else { return }
-    NSLog("[iroh-location] releasing the node; ladder stays armed")
-    // Ownership moves WITH the release, and this is the whole point of the call: the JS runtime is
-    // going away and is about to close the stores it built on, so from here this runtime is the
-    // only thing that can publish. `ensureStarted` refuses unless it owns the node, so without this
-    // the promise in the doc comment above — "rebuilds against the freed stores on the next
-    // delivery" — could never be kept, and a phone whose app was torn down would publish nothing
-    // until someone opened it again.
-    owner = .native
-    queue.async { self.teardown() }
-  }
-
-  /// Take ownership of the stores, so this runtime may build its own node.
-  ///
-  /// Called only from a launch that is NOT starting React. Everything else leaves ownership with
-  /// the app, which is the default and the common case.
-  func adoptNodeOwnership() {
-    owner = .native
-    clearClaimBackoff()
-  }
-
-  /// Hand ownership back without tearing anything down — what a mounted app asserts on start.
-  ///
-  /// Distinct from `yieldNode`, which also shuts the node down and waits for the claims. This one
-  /// is for the ordinary foreground case where this runtime never built a node at all, so there is
-  /// nothing to release and nothing to wait for.
-  func yieldOwnershipToApp() {
-    owner = .app
-  }
-
-  /// Give the stores back to the mounted app, and wait — bounded — until they are actually free.
-  ///
-  /// ## Why `release()` is not enough
-  ///
-  /// `release()` drops two Swift references and returns. It does not free the Rust writer claims:
-  /// `WriterClaim` releases on the last `Arc` drop, and `Subscription` holds its own
-  /// `Arc<LocationNode>`, as does the spawned receive task. Only `LocationNode::shutdown`
-  /// deterministically nils sessions/seq/outbox/recipients/gate/transport AND detaches the pair
-  /// runtime, which holds an `Arc<SessionManager>` of its own.
-  ///
-  /// That was survivable while this runtime essentially never held the claim. Once it can start
-  /// itself on a background launch, `.native` is the ordinary state of a phone in a pocket — and a
-  /// user opening the app would meet `AlreadyOpen`, which fails `init()` before
-  /// `setServiceReady(true)`: the 2026-09-18 dead-app shape, arriving from the other end of the
-  /// lifecycle.
-  ///
-  /// ## Why the bound is here and not only in JS
-  ///
-  /// AGENTS.md's rule is about a promise that never *settles*, as distinct from one that rejects.
-  /// A race decided in Swift guarantees this settles whatever Rust does, so the JS side can bound
-  /// it again on the outside without either bound being the only one. Ownership moves either way:
-  /// a shutdown we could not confirm still hands the app its turn, because leaving it `.native`
-  /// would mean nothing could ever claim the stores again.
-  ///
-  /// - Returns: whether the shutdown actually completed inside the timeout.
-  func yieldNode(timeoutMs: UInt64) async -> Bool {
-    eventSink = nil
-    let node = self.node
-    dropNodeHandles()
-    owner = .app
-    clearClaimBackoff()
-    guard let node else { return true }
-
-    let completed = await withTaskGroup(of: Bool.self) { group -> Bool in
-      group.addTask {
-        do {
-          try await node.shutdown()
-          return true
-        } catch {
-          // A shutdown that FAILED still finished — the claims are released either way. Only one
-          // that never returns is a problem, and that is what the timeout is for.
-          NSLog("[iroh-location] handover shutdown failed: \(error.localizedDescription)")
-          return true
-        }
+      if wasMoving && state == .stopped {
+        Task { await self.heartbeat(battery: battery, parked: true) }
+      } else {
+        Task { await self.ingest(fix: fix, battery: battery) }
       }
-      group.addTask {
-        try? await Task.sleep(nanoseconds: timeoutMs * 1_000_000)
-        return false
-      }
-      let first = await group.next() ?? false
-      group.cancelAll()
-      return first
     }
-    if !completed {
-      NSLog("[iroh-location] handover timed out after \(timeoutMs)ms; app may still be refused")
+  }
+
+  /// The `node_owner` health label for a host snapshot.
+  static func nodeOwnerLabel(_ snapshot: HostSnapshot) -> String {
+    switch (snapshot.appLeases > 0, snapshot.background) {
+    case (true, true): return "shared"
+    case (true, false): return "app"
+    case (false, true): return "native"
+    case (false, false): return "none"
     }
-    return completed
   }
 
   func stop() {
@@ -601,17 +561,27 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     manager.stopUpdatingLocation()
     manager.stopMonitoringSignificantLocationChanges()
     clearStopAnchorFence()
+    manager.stopMonitoringVisits()
     manager.allowsBackgroundLocationUpdates = false
-    dropActivitySession()
     NativeRefreshTask.cancel()
+    reporter.stopPulse()
     running = false
     state = .moving
     stopAnchor = nil
+    stopVia = nil
     stopCandidate = nil
     candidateFence = nil
+    visitArrival = nil
     persistState()
-    queue.async { self.teardown() }
+    // Sharing is off: return the background lease. If the app still holds the node it keeps
+    // running; if not, the host shuts it down, bounded, and the stores are free.
+    Task {
+      _ = await nodeHost().release(holder: .background, timeoutMs: Self.releaseBudgetMs)
+    }
   }
+
+  /// Bounds the release of the background lease; matches the app's own teardown budget.
+  private static let releaseBudgetMs: UInt64 = 5_000
 
   /// Re-program the OS from the sampling policy's decision.
   ///
@@ -709,7 +679,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// departure from standing still. So a stop taken without a fence is not a low-power state, it is
   /// a phone that has gone dark until the next relaunch. Staying in `moving` costs battery; that is
   /// the correct way to fail.
-  private func enterStopped(anchor: CLLocation) {
+  private func enterStopped(anchor: CLLocation, via evidence: StopEvidence) {
     guard armStopAnchorFence(at: anchor) else {
       NSLog("[iroh-location] stop declined: no fence could be armed, staying in moving")
       abandonStopCandidate()
@@ -717,7 +687,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     }
     state = .stopped
     stopAnchor = anchor
+    stopVia = evidence
     stopCandidate = nil
+    visitArrival = nil
     // The speculative fence has just been re-armed at `anchor` by the guard above and is now the
     // real one; what it was centred on no longer matters.
     candidateFence = nil
@@ -725,14 +697,16 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     manager.startUpdatingLocation()
     persistState()
     note(.stateChange)
+    reporter.event(.transition, reason: evidence.rawValue)
     NSLog(
-      "[iroh-location] stopped: anchor=(\(anchor.coordinate.latitude), "
+      "[iroh-location] stopped: via=\(evidence.rawValue) anchor=(\(anchor.coordinate.latitude), "
         + "\(anchor.coordinate.longitude)) fence=\(Self.stopAnchorRadiusM)m")
   }
 
   private func enterMoving(reason: WakeReason) {
     state = .moving
     stopAnchor = nil
+    stopVia = nil
     stopCandidate = nil
     candidateFence = nil
     clearStopAnchorFence()
@@ -740,6 +714,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     manager.startUpdatingLocation()
     persistState()
     note(reason)
+    reporter.event(.transition, reason: reason.rawValue)
     NSLog("[iroh-location] moving: reason=\(reason.rawValue)")
   }
 
@@ -772,7 +747,24 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// phone turns out to have been moving after all. Guessing early and paying for the guess is the
   /// correct way to fail here; the other way is a day of silence.
   private func considerStopping(at location: CLLocation) {
-    let movingFast = location.speed >= 0 && location.speed > 1.0
+    defer { persistCandidateIfChanged() }
+    let movingFast = Self.isMovingFast(location)
+    // A reported arrival, waiting for a fix from after it. Here and slow takes the stop with no
+    // dwell, because the visit already IS the dwell; anywhere else means the phone has gone on,
+    // and the arrival is spent. Here but still moving is the last few metres of the approach — the
+    // arrival waits, and the stream stays unfiltered so the fix that settles it still comes.
+    if let arrival = visitArrival, location.timestamp >= arrival.timestamp {
+      if location.distance(from: arrival) > arrival.horizontalAccuracy + Self.stopAnchorRadiusM {
+        visitArrival = nil
+      } else if movingFast {
+        holdCandidateCadence()
+        return
+      } else {
+        visitArrival = nil
+        enterStopped(anchor: location, via: .visit)
+        if state == .stopped { return }
+      }
+    }
     guard !movingFast else {
       abandonStopCandidate()
       return
@@ -789,7 +781,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       holdCandidateCadence()
       return
     }
-    enterStopped(anchor: location)
+    enterStopped(anchor: location, via: .dwell)
   }
 
   /// Open — or re-centre — the stop candidate, and arm the tripwire before we have earned it.
@@ -841,6 +833,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       candidateFence = nil
     }
     manager.startUpdatingLocation()
+    persistCandidateIfChanged()
   }
 
   // MARK: - The resurrection ladder
@@ -879,6 +872,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       NSLog("[iroh-location] could not re-arm the stop fence; resuming as moving")
       state = .moving
       self.stopAnchor = nil
+      stopVia = nil
       persistState()
     }
   }
@@ -911,11 +905,82 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       defaults.set(stopAnchor.coordinate.latitude, forKey: "sc.bg.anchor.lat")
       defaults.set(stopAnchor.coordinate.longitude, forKey: "sc.bg.anchor.lon")
       defaults.set(stopAnchor.timestamp.timeIntervalSince1970, forKey: "sc.bg.anchor.ts")
+      defaults.set(stopVia?.rawValue, forKey: "sc.bg.anchor.via")
     } else {
       defaults.removeObject(forKey: "sc.bg.anchor.lat")
       defaults.removeObject(forKey: "sc.bg.anchor.lon")
       defaults.removeObject(forKey: "sc.bg.anchor.ts")
+      defaults.removeObject(forKey: "sc.bg.anchor.via")
     }
+    if let lastVisitAt {
+      defaults.set(lastVisitAt.timeIntervalSince1970, forKey: "sc.bg.last_visit_ts")
+    }
+    writeCandidate(to: defaults)
+  }
+
+  /// Write the dwell-in-progress — `stopCandidate` and `visitArrival` — if it changed. See both.
+  private func persistCandidateIfChanged() {
+    guard candidateDirty else { return }
+    writeCandidate(to: UserDefaults.standard)
+  }
+
+  private func writeCandidate(to defaults: UserDefaults) {
+    candidateDirty = false
+    Self.write(stopCandidate?.centre, prefix: "sc.bg.candidate", to: defaults)
+    if let since = stopCandidate?.since {
+      defaults.set(since.timeIntervalSince1970, forKey: "sc.bg.candidate.since")
+    } else {
+      defaults.removeObject(forKey: "sc.bg.candidate.since")
+    }
+    Self.write(visitArrival, prefix: "sc.bg.visit_arrival", to: defaults)
+  }
+
+  private static func write(_ location: CLLocation?, prefix: String, to defaults: UserDefaults) {
+    guard let location else {
+      for key in ["lat", "lon", "acc", "ts"] { defaults.removeObject(forKey: "\(prefix).\(key)") }
+      return
+    }
+    defaults.set(location.coordinate.latitude, forKey: "\(prefix).lat")
+    defaults.set(location.coordinate.longitude, forKey: "\(prefix).lon")
+    defaults.set(location.horizontalAccuracy, forKey: "\(prefix).acc")
+    defaults.set(location.timestamp.timeIntervalSince1970, forKey: "\(prefix).ts")
+  }
+
+  private static func readLocation(prefix: String, from defaults: UserDefaults) -> CLLocation? {
+    guard defaults.object(forKey: "\(prefix).lat") != nil else { return nil }
+    return CLLocation(
+      coordinate: CLLocationCoordinate2D(
+        latitude: defaults.double(forKey: "\(prefix).lat"),
+        longitude: defaults.double(forKey: "\(prefix).lon")),
+      altitude: 0,
+      horizontalAccuracy: defaults.double(forKey: "\(prefix).acc"),
+      verticalAccuracy: -1,
+      timestamp: Date(timeIntervalSince1970: defaults.double(forKey: "\(prefix).ts")))
+  }
+
+  /// Bring back a dwell an earlier process started. Only while `moving` — a restored `stopped`
+  /// already has its anchor, and a candidate beside it would be a contradiction.
+  private func restoreCandidate(from defaults: UserDefaults) {
+    guard state == .moving else { return }
+    if let centre = Self.readLocation(prefix: "sc.bg.candidate", from: defaults),
+      defaults.object(forKey: "sc.bg.candidate.since") != nil
+    {
+      stopCandidate = (
+        centre: centre,
+        since: Date(timeIntervalSince1970: defaults.double(forKey: "sc.bg.candidate.since"))
+      )
+      // The speculative fence `openStopCandidate` armed is still held by Core Location; adopt it
+      // so `abandonStopCandidate` takes it down again if this turns out to be a departure.
+      if manager.monitoredRegions.contains(where: { $0.identifier == Self.stopAnchorRegionId }) {
+        candidateFence = centre
+      }
+    }
+    if let arrival = Self.readLocation(prefix: "sc.bg.visit_arrival", from: defaults),
+      Date().timeIntervalSince(arrival.timestamp) < Self.visitArrivalLifetime
+    {
+      visitArrival = arrival
+    }
+    candidateDirty = false
   }
 
   /// Whether sharing was on when this app was last running — readable with no JS and no SQLite.
@@ -939,7 +1004,11 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     if distance > 0 { movingDistanceFilter = distance }
     let accuracy = defaults.double(forKey: "sc.bg.accuracy_m")
     if accuracy > 0 { movingAccuracy = accuracy }
+    let visitTs = defaults.double(forKey: "sc.bg.last_visit_ts")
+    if visitTs > 0 { lastVisitAt = Date(timeIntervalSince1970: visitTs) }
+    restoreCandidate(from: defaults)
     guard defaults.object(forKey: "sc.bg.anchor.lat") != nil else { return }
+    stopVia = defaults.string(forKey: "sc.bg.anchor.via").flatMap(StopEvidence.init(rawValue:))
     let lat = defaults.double(forKey: "sc.bg.anchor.lat")
     let lon = defaults.double(forKey: "sc.bg.anchor.lon")
     let ts = defaults.double(forKey: "sc.bg.anchor.ts")
@@ -965,8 +1034,39 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     guard let location = locations.last else { return }
     let battery = Self.battery()
     lastSeenLocation = location
+    // Core Location hands back positions it has already given us — after a re-request, and on
+    // 2026-10-02 every 30 s for 73 minutes while the phone could get nothing newer. A repeated
+    // position carries no new information, and treating it as a capture did harm twice: the first
+    // ones passed the gate and went out `live` with a position 5-9 minutes old, and the rest were
+    // refused as stale while looking, to every counter, like a phone receiving fixes.
+    let redelivery = lastDeliveredAt.map { location.timestamp <= $0 } ?? false
+    if !redelivery { lastDeliveredAt = location.timestamp }
+    reporter.noteDelivery(location, redelivery: redelivery)
 
     switch state {
+    case .moving where redelivery:
+      // It can still finish a dwell. A candidate is waiting on a second delivery inside its radius
+      // `stopDwellSeconds` after the first, and a phone that can produce nothing newer than the
+      // position it opened on is exactly a phone that has not gone anywhere. It is never ingested.
+      if stopCandidate != nil {
+        considerStopping(at: location)
+        if state == .stopped {
+          Task { await self.heartbeat(battery: battery, parked: true) }
+          return
+        }
+      }
+      // Otherwise it is worth something as a clock: it proves the process is running, and on a
+      // JS-free process nothing else ticks while `moving`. Fill a due slot from the last ACCEPTED
+      // fix, claiming nothing about motion, and no more than once a minute.
+      let now = Date()
+      if let last = lastRedeliveryHeartbeatAt,
+        now.timeIntervalSince(last) < Self.redeliveryHeartbeatFloor
+      {
+        return
+      }
+      lastRedeliveryHeartbeatAt = now
+      Task { await self.heartbeat(battery: battery, parked: nil) }
+
     case .moving:
       note(.movement)
       // Re-tier from the speed this fix reports. Cheap, and it is what keeps a walk from being
@@ -991,7 +1091,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // next — SLC, BGProcessing, the app opening — seals `parked` too.
       considerStopping(at: location)
       if state == .stopped {
-        Task { await self.heartbeat(battery: battery) }
+        Task { await self.heartbeat(battery: battery, parked: true) }
       } else {
         let fix = Self.fix(from: location)
         Task { await self.ingest(fix: fix, battery: battery) }
@@ -1007,7 +1107,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // fix too coarse to publish can still be good enough to prove we are nowhere near the anchor.
       if considerDeparture(from: location) { return }
       note(.periodic)
-      Task { await self.heartbeat(battery: battery) }
+      Task { await self.heartbeat(battery: battery, parked: true) }
     }
   }
 
@@ -1043,7 +1143,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         + "(threshold \(Int(threshold))m); the fence did not fire")
     enterMoving(reason: .coarseDeparture)
     let battery = Self.battery()
-    Task { await self.heartbeat(battery: battery) }
+    Task { await self.heartbeat(battery: battery, parked: false) }
     return true
   }
 
@@ -1051,6 +1151,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     _ manager: CLLocationManager, didExitRegion region: CLRegion
   ) {
     guard region.identifier == Self.stopAnchorRegionId else { return }
+    reporter.event(.fenceExit)
     // The whole point of the stopped state: exit is event-driven, so we are responsive to movement
     // and cost nothing while parked, which normally trade off against each other.
     //
@@ -1059,7 +1160,164 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // covers the gap until that lands, so a crossing is never a silent slot.
     enterMoving(reason: .geofenceExit)
     let battery = Self.battery()
-    Task { await self.heartbeat(battery: battery) }
+    Task { await self.heartbeat(battery: battery, parked: false) }
+  }
+
+  /// Core Location's own verdict that the phone has arrived somewhere, or left.
+  ///
+  /// ## Why the state machine needs it
+  ///
+  /// Confirming a stop takes a second delivery `stopDwellSeconds` after the first, which assumes
+  /// the process is still running when the dwell elapses. A process started in the foreground is;
+  /// one relaunched in the background is not — iOS gives it bursts of about ninety seconds and
+  /// suspends it while the candidate is still dwelling, and nothing then wakes it, because the
+  /// phone has stopped and every other rung of the ladder (SLC, the fence) is waiting for it to
+  /// move. On 2026-09-30 that left an iPhone at a friend's that never declared itself parked.
+  ///
+  /// A visit is the one wake iOS raises for a phone that has STOPPED, and it relaunches a
+  /// terminated app to deliver it. It shows no indicator and keeps nothing resident, which is why
+  /// it, and not a `CLBackgroundActivitySession`, is what finishes the stop — see the note above
+  /// `serviceRefresh`. A foreground-started process is normally parked by the ordinary dwell
+  /// minutes before a visit arrives, so for it an arrival finds `stopped` and changes nothing.
+  ///
+  /// ## What it may and may not conclude
+  ///
+  /// A visit's coordinate can be coarse and its delivery late, so it is cross-checked against the
+  /// newest position we hold rather than trusted alone. "The same place" means within the visit's
+  /// own accuracy plus the fence radius — the tolerance `considerDeparture` uses, for the same
+  /// reason.
+  ///
+  /// - An **arrival** while `moving` takes the stop, unless we hold a position from after the
+  ///   arrival that is elsewhere (a late event about a place already left). Speed alone does not
+  ///   veto it: the arrival is dated before the last fix of the approach, which is often still
+  ///   moving. The anchor is always a real, slow fix from after the arrival — never the visit's own
+  ///   coordinate — so with none in hand yet the arrival waits in `visitArrival`, persisted, with
+  ///   the stream unfiltered so the fix that settles it actually arrives.
+  ///   An arrival somewhere other than the anchor while `stopped` re-parks there: the fence missed
+  ///   the departure, and this is where the phone now is.
+  /// - A **departure** from the anchor, dated after we parked, leaves `stopped` — a third way out
+  ///   alongside the fence and `considerDeparture`, for the same reason the second one exists.
+  ///   While `moving` it changes nothing: the precise stream already has the phone.
+  func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
+    lastVisitAt = Date()
+    guard running else { return }
+    note(.visit)
+    persistState()
+
+    // A negative accuracy means the coordinate is invalid, not that it is perfect.
+    guard visit.horizontalAccuracy >= 0 else {
+      reporter.event(.visit, reason: "invalid")
+      return
+    }
+    let arrival = visit.departureDate == .distantFuture
+    let at = arrival ? visit.arrivalDate : visit.departureDate
+    let place = CLLocation(
+      coordinate: visit.coordinate,
+      altitude: 0,
+      horizontalAccuracy: visit.horizontalAccuracy,
+      verticalAccuracy: -1,
+      timestamp: at == .distantPast ? Date() : at)
+    let reach = visit.horizontalAccuracy + Self.stopAnchorRadiusM
+    let newest = newestLocation()
+    // What this visit DID, on the span. Until 2026-10-06 the span went out before the decision and
+    // the decision went to `NSLog`, which reaches no telemetry — so an arrival the phone threw away
+    // and one it was still waiting on read identically, and the one evening that needed telling
+    // apart had to be reconstructed from which code path the next fix could have taken.
+    var outcome = "ignored"
+    defer {
+      persistCandidateIfChanged()
+      reporter.event(.visit, reason: arrival ? "arrival" : "departure", detail: outcome)
+      NSLog(
+        "[iroh-location] visit: \(arrival ? "arrival" : "departure") -> \(outcome) "
+          + "state=\(state.rawValue) accuracy=\(Int(visit.horizontalAccuracy))m")
+    }
+
+    if !arrival {
+      // Whatever arrival we were holding, the phone has now left it.
+      visitArrival = nil
+      guard state == .stopped, let anchor = stopAnchor,
+        visit.departureDate > anchor.timestamp,
+        place.distance(from: anchor) <= reach
+      else { return }
+      enterMoving(reason: .visit)
+      outcome = "unparked"
+      let battery = Self.battery()
+      Task { await self.heartbeat(battery: battery, parked: false) }
+      return
+    }
+
+    // A position from after the arrival that is somewhere ELSE outranks the visit: the event is
+    // about a place already left.
+    //
+    // Distance only. Speed used to veto too, and that is what lost the 2026-10-06 arrival: iOS
+    // dates an arrival to when the phone entered the place, which is routinely before the last
+    // fix of the drive in, so the fix taken pulling up outside the house at 8.6 m/s was "newer and
+    // moving" and the visit was discarded. A fast fix INSIDE the place's reach is the approach,
+    // not a departure — it just cannot be the anchor, which is handled below.
+    if let newest, newest.timestamp > visit.arrivalDate, newest.distance(from: place) > reach {
+      outcome = "stale"
+      return
+    }
+
+    switch state {
+    case .moving:
+      break
+    case .stopped:
+      // Already parked here: nothing to learn. Parked somewhere else: the fence missed the
+      // departure, so go back to `moving` — the precise stream it restarts is what finds the new
+      // spot, and the pending arrival below parks on its first fix.
+      guard let anchor = stopAnchor, place.distance(from: anchor) > reach,
+        visit.arrivalDate > anchor.timestamp
+      else {
+        outcome = "already-parked"
+        return
+      }
+      enterMoving(reason: .visit)
+    }
+
+    // The fence is only ever centred on a REAL, SLOW fix from after the arrival, never on the
+    // visit's own coordinate: a visit can be hundreds of metres coarse, and a fence armed around a
+    // spot the phone is already outside never reports an exit — a park with no way out.
+    if let newest, newest.timestamp >= visit.arrivalDate, !Self.isMovingFast(newest) {
+      enterStopped(anchor: newest, via: .visit)
+    } else if let candidate = stopCandidate, candidate.centre.timestamp >= visit.arrivalDate,
+      candidate.centre.distance(from: place) <= reach
+    {
+      enterStopped(anchor: candidate.centre, via: .visit)
+    }
+    if state == .stopped {
+      outcome = "parked"
+    } else {
+      // Nothing usable from after the arrival yet — on a relaunch, the cache; on a process that
+      // was already running, the last fix of the drive in. `considerStopping` parks on the first
+      // fix that agrees, and that fix has to be made to come: a process on the moving cadence
+      // has a 20-50 m distance filter, and a phone that has arrived somewhere moves less than
+      // that, so it would wait forever. That wait is the second half of 2026-10-06. Unfiltering
+      // is what the candidate dwell does for the same reason, at the same accuracy.
+      visitArrival = place
+      holdCandidateCadence()
+      outcome = "pending"
+    }
+    // Say so on the wire now, for the reason the confirming delivery does: this wake may be the
+    // last this process gets before the phone is next moved. That holds in the pending case too:
+    // the arrival is the OS saying the phone has stopped, so the `parked` stamp a heartbeat
+    // carries is honest before a fix has placed it, and a fix showing otherwise re-stamps `live`.
+    let battery = Self.battery()
+    Task { await self.heartbeat(battery: battery, parked: true) }
+  }
+
+  /// Faster than anyone standing somewhere. A negative speed is Core Location's "unknown", which
+  /// is not evidence of motion.
+  private static func isMovingFast(_ location: CLLocation) -> Bool {
+    location.speed >= 0 && location.speed > 1.0
+  }
+
+  /// Whichever of Core Location's cached position and the last one delivered to us is newer.
+  private func newestLocation() -> CLLocation? {
+    switch (manager.location, lastSeenLocation) {
+    case let (cached?, seen?): return cached.timestamp >= seen.timestamp ? cached : seen
+    case let (cached, seen): return cached ?? seen
+    }
   }
 
   /// Authorization changed under us — including the delayed re-prompt, where iOS shows the user a
@@ -1071,11 +1329,13 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
     let status = manager.authorizationStatus
     NSLog("[iroh-location] authorization -> \(Self.authorizationName(status))")
+    if running { reporter.event(.authorization, reason: Self.authorizationName(status)) }
     switch status {
     case .authorizedAlways:
       guard running else { return }
       manager.allowsBackgroundLocationUpdates = true
       manager.startMonitoringSignificantLocationChanges()
+      manager.startMonitoringVisits()
       rearmStopAnchorFence()
       note(.stateChange)
     case .authorizedWhenInUse:
@@ -1100,11 +1360,13 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// watermark, and a phone indistinguishable from one whose owner simply had not moved.
   func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
     NSLog("[iroh-location] Core Location paused updates; restarting")
+    reporter.event(.paused)
     manager.startUpdatingLocation()
   }
 
   func locationManagerDidResumeLocationUpdates(_ manager: CLLocationManager) {
     NSLog("[iroh-location] Core Location resumed updates")
+    reporter.event(.resumed)
   }
 
   func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
@@ -1112,6 +1374,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // here. `requestLocation` in particular fails outright when it cannot get a fix in time, and
     // the running stream is unaffected, so this must not tear anything down.
     NSLog("[iroh-location] background location error: \(error.localizedDescription)")
+    reporter.event(.locationError, detail: error.localizedDescription)
   }
 
   func locationManager(
@@ -1120,6 +1383,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // A fence we could not arm is a resurrection rung we do not have. SLC still covers us, but this
     // is worth saying out loud rather than inferring later from an absence.
     NSLog("[iroh-location] stop-anchor fence failed to arm: \(error.localizedDescription)")
+    reporter.event(.fenceFailed, detail: error.localizedDescription)
   }
 
   // MARK: - Node lifecycle
@@ -1130,7 +1394,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// a tick from the parked coarse stream, which has no position worth gating — see the two call
   /// sites. Dropping to the main queue because that is where the Expo event emitter expects to be
   /// called from, and Core Location has already delivered us there anyway.
-  private func handOff(kind: String, fix: LocationFix?, battery: BatteryState) {
+  private func handOff(
+    kind: String, fix: LocationFix?, battery: BatteryState, parked: Bool? = nil
+  ) {
     var payload: [String: Any] = [
       "kind": kind,
       "reason": lastWakeReason.rawValue,
@@ -1139,6 +1405,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         "level": battery.level, "charging": battery.charging, "lowPower": battery.lowPower,
       ],
     ]
+    // The heartbeat's motion claim, forwarded to `heartbeatFix` by `routeNativeCapture`. Omitted
+    // rather than null when there is none, which reads the same as a binary that predates it.
+    if let parked { payload["parked"] = parked }
     if let fix {
       payload["fix"] = [
         "lat": fix.lat, "lon": fix.lon, "accuracyM": fix.accuracyM,
@@ -1157,11 +1426,14 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       NSLog("[iroh-location] DROPPED \(kind): no node and no JS sink — nothing will publish this")
       return
     }
+    reporter.noteHandOff()
     DispatchQueue.main.async { sink.sendEvent("onNativeFix", payload) }
   }
 
   /// Run one captured fix through gate → outbox → seal → send.
   private func ingest(fix: LocationFix, battery: BatteryState) async {
+    reporter.noteWorkStarted()
+    defer { reporter.noteWorkFinished() }
     guard let subscription = await ensureStarted() else {
       handOff(kind: "fix", fix: fix, battery: battery)
       return
@@ -1189,9 +1461,16 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// Not an optimisation. The cadence is the one property of a sealed envelope the stash can read,
   /// so it has to be uniform whether or not the phone is moving — a series that stops when its
   /// owner sits still is a series that leaks when its owner sits still.
-  private func heartbeat(battery: BatteryState) async {
+  ///
+  /// `parked` is the motion claim the envelopes carry: `true` only from a proven stop (a confirmed
+  /// dwell, a visit arrival, a parked coarse tick), `false` from a stop just left, `nil` from a
+  /// clock that proves neither. Until 2026-10-02 every heartbeat stamped `parked`, and the mounted
+  /// timer published four hours of it from an iPhone this file had in `moving`.
+  private func heartbeat(battery: BatteryState, parked: Bool?) async {
+    reporter.noteWorkStarted()
+    defer { reporter.noteWorkFinished() }
     guard let subscription = await ensureStarted() else {
-      handOff(kind: "heartbeat", fix: nil, battery: battery)
+      handOff(kind: "heartbeat", fix: nil, battery: battery, parked: parked)
       return
     }
     do {
@@ -1199,7 +1478,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         subscriptionId: Self.subscriptionId,
         battery: battery,
         intervalMs: slotIntervalMs,
-        nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+        nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+        parked: parked)
       report("heartbeat", outcome)
       await pullFriendFixes()
       BackgroundWakeLedger.closeWindow()
@@ -1222,7 +1502,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// so an ungated pull on every coarse tick is a new way to spend the exact budget this work
   /// exists to protect. Two gates:
   ///
-  /// - only on a wake that means something moved (`movement`, `geofence_exit`, `relaunch`), never
+  /// - only on a wake that means something moved (`movement`, `geofence_exit`, `relaunch`,
+  ///   `visit`), or the rare `refresh` the OS hands a parked phone, never
   ///   on a `periodic` tick from the parked coarse stream, which fires purely as a clock;
   /// - and a durable floor between pulls, so a burst of deliveries is still one pull.
   ///
@@ -1230,7 +1511,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// publish that has already succeeded, and the next wake tries again.
   private func pullFriendFixes() async {
     switch lastWakeReason {
-    case .movement, .geofenceExit, .relaunch, .refresh: break
+    case .movement, .geofenceExit, .relaunch, .refresh, .visit: break
     case .periodic, .coarseDeparture, .stateChange, .seed: return
     }
     let now = Date().timeIntervalSince1970 * 1000
@@ -1238,7 +1519,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     guard now - last >= Self.syncFloorMs else { return }
     UserDefaults.standard.set(now, forKey: Self.lastSyncKey)
 
-    guard let node else { return }
+    guard let node = nodeHost().current() else { return }
     do {
       let config = try await node.deliveryConfig()
       guard !config.peerTickets.isEmpty else { return }
@@ -1265,156 +1546,53 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         + "pending=\(outcome.pending) suspended=\(outcome.suspended)")
   }
 
-  /// Build and start a node from Keychain-held state, unless one is already running.
+  /// The own-topic subscription on the process's node, taking the background lease if needed —
+  /// or `nil` when a mounted app should get the capture instead.
   ///
-  /// `nil` means this process should not have a background node — the app owns the stores, or the
-  /// device has no identity yet. Both are ordinary.
+  /// `nil` has three causes and only the first is routine: a mounted app is wired (`eventSink`)
+  /// and runs the pipeline's front half itself; the device has no identity yet (a fresh install
+  /// whose app has never run, where minting one would orphan the identity the app makes later);
+  /// or the node could not be started. The last two are retried by the next delivery.
   ///
-  /// ## The refusal is the steady state, so it has to be remembered
-  ///
-  /// While the app is mounted, `startStored()` throws on **every** call — the store claim is
-  /// process-wide and JS holds it (see `eventSink`). That is by design. What was not by design is
-  /// that the failure path memoised nothing: `ingest` and `heartbeat` call this on every delivery,
-  /// so each one built a fresh `LocationNode` — a keygen, a `derive_recv_public` KDF, fifteen
-  /// mutexes and a `telemetry::init_tracing` — purely to have the claim refused again, and
-  /// `node.construct` counts every one of them in a process-wide ordinal it then WARNs about.
-  ///
-  /// On 2026-09-16 that reached **187 constructions in one minute** on an iPhone 16 Pro Max, which
-  /// MetricKit reported as a CPU exception (48 s of CPU in a 55 s window) and which locked the UI
-  /// hard enough that the app never flushed another span. A second phone ran the same loop at
-  /// 20–29/min for hours; iOS answered by taking its background execution away, and its dot stopped
-  /// moving — the failure looked exactly like a parked phone, which is the one thing the whole
-  /// `fix_state` design exists to tell apart.
-  ///
-  /// So a refusal now suppresses the next few attempts, backing off to `claimRetryCeiling`
-  /// below. The one property that must survive is the handover: `release()`
-  /// promises the native path takes over "on the next delivery" once JS closes the stores, so it
-  /// clears the suppression outright rather than waiting it out. The ceiling is bounded rather than
-  /// a latch for the case `release()` never comes at all — a JS teardown that throws before it, say
-  /// — because a latch there would be a phone that never publishes again and never says why.
-  ///
-  /// ## One start at a time
-  ///
-  /// Every delivery runs `ingest` in its own unstructured `Task`, and a relaunch delivers a burst:
-  /// the cache seed plus the first few stream positions, within milliseconds. Each one used to find
-  /// no subscription and build its own node. On 2026-09-29 a background launch built three in one
-  /// second; the first took the stores, the other two were refused and armed the claim backoff,
-  /// and any capture that landed inside that backoff went to `handOff` with no sink — the likeliest
-  /// source of that wake's `dropped_captures = 4`. Concurrent callers now wait on the one start in
-  /// flight and share its answer.
+  /// There is no backoff, no owner flag and no in-flight dedupe any more. Each existed because
+  /// this runtime used to BUILD a node, and a build could be refused by the app's claim (187
+  /// constructions in a minute on 2026-09-16) or race a sibling delivery (three in a second on
+  /// 2026-09-29). Now `NodeHost` builds at most one node per process and hands every caller the
+  /// same one; concurrent deliveries simply queue on its transition lock.
   private func ensureStarted() async -> Subscription? {
-    startLock.lock()
-    let pending: Task<Subscription?, Never>
-    if let startInFlight {
-      pending = startInFlight
-    } else {
-      pending = Task { await self.startNode() }
-      startInFlight = pending
-    }
-    startLock.unlock()
-
-    let result = await pending.value
-    startLock.lock()
-    if startInFlight == pending { startInFlight = nil }
-    startLock.unlock()
-    return result
-  }
-
-  private let startLock = NSLock()
-  private var startInFlight: Task<Subscription?, Never>?
-
-  private func startNode() async -> Subscription? {
-    if let subscription { return subscription }
-    // "Is anyone ELSE going to publish this?" — and the only honest answer is whether a sink is
-    // wired. A mounted JS runtime sets `eventSink` and publishes what we hand it, so building a
-    // rival node would only earn a refused claim; nobody wired means nobody else will send this
-    // fix, so we must take the node ourselves.
-    //
-    // This gate was `owner == .native` for one day and that was a serious mistake. `owner` says
-    // what a launch DECLARED, not what is true: on a debug build `decideReactNativeDeferral`
-    // always returns false, so nothing ever declared `.native`, and every process in which JS had
-    // not yet reached `startNativeBackground` refused here, fell through to `handOff`, and dropped
-    // the fix into a nil sink. Silently, forever, on a phone that was moving. It reproduced within
-    // an hour on an iPhone 16 Pro.
-    //
-    // The cost this gate exists to avoid — 187 node constructions in a minute on 2026-09-16 — is
-    // still avoided, and better: a mounted app has a sink, so it returns here without building
-    // anything. The claim backoff below covers the genuine race, where JS holds the stores but has
-    // not wired the sink yet.
     if eventSink != nil { return nil }
-    if let until = claimRetryAfter, Date() < until { return nil }
-    guard KeychainDeviceSecrets.shared.identitySecret() != nil else {
-      // A fresh install whose app has never run. Minting an identity here would create one no
-      // friend has paired with and orphan the one the app makes later.
-      return nil
-    }
     do {
       let roots = nodeStorageRoots()
-      let built = try LocationNode.fromDeviceSecrets(
-        secrets: KeychainDeviceSecrets.shared,
-        dataRoot: roots.data.path,
-        stateRoot: roots.state.path)
-      try await built.startStored()
-      let sub = try await built.subscribe(
-        topic: deriveTopic(authorEndpointId: built.endpointId()),
-        bootstrap: [],
-        listener: SilentFixListener())
-      node = built
-      subscription = sub
-      if claimRefusals > 0 {
-        NSLog("[iroh-location] background node started after \(claimRefusals) refused claim(s)")
+      guard
+        let node = try await nodeHost().acquireBackground(
+          secrets: KeychainDeviceSecrets.shared,
+          dataRoot: roots.data.path,
+          stateRoot: roots.state.path)
+      else {
+        return nil
       }
-      clearClaimBackoff()
-      return sub
+      // `nil` listener: never silence a mounted app's own-topic listener, and stay silent when
+      // there is none. Inbound envelopes land in the replica either way.
+      return try await node.ownSubscription(bootstrap: [], listener: nil)
     } catch {
-      // The store claim refusing is the common case and means the app is mounted and already
-      // publishing — expected, not a fault. Log the first one of a run and then fall silent: at one
-      // line per delivery this was itself a meaningful share of the load it is reporting.
-      if claimRefusals == 0 {
-        NSLog("[iroh-location] background node not started: \(error.localizedDescription)")
-      }
-      dropNodeHandles()
-      backOffFromRefusedClaim()
+      NSLog("[iroh-location] background node unavailable: \(error.localizedDescription)")
       return nil
     }
   }
 
-  /// How long to wait after the first refused claim before trying to build a node again.
-  private static let claimRetryFloor: TimeInterval = 5
-  /// The longest a refusal may suppress a rebuild. See `ensureStarted` for why this is not a latch.
-  private static let claimRetryCeiling: TimeInterval = 60
-
-  /// Consecutive refused store claims. Reset by a success or by `release()`.
-  private var claimRefusals = 0
-  /// When `ensureStarted` may next attempt a build. `nil` means "now".
-  private var claimRetryAfter: Date?
-
-  private func backOffFromRefusedClaim() {
-    claimRefusals += 1
-    let delay = min(
-      Self.claimRetryCeiling,
-      Self.claimRetryFloor * pow(2, Double(claimRefusals - 1)))
-    claimRetryAfter = Date().addingTimeInterval(delay)
-  }
-
-  private func clearClaimBackoff() {
-    claimRefusals = 0
-    claimRetryAfter = nil
-  }
-
-  /// Drop the node handles WITHOUT touching the backoff.
-  ///
-  /// Split from `teardown` deliberately: the refusal path must not clear the very suppression it is
-  /// setting, and `release()` must clear it. Collapsing these two back together restores the loop.
-  private func dropNodeHandles() {
-    subscription = nil
-    node = nil
-  }
-
-  private func teardown() {
-    dropNodeHandles()
-    // JS is handing the stores back; the next delivery must be able to claim them immediately.
-    clearClaimBackoff()
+  /// What `location.runtime` spans say about the state machine. See `LocationRuntimeReporter`.
+  private func reportSnapshot() -> LocationRuntimeReporter.Snapshot {
+    LocationRuntimeReporter.Snapshot(
+      state: state.rawValue,
+      reason: lastWakeReason.rawValue,
+      desiredAccuracyM: manager.desiredAccuracy,
+      distanceFilterM: manager.distanceFilter,
+      nodeOwner: Self.nodeOwnerLabel(nodeHost().snapshot()),
+      candidatePending: stopCandidate != nil,
+      anchorArmed: stopAnchor != nil,
+      fenceRegistered: manager.monitoredRegions.contains {
+        $0.identifier == Self.stopAnchorRegionId
+      })
   }
 
   // MARK: - Conversions

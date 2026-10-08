@@ -262,6 +262,71 @@ pub struct Drained {
     pub reached: u32,
 }
 
+/// Serializes every run of a [`DrainEngine`] over the same stores. One per node.
+///
+/// The engine is built per call and holds no state, but the stores behind it are shared, and two
+/// runs interleaving over them publish the same slot twice. Both halves race:
+///
+/// * the gate: `get` → decide → `set` has no await in it, but UniFFI polls a foreign call's future
+///   on whichever thread the host's continuation runs, so two calls from Swift can be inside that
+///   block at once and both find the slot due;
+/// * the drain: `peek` → `publish().await` → `commit`, so a second drain peeks the same head while
+///   the first is on the wire and seals it again under a new seq.
+///
+/// On 2026-10-01 a parked iPhone, kept running by its `CLBackgroundActivitySession`, took its
+/// coarse deliveries in clusters, each spawning a heartbeat: it sealed 3-4 envelopes per slot,
+/// ~27 an hour against a cadence of 12, every extra one a `trail.push` and a `session.recover`.
+pub type DrainLock = tokio::sync::Mutex<()>;
+
+/// How long a run waits for the one before it before going ahead anyway.
+///
+/// Longer than any bounded run (the push budget is the long pole), so in practice a waiter always
+/// gets the lock and then finds its slot already covered. The bound exists for the case where a
+/// run never finishes: waiting forever behind it would turn one hung push into a phone that has
+/// stopped publishing, and a duplicate envelope is a far cheaper failure than silence.
+pub const DRAIN_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// What the caller of [`DrainEngine::heartbeat`] knows about whether the phone has settled.
+///
+/// A heartbeat used to mean "parked" by definition, on the reasoning that it was only reached from
+/// a phone that had stopped. It is not. The mounted app's five-minute timer runs whatever the motion
+/// state, and so does a wake that has just LEFT a stop; on 2026-10-02 an iPhone whose own state
+/// machine read `moving` (no anchor, no fence) published four hours of `parked` on that timer's
+/// exact 5:00 grid, so a friend's map showed a confident "parked here" at a stale spot. Only the
+/// caller knows which of these it is, so it says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    /// The phone has stopped and the caller can prove it: a confirmed dwell, a visit arrival, a tick
+    /// of the parked coarse stream, Android's no-delivery ticker. Stamps `FIX_STATE_PARKED`.
+    Parked,
+    /// The phone has just left a stop and no fix has placed it yet: a fence exit, a coarse
+    /// departure, a visit departure. A `parked` stamp still standing is now false, so it becomes
+    /// `FIX_STATE_NO_FIX` — "moving, no fix yet" is exactly what is true.
+    Moving,
+    /// A clock with no motion evidence at all: the JS timer, a refresh while still moving. The
+    /// stamp the last real evidence left is kept as it is.
+    Unknown,
+}
+
+impl Motion {
+    /// The foreign-call spelling: `Some(true)` parked, `Some(false)` moving, `None` no claim.
+    pub fn from_parked(parked: Option<bool>) -> Self {
+        match parked {
+            Some(true) => Motion::Parked,
+            Some(false) => Motion::Moving,
+            None => Motion::Unknown,
+        }
+    }
+
+    fn stamp(self, previous: Option<u8>) -> Option<u8> {
+        match self {
+            Motion::Parked => Some(FIX_STATE_PARKED),
+            Motion::Moving if previous == Some(FIX_STATE_PARKED) => Some(FIX_STATE_NO_FIX),
+            Motion::Moving | Motion::Unknown => previous,
+        }
+    }
+}
+
 /// Ties the gate, the queue and the sink together. Holds no state of its own — everything durable
 /// lives behind a port, so an engine is cheap to build per wake and impossible to leave stale.
 pub struct DrainEngine<'a, S: PublishSink> {
@@ -271,9 +336,25 @@ pub struct DrainEngine<'a, S: PublishSink> {
     pub gate: &'a dyn GateStateStore,
     pub sink: &'a S,
     pub quality: FixQualityConfig,
+    /// Shared by every engine over these stores. See [`DrainLock`].
+    pub lock: &'a DrainLock,
 }
 
 impl<S: PublishSink> DrainEngine<'_, S> {
+    /// Take the run lock, or give up waiting after [`DRAIN_LOCK_WAIT`] and run unserialized.
+    async fn serialize(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        match tokio::time::timeout(DRAIN_LOCK_WAIT, self.lock.lock()).await {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                tracing::warn!(
+                    wait_ms = DRAIN_LOCK_WAIT.as_millis() as u64,
+                    "drain run still held by an earlier one; proceeding unserialized"
+                );
+                None
+            }
+        }
+    }
+
     /// Take one captured location as far towards the wire as this wake allows.
     ///
     /// The order is deliberately the one `location-sharing.ts` runs, because the two must agree: a
@@ -287,6 +368,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         interval_ms: u64,
         now_ms: u64,
     ) -> Result<IngestOutcome, PublishError> {
+        let _run = self.serialize().await;
         let outcome = self
             .ingest_untraced(fix, battery, interval_ms, now_ms)
             .await?;
@@ -314,20 +396,34 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             now_ms,
             &self.quality,
         );
-        if rejection.is_none() {
-            state.last_known_fix = Some(StoredFix::from(&fix));
-            state.last_accepted_at = Some(now_ms);
-        }
 
         // Record WHY the position about to go out is the position it is. A rejected fix still
         // fills its slot with the last accepted one, so from the wire a stretch of bad GPS and a
         // stretch of sitting still are byte-identical — which is correct for privacy and useless
         // for the UI. This is the one bit that separates them, and only the sender has it.
-        state.last_state = Some(if rejection.is_none() {
-            FIX_STATE_LIVE
-        } else {
-            FIX_STATE_NO_FIX
-        });
+        //
+        // A standing `parked` survives a fix that proves nothing about motion: one accepted at the
+        // stop (see `gate::still_parked` for the incident), or one the gate refused. Only a fix
+        // that has left the stop, or a caller's `Motion::Moving`, ends it.
+        let parked = state.last_state == Some(FIX_STATE_PARKED);
+        let anchor = state
+            .parked_at
+            .take()
+            .or_else(|| state.last_known_fix.clone());
+        let (stamp, parked_at) = match (&rejection, anchor) {
+            (None, Some(at)) if parked && gate::still_parked(&fix, &LocationFix::from(&at)) => {
+                (FIX_STATE_PARKED, Some(at))
+            }
+            (None, _) => (FIX_STATE_LIVE, None),
+            (Some(_), at) if parked => (FIX_STATE_PARKED, at),
+            (Some(_), _) => (FIX_STATE_NO_FIX, None),
+        };
+        state.last_state = Some(stamp);
+        state.parked_at = parked_at;
+        if rejection.is_none() {
+            state.last_known_fix = Some(StoredFix::from(&fix));
+            state.last_accepted_at = Some(now_ms);
+        }
 
         // A hard stop, indistinguishable from the phone dying. Deliberately not a slower cadence:
         // the interval is observable to the stash, so backing it off would put the charge level on
@@ -357,7 +453,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // half-way, and re-running these slots on the next wake would double-publish them.
         self.gate.set(state);
 
-        let drained = self.drain(now_ms).await?;
+        let drained = self.drain_held(now_ms).await?;
         Ok(self.outcome(
             rejection,
             plan.due,
@@ -382,14 +478,19 @@ impl<S: PublishSink> DrainEngine<'_, S> {
     /// current.
     ///
     /// Returns `enqueued: 0` when the current slot is already covered, which is the common case.
+    ///
+    /// `motion` decides the `fix_state` the envelopes carry — see [`Motion`] for why the caller,
+    /// and not this function, is the one that knows.
     pub async fn heartbeat(
         &self,
+        motion: Motion,
         battery: BatteryState,
         interval_ms: u64,
         now_ms: u64,
     ) -> Result<IngestOutcome, PublishError> {
+        let _run = self.serialize().await;
         let outcome = self
-            .heartbeat_untraced(battery, interval_ms, now_ms)
+            .heartbeat_untraced(motion, battery, interval_ms, now_ms)
             .await?;
         trace_outcome("engine.heartbeat", &outcome);
         Ok(outcome)
@@ -397,6 +498,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
 
     async fn heartbeat_untraced(
         &self,
+        motion: Motion,
         battery: BatteryState,
         interval_ms: u64,
         now_ms: u64,
@@ -412,13 +514,20 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             return Ok(self.outcome(None, 0, Drained::default(), 0, 0, false));
         };
 
-        // The declaration this whole field exists for. `heartbeat` is only reached from a phone
-        // that has settled — iOS's parked coarse stream, Android's no-delivery tick — so the
-        // envelopes this wake produces are the ones that should say so. Whichever of them turns
-        // out to be the last before a silence is then self-describing, which matters because the
-        // silence is not bounded: parked publishing rides on OS wakes, and p90 between contacts on
-        // iOS is 92 minutes with a 17-hour tail.
-        state.last_state = Some(FIX_STATE_PARKED);
+        // The declaration this whole field exists for, when the caller can make it. A parked
+        // phone's envelopes say so, and whichever of them turns out to be the last before a
+        // silence is then self-describing — which matters because the silence is not bounded:
+        // parked publishing rides on OS wakes, and p90 between contacts on iOS is 92 minutes with
+        // a 17-hour tail. A caller that cannot prove a stop leaves the last real evidence standing.
+        state.last_state = motion.stamp(state.last_state);
+        // The stop is anchored where it was first declared; later parked ticks do not move it.
+        state.parked_at = match state.last_state {
+            Some(FIX_STATE_PARKED) => state
+                .parked_at
+                .take()
+                .or_else(|| state.last_known_fix.clone()),
+            _ => None,
+        };
 
         gate::regrid(&mut state, interval_ms);
         let plan = gate::due_slots(now_ms, interval_ms, state.last_published_slot);
@@ -430,14 +539,14 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             state.last_published_slot = Some(plan.current_slot);
         }
         // Saved unconditionally, unlike the slot index it carries. `plan.due == 0` — the current
-        // slot is already covered — is the COMMON case on a parked phone, and the parked
-        // declaration is the whole point of this call: a wake that had no slot to fill has still
+        // slot is already covered — is the COMMON case on a parked phone, and the declaration is
+        // the whole point of a parked tick: a wake that had no slot to fill has still
         // learned that the device has settled. Gating the write on `due` would leave the stamp
         // unsaved through exactly the ticks that prove it, and any envelope left over from an
         // earlier failed drain would then go out stamped `live` from a phone that is parked.
         self.gate.set(state);
 
-        let drained = self.drain(now_ms).await?;
+        let drained = self.drain_held(now_ms).await?;
         Ok(self.outcome(
             None,
             plan.due,
@@ -476,12 +585,13 @@ impl<S: PublishSink> DrainEngine<'_, S> {
     /// `enqueued: 0` means this device has never had a position to share — a fresh install that
     /// has not captured yet. There is nothing to introduce and the first capture will do it.
     pub async fn publish_introduction(&self, now_ms: u64) -> Result<IngestOutcome, PublishError> {
+        let _run = self.serialize().await;
         let state = self.gate.get();
         let Some(known) = state.last_known_fix.as_ref().map(LocationFix::from) else {
             return Ok(self.outcome(None, 0, Drained::default(), 0, 0, false));
         };
         let overflow_dropped = self.queue.enqueue(known)?.overflow_dropped;
-        let drained = self.drain(now_ms).await?;
+        let drained = self.drain_held(now_ms).await?;
         Ok(self.outcome(None, 1, drained, 0, overflow_dropped, false))
     }
 
@@ -495,6 +605,12 @@ impl<S: PublishSink> DrainEngine<'_, S> {
     /// Returns how many reached the wire. A send failure is **not** an error here — a wake that
     /// published three of five envelopes did useful work, and the remainder is still queued.
     pub async fn drain(&self, now_ms: u64) -> Result<Drained, PublishError> {
+        let _run = self.serialize().await;
+        self.drain_held(now_ms).await
+    }
+
+    /// [`drain`](Self::drain) for a caller that already holds the run lock.
+    async fn drain_held(&self, now_ms: u64) -> Result<Drained, PublishError> {
         let recipients = self.recipients.get();
         let watchers = self.recipients.watchers();
         let mut published = 0u32;

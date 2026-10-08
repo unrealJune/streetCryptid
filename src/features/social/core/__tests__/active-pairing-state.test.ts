@@ -22,6 +22,7 @@ function stage(
   intent: PairingRouteIntent = 'bump'
 ) {
   return deriveActivePairingStage({
+    servicePhase: 'ready',
     intent,
     pairingLoaded: true,
     available: true,
@@ -44,6 +45,45 @@ function stage(
 }
 
 describe('deriveActivePairingStage', () => {
+  describe('the service has to be up before any channel can be', () => {
+    /**
+     * 2026-10-03: init rejected, Bump's arm threw "Friend sync is not ready yet.", and the screen
+     * rendered that as a physical miss — "NOTHING FOUND" — for 13.7 hours.
+     */
+    it('says the service failed rather than letting Bump report a miss', () => {
+      expect(
+        stage({ servicePhase: 'failed', bumpStage: 'idle', bumpError: 'Friend sync is not ready.' })
+      ).toBe('service-failed');
+    });
+
+    it('treats a stalled start the same way: retryable, and not a Bump problem', () => {
+      expect(stage({ servicePhase: 'stalled' })).toBe('service-failed');
+    });
+
+    it('waits out a start that is still in flight', () => {
+      expect(stage({ servicePhase: 'initializing', bumpStage: 'idle' })).toBe('loading');
+    });
+
+    it('outranks every channel, because none of them can work without the node', () => {
+      for (const intent of ['bump', 'link', 'redeem'] as const) {
+        expect(
+          stage(
+            { servicePhase: 'failed', inviteLive: true, redeeming: true, failure: brokenPair() },
+            intent
+          )
+        ).toBe('service-failed');
+      }
+    });
+
+    it('leaves an idle service to the channel logic, which knows when there is no native module', () => {
+      expect(stage({ servicePhase: 'idle', available: false })).toBe('unavailable');
+    });
+
+    it('changes nothing once the service is ready', () => {
+      expect(stage({ servicePhase: 'ready' })).toBe('bump-armed');
+    });
+  });
+
   it('does not leak a stale Bump failure into an active link', () => {
     expect(
       stage(

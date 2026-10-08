@@ -13,7 +13,7 @@ import type { LocationFix } from '../../../core/types';
 import { routeNativeCapture, type EngineState } from '../location-engine';
 
 function engineStub(accepted: LocationFix | null) {
-  const calls = { ingest: [] as LocationFix[], heartbeat: 0 };
+  const calls = { ingest: [] as LocationFix[], heartbeat: 0, parked: [] as (boolean | null)[] };
   return {
     calls,
     engine: {
@@ -21,8 +21,9 @@ function engineStub(accepted: LocationFix | null) {
         calls.ingest.push(fix);
         return null as never;
       },
-      heartbeat: async () => {
+      heartbeat: async (_parent?: unknown, parked?: boolean | null) => {
         calls.heartbeat += 1;
+        calls.parked.push(parked ?? null);
         return 0;
       },
       getState: () => ({ lastAcceptedFix: accepted }) as EngineState,
@@ -61,6 +62,16 @@ describe('routeNativeCapture', () => {
     await expect(routeNativeCapture({ kind: 'heartbeat' }, engine)).resolves.toBeNull();
     expect(calls.heartbeat).toBe(1);
     expect(calls.ingest).toEqual([]);
+  });
+
+  it("forwards the runtime's parked claim, and makes none when it made none", async () => {
+    // The tick's `fix_state` is decided by what the native runtime proved. A JS layer that filled
+    // in `true` for it is how a moving iPhone published four hours of "parked" on 2026-10-02.
+    const { engine, calls } = engineStub(fix);
+    await routeNativeCapture({ kind: 'heartbeat', parked: true }, engine);
+    await routeNativeCapture({ kind: 'heartbeat', parked: false }, engine);
+    await routeNativeCapture({ kind: 'heartbeat' }, engine);
+    expect(calls.parked).toEqual([true, false, null]);
   });
 
   it('treats a fix-kind capture with no fix as a heartbeat rather than throwing', async () => {

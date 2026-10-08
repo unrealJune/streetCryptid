@@ -107,7 +107,9 @@ function refusalReason(): string | null {
   // only ever tracked the JS-side claim. On iOS a background launch can arm
   // `BackgroundLocationRuntime` with no React at all, and a headless session that then builds its
   // own node meets `AlreadyOpen` — or worse, wins the race and leaves the runtime that was
-  // publishing unable to. Guarded on the export, which is absent on Android and on older binaries.
+  // publishing unable to. Guarded on the export, which is absent on Android, on older binaries —
+  // and on every binary with a node host, where there is one node and a headless session simply
+  // takes a lease on it alongside the runtime (`node_host`, `drain_lock` in the Rust crate).
   try {
     if (tryGetIrohLocation()?.nativeNodeOwner?.() === 'native') return 'native-owns-node';
   } catch {

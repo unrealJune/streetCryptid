@@ -68,6 +68,24 @@ export interface NodeKeys {
 }
 
 /** Native endpoint transports enabled for a debug session. */
+/**
+ * Who holds the process's node, as the Rust `NodeHost` sees it. Counters are since process start.
+ * See `modules/iroh-location/rust/src/host.rs` for what each one means.
+ */
+export interface NodeHostSnapshot {
+  generation: number;
+  hasNode: boolean;
+  appLeases: number;
+  background: boolean;
+  builds: number;
+  adoptions: number;
+  replacements: number;
+  restarts: number;
+  shutdowns: number;
+  shutdownFailures: number;
+  shutdownTimeouts: number;
+}
+
 export interface TransportConfig {
   relay: boolean;
   ip: boolean;
@@ -480,6 +498,12 @@ export interface OnNativeFixEvent {
   battery: { level: number; charging: boolean; lowPower: boolean };
   /** Absent when `kind` is `heartbeat`. */
   fix?: NativeLocationFix;
+  /**
+   * On a `heartbeat`: what the runtime can prove about motion — `true` a confirmed stop, `false`
+   * a stop just left. Absent when it has no evidence either way, or from a binary that predates
+   * the field. Forwarded to {@link IrohLocationModule.heartbeatFix} unchanged.
+   */
+  parked?: boolean;
 }
 
 export type IrohLocationEvents = {
@@ -609,12 +633,18 @@ export interface IrohLocationApi {
    * The counterpart to {@link ingestFix}, driven on a timer by the mounted app: neither platform
    * gives a background process a reliable one, and the cadence has to stay uniform whether or not
    * the phone is moving — it is the one property of a sealed envelope the stash can read. Resolves
-   * with `enqueued: 0` when the current slot is already covered, which is the common case. OPTIONAL.
+   * with `enqueued: 0` when the current slot is already covered, which is the common case.
+   *
+   * `parked` is what the caller can prove about motion, and decides the envelope's `fix_state`:
+   * `true` a confirmed stop, `false` a stop just left, `null` no evidence either way — which is
+   * what the mounted timer has, and why it must not claim `parked` (see `publish::Motion`).
+   * OPTIONAL.
    */
   heartbeatFix?(
     subscriptionId: string,
     battery: { level: number; charging: boolean; lowPower: boolean },
-    intervalMs: number
+    intervalMs: number,
+    parked: boolean | null
   ): Promise<NativeIngestOutcome>;
   /**
    * Seal the last known position once, because the recipient set has just grown.
@@ -644,7 +674,8 @@ export interface IrohLocationApi {
   /**
    * What the native runtime is doing and why — `{ running, state, wake_reason, auth_status,
    * precise, anchor_armed, fence_registered, slc_available, candidate_pending,
-   * candidate_fence_armed, last_wake_age_ms?, candidate_age_ms?, anchor_age_ms? }`.
+   * candidate_fence_armed, last_wake_age_ms?, candidate_age_ms?, anchor_age_ms?, stop_via?,
+   * last_visit_age_ms? }`.
    *
    * `device.health` flattens this under `location.*`. On iOS a parked phone emits nothing by
    * construction, so "which state is it in and when did it last run" is the only way to tell it
@@ -678,21 +709,26 @@ export interface IrohLocationApi {
   /** Clear the wake counters. Called by whoever owns the reporting cadence, nothing else. OPTIONAL. */
   resetBackgroundWakeStats?(): void;
   /**
-   * Take the Rust stores back from the native background runtime, bounded.
-   *
-   * Not {@link releaseNativeBackground}: that drops the Swift references and returns, while
-   * `Subscription` and the spawned receive task each still hold an `Arc<LocationNode>` — only
-   * `shutdown` frees the process-wide writer claims. Without this, opening the app after a
-   * background launch that armed the native runtime meets `AlreadyOpen` and fails `init()` before
-   * the map can mount.
-   *
-   * Bounded on the native side so it always settles whatever Rust does. Resolves `true` when the
-   * shutdown completed; `false` still hands ownership over, because leaving it with the runtime
-   * would mean nothing could ever claim the stores again. iOS only. OPTIONAL.
+   * Take the Rust stores back from the native background runtime, bounded. LEGACY: only binaries
+   * from before the shared node (`restartNode` absent) export it — on those the background runtime
+   * built a node of its own, and opening the app after a background launch met `AlreadyOpen`.
+   * Binaries with a node host have nothing to hand over: both halves hold leases on ONE node.
    */
   handOverNativeBackground?(timeoutMs: number): Promise<boolean>;
-  /** Which half of the process owns the Rust stores: `app` or `native`. iOS only. OPTIONAL. */
+  /** LEGACY, iOS only: which half of the process owned the Rust stores before they were shared. */
   nativeNodeOwner?(): string;
+  /**
+   * Rebuild the node with new transport settings, keeping every holder's lease.
+   *
+   * Present exactly when the binary has a node host — so it doubles as that capability probe. A
+   * rebind on such a binary MUST use it: `shutdown` + `createNode` there only returns this
+   * context's lease and adopts the same node back (the background runtime's lease keeps it up),
+   * so the new settings would never apply. The host also starts the new node before the
+   * background runtime can start it from the stored (old) settings. OPTIONAL.
+   */
+  restartNode?(config?: TransportConfig): Promise<void>;
+  /** The node host's view of who holds the node, for `device.health`. OPTIONAL. */
+  nodeHostSnapshot?(): NodeHostSnapshot | null;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**
@@ -1019,34 +1055,30 @@ export interface IrohLocationApi {
   // regenerate on macOS), so callers must guard with `typeof mod.<name> === 'function'`.
 
   /**
-   * Whether this peer's session needs §4.6 recovery — a run of signature-valid envelopes we could
-   * not open, or state we cannot read at all. `false` for a peer we simply have no session with:
-   * that is un-bootstrapped, which a resync cannot fix and a re-pair can.
+   * Whether this peer's session needs a §4.6 restart: a run of distinct envelopes we could not
+   * open, a record we cannot read, a lapsed peer, or — when we follow — no sending chain for an
+   * hour. `false` for a peer we simply have no session with: that is unpaired, which a restart
+   * cannot fix and a re-pair can.
    */
   isDesynced?(peerEndpointHex: string): Promise<boolean>;
   /**
-   * How many resyncs we have driven with this peer. Recovery that keeps recovering is not
-   * recovering — past a small number, surface "re-pair with this friend" instead of retrying.
+   * How many restarts have been installed with this peer in this process. Recovery that keeps
+   * recovering is not recovering — past a small number, surface "re-pair with this friend".
    */
   resyncCount?(peerEndpointHex: string): Promise<number>;
   /**
-   * Publish our half of a resync exchange, addressed to these friends' **receiving keys**.
-   *
-   * HPKE-sealed rather than ratcheted, necessarily: this is the message that re-establishes a
-   * ratchet, so it cannot depend on one already working. Idempotent while the record is fresh,
-   * re-minted once it ages past half its acceptance window. Returns our ephemeral's public half.
+   * Publish our restart control record (prekeys + outstanding requests) now, sealed to these
+   * friends' **receiving keys**. The native drain publishes it on its own; this only forces it.
+   * Returns our newest prekey's public half.
    */
   publishResync?(recipientRecvPubsHex: string[]): Promise<string>;
   /**
-   * Look for this peer's resync record and restart the session from it, publishing our own half
-   * first if we have not — so one call from each side completes the exchange without either
-   * having to go first.
-   *
-   * Returns whether a session was installed. `false` covers "no record yet", "stale record", and
-   * "already applied": all ordinary, none an error.
+   * Run one native recovery pass for this peer (FORWARD-SECRECY.md §4.6): restart it if we lead
+   * the pair and it is due, adopt a waiting restart if we follow. Returns whether a session was
+   * installed. The receiving key argument is unused and kept for binding compatibility.
    */
   pollResync?(peerEndpointHex: string, peerRecvPubHex: string): Promise<boolean>;
-  /** Drop our in-flight resync ephemeral once every peer has been restarted. */
+  /** A no-op kept for binding compatibility: nothing about a restart is held in memory. */
   clearResync?(): Promise<void>;
   /** Forget a peer's ratchet session entirely — unfriend, or revoke. */
   forgetSession?(peerEndpointHex: string): Promise<void>;
@@ -1074,6 +1106,19 @@ export interface IrohLocationApi {
    * reading still needs our per-recipient wrap in each envelope. See ARCHITECTURE §6.
    */
   importDocTicket(ticket: string): Promise<void>;
+  /**
+   * Stop replicating a removed friend's trail (or profile) namespace, and stop reopening it on
+   * every start. Pass the ticket the friend was added with. Resolves whether it was replicated.
+   * Optional: absent on binaries built before the namespace book.
+   */
+  forgetDocTicket?(ticket: string): Promise<boolean>;
+  forgetProfileTicket?(ticket: string): Promise<boolean>;
+  /**
+   * Grant the trail stash replication of our trail and every friend's, from native. Resolves at
+   * once; the grant itself runs on a native task. Optional: absent on binaries that predate it,
+   * where the JS HTTP grant is still the only one.
+   */
+  grantStash?(): Promise<void>;
 
   // ── Developer telemetry (dev/preview builds; see src/features/dev/telemetry in the app) ─────
   /**

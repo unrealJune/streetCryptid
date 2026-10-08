@@ -163,6 +163,27 @@ pub struct RatchetHeader {
     pub counter: u32,
 }
 
+/// The restart header a leader attaches to every wrap for a peer until that peer answers
+/// (FORWARD-SECRECY.md §4.6, the `PreKeySignalMessage` analogue).
+///
+/// It carries what the follower needs to derive the restarted session on its own, from any one
+/// envelope, with nothing held in memory on either side: the leader's single-use base key, which
+/// of the follower's published prekeys it was combined with, and the leader-chosen origin
+/// timestamp that orders restarts. Plaintext like the ratchet header, and for the same reason —
+/// the receiver needs it to derive the key that opens the wrap — so it travels under the envelope
+/// signature and inside the wrap's AAD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootHeader {
+    /// The leader's single-use X25519 base key. Its private half is dropped the moment the
+    /// leader has derived the root, so nothing about this restart waits on it.
+    pub base: [u8; KEY_LEN],
+    /// Which of the follower's published prekeys the base key was combined with.
+    pub prekey_id: u32,
+    /// Leader-chosen and strictly increasing per pair: a follower adopts a restart only if this is
+    /// newer than the session it is on, which is what makes a replayed header inert.
+    pub ts: u64,
+}
+
 /// Everything one outgoing wrap needs from the schedule.
 ///
 /// The `kid` is taken at derive time and handed over with the key, because chain keys are
@@ -512,6 +533,59 @@ impl RatchetState {
                 found
             }
         }
+    }
+
+    /// Whether `header` sits on the receiving chain we hold, at a position we have already passed.
+    ///
+    /// Definitive rather than a guess: sender ratchet keys are fresh per session and per DH step,
+    /// so a wrap carrying the key our receiving chain was built from can only be this peer's, to
+    /// us. Such an envelope is one we opened (or skipped) — the peer is demonstrably still on our
+    /// chain, which is the opposite of a desync. Read from the persisted state, so it holds across
+    /// a restart that forgot everything in memory.
+    pub fn has_passed(&self, header: &RatchetHeader) -> bool {
+        self.ckr.is_some()
+            && self.dh_peer == Some(header.sender_ratchet_pub)
+            && header.epoch == self.recv_epoch
+            && header.counter < self.nr
+    }
+
+    /// Adopt the peer's ratchet key from an authenticated header **without consuming** the
+    /// position it names.
+    ///
+    /// Performs the DH ratchet [`accept`] would, so a responder gains its sending chain, but
+    /// leaves the receiving chain at the start of the new epoch: the envelope stays openable by
+    /// whoever reads it later. This is how a process with no reader alive (the native background
+    /// runtime) can join a restarted session without eating the fix inside the envelope that
+    /// carried it — opening it would spend the only key that decrypts it, and the reader that
+    /// finally runs would find nothing.
+    ///
+    /// A header on the chain we already hold is a no-op.
+    ///
+    /// [`accept`]: Self::accept
+    pub fn prime(
+        &mut self,
+        header: &RatchetHeader,
+        now_ms: u64,
+        window: u32,
+        keys: &mut impl RatchetKeySource,
+    ) -> Result<(), RatchetError> {
+        if self.dh_peer == Some(header.sender_ratchet_pub) {
+            return Ok(());
+        }
+        if self.ckr.is_some() && header.epoch <= self.recv_epoch {
+            return Err(RatchetError::NotAhead);
+        }
+        if header.counter > window {
+            return Err(RatchetError::BeyondWindow);
+        }
+        self.dh_ratchet(header.sender_ratchet_pub, now_ms, keys)?;
+        self.recv_epoch = header.epoch;
+        Ok(())
+    }
+
+    /// Whether this session can derive a sending key right now.
+    pub fn has_sending_chain(&self) -> bool {
+        self.cks.is_some()
     }
 
     /// Accept an authenticated header and derive the key that opens its wrap.
