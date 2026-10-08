@@ -28,6 +28,8 @@ behaviour needs, and the recommendations are ordered so each one lands as its ow
 | Record→dict mapper functions, Swift + Kotlin              | 19 + 19           |
 | UniFFI exports reachable from no binding                  | 22                |
 | Rust `publish` / `docs_write` variants for two operations | 12                |
+| Orphan JS modules (no importer outside tests)             | 11                |
+| Browser build: wasm crate + web stub + `.web.tsx` files   | 759 + 505 + 704   |
 
 The six copies of the contract: the `uniffi::Record` structs in `lib.rs`; the `*Dict()` mappers in
 `IrohLocationModule.swift`; the `*Map()` mappers in `IrohLocationModule.kt`; the
@@ -268,6 +270,123 @@ string that the native layers put in `Exception.code`, and JS switches on `error
 - **24 `*_MS` constants** scattered across `net/` with no single place that says what the
   cadences are relative to each other.
 
+### 9. Dead JS left behind by the native cutover (#147 / #148)
+
+Capture, cadence, the parked heartbeat, friend pulls and node ownership all moved native in
+v2.15 to v2.17. The JS that used to do those jobs was not removed with them; it was guarded. Each
+item below is reachable from no non-test code on the current binaries, or exists only to serve a
+binary that no longer ships.
+
+**Compatibility paths for binaries that predate `NodeHost`.**
+
+- `nativeAdoptsNode()` / `nodeAdoptionSupported` / the `nativeRuntimeAdoptsNode` probe. The probe
+  answers "does this binary have `NodeHost`". Every binary since #148 does. Its `false` branch in
+  `rebindNodeInner` is `shutdown()` + `createNode()` + `startNativeBounded()`, which is the exact
+  sequence AGENTS.md now forbids ("a settings change is `restartNode`, never `shutdown` +
+  `createNode`"). Make `restartNode` required and delete the probe, the cache, and the branch.
+- `isClaimRefusal` and the handover-and-retry inside `startNativeBounded`. A store claim cannot
+  be refused under `NodeHost` ("the app always gets a node... never refused"). The bounded wait
+  stays; the regex, the retry, and the `handOver` dependency go. `native-node.test.ts` (244 lines,
+  added by #147) is mostly tests of this dead branch.
+- `handOverNativeBackground()` in `native-node.ts`, its `node.handover` span, and
+  `refusalReason()`'s `nativeNodeOwner?.()` check in `headless-runtime.ts`: both call methods no
+  platform implements (finding 4).
+
+**The JS publish pipeline** (finding 3): `publishFix`, `publishNullFix`, `runResyncDriver`,
+`noteDroppedRecipients`, `persistDropCounts`, the shadow `seq` (`seq`, `nativeSeq`,
+`reserveSeqAhead`, `adoptNativeSeq`, `nextSeq`), `droppedRecipients`, `sessionVerdicts`,
+`resyncInFlight`, `RESYNC_ATTEMPT_LIMIT`, and the `RatchetDropReason` / `SessionHealthSnapshot`
+types that only they populate. One caller, the manual locate button.
+
+**Headless entry points with no caller.** `ingestFixesHeadless` was the expo-location task
+consumer; capture is native, so nothing calls it. Delete with its test.
+
+**Public service methods no screen or hook calls**: `createPairCode`, `pairNearby`,
+`refreshBackgroundAccess`, `selfCard`, `deliveryState`, `stashState`, `transportState`. Only
+tests reach them. `awaitFriendWiring` is a documented test seam and can stay, named as one.
+
+**A dev knob with no writer.** `loadIosLocationBenchmarkProfile` reads a `__DEV__`-only KV key
+(`sc.dev.iosLocationProfile`) that nothing in `src/` or `scripts/` writes. `benchmarkProfileOverrides`,
+`IosLocationBenchmarkProfile`, the key, and both call sites are dead.
+
+**Orphan modules** (no importer anywhere outside tests): `pair-link-action.tsx`,
+`stash-setting-row.tsx`, `cryptid-discovery-celebration.tsx`, `profile-onboarding-preview.tsx`,
+`locator-label.tsx`, `map/core/region-session.ts`, `map/core/hash.ts`, and four Expo-template
+leftovers (`web-badge`, `external-link`, `ui/collapsible`, `hint-row`). The
+`net/background/index.ts` barrel is imported by nothing.
+
+**The JS engine layer is the next cutover, not a deletion.** `location-engine.ts` (337 lines),
+`cadence-controller.ts` (162), `sampling-policy.ts` (143), `battery-source.ts` (101) and about
+1,000 lines of their tests survive the cutover, but look at what they still do. `engine.ingest`
+computes a battery-only `SamplingDecision`, passes the fix and the battery to `ingestFix` (where
+the Rust gate makes the real accept/reject call with that same battery), and feeds the decision to
+`cadence-controller`, which calls `setBackgroundCadence`, which the native runtime then overrides
+with its own motion-derived cadence (`applyMovingCadence` / `applyStoppedCadence`). What is left
+is: a ninth hand-rolled single-flight (`exclusive`), a state snapshot (`lastAcceptedFix`,
+`pending`, `decision`) the UI reads, and `onPublished → refreshTrailFromReplica`. The native
+runtime already ingests directly whenever the app is not wired. Let it always ingest, make
+`onNativeFix` a notification that carries the `IngestOutcome`, move the battery→accuracy-tier
+table into Rust as one more output of the motion machine (finding 6), and the "engine" becomes an
+event listener. That is the first step of finding 6, and it retires two owners of cadence.
+
+**Android's JS background tasks are now mostly duplicates of its native service.** Since 8abb3b1
+(2026-09-18) iOS does not boot React Native on a wake, so `refresh-task.ts` (182),
+`revive-task.ts` (444), `headless-runtime.ts` (409), `register-task.ts`, `native-runtime-owner.ts`
+and `teardown-watermark.ts` run on Android only. The 45-line header of `revive-task.ts` still
+describes it as the "iOS revive tripwire". What they do there: `runBackgroundRefreshHeadless`
+self-heals the foreground service, then boots a whole `LocationSharingService` headless to run
+`heartbeatNativeFix` + `syncTrail`, then tears it down under a 10 s watchdog. Android's native
+`BackgroundLocationService` now has a stationary heartbeat ticker and `pullFriendFixes` (floored
+at 5 min), `START_REDELIVER_INTENT` covers process kills, and the boot receiver covers reboot. The
+two jobs not duplicated natively are the geofence-triggered self-heal (the one legal window to
+start a foreground service from the background) and `recordDeviceHealth`. Keep exactly those,
+preferably as a native geofence `BroadcastReceiver` that starts the service with no JS at all, and
+delete `runRefresh`, `ingestFixesHeadless`, `teardownBounded`, and the `native-runtime-owner`
+session chain. That removes the "boot a 5k-line service inside a background task" shape, which is
+the shape behind three of the incidents AGENTS.md records (the stranded teardown, the init-latch
+freeze, the 19-hour silence).
+
+### 10. Deprecate wasm, and decide separately about the web target
+
+The browser build exists to run the location core relay-only in a tab. Nothing ships there.
+What it costs:
+
+- `modules/iroh-location/rust-wasm/` (759 lines, its own `Cargo.lock`, a second iroh dependency
+  set that must track the native one), and the `#[path]`-inclusion of `crypto.rs` and `docs.rs`,
+  which pins both files to compile for `wasm32-unknown-unknown` with `default-features = false`.
+- `IrohLocationModule.web.ts` (505 lines): 23 methods that throw or return empty. This is the
+  third meaning of `?` in finding 4, and removing it makes the API-required change there cleaner.
+- The CI `wasm` job in `ci.yml` (lines 63-108): a second Rust toolchain, `wasm-pack`, `binaryen`,
+  and three caches, on every run.
+- `just web`, `just build-wasm`, the `wasm` asset extension in `metro.config.js`,
+  `wasm-assets.d.ts`, the `web/` build output, and the relay-token-in-the-bundle caveat in the
+  module README.
+- Six `.web.tsx` overrides (704 lines), ten `Platform.OS === 'web'` branches across six files,
+  `web-badge.tsx`, and `react-native-web` / `react-dom` in `dependencies`.
+
+**What it breaks, and this is the only thing to plan around:** `just store-shots`, `map-shot.ts`,
+`island-preview.ts`, `shot-server.ts`, `cdp.ts` and `tile-proxy.ts` drive the **web target** in
+Chrome, because the machine they were built on had no iOS simulator (AGENTS.md, "Store
+screenshots"). The map scenes need CanvasKit and tiles, not the node; the friends scenes take
+fixtures as `Friend` records and `LocationFix` points, not the node. The one scene that needs the
+wasm node is pairing, which drives the one-time LINK handshake through the wasm crypto because
+BLE pairing photographs as "PAIRING UNAVAILABLE" in a browser.
+
+So there are two sizes of this:
+
+- **wasm only, now.** Delete `rust-wasm/`, the CI job, `build-wasm`, the `#[path]` sharing, and
+  replace `IrohLocationModule.web.ts` with a 20-line stub that reports the node unavailable.
+  `store-shots` keeps working for every scene but pairing; the pairing screenshot either moves to
+  the field-soak Mac's simulator (`scripts/field-soak` means one exists now) or is retaken from a
+  device. Nothing else in the app depends on the browser node.
+- **the web target too, later.** Once the screenshot pipeline runs on a simulator, the six
+  `.web.tsx` files, the `Platform.OS === 'web'` branches, `react-native-web`, `react-dom`, `just
+web` and the CDP tooling go with it. Do not do this half: a web target with no node is still a
+  working map, and the screenshot tooling is real work that should be re-homed before it is
+  deleted.
+
+The first size is a day and is pure deletion. It should go in step 1.
+
 ## What is right, and should be the pattern
 
 - `pool.ts`: pure functions over an immutable friend-pool value. Every extraction in finding 5
@@ -286,10 +405,14 @@ string that the native layers put in `Exception.code`, and JS switches on `error
 
 Each step is its own PR and leaves `just check-all` green.
 
-1. **Delete the dead exports** (Rust, Swift, Kotlin, TS, web): four un-ratcheted `docs_write*`,
-   two `read_latest*`, three session methods, `sync_latest_via_only`, `new_with_data_dir`,
-   `handOverNativeBackground`, `nativeNodeOwner`, `publishResync`, `clearResync`; mesh behind
-   `cli`. CI regenerates the bindings. No behaviour change.
+1. **Delete what nothing calls.** Rust: four un-ratcheted `docs_write*`, two `read_latest*`,
+   three session methods, `sync_latest_via_only`, `new_with_data_dir`, `publishResync`,
+   `clearResync`; mesh behind `cli`. TS/JS: `handOverNativeBackground`, `nativeNodeOwner`, the
+   `NodeHost` compat paths (`nativeAdoptsNode`, `isClaimRefusal`'s retry, the `shutdown` +
+   `createNode` branch), `ingestFixesHeadless`, the seven uncalled service methods, the iOS
+   benchmark profile, the eleven orphan modules, the `background/` barrel. **wasm**: the crate,
+   the CI job, `build-wasm`, the `#[path]` sharing; `IrohLocationModule.web.ts` becomes a stub.
+   CI regenerates the bindings. No behaviour change.
 2. **Collapse the boolean-product names** with `Payload` and `Option<String>` traceparent;
    `push_trail` becomes the budgeted one.
 3. **`force` on `ingest_fix`**, delete the JS publish pipeline, shadow seq, and resync driver.
@@ -299,9 +422,15 @@ Each step is its own PR and leaves `just check-all` green.
 5. **Generated TS types from the Rust records**, ids as hex strings in Rust, total decoders,
    delete the 38 mappers and the `declare class`.
 6. **Typed errors** with codes; delete the regex classifiers.
-7. **Extract `PairingSession`** as a reducer; introduce `singleFlight` / `withTimeout` /
-   `changedSince`; then trail and background.
-8. **Motion machine into Rust.**
+7. **Android background: native geofence receiver + native device health**, then delete
+   `runRefresh`, `teardownBounded` and the `native-runtime-owner` chain. Fix the `revive-task.ts`
+   header either way.
+8. **Extract `PairingSession`** as a reducer; introduce `singleFlight` / `withTimeout` /
+   `changedSince`; then trail.
+9. **Native runtime always ingests; the JS engine becomes a listener.** Battery tiers move into
+   Rust. This is the first half of the motion machine.
+10. **Motion machine into Rust.**
+11. **Retire the web target** once `store-shots` runs on a simulator.
 
-Steps 1 to 4 are mechanical and each is a day. Step 5 is the one worth designing before starting,
+Steps 1 to 4 are mechanical and each is a day or less. Step 5 is the one worth designing before starting,
 because it decides what every later record looks like.
