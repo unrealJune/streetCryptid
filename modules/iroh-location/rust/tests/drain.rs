@@ -1193,6 +1193,215 @@ async fn leaving_a_stop_retracts_the_parked_declaration() {
     );
 }
 
+/// [`fix`], `metres` due north of it.
+fn fix_north(ts: u64, accuracy_m: f64, metres: f64) -> LocationFix {
+    LocationFix {
+        lat: 47.6062 + metres / 111_195.0,
+        ..fix(ts, accuracy_m)
+    }
+}
+
+/// A phone parked by a visit: one fix, then the runtime's proof of a stop.
+async fn parked_harness(base: u64) -> Harness {
+    let h = Harness::new();
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    h.engine()
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, base + INTERVAL)
+        .await
+        .unwrap();
+    h
+}
+
+#[tokio::test]
+async fn opening_the_app_at_a_stop_does_not_retract_the_parked_declaration() {
+    // 2026-10-07: parked by a visit, the owner opened the app, the mounted app's fixes from the
+    // same spot went out `live`, the app was put away and iOS suspended the process. Nothing ever
+    // said `parked` again, so the friend's map read "out of contact" about a phone sitting still.
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+
+    let opened = base + INTERVAL * 2;
+    let out = h
+        .engine()
+        .ingest(
+            fix_north(opened, 12.0, 17.0),
+            healthy_battery(),
+            INTERVAL,
+            opened,
+        )
+        .await
+        .unwrap();
+    assert!(out.accepted, "precondition: a good fix, not a refused one");
+
+    let sent = h.sink.sent.lock().unwrap();
+    let stamps = h.sink.stamps.lock().unwrap();
+    let last = stamps.len() - 1;
+    assert_eq!(stamps[last].0, Some(iroh_location::FIX_STATE_PARKED));
+    assert_eq!(sent[last].1, opened, "and it carries the fresh position");
+    assert_eq!(stamps[last].1, Some(0));
+}
+
+#[tokio::test]
+async fn walking_out_of_the_stop_goes_back_to_live() {
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+
+    // 12 m accuracy + the 100 m fence: 150 m out has left.
+    let walked = base + INTERVAL * 2;
+    h.engine()
+        .ingest(
+            fix_north(walked, 12.0, 150.0),
+            healthy_battery(),
+            INTERVAL,
+            walked,
+        )
+        .await
+        .unwrap();
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_LIVE)
+    );
+    assert!(h.gate.0.lock().unwrap().parked_at.is_none());
+}
+
+#[tokio::test]
+async fn a_slow_walk_is_measured_from_the_stop_not_from_the_last_fix() {
+    // Each step is well inside the fence of the one before; the fourth is outside the stop's.
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+
+    for step in 1..=4u64 {
+        let at = base + INTERVAL + step * INTERVAL;
+        h.engine()
+            .ingest(
+                fix_north(at, 5.0, 40.0 * step as f64),
+                healthy_battery(),
+                INTERVAL,
+                at,
+            )
+            .await
+            .unwrap();
+    }
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    let tail: Vec<_> = stamps[stamps.len() - 4..].iter().map(|s| s.0).collect();
+    use iroh_location::{FIX_STATE_LIVE as LIVE, FIX_STATE_PARKED as PARKED};
+    assert_eq!(
+        tail,
+        vec![Some(PARKED), Some(PARKED), Some(LIVE), Some(LIVE)],
+        "40 and 80 m are the stop; 120 m (> 5 + 100) has left it"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_fix_at_a_stop_does_not_retract_the_parked_declaration() {
+    // An indoor Wi-Fi fix past the accuracy gate says nothing about motion either.
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+
+    let later = base + INTERVAL * 2;
+    let out = h
+        .engine()
+        .ingest(fix(later, 5_000.0), healthy_battery(), INTERVAL, later)
+        .await
+        .unwrap();
+    assert!(!out.accepted, "precondition: the gate refused this fix");
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_PARKED)
+    );
+}
+
+#[tokio::test]
+async fn a_stop_declared_before_the_anchor_existed_holds_from_the_last_known_position() {
+    // Gate state from a build that predates `parked_at`: the phone parked, then upgraded.
+    let base = INTERVAL * 10;
+    let h = Harness::new();
+    *h.gate.0.lock().unwrap() = GateState {
+        last_known_fix: Some((&fix(base, 20.0)).into()),
+        last_accepted_at: Some(base),
+        last_published_slot: Some(base / INTERVAL),
+        last_state: Some(iroh_location::FIX_STATE_PARKED),
+        slot_interval_ms: Some(INTERVAL),
+        ..GateState::default()
+    };
+
+    let at = base + INTERVAL;
+    h.engine()
+        .ingest(fix_north(at, 10.0, 30.0), healthy_battery(), INTERVAL, at)
+        .await
+        .unwrap();
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_PARKED)
+    );
+    let anchor = h.gate.0.lock().unwrap().parked_at.clone().unwrap();
+    assert_eq!(
+        anchor.ts, base,
+        "anchored on the position it parked at, once"
+    );
+}
+
+#[tokio::test]
+async fn a_parked_tick_does_not_move_the_stop() {
+    // Fixes at the stop refresh `last_known_fix`; a later parked tick must not re-anchor on it,
+    // or a stop could be walked away from one tick at a time.
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+    let at = base + INTERVAL * 2;
+    h.engine()
+        .ingest(fix_north(at, 5.0, 60.0), healthy_battery(), INTERVAL, at)
+        .await
+        .unwrap();
+    h.engine()
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, at + INTERVAL)
+        .await
+        .unwrap();
+
+    let anchor = h.gate.0.lock().unwrap().parked_at.clone().unwrap();
+    assert_eq!(
+        anchor.ts, base,
+        "still the position the stop was declared at"
+    );
+}
+
+#[tokio::test]
+async fn leaving_a_stop_clears_its_anchor() {
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+    h.engine()
+        .heartbeat(
+            Motion::Moving,
+            healthy_battery(),
+            INTERVAL,
+            base + INTERVAL * 2,
+        )
+        .await
+        .unwrap();
+    assert!(h.gate.0.lock().unwrap().parked_at.is_none());
+
+    // ...so a fix back at the old spot is a live fix, not a resumed stop.
+    let back = base + INTERVAL * 3;
+    h.engine()
+        .ingest(fix(back, 20.0), healthy_battery(), INTERVAL, back)
+        .await
+        .unwrap();
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_LIVE)
+    );
+}
+
 #[tokio::test]
 async fn leaving_a_stop_does_not_downgrade_a_live_stamp() {
     let h = Harness::new();

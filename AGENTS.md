@@ -166,6 +166,11 @@ Conventions when changing that code:
   JS timer, a refresh while moving — which keeps whatever the last evidence stamped. It used to stamp
   `parked` unconditionally, and on 2026-10-02 the JS timer published four hours of "parked here"
   from an iPhone whose runtime was in `moving`.
+  The converse binds `ingest`: a fix is not motion evidence either. An accepted fix within its own
+  accuracy plus 100 m of where the stop was declared (`GateState::parked_at`, mirroring Swift's
+  `considerDeparture`), or a fix the gate refused, keeps `parked`; only leaving that radius or
+  `Some(false)` ends it. On 2026-10-07 opening the app at a stop sealed two `live` envelopes, the
+  process was then suspended, and friends read "out of contact" about a phone sitting still.
 - **A position Core Location hands back is not a capture.** `didUpdateLocations` drops a location
   whose timestamp is not newer than the last one delivered: on 2026-10-02 one fix came back every
   30 s for 73 minutes, the first two went out `live` 5-9 minutes stale, and the rest read as a

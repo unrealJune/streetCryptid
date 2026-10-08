@@ -157,6 +157,28 @@ pub fn assess_fix(
     None
 }
 
+/// How far an accepted fix may sit from the parked anchor and still be the same stop.
+///
+/// Mirrors `stopAnchorRadiusM` in `BackgroundLocationRuntime.swift`, and [`still_parked`] mirrors
+/// its `considerDeparture` threshold (the fix's own accuracy plus this), so the engine and the iOS
+/// state machine agree on where a stop ends. Agreeing matters more than the number: if the engine
+/// let go first it would go back to stamping `live` from a phone the runtime still calls stopped.
+pub const PARKED_HOLD_RADIUS_M: f64 = 100.0;
+
+/// Whether an accepted fix leaves a standing `parked` declaration standing.
+///
+/// A fresh position is not evidence of motion. On 2026-10-07 an iPhone parked through a `CLVisit`
+/// at 22:49 UTC, its owner opened the app at 22:59, and the mounted app's two fixes from the same
+/// spot (17 m from the anchor) went out `live`. The app was backgrounded at 23:01, iOS suspended
+/// the process, and since the runtime was ALREADY stopped no later delivery confirmed the stop
+/// again — so the last envelope before the silence said `live`, and friends' maps read "out of
+/// contact" two hours later about a phone that was sitting still on purpose.
+///
+/// A fix with no radius (`accuracy_m <= 0`) is judged on the fence alone.
+pub fn still_parked(fix: &LocationFix, anchor: &LocationFix) -> bool {
+    haversine_metres(anchor, fix) <= fix.accuracy_m.max(0.0) + PARKED_HOLD_RADIUS_M
+}
+
 /// How many envelopes this moment owes, and how many the backfill cap skipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlotPlan {
@@ -288,8 +310,17 @@ pub struct GateState {
     /// very end — a field inserted above shifts everything after it and reads as garbage.
     pub last_state: Option<u8>,
     /// The interval `last_published_slot` was minted on. `None` in state written before
-    /// 2026-09-30. See [`regrid`], which is the only reader. MUST STAY LAST (append after it).
+    /// 2026-09-30. See [`regrid`], which is the only reader.
     pub slot_interval_ms: Option<u64>,
+    /// Where the standing `parked` declaration was made. `Some` only while
+    /// [`Self::last_state`] is `FIX_STATE_PARKED`.
+    ///
+    /// A fix accepted inside [`still_parked`] of this keeps the declaration; one outside it ends
+    /// it. It is the anchor and not [`Self::last_known_fix`] because the latter moves with every
+    /// accepted fix, and measuring each fix against the one before would let a slow walk out of
+    /// the house stay `parked` the whole way. `None` in state written before 2026-10-07, which
+    /// falls back to `last_known_fix` once. MUST STAY LAST (append after it).
+    pub parked_at: Option<StoredFix>,
 }
 
 /// Durable home for [`GateState`], next to the outbox it feeds.

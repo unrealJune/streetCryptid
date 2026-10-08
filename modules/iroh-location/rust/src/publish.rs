@@ -396,20 +396,34 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             now_ms,
             &self.quality,
         );
-        if rejection.is_none() {
-            state.last_known_fix = Some(StoredFix::from(&fix));
-            state.last_accepted_at = Some(now_ms);
-        }
 
         // Record WHY the position about to go out is the position it is. A rejected fix still
         // fills its slot with the last accepted one, so from the wire a stretch of bad GPS and a
         // stretch of sitting still are byte-identical — which is correct for privacy and useless
         // for the UI. This is the one bit that separates them, and only the sender has it.
-        state.last_state = Some(if rejection.is_none() {
-            FIX_STATE_LIVE
-        } else {
-            FIX_STATE_NO_FIX
-        });
+        //
+        // A standing `parked` survives a fix that proves nothing about motion: one accepted at the
+        // stop (see `gate::still_parked` for the incident), or one the gate refused. Only a fix
+        // that has left the stop, or a caller's `Motion::Moving`, ends it.
+        let parked = state.last_state == Some(FIX_STATE_PARKED);
+        let anchor = state
+            .parked_at
+            .take()
+            .or_else(|| state.last_known_fix.clone());
+        let (stamp, parked_at) = match (&rejection, anchor) {
+            (None, Some(at)) if parked && gate::still_parked(&fix, &LocationFix::from(&at)) => {
+                (FIX_STATE_PARKED, Some(at))
+            }
+            (None, _) => (FIX_STATE_LIVE, None),
+            (Some(_), at) if parked => (FIX_STATE_PARKED, at),
+            (Some(_), _) => (FIX_STATE_NO_FIX, None),
+        };
+        state.last_state = Some(stamp);
+        state.parked_at = parked_at;
+        if rejection.is_none() {
+            state.last_known_fix = Some(StoredFix::from(&fix));
+            state.last_accepted_at = Some(now_ms);
+        }
 
         // A hard stop, indistinguishable from the phone dying. Deliberately not a slower cadence:
         // the interval is observable to the stash, so backing it off would put the charge level on
@@ -506,6 +520,14 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // parked publishing rides on OS wakes, and p90 between contacts on iOS is 92 minutes with
         // a 17-hour tail. A caller that cannot prove a stop leaves the last real evidence standing.
         state.last_state = motion.stamp(state.last_state);
+        // The stop is anchored where it was first declared; later parked ticks do not move it.
+        state.parked_at = match state.last_state {
+            Some(FIX_STATE_PARKED) => state
+                .parked_at
+                .take()
+                .or_else(|| state.last_known_fix.clone()),
+            _ => None,
+        };
 
         gate::regrid(&mut state, interval_ms);
         let plan = gate::due_slots(now_ms, interval_ms, state.last_published_slot);
