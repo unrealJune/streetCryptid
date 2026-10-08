@@ -2,7 +2,9 @@
 
 Reproduces `docs/audit/ubrn-spike-2026-10-08.md` on a Linux or macOS host with Rust and bun.
 Nothing here is wired into the app; it generates bindings into a scratch directory and calls
-the real crate from TypeScript through the Node runtime.
+the real crate from TypeScript through the Node runtime. `scripts/spikes/**` is excluded from the
+app's `tsconfig.json`, since the harness imports generated code that lives only in the scratch
+directory; it typechecks against its own `tsconfig.json` there.
 
 ```sh
 # 1. a cdylib to read the UniFFI metadata from (debug is fine, ~8 min cold on 4 cores)
