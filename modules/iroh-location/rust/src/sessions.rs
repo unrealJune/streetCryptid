@@ -305,7 +305,7 @@ pub struct SessionManager {
     /// takes `critical`. Holding `health` across the acquisition of `critical` anywhere would
     /// invert that and deadlock the publish path against the receive path, intermittently.
     critical: Mutex<()>,
-    window: u32,
+    window: std::sync::atomic::AtomicU32,
     t_lapse_ms: std::sync::atomic::AtomicU64,
     /// Miss counting and restart bookkeeping per peer.
     ///
@@ -337,7 +337,7 @@ impl std::fmt::Debug for SessionManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionManager")
             .field("store", &self.store)
-            .field("window", &self.window)
+            .field("window", &self.window())
             .field("t_lapse_ms", &self.t_lapse_ms())
             .finish()
     }
@@ -393,7 +393,7 @@ impl SessionManager {
             store,
             self_id,
             critical: Mutex::new(()),
-            window: DEFAULT_ACCEPT_WINDOW,
+            window: std::sync::atomic::AtomicU32::new(DEFAULT_ACCEPT_WINDOW),
             t_lapse_ms: std::sync::atomic::AtomicU64::new(DEFAULT_T_LAPSE_MS),
             health: Mutex::new(HashMap::new()),
             desync_threshold: DEFAULT_DESYNC_THRESHOLD,
@@ -415,6 +415,17 @@ impl SessionManager {
 
     fn t_lapse_ms(&self) -> u64 {
         self.t_lapse_ms.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Change the acceptance window on a live manager. Tests only: it is how an integration test
+    /// reaches "beyond the window" without publishing [`DEFAULT_ACCEPT_WINDOW`] real envelopes.
+    pub fn set_accept_window(&self, window: u32) {
+        self.window
+            .store(window, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn window(&self) -> u32 {
+        self.window.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn self_id(&self) -> [u8; 32] {
@@ -689,12 +700,12 @@ impl SessionManager {
             let in_use = record
                 .current
                 .as_ref()
-                .is_some_and(|entry| entry.state.matches(&loc.header, &loc.kid, self.window));
+                .is_some_and(|entry| entry.state.matches(&loc.header, &loc.kid, self.window()));
             if in_use {
                 let entry = record.current.as_mut().expect("checked above");
                 let key = entry
                     .state
-                    .accept(&loc.header, now_ms, self.window, &mut keys)?;
+                    .accept(&loc.header, now_ms, self.window(), &mut keys)?;
                 let opened = verified
                     .open_wrap(index, &entry.state.session_id(), key)
                     .map_err(|_| SessionError::NotForUs)?;
@@ -720,12 +731,12 @@ impl SessionManager {
             let archived = record
                 .previous
                 .iter()
-                .position(|entry| entry.state.matches(&loc.header, &loc.kid, self.window));
+                .position(|entry| entry.state.matches(&loc.header, &loc.kid, self.window()));
             if let Some(slot) = archived {
                 let entry = &mut record.previous[slot];
                 let key = entry
                     .state
-                    .accept(&loc.header, now_ms, self.window, &mut keys)?;
+                    .accept(&loc.header, now_ms, self.window(), &mut keys)?;
                 let opened = verified
                     .open_wrap(index, &entry.state.session_id(), key)
                     .map_err(|_| SessionError::NotForUs)?;
@@ -753,10 +764,10 @@ impl SessionManager {
                 };
                 // Another recipient's restart header can name a prekey id that happens to exist
                 // here too; only our own derivation reproduces this wrap's kid.
-                if !state.matches(&loc.header, &loc.kid, self.window) {
+                if !state.matches(&loc.header, &loc.kid, self.window()) {
                     continue;
                 }
-                let key = state.accept(&loc.header, now_ms, self.window, &mut keys)?;
+                let key = state.accept(&loc.header, now_ms, self.window(), &mut keys)?;
                 let session_id = state.session_id();
                 let opened = verified
                     .open_wrap(index, &session_id, key)
@@ -826,10 +837,10 @@ impl SessionManager {
             let Some(mut state) = self.derive_follower_session(author, &boot, now_ms)? else {
                 continue;
             };
-            if !state.matches(&loc.header, &loc.kid, self.window) {
+            if !state.matches(&loc.header, &loc.kid, self.window()) {
                 continue;
             }
-            state.prime(&loc.header, now_ms, self.window, &mut keys)?;
+            state.prime(&loc.header, now_ms, self.window(), &mut keys)?;
             let session_id = state.session_id();
             self.adopt(author, &mut record, state, now_ms)?;
             tracing::info!(
