@@ -123,8 +123,9 @@ Conventions when changing that code:
   margin. `friend.pull` records each one (and `expired` from the expiration handler, `stranded`
   from the next pull finding the durable in-flight mark); `wake.pull_*` counts the same, because
   the outcomes that matter are the ones that may never ship. A mounted app is sent
-  `onFriendsPulled` and re-reads the replica — a local read, never a second dial. See
-  `infra/otel/README.md`.
+  `onFriendsPulled` and re-reads the replica — a local read, never a second dial. Android had the
+  same hole (the service keeps the app mounted, so every capture is a hand-off) and pulls the same
+  way after a hand-off while no activity is in the foreground. See `infra/otel/README.md`.
 - **`bg.wake` and `bg.backfill` do not exist.** They went dead when capture moved into Rust — the
   location wake is native and emits no JS span at all. Six e2e scenarios asserted them,
   `background-location-e2e.sh` gated its PASS on `bg.wake > 0` so it could never pass, and two
