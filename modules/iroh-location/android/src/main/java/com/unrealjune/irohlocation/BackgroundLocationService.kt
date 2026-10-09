@@ -206,7 +206,7 @@ class BackgroundLocationService : Service() {
       // Same hand-off as a capture: while the app is mounted it runs the pipeline's front half
       // (policy, own marker). `null` fix: a parked tick has no position, and `routeNativeCapture`
       // reads `kind` to know that.
-      NativeBackgroundRuntime.Capture.HandToApp ->
+      NativeBackgroundRuntime.Capture.HandToApp -> {
         IrohLocationModule.handOffCapture(
           fix = null,
           battery = battery,
@@ -215,6 +215,9 @@ class BackgroundLocationService : Service() {
           state = "stopped",
           parked = true,
         )
+        // The app publishes; receiving off screen is still ours. Declines while it is on screen.
+        NativeBackgroundRuntime.pullAfterHandOff(applicationContext, trigger = "periodic")
+      }
       NativeBackgroundRuntime.Capture.Unavailable -> Unit
     }
   }
@@ -246,6 +249,8 @@ class BackgroundLocationService : Service() {
           // The module was torn down between the routing decision and the hand-off. Unlike the
           // queued cases this fix is simply gone, so say so rather than letting it look routine.
           Log.w(TAG, "capture dropped: the app was wired a moment ago and is not any more")
+        } else {
+          NativeBackgroundRuntime.pullAfterHandOff(applicationContext, trigger = "movement")
         }
       // No identity, or the ingest threw. The fix stays in the native outbox for the next wake.
       NativeBackgroundRuntime.Capture.Unavailable -> Unit

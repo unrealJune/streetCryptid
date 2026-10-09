@@ -603,6 +603,36 @@ describe('LocationSharingService — durable trail wiring', () => {
     expect(latest.some((p) => p.author === 'bb22' && p.seq === 7)).toBe(true);
   });
 
+  it('reads a native background pull out of the replica without dialling anyone', async () => {
+    // The native runtime pulled while the app was off screen and the entries are already in the
+    // replica. The app's half is a local read, so the map is current the moment it is opened —
+    // a second network pass here would cost exactly the background time the pull was bounded by.
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+    const syncsBefore = mockHolder.mod.calls.syncLatest.length;
+    mockHolder.mod.trailFixes = [
+      { author: 'bb22', seq: 11, fix: { lat: 7, lon: 8, accuracyM: 4, headingDeg: 0, ts: 777 } },
+    ];
+    // The snapshot, not the trail-change fan-out: that one is coalesced behind a timer.
+    let notified = 0;
+    svc.onChange(() => {
+      notified += 1;
+    });
+    notified = 0;
+
+    await (
+      svc as unknown as {
+        handleNativePull(e: { trigger: string; entries: number; elapsedMs: number }): Promise<void>;
+      }
+    ).handleNativePull({ trigger: 'periodic', entries: 1, elapsedMs: 900 });
+
+    const latest = await svc.friendLatest();
+    expect(latest.some((p) => p.author === 'bb22' && p.seq === 11)).toBe(true);
+    expect(notified).toBeGreaterThan(0);
+    expect(mockHolder.mod.calls.syncLatest.length).toBe(syncsBefore);
+  });
+
   it('routes a backfill onFix into the trail and flags it', async () => {
     const svc = makeService();
     const received: IncomingFix[] = [];

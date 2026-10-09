@@ -13,6 +13,7 @@ import {
   type NativeRatchetEvent,
   type NodeKeys,
   type OnFixEvent,
+  type OnFriendsPulledEvent,
   type OnNativeFixEvent,
   type OnOpaqueEvent,
   type PairEvent,
@@ -822,6 +823,11 @@ export class LocationSharingService {
    * See {@link handleNativeCapture} — this is how a mounted app publishes at all.
    */
   private nativeFixSub: Removable | null = null;
+  /**
+   * The native runtime's "I pulled friends while you were off screen" — see
+   * {@link handleNativePull}. Live only while background sharing is on, like the handoff.
+   */
+  private nativePullSub: Removable | null = null;
   private bgRefreshHandlerStop: (() => void) | null = null;
   private bgLifecycleStop: (() => void) | null = null;
   private bgCadenceStop: (() => Promise<void>) | null = null;
@@ -3437,6 +3443,10 @@ export class LocationSharingService {
         this.mod.addListener?.('onNativeFix', (event: OnNativeFixEvent) => {
           void this.handleNativeCapture(event);
         }) ?? null;
+      this.nativePullSub =
+        this.mod.addListener?.('onFriendsPulled', (event: OnFriendsPulledEvent) => {
+          void this.handleNativePull(event);
+        }) ?? null;
 
       await nativeProvider.reprogram(initialCfg);
       this.setNativeBackground(true);
@@ -3627,6 +3637,8 @@ export class LocationSharingService {
     this.bgLifecycleStop = null;
     this.nativeFixSub?.remove();
     this.nativeFixSub = null;
+    this.nativePullSub?.remove();
+    this.nativePullSub = null;
     // Detach the engine BEFORE any of the slow work below, and stop the detached copy rather than
     // re-reading the field.
     //
@@ -4471,6 +4483,35 @@ export class LocationSharingService {
    * phone sometimes reports a position kilometres away, and rendering that before discarding it
    * would throw the user's own marker across town for a frame.
    */
+  /**
+   * The native runtime pulled friends' fixes into the replica while this app was off screen.
+   *
+   * The pull is native because the app's own pull clock runs only on screen, and a pocketed app
+   * used to see nothing until it was opened (2026-10-09: 4892 wakes, 0 pulls). This is the local
+   * half: read what landed into the trail store, so the map is already current when it is opened
+   * rather than a network round trip later. A replica read only — no dial.
+   */
+  private async handleNativePull(event: OnFriendsPulledEvent): Promise<void> {
+    const span = getTelemetry().startSpan('trail.refresh.native_pull', {
+      attributes: {
+        'pull.trigger': event.trigger,
+        'pull.entries': event.entries,
+        'pull.elapsed_ms': event.elapsedMs,
+      },
+    });
+    try {
+      const recovered = await this.refreshTrailFromReplica(0);
+      span.setAttribute('recovered', recovered);
+      span.setStatus('ok');
+      this.notifyTrailChanged();
+      this.emit();
+    } catch (error) {
+      span.setStatus('error', error instanceof Error ? error.message : String(error));
+    } finally {
+      span.end();
+    }
+  }
+
   private async handleNativeCapture(event: OnNativeFixEvent): Promise<void> {
     const engine = this.engine;
     // No engine means sharing is not running here; the capture is not ours to publish.

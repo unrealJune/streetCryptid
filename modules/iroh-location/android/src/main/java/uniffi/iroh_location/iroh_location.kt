@@ -737,6 +737,8 @@ external fun uniffi_iroh_location_checksum_func_mesh_open_fix(
 ): Int
 external fun uniffi_iroh_location_checksum_func_mesh_seal_fix(
 ): Int
+external fun uniffi_iroh_location_checksum_func_record_friend_pull(
+): Int
 external fun uniffi_iroh_location_checksum_func_node_host(
 ): Int
 external fun uniffi_iroh_location_checksum_func_record_location_runtime(
@@ -870,6 +872,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_publish_profile(
 external fun uniffi_iroh_location_checksum_method_locationnode_publish_resync(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_publish_watermarks(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_pull_latest(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_push_trail(
 ): Int
@@ -1153,6 +1157,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_publish_resync(`ptr`: L
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_publish_watermarks(`ptr`: Long,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_pull_latest(`ptr`: Long,`peerTickets`: RustBuffer.ByValue,`budgetMs`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_push_trail(`ptr`: Long,`peerTickets`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_push_trail_budgeted(`ptr`: Long,`peers`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
@@ -1305,6 +1311,8 @@ external fun uniffi_iroh_location_fn_func_mesh_open_fix(`recvSecret`: RustBuffer
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_mesh_seal_fix(`identitySecret`: RustBuffer.ByValue,`recvSecret`: RustBuffer.ByValue,`authorEndpointId`: RustBuffer.ByValue,`seq`: Long,`meshEpoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_record_friend_pull(`event`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_iroh_location_fn_func_node_host(uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_iroh_location_fn_func_record_location_runtime(`event`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1478,6 +1486,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_mesh_seal_fix() != 60001) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_record_friend_pull() != 38676) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_node_host() != 26497) {
@@ -1679,6 +1690,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_watermarks() != 59312) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_pull_latest() != 61053) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_push_trail() != 39469) {
@@ -3621,6 +3635,17 @@ public interface LocationNodeInterface {
     suspend fun `publishWatermarks`(): PublishWatermarks
     
     /**
+     * [`Self::sync_latest`] with a wall-clock budget, reporting what the pass cost and found.
+     *
+     * For the native background runtimes, which pull inside a window the OS sizes and may end
+     * without warning. `budget_ms` bounds the whole pass (`None` keeps `sync_latest`'s natural
+     * timeouts, up to 25 s waiting for a first event plus 8 s per idle gap); a pass cut short
+     * keeps whatever had already landed, and the live engine goes on syncing behind it. The
+     * report is what the caller puts on its `friend.pull` span — see `infra/otel/README.md`.
+     */
+    suspend fun `pullLatest`(`peerTickets`: List<kotlin.String>, `budgetMs`: kotlin.ULong?, `traceparent`: kotlin.String?): PullReport
+    
+    /**
      * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
      * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
      * actually gets a published fix off the phone.**
@@ -5542,6 +5567,36 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypePublishWatermarks.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * [`Self::sync_latest`] with a wall-clock budget, reporting what the pass cost and found.
+     *
+     * For the native background runtimes, which pull inside a window the OS sizes and may end
+     * without warning. `budget_ms` bounds the whole pass (`None` keeps `sync_latest`'s natural
+     * timeouts, up to 25 s waiting for a first event plus 8 s per idle gap); a pass cut short
+     * keeps whatever had already landed, and the live engine goes on syncing behind it. The
+     * report is what the caller puts on its `friend.pull` span — see `infra/otel/README.md`.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `pullLatest`(`peerTickets`: List<kotlin.String>, `budgetMs`: kotlin.ULong?, `traceparent`: kotlin.String?) : PullReport {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_pull_latest(
+                uniffiHandle,
+                FfiConverterSequenceString.lower(`peerTickets`),FfiConverterOptionalULong.lower(`budgetMs`),FfiConverterOptionalString.lower(`traceparent`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypePullReport.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -8298,6 +8353,136 @@ public object FfiConverterTypeEnqueueOutcome: FfiConverterRustBuffer<EnqueueOutc
 
 
 /**
+ * One `friend.pull` span.
+ */
+data class FriendPullEvent (
+    var `outcome`: FriendPullOutcome
+    , 
+    /**
+     * The wake reason the pull rode (`movement`, `periodic`, `refresh`, …).
+     */
+    var `trigger`: kotlin.String
+    , 
+    /**
+     * `active` / `inactive` / `background` — the app's state as UIKit reported it.
+     */
+    var `appState`: kotlin.String
+    , 
+    /**
+     * Whether a mounted JS runtime held the capture sink, i.e. this is the resident-app case.
+     */
+    var `jsWired`: kotlin.Boolean
+    , 
+    /**
+     * The deadline handed to `pull_latest`.
+     */
+    var `budgetMs`: kotlin.ULong
+    , 
+    /**
+     * What iOS said was left of the background allowance before and after the pull. `None` when
+     * it reported no limit, which is what a resident location-mode process usually sees.
+     */
+    var `bgRemainingStartMs`: kotlin.ULong?
+    , 
+    var `bgRemainingEndMs`: kotlin.ULong?
+    , 
+    /**
+     * Monotonic wall time around the call, measured by the caller (for `Stranded`, the age of
+     * the mark it found).
+     */
+    var `elapsedMs`: kotlin.ULong
+    , 
+    /**
+     * Process CPU across the pull, all threads, and the Rust core's share of it.
+     */
+    var `cpuMs`: kotlin.ULong?
+    , 
+    var `cpuMsRust`: kotlin.ULong?
+    , 
+    /**
+     * Time since the previous pull started, against the floor that gates them.
+     */
+    var `sinceLastMs`: kotlin.ULong?
+    , 
+    var `floorMs`: kotlin.ULong
+    , 
+    /**
+     * The core's measurement, when the pass returned.
+     */
+    var `report`: PullReport?
+    , 
+    var `error`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFriendPullEvent: FfiConverterRustBuffer<FriendPullEvent> {
+    override fun read(buf: ByteBuffer): FriendPullEvent {
+        return FriendPullEvent(
+            FfiConverterTypeFriendPullOutcome.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalTypePullReport.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FriendPullEvent) = (
+            FfiConverterTypeFriendPullOutcome.allocationSize(value.`outcome`) +
+            FfiConverterString.allocationSize(value.`trigger`) +
+            FfiConverterString.allocationSize(value.`appState`) +
+            FfiConverterBoolean.allocationSize(value.`jsWired`) +
+            FfiConverterULong.allocationSize(value.`budgetMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`bgRemainingStartMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`bgRemainingEndMs`) +
+            FfiConverterULong.allocationSize(value.`elapsedMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`cpuMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`cpuMsRust`) +
+            FfiConverterOptionalULong.allocationSize(value.`sinceLastMs`) +
+            FfiConverterULong.allocationSize(value.`floorMs`) +
+            FfiConverterOptionalTypePullReport.allocationSize(value.`report`) +
+            FfiConverterOptionalString.allocationSize(value.`error`)
+    )
+
+    override fun write(value: FriendPullEvent, buf: ByteBuffer) {
+            FfiConverterTypeFriendPullOutcome.write(value.`outcome`, buf)
+            FfiConverterString.write(value.`trigger`, buf)
+            FfiConverterString.write(value.`appState`, buf)
+            FfiConverterBoolean.write(value.`jsWired`, buf)
+            FfiConverterULong.write(value.`budgetMs`, buf)
+            FfiConverterOptionalULong.write(value.`bgRemainingStartMs`, buf)
+            FfiConverterOptionalULong.write(value.`bgRemainingEndMs`, buf)
+            FfiConverterULong.write(value.`elapsedMs`, buf)
+            FfiConverterOptionalULong.write(value.`cpuMs`, buf)
+            FfiConverterOptionalULong.write(value.`cpuMsRust`, buf)
+            FfiConverterOptionalULong.write(value.`sinceLastMs`, buf)
+            FfiConverterULong.write(value.`floorMs`, buf)
+            FfiConverterOptionalTypePullReport.write(value.`report`, buf)
+            FfiConverterOptionalString.write(value.`error`, buf)
+    }
+}
+
+
+
+/**
  * Everything the host knows, for `device.health` and for tests.
  */
 data class HostSnapshot (
@@ -9785,6 +9970,118 @@ public object FfiConverterTypePublishWatermarks: FfiConverterRustBuffer<PublishW
 
 
 /**
+ * What one [`LocationNode::pull_latest`] pass cost and found. The same numbers are on its
+ * `trail.sync` span; returning them lets the native caller put them on `friend.pull` beside the
+ * things only it knows (the wake, the OS's time allowance, the CPU spent).
+ */
+data class PullReport (
+    /**
+     * Wall time inside the pass. Read against the budget: well past it means the process was
+     * frozen mid-pull, since the deadline timer could not fire while it was.
+     */
+    var `elapsedMs`: kotlin.ULong
+    , 
+    var `peersRequested`: kotlin.UInt
+    , 
+    var `peersDialed`: kotlin.UInt
+    , 
+    /**
+     * Peers that delivered at least one entry.
+     */
+    var `peersDelivered`: kotlin.UInt
+    , 
+    /**
+     * Entries that landed in the replica.
+     */
+    var `entries`: kotlin.UInt
+    , 
+    /**
+     * Namespaces reconciled (our own plus one per friend).
+     */
+    var `namespaces`: kotlin.UInt
+    , 
+    /**
+     * Namespaces that errored before they could wait.
+     */
+    var `namespacesFailed`: kotlin.UInt
+    , 
+    /**
+     * How the others ended — see `docs::SyncEnd`. `ns_no_answer` is time spent on nobody.
+     */
+    var `nsContentReady`: kotlin.UInt
+    , 
+    var `nsClosed`: kotlin.UInt
+    , 
+    var `nsIdle`: kotlin.UInt
+    , 
+    var `nsNoAnswer`: kotlin.UInt
+    , 
+    var `nsDeadline`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePullReport: FfiConverterRustBuffer<PullReport> {
+    override fun read(buf: ByteBuffer): PullReport {
+        return PullReport(
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PullReport) = (
+            FfiConverterULong.allocationSize(value.`elapsedMs`) +
+            FfiConverterUInt.allocationSize(value.`peersRequested`) +
+            FfiConverterUInt.allocationSize(value.`peersDialed`) +
+            FfiConverterUInt.allocationSize(value.`peersDelivered`) +
+            FfiConverterUInt.allocationSize(value.`entries`) +
+            FfiConverterUInt.allocationSize(value.`namespaces`) +
+            FfiConverterUInt.allocationSize(value.`namespacesFailed`) +
+            FfiConverterUInt.allocationSize(value.`nsContentReady`) +
+            FfiConverterUInt.allocationSize(value.`nsClosed`) +
+            FfiConverterUInt.allocationSize(value.`nsIdle`) +
+            FfiConverterUInt.allocationSize(value.`nsNoAnswer`) +
+            FfiConverterUInt.allocationSize(value.`nsDeadline`)
+    )
+
+    override fun write(value: PullReport, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`elapsedMs`, buf)
+            FfiConverterUInt.write(value.`peersRequested`, buf)
+            FfiConverterUInt.write(value.`peersDialed`, buf)
+            FfiConverterUInt.write(value.`peersDelivered`, buf)
+            FfiConverterUInt.write(value.`entries`, buf)
+            FfiConverterUInt.write(value.`namespaces`, buf)
+            FfiConverterUInt.write(value.`namespacesFailed`, buf)
+            FfiConverterUInt.write(value.`nsContentReady`, buf)
+            FfiConverterUInt.write(value.`nsClosed`, buf)
+            FfiConverterUInt.write(value.`nsIdle`, buf)
+            FfiConverterUInt.write(value.`nsNoAnswer`, buf)
+            FfiConverterUInt.write(value.`nsDeadline`, buf)
+    }
+}
+
+
+
+/**
  * A decrypted ratcheted envelope read from the durable replica.
  *
  * `kind` is `fix` or `null`; `fix` is present only for the fix lane. Keeping null envelopes in
@@ -10294,6 +10591,59 @@ public object FfiConverterTypeFixRejection: FfiConverterRustBuffer<FixRejection>
     override fun allocationSize(value: FixRejection) = 4UL
 
     override fun write(value: FixRejection, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * How a pull ended, or how it was found to have ended.
+ */
+
+enum class FriendPullOutcome {
+    
+    /**
+     * The pass returned. Whether anything arrived is in the report.
+     */
+    COMPLETED,
+    /**
+     * The pass returned an error (every namespace failed, or the node was not running).
+     */
+    FAILED,
+    /**
+     * iOS's background-task expiration handler ran while the pull was still in flight: the OS
+     * is about to suspend us, and the pull may not finish. Emitted from the handler itself.
+     */
+    EXPIRED,
+    /**
+     * The next pull found this one's in-flight mark still set: the process was frozen or killed
+     * before it could finish, so nothing else could report it. `elapsed_ms` is the mark's age.
+     */
+    STRANDED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFriendPullOutcome: FfiConverterRustBuffer<FriendPullOutcome> {
+    override fun read(buf: ByteBuffer) = try {
+        FriendPullOutcome.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: FriendPullOutcome) = 4UL
+
+    override fun write(value: FriendPullOutcome, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -11209,6 +11559,38 @@ public object FfiConverterOptionalTypeProfileView: FfiConverterRustBuffer<Profil
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypePullReport: FfiConverterRustBuffer<PullReport?> {
+    override fun read(buf: ByteBuffer): PullReport? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypePullReport.read(buf)
+    }
+
+    override fun allocationSize(value: PullReport?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypePullReport.allocationSize(value)
+        }
+    }
+
+    override fun write(value: PullReport?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypePullReport.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeSasChallenge: FfiConverterRustBuffer<SasChallenge?> {
     override fun read(buf: ByteBuffer): SasChallenge? {
         if (buf.get().toInt() == 0) {
@@ -12095,6 +12477,19 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
 }
     )
     }
+    
+
+        /**
+         * Record one pull as a `friend.pull` span. Synchronous and cheap, like `record_location_runtime`;
+         * safe to call from an expiration handler.
+         */ fun `recordFriendPull`(`event`: FriendPullEvent)
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_record_friend_pull(
+    
+        FfiConverterTypeFriendPullEvent.lower(`event`),_status)
+}
+    
     
 
         /**

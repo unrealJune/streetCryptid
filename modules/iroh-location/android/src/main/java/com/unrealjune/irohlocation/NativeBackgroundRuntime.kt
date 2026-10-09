@@ -1,16 +1,24 @@
 package com.unrealjune.irohlocation
 
+import android.app.ActivityManager
 import android.content.Context
+import android.os.Process
+import android.os.SystemClock
 import android.util.Log
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import uniffi.iroh_location.BatteryState
+import uniffi.iroh_location.FriendPullEvent
+import uniffi.iroh_location.FriendPullOutcome
 import uniffi.iroh_location.IngestOutcome
 import uniffi.iroh_location.LocationFix
 import uniffi.iroh_location.NodeHolder
+import uniffi.iroh_location.PullReport
 import uniffi.iroh_location.Subscription
+import uniffi.iroh_location.recordFriendPull
 
 /**
  * The foreground service's way onto the network, for wakes with no JS context alive.
@@ -129,7 +137,7 @@ internal object NativeBackgroundRuntime {
           intervalMs,
           System.currentTimeMillis().toULong(),
         )
-      pullFriendFixes(context)
+      pullFriendFixes(context, trigger = "movement", wired = false)
       Capture.Ingested(outcome)
     } catch (e: Exception) {
       // The fix stays in the native outbox, so the next wake retries it. Failing loudly here would
@@ -172,7 +180,7 @@ internal object NativeBackgroundRuntime {
           // delivered for a whole slot — the Android proof of a stop.
           true,
         )
-      pullFriendFixes(context)
+      pullFriendFixes(context, trigger = "periodic", wired = false)
       Capture.Ingested(outcome)
     } catch (e: Exception) {
       // Same reasoning as `ingest`: a transient relay error must not take down the service. The
@@ -194,20 +202,110 @@ internal object NativeBackgroundRuntime {
    * Floored at one pull per [SYNC_FLOOR_MS], durably, because `syncLatest` dials every delivery
    * peer and a pull on every delivery would spend the budget the whole native path exists to
    * protect. Failures are swallowed: the publish already succeeded, and the next wake retries.
+   *
+   * Bounded by [PULL_BUDGET_MS] and recorded as a `friend.pull` span, the same as iOS's, so the two
+   * platforms' receive cost reads off one panel. A foreground service has no OS time allowance to
+   * report, so the `bg_remaining_*` fields stay empty here.
+   *
+   * `trigger` is `movement` for a delivery and `periodic` for the stationary ticker, which pulls on
+   * the longer [PARKED_SYNC_FLOOR_MS] — a clock, not news. `wired` is the mounted-app case (see
+   * [pullAfterHandOff]), which is told when the pull brought something.
    */
-  private suspend fun pullFriendFixes(context: Context) {
+  private suspend fun pullFriendFixes(context: Context, trigger: String, wired: Boolean) {
+    val floorMs = if (trigger == "periodic") PARKED_SYNC_FLOOR_MS else SYNC_FLOOR_MS
+    // One at a time: the service's deliveries and its ticker can both get here, and the floor
+    // below is only a read-then-write.
+    if (!pullInFlight.compareAndSet(false, true)) return
+    try {
+      pullUnlocked(context, trigger, wired, floorMs)
+    } finally {
+      pullInFlight.set(false)
+    }
+  }
+
+  /**
+   * Pull for a mounted app that is OFF SCREEN, after a capture was handed to it.
+   *
+   * The app takes every capture while it is mounted ([Capture.HandToApp]), and the foreground
+   * service keeps it mounted for as long as sharing runs — so this is the ordinary background case,
+   * not an edge one. Its own pulls are an on-screen clock plus the ~15 min `bg.refresh`, which Doze
+   * defers: on 2026-10-09 the Pixel's background pulls were 295 of 597 at that cadence, and the
+   * friend dots it showed on opening were that old. Declines while the app is on screen, which
+   * pulls for itself every 20 s to 5 min.
+   *
+   * Launched on its own scope so a 20 s pull never holds up the service's capture loop.
+   */
+  fun pullAfterHandOff(context: Context, trigger: String) {
+    if (appInForeground()) return
+    val app = context.applicationContext
+    pullScope.launch { pullFriendFixes(app, trigger, wired = true) }
+  }
+
+  /**
+   * Whether an activity of ours is in the foreground. The foreground service alone reports
+   * `IMPORTANCE_FOREGROUND_SERVICE`, which is ranked below this, so a pocketed app reads `false`.
+   */
+  private fun appInForeground(): Boolean {
+    val info = ActivityManager.RunningAppProcessInfo()
+    ActivityManager.getMyMemoryState(info)
+    return info.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+  }
+
+  private suspend fun pullUnlocked(
+    context: Context,
+    trigger: String,
+    wired: Boolean,
+    floorMs: Long,
+  ) {
     val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     val now = System.currentTimeMillis()
-    if (now - prefs.getLong(LAST_SYNC_KEY, 0L) < SYNC_FLOOR_MS) return
+    val last = prefs.getLong(LAST_SYNC_KEY, 0L)
+    if (now - last < floorMs) return
     prefs.edit().putLong(LAST_SYNC_KEY, now).apply()
     val held = NodeStorage.host.current() ?: return
+    val tickets =
+      try {
+        held.deliveryConfig().peerTickets
+      } catch (e: Exception) {
+        Log.w(TAG, "pull skipped: no delivery config", e)
+        return
+      }
+    if (tickets.isEmpty()) return
+    val startedAt = SystemClock.elapsedRealtime()
+    val cpuStart = Process.getElapsedCpuTime()
+    var report: PullReport? = null
+    var failure: String? = null
     try {
-      val tickets = held.deliveryConfig().peerTickets
-      if (tickets.isEmpty()) return
-      held.syncLatest(tickets, null)
-      Log.i(TAG, "pulled from ${tickets.size} peer(s)")
+      report = held.pullLatest(tickets, PULL_BUDGET_MS.toULong(), null)
     } catch (e: Exception) {
+      failure = e.message ?: e.javaClass.simpleName
       Log.w(TAG, "pull failed; the next wake retries", e)
+    }
+    val elapsed = SystemClock.elapsedRealtime() - startedAt
+    recordFriendPull(
+      FriendPullEvent(
+        outcome = if (failure == null) FriendPullOutcome.COMPLETED else FriendPullOutcome.FAILED,
+        trigger = trigger,
+        appState = "background",
+        jsWired = wired,
+        budgetMs = PULL_BUDGET_MS.toULong(),
+        bgRemainingStartMs = null,
+        bgRemainingEndMs = null,
+        elapsedMs = elapsed.coerceAtLeast(0L).toULong(),
+        cpuMs = (Process.getElapsedCpuTime() - cpuStart).coerceAtLeast(0L).toULong(),
+        cpuMsRust = null,
+        sinceLastMs = if (last > 0L) (now - last).coerceAtLeast(0L).toULong() else null,
+        floorMs = floorMs.toULong(),
+        report = report,
+        error = failure,
+      ),
+    )
+    if (report == null) return
+    Log.i(TAG, "pulled ${report.entries} entries from ${tickets.size} peer(s) in $elapsed ms")
+    // A mounted app draws friends from its own store; tell it there is something to read, so the
+    // map is current the moment it is opened rather than one network round trip later.
+    if (wired && report.entries > 0u) {
+      IrohLocationModule.notifyFriendsPulled(trigger, report.entries.toInt(), elapsed)
     }
   }
 
@@ -241,6 +339,15 @@ internal object NativeBackgroundRuntime {
   private const val LAST_SYNC_KEY = "last_sync_ms"
   /** One pull per default publish slot: a phone in motion pulls about as often as it sends. */
   private const val SYNC_FLOOR_MS = 5 * 60 * 1000L
+  /** The stationary ticker's floor: three publish slots, as on iOS's parked coarse stream. */
+  private const val PARKED_SYNC_FLOOR_MS = 15 * 60 * 1000L
+  /** The most one pull may take; see `pullBudgetMs` in `BackgroundLocationRuntime.swift`. */
+  private const val PULL_BUDGET_MS = 20_000L
+
+  private val pullInFlight = AtomicBoolean(false)
+
+  /** Where [pullAfterHandOff] runs, off the service's capture loop. Never cancelled. */
+  private val pullScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
   /** Bounds a release nobody is waiting on; matches the app's own teardown budget. */
   private const val STOP_TIMEOUT_MS: ULong = 5_000UL

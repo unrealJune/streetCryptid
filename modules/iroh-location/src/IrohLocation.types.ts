@@ -506,12 +506,26 @@ export interface OnNativeFixEvent {
   parked?: boolean;
 }
 
+/**
+ * The native runtime pulled friends' fixes into the replica while a mounted app was off screen
+ * (iOS only). Sent only when the pull brought something, so the app can re-read the replica it
+ * already holds — no network on this side.
+ */
+export interface OnFriendsPulledEvent {
+  /** The wake the pull rode: `movement` | `periodic` | `refresh` | ... */
+  trigger: string;
+  /** Entries that landed in the replica. */
+  entries: number;
+  elapsedMs: number;
+}
+
 export type IrohLocationEvents = {
   onFix: (event: OnFixEvent) => void;
   onOpaque: (event: OnOpaqueEvent) => void;
   onStatus: (event: OnStatusEvent) => void;
   onSync: (event: OnSyncEvent) => void;
   onNativeFix: (event: OnNativeFixEvent) => void;
+  onFriendsPulled: (event: OnFriendsPulledEvent) => void;
 };
 
 /** The callable surface of the native module. */

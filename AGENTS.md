@@ -112,6 +112,20 @@ Conventions when changing that code:
   on 2026-09-29 an iPhone reported 88 s in one window and nothing could say whether that was 88 s
   in a minute (an exception) or across twenty (7%), or whose it was. `rust` is ONE thread: UniFFI's
   tokio runtime is async-compat's current-thread `async-compat/tokio-1`, iroh's endpoint included.
+- **A pocketed app pulls friends natively, under a deadline, and every pull is watched.** On
+  2026-10-09 the fleet showed a foreground-launched iPhone, backgrounded and resident, taking 4892
+  wakes and 0 pulls in six hours: `pullFriendFixes` ran only when the native runtime owned the node,
+  and a mounted app's own pull clock (`presenceSyncIntervalMs`) stops off screen. It now pulls
+  from the `handOff` path too, declining only while the app is `active`; the parked coarse stream
+  (`periodic`) pulls on a 15 min floor, everything else on 5. A pull goes through
+  `pull_latest(budget)` — `sync_all_until` stops at the deadline and keeps what landed — under a
+  `beginBackgroundTask` assertion, with the budget clamped to `backgroundTimeRemaining` minus a
+  margin. `friend.pull` records each one (and `expired` from the expiration handler, `stranded`
+  from the next pull finding the durable in-flight mark); `wake.pull_*` counts the same, because
+  the outcomes that matter are the ones that may never ship. A mounted app is sent
+  `onFriendsPulled` and re-reads the replica — a local read, never a second dial. Android had the
+  same hole (the service keeps the app mounted, so every capture is a hand-off) and pulls the same
+  way after a hand-off while no activity is in the foreground. See `infra/otel/README.md`.
 - **`bg.wake` and `bg.backfill` do not exist.** They went dead when capture moved into Rust — the
   location wake is native and emits no JS span at all. Six e2e scenarios asserted them,
   `background-location-e2e.sh` gated its PASS on `bg.wake > 0` so it could never pass, and two
