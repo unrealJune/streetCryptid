@@ -562,7 +562,7 @@ class IrohLocationModule : Module() {
     Name("IrohLocation")
     // `onNativeFix` is the mounted-app handoff: while the app is wired the foreground service hands
     // its captures here rather than running them itself. See `IrohLocationModule.handOffCapture`.
-    Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix")
+    Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix", "onFriendsPulled")
 
     OnCreate {
       val context = checkNotNull(

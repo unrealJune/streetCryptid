@@ -55,6 +55,31 @@ enum BackgroundWakeLedger {
   /// 2026-09-29 could not say which it was.
   private static let wallAtCpuMax = "sc.bg.wall_ms_at_cpu_max"
 
+  /// Receive-side pulls (`BackgroundLocationRuntime.pullFriendFixes`): what they cost and how they
+  /// ended. `syncs` above still counts every pull that ran; these say whether running them is
+  /// safe inside the window iOS gives us — see `friend_pull.rs` for the span with the detail.
+  private static let pullMsTotal = "sc.bg.pull_ms_total"
+  private static let pullMsMax = "sc.bg.pull_ms_max"
+  private static let pullCpuMsTotal = "sc.bg.pull_cpu_ms_total"
+  /// Pulls that brought at least one entry. Against `syncs`, the share that was worth it.
+  private static let pullDelivered = "sc.bg.pull_delivered"
+  private static let pullFailed = "sc.bg.pull_failed"
+  /// Pulls the budget cut short (at least one namespace ended on the deadline).
+  private static let pullDeadlineHits = "sc.bg.pull_deadline_hits"
+  /// Pulls that came back well past their budget: the process was frozen inside one.
+  private static let pullOverruns = "sc.bg.pull_overruns"
+  /// iOS's background-task expiration handler ran while a pull was in flight.
+  private static let pullExpired = "sc.bg.pull_expired"
+  /// A pull's in-flight mark found by a later one: frozen or killed before it finished.
+  private static let pullStranded = "sc.bg.pull_stranded"
+  /// Pulls not started because iOS had too little background time left to give one a budget.
+  private static let pullNoTime = "sc.bg.pull_no_time"
+  /// The in-flight mark. Set before a pull starts, cleared when it returns — so one found by the
+  /// NEXT pull is a pull that never returned. Not reset with the counters: it is state, not a count.
+  private static let pullOpenAt = "sc.bg.pull_open_at_ms"
+  private static let pullOpenTrigger = "sc.bg.pull_open_trigger"
+  private static let pullOpenBudget = "sc.bg.pull_open_budget_ms"
+
   /// Marks of an open window. Absent means nothing is being timed, which is the ordinary state of a
   /// foregrounded app.
   private static let openCpu = "sc.bg.open_cpu_ms"
@@ -225,6 +250,69 @@ enum BackgroundWakeLedger {
     defaults.set(defaults.integer(forKey: syncs) + 1, forKey: syncs)
   }
 
+  // MARK: - Pulls
+
+  /// A pull's in-flight mark, as `openPull` left it.
+  struct OpenPull {
+    let startedAtMs: Double
+    let trigger: String
+    let budgetMs: UInt64
+  }
+
+  /// Set the in-flight mark. Synchronous, so it is on disk before the pull can be frozen. Returns
+  /// the mark's identity for `closePull`.
+  static func openPull(trigger: String, budgetMs: UInt64) -> Double {
+    let at = Date().timeIntervalSince1970 * 1000
+    defaults.set(at, forKey: pullOpenAt)
+    defaults.set(trigger, forKey: pullOpenTrigger)
+    defaults.set(Int(budgetMs), forKey: pullOpenBudget)
+    return at
+  }
+
+  /// Clear the in-flight mark at the end of the pull that set it — and only that one. A pull that
+  /// hung, was reported stranded, and finally returned must not clear its successor's mark.
+  static func closePull(_ mark: Double) {
+    guard defaults.double(forKey: pullOpenAt) == mark else { return }
+    for key in [pullOpenAt, pullOpenTrigger, pullOpenBudget] { defaults.removeObject(forKey: key) }
+  }
+
+  /// Clear the in-flight mark, returning what it held. Called before a pull starts, so a mark
+  /// found here belongs to a pull that never returned — the caller reports it and counts it with
+  /// `notePullStranded`.
+  static func takeOpenPull() -> OpenPull? {
+    guard let at = defaults.object(forKey: pullOpenAt) as? Double else { return nil }
+    let open = OpenPull(
+      startedAtMs: at,
+      trigger: defaults.string(forKey: pullOpenTrigger) ?? "unknown",
+      budgetMs: UInt64(max(0, defaults.integer(forKey: pullOpenBudget))))
+    for key in [pullOpenAt, pullOpenTrigger, pullOpenBudget] { defaults.removeObject(forKey: key) }
+    return open
+  }
+
+  /// Fold one finished pull into the counters.
+  static func notePull(
+    elapsedMs: Double, cpuMs: Double?, delivered: Bool, failed: Bool, deadlineHit: Bool,
+    overran: Bool
+  ) {
+    defaults.set(defaults.double(forKey: pullMsTotal) + elapsedMs, forKey: pullMsTotal)
+    if elapsedMs > defaults.double(forKey: pullMsMax) { defaults.set(elapsedMs, forKey: pullMsMax) }
+    if let cpuMs {
+      defaults.set(defaults.double(forKey: pullCpuMsTotal) + cpuMs, forKey: pullCpuMsTotal)
+    }
+    if delivered { bump(pullDelivered) }
+    if failed { bump(pullFailed) }
+    if deadlineHit { bump(pullDeadlineHits) }
+    if overran { bump(pullOverruns) }
+  }
+
+  static func notePullExpired() { bump(pullExpired) }
+  static func notePullStranded() { bump(pullStranded) }
+  static func notePullNoTime() { bump(pullNoTime) }
+
+  private static func bump(_ key: String) {
+    defaults.set(defaults.integer(forKey: key) + 1, forKey: key)
+  }
+
   /// Begin timing a window.
   static func openWindow() {
     defaults.set(cpuMs(), forKey: openCpu)
@@ -292,6 +380,24 @@ enum BackgroundWakeLedger {
       out["cpu_ms_\(group.rawValue)"] = Int(ms)
     }
     out["cpu_ms_other"] = Int(max(0, defaults.double(forKey: cpuTotal) - attributed))
+    // `pull_*`: see the keys above. `pull_open` with a large `pull_open_age_ms` is a pull that is
+    // stranded right now and has not yet been found by the next one.
+    out["pull_ms_total"] = Int(defaults.double(forKey: pullMsTotal))
+    out["pull_ms_max"] = Int(defaults.double(forKey: pullMsMax))
+    out["pull_cpu_ms_total"] = Int(defaults.double(forKey: pullCpuMsTotal))
+    for (key, name) in [
+      (pullDelivered, "pull_delivered"), (pullFailed, "pull_failed"),
+      (pullDeadlineHits, "pull_deadline_hits"), (pullOverruns, "pull_overruns"),
+      (pullExpired, "pull_expired"), (pullStranded, "pull_stranded"), (pullNoTime, "pull_no_time"),
+    ] {
+      out[name] = defaults.integer(forKey: key)
+    }
+    if let at = defaults.object(forKey: pullOpenAt) as? Double {
+      out["pull_open"] = true
+      out["pull_open_age_ms"] = Int(Date().timeIntervalSince1970 * 1000 - at)
+    } else {
+      out["pull_open"] = false
+    }
     return out
   }
 
@@ -303,8 +409,12 @@ enum BackgroundWakeLedger {
   /// cadence resets; everything else reads.
   static func reset() {
     let groups = ThreadGroup.allCases.map { groupTotalPrefix + $0.rawValue }
+    let pulls = [
+      pullMsTotal, pullMsMax, pullCpuMsTotal, pullDelivered, pullFailed, pullDeadlineHits,
+      pullOverruns, pullExpired, pullStranded, pullNoTime,
+    ]
     for key in [wakes, bgLaunches, jsBoots, cpuTotal, cpuMax, wallTotal, wallAtCpuMax, syncs, dropped]
-      + groups
+      + groups + pulls
     {
       defaults.removeObject(forKey: key)
     }

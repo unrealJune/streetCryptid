@@ -458,7 +458,7 @@ public final class IrohLocationModule: Module {
     Name("IrohLocation")
     // `onNativeFix` is the mounted-app handoff: while the app is wired the background runtime hands
     // its captures here rather than running them itself. See `BackgroundLocationRuntime.eventSink`.
-    Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix")
+    Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix", "onFriendsPulled")
 
     /// Whether this binary refcounts the node instead of clobbering it on a second `createNode`.
     ///

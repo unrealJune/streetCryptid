@@ -6,11 +6,17 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import android.os.Process
+import android.os.SystemClock
 import uniffi.iroh_location.BatteryState
+import uniffi.iroh_location.FriendPullEvent
+import uniffi.iroh_location.FriendPullOutcome
 import uniffi.iroh_location.IngestOutcome
 import uniffi.iroh_location.LocationFix
 import uniffi.iroh_location.NodeHolder
+import uniffi.iroh_location.PullReport
 import uniffi.iroh_location.Subscription
+import uniffi.iroh_location.recordFriendPull
 
 /**
  * The foreground service's way onto the network, for wakes with no JS context alive.
@@ -194,20 +200,58 @@ internal object NativeBackgroundRuntime {
    * Floored at one pull per [SYNC_FLOOR_MS], durably, because `syncLatest` dials every delivery
    * peer and a pull on every delivery would spend the budget the whole native path exists to
    * protect. Failures are swallowed: the publish already succeeded, and the next wake retries.
+   *
+   * Bounded by [PULL_BUDGET_MS] and recorded as a `friend.pull` span, the same as iOS's, so the two
+   * platforms' receive cost reads off one panel. A foreground service has no OS time allowance to
+   * report, so the `bg_remaining_*` fields stay empty here.
    */
   private suspend fun pullFriendFixes(context: Context) {
     val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     val now = System.currentTimeMillis()
-    if (now - prefs.getLong(LAST_SYNC_KEY, 0L) < SYNC_FLOOR_MS) return
+    val last = prefs.getLong(LAST_SYNC_KEY, 0L)
+    if (now - last < SYNC_FLOOR_MS) return
     prefs.edit().putLong(LAST_SYNC_KEY, now).apply()
     val held = NodeStorage.host.current() ?: return
+    val tickets =
+      try {
+        held.deliveryConfig().peerTickets
+      } catch (e: Exception) {
+        Log.w(TAG, "pull skipped: no delivery config", e)
+        return
+      }
+    if (tickets.isEmpty()) return
+    val startedAt = SystemClock.elapsedRealtime()
+    val cpuStart = Process.getElapsedCpuTime()
+    var report: PullReport? = null
+    var failure: String? = null
     try {
-      val tickets = held.deliveryConfig().peerTickets
-      if (tickets.isEmpty()) return
-      held.syncLatest(tickets, null)
-      Log.i(TAG, "pulled from ${tickets.size} peer(s)")
+      report = held.pullLatest(tickets, PULL_BUDGET_MS.toULong(), null)
     } catch (e: Exception) {
+      failure = e.message ?: e.javaClass.simpleName
       Log.w(TAG, "pull failed; the next wake retries", e)
+    }
+    val elapsed = SystemClock.elapsedRealtime() - startedAt
+    recordFriendPull(
+      FriendPullEvent(
+        outcome = if (failure == null) FriendPullOutcome.COMPLETED else FriendPullOutcome.FAILED,
+        // Android's runtime does not classify its wakes; the service is the trigger.
+        trigger = "service",
+        appState = "background",
+        jsWired = false,
+        budgetMs = PULL_BUDGET_MS.toULong(),
+        bgRemainingStartMs = null,
+        bgRemainingEndMs = null,
+        elapsedMs = elapsed.coerceAtLeast(0L).toULong(),
+        cpuMs = (Process.getElapsedCpuTime() - cpuStart).coerceAtLeast(0L).toULong(),
+        cpuMsRust = null,
+        sinceLastMs = if (last > 0L) (now - last).coerceAtLeast(0L).toULong() else null,
+        floorMs = SYNC_FLOOR_MS.toULong(),
+        report = report,
+        error = failure,
+      ),
+    )
+    if (report != null) {
+      Log.i(TAG, "pulled ${report.entries} entries from ${tickets.size} peer(s) in $elapsed ms")
     }
   }
 
@@ -241,6 +285,8 @@ internal object NativeBackgroundRuntime {
   private const val LAST_SYNC_KEY = "last_sync_ms"
   /** One pull per default publish slot: a phone in motion pulls about as often as it sends. */
   private const val SYNC_FLOOR_MS = 5 * 60 * 1000L
+  /** The most one pull may take; see `pullBudgetMs` in `BackgroundLocationRuntime.swift`. */
+  private const val PULL_BUDGET_MS = 20_000L
 
   /** Bounds a release nobody is waiting on; matches the app's own teardown budget. */
   private const val STOP_TIMEOUT_MS: ULong = 5_000UL

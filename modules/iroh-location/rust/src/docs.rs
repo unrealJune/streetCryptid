@@ -1015,12 +1015,16 @@ impl TrailDocs {
     /// so there is no per-entry surfacing and no sink.
     ///
     /// Returns every `(serving peer, author)` delivered into the replica during the pass, for
-    /// `peer.contact` (see [`crate::contact::tally_pull`]).
+    /// `peer.contact` (see [`crate::contact::tally_pull`]), and how the wait ended.
+    ///
+    /// `deadline` caps the whole wait. Stopping early is safe: dropping the subscription only stops
+    /// us WATCHING — the live engine keeps the namespace syncing and lands whatever arrives later.
     async fn sync_ns(
         &self,
         ns: NamespaceId,
         peers: Vec<EndpointAddr>,
-    ) -> Result<Vec<([u8; 32], [u8; 32])>> {
+        deadline: Option<Instant>,
+    ) -> Result<(Vec<([u8; 32], [u8; 32])>, SyncEnd)> {
         let doc = self.doc_for(ns).await?;
         let mut events = doc.subscribe().await?;
         doc.start_sync(peers).await?;
@@ -1031,14 +1035,16 @@ impl TrailDocs {
         let mut saw_event = false;
         let mut delivered: Vec<([u8; 32], [u8; 32])> = Vec::new();
         loop {
-            let wait = if saw_event {
-                SYNC_IDLE_TIMEOUT_SECS
-            } else {
-                SYNC_FIRST_EVENT_TIMEOUT_SECS
-            };
-            match timeout(Duration::from_secs(wait), events.next()).await {
+            let remaining = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+            let (wait, deadline_bound) = next_wait(saw_event, remaining);
+            if deadline_bound && wait.is_zero() {
+                return Ok((delivered, SyncEnd::Deadline));
+            }
+            match timeout(wait, events.next()).await {
                 // All reconciled entries have their content locally — the clean finish.
-                Ok(Some(Ok(LiveEvent::PendingContentReady))) => break,
+                Ok(Some(Ok(LiveEvent::PendingContentReady))) => {
+                    return Ok((delivered, SyncEnd::ContentReady))
+                }
                 // The one place a peer is named per entry. `read_latest_sealed` reads the replica
                 // afterwards and cannot tell a freshly delivered slot from one that was already
                 // there, so provenance has to be captured here, as it arrives.
@@ -1055,11 +1061,11 @@ impl TrailDocs {
                     }
                 }
                 Ok(Some(Ok(_))) => saw_event = true,
-                Ok(Some(Err(_))) | Ok(None) => break,
-                Err(_) => break, // idle timeout — settle for what transferred
+                Ok(Some(Err(_))) | Ok(None) => return Ok((delivered, SyncEnd::Closed)),
+                // Timed out — settle for what transferred, and say which clock ran out.
+                Err(_) => return Ok((delivered, timeout_end(saw_event, deadline_bound))),
             }
         }
-        Ok(delivered)
     }
 
     /// Put `ns` into the iroh-docs live engine with `peers` and wait for one reconciliation to
@@ -1325,6 +1331,20 @@ impl TrailDocs {
     ///
     /// Returns every `(serving peer, author)` delivered across all namespaces, for `peer.contact`.
     pub async fn sync_all(&self, peers: Vec<EndpointAddr>) -> Result<Vec<([u8; 32], [u8; 32])>> {
+        Ok(self.sync_all_until(peers, None).await?.delivered)
+    }
+
+    /// [`Self::sync_all`], stopped at `deadline` when one is given, reporting how each namespace's
+    /// wait ended.
+    ///
+    /// The deadline exists for the background callers: one pass can wait 25 s for a first event
+    /// and then 8 s per idle gap, which is the whole of an iOS background window. A pass cut short
+    /// keeps everything that had already arrived.
+    pub async fn sync_all_until(
+        &self,
+        peers: Vec<EndpointAddr>,
+        deadline: Option<Instant>,
+    ) -> Result<SyncPass> {
         let namespaces = self.namespaces().await;
         // CONCURRENTLY, not one after another. Every namespace that nobody answers for costs the
         // full `SYNC_FIRST_EVENT_TIMEOUT_SECS`, and a serial loop multiplied that by the friend
@@ -1334,18 +1354,21 @@ impl TrailDocs {
         // there is no ordering between them — so the pass now costs ONE timeout, not N.
         let results = join_all(namespaces.iter().map(|ns| {
             let peers = peers.clone();
-            async move { (*ns, self.sync_ns(*ns, peers).await) }
+            async move { (*ns, self.sync_ns(*ns, peers, deadline).await) }
         }))
         .await;
 
-        let mut failed = 0usize;
-        let mut delivered = Vec::new();
+        let mut pass = SyncPass {
+            namespaces: namespaces.len(),
+            ..SyncPass::default()
+        };
         for (ns, result) in &results {
-            if let Ok(from_ns) = result {
-                delivered.extend_from_slice(from_ns);
+            if let Ok((from_ns, end)) = result {
+                pass.delivered.extend_from_slice(from_ns);
+                pass.ends.tally(*end);
             }
             if let Err(err) = result {
-                failed += 1;
+                pass.failed += 1;
                 tracing::warn!(
                     sc.namespace = %crate::telemetry::short_hex(&ns.to_bytes()),
                     error = %err,
@@ -1355,16 +1378,167 @@ impl TrailDocs {
         }
         // Only a total wipeout is an error worth failing the call for — otherwise the caller gets
         // whatever was reachable, which is the point of a best-effort refresh.
-        if failed > 0 && failed == namespaces.len() {
-            return Err(anyhow!("all {failed} trail namespaces failed to sync"));
+        if pass.failed > 0 && pass.failed == namespaces.len() {
+            return Err(anyhow!(
+                "all {} trail namespaces failed to sync",
+                pass.failed
+            ));
         }
-        Ok(delivered)
+        Ok(pass)
+    }
+}
+
+/// How one namespace's reconciliation wait ended.
+///
+/// The cost of a pull is almost all waiting, and these say what was waited on: `NoAnswer` is a
+/// namespace nobody answered for at all (the full first-event timeout, spent on peers asleep in a
+/// pocket), `Idle` is one that transferred and then went quiet, `Deadline` is the caller's budget
+/// running out first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncEnd {
+    /// `PendingContentReady`: every reconciled entry has its content locally. The clean finish.
+    ContentReady,
+    /// The event stream closed or errored.
+    Closed,
+    /// Events flowed, then none for [`SYNC_IDLE_TIMEOUT_SECS`].
+    Idle,
+    /// No event at all within [`SYNC_FIRST_EVENT_TIMEOUT_SECS`].
+    NoAnswer,
+    /// The caller's deadline arrived before either timeout.
+    Deadline,
+}
+
+/// Namespaces per [`SyncEnd`], for one pass.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SyncEnds {
+    pub content_ready: usize,
+    pub closed: usize,
+    pub idle: usize,
+    pub no_answer: usize,
+    pub deadline: usize,
+}
+
+impl SyncEnds {
+    pub fn tally(&mut self, end: SyncEnd) {
+        match end {
+            SyncEnd::ContentReady => self.content_ready += 1,
+            SyncEnd::Closed => self.closed += 1,
+            SyncEnd::Idle => self.idle += 1,
+            SyncEnd::NoAnswer => self.no_answer += 1,
+            SyncEnd::Deadline => self.deadline += 1,
+        }
+    }
+}
+
+/// One [`TrailDocs::sync_all_until`] pass.
+#[derive(Debug, Default, Clone)]
+pub struct SyncPass {
+    /// Every `(serving peer, author)` delivered into the replica.
+    pub delivered: Vec<([u8; 32], [u8; 32])>,
+    /// Namespaces attempted.
+    pub namespaces: usize,
+    /// Namespaces that errored before they could wait at all.
+    pub failed: usize,
+    /// How the rest ended.
+    pub ends: SyncEnds,
+}
+
+/// How long to wait for the next event, and whether the caller's deadline is what bounds it.
+fn next_wait(saw_event: bool, remaining: Option<Duration>) -> (Duration, bool) {
+    let natural = Duration::from_secs(if saw_event {
+        SYNC_IDLE_TIMEOUT_SECS
+    } else {
+        SYNC_FIRST_EVENT_TIMEOUT_SECS
+    });
+    match remaining {
+        Some(left) if left <= natural => (left, true),
+        _ => (natural, false),
+    }
+}
+
+/// Which clock ran out when a wait timed out.
+fn timeout_end(saw_event: bool, deadline_bound: bool) -> SyncEnd {
+    if deadline_bound {
+        SyncEnd::Deadline
+    } else if saw_event {
+        SyncEnd::Idle
+    } else {
+        SyncEnd::NoAnswer
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    // ── pull deadline ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn no_deadline_keeps_the_natural_timeouts() {
+        assert_eq!(
+            next_wait(false, None),
+            (Duration::from_secs(SYNC_FIRST_EVENT_TIMEOUT_SECS), false)
+        );
+        assert_eq!(
+            next_wait(true, None),
+            (Duration::from_secs(SYNC_IDLE_TIMEOUT_SECS), false)
+        );
+    }
+
+    #[test]
+    fn a_generous_deadline_does_not_shorten_the_wait() {
+        let far = Duration::from_secs(SYNC_FIRST_EVENT_TIMEOUT_SECS + 60);
+        assert_eq!(
+            next_wait(false, Some(far)),
+            (Duration::from_secs(SYNC_FIRST_EVENT_TIMEOUT_SECS), false)
+        );
+    }
+
+    #[test]
+    fn a_near_deadline_bounds_the_wait_and_says_so() {
+        let near = Duration::from_millis(1_500);
+        assert_eq!(next_wait(false, Some(near)), (near, true));
+        assert_eq!(next_wait(true, Some(near)), (near, true));
+        // Exhausted: a zero wait the caller turns into `Deadline` without polling at all.
+        assert_eq!(
+            next_wait(true, Some(Duration::ZERO)),
+            (Duration::ZERO, true)
+        );
+    }
+
+    #[test]
+    fn a_timeout_names_the_clock_that_ran_out() {
+        // The deadline wins even after events flowed: it is what stopped us.
+        assert_eq!(timeout_end(true, true), SyncEnd::Deadline);
+        assert_eq!(timeout_end(false, true), SyncEnd::Deadline);
+        assert_eq!(timeout_end(true, false), SyncEnd::Idle);
+        assert_eq!(timeout_end(false, false), SyncEnd::NoAnswer);
+    }
+
+    #[test]
+    fn sync_ends_tally_each_kind_separately() {
+        let mut ends = SyncEnds::default();
+        for end in [
+            SyncEnd::ContentReady,
+            SyncEnd::ContentReady,
+            SyncEnd::Closed,
+            SyncEnd::Idle,
+            SyncEnd::NoAnswer,
+            SyncEnd::Deadline,
+        ] {
+            ends.tally(end);
+        }
+        assert_eq!(
+            ends,
+            SyncEnds {
+                content_ready: 2,
+                closed: 1,
+                idle: 1,
+                no_answer: 1,
+                deadline: 1,
+            }
+        );
+    }
 
     // ── key encoding round-trip ──────────────────────────────────────────────────────────
     // ── per-peer push accounting ─────────────────────────────────────────────────────────

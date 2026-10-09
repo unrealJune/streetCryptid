@@ -21,6 +21,9 @@ pub mod crypto;
 pub mod delivery;
 mod docs;
 mod durable;
+/// `friend.pull` spans: a native runtime's receive-side pull, with what it cost against the OS's
+/// background allowance (see the module docs).
+pub mod friend_pull;
 pub mod gate;
 mod h3;
 /// `location.runtime` spans: the native location runtime reporting itself (see the module docs).
@@ -572,6 +575,32 @@ pub struct PeerPushReport {
     pub entries_sent: u64,
     /// The deadline this peer was granted, so a truncated dial is distinguishable from a real one.
     pub budget_ms: u64,
+}
+
+/// What one [`LocationNode::pull_latest`] pass cost and found. The same numbers are on its
+/// `trail.sync` span; returning them lets the native caller put them on `friend.pull` beside the
+/// things only it knows (the wake, the OS's time allowance, the CPU spent).
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct PullReport {
+    /// Wall time inside the pass. Read against the budget: well past it means the process was
+    /// frozen mid-pull, since the deadline timer could not fire while it was.
+    pub elapsed_ms: u64,
+    pub peers_requested: u32,
+    pub peers_dialed: u32,
+    /// Peers that delivered at least one entry.
+    pub peers_delivered: u32,
+    /// Entries that landed in the replica.
+    pub entries: u32,
+    /// Namespaces reconciled (our own plus one per friend).
+    pub namespaces: u32,
+    /// Namespaces that errored before they could wait.
+    pub namespaces_failed: u32,
+    /// How the others ended — see `docs::SyncEnd`. `ns_no_answer` is time spent on nobody.
+    pub ns_content_ready: u32,
+    pub ns_closed: u32,
+    pub ns_idle: u32,
+    pub ns_no_answer: u32,
+    pub ns_deadline: u32,
 }
 
 /// A mailbox address we expect traffic on, plus who/when it belongs to.
@@ -3125,67 +3154,28 @@ impl LocationNode {
         peer_tickets: Vec<String>,
         traceparent: Option<String>,
     ) -> Result<(), LocationError> {
-        use tracing::Instrument;
-        let requested = peer_tickets.len();
-        let peers: Vec<EndpointAddr> = peer_tickets
-            .iter()
-            .filter_map(|ticket| ticket.parse::<EndpointTicket>().ok())
-            .map(|ticket| ticket.endpoint_addr().clone())
-            .collect();
-        let span = tracing::info_span!(
-            "trail.sync",
-            sc.author = %telemetry::short_hex(&self.author),
-            sync.peers_requested = requested,
-            sync.peers_dialed = peers.len(),
-            // Peers that delivered at least one entry this pass — each is a `peer.contact`.
-            sync.peers_delivered = tracing::field::Empty,
-        );
-        telemetry::set_parent(&span, traceparent.as_deref());
-        async move {
-            if peers.len() < requested {
-                tracing::warn!(
-                    skipped = requested - peers.len(),
-                    "trail sync: some peer tickets were unparseable and were skipped"
-                );
-            }
-            let started = self.live().await?;
-            let trail = started.trail.clone();
+        self.pull_inner(peer_tickets, None, traceparent).await?;
+        Ok(())
+    }
 
-            // No sink and no `recovered` count here any more: with one overwritten slot per author
-            // there is no back-catalogue to stream, so a sync just reconciles and the app reads the
-            // current fixes afterwards. The `recovered` span attribute is recorded app-side instead
-            // (see `refreshTrailFromReplica`), which keeps the infra/otel `sc.*` join keys intact.
-            let delivered = trail.sync_all(peers).await.map_err(|e| {
-                tracing::warn!(error = %e, "trail sync failed");
-                LocationError::Network(e.to_string())
-            })?;
-
-            // One `peer.contact` per peer that actually delivered something. A peer that was
-            // dialled and had nothing new is not counted: it is indistinguishable here from one
-            // that never answered, and claiming a contact we cannot see is how a tile starts lying.
-            let tallies = contact::tally_pull(&delivered);
-            tracing::Span::current().record("sync.peers_delivered", tallies.len());
-            if !tallies.is_empty() {
-                let roles = self.peer_roles().await;
-                for (peer, tally) in tallies {
-                    let path = match EndpointId::from_bytes(&peer) {
-                        Ok(id) => delivery_label(&started.endpoint, id).await,
-                        Err(_) => "live".to_string(),
-                    };
-                    contact::record(contact::Contact {
-                        dir: contact::Dir::Recv,
-                        lane: contact::Lane::Docs,
-                        peer: &peer,
-                        role: roles.role(&peer),
-                        path: &path,
-                        from_author: Some(tally.from_author),
-                        entries: tally.entries,
-                    });
-                }
-            }
-            Ok(())
-        }
-        .instrument(span)
+    /// [`Self::sync_latest`] with a wall-clock budget, reporting what the pass cost and found.
+    ///
+    /// For the native background runtimes, which pull inside a window the OS sizes and may end
+    /// without warning. `budget_ms` bounds the whole pass (`None` keeps `sync_latest`'s natural
+    /// timeouts, up to 25 s waiting for a first event plus 8 s per idle gap); a pass cut short
+    /// keeps whatever had already landed, and the live engine goes on syncing behind it. The
+    /// report is what the caller puts on its `friend.pull` span — see `infra/otel/README.md`.
+    pub async fn pull_latest(
+        &self,
+        peer_tickets: Vec<String>,
+        budget_ms: Option<u64>,
+        traceparent: Option<String>,
+    ) -> Result<PullReport, LocationError> {
+        self.pull_inner(
+            peer_tickets,
+            budget_ms.map(std::time::Duration::from_millis),
+            traceparent,
+        )
         .await
     }
 
@@ -4551,6 +4541,120 @@ impl LocationNode {
             .await
             .map(|s| s.ble.has_scan_hint(&endpoint_id))
             .unwrap_or(false)
+    }
+}
+
+impl LocationNode {
+    /// The body of [`Self::sync_latest`] and [`Self::pull_latest`]. Kept out of the exported block
+    /// so UniFFI does not see it.
+    async fn pull_inner(
+        &self,
+        peer_tickets: Vec<String>,
+        budget: Option<std::time::Duration>,
+        traceparent: Option<String>,
+    ) -> Result<PullReport, LocationError> {
+        use tracing::Instrument;
+        let started_at = n0_future::time::Instant::now();
+        let deadline = budget.map(|b| started_at + b);
+        let requested = peer_tickets.len();
+        let peers: Vec<EndpointAddr> = peer_tickets
+            .iter()
+            .filter_map(|ticket| ticket.parse::<EndpointTicket>().ok())
+            .map(|ticket| ticket.endpoint_addr().clone())
+            .collect();
+        let dialed = peers.len();
+        let span = tracing::info_span!(
+            "trail.sync",
+            sc.author = %telemetry::short_hex(&self.author),
+            sync.peers_requested = requested,
+            sync.peers_dialed = dialed,
+            // Peers that delivered at least one entry this pass — each is a `peer.contact`.
+            sync.peers_delivered = tracing::field::Empty,
+            // What the pass cost and why it ended — see `docs::SyncEnd`. `budget_ms` is absent
+            // for the unbudgeted foreground/JS callers.
+            sync.budget_ms = tracing::field::Empty,
+            sync.entries = tracing::field::Empty,
+            sync.namespaces = tracing::field::Empty,
+            sync.namespaces_failed = tracing::field::Empty,
+            sync.ns_content_ready = tracing::field::Empty,
+            sync.ns_closed = tracing::field::Empty,
+            sync.ns_idle = tracing::field::Empty,
+            sync.ns_no_answer = tracing::field::Empty,
+            sync.ns_deadline = tracing::field::Empty,
+        );
+        if let Some(budget) = budget {
+            span.record("sync.budget_ms", budget.as_millis() as u64);
+        }
+        telemetry::set_parent(&span, traceparent.as_deref());
+        async move {
+            if dialed < requested {
+                tracing::warn!(
+                    skipped = requested - dialed,
+                    "trail sync: some peer tickets were unparseable and were skipped"
+                );
+            }
+            let started = self.live().await?;
+            let trail = started.trail.clone();
+
+            // No sink and no `recovered` count here any more: with one overwritten slot per author
+            // there is no back-catalogue to stream, so a sync just reconciles and the app reads the
+            // current fixes afterwards. The `recovered` span attribute is recorded app-side instead
+            // (see `refreshTrailFromReplica`), which keeps the infra/otel `sc.*` join keys intact.
+            let pass = trail.sync_all_until(peers, deadline).await.map_err(|e| {
+                tracing::warn!(error = %e, "trail sync failed");
+                LocationError::Network(e.to_string())
+            })?;
+            let current = tracing::Span::current();
+            current.record("sync.entries", pass.delivered.len());
+            current.record("sync.namespaces", pass.namespaces);
+            current.record("sync.namespaces_failed", pass.failed);
+            current.record("sync.ns_content_ready", pass.ends.content_ready);
+            current.record("sync.ns_closed", pass.ends.closed);
+            current.record("sync.ns_idle", pass.ends.idle);
+            current.record("sync.ns_no_answer", pass.ends.no_answer);
+            current.record("sync.ns_deadline", pass.ends.deadline);
+
+            // One `peer.contact` per peer that actually delivered something. A peer that was
+            // dialled and had nothing new is not counted: it is indistinguishable here from one
+            // that never answered, and claiming a contact we cannot see is how a tile starts lying.
+            let tallies = contact::tally_pull(&pass.delivered);
+            let peers_delivered = tallies.len();
+            current.record("sync.peers_delivered", peers_delivered);
+            if !tallies.is_empty() {
+                let roles = self.peer_roles().await;
+                for (peer, tally) in tallies {
+                    let path = match EndpointId::from_bytes(&peer) {
+                        Ok(id) => delivery_label(&started.endpoint, id).await,
+                        Err(_) => "live".to_string(),
+                    };
+                    contact::record(contact::Contact {
+                        dir: contact::Dir::Recv,
+                        lane: contact::Lane::Docs,
+                        peer: &peer,
+                        role: roles.role(&peer),
+                        path: &path,
+                        from_author: Some(tally.from_author),
+                        entries: tally.entries,
+                    });
+                }
+            }
+            Ok(PullReport {
+                elapsed_ms: started_at.elapsed().as_millis() as u64,
+                peers_requested: requested as u32,
+                peers_dialed: dialed as u32,
+                peers_delivered: peers_delivered as u32,
+                entries: pass.delivered.len() as u32,
+                namespaces: pass.namespaces as u32,
+                namespaces_failed: pass.failed as u32,
+                ns_content_ready: pass.ends.content_ready as u32,
+                ns_closed: pass.ends.closed as u32,
+                ns_idle: pass.ends.idle as u32,
+                ns_no_answer: pass.ends.no_answer as u32,
+                ns_deadline: pass.ends.deadline as u32,
+            })
+        }
+        .instrument(span)
+        .await
     }
 }
 
