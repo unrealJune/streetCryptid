@@ -363,6 +363,14 @@ Conventions when changing that code:
   An envelope with every recipient dropped is not a publish: it does not stamp
   `last_published_at` or count as `reached`. `publishResync`/`pollResync`/`clearResync` survive
   only as binding-compatible shims.
+- **The ratchet acceptance window is sized by how long a READER can stay away.** A sender's
+  chain resets only when the reader opens something (on iOS, only while the app is mounted), and
+  every tick spends two positions because the gossip and docs lanes each call `next_wraps`. At
+  512 (`DEFAULT_ACCEPT_WINDOW`) that ran out after ~21 h: on 2026-10-09 an iPhone whose owner had
+  not opened the app for 25 h was 570 positions behind its friend's Pixel, read every new
+  envelope as "no wrap in this envelope belongs to us", and showed the Pixel as a day stale until
+  the leader restart healed it. It is `2^17` now. Do not shrink it to bound work: the walk is one
+  hash per position and the counter is signed, so only a friend can ask for one.
 - **A pair is complete when `finalize` says so, not when the decision bits agree.** `is_complete()`
   goes true the instant a local accept latches; `finalize` — which installs the ratchet, ingests the
   handed profile record and raises `Ready` — runs after, and can still decline, because a wire

@@ -1869,6 +1869,14 @@ impl LocationNode {
         Ok(())
     }
 
+    /// Shrink or restore the ratchet acceptance window on this node's live sessions. Tests only —
+    /// it is how an integration test gets past the window without publishing that many fixes.
+    #[doc(hidden)]
+    pub async fn set_accept_window_for_tests(&self, window: u32) -> Result<(), LocationError> {
+        self.session_manager().await?.set_accept_window(window);
+        Ok(())
+    }
+
     /// A friend's receiving key from their verified profile — the fallback when JS has not
     /// mirrored one yet (a binary upgraded before its bundle, or a wake before the first launch).
     async fn profile_recv_key(&self, peer: &[u8]) -> Option<String> {

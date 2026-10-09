@@ -597,22 +597,26 @@ async fn a_friend_offline_for_many_intervals_catches_up_to_the_current_fix() {
 /// all (§4.2 bounds the work an unauthenticated counter can demand), so the friend cannot open
 /// the fix and the session needs a §4.6 restart rather than patience.
 ///
-/// This is the case that decides whether `T_lapse` and the window are tuned sanely (§8.4): the
-/// window is 512 positions, so at the 5-minute cold cadence a friend has ~42 hours before their
-/// session stops being recoverable by fast-forward alone.
+/// The production window is far too wide to publish past in a test, so the friend's is shrunk to
+/// `SMALL_WINDOW`; what is pinned is the behaviour at the edge, not the edge's position.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn beyond_the_acceptance_window_the_friend_needs_a_restart_not_patience() {
+    const SMALL_WINDOW: u32 = 16;
     let _network_test = NETWORK_TEST_LOCK.lock().await;
     let author = start_node().await;
     let friend = start_node().await;
     let stash = start_node().await;
 
     bootstrap_and_prime(&author, &friend, &stash).await;
+    friend
+        .set_accept_window_for_tests(SMALL_WINDOW)
+        .await
+        .expect("shrink the window");
     let author_id = author.endpoint_id();
     let friend_id = hex(&friend.endpoint_id());
 
-    // One past the 512-position acceptance window.
-    for seq in 1..=520u64 {
+    // Past the shrunken window.
+    for seq in 1..=u64::from(SMALL_WINDOW) + 8 {
         author
             .docs_write_ratcheted(
                 "t".into(),
@@ -629,6 +633,46 @@ async fn beyond_the_acceptance_window_the_friend_needs_a_restart_not_patience() 
     assert!(
         !recovered.iter().any(|e| e.author == author_id),
         "a position beyond the acceptance window must be refused, not walked to"
+    );
+
+    for node in [author, friend, stash] {
+        node.shutdown().await.expect("shutdown");
+    }
+}
+
+/// **A friend who did not open the app for a day.** Replays 2026-10-09: an iPhone opened nothing
+/// for 25 h, so nothing reset its friend's sending chain, and the friend spent 570 positions on
+/// it — two per tick, because the gossip and docs lanes each take one — against a window of 512.
+/// Every later envelope read as "no wrap in this envelope belongs to us" until a restart. A gap
+/// like that is ordinary use and must be crossed by fast-forward alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_day_without_opening_the_app_is_recovered_by_fast_forward() {
+    let _network_test = NETWORK_TEST_LOCK.lock().await;
+    let author = start_node().await;
+    let friend = start_node().await;
+    let stash = start_node().await;
+
+    bootstrap_and_prime(&author, &friend, &stash).await;
+    let author_id = author.endpoint_id();
+    let friend_id = hex(&friend.endpoint_id());
+
+    for seq in 1..=600u64 {
+        author
+            .docs_write_ratcheted(
+                "t".into(),
+                seq,
+                fix_at(30_000 + seq),
+                vec![friend_id.clone()],
+            )
+            .await
+            .expect("author publishes");
+    }
+
+    replicate(&author, &stash, &friend).await;
+    let recovered = friend.read_latest_ratcheted().await.expect("friend reads");
+    assert!(
+        recovered.iter().any(|e| e.author == author_id),
+        "600 positions behind is a day offline, and must open without a restart"
     );
 
     for node in [author, friend, stash] {
