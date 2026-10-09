@@ -194,9 +194,28 @@ const MAX_HOUSENUMBER_LABELS = 24;
 /** Extra breathing room around each placed chip when testing for collisions. */
 const COLLISION_MARGIN_PX = 3;
 
-/** Rendered width of a label chip, logical px. */
+/**
+ * Advance of a full-width character (CJK, kana, Hangul, fullwidth forms) in the
+ * system fallback face — Plex Mono has none of these glyphs — plus the tracking.
+ */
+export const LABEL_WIDE_CHAR_PX = LABEL_FONT_SIZE + LABEL_LETTER_SPACING;
+
+const WIDE_CHAR =
+  /[\u1100-\u115f\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua000-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6\u{20000}-\u{3fffd}]/u;
+const ZERO_WIDTH = /[\u0300-\u036f\u200b-\u200d]/u;
+
+/**
+ * Rendered width of a label chip, logical px. Counts code points, not UTF-16
+ * units, and gives full-width scripts their full em so a local-script name
+ * (map-name.ts falls back to one) is not clipped by `numberOfLines={1}`.
+ */
 export function labelWidthPx(text: string): number {
-  return text.length * LABEL_CHAR_PX + LABEL_PAD_PX;
+  let width = LABEL_PAD_PX;
+  for (const ch of text) {
+    if (ZERO_WIDTH.test(ch)) continue;
+    width += WIDE_CHAR.test(ch) ? LABEL_WIDE_CHAR_PX : LABEL_CHAR_PX;
+  }
+  return width;
 }
 
 interface Candidate {

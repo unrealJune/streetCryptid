@@ -27,12 +27,18 @@ describe('mapName', () => {
     [{ name: 'Đà Nẵng' }, 'Đà Nẵng'],
     [{ name: 'Cafe\u0301 — São Tomé' }, 'Cafe\u0301 — São Tomé'],
     [{ name: 'I-5 / Exit 42' }, 'I-5 / Exit 42'],
-    [{ name: '京都' }, undefined],
-    [{ name: 'Москва' }, undefined],
-    [{ name: 'Αθήνα' }, undefined],
-    [{ name: 'القاهرة' }, undefined],
-    [{ name: 'กรุงเทพ' }, undefined],
-    [{ name: 'Kyoto 京都' }, undefined],
+    // No Latin name: the local one as written, never a stand-in reading.
+    [{ name: '京都' }, '京都'],
+    [{ name: ' 京都 ' }, '京都'],
+    [{ name: '京都', name_en: '京都' }, '京都'],
+    [{ name: 'Москва' }, 'Москва'],
+    [{ name: 'Αθήνα' }, 'Αθήνα'],
+    [{ name: 'القاهرة' }, 'القاهرة'],
+    [{ name: 'กรุงเทพ' }, 'กรุงเทพ'],
+    [{ name: 'Kyoto 京都' }, 'Kyoto 京都'],
+    [{ name: '、　「」' }, undefined],
+    [{ name: '京都\u202e' }, undefined],
+    [{ name: '京都\u2066' }, undefined],
     [{ name: 'Kyoto\u202e' }, undefined],
     [{ name: 'Kyoto\nStation' }, undefined],
     [{ name: '---' }, undefined],
@@ -212,7 +218,7 @@ describe('map name policy across layers', () => {
     }
   );
 
-  it('keeps road and park geometry when their names have no Latin alternative', () => {
+  it('keeps road and park geometry when their names are not text', () => {
     const decoded = buildAndDecode(
       {
         transportation: {
@@ -227,7 +233,7 @@ describe('map name policy across layers', () => {
                   [1, 1],
                 ],
               },
-              properties: { class: 'primary', name: '京都' },
+              properties: { class: 'primary', name: '---' },
             },
           ],
         },
@@ -247,7 +253,7 @@ describe('map name policy across layers', () => {
                   ],
                 ],
               },
-              properties: { name: '京都' },
+              properties: { name: '\u202e' },
             },
           ],
         },

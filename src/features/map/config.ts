@@ -154,7 +154,11 @@ export function createPlanetGeometrySource(
         coarseUpstream: new MartinByteSource(tileUrl),
         bundleUpstream: new StreamingBundleSource(tileUrl, undefined, undefined, streamingFetch),
         store,
-        sourceId: 'planet-z10-v1',
+        // v2: the 2026-10 re-bake (no ICU transliteration, Wikidata English names).
+        // A new id strands the old rows for LRU eviction instead of serving pinyin
+        // labels for the rest of their 30-day TTL. Bump again on any bake whose
+        // labels must replace what phones already hold.
+        sourceId: 'planet-z10-v2',
         anchorZoom: PRIVACY_ANCHOR_ZOOM,
         ttlMs: TILE_TTL_MS,
       }),

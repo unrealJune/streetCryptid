@@ -4,6 +4,8 @@ import {
   PLACE_LABEL_BANDS,
   placeRankBudget,
   HOUSENUMBER_MIN_ZOOM,
+  LABEL_CHAR_PX,
+  LABEL_WIDE_CHAR_PX,
   labelWidthPx,
   LABEL_MIN_ZOOM,
   POI_LABEL_MIN_ZOOM,
@@ -118,6 +120,22 @@ describe('selectMapLabels — road class', () => {
 
     expect(found.find((l) => l.kind === 'street')?.roadClass).toBe(4);
     expect(found.find((l) => l.kind === 'area')?.roadClass).toBeUndefined();
+  });
+});
+
+describe('labelWidthPx', () => {
+  it('gives full-width scripts a full em, so a local-script name is not clipped', () => {
+    const pad = labelWidthPx('');
+    expect(labelWidthPx('Kyoto') - pad).toBeCloseTo(5 * LABEL_CHAR_PX);
+    expect(labelWidthPx('京都駅') - pad).toBeCloseTo(3 * LABEL_WIDE_CHAR_PX);
+    expect(labelWidthPx('서울') - pad).toBeCloseTo(2 * LABEL_WIDE_CHAR_PX);
+    expect(labelWidthPx('真野IC') - pad).toBeCloseTo(2 * LABEL_WIDE_CHAR_PX + 2 * LABEL_CHAR_PX);
+  });
+
+  it('counts code points and skips combining marks', () => {
+    const pad = labelWidthPx('');
+    expect(labelWidthPx('Cafe\u0301') - pad).toBeCloseTo(4 * LABEL_CHAR_PX);
+    expect(labelWidthPx('\u{20b9f}') - pad).toBeCloseTo(LABEL_WIDE_CHAR_PX);
   });
 });
 

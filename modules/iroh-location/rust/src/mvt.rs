@@ -577,14 +577,18 @@ fn decode_feature(bytes: &[u8]) -> RawFeature {
 }
 
 impl Layer {
-    /// English-first map-language policy; mirrors tiles/map-name.ts. Raw tile
-    /// caches keep all translations so future locales can re-decode them.
+    /// English-first map-language policy; mirrors tiles/map-name.ts: English,
+    /// then a real Latin name, then the local name as written. The bake runs
+    /// with `--transliterate=false`, so no Latin key holds ICU's guess (which
+    /// reads Japanese kanji as Mandarin pinyin). Raw tile caches keep all
+    /// translations so future locales can re-decode them.
     fn map_name<'b>(&'b self, f: &RawFeature) -> Option<&'b str> {
-        ["name:en", "name_en", "name:latin", "name_int", "name"]
-            .iter()
-            .filter_map(|key| self.prop(f, key).and_then(Value::as_str))
-            .map(str::trim)
+        let text = |key| self.prop(f, key).and_then(Value::as_str).map(trim_name);
+        ["name:en", "name_en", "name:latin", "name_int"]
+            .into_iter()
+            .filter_map(text)
             .find(|name| is_latin_map_name(name))
+            .or_else(|| text("name").filter(|name| is_local_map_name(name)))
     }
 
     /// Look up a feature property value by key name via its tag pairs.
@@ -615,6 +619,31 @@ fn is_latin_map_name(name: &str) -> bool {
             || matches!(c, '\u{00c0}'..='\u{00d6}' | '\u{00d8}'..='\u{00f6}' |
                 '\u{00f8}'..='\u{024f}' | '\u{1e00}'..='\u{1eff}')
     })
+}
+
+/// JS `String.prototype.trim`: Unicode whitespace plus the BOM.
+fn trim_name(name: &str) -> &str {
+    name.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+}
+
+/// A local name is shown as written, minus anything that is not text: control
+/// characters (a newline breaks the one-line chip), bidi overrides/isolates
+/// (which reorder the chip), and names made only of spaces and punctuation.
+/// Keep the ranges in sync with `UNSAFE` / `NOT_TEXT` in tiles/map-name.ts.
+fn is_local_map_name(name: &str) -> bool {
+    let unsafe_char = |c: char| {
+        matches!(c,
+            '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}' | '\u{200e}' | '\u{200f}' |
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    };
+    let not_text = |c: char| {
+        c.is_whitespace()
+            || matches!(c,
+                '\u{feff}' | '\u{0021}'..='\u{002f}' | '\u{003a}'..='\u{0040}' |
+                '\u{005b}'..='\u{0060}' | '\u{007b}'..='\u{007e}' | '\u{00a1}'..='\u{00bf}' |
+                '\u{2000}'..='\u{206f}' | '\u{3000}'..='\u{303f}' | '\u{ff01}'..='\u{ff0f}')
+    };
+    !name.chars().any(unsafe_char) && !name.chars().all(not_text)
 }
 
 // ---------------------------------------------------------------------------
@@ -1499,12 +1528,18 @@ mod tests {
                 Some("Cafe\u{0301} — São Tomé"),
             ),
             (&[("name", "I-5 / Exit 42")], Some("I-5 / Exit 42")),
-            (&[("name", "京都")], None),
-            (&[("name", "Москва")], None),
-            (&[("name", "Αθήνα")], None),
-            (&[("name", "القاهرة")], None),
-            (&[("name", "กรุงเทพ")], None),
-            (&[("name", "Kyoto 京都")], None),
+            // No Latin name: the local one as written, never a stand-in reading.
+            (&[("name", "京都")], Some("京都")),
+            (&[("name", " 京都 ")], Some("京都")),
+            (&[("name", "京都"), ("name_en", "京都")], Some("京都")),
+            (&[("name", "Москва")], Some("Москва")),
+            (&[("name", "Αθήνα")], Some("Αθήνα")),
+            (&[("name", "القاهرة")], Some("القاهرة")),
+            (&[("name", "กรุงเทพ")], Some("กรุงเทพ")),
+            (&[("name", "Kyoto 京都")], Some("Kyoto 京都")),
+            (&[("name", "、　「」")], None),
+            (&[("name", "京都\u{202e}")], None),
+            (&[("name", "京都\u{2066}")], None),
             (&[("name", "Kyoto\u{202e}")], None),
             (&[("name", "Kyoto\nStation")], None),
             (&[("name", "---")], None),
@@ -1557,7 +1592,8 @@ mod tests {
                 ("name:en", "Kyoto", Some("Kyoto")),
                 ("name_en", "Kyoto", Some("Kyoto")),
                 ("name:latin", "Kyōto", Some("Kyōto")),
-                ("name", "京都", None),
+                ("name", "京都", Some("京都")),
+                ("name", "---", None),
             ] {
                 let tile = build_layer(
                     layer_name,
