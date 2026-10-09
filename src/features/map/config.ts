@@ -154,7 +154,9 @@ export function createPlanetGeometrySource(
         coarseUpstream: new MartinByteSource(tileUrl),
         bundleUpstream: new StreamingBundleSource(tileUrl, undefined, undefined, streamingFetch),
         store,
-        sourceId: 'planet-z10-v1',
+        // v3: rows hold SCB3's per-tile gzip members and z14 is split into structure + labels.
+        sourceId: 'planet-z10-v3',
+        retiredSourceIds: ['planet-z10-v1'],
         anchorZoom: PRIVACY_ANCHOR_ZOOM,
         ttlMs: TILE_TTL_MS,
       }),

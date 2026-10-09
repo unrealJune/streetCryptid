@@ -1,6 +1,7 @@
 import { BundleFetchByteSource } from '../bundle-fetch';
 import {
   bundleRequestFor,
+  type StreamStage,
   bundleTiles,
   MartinTileBundleSource,
   TILE_BUNDLE_MEDIA_TYPE,
@@ -42,6 +43,14 @@ class FakeStore implements TileByteStore {
   private readonly rows = new Map<string, StoredTile>();
   putCount = 0;
   lastPutSize = 0;
+  readonly deleted: string[] = [];
+
+  async deleteSource(sourceId: string): Promise<void> {
+    this.deleted.push(sourceId);
+    for (const key of [...this.rows.keys()]) {
+      if (key.startsWith(sourceId + '|')) this.rows.delete(key);
+    }
+  }
 
   async get(sourceId: string, tile: TileCoord): Promise<StoredTile | null> {
     return this.rows.get(sourceId + '|' + tileKeyOf(tile.z, tile.x, tile.y)) ?? null;
@@ -82,6 +91,7 @@ function makeSource(opts?: {
     bundleUpstream: bundles,
     store,
     sourceId: 'planet-z10-v1',
+    retiredSourceIds: ['planet-z10-v0'],
     anchorZoom: 10,
     ttlMs: opts?.ttlMs ?? 1000,
     now: opts?.now ?? (() => 0),
@@ -90,6 +100,46 @@ function makeSource(opts?: {
 }
 
 const T13: TileCoord = { z: 13, x: 1313, y: 2861 };
+
+async function flush() {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+}
+
+function labelBytes(tile: TileCoord): Uint8Array {
+  return new Uint8Array([0xee, tile.x % 251, tile.y % 251]);
+}
+
+/** An SCB3-shaped source: z13 overview, z14 structure, then resolves with z14 labels. */
+class SplitBundleSource implements TileBundleSource {
+  readonly requested: TileBundleRequest[] = [];
+  gate: Promise<void> = Promise.resolve();
+
+  async getBundle(
+    request: TileBundleRequest,
+    onStage?: Parameters<TileBundleSource['getBundle']>[1]
+  ): Promise<readonly TileBundleEntry[]> {
+    this.requested.push(request);
+    if (request.tileZoom !== 14) {
+      return bundleTiles(request).map((tile) => ({ tile, bytes: tagBytes(tile) }));
+    }
+    const overview = { ...request, tileZoom: 13 };
+    await onStage?.(
+      overview,
+      bundleTiles(overview).map((tile) => ({ tile, bytes: tagBytes(tile) })),
+      { tileZoom: 13, part: 'full' }
+    );
+    const structure = bundleTiles(request).map((tile) => ({ tile, bytes: tagBytes(tile) }));
+    await onStage?.(request, structure, { tileZoom: 14, part: 'structure' });
+    await this.gate;
+    // Even columns carry no labels: an empty labels part is the empty sentinel.
+    const labels = bundleTiles(request).map((tile) => ({
+      tile,
+      bytes: tile.x % 2 ? labelBytes(tile) : null,
+    }));
+    await onStage?.(request, labels, { tileZoom: 14, part: 'labels' });
+    return labels;
+  }
+}
 const T14: TileCoord = { z: 14, x: 2625, y: 5723 };
 
 describe('BundleFetchByteSource — privacy contract', () => {
@@ -111,7 +161,10 @@ describe('BundleFetchByteSource — privacy contract', () => {
     };
     let detailDone = false;
     const { source, store } = makeSource({ bundles });
-    const preview = source.getPreviewTiles([T14]);
+    const previews: { stage: StreamStage; count: number }[] = [];
+    const preview = source.getPreviewTiles([T14], async (stage, entries) => {
+      previews.push({ stage, count: entries.length });
+    });
     const detail = source.getTileBytes(T14).then((bytes) => {
       detailDone = true;
       return bytes;
@@ -119,21 +172,29 @@ describe('BundleFetchByteSource — privacy contract', () => {
     await ready;
     const request = { ...bundleRequestFor(T14, 10), tileZoom: 13 };
     const entries = bundleTiles(request).map((tile) => ({ tile, bytes: tagBytes(tile) }));
-    await publish(request, entries);
-    const coarse = await preview;
-    expect(coarse).toHaveLength(1);
+    await publish(request, entries, { tileZoom: 13, part: 'full' });
+    await flush();
+    expect(previews).toEqual([{ stage: { tileZoom: 13, part: 'full' }, count: 1 }]);
     expect(store.lastPutSize).toBe(64);
     expect(detailDone).toBe(false);
     expect(await store.get('planet-z10-v1', entries[0].tile)).not.toBeNull();
-    finish(bundleTiles(bundleRequestFor(T14, 10)).map((tile) => ({ tile, bytes: tagBytes(tile) })));
-    expect(await detail).toEqual(tagBytes(T14));
-    expect(store.lastPutSize).toBe(256);
+    const detailRequest = bundleRequestFor(T14, 10);
+    const full = bundleTiles(detailRequest).map((tile) => ({ tile, bytes: tagBytes(tile) }));
+    await publish(detailRequest, full, { tileZoom: 14, part: 'full' });
+    finish(full);
+    expect(await detail).toEqual([tagBytes(T14)]);
+    await preview;
+    // A whole z14 stage has no structure preview; the detail itself is complete.
+    expect(previews).toHaveLength(1);
+    // Its labels row is written empty so the stored tile counts as complete.
+    expect(await store.get('planet-z10-v1#labels', T14)).toEqual({ bytes: null, fetchedAt: 0 });
+    expect(await source.getTileBytes(T14)).toEqual([tagBytes(T14)]);
   });
 
   it('turns one z13 tile miss into one complete z10 bundle request', async () => {
     const { coarse, bundles, store, source } = makeSource();
 
-    expect(await source.getTileBytes(T13)).toEqual(tagBytes(T13));
+    expect(await source.getTileBytes(T13)).toEqual([tagBytes(T13)]);
 
     expect(coarse.requested).toEqual([]);
     expect((bundles as FakeBundleSource).requested).toEqual([bundleRequestFor(T13, 10)]);
@@ -144,7 +205,7 @@ describe('BundleFetchByteSource — privacy contract', () => {
   it('turns one z14 tile miss into one 256-entry z10 bundle request', async () => {
     const { bundles, store, source } = makeSource();
 
-    expect(await source.getTileBytes(T14)).toEqual(tagBytes(T14));
+    expect(await source.getTileBytes(T14)).toEqual([tagBytes(T14)]);
 
     expect((bundles as FakeBundleSource).requested).toEqual([bundleRequestFor(T14, 10)]);
     expect(store.lastPutSize).toBe(256);
@@ -155,7 +216,7 @@ describe('BundleFetchByteSource — privacy contract', () => {
     await source.getTileBytes(T13);
 
     const sibling = { z: 13, x: 1319, y: 2856 };
-    expect(await source.getTileBytes(sibling)).toEqual(tagBytes(sibling));
+    expect(await source.getTileBytes(sibling)).toEqual([tagBytes(sibling)]);
     expect(coarse.requested).toEqual([]);
     expect((bundles as FakeBundleSource).requested).toHaveLength(1);
   });
@@ -173,7 +234,7 @@ describe('BundleFetchByteSource — privacy contract', () => {
     const { coarse, bundles, store, source } = makeSource();
     const tile = { z: 10, x: 164, y: 357 };
 
-    expect(await source.getTileBytes(tile)).toEqual(tagBytes(tile));
+    expect(await source.getTileBytes(tile)).toEqual([tagBytes(tile)]);
     expect(coarse.requested).toEqual([tile]);
     expect((bundles as FakeBundleSource).requested).toEqual([]);
     expect(store.lastPutSize).toBe(1);
@@ -218,7 +279,7 @@ describe('BundleFetchByteSource — TTL and failure', () => {
 
     now = 200;
     bundles.failing = true;
-    expect(await source.getTileBytes(T13)).toEqual(tagBytes(T13));
+    expect(await source.getTileBytes(T13)).toEqual([tagBytes(T13)]);
   });
 
   it('rejects a bundle failure when nothing is stored', async () => {
@@ -248,8 +309,7 @@ describe('BundleFetchByteSource — in-flight dedup', () => {
     const p1 = source.getTileBytes(T13);
     const sibling = { z: 13, x: 1319, y: 2856 };
     const p2 = source.getTileBytes(sibling);
-    await Promise.resolve();
-    await Promise.resolve();
+    await flush();
 
     expect(requested).toHaveLength(1);
     resolveBundle!(
@@ -259,8 +319,8 @@ describe('BundleFetchByteSource — in-flight dedup', () => {
       }))
     );
 
-    expect(await p1).toEqual(tagBytes(T13));
-    expect(await p2).toEqual(tagBytes(sibling));
+    expect(await p1).toEqual([tagBytes(T13)]);
+    expect(await p2).toEqual([tagBytes(sibling)]);
     expect(store.putCount).toBe(1);
   });
 
@@ -310,7 +370,7 @@ describe('BundleFetchByteSource — in-flight dedup', () => {
       const sibling = source.getTileBytes(tiles[0]).catch((error: Error) => error.name);
 
       await jest.advanceTimersByTimeAsync(60_000);
-      expect(await stale).toEqual(tagBytes(T13));
+      expect(await stale).toEqual([tagBytes(T13)]);
       expect(await sibling).toBe('TimeoutError');
       expect(global.fetch).toHaveBeenCalledTimes(1);
       expect(store.putCount).toBe(1);
@@ -333,5 +393,79 @@ describe('BundleFetchByteSource — in-flight dedup', () => {
       global.fetch = realFetch;
       jest.useRealTimers();
     }
+  });
+});
+
+describe('BundleFetchByteSource — split z14 stages (SCB3)', () => {
+  it('stores structure and labels as two rows and serves both parts', async () => {
+    const bundles = new SplitBundleSource();
+    const { source, store } = makeSource({ bundles });
+
+    expect(await source.getTileBytes(T14)).toEqual([tagBytes(T14), labelBytes(T14)]);
+    const even = { ...T14, x: T14.x + 1 };
+    expect(await source.getTileBytes(even)).toEqual([tagBytes(even)]);
+    expect(await store.get('planet-z10-v1', T14)).toEqual({ bytes: tagBytes(T14), fetchedAt: 0 });
+    expect(await store.get('planet-z10-v1#labels', T14)).toEqual({
+      bytes: labelBytes(T14),
+      fetchedAt: 0,
+    });
+    expect(bundles.requested).toHaveLength(1);
+  });
+
+  it('treats a z14 tile whose labels row is missing as a miss', async () => {
+    const bundles = new SplitBundleSource();
+    const { source, store } = makeSource({ bundles });
+    await store.putMany('planet-z10-v1', [{ tile: T14, bytes: tagBytes(T14) }], 0);
+
+    expect(await source.getTileBytes(T14)).toEqual([tagBytes(T14), labelBytes(T14)]);
+    expect(bundles.requested).toHaveLength(1);
+  });
+
+  it('serves a structure-only copy offline when the labels never arrived', async () => {
+    const bundles = new FakeBundleSource(tagBytes);
+    bundles.failing = true;
+    const { source, store } = makeSource({ bundles });
+    await store.putMany('planet-z10-v1', [{ tile: T14, bytes: tagBytes(T14) }], 0);
+
+    expect(await source.getTileBytes(T14)).toEqual([tagBytes(T14)]);
+  });
+
+  it('previews the z13 overview, then the z14 structure, before the labels land', async () => {
+    const bundles = new SplitBundleSource();
+    let release!: () => void;
+    bundles.gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const { source } = makeSource({ bundles });
+    const stages: { stage: StreamStage; tiles: string[] }[] = [];
+    const preview = source.getPreviewTiles([T14], async (stage, entries) => {
+      stages.push({ stage, tiles: entries.map(({ tile }) => tileKeyOf(tile.z, tile.x, tile.y)) });
+    });
+    let detailDone = false;
+    const detail = source.getTileBytes(T14).then((parts) => {
+      detailDone = true;
+      return parts;
+    });
+    await flush();
+    expect(stages).toEqual([
+      { stage: { tileZoom: 13, part: 'full' }, tiles: [tileKeyOf(13, T14.x >> 1, T14.y >> 1)] },
+      { stage: { tileZoom: 14, part: 'structure' }, tiles: [tileKeyOf(14, T14.x, T14.y)] },
+    ]);
+    expect(detailDone).toBe(false);
+    release();
+    expect(await detail).toEqual([tagBytes(T14), labelBytes(T14)]);
+    await preview;
+    expect(stages).toHaveLength(2);
+  });
+
+  it('deletes retired namespaces once, without blocking reads', async () => {
+    const store = new FakeStore();
+    await store.putMany('planet-z10-v0', [{ tile: T13, bytes: tagBytes(T13) }], 0);
+    const { source } = makeSource({ store });
+
+    await source.getTileBytes(T13);
+    await source.getTileBytes(T13);
+    expect(store.deleted).toEqual(['planet-z10-v0']);
+    expect(await store.get('planet-z10-v0', T13)).toBeNull();
   });
 });
