@@ -88,6 +88,7 @@ import { getRevealMaskEffect } from './reveal-mask-shader';
 import { prevRectUniform, REVEAL_TARGET } from './reveal-mask';
 import { YouLocator } from './you-locator';
 import { LoadingHexGrid } from './loading-hex-grid';
+import { SunlightLayer } from './sunlight-layer';
 
 /** Crossfade duration (ms) — fallback only, when a bundle lacks its textures. */
 const CROSSFADE_MS = 200;
@@ -1102,6 +1103,13 @@ export function MapView({
                     </>
                   ) : null}
                 </Group>
+                <SunlightLayer
+                  anchor={anchor}
+                  viewport={viewport}
+                  scale={k}
+                  translateX={tx}
+                  translateY={ty}
+                />
               </Canvas>
             )}
           </View>
