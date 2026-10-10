@@ -85,6 +85,9 @@ x25519-dalek = { version = "2", default-features = false, features = [
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 thiserror = "2"
+# SCB3 map tiles arrive as per-tile gzip members (src/mvt.rs `decode_tile`). The pure-Rust
+# backend keeps iOS, Android and host builds free of a C toolchain.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Explicit scrubbing of ratchet key material (src/ratchet.rs). Already in the tree transitively
 # via x25519-dalek's `zeroize` feature — named directly here because the schedule holds raw
 # [u8; 32] chain keys that dalek's own Drop impls do not cover.

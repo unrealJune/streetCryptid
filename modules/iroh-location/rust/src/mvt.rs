@@ -7,7 +7,8 @@
 //! the JS/Hermes thread — the JS decoder allocated ~4.6M coordinate tuples per
 //! z13 bundle on the UI thread.
 //!
-//! Pure and dependency-free (no iroh/BLE), so `cargo test` exercises it on any host.
+//! Pure (no iroh/BLE; its only dependency is `flate2`'s pure-Rust inflater), so
+//! `cargo test` exercises it on any host.
 //!
 //! ## Coordinate precision
 //! World space is normalized Web Mercator ([0,1]² at z0). Storing absolute world
@@ -1303,12 +1304,38 @@ pub fn decode_bundle(bundle: &[u8]) -> Result<Vec<u8>, String> {
     Ok(encode(&geo, (ox, oy)))
 }
 
-/// Decode one coarse XYZ tile (z ≤ anchor) into a flat SCG1 geometry buffer.
+/// Bound on one tile's inflated MVT, matching the map server's `mvt.MaxTileBytes`.
+pub const MAX_INFLATED_TILE_BYTES: usize = 16 << 20;
+
+/// Decode one tile into a flat SCG1 geometry buffer.
+///
+/// `bytes` is raw MVT, or one or more concatenated gzip members (SCB3 entries; a
+/// z14 tile arrives as its structure member followed by its labels member). A raw
+/// MVT can never start with `1f 8b`: `0x1f` would be field 3 with wire type 7.
+/// Gzip that is malformed or inflates past [`MAX_INFLATED_TILE_BYTES`] decodes
+/// as an empty tile, the same as a malformed protobuf.
 pub fn decode_tile(bytes: &[u8], z: u32, x: u32, y: u32) -> Vec<u8> {
     let (ox, oy, _) = tile_min(z, x, y);
     let mut geo = Geometry::default();
-    decode_tile_into(bytes, z, x, y, (ox, oy), &mut geo);
+    if let Some(raw) = inflate_tile(bytes) {
+        decode_tile_into(&raw, z, x, y, (ox, oy), &mut geo);
+    }
     encode(&geo, (ox, oy))
+}
+
+/// Raw MVT for a tile that may be gzip members; `None` when the gzip is unusable.
+fn inflate_tile(bytes: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
+    use std::io::Read;
+    if bytes.len() < 2 || bytes[0] != 0x1f || bytes[1] != 0x8b {
+        return Some(std::borrow::Cow::Borrowed(bytes));
+    }
+    let mut raw = Vec::new();
+    // MultiGzDecoder reads every member; a plain GzDecoder stops after the first.
+    flate2::read::MultiGzDecoder::new(bytes)
+        .take(MAX_INFLATED_TILE_BYTES as u64 + 1)
+        .read_to_end(&mut raw)
+        .ok()?;
+    (raw.len() <= MAX_INFLATED_TILE_BYTES).then_some(std::borrow::Cow::Owned(raw))
 }
 
 #[cfg(test)]
@@ -1490,6 +1517,78 @@ mod tests {
             geo.strings.list[geo.label_streets[0].name as usize],
             "East Pine Street"
         );
+    }
+
+    fn gzip(raw: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut zw = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        zw.write_all(raw).unwrap();
+        zw.finish().unwrap()
+    }
+
+    #[test]
+    fn decodes_concatenated_gzip_members_as_one_tile() {
+        let streets = build_layer(
+            "transportation",
+            &["class"],
+            &[value_str("primary")],
+            &[(
+                GEOM_LINE,
+                vec![0, 0],
+                geom_cmds(&[(0, 0), (100, 200)], false),
+            )],
+        );
+        let names = build_layer(
+            "transportation_name",
+            &["class", "name"],
+            &[value_str("minor"), value_str("East Pine Street")],
+            &[(
+                GEOM_LINE,
+                vec![0, 0, 1, 1],
+                geom_cmds(&[(0, 0), (100, 200)], false),
+            )],
+        );
+        let mut raw = streets.clone();
+        raw.extend_from_slice(&names);
+        let mut members = gzip(&streets);
+        members.extend_from_slice(&gzip(&names));
+
+        assert_eq!(inflate_tile(&members).unwrap().as_ref(), raw.as_slice());
+        assert_eq!(
+            decode_tile(&members, 14, 100, 200),
+            decode_tile(&raw, 14, 100, 200)
+        );
+        let mut geo = Geometry::default();
+        let o = tile_min(14, 100, 200);
+        decode_tile_into(
+            &inflate_tile(&members).unwrap(),
+            14,
+            100,
+            200,
+            (o.0, o.1),
+            &mut geo,
+        );
+        assert_eq!(geo.streets.len(), 1);
+        assert_eq!(geo.label_streets.len(), 1);
+    }
+
+    #[test]
+    fn unusable_gzip_decodes_as_an_empty_tile() {
+        let streets = build_layer(
+            "transportation",
+            &["class"],
+            &[value_str("primary")],
+            &[(
+                GEOM_LINE,
+                vec![0, 0],
+                geom_cmds(&[(0, 0), (100, 200)], false),
+            )],
+        );
+        let member = gzip(&streets);
+        assert!(inflate_tile(&member[..member.len() - 5]).is_none());
+        let bomb = gzip(&vec![0u8; MAX_INFLATED_TILE_BYTES + 1]);
+        assert!(inflate_tile(&bomb).is_none());
+        assert_eq!(decode_tile(&bomb, 14, 0, 0), decode_tile(&[], 14, 0, 0));
     }
 
     #[test]

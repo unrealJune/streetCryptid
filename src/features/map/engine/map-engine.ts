@@ -337,18 +337,21 @@ export class MapEngine {
     }
 
     const t0 = now();
+    // Set once full detail is in hand: a preview stage landing after it is wasted work.
+    let detailLoaded = false;
     const streamedPreview =
       coldStart && spec.tileZoom === 14 && onPreview && this.source.getPreview
         ? this.source
-            .getPreview(tiles)
-            .then(async (geometry) => {
-              if (!geometry) return;
+            .getPreview(tiles, async (stage, geometry) => {
+              // Stages arrive in stream order: the z13 overview, then the z14 structure part.
+              if (detailLoaded) return;
               const preview = await this.buildFromGeometry(
                 request,
-                { ...spec, tileZoom: 13 },
+                { ...spec, tileZoom: stage.tileZoom },
                 geometry,
                 { tiles: tiles.length, coldStart: true, sourceMs: now() - t0, mergeMs: 0 }
               );
+              if (detailLoaded) return;
               this.last = preview;
               onPreview(preview);
             })
@@ -367,6 +370,7 @@ export class MapEngine {
           })
         )
       );
+      detailLoaded = true;
       await streamedPreview;
     } catch (error) {
       await streamedPreview;

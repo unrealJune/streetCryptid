@@ -242,6 +242,7 @@ describe('createTileByteStore — degradation', () => {
       upsertMany: () => Promise.reject(new Error('io')),
       totalBytes: () => Promise.reject(new Error('io')),
       evictOldest: () => Promise.reject(new Error('io')),
+      deleteSource: () => Promise.reject(new Error('io')),
     };
     const store = createTileByteStore({ openDb: async () => broken });
 
