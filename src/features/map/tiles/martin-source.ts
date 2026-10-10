@@ -1,4 +1,4 @@
-import type { TileByteSource } from './tile-bytes';
+import type { SingleTileByteSource } from './tile-bytes';
 import type { TileCoord } from './tile-math';
 import { withRequestDeadline } from './request-deadline';
 import { addMapPerfMetric, captureMapPerfMetricScope, perfNow } from '../perf/map-perf';
@@ -14,7 +14,7 @@ const TILE_REQUEST_TIMEOUT_MS = 30_000;
  * (bundle-fetch.ts, sqlite-tile-store.ts) can wrap it byte-for-byte;
  * lifting bytes into decoded geometry is DecodingGeometrySource's job.
  */
-export class MartinByteSource implements TileByteSource {
+export class MartinByteSource implements SingleTileByteSource {
   constructor(private readonly baseUrl: string) {}
 
   async getTileBytes(tile: TileCoord, signal?: AbortSignal): Promise<Uint8Array | null> {

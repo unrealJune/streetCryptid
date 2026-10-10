@@ -22,6 +22,10 @@ use wasm_streams::ReadableStream;
 mod crypto;
 #[path = "../../rust/src/docs.rs"]
 mod docs;
+// `docs.rs` names the namespace book; the web store is in memory and never builds one.
+#[allow(dead_code)]
+#[path = "../../rust/src/ns_book.rs"]
+mod ns_book;
 #[path = "../../rust/src/pad.rs"]
 mod pad;
 // crypto.rs's v3 envelope wraps under a Double Ratchet message key, so the schedule comes with
@@ -227,7 +231,7 @@ impl WasmLocationNode {
             // Wasm uses an in-memory docs store (`Docs::memory()`), so there is no persistent
             // data dir: namespace persistence is a no-op here (fs reads yield None → a fresh
             // namespace each load), which is correct for the ephemeral web store.
-            TrailDocs::init(docs, (*blobs).clone(), std::path::PathBuf::new())
+            TrailDocs::init(docs, (*blobs).clone(), std::path::PathBuf::new(), None)
                 .await
                 .map_err(to_js_err)?,
         );

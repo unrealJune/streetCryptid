@@ -23,7 +23,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::ratchet::{MessageKey, RatchetHeader, KID_LEN, SESSION_ID_LEN};
+use crate::ratchet::{BootHeader, MessageKey, RatchetHeader, KID_LEN, SESSION_ID_LEN};
 
 /// Domain-separation string for HPKE key wrapping.
 const HPKE_INFO: &[u8] = b"streetcryptid/loc/v2/keywrap";
@@ -38,6 +38,15 @@ pub const ENVELOPE_V: u8 = 2;
 /// record, which cannot be ratchet-sealed because it is the thing that re-establishes the
 /// ratchet — and for the mesh path, whose forward secrecy is left open by §8.1.
 pub const ENVELOPE_V3: u8 = 3;
+
+/// v3 plus a per-wrap **restart header** ([`BootHeader`], FORWARD-SECRECY.md §4.6).
+///
+/// Emitted only while a leader has a restarted session the follower has not yet answered on, so
+/// ordinary traffic stays v3 and a peer on an older build keeps reading it. A separate version
+/// rather than an appended field because the envelope signature covers a re-encode of the decoded
+/// struct: a reader that does not know a field drops it, re-encodes different bytes, and fails the
+/// signature — appending is a breaking change here however tolerant postcard is.
+pub const ENVELOPE_V4: u8 = 4;
 
 /// Fixed all-zero nonce for the v3 wrap AEAD.
 ///
@@ -134,6 +143,40 @@ struct WrapV3 {
     ct: Vec<u8>,
 }
 
+/// A v4 wrap: a v3 wrap plus the optional restart header for this recipient.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WrapV4 {
+    kid: [u8; KID_LEN],
+    header: RatchetHeader,
+    /// Present while the sender leads a restarted session this recipient has not answered on yet.
+    /// Bound into the wrap AAD as well as signed.
+    boot: Option<BootHeader>,
+    ct: Vec<u8>,
+}
+
+/// The v4 envelope: v3 with [`WrapV4`] wraps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EnvelopeV4 {
+    v: u8,
+    author: Vec<u8>,
+    seq: u64,
+    ts: u64,
+    mesh_epoch: u32,
+    nonce: Vec<u8>,
+    ct: Vec<u8>,
+    wraps: Vec<WrapV4>,
+    sig: Vec<u8>,
+}
+
+/// One wrap of either ratcheted version, as the receive path sees it.
+#[derive(Debug, Clone)]
+struct RatchetWrap {
+    kid: [u8; KID_LEN],
+    header: RatchetHeader,
+    boot: Option<BootHeader>,
+    ct: Vec<u8>,
+}
+
 /// The v3 envelope. Same shape as v2 except for the wrap layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EnvelopeV3 {
@@ -157,6 +200,9 @@ pub struct SealWrap {
     pub header: RatchetHeader,
     pub session_id: [u8; SESSION_ID_LEN],
     pub key: MessageKey,
+    /// The restart header to carry for this recipient, if any. Any wrap carrying one makes the
+    /// whole envelope v4.
+    pub boot: Option<BootHeader>,
 }
 
 impl std::fmt::Debug for SealWrap {
@@ -164,6 +210,7 @@ impl std::fmt::Debug for SealWrap {
         f.debug_struct("SealWrap")
             .field("kid", &self.kid)
             .field("header", &self.header)
+            .field("boot", &self.boot)
             .finish_non_exhaustive()
     }
 }
@@ -180,7 +227,9 @@ pub struct VerifiedEnvelope {
     pub seq: u64,
     pub ts: u64,
     pub mesh_epoch: u32,
-    wraps: Vec<WrapV3>,
+    /// [`ENVELOPE_V3`] or [`ENVELOPE_V4`]; selects the AAD layout.
+    version: u8,
+    wraps: Vec<RatchetWrap>,
     nonce: Vec<u8>,
     ct: Vec<u8>,
 }
@@ -190,6 +239,8 @@ pub struct VerifiedEnvelope {
 pub struct WrapLocator {
     pub kid: [u8; KID_LEN],
     pub header: RatchetHeader,
+    /// The sender's restart header for this wrap's recipient, if it carried one (v4 only).
+    pub boot: Option<BootHeader>,
 }
 
 impl VerifiedEnvelope {
@@ -201,6 +252,7 @@ impl VerifiedEnvelope {
             .map(|w| WrapLocator {
                 kid: w.kid,
                 header: w.header,
+                boot: w.boot,
             })
             .collect()
     }
@@ -218,13 +270,13 @@ impl VerifiedEnvelope {
     ) -> Result<Opened, CryptoError> {
         let wrap = self.wraps.get(index).ok_or(CryptoError::NotARecipient)?;
         let ad = aad(
-            ENVELOPE_V3,
+            self.version,
             &self.author,
             self.seq,
             self.ts,
             self.mesh_epoch,
         );
-        let wrap_ad = wrap_aad(&ad, &wrap.header, session_id);
+        let wrap_ad = wrap_aad(&ad, &wrap.header, session_id, wrap.boot.as_ref());
 
         // `Zeroizing` because this is the key that protects the fix, and §5.4 makes erasure
         // hygiene an explicit design surface. `RatchetState` and `MessageKey` already scrub
@@ -267,21 +319,29 @@ impl VerifiedEnvelope {
     }
 }
 
-/// The wrap's associated data: `envelope_aad ‖ wrap_header ‖ session_id` (§4.7).
+/// The wrap's associated data: `envelope_aad ‖ wrap_header ‖ session_id [‖ boot]` (§4.7).
 ///
 /// Hand-encoded rather than postcard'd so the bytes are pinned by this function alone — the AAD
 /// is a security boundary, and a serializer's framing decisions should not be able to move it.
+/// A v3 wrap never has a `boot`, so its AAD is byte-for-byte what it always was; a v4 wrap that
+/// carries one binds it, so a restart header cannot be moved onto another recipient's wrap.
 fn wrap_aad(
     envelope_aad: &[u8],
     header: &RatchetHeader,
     session_id: &[u8; SESSION_ID_LEN],
+    boot: Option<&BootHeader>,
 ) -> Vec<u8> {
-    let mut ad = Vec::with_capacity(envelope_aad.len() + 40 + SESSION_ID_LEN);
+    let mut ad = Vec::with_capacity(envelope_aad.len() + 40 + SESSION_ID_LEN + 44);
     ad.extend_from_slice(envelope_aad);
     ad.extend_from_slice(&header.sender_ratchet_pub);
     ad.extend_from_slice(&header.epoch.to_le_bytes());
     ad.extend_from_slice(&header.counter.to_le_bytes());
     ad.extend_from_slice(session_id);
+    if let Some(boot) = boot {
+        ad.extend_from_slice(&boot.base);
+        ad.extend_from_slice(&boot.prekey_id.to_le_bytes());
+        ad.extend_from_slice(&boot.ts.to_le_bytes());
+    }
     ad
 }
 
@@ -292,11 +352,21 @@ fn signing_bytes_v3(env: &EnvelopeV3) -> Result<Vec<u8>, CryptoError> {
     postcard::to_allocvec(&unsigned).map_err(|_| CryptoError::Encode)
 }
 
+/// Encode a v4 envelope with an empty signature — the exact bytes that get signed.
+fn signing_bytes_v4(env: &EnvelopeV4) -> Result<Vec<u8>, CryptoError> {
+    let mut unsigned = env.clone();
+    unsigned.sig = Vec::new();
+    postcard::to_allocvec(&unsigned).map_err(|_| CryptoError::Encode)
+}
+
 /// Seal a payload under envelope v3: one random content key `K`, wrapped per recipient with that
 /// peer's ratchet message key rather than with HPKE.
 ///
 /// Revocation still works the same way — no wrap, no key, and `K` is fresh per fix. What changes
 /// is that a wrap is no longer openable by a long-term secret a seized device still holds.
+///
+/// If any wrap carries a restart header the envelope is written as [`ENVELOPE_V4`]; otherwise it
+/// is v3, so a peer on an older build keeps reading everything that is not a restart.
 #[allow(clippy::too_many_arguments)]
 pub fn seal_v3(
     signing_seed: &[u8],
@@ -314,6 +384,11 @@ pub fn seal_v3(
         .try_into()
         .map_err(|_| CryptoError::KeyLength)?;
     let signing_key = SigningKey::from_bytes(&seed);
+    let version = if wraps.iter().any(|w| w.boot.is_some()) {
+        ENVELOPE_V4
+    } else {
+        ENVELOPE_V3
+    };
 
     // The one key every wrap in this envelope protects. `Zeroizing` rather than a bare array
     // because it outlives the loop below and is copied into each wrap's plaintext — leaving it in
@@ -324,7 +399,7 @@ pub fn seal_v3(
     let mut nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
 
-    let ad = aad(ENVELOPE_V3, author, seq, ts, mesh_epoch);
+    let ad = aad(version, author, seq, ts, mesh_epoch);
 
     let cipher =
         ChaCha20Poly1305::new_from_slice(key.as_ref()).map_err(|_| CryptoError::KeyLength)?;
@@ -340,9 +415,10 @@ pub fn seal_v3(
 
     let mut out_wraps = Vec::with_capacity(wraps.len());
     for w in wraps {
-        let wrap_ad = wrap_aad(&ad, &w.header, &w.session_id);
+        let wrap_ad = wrap_aad(&ad, &w.header, &w.session_id, w.boot.as_ref());
         let header = w.header;
         let kid = w.kid;
+        let boot = w.boot;
         let wrap_ct = w.key.use_once(|mk| {
             let c = ChaCha20Poly1305::new_from_slice(mk).map_err(|_| CryptoError::KeyLength)?;
             c.encrypt(
@@ -354,45 +430,147 @@ pub fn seal_v3(
             )
             .map_err(|_| CryptoError::Cipher)
         })?;
-        out_wraps.push(WrapV3 {
+        out_wraps.push(RatchetWrap {
             kid,
             header,
+            boot,
             ct: wrap_ct,
         });
     }
 
-    let mut env = EnvelopeV3 {
-        v: ENVELOPE_V3,
-        author: author.to_vec(),
-        seq,
-        ts,
-        mesh_epoch,
-        nonce: nonce.to_vec(),
-        ct,
-        wraps: out_wraps,
-        sig: Vec::new(),
-    };
-    let signature = signing_key.sign(&signing_bytes_v3(&env)?);
-    env.sig = signature.to_bytes().to_vec();
-
-    postcard::to_allocvec(&env).map_err(|_| CryptoError::Encode)
+    if version == ENVELOPE_V3 {
+        let mut env = EnvelopeV3 {
+            v: ENVELOPE_V3,
+            author: author.to_vec(),
+            seq,
+            ts,
+            mesh_epoch,
+            nonce: nonce.to_vec(),
+            ct,
+            wraps: out_wraps
+                .into_iter()
+                .map(|w| WrapV3 {
+                    kid: w.kid,
+                    header: w.header,
+                    ct: w.ct,
+                })
+                .collect(),
+            sig: Vec::new(),
+        };
+        let signature = signing_key.sign(&signing_bytes_v3(&env)?);
+        env.sig = signature.to_bytes().to_vec();
+        postcard::to_allocvec(&env).map_err(|_| CryptoError::Encode)
+    } else {
+        let mut env = EnvelopeV4 {
+            v: ENVELOPE_V4,
+            author: author.to_vec(),
+            seq,
+            ts,
+            mesh_epoch,
+            nonce: nonce.to_vec(),
+            ct,
+            wraps: out_wraps
+                .into_iter()
+                .map(|w| WrapV4 {
+                    kid: w.kid,
+                    header: w.header,
+                    boot: w.boot,
+                    ct: w.ct,
+                })
+                .collect(),
+            sig: Vec::new(),
+        };
+        let signature = signing_key.sign(&signing_bytes_v4(&env)?);
+        env.sig = signature.to_bytes().to_vec();
+        postcard::to_allocvec(&env).map_err(|_| CryptoError::Encode)
+    }
 }
 
-/// Decode a v3 envelope and verify the author's signature. **Touches no session state.**
+/// The fields every ratcheted envelope version shares, after decoding and before verification.
+struct DecodedRatcheted {
+    v: u8,
+    author: Vec<u8>,
+    seq: u64,
+    ts: u64,
+    mesh_epoch: u32,
+    nonce: Vec<u8>,
+    ct: Vec<u8>,
+    wraps: Vec<RatchetWrap>,
+    sig: Vec<u8>,
+    /// The exact bytes the author signed.
+    signed: Vec<u8>,
+}
+
+fn decode_ratcheted(envelope_bytes: &[u8]) -> Result<DecodedRatcheted, CryptoError> {
+    // Version before layout. The schemas differ in wrap shape, so decoding first would report a
+    // v2 envelope as "wire decode failed" — true but useless. A receiver that logs
+    // "unsupported envelope version 2" can act on it.
+    match envelope_version(envelope_bytes) {
+        Some(ENVELOPE_V3) => {
+            let env: EnvelopeV3 =
+                postcard::from_bytes(envelope_bytes).map_err(|_| CryptoError::Decode)?;
+            let signed = signing_bytes_v3(&env)?;
+            Ok(DecodedRatcheted {
+                v: env.v,
+                author: env.author,
+                seq: env.seq,
+                ts: env.ts,
+                mesh_epoch: env.mesh_epoch,
+                nonce: env.nonce,
+                ct: env.ct,
+                wraps: env
+                    .wraps
+                    .into_iter()
+                    .map(|w| RatchetWrap {
+                        kid: w.kid,
+                        header: w.header,
+                        boot: None,
+                        ct: w.ct,
+                    })
+                    .collect(),
+                sig: env.sig,
+                signed,
+            })
+        }
+        Some(ENVELOPE_V4) => {
+            let env: EnvelopeV4 =
+                postcard::from_bytes(envelope_bytes).map_err(|_| CryptoError::Decode)?;
+            let signed = signing_bytes_v4(&env)?;
+            Ok(DecodedRatcheted {
+                v: env.v,
+                author: env.author,
+                seq: env.seq,
+                ts: env.ts,
+                mesh_epoch: env.mesh_epoch,
+                nonce: env.nonce,
+                ct: env.ct,
+                wraps: env
+                    .wraps
+                    .into_iter()
+                    .map(|w| RatchetWrap {
+                        kid: w.kid,
+                        header: w.header,
+                        boot: w.boot,
+                        ct: w.ct,
+                    })
+                    .collect(),
+                sig: env.sig,
+                signed,
+            })
+        }
+        Some(other) => Err(CryptoError::UnsupportedVersion(other)),
+        None => Err(CryptoError::Decode),
+    }
+}
+
+/// Decode a ratcheted (v3 or v4) envelope and verify the author's signature. **Touches no session
+/// state.**
 ///
 /// Everything downstream — locating our wrap, accepting a ratchet position, opening the payload —
 /// runs on the returned value, so no unauthenticated byte can reach the ratchet (§4.2).
 pub fn verify_v3(envelope_bytes: &[u8]) -> Result<VerifiedEnvelope, CryptoError> {
-    // Version before layout. The two schemas differ in wrap shape, so decoding first would report
-    // a v2 envelope as "wire decode failed" — true but useless. A receiver that logs
-    // "unsupported envelope version 2" can act on it.
-    match envelope_version(envelope_bytes) {
-        Some(ENVELOPE_V3) => {}
-        Some(other) => return Err(CryptoError::UnsupportedVersion(other)),
-        None => return Err(CryptoError::Decode),
-    }
-    let env: EnvelopeV3 = postcard::from_bytes(envelope_bytes).map_err(|_| CryptoError::Decode)?;
-    if env.v != ENVELOPE_V3 {
+    let env = decode_ratcheted(envelope_bytes)?;
+    if env.v != ENVELOPE_V3 && env.v != ENVELOPE_V4 {
         return Err(CryptoError::UnsupportedVersion(env.v));
     }
     if env.author.len() != AUTHOR_LEN || env.nonce.len() != NONCE_LEN {
@@ -405,7 +583,7 @@ pub fn verify_v3(envelope_bytes: &[u8]) -> Result<VerifiedEnvelope, CryptoError>
         .map_err(|_| CryptoError::Decode)?;
     let vk = VerifyingKey::from_bytes(&author).map_err(|_| CryptoError::BadSignature)?;
     let sig = Signature::from_slice(&env.sig).map_err(|_| CryptoError::BadSignature)?;
-    vk.verify_strict(&signing_bytes_v3(&env)?, &sig)
+    vk.verify_strict(&env.signed, &sig)
         .map_err(|_| CryptoError::BadSignature)?;
 
     Ok(VerifiedEnvelope {
@@ -413,6 +591,7 @@ pub fn verify_v3(envelope_bytes: &[u8]) -> Result<VerifiedEnvelope, CryptoError>
         seq: env.seq,
         ts: env.ts,
         mesh_epoch: env.mesh_epoch,
+        version: env.v,
         wraps: env.wraps,
         nonce: env.nonce,
         ct: env.ct,
@@ -455,7 +634,7 @@ pub struct EnvelopeHeader {
 /// Read + signature-check an envelope's [`EnvelopeHeader`], routing on the declared version.
 pub fn envelope_header(envelope_bytes: &[u8]) -> Result<EnvelopeHeader, CryptoError> {
     match envelope_version(envelope_bytes) {
-        Some(ENVELOPE_V3) => {
+        Some(ENVELOPE_V3) | Some(ENVELOPE_V4) => {
             let env = verify_v3(envelope_bytes)?;
             Ok(EnvelopeHeader {
                 author: env.author,
@@ -753,6 +932,7 @@ mod v3_tests {
                     header: slot.header,
                     session_id: **sid,
                     key: slot.key,
+                    boot: None,
                 }
             })
             .collect();
@@ -977,6 +1157,130 @@ mod v3_tests {
                 .as_slice(),
             b"pong"
         );
+    }
+
+    fn boot(tag: u8) -> BootHeader {
+        BootHeader {
+            base: [tag; 32],
+            prekey_id: u32::from(tag),
+            ts: 1000 + u64::from(tag),
+        }
+    }
+
+    /// Seal like `seal_to`, attaching `boots[i]` to wrap `i`.
+    fn seal_with_boots(
+        seed: &[u8; 32],
+        author: &[u8; 32],
+        peers: &mut [(&[u8; SESSION_ID_LEN], &mut RatchetState)],
+        boots: &[Option<BootHeader>],
+    ) -> Vec<u8> {
+        let wraps = peers
+            .iter_mut()
+            .zip(boots)
+            .map(|((sid, state), boot)| {
+                let slot = state.next_send().unwrap();
+                SealWrap {
+                    kid: slot.kid,
+                    header: slot.header,
+                    session_id: **sid,
+                    key: slot.key,
+                    boot: *boot,
+                }
+            })
+            .collect();
+        seal_v3(seed, author, 1, 1000, 0, b"restart", wraps).unwrap()
+    }
+
+    /// A restart header makes the envelope v4; it still opens, and every recipient sees its own.
+    #[test]
+    fn a_restart_header_makes_v4_and_opens_for_every_recipient() {
+        let (seed, author) = test_identity();
+        let sid_b = [1u8; SESSION_ID_LEN];
+        let sid_c = [2u8; SESSION_ID_LEN];
+        let (mut a_b, _k1, mut b, mut kb) = session(sid_b, 7, 0xB0);
+        let (mut a_c, _k2, mut c, mut kc) = session(sid_c, 8, 0xC0);
+
+        let env = seal_with_boots(
+            &seed,
+            &author,
+            &mut [(&sid_b, &mut a_b), (&sid_c, &mut a_c)],
+            &[Some(boot(5)), None],
+        );
+        assert_eq!(envelope_version(&env), Some(ENVELOPE_V4));
+        let verified = verify_v3(&env).unwrap();
+        let locators = verified.locators();
+        assert_eq!(locators[0].boot, Some(boot(5)));
+        assert_eq!(locators[1].boot, None);
+        assert_eq!(
+            receive(&env, &sid_b, &mut b, &mut kb)
+                .unwrap()
+                .payload
+                .as_slice(),
+            b"restart"
+        );
+        assert_eq!(
+            receive(&env, &sid_c, &mut c, &mut kc)
+                .unwrap()
+                .payload
+                .as_slice(),
+            b"restart"
+        );
+        let header = envelope_header(&env).unwrap();
+        assert_eq!((header.author, header.seq), (author, 1));
+    }
+
+    /// The header is bound into its wrap's AAD and under the signature: it can be neither edited
+    /// nor moved onto another recipient's wrap.
+    #[test]
+    fn a_restart_header_cannot_be_edited_or_moved() {
+        let (seed, author) = test_identity();
+        let sid = [1u8; SESSION_ID_LEN];
+        let (mut a, _ka, _b, _kb) = session(sid, 7, 0xB0);
+        let env = seal_with_boots(&seed, &author, &mut [(&sid, &mut a)], &[Some(boot(5))]);
+
+        let mut decoded: EnvelopeV4 = postcard::from_bytes(&env).unwrap();
+        decoded.wraps[0].boot = Some(boot(6));
+        let edited = postcard::to_allocvec(&decoded).unwrap();
+        assert!(matches!(verify_v3(&edited), Err(CryptoError::BadSignature)));
+
+        // Re-signed by the author (so the signature is valid) but with the header moved: the wrap
+        // AAD no longer matches, so the wrap does not open.
+        let (mut a2, _k2, mut b2, mut kb2) = session(sid, 9, 0xD0);
+        let mut slot_wraps = Vec::new();
+        let slot = a2.next_send().unwrap();
+        slot_wraps.push(SealWrap {
+            kid: slot.kid,
+            header: slot.header,
+            session_id: sid,
+            key: slot.key,
+            boot: Some(boot(5)),
+        });
+        let sealed = seal_v3(&seed, &author, 2, 1000, 0, b"x", slot_wraps).unwrap();
+        let mut moved: EnvelopeV4 = postcard::from_bytes(&sealed).unwrap();
+        moved.wraps[0].boot = Some(boot(6));
+        moved.sig = Vec::new();
+        let signing_key = SigningKey::from_bytes(&seed);
+        moved.sig = signing_key
+            .sign(&signing_bytes_v4(&moved).unwrap())
+            .to_bytes()
+            .to_vec();
+        let resigned = postcard::to_allocvec(&moved).unwrap();
+        assert!(matches!(
+            receive(&resigned, &sid, &mut b2, &mut kb2),
+            Err(CryptoError::Cipher)
+        ));
+    }
+
+    /// Without a restart header the bytes are exactly v3, so a peer on an older build reads them.
+    #[test]
+    fn no_restart_header_means_plain_v3() {
+        let (seed, author) = test_identity();
+        let sid = [1u8; SESSION_ID_LEN];
+        let (mut a, _ka, _b, _kb) = session(sid, 7, 0xB0);
+        let env = seal_with_boots(&seed, &author, &mut [(&sid, &mut a)], &[None]);
+        assert_eq!(envelope_version(&env), Some(ENVELOPE_V3));
+        let decoded: EnvelopeV3 = postcard::from_bytes(&env).unwrap();
+        assert_eq!(decoded.v, ENVELOPE_V3);
     }
 
     /// Loss: the sender runs ahead while the receiver hears nothing, then one envelope lands.

@@ -117,7 +117,7 @@ jest.mock('../persistence', () => ({
 // eslint-disable-next-line import/first
 import { LocationSharingService } from '../location-sharing';
 
-/** Matches `NATIVE_START_TIMEOUT_MS` in `location-sharing.ts`. */
+/** Matches `NATIVE_START_TIMEOUT_MS` in `native-node.ts`. */
 const NATIVE_START_TIMEOUT_MS = 60_000;
 
 const spanNames: string[] = [];

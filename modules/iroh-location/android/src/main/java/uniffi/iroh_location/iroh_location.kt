@@ -737,6 +737,10 @@ external fun uniffi_iroh_location_checksum_func_mesh_open_fix(
 ): Int
 external fun uniffi_iroh_location_checksum_func_mesh_seal_fix(
 ): Int
+external fun uniffi_iroh_location_checksum_func_node_host(
+): Int
+external fun uniffi_iroh_location_checksum_func_record_location_runtime(
+): Int
 external fun uniffi_iroh_location_checksum_func_configure_telemetry(
 ): Int
 external fun uniffi_iroh_location_checksum_func_flush_telemetry(
@@ -801,9 +805,15 @@ external fun uniffi_iroh_location_checksum_method_locationnode_docs_write_traced
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_endpoint_id(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_forget_doc_ticket(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_forget_pair_sessions(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_forget_profile_ticket(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_forget_session(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_grant_stash_now(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_has_session(
 ): Int
@@ -821,6 +831,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nea
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_is_desynced(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_is_started(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_last_seal_report(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_list_pair_sessions(
@@ -832,6 +844,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_network_changed(
 external fun uniffi_iroh_location_checksum_method_locationnode_next_seq(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_outbox_pending(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_own_subscription(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_pair_result(
 ): Int
@@ -949,6 +963,20 @@ external fun uniffi_iroh_location_checksum_method_subscription_publish_null_trac
 ): Int
 external fun uniffi_iroh_location_checksum_method_subscription_publish_traced(
 ): Int
+external fun uniffi_iroh_location_checksum_method_nodehost_acquire_app(
+): Int
+external fun uniffi_iroh_location_checksum_method_nodehost_acquire_background(
+): Int
+external fun uniffi_iroh_location_checksum_method_nodehost_current(
+): Int
+external fun uniffi_iroh_location_checksum_method_nodehost_generation(
+): Int
+external fun uniffi_iroh_location_checksum_method_nodehost_release(
+): Int
+external fun uniffi_iroh_location_checksum_method_nodehost_restart(
+): Int
+external fun uniffi_iroh_location_checksum_method_nodehost_snapshot(
+): Int
 external fun uniffi_iroh_location_checksum_constructor_locationnode_from_device_secrets(
 ): Int
 external fun uniffi_iroh_location_checksum_constructor_locationnode_new(
@@ -1059,9 +1087,15 @@ external fun uniffi_iroh_location_fn_method_locationnode_docs_write_traced(`ptr`
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_endpoint_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_locationnode_forget_doc_ticket(`ptr`: Long,`ticket`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_forget_pair_sessions(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_forget_profile_ticket(`ptr`: Long,`ticket`: RustBuffer.ByValue,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_forget_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_grant_stash_now(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_has_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
@@ -1079,6 +1113,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_initiate_pair_nearby(`p
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_is_desynced(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_is_started(`ptr`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_last_seal_report(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_list_pair_sessions(`ptr`: Long,
@@ -1090,6 +1126,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_network_changed(`ptr`: 
 external fun uniffi_iroh_location_fn_method_locationnode_next_seq(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_outbox_pending(`ptr`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_own_subscription(`ptr`: Long,`bootstrap`: RustBuffer.ByValue,`listener`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_pair_result(`ptr`: Long,`sessionId`: RustBuffer.ByValue,
 ): Long
@@ -1201,7 +1239,7 @@ external fun uniffi_iroh_location_fn_clone_subscription(`handle`: Long,uniffi_ou
 ): Long
 external fun uniffi_iroh_location_fn_free_subscription(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_iroh_location_fn_method_subscription_heartbeat_fix(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,
+external fun uniffi_iroh_location_fn_method_subscription_heartbeat_fix(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,`parked`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_subscription_ingest_fix(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,`fix`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,
 ): Long
@@ -1217,6 +1255,24 @@ external fun uniffi_iroh_location_fn_method_subscription_publish_null_traced(`pt
 ): Long
 external fun uniffi_iroh_location_fn_method_subscription_publish_traced(`ptr`: Long,`seq`: Long,`fix`: RustBuffer.ByValue,`recipientEndpoints`: RustBuffer.ByValue,`traceparent`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_clone_nodehost(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_iroh_location_fn_free_nodehost(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_iroh_location_fn_method_nodehost_acquire_app(`ptr`: Long,`identitySecret`: RustBuffer.ByValue,`recvSecret`: RustBuffer.ByValue,`dataRoot`: RustBuffer.ByValue,`stateRoot`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_nodehost_acquire_background(`ptr`: Long,`secrets`: Long,`dataRoot`: RustBuffer.ByValue,`stateRoot`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_nodehost_current(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_nodehost_generation(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_iroh_location_fn_method_nodehost_release(`ptr`: Long,`holder`: RustBuffer.ByValue,`timeoutMs`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_nodehost_restart(`ptr`: Long,`config`: RustBuffer.ByValue,`timeoutMs`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_nodehost_snapshot(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_decode_mvt_bundle(`bundle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_decode_mvt_tile(`bytes`: RustBuffer.ByValue,`z`: Int,`x`: Int,`y`: Int,uniffi_out_err: UniffiRustCallStatus, 
@@ -1249,6 +1305,10 @@ external fun uniffi_iroh_location_fn_func_mesh_open_fix(`recvSecret`: RustBuffer
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_mesh_seal_fix(`identitySecret`: RustBuffer.ByValue,`recvSecret`: RustBuffer.ByValue,`authorEndpointId`: RustBuffer.ByValue,`seq`: Long,`meshEpoch`: Int,`fix`: RustBuffer.ByValue,`recipients`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_func_node_host(uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_iroh_location_fn_func_record_location_runtime(`event`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_iroh_location_fn_func_configure_telemetry(`endpoint`: RustBuffer.ByValue,`instanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_iroh_location_fn_func_flush_telemetry(
@@ -1420,6 +1480,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_func_mesh_seal_fix() != 60001) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_func_node_host() != 26497) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_record_location_runtime() != 22013) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1459,7 +1525,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_clear_outbox() != 61861) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_clear_resync() != 52312) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_clear_resync() != 23779) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_complete_session() != 30383) {
@@ -1516,10 +1582,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_endpoint_id() != 34847) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_forget_doc_ticket() != 38306) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_forget_pair_sessions() != 29011) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_forget_profile_ticket() != 24320) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_forget_session() != 58135) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_grant_stash_now() != 41760) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_has_session() != 16365) {
@@ -1528,7 +1603,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_identity_secret() != 6853) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_import_doc_ticket() != 57589) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_import_doc_ticket() != 43304) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_import_profile_ticket() != 16047) {
@@ -1543,7 +1618,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby() != 64589) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 27631) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 17624) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_is_started() != 55424) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_last_seal_report() != 27654) {
@@ -1564,6 +1642,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_outbox_pending() != 57932) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_own_subscription() != 45730) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_pair_result() != 26021) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1582,7 +1663,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_poll_profile_events() != 11150) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_poll_resync() != 5911) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_poll_resync() != 23719) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_profile_ticket() != 35099) {
@@ -1594,7 +1675,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_profile() != 57330) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 54563) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 6657) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_publish_watermarks() != 59312) {
@@ -1636,7 +1717,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_respond_pair() != 4487) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_resync_count() != 62719) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_resync_count() != 21715) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_revoke_pair_invite() != 25847) {
@@ -1645,7 +1726,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_seed_seq() != 19292) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_delivery_config() != 36860) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_delivery_config() != 59214) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
@@ -1675,7 +1756,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_submit_pair_choice() != 8652) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_subscribe() != 37204) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_subscribe() != 45610) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_sync_latest() != 8256) {
@@ -1714,7 +1795,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_subscription_heartbeat_fix() != 34732) {
+    if (lib.uniffi_iroh_location_checksum_method_subscription_heartbeat_fix() != 26170) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_subscription_ingest_fix() != 22084) {
@@ -1736,6 +1817,27 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_subscription_publish_traced() != 2036) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_nodehost_acquire_app() != 18446) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_nodehost_acquire_background() != 4405) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_nodehost_current() != 42756) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_nodehost_generation() != 9170) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_nodehost_release() != 49974) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_nodehost_restart() != 13316) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_nodehost_snapshot() != 21497) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_constructor_locationnode_from_device_secrets() != 9138) {
@@ -3154,7 +3256,8 @@ public interface LocationNodeInterface {
     suspend fun `clearOutbox`()
     
     /**
-     * Drop our in-flight resync ephemeral once every peer has been restarted.
+     * Retained for binding compatibility. Nothing about a restart is held in memory any more,
+     * so there is nothing to clear.
      */
     suspend fun `clearResync`()
     
@@ -3287,6 +3390,12 @@ public interface LocationNodeInterface {
     fun `endpointId`(): kotlin.ByteArray
     
     /**
+     * Stop replicating a removed friend's trail namespace, and stop reopening it on every start.
+     * Returns whether we were replicating it. Call with the docs ticket the friend was added with.
+     */
+    suspend fun `forgetDocTicket`(`ticket`: kotlin.String): kotlin.Boolean
+    
+    /**
      * Drop every FINISHED pairing session with this peer. Returns how many were removed.
      *
      * The companion to [`forget_session`](Self::forget_session): that one erases the ratchet
@@ -3300,9 +3409,21 @@ public interface LocationNodeInterface {
     suspend fun `forgetPairSessions`(`peerEndpointHex`: kotlin.String): kotlin.UInt
     
     /**
+     * [`Self::forget_doc_ticket`] for the friend's profile namespace.
+     */
+    suspend fun `forgetProfileTicket`(`ticket`: kotlin.String): kotlin.Boolean
+    
+    /**
      * Forget the session with this peer (un-friending, or a §4.6 restart).
      */
     suspend fun `forgetSession`(`peerEndpointHex`: kotlin.String)
+    
+    /**
+     * Grant the stash our namespaces now — what `syncStashGrants` in `location-sharing.ts` did
+     * over HTTP from JS, which only ever ran on a foreground launch. Returns at once; the grant
+     * runs on its own task and reports as a `stash.grant` span.
+     */
+    suspend fun `grantStashNow`()
     
     /**
      * Whether a ratchet session exists for this peer.
@@ -3318,6 +3439,9 @@ public interface LocationNodeInterface {
      * Import a friend's docs **read-ticket** (from their contact card) so we replicate their trail
      * namespace and can recover their missed fixes via [`sync_trail`]. This grants only
      * replication; reading still requires our per-recipient wrap in each envelope (ARCHITECTURE §6).
+     *
+     * The namespace is recorded so every later start reopens it, JS or not (see [`ns_book`]), and
+     * the stash is granted it at once.
      */
     suspend fun `importDocTicket`(`ticket`: kotlin.String)
     
@@ -3344,10 +3468,16 @@ public interface LocationNodeInterface {
     suspend fun `initiatePairNearby`(`peerEndpointId`: kotlin.ByteArray): kotlin.ByteArray
     
     /**
-     * Whether this peer's session needs §4.6 recovery: `R` consecutive missed envelopes, an
-     * unreadable state file, or a peer lapsed past `T_lapse` (§4.5).
+     * Whether this peer's session needs §4.6 recovery: a damaged record, `R` distinct envelopes
+     * we cannot open, a peer lapsed past `T_lapse` (§4.5), or — following — no sending chain for
+     * an hour.
      */
     suspend fun `isDesynced`(`peerEndpointHex`: kotlin.String): kotlin.Boolean
+    
+    /**
+     * Whether `start` has bound an endpoint that has not since been shut down.
+     */
+    suspend fun `isStarted`(): kotlin.Boolean
     
     /**
      * Who the latest fix envelope was sealed for and who it left out. `None` before the first.
@@ -3400,6 +3530,21 @@ public interface LocationNodeInterface {
     suspend fun `outboxPending`(): kotlin.UInt
     
     /**
+     * The single subscription to this node's own topic: create it, or adopt the live one.
+     *
+     * Adopting joins `bootstrap`'s peers on the existing subscription and, when `listener` is
+     * given, makes it the one events go to. `None` keeps whoever is listening — the background
+     * runtime's call, which must never silence a mounted app — and creates the subscription
+     * silent if there is none yet. A subscription whose receive loop has ended is replaced rather
+     * than handed out.
+     *
+     * Removing a friend therefore does not drop them from this topic's swarm until the node next
+     * restarts. That costs nothing: everything published here is sealed per recipient, and they
+     * are no longer one.
+     */
+    suspend fun `ownSubscription`(`bootstrap`: List<kotlin.String>, `listener`: FixListener?): Subscription
+    
+    /**
      * The completed-pair result for a session, enriched with the peer's verified latest profile
      * (once replicated). `None` until both sides have accepted.
      */
@@ -3433,14 +3578,8 @@ public interface LocationNodeInterface {
     suspend fun `pollProfileEvents`(): List<ProfileView>
     
     /**
-     * Look for `peer`'s resync record and, if one is there, restart the session from it.
-     *
-     * Publishes our own half first when we have not already, so a single call from each side
-     * completes the exchange without either having to go first — which matters because the
-     * side that noticed the desync and the side that caused it are usually not the same one.
-     *
-     * Returns whether a session was installed. `false` covers "no record yet", "stale record",
-     * and "already applied" — all ordinary, none an error.
+     * Run one recovery pass for this peer alone. Returns whether a session was installed —
+     * restarted (leader) or adopted (follower).
      */
     suspend fun `pollResync`(`peerEndpointHex`: kotlin.String, `peerRecvPubHex`: kotlin.String): kotlin.Boolean
     
@@ -3464,16 +3603,10 @@ public interface LocationNodeInterface {
     suspend fun `publishProfile`(`handle`: kotlin.String, `cryptidName`: kotlin.String, `sigil`: kotlin.String, `color`: kotlin.String): kotlin.ULong
     
     /**
-     * Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+     * Publish our control record (§4.6) now, sealed to `recipient_recv_pubs`, whether or not it
+     * changed. Returns our newest prekey's public half as hex.
      *
-     * Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
-     * re-establishes a ratchet, so it cannot require one. That is also why it is the one place
-     * the design has to be most careful: **recovery must never become the bypass**. The record
-     * carries only an ephemeral public key. It cannot downgrade anything, because a root is
-     * only ever derived when *both* ephemerals are in hand.
-     *
-     * Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
-     * than minting a new one, so a peer that already saw our half does not have to see a second.
+     * The native drain publishes it on its own; this is for a caller that wants it out now.
      */
     suspend fun `publishResync`(`recipientRecvPubs`: List<kotlin.String>): kotlin.String
     
@@ -3607,9 +3740,9 @@ public interface LocationNodeInterface {
     suspend fun `respondPair`(`sessionId`: kotlin.ByteArray, `accept`: kotlin.Boolean)
     
     /**
-     * How many resyncs we have driven with this peer.
+     * How many restarts have been installed with this peer in this process.
      *
-     * §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+     * §4.6 wants a restart *loop* to surface a "re-pair with this friend" prompt rather than
      * retrying forever, so this is deliberately a count rather than a boolean: the UI decides
      * where patience runs out, and the crypto layer does not pretend to know.
      */
@@ -3644,6 +3777,10 @@ public interface LocationNodeInterface {
      *
      * An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
      * so this never fails for being empty — the drain simply has no push to make.
+     *
+     * Opting into a stash (or moving to another one) grants it our namespaces at once; any other
+     * write re-grants at most once per [`stash::REGRANT_FLOOR_MS`], which covers the app's call
+     * on every launch without repeating the grant this node's start already made.
      */
     suspend fun `setDeliveryConfig`(`config`: DeliveryConfig)
     
@@ -3730,6 +3867,11 @@ public interface LocationNodeInterface {
      *
      * `bootstrap` are peer EndpointTickets (e.g. from friends' contact cards) that are
      * already in the topic. Returns a handle used to publish our own fixes.
+     *
+     * The node's OWN topic is the exception: it is routed to [`Self::own_subscription`], so a
+     * second caller adopts the live subscription (joining its bootstrap peers and taking over its
+     * events) instead of opening a second receive loop. Every other topic gets a fresh
+     * subscription per call, as it always has.
      */
     suspend fun `subscribe`(`topic`: kotlin.ByteArray, `bootstrap`: List<kotlin.String>, `listener`: FixListener): Subscription
     
@@ -4071,7 +4213,8 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Drop our in-flight resync ephemeral once every peer has been restarted.
+     * Retained for binding compatibility. Nothing about a restart is held in memory any more,
+     * so there is nothing to clear.
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `clearResync`() {
@@ -4565,6 +4708,31 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Stop replicating a removed friend's trail namespace, and stop reopening it on every start.
+     * Returns whether we were replicating it. Call with the docs ticket the friend was added with.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `forgetDocTicket`(`ticket`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_forget_doc_ticket(
+                uniffiHandle,
+                FfiConverterString.lower(`ticket`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Drop every FINISHED pairing session with this peer. Returns how many were removed.
      *
      * The companion to [`forget_session`](Self::forget_session): that one erases the ratchet
@@ -4597,6 +4765,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * [`Self::forget_doc_ticket`] for the friend's profile namespace.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `forgetProfileTicket`(`ticket`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_forget_profile_ticket(
+                uniffiHandle,
+                FfiConverterString.lower(`ticket`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Forget the session with this peer (un-friending, or a §4.6 restart).
      */
     @Throws(LocationException::class)
@@ -4617,6 +4809,32 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         
         // Error FFI converter
         LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Grant the stash our namespaces now — what `syncStashGrants` in `location-sharing.ts` did
+     * over HTTP from JS, which only ever ran on a foreground launch. Returns at once; the grant
+     * runs on its own task and reports as a `stash.grant` span.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `grantStashNow`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_grant_stash_now(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
     )
     }
 
@@ -4665,6 +4883,9 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
      * Import a friend's docs **read-ticket** (from their contact card) so we replicate their trail
      * namespace and can recover their missed fixes via [`sync_trail`]. This grants only
      * replication; reading still requires our per-recipient wrap in each envelope (ARCHITECTURE §6).
+     *
+     * The namespace is recorded so every later start reopens it, JS or not (see [`ns_book`]), and
+     * the stash is granted it at once.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -4788,8 +5009,9 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Whether this peer's session needs §4.6 recovery: `R` consecutive missed envelopes, an
-     * unreadable state file, or a peer lapsed past `T_lapse` (§4.5).
+     * Whether this peer's session needs §4.6 recovery: a damaged record, `R` distinct envelopes
+     * we cannot open, a peer lapsed past `T_lapse` (§4.5), or — following — no sending chain for
+     * an hour.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -4808,6 +5030,29 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Whether `start` has bound an endpoint that has not since been shut down.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `isStarted`() : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_is_started(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
     )
     }
 
@@ -4975,6 +5220,40 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * The single subscription to this node's own topic: create it, or adopt the live one.
+     *
+     * Adopting joins `bootstrap`'s peers on the existing subscription and, when `listener` is
+     * given, makes it the one events go to. `None` keeps whoever is listening — the background
+     * runtime's call, which must never silence a mounted app — and creates the subscription
+     * silent if there is none yet. A subscription whose receive loop has ended is replaced rather
+     * than handed out.
+     *
+     * Removing a friend therefore does not drop them from this topic's swarm until the node next
+     * restarts. That costs nothing: everything published here is sealed per recipient, and they
+     * are no longer one.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `ownSubscription`(`bootstrap`: List<kotlin.String>, `listener`: FixListener?) : Subscription {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_own_subscription(
+                uniffiHandle,
+                FfiConverterSequenceString.lower(`bootstrap`),FfiConverterOptionalTypeFixListener.lower(`listener`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeSubscription.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * The completed-pair result for a session, enriched with the peer's verified latest profile
      * (once replicated). `None` until both sides have accepted.
      */
@@ -5112,14 +5391,8 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Look for `peer`'s resync record and, if one is there, restart the session from it.
-     *
-     * Publishes our own half first when we have not already, so a single call from each side
-     * completes the exchange without either having to go first — which matters because the
-     * side that noticed the desync and the side that caused it are usually not the same one.
-     *
-     * Returns whether a session was installed. `false` covers "no record yet", "stale record",
-     * and "already applied" — all ordinary, none an error.
+     * Run one recovery pass for this peer alone. Returns whether a session was installed —
+     * restarted (leader) or adopted (follower).
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -5220,16 +5493,10 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
+     * Publish our control record (§4.6) now, sealed to `recipient_recv_pubs`, whether or not it
+     * changed. Returns our newest prekey's public half as hex.
      *
-     * Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
-     * re-establishes a ratchet, so it cannot require one. That is also why it is the one place
-     * the design has to be most careful: **recovery must never become the bypass**. The record
-     * carries only an ephemeral public key. It cannot downgrade anything, because a root is
-     * only ever derived when *both* ephemerals are in hand.
-     *
-     * Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
-     * than minting a new one, so a peer that already saw our half does not have to see a second.
+     * The native drain publishes it on its own; this is for a caller that wants it out now.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -5614,9 +5881,9 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * How many resyncs we have driven with this peer.
+     * How many restarts have been installed with this peer in this process.
      *
-     * §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
+     * §4.6 wants a restart *loop* to surface a "re-pair with this friend" prompt rather than
      * retrying forever, so this is deliberately a count rather than a boolean: the UI decides
      * where patience runs out, and the crypto layer does not pretend to know.
      */
@@ -5708,6 +5975,10 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
      *
      * An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
      * so this never fails for being empty — the drain simply has no push to make.
+     *
+     * Opting into a stash (or moving to another one) grants it our namespaces at once; any other
+     * write re-grants at most once per [`stash::REGRANT_FLOOR_MS`], which covers the app's call
+     * on every launch without repeating the grant this node's start already made.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -5983,6 +6254,11 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
      *
      * `bootstrap` are peer EndpointTickets (e.g. from friends' contact cards) that are
      * already in the topic. Returns a handle used to publish our own fixes.
+     *
+     * The node's OWN topic is the exception: it is routed to [`Self::own_subscription`], so a
+     * second caller adopts the live subscription (joining its bootstrap peers and taking over its
+     * events) instead of opening a second receive loop. Every other topic gets a fresh
+     * subscription per call, as it always has.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -6753,6 +7029,413 @@ public object FfiConverterTypeMeshCapsuleStore: FfiConverter<MeshCapsuleStore, L
 
 
 /**
+ * The process's node host, as the platforms see it. Every method is a thin conversion over
+ * [`Host`]; the contract lives there.
+ */
+public interface NodeHostInterface {
+    
+    /**
+     * Take an app lease. Call once per `createNode`, and [`Self::release`] once per `shutdown`.
+     */
+    suspend fun `acquireApp`(`identitySecret`: kotlin.ByteArray?, `recvSecret`: kotlin.ByteArray?, `dataRoot`: kotlin.String, `stateRoot`: kotlin.String): LocationNode
+    
+    /**
+     * Take (or keep) the background lease and return a started node. `None` before the app has
+     * ever run. Cheap when the node is already up: no keystore read, no construction.
+     */
+    suspend fun `acquireBackground`(`secrets`: DeviceSecrets, `dataRoot`: kotlin.String, `stateRoot`: kotlin.String): LocationNode?
+    
+    fun `current`(): LocationNode?
+    
+    fun `generation`(): kotlin.ULong
+    
+    /**
+     * Return a lease. The last one out shuts the node down within `timeout_ms`.
+     */
+    suspend fun `release`(`holder`: NodeHolder, `timeoutMs`: kotlin.ULong): ReleaseOutcome
+    
+    /**
+     * Rebuild the node with new settings, keeping every lease. Holders must re-read
+     * [`Self::current`] afterwards; the old node is shut down.
+     */
+    suspend fun `restart`(`config`: TransportConfig, `timeoutMs`: kotlin.ULong): LocationNode
+    
+    fun `snapshot`(): HostSnapshot
+    
+    companion object
+}
+
+/**
+ * The process's node host, as the platforms see it. Every method is a thin conversion over
+ * [`Host`]; the contract lives there.
+ */
+open class NodeHost: Disposable, AutoCloseable, NodeHostInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_iroh_location_fn_free_nodehost(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_iroh_location_fn_clone_nodehost(handle, status)
+        }
+    }
+
+    
+    /**
+     * Take an app lease. Call once per `createNode`, and [`Self::release`] once per `shutdown`.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `acquireApp`(`identitySecret`: kotlin.ByteArray?, `recvSecret`: kotlin.ByteArray?, `dataRoot`: kotlin.String, `stateRoot`: kotlin.String) : LocationNode {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_nodehost_acquire_app(
+                uniffiHandle,
+                FfiConverterOptionalByteArray.lower(`identitySecret`),FfiConverterOptionalByteArray.lower(`recvSecret`),FfiConverterString.lower(`dataRoot`),FfiConverterString.lower(`stateRoot`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeLocationNode.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Take (or keep) the background lease and return a started node. `None` before the app has
+     * ever run. Cheap when the node is already up: no keystore read, no construction.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `acquireBackground`(`secrets`: DeviceSecrets, `dataRoot`: kotlin.String, `stateRoot`: kotlin.String) : LocationNode? {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_nodehost_acquire_background(
+                uniffiHandle,
+                FfiConverterTypeDeviceSecrets.lower(`secrets`),FfiConverterString.lower(`dataRoot`),FfiConverterString.lower(`stateRoot`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeLocationNode.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    override fun `current`(): LocationNode? {
+            return FfiConverterOptionalTypeLocationNode.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_nodehost_current(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `generation`(): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_nodehost_generation(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Return a lease. The last one out shuts the node down within `timeout_ms`.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `release`(`holder`: NodeHolder, `timeoutMs`: kotlin.ULong) : ReleaseOutcome {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_nodehost_release(
+                uniffiHandle,
+                FfiConverterTypeNodeHolder.lower(`holder`),FfiConverterULong.lower(`timeoutMs`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeReleaseOutcome.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Rebuild the node with new settings, keeping every lease. Holders must re-read
+     * [`Self::current`] afterwards; the old node is shut down.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `restart`(`config`: TransportConfig, `timeoutMs`: kotlin.ULong) : LocationNode {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_nodehost_restart(
+                uniffiHandle,
+                FfiConverterTypeTransportConfig.lower(`config`),FfiConverterULong.lower(`timeoutMs`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeLocationNode.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    override fun `snapshot`(): HostSnapshot {
+            return FfiConverterTypeHostSnapshot.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_method_nodehost_snapshot(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNodeHost: FfiConverter<NodeHost, Long> {
+    override fun lower(value: NodeHost): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): NodeHost {
+        return NodeHost(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): NodeHost {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: NodeHost) = 8UL
+
+    override fun write(value: NodeHost, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
  * A live topic subscription; publish fixes through it.
  */
 public interface SubscriptionInterface {
@@ -6764,8 +7447,12 @@ public interface SubscriptionInterface {
      * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
      * delivers a location, and on a stationary phone that can be never; the cadence still has to
      * be uniform, because it is the one property of a sealed envelope the stash can read.
+     *
+     * `parked` is what the caller can prove about motion: `Some(true)` a confirmed stop,
+     * `Some(false)` a stop just left, `None` a clock with no evidence either way (the JS timer).
+     * Only the first stamps `parked` — see [`publish::Motion`] for the day it was unconditional.
      */
-    suspend fun `heartbeatFix`(`subscriptionId`: kotlin.String, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong): IngestOutcome
+    suspend fun `heartbeatFix`(`subscriptionId`: kotlin.String, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong, `parked`: kotlin.Boolean?): IngestOutcome
     
     /**
      * Take one captured location all the way to the wire, with no JS involved.
@@ -6925,15 +7612,19 @@ open class Subscription: Disposable, AutoCloseable, SubscriptionInterface
      * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
      * delivers a location, and on a stationary phone that can be never; the cadence still has to
      * be uniform, because it is the one property of a sealed envelope the stash can read.
+     *
+     * `parked` is what the caller can prove about motion: `Some(true)` a confirmed stop,
+     * `Some(false)` a stop just left, `None` a clock with no evidence either way (the JS timer).
+     * Only the first stamps `parked` — see [`publish::Motion`] for the day it was unconditional.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `heartbeatFix`(`subscriptionId`: kotlin.String, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong) : IngestOutcome {
+    override suspend fun `heartbeatFix`(`subscriptionId`: kotlin.String, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong, `parked`: kotlin.Boolean?) : IngestOutcome {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_iroh_location_fn_method_subscription_heartbeat_fix(
                 uniffiHandle,
-                FfiConverterString.lower(`subscriptionId`),FfiConverterTypeBatteryState.lower(`battery`),FfiConverterULong.lower(`intervalMs`),FfiConverterULong.lower(`nowMs`),
+                FfiConverterString.lower(`subscriptionId`),FfiConverterTypeBatteryState.lower(`battery`),FfiConverterULong.lower(`intervalMs`),FfiConverterULong.lower(`nowMs`),FfiConverterOptionalBoolean.lower(`parked`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -7607,6 +8298,125 @@ public object FfiConverterTypeEnqueueOutcome: FfiConverterRustBuffer<EnqueueOutc
 
 
 /**
+ * Everything the host knows, for `device.health` and for tests.
+ */
+data class HostSnapshot (
+    /**
+     * Bumped every time [`Host::current`] would answer differently.
+     */
+    var `generation`: kotlin.ULong
+    , 
+    /**
+     * Whether there is a node at all. Not whether it is started — ask the node.
+     */
+    var `hasNode`: kotlin.Boolean
+    , 
+    /**
+     * Live app leases (JS contexts that called `createNode` and have not called `shutdown`).
+     */
+    var `appLeases`: kotlin.UInt
+    , 
+    /**
+     * Whether the native background runtime holds a lease.
+     */
+    var `background`: kotlin.Boolean
+    , 
+    /**
+     * Nodes this host has built.
+     */
+    var `builds`: kotlin.ULong
+    , 
+    /**
+     * Acquires that adopted a live node instead of building one.
+     */
+    var `adoptions`: kotlin.ULong
+    , 
+    /**
+     * App acquires that had to replace a node built for a different identity or storage.
+     */
+    var `replacements`: kotlin.ULong
+    , 
+    /**
+     * Restarts (a settings change: shut down, rebuild, start with the new settings).
+     */
+    var `restarts`: kotlin.ULong
+    , 
+    /**
+     * Shutdowns that finished cleanly inside their budget.
+     */
+    var `shutdowns`: kotlin.ULong
+    , 
+    /**
+     * Shutdowns that finished with an error.
+     */
+    var `shutdownFailures`: kotlin.ULong
+    , 
+    /**
+     * Shutdowns that were still running when their budget ran out.
+     */
+    var `shutdownTimeouts`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeHostSnapshot: FfiConverterRustBuffer<HostSnapshot> {
+    override fun read(buf: ByteBuffer): HostSnapshot {
+        return HostSnapshot(
+            FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: HostSnapshot) = (
+            FfiConverterULong.allocationSize(value.`generation`) +
+            FfiConverterBoolean.allocationSize(value.`hasNode`) +
+            FfiConverterUInt.allocationSize(value.`appLeases`) +
+            FfiConverterBoolean.allocationSize(value.`background`) +
+            FfiConverterULong.allocationSize(value.`builds`) +
+            FfiConverterULong.allocationSize(value.`adoptions`) +
+            FfiConverterULong.allocationSize(value.`replacements`) +
+            FfiConverterULong.allocationSize(value.`restarts`) +
+            FfiConverterULong.allocationSize(value.`shutdowns`) +
+            FfiConverterULong.allocationSize(value.`shutdownFailures`) +
+            FfiConverterULong.allocationSize(value.`shutdownTimeouts`)
+    )
+
+    override fun write(value: HostSnapshot, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`generation`, buf)
+            FfiConverterBoolean.write(value.`hasNode`, buf)
+            FfiConverterUInt.write(value.`appLeases`, buf)
+            FfiConverterBoolean.write(value.`background`, buf)
+            FfiConverterULong.write(value.`builds`, buf)
+            FfiConverterULong.write(value.`adoptions`, buf)
+            FfiConverterULong.write(value.`replacements`, buf)
+            FfiConverterULong.write(value.`restarts`, buf)
+            FfiConverterULong.write(value.`shutdowns`, buf)
+            FfiConverterULong.write(value.`shutdownFailures`, buf)
+            FfiConverterULong.write(value.`shutdownTimeouts`, buf)
+    }
+}
+
+
+
+/**
  * A decrypted fix read back from the durable replica (mirrors the TS `NativeIncomingFix`).
  */
 data class IncomingFix (
@@ -7852,6 +8662,181 @@ public object FfiConverterTypeLocationFix: FfiConverterRustBuffer<LocationFix> {
             FfiConverterULong.write(value.`ts`, buf)
             FfiConverterOptionalUByte.write(value.`state`, buf)
             FfiConverterOptionalUInt.write(value.`publishedDeltaS`, buf)
+    }
+}
+
+
+
+/**
+ * One `location.runtime` span. `deliveries`, `redeliveries` and `handed_off` count since the
+ * previous pulse; `work_started` / `work_finished` are totals for the life of the process.
+ */
+data class LocationRuntimeEvent (
+    var `kind`: LocationRuntimeKind
+    , 
+    /**
+     * `moving` / `stopped`.
+     */
+    var `state`: kotlin.String
+    , 
+    /**
+     * The wake reason, stop evidence, visit direction or authorization status, by kind.
+     */
+    var `reason`: kotlin.String?
+    , 
+    /**
+     * `didUpdateLocations` calls.
+     */
+    var `deliveries`: kotlin.UInt
+    , 
+    /**
+     * Of those, deliveries whose newest location was NOT newer than the previous one — Core
+     * Location handing back a position it already gave us. On 2026-10-02 one 22:51 fix came back
+     * every 30 s for 73 minutes, and the first two went out as `live`.
+     */
+    var `redeliveries`: kotlin.UInt
+    , 
+    /**
+     * Publish-path calls (ingest + heartbeat) started and finished in this process. The difference
+     * is the work in flight; one that keeps growing is work spawned that never ran or never
+     * returned, which is what deliveries arriving and no `engine.*` span following would look like.
+     */
+    var `workStarted`: kotlin.UInt
+    , 
+    var `workFinished`: kotlin.UInt
+    , 
+    /**
+     * Captures handed to a mounted JS runtime instead of published here.
+     */
+    var `handedOff`: kotlin.UInt
+    , 
+    /**
+     * Since the last `didUpdateLocations`, at emission time.
+     */
+    var `lastDeliveryAgeMs`: kotlin.ULong?
+    , 
+    /**
+     * How old the newest delivered position was when it arrived (`now - location.timestamp`).
+     */
+    var `fixAgeAtDeliveryMs`: kotlin.ULong?
+    , 
+    var `accuracyM`: kotlin.Double?
+    , 
+    /**
+     * Negative is Core Location's "unknown", passed through.
+     */
+    var `speedMps`: kotlin.Double?
+    , 
+    /**
+     * What the manager is programmed with right now.
+     */
+    var `desiredAccuracyM`: kotlin.Double
+    , 
+    var `distanceFilterM`: kotlin.Double
+    , 
+    /**
+     * Round trip of the main-thread probe that preceded this event, when one ran.
+     */
+    var `mainLatencyMs`: kotlin.ULong?
+    , 
+    /**
+     * Whether this runtime holds the node (`native`) or hands captures to the app (`app`).
+     */
+    var `nodeOwner`: kotlin.String
+    , 
+    var `candidatePending`: kotlin.Boolean
+    , 
+    var `anchorArmed`: kotlin.Boolean
+    , 
+    var `fenceRegistered`: kotlin.Boolean
+    , 
+    /**
+     * An OS error description, for the error kinds only.
+     */
+    var `detail`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLocationRuntimeEvent: FfiConverterRustBuffer<LocationRuntimeEvent> {
+    override fun read(buf: ByteBuffer): LocationRuntimeEvent {
+        return LocationRuntimeEvent(
+            FfiConverterTypeLocationRuntimeKind.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalDouble.read(buf),
+            FfiConverterOptionalDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: LocationRuntimeEvent) = (
+            FfiConverterTypeLocationRuntimeKind.allocationSize(value.`kind`) +
+            FfiConverterString.allocationSize(value.`state`) +
+            FfiConverterOptionalString.allocationSize(value.`reason`) +
+            FfiConverterUInt.allocationSize(value.`deliveries`) +
+            FfiConverterUInt.allocationSize(value.`redeliveries`) +
+            FfiConverterUInt.allocationSize(value.`workStarted`) +
+            FfiConverterUInt.allocationSize(value.`workFinished`) +
+            FfiConverterUInt.allocationSize(value.`handedOff`) +
+            FfiConverterOptionalULong.allocationSize(value.`lastDeliveryAgeMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`fixAgeAtDeliveryMs`) +
+            FfiConverterOptionalDouble.allocationSize(value.`accuracyM`) +
+            FfiConverterOptionalDouble.allocationSize(value.`speedMps`) +
+            FfiConverterDouble.allocationSize(value.`desiredAccuracyM`) +
+            FfiConverterDouble.allocationSize(value.`distanceFilterM`) +
+            FfiConverterOptionalULong.allocationSize(value.`mainLatencyMs`) +
+            FfiConverterString.allocationSize(value.`nodeOwner`) +
+            FfiConverterBoolean.allocationSize(value.`candidatePending`) +
+            FfiConverterBoolean.allocationSize(value.`anchorArmed`) +
+            FfiConverterBoolean.allocationSize(value.`fenceRegistered`) +
+            FfiConverterOptionalString.allocationSize(value.`detail`)
+    )
+
+    override fun write(value: LocationRuntimeEvent, buf: ByteBuffer) {
+            FfiConverterTypeLocationRuntimeKind.write(value.`kind`, buf)
+            FfiConverterString.write(value.`state`, buf)
+            FfiConverterOptionalString.write(value.`reason`, buf)
+            FfiConverterUInt.write(value.`deliveries`, buf)
+            FfiConverterUInt.write(value.`redeliveries`, buf)
+            FfiConverterUInt.write(value.`workStarted`, buf)
+            FfiConverterUInt.write(value.`workFinished`, buf)
+            FfiConverterUInt.write(value.`handedOff`, buf)
+            FfiConverterOptionalULong.write(value.`lastDeliveryAgeMs`, buf)
+            FfiConverterOptionalULong.write(value.`fixAgeAtDeliveryMs`, buf)
+            FfiConverterOptionalDouble.write(value.`accuracyM`, buf)
+            FfiConverterOptionalDouble.write(value.`speedMps`, buf)
+            FfiConverterDouble.write(value.`desiredAccuracyM`, buf)
+            FfiConverterDouble.write(value.`distanceFilterM`, buf)
+            FfiConverterOptionalULong.write(value.`mainLatencyMs`, buf)
+            FfiConverterString.write(value.`nodeOwner`, buf)
+            FfiConverterBoolean.write(value.`candidatePending`, buf)
+            FfiConverterBoolean.write(value.`anchorArmed`, buf)
+            FfiConverterBoolean.write(value.`fenceRegistered`, buf)
+            FfiConverterOptionalString.write(value.`detail`, buf)
     }
 }
 
@@ -9437,6 +10422,131 @@ public object FfiConverterTypeLocationError : FfiConverterRustBuffer<LocationExc
 
 
 /**
+ * What happened. Each kind is either a discrete Core Location event or the periodic pulse.
+ */
+
+enum class LocationRuntimeKind {
+    
+    /**
+     * The runtime armed itself (`start()`): a launch, foreground or background.
+     */
+    STARTED,
+    /**
+     * Periodic summary of what Core Location delivered since the previous pulse. Emitted from a
+     * background timer, NOT from the delivery path, so it still fires when deliveries stop —
+     * which is the case it exists for.
+     */
+    PULSE,
+    /**
+     * The main thread did not run a probe within the stall threshold. Core Location delivers on
+     * main, so this is the "alive and deaf" state reported while it is happening.
+     */
+    MAIN_STALLED,
+    /**
+     * `moving` ⇄ `stopped`. `reason` names what caused it.
+     */
+    TRANSITION,
+    /**
+     * A `CLVisit`. `reason` is `arrival` or `departure`.
+     */
+    VISIT,
+    /**
+     * The stop-anchor fence reported an exit.
+     */
+    FENCE_EXIT,
+    /**
+     * Core Location paused updates (it should not, with auto-pause off).
+     */
+    PAUSED,
+    /**
+     * Core Location resumed updates.
+     */
+    RESUMED,
+    /**
+     * `didFailWithError`.
+     */
+    LOCATION_ERROR,
+    /**
+     * `monitoringDidFailFor` — a fence we believed armed is not.
+     */
+    FENCE_FAILED,
+    /**
+     * Authorization changed. `reason` is the new status.
+     */
+    AUTHORIZATION;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLocationRuntimeKind: FfiConverterRustBuffer<LocationRuntimeKind> {
+    override fun read(buf: ByteBuffer) = try {
+        LocationRuntimeKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: LocationRuntimeKind) = 4UL
+
+    override fun write(value: LocationRuntimeKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * Who holds a lease on the node.
+ */
+
+enum class NodeHolder {
+    
+    /**
+     * A JS context in the mounted app (or a headless one). Counted: there can be several.
+     */
+    APP,
+    /**
+     * The native background runtime. A flag: there is one per process.
+     */
+    BACKGROUND;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNodeHolder: FfiConverterRustBuffer<NodeHolder> {
+    override fun read(buf: ByteBuffer) = try {
+        NodeHolder.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NodeHolder) = 4UL
+
+    override fun write(value: NodeHolder, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
  * The kind of a polled pairing event.
  */
 
@@ -9534,6 +10644,68 @@ public object FfiConverterTypePairState: FfiConverterRustBuffer<PairState> {
     override fun allocationSize(value: PairState) = 4UL
 
     override fun write(value: PairState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * What a [`Host::release`] did.
+ */
+
+enum class ReleaseOutcome {
+    
+    /**
+     * This holder had no lease. Nothing changed.
+     */
+    NOT_HELD,
+    /**
+     * Released; another holder still has the node, so it keeps running.
+     */
+    STILL_HELD,
+    /**
+     * Released by the last holder, and there was no node to shut down.
+     */
+    RELEASED,
+    /**
+     * Last holder out: the node shut down inside the budget.
+     */
+    SHUT_DOWN,
+    /**
+     * Last holder out: the shutdown finished, but reported an error. The claims are released
+     * either way (`LocationNode::shutdown` clears every store before it returns the error).
+     */
+    SHUTDOWN_FAILED,
+    /**
+     * Last holder out: the shutdown did not finish inside the budget. It keeps running in the
+     * background and the host has forgotten the node; until it finishes, the stores may still be
+     * claimed, so a node built meanwhile may be refused its `start`.
+     */
+    SHUTDOWN_TIMED_OUT;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeReleaseOutcome: FfiConverterRustBuffer<ReleaseOutcome> {
+    override fun read(buf: ByteBuffer) = try {
+        ReleaseOutcome.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ReleaseOutcome) = 4UL
+
+    override fun write(value: ReleaseOutcome, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -9717,6 +10889,38 @@ public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
 /**
  * @suppress
  */
+public object FfiConverterOptionalDouble: FfiConverterRustBuffer<kotlin.Double?> {
+    override fun read(buf: ByteBuffer): kotlin.Double? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterDouble.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Double?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterDouble.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Double?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterDouble.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalBoolean: FfiConverterRustBuffer<kotlin.Boolean?> {
     override fun read(buf: ByteBuffer): kotlin.Boolean? {
         if (buf.get().toInt() == 0) {
@@ -9803,6 +11007,70 @@ public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteA
         } else {
             buf.put(1)
             FfiConverterByteArray.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeFixListener: FfiConverterRustBuffer<FixListener?> {
+    override fun read(buf: ByteBuffer): FixListener? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFixListener.read(buf)
+    }
+
+    override fun allocationSize(value: FixListener?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFixListener.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FixListener?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFixListener.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeLocationNode: FfiConverterRustBuffer<LocationNode?> {
+    override fun read(buf: ByteBuffer): LocationNode? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeLocationNode.read(buf)
+    }
+
+    override fun allocationSize(value: LocationNode?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeLocationNode.allocationSize(value)
+        }
+    }
+
+    override fun write(value: LocationNode?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeLocationNode.write(value, buf)
         }
     }
 }
@@ -10827,6 +12095,35 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
 }
     )
     }
+    
+
+        /**
+         * The process-wide host. There is one per process, and it is the only thing that builds a node.
+         */ fun `nodeHost`(): NodeHost {
+            return FfiConverterTypeNodeHost.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_node_host(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * Record one runtime event as a `location.runtime` span.
+         *
+         * Synchronous and cheap: it opens and closes a span, and the batch exporter does the rest on its
+         * own thread. Safe to call from the main thread — and from a background queue while the main
+         * thread is wedged, which is when `MainStalled` is emitted.
+         */ fun `recordLocationRuntime`(`event`: LocationRuntimeEvent)
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_record_location_runtime(
+    
+        FfiConverterTypeLocationRuntimeEvent.lower(`event`),_status)
+}
+    
     
 
         /**

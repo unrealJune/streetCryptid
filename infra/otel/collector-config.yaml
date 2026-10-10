@@ -59,6 +59,10 @@ connectors:
       # the same 10-hex form as `service.instance.id`, so `service_instance_id` x `sc_peer` is a
       # device pair. Also splits `trail.push.peer` per peer, which is the point of that span.
       - name: sc.peer
+      # `location.runtime` — which iOS runtime event, in which motion state. Both closed
+      # vocabularies (`location_runtime.rs`), so a handful of series per device.
+      - name: location.event
+      - name: location.state
     # Deliberately NOT `sc.author`, `sc.seq` or `sc.entry_hash`: those are per-envelope and would
     # make a new time series for every ping. Follow one envelope in Tempo; count them here.
     histogram:

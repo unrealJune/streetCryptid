@@ -28,6 +28,8 @@ class FakeNativeModule {
     pollResync: [] as { peer: string; recvPub: string }[],
     forgetSession: [] as string[],
     forgetPairSessions: [] as string[],
+    forgetDocTicket: [] as string[],
+    forgetProfileTicket: [] as string[],
     clearResync: 0,
     setDeliveryConfig: [] as {
       peerTickets: string[];
@@ -129,6 +131,14 @@ class FakeNativeModule {
   async forgetPairSessions(peerEndpointHex: string) {
     this.calls.forgetPairSessions.push(peerEndpointHex);
     return this.forgetPairSessionsResult;
+  }
+  async forgetDocTicket(ticket: string) {
+    this.calls.forgetDocTicket.push(ticket);
+    return true;
+  }
+  async forgetProfileTicket(ticket: string) {
+    this.calls.forgetProfileTicket.push(ticket);
+    return true;
   }
   async docsWriteControl(...args: unknown[]) {
     this.calls.docsWriteControl.push(args);
@@ -754,6 +764,59 @@ describe('LocationSharingService — native delivery targets', () => {
     expect(latest?.peerTickets[0]).toBe('ticket-stash');
   });
 
+  /**
+   * The stash forgets every namespace when it restarts, and JS re-registered them only on a
+   * foreground launch, so a phone the native runtime drove stayed unregistered. A binary with the
+   * native grant does it on every node start; JS hands over instead of repeating it over HTTP.
+   */
+  it('hands the stash grant to native when the binary has it', async () => {
+    mockHolder.stashConfig = {
+      baseUrl: 'https://stash.example.com',
+      ticket: 'ticket-stash',
+      psk: null,
+    };
+    const registered: string[] = [];
+    const stash = {
+      configured: true,
+      registerNamespace: async ({ readTicket }: { readTicket: string }) => {
+        registered.push(readTicket);
+      },
+    };
+    let grants = 0;
+    (mockHolder.mod as { grantStash?: () => Promise<void> }).grantStash = async () => {
+      grants += 1;
+    };
+    const svc = makeService({ stash });
+    await svc.init('@me', 'mothman');
+    await svc.setDeliveryMode('stash');
+    await svc.addFriend(friend);
+
+    expect(grants).toBeGreaterThan(0);
+    expect(registered).toEqual([]);
+  });
+
+  it('still grants over HTTP on a binary without the native grant', async () => {
+    mockHolder.stashConfig = {
+      baseUrl: 'https://stash.example.com',
+      ticket: 'ticket-stash',
+      psk: null,
+    };
+    const registered: string[] = [];
+    const stash = {
+      configured: true,
+      registerNamespace: async ({ readTicket }: { readTicket: string }) => {
+        registered.push(readTicket);
+      },
+    };
+    const svc = makeService({ stash });
+    await svc.init('@me', 'mothman');
+    await svc.setDeliveryMode('stash');
+    await svc.addFriend(friend);
+
+    expect(registered).toContain('doc-self');
+    expect(registered).toContain('doc-b');
+  });
+
   it('stops naming the stash when the user switches back to peer-only relay', async () => {
     mockHolder.stashConfig = {
       baseUrl: 'https://stash.example.com',
@@ -1052,8 +1115,9 @@ describe('LocationSharingService — session health and resync', () => {
       { peer: friend.endpointId, recvPub: friend.recvPublic },
     ]);
     expect(health()).toEqual({});
-    // The ephemeral is dropped once nobody is mid-exchange — a private key held for no reason.
-    expect(mockHolder.mod.calls.clearResync).toBe(1);
+    // The ephemeral outlives the restore: a peer may still apply our record, and only that secret
+    // lets us join the root it moved to. The native driver drops it once the record expires.
+    expect(mockHolder.mod.calls.clearResync).toBe(0);
   });
 
   it('leaves a friend marked desynced while the exchange is still in flight', async () => {
@@ -1119,6 +1183,28 @@ describe('LocationSharingService — session health and resync', () => {
     await svc.removeFriend(friend.endpointId);
 
     expect(mockHolder.mod.calls.forgetPairSessions).toEqual([friend.endpointId]);
+  });
+
+  /**
+   * The node reopens every namespace it ever imported on each start (`ns_book.rs`), so a removal
+   * has to tell it — or a removed friend's trail is reconciled, and granted to the stash, forever.
+   */
+  it("forgets a removed friend's trail namespace", async () => {
+    const svc = await shared();
+
+    await svc.removeFriend(friend.endpointId);
+
+    expect(mockHolder.mod.calls.forgetDocTicket).toEqual(['doc-b']);
+  });
+
+  it('removes a friend fine on a binary that predates the namespace book', async () => {
+    const svc = await shared();
+    (mockHolder.mod as { forgetDocTicket?: unknown }).forgetDocTicket = undefined;
+    (mockHolder.mod as { forgetProfileTicket?: unknown }).forgetProfileTicket = undefined;
+
+    await expect(svc.removeFriend(friend.endpointId)).resolves.toBeUndefined();
+
+    expect(mockHolder.mod.calls.forgetSession).toEqual([friend.endpointId]);
   });
 
   /** A phone can be running an older binary than this bundle; the export may simply be absent. */

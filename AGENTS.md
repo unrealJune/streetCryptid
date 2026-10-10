@@ -130,23 +130,95 @@ Conventions when changing that code:
   badges (`refreshSessionHealth`); they were written only by the JS publish path. (4)
   `engine.ingest` / `engine.heartbeat` are emitted by `DrainEngine` itself, with the JS
   `sc.drop_reason` spellings (`publish::drop_reason`), so JS-free wakes are observable.
-- **A background-relaunched iOS process needs a `CLBackgroundActivitySession`, and a parked one needs
-  `NativeRefreshTask`.** On 2026-09-30 a relaunched iPhone ran ~90 s per wake and was suspended mid
-  stop-dwell (180 s), so it never declared `parked`. `holdActivitySession` runs on every `start()`
-  and foreground entry. `NativeRefreshTask` is the `BGProcessingTask` the retired JS refresh used
-  to be: it confirms a dwell the wake windows starved (`confirmDwelledCandidate`), heartbeats and
-  pulls. Its identifier must stay in `BGTaskSchedulerPermittedIdentifiers` (`app.json`).
-  Android's `NativeBackgroundRuntime` pulls friends too (`pullFriendFixes`), floored at 5 min.
-- **Who owns the Rust stores is now stated, not raced.** `BackgroundLocationRuntime.owner` defaults
-  to `.app`, and `ensureStarted()` returns on its first line unless it is `.native` — which removes
-  the reason for the 2026-09-16 construction storm rather than merely bounding it, since the
-  refusal path no longer builds a whole `LocationNode` to have it refused. Only a launch that does
-  not start React calls `adoptNodeOwnership()`. **`releaseNativeBackground` does NOT free the
-  claims**: `WriterClaim` releases on the last `Arc` drop, and `Subscription` and the spawned
-  receive task each hold their own `Arc<LocationNode>` — only `shutdown` nils them all and detaches
-  the pair runtime. `yieldNode` races that shutdown against a Swift-side timeout so the promise
-  always settles (AGENTS.md's rule is about a promise that never _settles_), JS bounds it again,
-  and `startNativeBounded` retries once — once, not in a loop.
+- **Never hold a `CLBackgroundActivitySession`.** Apple documents it as "an object that manages a
+  visual indicator", and on our `Always`-authorized iPhones it still put a persistent location
+  indicator on screen: v2.16.0/v2.17.0 held one for as long as sharing ran and brought back what
+  7550186 had removed in July, while keeping every background process resident (the CPU the native
+  rewrite existed to give back). It was added because on 2026-09-30 a background-RELAUNCHED iPhone
+  ran ~90 s per wake and was suspended mid stop-dwell (180 s), so it never declared `parked` —
+  `allowsBackgroundLocationUpdates` keeps a process running only for updates started in the
+  foreground. A relaunched process now finishes the stop through events instead: a `CLVisit`
+  arrival (`didVisit`, which also relaunches a terminated app) and `NativeRefreshTask`, the
+  `BGProcessingTask` the retired JS refresh used to be, which confirms a dwell the wake windows
+  starved (`confirmDwelledCandidate`), heartbeats and pulls. Its identifier must stay in
+  `BGTaskSchedulerPermittedIdentifiers` (`app.json`). `location.stop_via` (`dwell` / `visit` /
+  `refresh`) says which one parked a phone. Android's `NativeBackgroundRuntime` pulls friends too
+  (`pullFriendFixes`), floored at 5 min.
+- **One drain run at a time, per node (`publish::DrainLock`).** "Idempotent per slot" held only for
+  SEQUENTIAL callers: UniFFI polls each foreign call on the host's thread, so concurrent
+  `heartbeat_fix`/`ingest_fix` calls both found the slot due, and two drains peeked the same outbox
+  head while the first was on the wire. On 2026-10-01 a parked iPhone (kept alive by the since-removed activity
+  session, coarse deliveries arriving in clusters, one `Task` heartbeat each) sealed 3-4 envelopes
+  per slot. The lock waits at most `DRAIN_LOCK_WAIT` and then runs unserialized, because a duplicate
+  is cheaper than a hung push silencing the phone. `tests/drain.rs` "Concurrent runs" covers it.
+- **The iOS location runtime reports itself as `location.runtime`, because nothing else can.** On
+  2026-10-01 an iPhone drove 88 minutes with its process alive (Loki) and no location reaching Rust
+  (zero `engine.*` spans), and nothing could say why: the Swift state machine wrote only `NSLog`,
+  and `device.health` is JS-emitted, which a background-relaunched process never boots.
+  `LocationRuntimeReporter` emits a `pulse` every 5 min from a background timer — deliberately not
+  from the delivery path, which falls silent exactly when it matters — probing the main thread
+  first (`main_stalled` when it cannot answer), plus a span per transition, visit, fence exit and
+  Core Location error. Anything new the runtime decides goes on it; see `infra/otel/README.md`.
+- **A heartbeat states what it knows about motion, and only a proven stop says `parked`.**
+  `heartbeat_fix` takes `parked: Option<bool>` (`publish::Motion`): `Some(true)` from a confirmed
+  dwell, a visit arrival, a parked coarse tick or Android's no-delivery ticker; `Some(false)` from a
+  stop just left (retracts a standing `parked` to `no-fix`); `None` from any clock — the mounted
+  JS timer, a refresh while moving — which keeps whatever the last evidence stamped. It used to stamp
+  `parked` unconditionally, and on 2026-10-02 the JS timer published four hours of "parked here"
+  from an iPhone whose runtime was in `moving`.
+  The converse binds `ingest`: a fix is not motion evidence either. An accepted fix within its own
+  accuracy plus 100 m of where the stop was declared (`GateState::parked_at`, mirroring Swift's
+  `considerDeparture`), or a fix the gate refused, keeps `parked`; only leaving that radius or
+  `Some(false)` ends it. On 2026-10-07 opening the app at a stop sealed two `live` envelopes, the
+  process was then suspended, and friends read "out of contact" about a phone sitting still.
+- **A position Core Location hands back is not a capture.** `didUpdateLocations` drops a location
+  whose timestamp is not newer than the last one delivered: on 2026-10-02 one fix came back every
+  30 s for 73 minutes, the first two went out `live` 5-9 minutes stale, and the rest read as a
+  phone receiving fixes. A redelivery may still confirm a pending dwell, and otherwise drives a
+  no-claim heartbeat at most once a minute, since on a JS-free process nothing else ticks while
+  `moving`.
+- **There is ONE node per process, and only `NodeHost` builds it** (`rust/src/host.rs`). The
+  mounted app (every JS context, through the module's `createNode`/`shutdown`) and the native
+  background runtime (`acquireBackground`) take LEASES on it; the last one out shuts it down,
+  bounded, on its own task. This replaced two nodes racing for the process-wide store claim and
+  every rule that grew up around that race — an iOS owner flag, a claim backoff on both platforms,
+  a sink gate, a bounded `handOverNativeBackground` — which existed in three hand-written copies
+  with no tests on the two platform copies, and Android was missing one: on 2026-10-03 its service built a
+  node in the seconds between the app's `createNode` and `start()`, the app's start met
+  `AlreadyOpen`, and a Pixel 10 spent 13.7 h unable to pair ("NOTHING FOUND"). The contract is in
+  the module docs and every rule is a test (`src/host/tests.rs` against fakes, including every
+  five-operation sequence against a reference model; `tests/node_host.rs` against real claims).
+  Rules that matter at the call sites: the app always gets a node (adopt, or REPLACE a different
+  identity — never refused); the background runtime never builds over anyone and never mints an
+  identity; a settings change is `restartNode`, never `shutdown` + `createNode` (that would only
+  return your own lease and adopt the same node back); and platform code caches the node by
+  `generation()` and must not `destroy()` a superseded handle (another call may be inside it).
+  The own topic is a SLOT on the node (`own_subscription`): a second `subscribe` adopts the live
+  one rather than opening a second receive loop, and listeners are swappable so a departing app's
+  are detached without stopping what the background runtime publishes through. Every drain on a
+  node is serialized (`drain_lock`), because two holders can now both drive one. The sink
+  (`eventSink` / `appIsWired()`) is ROUTING, not ownership: a wired app gets the capture because it
+  runs the sampling policy and draws the own marker, and both paths end in `ingestFix` on the same
+  node. `LocationNode::shutdown` releases every store even when the router fails to close — it
+  used to return early with all of them still claimed.
+- **A node reopens its namespaces from `state_dir`, never from memory or the cache directory**
+  (`rust/src/ns_book.rs`). Until 2026-10-06 a friend's docs namespace was open only if JS had called
+  `importDocTicket` on that run, and the own namespace was remembered by an id file beside the
+  replica. On 2026-10-05 a Pixel's node started by the native runtime hit both at once: it
+  reconciled only its own namespace (so its leader's session restart reached the stash and never
+  the Pixel), and the same start rotated its own namespace, because `Docs::open` reports a missing
+  namespace as an `Err` and `init` answered every `Err` by minting one — so the iPhone read a
+  namespace nobody wrote again. Only a re-pair recovered it. The book holds the own namespace
+  SECRET (a wiped replica comes back as the SAME namespace) and every imported friend namespace with
+  its read ticket. Rules: an unreadable book fails the start rather than starting over; a
+  namespace that is listed but fails to open fails the start rather than being replaced; removing a
+  friend must call `forgetDocTicket` / `forgetProfileTicket`, or every later start reopens them.
+- **The stash grant belongs to the node** (`rust/src/stash.rs`, span `stash.grant`). The stash keeps
+  its namespace list in memory and forgets it on every restart (2026-10-03 18:39, 2026-10-06 03:56);
+  JS re-registered only on a foreground launch, so a phone the native runtime drove stayed
+  unregistered. The node grants on every start, on a stash opt-in change, per imported friend, and
+  (floored, 10 min) when an upload reports `untracked` slots — what a stash that forgot us looks
+  like. JS's `syncStashGrants` calls `grantStash()` and keeps its HTTP only for older binaries.
 - **`IrohBackgroundBootstrap.swift` runs before React, and must return `true`.**
   `ExpoAppDelegateSubscriberManager` reduces `willFinishLaunchingWithOptions` with
   `?? false || result` and short-circuits to `true` only when NO subscriber implements it; once ours
@@ -209,7 +281,9 @@ Conventions when changing that code:
   was never reached: no map, no working controls, no telemetry. Only a force-quit cleared it.
   The wait is now bounded by `INIT_WATCHDOG_MS` (`init-watchdog.ts`), an overrun emits
   `app.init.timeout`, and coming back to the foreground after one discards the wedged service and
-  retries rather than waiting again — the in-process equivalent of the force-quit.
+  retries rather than waiting again — the in-process equivalent of the force-quit. A REJECTED init
+  (`app.init.failed`) gets the same retry: clearing the latch was never enough, because the
+  provider does not remount and so nothing ever asked again.
 - **A stalled `init` names its own step, and only from disk.** `saveInitWatermark` stamps the phase
   (`create-node`, `native-start`, `tickets`, …) before each step that can block, and a later
   context reports it as `app.init.stranded` with `init.phase`. This exists because on 2026-09-18
@@ -265,17 +339,38 @@ Conventions when changing that code:
   refused the pair". v4 carries the sender's signed `ProfileRecord` on the `Accept`, which is why a
   persona now arrives WITH the pair instead of after a separate iroh-docs dial; the profile ticket
   still rides along, and is now only how later edits arrive.
-- **Session recovery runs in the native drain, not in JS.** A pair that exchanges nothing for
-  `T_lapse` (24 h) lapses on BOTH sides; each then drops the other from its wrap set, so neither
-  can deliver the fresh ratchet key that would un-lapse it, and only §4.6 resync breaks it.
-  `DrainEngine::drain` calls `PublishSink::recover` once per drain (after the fixes, every friend,
-  watchers included) and pushes while `in_progress` because the push is also the pull that brings
-  the peer's half in. It used to be `runResyncDriver` on the JS publish tick, which the native
-  drain replaced — and a Pixel 9 then spent 2026-09-22..29 publishing 785 envelopes sealed for
-  nobody while `last_publish_age_ms` read 30 s. The resync record is sealed to receiving keys JS
-  mirrors with `setRecipientKeys`; `poll_resync` offers our half BEFORE looking for theirs (it
-  did not, so two polling sides waited on each other forever). An envelope with every recipient
-  dropped is not a publish: it does not stamp `last_published_at` or count as `reached`.
+- **Session recovery runs in the native drain, not in JS, and only the leader restarts.**
+  `DrainEngine::drain` calls `PublishSink::recover` → `recover_sessions` once per drain (every
+  friend, watchers included); its policy is `restart::run_pass`, which `tests/restart_protocol.rs`
+  runs verbatim. FORWARD-SECRECY.md §4.6 (revision 4) is the design: the lower endpoint id is the
+  pair's **leader** and is the only side that ever restarts a session — against the follower's
+  newest signed **prekey** (published in the follower's control record in its `rsy/<author>`
+  slot, rotated daily, never used if older than 72 h) — and the restart header rides every wrap
+  for that follower (envelope v4) until the leader opens something under the new session. The
+  follower adopts it from any one envelope, or **primes** it natively without consuming the fix
+  (`SessionManager::prime`), and asks for a restart by putting a request in its control record.
+  Records keep the last two replaced sessions for decryption only. This replaced a two-sided
+  resync exchange that had no convergence guarantee: on 2026-10-02 it split a working
+  iPhone/Pixel pair (one side applied, the other had stopped looking), and on 2026-10-03 the
+  follower's process died holding the ephemeral the leader then applied against, after which only
+  a re-pair helped. Rules that keep it convergent, each with a test: a miss is a NEW envelope we
+  cannot open (re-reads are `SessionError::Replayed`); a follower adopts only a restart newer than
+  the session it is on, and the leader makes each one strictly newer; a lapse alone never makes
+  the leader restart (§4.5 — a seized phone must not keep tracking by doing nothing), only a
+  request does; nothing about a restart lives only in memory. A pair that exchanges nothing for
+  `T_lapse` lapses on both sides and heals through the follower's request — a Pixel 9 spent
+  2026-09-22..29 publishing 785 envelopes sealed for nobody before recovery ran natively at all.
+  An envelope with every recipient dropped is not a publish: it does not stamp
+  `last_published_at` or count as `reached`. `publishResync`/`pollResync`/`clearResync` survive
+  only as binding-compatible shims.
+- **The ratchet acceptance window is sized by how long a READER can stay away.** A sender's
+  chain resets only when the reader opens something (on iOS, only while the app is mounted), and
+  every tick spends two positions because the gossip and docs lanes each call `next_wraps`. At
+  512 (`DEFAULT_ACCEPT_WINDOW`) that ran out after ~21 h: on 2026-10-09 an iPhone whose owner had
+  not opened the app for 25 h was 570 positions behind its friend's Pixel, read every new
+  envelope as "no wrap in this envelope belongs to us", and showed the Pixel as a day stale until
+  the leader restart healed it. It is `2^17` now. Do not shrink it to bound work: the walk is one
+  hash per position and the counter is signed, so only a friend can ask for one.
 - **A pair is complete when `finalize` says so, not when the decision bits agree.** `is_complete()`
   goes true the instant a local accept latches; `finalize` — which installs the ratchet, ingests the
   handed profile record and raises `Ready` — runs after, and can still decline, because a wire

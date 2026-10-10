@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type PropsWithChildren,
 } from 'react';
 import { AppState, Platform } from 'react-native';
@@ -28,6 +29,14 @@ import {
 import type { IncomingFix, LocationFix } from '@/features/social/core/types';
 import { type TrailPoint } from '@/features/social/net/background/trail-store';
 import { awaitInitBounded, INIT_WATCHDOG_MS } from '@/features/social/net/background/init-watchdog';
+import {
+  canRetryService,
+  INITIAL_SERVICE_LIFECYCLE,
+  isServiceReady,
+  reduceServiceLifecycle,
+  type ServiceLifecycle,
+  type ServiceLifecycleEvent,
+} from '@/features/social/core/service-lifecycle';
 import {
   BLUETOOTH_OFF_MESSAGE,
   BLUETOOTH_UNSUPPORTED_MESSAGE,
@@ -133,6 +142,17 @@ interface LocationSharingContextValue {
   runDevCommand(name: string, id: string): Promise<void>;
   /** Honest, live diagnostic of every transport (for the Settings tab). */
   transportReport: TransportReport;
+  /**
+   * Where the service is in starting up. Anything that needs the node — pairing above all — reads
+   * this rather than guessing from an error: `failed` and `stalled` are retryable, `initializing`
+   * must be waited out.
+   */
+  service: ServiceLifecycle;
+  /**
+   * Discard a failed or stalled service and start again. A no-op in any other phase, so a button
+   * can call it without knowing which one it is in.
+   */
+  retryService(): void;
   acknowledgeDiscoveredFriend(): Promise<void>;
   rejectDiscoveredFriend(): Promise<void>;
 }
@@ -176,8 +196,33 @@ function profileSignature(
 let sharedService: LocationSharingService | null = null;
 let sharedServiceInit: Promise<void> | null = null;
 
-/** Set when the last init attempt overran {@link INIT_WATCHDOG_MS}, so a resume can retry it. */
-let sharedServiceInitTimedOut = false;
+/**
+ * Where startup is, for the life of the process. Module scope for the same reason as the service:
+ * it outlives any one mount of this provider. The rules live in `core/service-lifecycle.ts`; this
+ * only holds the current state and tells mounted providers when it moves.
+ */
+let sharedLifecycle: ServiceLifecycle = INITIAL_SERVICE_LIFECYCLE;
+const lifecycleListeners = new Set<() => void>();
+
+function transitionService(event: ServiceLifecycleEvent): ServiceLifecycle {
+  const next = reduceServiceLifecycle(sharedLifecycle, event);
+  if (next !== sharedLifecycle) {
+    sharedLifecycle = next;
+    lifecycleListeners.forEach((listener) => listener());
+  }
+  return sharedLifecycle;
+}
+
+function subscribeToLifecycle(onChange: () => void): () => void {
+  lifecycleListeners.add(onChange);
+  return () => {
+    lifecycleListeners.delete(onChange);
+  };
+}
+
+function currentLifecycle(): ServiceLifecycle {
+  return sharedLifecycle;
+}
 
 function getSharedService(): LocationSharingService {
   if (!sharedService) sharedService = new LocationSharingService();
@@ -197,7 +242,6 @@ function discardWedgedService(): void {
   const wedged = sharedService;
   sharedService = null;
   sharedServiceInit = null;
-  sharedServiceInitTimedOut = false;
   if (wedged) {
     try {
       wedged.shutdown();
@@ -227,6 +271,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   const [serviceError, setServiceError] = useState<string | null>(null);
   const [disclosureStatus, setDisclosureStatus] = useState<LocationDisclosureStatus>('loading');
   const [serviceReady, setServiceReady] = useState(false);
+  const lifecycle = useSyncExternalStore(subscribeToLifecycle, currentLifecycle);
   // Bumped by the foreground self-heal to re-run the init effect against a rebuilt service.
   const [initAttempt, setInitAttempt] = useState(0);
   const locationStartRequested = useRef(false);
@@ -362,7 +407,8 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
         // Initialise the shared native node exactly once across all mounts. A failed attempt
         // clears the latch (below) so a later mount retries rather than awaiting a rejected promise.
         if (!sharedServiceInit) {
-          sharedServiceInit = (async () => {
+          const { attempt: thisAttempt } = transitionService({ type: 'begin' });
+          const init = (async () => {
             await ensureLocalNetworkPermission();
             // REQUEST Bluetooth here (not just check), for two reasons:
             //
@@ -384,7 +430,21 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
               initialProfile.cryptidName,
               initialProfile.color
             );
-          })().catch((error: unknown) => {
+          })();
+          // Bookkeeping that belongs to the ATTEMPT, not to whichever mount is waiting on it — so
+          // an init that lands after its watchdog still counts, and one that fails after a mount
+          // has gone still says so.
+          void init.then(
+            () => transitionService({ type: 'ready', attempt: thisAttempt }),
+            (error: unknown) =>
+              transitionService({
+                type: 'failed',
+                attempt: thisAttempt,
+                error: errorMessage(error),
+                initPhase: service.currentInitPhase(),
+              })
+          );
+          sharedServiceInit = init.catch((error: unknown) => {
             sharedServiceInit = null;
             throw error;
           });
@@ -393,11 +453,30 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
         // before it rethrows, so by the time a rejection lands the module-level binding is already
         // null and awaiting it again would resolve on `null` and swallow the error.
         const pending = sharedServiceInit;
+        const attempt = sharedLifecycle.attempt;
         // Bounded, because a promise that never settles here is terminal for every later mount.
         // A `failed` outcome re-awaits the original promise so the catch below still reports the
         // error exactly as it used to; only `timeout` is new behaviour.
         const outcome = await awaitInitBounded(pending, INIT_WATCHDOG_MS);
-        if (outcome === 'failed') await pending;
+        if (outcome === 'failed') {
+          try {
+            await pending;
+          } catch (initError: unknown) {
+            // The live-process record of a rejected init. The durable watermark names the same phase,
+            // but only to a LATER launch — and the process that failed may run for hours first.
+            getTelemetry()
+              .startSpan('app.init.failed', {
+                attributes: {
+                  'init.phase': service.currentInitPhase() ?? 'unknown',
+                  'init.elapsed_ms': service.initElapsedMs(),
+                  error: errorMessage(initError),
+                  'sc.drop_reason': 'init-failed',
+                },
+              })
+              .end();
+            throw initError;
+          }
+        }
         if (outcome === 'timeout') {
           // The span carries the phase because that is the question the data could not answer on
           // 2026-09-18: the journal stopped after `node.create` and nothing said what came next.
@@ -413,9 +492,27 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
               },
             })
             .end();
-          // Let the stalled init keep running — it may still land — but stop holding the latch, and
-          // remember that it overran so a foreground resume can rebuild rather than wait again.
-          sharedServiceInitTimedOut = true;
+          // Let the stalled init keep running — it may still land — but mark it stalled, so a
+          // foreground resume (or a retry button) can rebuild rather than wait again.
+          transitionService({
+            type: 'watchdog',
+            attempt,
+            initPhase: service.currentInitPhase(),
+          });
+          // And if it DOES land, that is a working service. This used to be ignored: the service
+          // came up and the UI kept saying it had not, until the next foreground discarded it.
+          void pending.then(
+            async () => {
+              if (!active || sharedLifecycle.attempt !== attempt) return;
+              if (!isServiceReady(sharedLifecycle)) return;
+              publishedProfileSignature.current = profileSignature(initialProfile);
+              setServiceError(null);
+              await refreshTrail(service);
+              setServiceReady(true);
+              await service.syncTrail(0);
+            },
+            () => undefined
+          );
           if (!active) return;
           setLocationStatus('error');
           setServiceError(
@@ -454,34 +551,53 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   }, [initialProfile, refreshTrail, startLocation, initAttempt]);
 
   /**
+   * Discard a failed or stalled service and start again — the in-process equivalent of the
+   * force-quit that used to be the only cure.
+   *
+   * Gated on the lifecycle, not merely on `!serviceReady`: an init that is still legitimately in
+   * flight (a slow node build, an unanswered permission prompt) must be left alone, or retrying
+   * would restart a healthy launch out from under itself. See `canRetryService`.
+   */
+  const retryServiceFrom = useCallback((trigger: 'foreground' | 'user'): boolean => {
+    if (!canRetryService(sharedLifecycle)) return false;
+    getTelemetry()
+      .startSpan('app.init.recover', {
+        attributes: {
+          trigger,
+          'sc.drop_reason': sharedLifecycle.phase === 'stalled' ? 'init-timeout' : 'init-failed',
+          'init.phase': sharedLifecycle.initPhase ?? 'unknown',
+          attempt: sharedLifecycle.attempt,
+        },
+      })
+      .end();
+    discardWedgedService();
+    setServiceReady(false);
+    setServiceError(null);
+    setLocationStatus('starting');
+    // Re-runs the init effect above against a freshly built service.
+    setInitAttempt((n) => n + 1);
+    return true;
+  }, []);
+
+  const retryService = useCallback(() => {
+    retryServiceFrom('user');
+  }, [retryServiceFrom]);
+
+  /**
    * Retry a wedged init when the app comes back to the foreground.
    *
    * This is the self-heal for the 2026-09-18 failure, and the foreground transition is the right
    * trigger for it: the process was frozen mid-`init()` during a BACKGROUND launch, so the moment
    * it is next made active is both the first moment it can do anything about it and the moment a
-   * user is looking at the broken screen. Before this, the only cure was a force-quit.
-   *
-   * Gated on the watchdog having actually fired, not merely on `!serviceReady` — an init that is
-   * still legitimately in flight (a slow node build, an unanswered permission prompt) must be left
-   * alone, or resuming the app would restart a healthy launch out from under itself.
+   * user is looking at the broken screen. A rejected init (2026-10-03) is retried for the same
+   * reason a hung one is: otherwise it stays rejected for the life of the process.
    */
   useEffect(() => {
     const sub = AppState.addEventListener('change', (next) => {
-      if (next !== 'active') return;
-      if (!sharedServiceInitTimedOut) return;
-      getTelemetry()
-        .startSpan('app.init.recover', {
-          attributes: { trigger: 'foreground', 'sc.drop_reason': 'init-timeout' },
-        })
-        .end();
-      discardWedgedService();
-      setServiceError(null);
-      setLocationStatus('starting');
-      // Re-runs the init effect above against a freshly built service.
-      setInitAttempt((n) => n + 1);
+      if (next === 'active') retryServiceFrom('foreground');
     });
     return () => sub.remove();
-  }, []);
+  }, [retryServiceFrom]);
 
   useEffect(() => {
     if (!profile || !snapshot?.ready) return;
@@ -1004,6 +1120,8 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       transportReport,
       acknowledgeDiscoveredFriend,
       rejectDiscoveredFriend,
+      service: lifecycle,
+      retryService,
     }),
     [
       snapshot,
@@ -1040,6 +1158,8 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       transportReport,
       acknowledgeDiscoveredFriend,
       rejectDiscoveredFriend,
+      lifecycle,
+      retryService,
     ]
   );
 

@@ -181,6 +181,36 @@ fn a_position_beyond_the_window_is_refused_rather_than_walked() {
     );
 }
 
+#[test]
+fn the_default_window_still_has_an_edge() {
+    let (mut a, _ka, mut b, mut kb) = pair();
+    let mut slot = a.next_send().unwrap();
+    slot.header.counter = W + 1;
+    assert_eq!(
+        b.accept(&slot.header, 0, W, &mut kb).unwrap_err(),
+        RatchetError::BeyondWindow
+    );
+}
+
+/// A reader who did not open the app for a day. The sender's chain only resets when the reader
+/// answers, and every tick spends two positions (gossip and docs lanes), so on 2026-10-09 an
+/// iPhone away for 25 h was 570 positions behind — past the old 512 window, and unopenable
+/// until a restart. The default window must cross that by fast-forward alone.
+#[test]
+fn a_day_away_is_inside_the_default_window() {
+    let (mut a, _ka, mut b, mut kb) = pair();
+    for _ in 0..600 {
+        drop(a.next_send().unwrap());
+    }
+    let last = a.next_send().unwrap();
+    assert!(b.matches(&last.header, &last.kid, W));
+    let expected = bytes(last.key);
+    assert_eq!(
+        expected,
+        bytes(b.accept(&last.header, 0, W, &mut kb).unwrap())
+    );
+}
+
 // ── replay ────────────────────────────────────────────────────────────────────────────────────
 
 #[test]

@@ -26,12 +26,14 @@ const mockNativeHolder: {
     | undefined;
   sharingRecipients: (() => Promise<string[]>) | undefined;
   wake: (() => Record<string, unknown>) | undefined;
+  host: (() => Record<string, unknown> | null) | undefined;
   resets: number;
 } = {
   state: undefined,
   watermarks: undefined,
   sharingRecipients: undefined,
   wake: undefined,
+  host: undefined,
   resets: 0,
 };
 
@@ -43,6 +45,9 @@ jest.mock('iroh-location', () => ({
     publishWatermarks: mockNativeHolder.watermarks,
     sharingRecipients: mockNativeHolder.sharingRecipients,
     takeBackgroundWakeStats: mockNativeHolder.wake,
+    get nodeHostSnapshot() {
+      return mockNativeHolder.host;
+    },
     resetBackgroundWakeStats: () => {
       mockNativeHolder.resets += 1;
     },
@@ -50,7 +55,7 @@ jest.mock('iroh-location', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { recordDeviceHealth } from '../device-health';
+import { recordDeviceHealth, snakeCase } from '../device-health';
 
 function attributes(): Record<string, unknown> {
   const entry = getEventLog().find((e) => e.action === 'device.health');
@@ -200,6 +205,79 @@ describe('device.health — native runtime state', () => {
      * `createPersistentKV()` hands back a fresh in-memory store, so the health watermark never
      * survives between calls.
      */
+  });
+});
+
+describe('device.health — who holds the node', () => {
+  beforeEach(() => {
+    resetEventLogForTesting();
+    setTelemetryForTesting(createTelemetry({ now: () => 1_000 }));
+    mockNativeHolder.state = undefined;
+    mockNativeHolder.watermarks = undefined;
+    mockNativeHolder.sharingRecipients = undefined;
+    mockNativeHolder.wake = undefined;
+    mockNativeHolder.host = undefined;
+    mockNativeHolder.resets = 0;
+  });
+
+  afterEach(() => setTelemetryForTesting(undefined));
+
+  it('flattens the node host snapshot under node.host.*, in snake_case', async () => {
+    mockNativeHolder.host = () => ({
+      generation: 4,
+      hasNode: true,
+      appLeases: 1,
+      background: true,
+      builds: 2,
+      adoptions: 3,
+      replacements: 0,
+      restarts: 1,
+      shutdowns: 1,
+      shutdownFailures: 0,
+      shutdownTimeouts: 0,
+    });
+
+    await recordDeviceHealth('refresh');
+
+    expect(attributes()).toMatchObject({
+      'node.host.generation': 4,
+      'node.host.has_node': true,
+      'node.host.app_leases': 1,
+      'node.host.background': true,
+      'node.host.builds': 2,
+      'node.host.adoptions': 3,
+      'node.host.restarts': 1,
+      'node.host.shutdowns': 1,
+      'node.host.shutdown_failures': 0,
+      'node.host.shutdown_timeouts': 0,
+    });
+  });
+
+  it('omits the section on a binary from before the node host', async () => {
+    mockNativeHolder.host = undefined;
+    await recordDeviceHealth('refresh');
+    expect(Object.keys(attributes()).some((key) => key.startsWith('node.host.'))).toBe(false);
+  });
+
+  it('omits the section when the native library is not loaded yet', async () => {
+    mockNativeHolder.host = () => null;
+    await recordDeviceHealth('refresh');
+    expect(Object.keys(attributes()).some((key) => key.startsWith('node.host.'))).toBe(false);
+  });
+
+  it('omits the section rather than failing the record when the read throws', async () => {
+    mockNativeHolder.host = () => {
+      throw new Error('binary is older than the JS bundle');
+    };
+    await expect(recordDeviceHealth('refresh')).resolves.not.toThrow();
+    expect(attributes()['node.host.generation']).toBeUndefined();
+    expect(attributes()['task.location_running']).toBe(true);
+  });
+
+  it('snake-cases exactly the way the dashboards spell the keys', () => {
+    expect(snakeCase('appLeases')).toBe('app_leases');
+    expect(snakeCase('shutdownTimeouts')).toBe('shutdown_timeouts');
+    expect(snakeCase('generation')).toBe('generation');
   });
 });
 

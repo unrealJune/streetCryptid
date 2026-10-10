@@ -1,9 +1,12 @@
+import { gzipSync } from 'fflate';
+
 import {
   bundleKeyOf,
   bundleRequestFor,
   bundleTiles,
   decodeTileBundle,
   MartinTileBundleSource,
+  TILE_BUNDLE_FLAG_GZIP_ENTRIES,
   TILE_BUNDLE_MAX_BYTES,
   TILE_BUNDLE_MEDIA_TYPE,
   TILE_BUNDLE_VERSION,
@@ -108,6 +111,26 @@ describe('decodeTileBundle', () => {
     const trailing = new Uint8Array(valid.byteLength + 1);
     trailing.set(valid);
     expect(() => decodeTileBundle(trailing, request)).toThrow('trailing bytes');
+  });
+
+  it('requires exactly the flags its caller expects, and gzip members under flag 0x01', () => {
+    const raw = encodeBundle(request, () => new Uint8Array([0x1a, 0]));
+    expect(() => decodeTileBundle(raw, request, TILE_BUNDLE_FLAG_GZIP_ENTRIES)).toThrow('flags');
+
+    const member = gzipSync(new Uint8Array([0x1a, 0]), { mtime: 0 });
+    const gz = encodeBundle(request, (tile) => (tile.x % 2 ? member : null));
+    gz[7] = TILE_BUNDLE_FLAG_GZIP_ENTRIES;
+    expect(() => decodeTileBundle(gz, request)).toThrow('flags');
+    const entries = decodeTileBundle(gz, request, TILE_BUNDLE_FLAG_GZIP_ENTRIES);
+    // Entries stay compressed: inflating is the decoder's job, per tile drawn.
+    expect(entries[1].bytes).toEqual(member);
+    expect(entries[0].bytes).toBeNull();
+
+    const notGzip = encodeBundle(request, () => new Uint8Array(18).fill(0x1a));
+    notGzip[7] = TILE_BUNDLE_FLAG_GZIP_ENTRIES;
+    expect(() => decodeTileBundle(notGzip, request, TILE_BUNDLE_FLAG_GZIP_ENTRIES)).toThrow(
+      'not a gzip member'
+    );
   });
 
   it('rejects a declared entry count that is not the complete descendant set', () => {

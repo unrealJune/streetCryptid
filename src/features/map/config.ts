@@ -154,11 +154,13 @@ export function createPlanetGeometrySource(
         coarseUpstream: new MartinByteSource(tileUrl),
         bundleUpstream: new StreamingBundleSource(tileUrl, undefined, undefined, streamingFetch),
         store,
-        // v2: the 2026-10 re-bake (no ICU transliteration, Wikidata English names).
-        // A new id strands the old rows for LRU eviction instead of serving pinyin
-        // labels for the rest of their 30-day TTL. Bump again on any bake whose
-        // labels must replace what phones already hold.
-        sourceId: 'planet-z10-v2',
+        // v3: rows hold SCB3's per-tile gzip members and z14 is split into structure + labels.
+        // v4: the 2026-10 re-bake (no ICU transliteration, Wikidata English names). v3 rows
+        // may hold the old bake's pinyin labels, so they are retired with v1 rather than served
+        // for the rest of their 30-day TTL. Bump again on any bake whose labels must replace
+        // what phones already hold.
+        sourceId: 'planet-z10-v4',
+        retiredSourceIds: ['planet-z10-v1', 'planet-z10-v3'],
         anchorZoom: PRIVACY_ANCHOR_ZOOM,
         ttlMs: TILE_TTL_MS,
       }),

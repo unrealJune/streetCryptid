@@ -98,6 +98,8 @@ export default function ActivePairingScreen() {
     refreshPairing,
     acknowledgeDiscoveredFriend,
     rejectDiscoveredFriend,
+    service,
+    retryService,
   } = useLocationSharing();
   const [intent, setIntent] = useState<PairingRouteIntent>(token ? 'redeem' : 'bump');
   const [redeeming, setRedeeming] = useState(Boolean(token));
@@ -239,7 +241,11 @@ export default function ActivePairingScreen() {
   const failure = pairing?.failure ?? null;
   const effectiveIntent: PairingRouteIntent =
     !token && intent === 'bump' && inviteLive ? 'link' : intent;
-  const bump = useArmedBump(effectiveIntent === 'bump' && !token && !redeeming && !leaving);
+  // Never arm against a service that is not up: the arm would throw, and that throw is exactly
+  // what the screen used to render as a Bump that found nobody.
+  const bump = useArmedBump(
+    service.phase === 'ready' && effectiveIntent === 'bump' && !token && !redeeming && !leaving
+  );
   // Every pairing channel, not just Bump — this hook used to hang off `useArmedBump`, which is
   // armed for nearby pairing only, so a link or QR pair had no haptics of any kind. Gated on
   // focus AND foreground, not merely on being mounted: this screen survives backgrounding, and a
@@ -252,6 +258,7 @@ export default function ActivePairingScreen() {
   const signal = friend ? resolveSignalColor(friend.color, chrome.green) : chrome.green;
 
   const stage: ActivePairingStage = deriveActivePairingStage({
+    servicePhase: service.phase,
     intent: effectiveIntent,
     pairingLoaded: pairing !== null,
     available: pairing?.available ?? false,
@@ -410,6 +417,18 @@ export default function ActivePairingScreen() {
           fieldMode: 'scatter',
           tone: 'amber',
         };
+      case 'service-failed':
+        return {
+          mode: 'PAIRING',
+          status: 'PAIRING IS NOT READY',
+          detail: service.error
+            ? `Location sync did not start: ${service.error}`
+            : 'Location sync is taking longer than it should to start.',
+          caption: 'NOT STARTED',
+          readout: '',
+          fieldMode: 'scatter',
+          tone: 'amber',
+        };
       case 'loading':
         return {
           mode: 'BUMP',
@@ -454,6 +473,21 @@ export default function ActivePairingScreen() {
           tone: 'steel',
         };
       case 'bump-failed':
+        // Two different things reach this stage and only one of them is a miss. An arm that threw
+        // never opened the radio at all, so "No phone replied" is false — and it used to be all
+        // this screen would say, which is how a service that never finished starting read as
+        // Bluetooth failing to find anyone, retry after retry, until a force-quit.
+        if (bump.error) {
+          return {
+            mode: 'BUMP PAUSED',
+            status: 'BUMP COULD NOT START',
+            detail: bump.error,
+            caption: 'NOT STARTED',
+            readout: '',
+            fieldMode: 'scatter',
+            tone: 'amber',
+          };
+        }
         return {
           mode: 'BUMP MISSED',
           status: 'NOTHING FOUND',
@@ -495,6 +529,8 @@ export default function ActivePairingScreen() {
         };
     }
   }, [
+    bump.error,
+    service.error,
     failure,
     inputError,
     inviteRemaining,
@@ -663,12 +699,20 @@ export default function ActivePairingScreen() {
    * for a screen the user had just dismissed. REJECT was worse — it awaits a native round trip
    * between clearing the friend and closing, so the radio stayed armed for the whole of it, and
    * nothing guaranteed `cancelBump` won the race at all.
+   *
+   * `router.back()` is only a way out when there is something to go back to. A pairing link that
+   * cold-launches the app makes this screen the ONLY route on the stack, and there `back()` is a
+   * silent no-op: the screen stays mounted with `leaving` latched, so Bump can never arm and the
+   * stage falls through to `bump-starting` — "STARTING NEARBY PAIRING" forever, after a pair that
+   * had completed. An iPhone did exactly that on 2026-10-05 (`pool.friend_added` at 22:18:17,
+   * then 300 ms `pairing.poll`s on a screen the user had acknowledged). Replace onto the map.
    */
   const close = useCallback((): void => {
     routeActive.current = false;
     setLeaving(true);
     void standDown();
-    router.back();
+    if (router.canGoBack()) router.back();
+    else router.replace('/');
   }, [router, standDown]);
 
   const decideFriend = useCallback(
@@ -1017,6 +1061,8 @@ export default function ActivePairingScreen() {
               <Action color={chrome.steel} label="BACK TO BUMP" onPress={returnToBump} outline />
               <Action color={signal} label="NEW LINK" onPress={() => void createAndShareLink()} />
             </>
+          ) : stage === 'service-failed' ? (
+            <Action color={signal} label="TRY AGAIN" onPress={retryService} />
           ) : stage === 'bump-failed' ? (
             <>
               <Action

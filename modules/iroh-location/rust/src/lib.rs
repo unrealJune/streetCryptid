@@ -17,17 +17,21 @@
 
 mod ble;
 mod contact;
-mod crypto;
+pub mod crypto;
 pub mod delivery;
 mod docs;
 mod durable;
 pub mod gate;
 mod h3;
+/// `location.runtime` spans: the native location runtime reporting itself (see the module docs).
+pub mod location_runtime;
 /// Festival-mesh radio capsules: the outer wrapper that carries an envelope over open
 /// radio without a linkable identity (pure; see `mesh.rs` and `docs/mesh/DESIGN.md`).
 pub mod mesh;
 /// Native MVT tile/bundle decoder for the map pipeline (pure; see `mvt.rs`).
 pub mod mvt;
+/// Which docs namespaces a node reopens on every start, in `state_dir` (see the module docs).
+pub mod ns_book;
 pub mod outbox;
 pub mod own_log;
 pub mod pad;
@@ -36,9 +40,11 @@ mod profile;
 pub mod publish;
 pub mod ratchet;
 pub mod recipients;
+pub mod restart;
 pub mod seq_store;
 pub mod session_store;
 pub mod sessions;
+mod stash;
 pub mod transport;
 
 /// The `mesh_epoch` every DOCS-path envelope carries.
@@ -50,6 +56,7 @@ pub mod transport;
 ///
 /// The docs-path key epoch is the per-wrap `i` in the v3 ratchet header (§4.7), not this.
 pub const DOCS_MESH_EPOCH: u32 = 0;
+pub mod host;
 mod relay;
 mod telemetry;
 
@@ -60,6 +67,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 #[cfg(target_os = "android")]
 use std::sync::OnceLock;
+use std::sync::RwLock as StdRwLock;
 
 use iroh::{
     address_lookup::MemoryLookup, protocol::Router, Endpoint, EndpointAddr, EndpointId, SecretKey,
@@ -393,6 +401,60 @@ pub trait FixListener: Send + Sync + 'static {
     fn on_opaque(&self, author: Vec<u8>, seq: u64);
     /// Membership / connectivity status strings for the harness UI.
     fn on_status(&self, status: String);
+}
+
+/// Where a subscription's events go — swappable while it runs.
+///
+/// A subscription used to capture its listener for life, which was right while each one had a
+/// single owner. The own-topic subscription now has two (the mounted app and the native background
+/// runtime share one node through [`host`]), and the app's listener points into a JS context that
+/// can be torn down while the node keeps running for the background runtime. `None` is silence, not
+/// loss: an inbound envelope is still opened and still lands in the replica; nothing surfaces it.
+#[derive(Clone, Default)]
+pub(crate) struct ListenerCell(Arc<StdRwLock<Option<Arc<dyn FixListener>>>>);
+
+impl ListenerCell {
+    fn new(listener: Option<Arc<dyn FixListener>>) -> Self {
+        Self(Arc::new(StdRwLock::new(listener)))
+    }
+
+    /// The current listener. A poisoned lock reads as silence rather than a panic in the receive
+    /// loop: a listener that panicked once is not one worth delivering to again.
+    pub(crate) fn get(&self) -> Option<Arc<dyn FixListener>> {
+        self.0.read().ok().and_then(|slot| slot.clone())
+    }
+
+    pub(crate) fn set(&self, listener: Option<Arc<dyn FixListener>>) {
+        if let Ok(mut slot) = self.0.write() {
+            *slot = listener;
+        }
+    }
+
+    fn on_fix(
+        &self,
+        author: Vec<u8>,
+        seq: u64,
+        fix: LocationFix,
+        backfill: bool,
+        via: String,
+        via_peer: Option<String>,
+    ) {
+        if let Some(listener) = self.get() {
+            listener.on_fix(author, seq, fix, backfill, via, via_peer);
+        }
+    }
+
+    fn on_opaque(&self, author: Vec<u8>, seq: u64) {
+        if let Some(listener) = self.get() {
+            listener.on_opaque(author, seq);
+        }
+    }
+
+    fn on_status(&self, status: String) {
+        if let Some(listener) = self.get() {
+            listener.on_status(status);
+        }
+    }
 }
 
 /// Derive the gossip topic for a given author's location stream.
@@ -1080,6 +1142,14 @@ impl ProfileSink for ProfileEventQueue {
     }
 }
 
+/// What [`LocationNode::grant_stash`] registers.
+enum StashGrant {
+    /// One newly imported friend ticket.
+    One(String),
+    /// Our trail and every friend's; `floored` defers to [`stash::REGRANT_FLOOR_MS`].
+    All { floored: bool },
+}
+
 struct Started {
     endpoint: Endpoint,
     gossip: Gossip,
@@ -1114,6 +1184,28 @@ struct Started {
 /// (`Endpoint`, `Gossip` and `MemoryLookup` are handle types; the docs are `Arc`), and cloning a
 /// handle is exactly what makes the release safe — a `shutdown` that replaces `inner` cannot pull
 /// the engine out from under an in-flight call, it can only stop being the node the NEXT call sees.
+/// Parse peer tickets and seed each one's full address into the in-memory lookup.
+///
+/// Collect bootstrap peer ids AND seed each ticket's full node addr (id + LAN/direct socket addrs
+/// + relay) into our in-memory address lookup. This lets gossip dial the peer DIRECTLY on its
+/// known addresses — the same-wifi fast path — instead of waiting on relay/DNS resolution. The N0
+/// preset's pkarr/DNS discovery still resolves peers over the internet as a fallback. Seeding
+/// never fails, so it can't abort the subscribe; a malformed ticket still surfaces a parse error.
+fn seed_bootstrap(
+    memory: &MemoryLookup,
+    bootstrap: &[String],
+) -> Result<Vec<EndpointId>, LocationError> {
+    let mut ids = Vec::with_capacity(bootstrap.len());
+    for t in bootstrap {
+        let ticket: EndpointTicket = t
+            .parse()
+            .map_err(|_| LocationError::Decode("bad endpoint ticket".into()))?;
+        memory.add_endpoint_info(ticket.endpoint_addr().clone());
+        ids.push(ticket.endpoint_addr().id);
+    }
+    Ok(ids)
+}
+
 #[derive(Clone)]
 struct Live {
     endpoint: Endpoint,
@@ -1125,1371 +1217,33 @@ struct Live {
 }
 
 impl LocationNode {
-    /// Clone this node's live handles and RELEASE the node lock. See [`Live`].
-    ///
-    /// Every method below that touches the endpoint, gossip or the docs engines starts here. The
-    /// rule it enforces is one line long and has cost us two multi-day outages when broken: the
-    /// `inner` guard must never be alive across an `await`.
-    async fn live(&self) -> Result<Live, LocationError> {
-        self.live_opt().await.ok_or(LocationError::NotStarted)
-    }
-
-    /// [`Self::live`] for the callers whose honest answer to "not started" is a default, not an
-    /// error (BLE capability reads, diagnostics).
-    async fn live_opt(&self) -> Option<Live> {
-        let guard = self.inner.lock().await;
-        let started = guard.as_ref()?;
-        Some(Live {
-            endpoint: started.endpoint.clone(),
-            gossip: started.gossip.clone(),
-            trail: started.trail.clone(),
-            profile: started.profile.clone(),
-            ble: started.ble.clone(),
-            memory: started.memory.clone(),
-        })
-    }
-}
-
-// The process-global `tracing` subscriber (Android logcat pipe + the optional OTLP developer
-// telemetry reload slot) lives in `telemetry.rs` — see the module docs there for the layering
-// and the `sc.*` correlation model.
-
-/// The device node: holds identity + receiving keys and, once started, the iroh
-/// endpoint + gossip router.
-#[derive(uniffi::Object)]
-pub struct LocationNode {
-    identity_seed: [u8; 32],
-    author: [u8; 32],
-    recv_secret: Vec<u8>,
-    recv_public: Vec<u8>,
-    /// Which node this is within this process. See [`NODE_ORDINAL`]; carried here so later spans
-    /// can say WHICH node they came from, not only that a node existed.
-    ordinal: u64,
-    /// On-disk root for the persistent docs replica + blobs store (durable trail). Derived from
-    /// the identity so it stays stable across restarts.
-    ///
-    /// This one is allowed to live in cache/temp: everything under it is *recoverable* — a purged
-    /// trail resyncs from the stash and from friends. Ratchet state is not, which is why it does
-    /// not live here; see [`state_dir`](Self::state_dir).
-    data_dir: PathBuf,
-    /// On-disk root for state that **cannot be re-derived or re-fetched** — today, the ratchet
-    /// session store (§4.2).
-    ///
-    /// Separate from `data_dir` because the two have opposite storage requirements, and getting
-    /// either wrong is a break rather than an inconvenience:
-    ///
-    /// | | cache / temp | app data dir |
-    /// |---|---|---|
-    /// | backup rollback → counter rewind → key reuse | impossible | must be excluded |
-    /// | OS purge → every session lost at once | likely | no |
-    ///
-    /// Sequential state has to survive an OS purge, so it belongs in the app data dir — and a
-    /// restored backup would rewind counters into key reuse, so the host is responsible for
-    /// excluding this path from backup *as well*. Both halves ship together: iOS stamps
-    /// `NSURLIsExcludedFromBackupKey` in `IrohLocationModule.swift`, Android excludes `files/` in
-    /// `plugins/withBackupExclusion.js`. Never point this at `data_dir` on a device.
-    state_dir: PathBuf,
-    inner: Mutex<Option<Started>>,
-    /// Serializes `start`, so building the endpoint does not have to hold [`inner`].
-    ///
-    /// `start` awaits the BLE radio coming up and the endpoint binding, neither of which is fast
-    /// and neither of which the OS promises to finish. Holding `inner` across them made every
-    /// unrelated call — and therefore the whole UI — wait on the slowest thing in startup; on
-    /// 2026-09-13 a wedged CoreBluetooth turned that into a 13 h outage ending in a locked splash
-    /// screen. The two locks separate "is the node up?" (cheap, contended, answered constantly)
-    /// from "is someone bringing it up?" (slow, rare, and only ever contended by a second caller
-    /// who would have had to wait anyway).
-    starting: Mutex<()>,
-    /// The most recently attached listener, reused to surface durable-trail (backfill / sync)
-    /// events from the node-level `sync_trail` call.
-    listener: Mutex<Option<Arc<dyn FixListener>>>,
-    /// Bilateral pairing core (`streetcryptid/pair/1`). Created at construction so its ALPN
-    /// handler can be registered on the router in `start`; its live handles are attached there.
-    pair: Arc<PairCore>,
-    /// Node-level queue of verified profile-update events (drained via `poll_profile_events`).
-    profile_events: ProfileEventQueue,
-    /// Per-friend Double Ratchet sessions (FORWARD-SECRECY §4.2). Created on `start`, because
-    /// [`SessionStore`](session_store::SessionStore) claims the session directory for the
-    /// process and that claim must be released on shutdown.
-    sessions: Mutex<Option<Arc<sessions::SessionManager>>>,
-    /// This device's monotonic publish counter (`seq_store.rs`). Created on `start` alongside the
-    /// session store and for the same reason: it claims a directory for the process, and that
-    /// claim has to be released on shutdown.
-    seq: Mutex<Option<Arc<seq_store::SeqStore>>>,
-    /// The three stores the native drain path needs to run with no JS context alive: what is
-    /// waiting to be sealed, who to seal it for, and where we are on the slot grid. Opened with
-    /// the node for the same reason as the counter — two of them claim directories.
-    outbox: Mutex<Option<Arc<outbox::Outbox>>>,
-    recipients: Mutex<Option<Arc<recipients::RecipientStore>>>,
-    gate: Mutex<Option<Arc<gate::GateStore>>>,
-    /// Every position this device put on the wire, until the app takes them into its own trail.
-    /// See [`own_log`] for why the replica cannot answer that.
-    own_log: Mutex<Option<Arc<own_log::OwnLog>>>,
-    /// The settings a background bootstrap needs before it can call `start` — see
-    /// [`crate::transport`]. Opened eagerly with the node rather than lazily, because the one
-    /// caller that needs it is the one with no JS context to fall back on.
-    transport: Mutex<Option<Arc<transport::TransportStore>>>,
-    /// Where a drained envelope has to be sent to actually leave the phone — see
-    /// [`crate::delivery`]. Opened with the others because the drain reads it on every wake, and a
-    /// wake with no JS context has nowhere else to get it.
-    delivery: Mutex<Option<Arc<delivery::DeliveryStore>>>,
-    /// Ephemerals minted by `begin_session` and awaiting the peer's half. Keyed by peer endpoint
-    /// id. Held in memory only: an unfinished bootstrap that does not survive a restart is a
-    /// bootstrap the user simply repeats, whereas one persisted to disk is a private key sitting
-    /// in storage for no reason.
-    pending_bootstrap: Mutex<HashMap<Vec<u8>, x25519_dalek::StaticSecret>>,
-    /// The ephemeral behind our currently published resync record (§4.6), if any.
-    ///
-    /// One, not one per peer: a single fresh ephemeral serves every peer we are restarting with,
-    /// because the transcript separates the roots. Dropped once every peer has been resynced, and
-    /// on restart — a resync whose ephemeral is gone is simply re-offered.
-    pending_resync: Mutex<Option<PendingResync>>,
-}
-
-/// Our half of an in-flight resync exchange.
-struct PendingResync {
-    secret: x25519_dalek::StaticSecret,
-    public: [u8; 32],
-    nonce: [u8; 16],
-    ts: u64,
-    /// The receiving keys the record currently in our `rsy` slot is wrapped for, sorted. Lets the
-    /// native driver — which calls on every drain — skip rewriting an identical record, which would
-    /// otherwise put a fresh docs entry on the wire every few minutes for as long as a friend is
-    /// away.
-    wrapped_for: Vec<Vec<u8>>,
-}
-
-/// Internals kept out of the `#[uniffi::export]` block above — UniFFI exports every method in an
-/// exported impl, including private ones, and `SessionManager` is not an FFI type.
-impl LocationNode {
-    /// Drive §4.6 recovery for every one of `peers` whose session has stopped working.
-    ///
-    /// The native counterpart of what `runResyncDriver` in `location-sharing.ts` used to do on
-    /// every JS publish tick, and the reason it exists is that the JS tick no longer happens: the
-    /// native drain became the only publish path and nothing took recovery over. A session that
-    /// lapses (§4.5) cannot heal itself — each side drops the other from its wrap set, so neither
-    /// ever delivers the fresh ratchet key that would un-lapse it — so without this a lapse is
-    /// permanent. On 2026-09-29 that had cost a week of fixes from a Pixel 9, and it held three of
-    /// the four sessions on the phone that noticed.
-    ///
-    /// One record, wrapped for every desynced peer at once. The `rsy` slot holds a single record,
-    /// so offering it peer-by-peer would leave it wrapped for whoever came last. The poll per peer
-    /// then finds theirs and restarts the session; the exchange completes across two drains on
-    /// each side, and the push the drain makes while [`publish::RecoveryOutcome::in_progress`] is
-    /// set is what carries our half out and brings theirs in.
-    ///
-    /// Past [`RESYNC_ATTEMPT_LIMIT`] a peer is left alone: recovery that keeps recovering is not
-    /// recovering, and that pair needs an in-person bump. `no_session` peers are never touched —
-    /// there is no session to restart, and only pairing roots one.
-    pub async fn recover_sessions(&self, peers: &[String]) -> publish::RecoveryOutcome {
-        use tracing::Instrument;
-        let span = tracing::info_span!(
-            "session.recover",
-            sc.author = %telemetry::short_hex(&self.author),
-            peers = peers.len(),
-            desynced = tracing::field::Empty,
-            gave_up = tracing::field::Empty,
-            no_key = tracing::field::Empty,
-            restored = tracing::field::Empty,
-            remaining = tracing::field::Empty,
-            error = tracing::field::Empty,
-        );
-        async move {
-            let Ok(manager) = self.session_manager().await else {
-                return publish::RecoveryOutcome::default();
-            };
-            let store = self.recipient_store().await.ok();
-            let now = now_ms();
-
-            let mut unique: Vec<&String> = peers.iter().collect();
-            unique.sort();
-            unique.dedup();
-
-            let (mut desynced, mut gave_up, mut no_key) = (0u32, 0u32, 0u32);
-            let mut todo: Vec<(String, String)> = Vec::new();
-            for peer_hex in unique {
-                let Ok(peer) = decode_endpoint(peer_hex) else {
-                    continue;
-                };
-                if !manager.is_desynced(&peer, now) {
-                    continue;
-                }
-                desynced += 1;
-                if manager.resync_count(&peer) >= RESYNC_ATTEMPT_LIMIT {
-                    gave_up += 1;
-                    continue;
-                }
-                let key = match store.as_ref().and_then(|s| s.key_for(peer_hex)) {
-                    Some(key) => Some(key),
-                    None => self.profile_recv_key(&peer).await,
-                };
-                match key {
-                    Some(key) => todo.push((peer_hex.clone(), key)),
-                    None => no_key += 1,
-                }
-            }
-
-            let span = tracing::Span::current();
-            span.record("desynced", desynced);
-            span.record("gave_up", gave_up);
-            span.record("no_key", no_key);
-            if todo.is_empty() {
-                // The common case — nobody desynced — costs one state load per friend and nothing
-                // else. A desynced peer with no key or past the limit is on the span, not retried.
-                return publish::RecoveryOutcome::default();
-            }
-
-            if let Err(err) = self
-                .publish_resync(todo.iter().map(|(_, key)| key.clone()).collect())
-                .await
-            {
-                span.record("error", tracing::field::display(&err));
-                // Still in progress: the push this triggers may bring the peer's half in, and the
-                // next drain retries ours.
-                return publish::RecoveryOutcome {
-                    in_progress: true,
-                    restored: 0,
-                };
-            }
-
-            let (mut restored, mut remaining) = (0u32, 0u32);
-            for (peer_hex, key) in &todo {
-                match self.poll_resync(peer_hex.clone(), key.clone()).await {
-                    Ok(true) => restored += 1,
-                    Ok(false) => remaining += 1,
-                    Err(err) => {
-                        remaining += 1;
-                        span.record("error", tracing::field::display(&err));
-                    }
-                }
-            }
-            span.record("restored", restored);
-            span.record("remaining", remaining);
-
-            // Drop our ephemeral once nobody is mid-exchange: a private key held for no reason.
-            // The record stays in the slot, so a peer that has not pulled it yet still can.
-            if restored > 0 && remaining == 0 {
-                self.clear_resync().await;
-            }
-            publish::RecoveryOutcome {
-                in_progress: remaining > 0,
-                restored,
-            }
-        }
-        .instrument(span)
-        .await
-    }
-
-    /// Shorten or restore the §4.5 lapse bound on this node's live sessions. Tests only — it is
-    /// how an integration test lapses a real pair without waiting a day.
-    #[doc(hidden)]
-    pub async fn set_t_lapse_ms_for_tests(&self, t_lapse_ms: u64) -> Result<(), LocationError> {
-        self.session_manager().await?.set_t_lapse_ms(t_lapse_ms);
-        Ok(())
-    }
-
-    /// A friend's receiving key from their verified profile — the fallback when JS has not
-    /// mirrored one yet (a binary upgraded before its bundle, or a wake before the first launch).
-    async fn profile_recv_key(&self, peer: &[u8]) -> Option<String> {
-        let profile = self.live().await.ok()?.profile;
-        let record = profile.read_for_endpoint(peer).await.ok()??;
-        (!record.recv_pub.is_empty()).then(|| encode_hex(&record.recv_pub))
-    }
-
-    /// Record what the latest fix envelope was sealed for, for `device.health`.
-    async fn note_seal(&self, total: usize, dropped: &[String]) {
-        let Ok(store) = self.recipient_store().await else {
-            return;
-        };
-        let mut report = recipients::SealReport {
-            at: now_ms(),
-            recipients: total as u32,
-            dropped: dropped.len() as u32,
-            dropped_peers: dropped.to_vec(),
-            ..Default::default()
-        };
-        for entry in dropped {
-            match entry.rsplit_once(':').map(|(_, reason)| reason) {
-                Some("lapsed") => report.lapsed += 1,
-                Some("no_session") => report.no_session += 1,
-                _ => report.other += 1,
-            }
-        }
-        store.record_seal(report);
-    }
-
-    async fn session_manager(&self) -> Result<Arc<sessions::SessionManager>, LocationError> {
-        self.sessions
-            .lock()
-            .await
-            .clone()
-            .ok_or(LocationError::NotStarted)
-    }
-
-    async fn outbox(&self) -> Result<Arc<outbox::Outbox>, LocationError> {
-        self.outbox
-            .lock()
-            .await
-            .clone()
-            .ok_or(LocationError::NotStarted)
-    }
-
-    async fn recipient_store(&self) -> Result<Arc<recipients::RecipientStore>, LocationError> {
-        self.recipients
-            .lock()
-            .await
-            .clone()
-            .ok_or(LocationError::NotStarted)
-    }
-
-    async fn transport_store(&self) -> Result<Arc<transport::TransportStore>, LocationError> {
-        self.transport
-            .lock()
-            .await
-            .clone()
-            .ok_or(LocationError::NotStarted)
-    }
-
-    async fn delivery_store(&self) -> Result<Arc<delivery::DeliveryStore>, LocationError> {
-        self.delivery
-            .lock()
-            .await
-            .clone()
-            .ok_or(LocationError::NotStarted)
-    }
-
-    /// Who each peer is, for `peer.contact` (see [`contact::PeerRoles`]).
-    ///
-    /// Reads the recipient and delivery stores, each behind its own small mutex — NOT the node-wide
-    /// `inner` lock — so it is safe on the gossip receive loop. A store that is not open yet yields
-    /// an empty answer (every peer `other`) rather than an error: this only labels telemetry.
-    async fn peer_roles(&self) -> contact::PeerRoles {
-        let friends: Vec<[u8; 32]> = match self.recipient_store().await {
-            Ok(store) => store
-                .get()
-                .iter()
-                .chain(store.watchers().iter())
-                .filter_map(|hex| decode_endpoint(hex).ok())
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        // The stash goes FIRST in the delivery list when it is opted into (`DeliveryConfig`), and
-        // only then; `PeerRoles::new` still lets a friend's recipient record win that position.
-        let stash = match self.delivery_store().await {
-            Ok(store) => {
-                let config = store.get();
-                config
-                    .stash_base_url
-                    .as_ref()
-                    .and(config.peer_tickets.first())
-                    .and_then(|ticket| ticket.parse::<EndpointTicket>().ok())
-                    .map(|ticket| *ticket.endpoint_addr().id.as_bytes())
-            }
-            Err(_) => None,
-        };
-        contact::PeerRoles::new(friends, stash)
-    }
-
-    async fn gate_store(&self) -> Result<Arc<gate::GateStore>, LocationError> {
-        self.gate
-            .lock()
-            .await
-            .clone()
-            .ok_or(LocationError::NotStarted)
-    }
-
-    async fn seq_store(&self) -> Result<Arc<seq_store::SeqStore>, LocationError> {
-        self.seq
-            .lock()
-            .await
-            .clone()
-            .ok_or(LocationError::NotStarted)
-    }
-
-    /// Verify and open one inbound **ratcheted** envelope from the live gossip lane.
-    ///
-    /// The live lane is v3 for the same reason the durable one is: §4.3 asks for a ratchet header
-    /// on every envelope, and a hot-mode fix sealed to a long-term receiving key is a fix the
-    /// archive can decrypt forever once the device is seized. Hot and cold now share one schedule,
-    /// so a live session also advances the counters the cold cadence will use next.
-    ///
-    /// Three outcomes rather than a `Result`, because "not addressed to us" is the common case in
-    /// a pool — every envelope carries a wrap per recipient and only one is ever ours — and must
-    /// not be logged as a failure.
-    async fn open_ratcheted_envelope(&self, bytes: &[u8]) -> GossipOpen {
-        let Ok(verified) = crypto::verify_v3(bytes) else {
-            return GossipOpen::Failed;
-        };
-        if verified.author == self.author {
-            return GossipOpen::NotForUs; // our own broadcast, echoed back
-        }
-        let Ok(manager) = self.session_manager().await else {
-            return GossipOpen::Failed;
-        };
-        match manager.open(&verified.author, &verified, now_ms()) {
-            Ok(payload) => GossipOpen::Delivered {
-                author: verified.author,
-                seq: verified.seq,
-                payload,
-            },
-            Err(sessions::SessionError::NotForUs) | Err(sessions::SessionError::NoSession) => {
-                GossipOpen::NotForUs
-            }
-            Err(_) => GossipOpen::Failed,
-        }
-    }
-
-    async fn read_latest_ratcheted_events_inner(&self) -> Result<Vec<RatchetEvent>, LocationError> {
-        let (trail, sealed) = {
-            let started = self.live().await?;
-            let sealed = started
-                .trail
-                .read_latest_sealed()
-                .await
-                .map_err(|e| LocationError::Network(e.to_string()))?;
-            (started.trail.clone(), sealed)
-        };
-        let manager = self.session_manager().await?;
-        let now = now_ms();
-
-        let mut verified = sealed
-            .into_iter()
-            .filter_map(|bytes| crypto::verify_v3(&bytes).ok())
-            .filter(|envelope| envelope.author != self.author)
-            .collect::<Vec<_>>();
-        // The fix and null lanes occupy separate LWW slots. If both current slots address us
-        // (for example just after a sharing-direction change), open them in seq order so the
-        // newer one does not advance the ratchet past the older activity record first.
-        verified.sort_unstable_by_key(|envelope| (envelope.author, envelope.seq));
-
-        let mut out = Vec::new();
-        for verified in verified {
-            let author = verified.author.to_vec();
-            let payload = match manager.open(&author, &verified, now) {
-                Ok(payload) => payload,
-                Err(err) => {
-                    tracing::debug!(
-                        sc.author = %telemetry::short_hex(&author),
-                        sc.seq = verified.seq,
-                        sc.drop_reason = %err,
-                        "ratcheted envelope not opened"
-                    );
-                    continue;
-                }
-            };
-            let fix = match decode_fix_payload(&payload) {
-                Ok(fix) => fix,
-                Err(err) => {
-                    tracing::debug!(
-                        sc.author = %telemetry::short_hex(&author),
-                        sc.seq = verified.seq,
-                        error = %err,
-                        "ratchet response payload could not be decoded"
-                    );
-                    continue;
-                }
-            };
-            let kind = if fix.is_some() { "fix" } else { "null" };
-            tracing::debug!(
-                sc.author = %telemetry::short_hex(&author),
-                sc.seq = verified.seq,
-                sc.lane = kind,
-                source = "durable",
-                "ratchet response received"
-            );
-            // Who served this author's slot in the reconciliation that just ran. Absent for an
-            // entry that was already in the replica — this reports delivery, never mere presence.
-            let via_peer = trail.serving_peer(&author).await.map(|id| encode_hex(&id));
-            out.push(RatchetEvent {
-                author,
-                seq: verified.seq,
-                ts: verified.ts,
-                kind: kind.to_string(),
-                fix,
-                via_peer,
-            });
-        }
-        Ok(out)
-    }
-}
-
-/// What happened to an inbound gossip envelope. See [`LocationNode::open_ratcheted_envelope`].
-enum GossipOpen {
-    Delivered {
-        author: [u8; 32],
-        seq: u64,
-        payload: zeroize::Zeroizing<Vec<u8>>,
-    },
-    /// Addressed to someone else, or from a peer we hold no session with. Ordinary.
-    NotForUs,
-    /// Not a v3 envelope, signature invalid, or the schedule refused the position.
-    Failed,
-}
-
-/// Desync detection and the §4.6 resync primitive.
-#[uniffi::export(async_runtime = "tokio")]
-impl LocationNode {
-    /// Whether this peer's session needs §4.6 recovery: `R` consecutive missed envelopes, an
-    /// unreadable state file, or a peer lapsed past `T_lapse` (§4.5).
-    pub async fn is_desynced(&self, peer_endpoint_hex: String) -> Result<bool, LocationError> {
-        let peer = decode_endpoint(&peer_endpoint_hex)?;
-        Ok(self.session_manager().await?.is_desynced(&peer, now_ms()))
-    }
-
-    /// How many resyncs we have driven with this peer.
-    ///
-    /// §4.6 wants a resync *loop* to surface a "re-pair with this friend" prompt rather than
-    /// retrying forever, so this is deliberately a count rather than a boolean: the UI decides
-    /// where patience runs out, and the crypto layer does not pretend to know.
-    pub async fn resync_count(&self, peer_endpoint_hex: String) -> Result<u32, LocationError> {
-        let peer = decode_endpoint(&peer_endpoint_hex)?;
-        Ok(self.session_manager().await?.resync_count(&peer))
-    }
-
-    /// Publish our half of a §4.6 resync: a fresh ephemeral, wrapped for `recipient_recv_pubs`.
-    ///
-    /// Rides the HPKE lane rather than the ratchet, necessarily — this is the message that
-    /// re-establishes a ratchet, so it cannot require one. That is also why it is the one place
-    /// the design has to be most careful: **recovery must never become the bypass**. The record
-    /// carries only an ephemeral public key. It cannot downgrade anything, because a root is
-    /// only ever derived when *both* ephemerals are in hand.
-    ///
-    /// Idempotent within an exchange: calling it again re-publishes the same ephemeral rather
-    /// than minting a new one, so a peer that already saw our half does not have to see a second.
-    pub async fn publish_resync(
-        &self,
-        recipient_recv_pubs: Vec<String>,
-    ) -> Result<String, LocationError> {
-        let mut recipients = recipient_recv_pubs
-            .iter()
-            .map(|h| decode_hex(h).ok_or_else(|| LocationError::Decode("bad recv key hex".into())))
-            .collect::<Result<Vec<_>, _>>()?;
-        recipients.sort();
-        recipients.dedup();
-
-        let (public, nonce, ts, reminted, unchanged) = {
-            let mut pending = self.pending_resync.lock().await;
-            let now = now_ms();
-            // Idempotent while the record is still usable, re-minted once it is not.
-            //
-            // Without the age check this is idempotent *forever*: it would re-publish the original
-            // `ts` on every call, and once that passed `RESYNC_FRESHNESS_MS` the peer would refuse
-            // our record permanently while we kept republishing the same stale bytes. The session
-            // would sit desynced, refusing to heal, reporting no error — and the normal reason you
-            // are resyncing at all is a peer who is offline, i.e. exactly the case that takes
-            // longer than an hour.
-            //
-            // Re-minting at half the window leaves the fresh record a full half-window of validity
-            // before it too needs replacing, so there is no gap where our published record is
-            // unusable.
-            let stale = pending
-                .as_ref()
-                .is_some_and(|p| now.saturating_sub(p.ts) >= sessions::RESYNC_REMINT_MS);
-            match pending.as_mut() {
-                Some(p) if !stale => {
-                    let unchanged = p.wrapped_for == recipients;
-                    p.wrapped_for = recipients.clone();
-                    (p.public, p.nonce, p.ts, false, unchanged)
-                }
-                _ => {
-                    let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
-                    let public = x25519_dalek::PublicKey::from(&secret).to_bytes();
-                    let mut nonce = [0u8; 16];
-                    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
-                    let was_pending = pending.is_some();
-                    *pending = Some(PendingResync {
-                        secret,
-                        public,
-                        nonce,
-                        ts: now,
-                        wrapped_for: recipients.clone(),
-                    });
-                    (public, nonce, now, was_pending, false)
-                }
-            }
-        };
-
-        // Re-minting discards the ephemeral behind every conclusion we have already drawn, so
-        // those conclusions have to go with it. Concretely: we may have already applied the peer's
-        // record against the *old* ephemeral and installed a session from it. The peer will see
-        // our new record and re-apply against the new one, landing on a different root — while we,
-        // having already marked their nonce as seen, would never re-apply and would sit on the old
-        // session forever. Forgetting the applied nonces lets us re-apply their current record
-        // against the new ephemeral, so both sides converge on the same root again.
-        if reminted {
-            if let Ok(manager) = self.session_manager().await {
-                manager.forget_applied_resyncs();
-            }
-        }
-        // Same ephemeral, same recipients: the record already in our slot is byte-for-byte what
-        // we would write, bar a fresh signature. Nothing to do.
-        if unchanged {
-            return Ok(encode_hex(&public));
-        }
-
-        let record = ResyncRecord {
-            v: RESYNC_V,
-            ephemeral: public.to_vec(),
-            ts,
-            nonce: nonce.to_vec(),
-        };
-        let payload =
-            postcard::to_allocvec(&record).map_err(|_| LocationError::Decode("encode".into()))?;
-        let envelope = crypto::seal(
-            &self.identity_seed,
-            &self.author,
-            0,
-            ts,
-            0,
-            &payload,
-            &recipients,
-        )?;
-        tracing::info!(
-            sc.author = %telemetry::short_hex(&self.author),
-            sc.resync = "published",
-            recipients = recipients.len(),
-            "published a resync record"
-        );
-
-        let started = self.live().await?;
-        let ns = started.trail.own_namespace();
-        started
-            .trail
-            .write_rsy(ns, &self.author, envelope)
-            .await
-            .map_err(|e| LocationError::Network(e.to_string()))?;
-        Ok(encode_hex(&public))
-    }
-
-    /// Look for `peer`'s resync record and, if one is there, restart the session from it.
-    ///
-    /// Publishes our own half first when we have not already, so a single call from each side
-    /// completes the exchange without either having to go first — which matters because the
-    /// side that noticed the desync and the side that caused it are usually not the same one.
-    ///
-    /// Returns whether a session was installed. `false` covers "no record yet", "stale record",
-    /// and "already applied" — all ordinary, none an error.
-    pub async fn poll_resync(
-        &self,
-        peer_endpoint_hex: String,
-        peer_recv_pub_hex: String,
-    ) -> Result<bool, LocationError> {
-        let peer = decode_endpoint(&peer_endpoint_hex)?;
-
-        // Offer our half if we have not — BEFORE looking for theirs. This used to sit below the
-        // early return for "no record from them yet", so a side that only ever polled never
-        // published: two phones that both noticed a lapse would each wait for the other forever,
-        // and the only test of the exchange published both halves by hand. Without this the
-        // exchange needs the two sides to independently decide to start one, and only one of them
-        // can see the failure.
-        if self.pending_resync.lock().await.is_none() {
-            self.publish_resync(vec![peer_recv_pub_hex]).await?;
-        }
-
-        let payloads = {
-            let started = self.live().await?;
-            started
-                .trail
-                .read_rsy(&peer, &self.recv_secret)
-                .await
-                .map_err(|e| LocationError::Network(e.to_string()))?
-        };
-        let Some(record) = payloads
-            .iter()
-            .filter_map(|p| postcard::from_bytes::<ResyncRecord>(p).ok())
-            .find(|r| r.v == RESYNC_V && r.ephemeral.len() == 32 && r.nonce.len() == 16)
-        else {
-            return Ok(false);
-        };
-        let (our_secret, our_public) = {
-            let pending = self.pending_resync.lock().await;
-            let p = pending.as_ref().ok_or(LocationError::NotStarted)?;
-            (p.secret.clone(), p.public)
-        };
-
-        let peer_eph: [u8; 32] = record.ephemeral[..]
+    /// This node's own gossip topic — the one every friend subscribes to in order to hear us.
+    fn own_topic(&self) -> TopicId {
+        let bytes: [u8; 32] = derive_topic(self.author.to_vec())
             .try_into()
-            .map_err(|_| LocationError::Decode("bad ephemeral".into()))?;
-        let nonce: [u8; 16] = record.nonce[..]
-            .try_into()
-            .map_err(|_| LocationError::Decode("bad nonce".into()))?;
-
-        let shared = our_secret.diffie_hellman(&x25519_dalek::PublicKey::from(peer_eph));
-        if !shared.was_contributory() {
-            return Err(LocationError::Decode("degenerate ephemeral key".into()));
-        }
-        let transcript = boot_transcript(&self.author, &peer, &our_public, &peer_eph);
-        let (rk0, session_id) = derive_boot_root(shared.as_bytes(), &transcript);
-
-        let manager = self.session_manager().await?;
-        let initiator = ratchet::initiator_by_endpoint(&self.author, &peer);
-        let applied = manager
-            .apply_resync(
-                &peer,
-                nonce,
-                record.ts,
-                session_id,
-                rk0,
-                peer_eph,
-                if initiator { None } else { Some(our_secret) },
-                now_ms(),
-            )
-            .map_err(|e| LocationError::Network(e.to_string()))?;
-
-        if applied {
-            tracing::info!(
-                sc.author = %telemetry::short_hex(&self.author),
-                sc.peer = %telemetry::short_hex(&peer),
-                sc.resync = "applied",
-                sc.resync_count = manager.resync_count(&peer),
-                "restarted the session from a resync record"
-            );
-        }
-        Ok(applied)
+            .expect("blake3 output is 32 bytes");
+        TopicId::from_bytes(bytes)
     }
 
-    /// Drop our in-flight resync ephemeral once every peer has been restarted.
-    pub async fn clear_resync(&self) {
-        *self.pending_resync.lock().await = None;
-    }
-}
-
-/// The §4.6 resync record: one fresh ephemeral, offered to every peer we need to restart with.
-///
-/// Two deliberate departures from §4.6's field list, both of which remove a way to disagree:
-///
-/// * **no session id.** §4.6 lists one, but both sides can derive it from the transcript, and a
-///   transmitted id is an id the two sides can differ on. Derived, they cannot.
-/// * **no peer id.** The wrap set already addresses the record, and the transcript binds both
-///   identities into the root, so a record replayed at a third party derives a root its supposed
-///   author never computes. Naming the peer in the payload would add nothing except a second
-///   place for the answer to live.
-///
-/// Authentication is inherited, not added: the record rides inside a v2 envelope, which is
-/// ed25519-signed over the whole thing by the author's identity key. That is the same argument
-/// §4.1 makes for the ratchet header — one signed lane rather than a second one to get wrong.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct ResyncRecord {
-    v: u8,
-    /// Our fresh ephemeral X25519 public key. One serves every peer: each peer's root is
-    /// `KDF(DH(eph_ours, eph_theirs), transcript)`, so the transcript separates them.
-    ephemeral: Vec<u8>,
-    ts: u64,
-    /// 16 random bytes, so a record replayed out of the overwritten slot is a recognisable
-    /// no-op rather than a second session restart.
-    nonce: Vec<u8>,
-}
-
-const RESYNC_V: u8 = 1;
-
-/// How many resyncs with one peer before recovery stops and the pair needs an in-person bump.
-/// Matches `RESYNC_ATTEMPT_LIMIT` in `location-sharing.ts`, which drove this before the native
-/// drain did.
-const RESYNC_ATTEMPT_LIMIT: u32 = 3;
-
-/// How a caller wants the node's two on-disk roots resolved.
-///
-/// Both variants have to be resolved *after* the identity is known, because every path here is
-/// scoped by the author hex and the author is only derivable once the key exists (it may have
-/// just been generated).
-enum NodeDirs {
-    /// OS temp, scoped by author. Host tests and the desktop CLI, where nothing purges anything
-    /// mid-run and there is no backup to be restored from.
-    Default,
-    /// Exact directories, used verbatim — the `cli` feature's `new_with_data_dir`, which keeps
-    /// deliberately separate replica stores and must not have them renamed underneath it.
-    #[cfg(feature = "cli")]
-    Exact(PathBuf),
-    /// Storage roots to scope per identity. The mobile path; see [`LocationNode::new_at_dirs`].
-    Roots { data: PathBuf, state: PathBuf },
-}
-
-/// How many `LocationNode`s this PROCESS has built, ever.
-///
-/// The node is meant to be process-wide and singular — the host bridges refcount it so a mounted
-/// app and a headless session adopt one node rather than clobbering each other. This counter is
-/// what proves whether that actually held, and it is the only place that can: it sits below every
-/// constructor and below every JS context, so it counts nodes in a process rather than nodes a
-/// context believes it has.
-///
-/// **An ordinal above 1 with no intervening `shutdown` means two live nodes on one identity.** That
-/// is not a degraded mode, it is two endpoints publishing the same endpoint id: a dial to that
-/// identity lands on whichever one the relay or BLE picked, so a pairing handshake can reach
-/// `verifying` on one node and have its `Accept` delivered to the other, which has never heard of
-/// the session. It was reachable-but-unproven on 2026-09-13 — the evidence was three
-/// `iroh endpoint bound` lines in a process that logged no shutdowns at all, which says a node was
-/// built but not which context built it, and there was no way to tell a rebuild from a duplicate.
-static NODE_ORDINAL: AtomicU64 = AtomicU64::new(0);
-
-fn new_location_node_at(
-    identity_secret: Option<Vec<u8>>,
-    recv_secret: Option<Vec<u8>>,
-    dirs: NodeDirs,
-) -> Result<Arc<LocationNode>, LocationError> {
-    telemetry::init_tracing();
-    let ordinal = NODE_ORDINAL.fetch_add(1, Ordering::Relaxed) + 1;
-    let secret = match identity_secret {
-        Some(bytes) => SecretKey::from_bytes(
-            &bytes
-                .try_into()
-                .map_err(|_| LocationError::Decode("bad identity key".into()))?,
-        ),
-        None => SecretKey::generate(),
-    };
-    let identity_seed = secret.to_bytes();
-    let author = secret.public().as_bytes().to_owned();
-
-    let (recv_secret, recv_public) = match recv_secret {
-        Some(sk) => {
-            // derive the public half from the stored secret for a stable id.
-            let both = derive_recv_public(&sk)?;
-            (sk, both)
-        }
-        None => {
-            let (sk, pk) = crypto::generate_recv_keypair();
-            (sk, pk)
-        }
-    };
-
-    // Off-device, both live in one directory: temp is the right answer there, and collapsing them
-    // keeps the CLI's on-disk layout exactly as it was. On a device they must diverge — see
-    // `NodeDirs` and `LocationNode::state_dir`.
-    let (data_dir, state_dir) = match dirs {
-        NodeDirs::Default => {
-            let dir = default_data_dir(&author);
-            (dir.clone(), dir)
-        }
-        #[cfg(feature = "cli")]
-        NodeDirs::Exact(dir) => (dir.clone(), dir),
-        NodeDirs::Roots { data, state } => {
-            let scope = encode_hex(&author);
-            (data.join(&scope), state.join(&scope))
-        }
-    };
-
-    let node = Arc::new(LocationNode {
-        identity_seed,
-        author,
-        recv_secret,
-        recv_public: recv_public.clone(),
-        data_dir,
-        state_dir,
-        inner: Mutex::new(None),
-        starting: Mutex::new(()),
-        listener: Mutex::new(None),
-        pair: PairCore::new(identity_seed, author, recv_public),
-        profile_events: ProfileEventQueue::default(),
-        sessions: Mutex::new(None),
-        seq: Mutex::new(None),
-        outbox: Mutex::new(None),
-        recipients: Mutex::new(None),
-        gate: Mutex::new(None),
-        own_log: Mutex::new(None),
-        transport: Mutex::new(None),
-        delivery: Mutex::new(None),
-        pending_bootstrap: Mutex::new(HashMap::new()),
-        pending_resync: Mutex::new(None),
-        ordinal,
-    });
-    tracing::info!(
-        node.ordinal = ordinal,
-        sc.author = %telemetry::short_hex(&author),
-        "node.construct: built a LocationNode in this process"
-    );
-    if ordinal > 1 {
-        // Loud on purpose. The bridges refcount precisely so this does not happen, and every way
-        // it still can (a second host module instance, an identity mismatch adopting nothing, a
-        // clobber) ends with two endpoints answering for one identity.
-        tracing::warn!(
-            node.ordinal = ordinal,
-            sc.author = %telemetry::short_hex(&author),
-            "node.construct: this process has now built more than one node for this identity"
-        );
-    }
-    Ok(node)
-}
-
-#[uniffi::export(async_runtime = "tokio")]
-impl LocationNode {
-    /// Create (or restore) a node from persisted key material. Pass `None` to generate
-    /// fresh keys; then read `identity_secret()` / `recv_secret()` and persist them in
-    /// the OS secure store so the EndpointId + receiving key stay stable.
-    #[uniffi::constructor]
-    pub fn new(
-        identity_secret: Option<Vec<u8>>,
-        recv_secret: Option<Vec<u8>>,
-    ) -> Result<Arc<Self>, LocationError> {
-        new_location_node_at(identity_secret, recv_secret, NodeDirs::Default)
-    }
-
-    /// Create a node under host-supplied storage roots. **This is the constructor mobile must
-    /// use**; [`new`](Self::new) puts everything in the OS temp dir, which is right for host tests
-    /// and wrong for a device.
+    /// Stop surfacing events into the app; keep the node, and every subscription, running.
     ///
-    /// Both roots are scoped per identity internally (`<root>/<author hex>`), because the host
-    /// cannot know the endpoint id before the node that derives it exists.
-    ///
-    /// - `data_root` — the recoverable trail replica and blobs. Cache is the correct home: it is
-    ///   large, it is re-fetchable, and it must never be restored from a backup.
-    /// - `state_root` — ratchet session state, which is **not** recoverable. This must be the
-    ///   app's private data dir (Android `filesDir`, iOS Application Support) *and* excluded from
-    ///   backup, since restoring an old copy rewinds send counters into key reuse. See
-    ///   [`LocationNode::state_dir`].
-    ///
-    /// Passing the same root for both is a bug on device in one direction and a break in the
-    /// other; the two have opposite requirements.
-    /// Build a node from the platform keystore, for a background wake with no JS context alive.
-    ///
-    /// The counterpart to [`new_at_dirs`](Self::new_at_dirs), which takes the secrets as arguments
-    /// because JS had already read them. Here nothing has: an OS location callback is the first
-    /// code to run, so the node asks the platform for the identity itself through
-    /// [`DeviceSecrets`].
-    ///
-    /// Fails with [`LocationError::NotStarted`] when the device has no identity yet. That is a
-    /// fresh install whose app has never been opened, and the correct response is to do nothing —
-    /// generating one here would mint an identity none of the user's friends have ever paired with,
-    /// and silently orphan the one the app creates later.
-    #[uniffi::constructor]
-    pub fn from_device_secrets(
-        secrets: Arc<dyn DeviceSecrets>,
-        data_root: String,
-        state_root: String,
-    ) -> Result<Arc<Self>, LocationError> {
-        let identity = secrets.identity_secret().ok_or(LocationError::NotStarted)?;
-        let recv = secrets.recv_secret().ok_or(LocationError::NotStarted)?;
-        new_location_node_at(
-            Some(identity),
-            Some(recv),
-            NodeDirs::Roots {
-                data: PathBuf::from(data_root),
-                state: PathBuf::from(state_root),
-            },
-        )
-    }
-
-    #[uniffi::constructor]
-    pub fn new_at_dirs(
-        identity_secret: Option<Vec<u8>>,
-        recv_secret: Option<Vec<u8>>,
-        data_root: String,
-        state_root: String,
-    ) -> Result<Arc<Self>, LocationError> {
-        new_location_node_at(
-            identity_secret,
-            recv_secret,
-            NodeDirs::Roots {
-                data: PathBuf::from(data_root),
-                state: PathBuf::from(state_root),
-            },
-        )
-    }
-
-    /// Bind the iroh endpoint + spawn the gossip router. Idempotent.
-    #[tracing::instrument(
-        name = "node.start",
-        skip_all,
-        fields(sc.author = %telemetry::short_hex(&self.author), relays = relay_urls.len())
-    )]
-    pub async fn start(
-        &self,
-        relay_urls: Vec<String>,
-        relay_auth_token: String,
-        relay_enabled: bool,
-        ip_enabled: bool,
-        ble_enabled: bool,
-    ) -> Result<(), LocationError> {
-        // Cheap check first, so a started node costs one uncontended lock and nothing else.
-        if self.inner.lock().await.is_some() {
-            return Ok(());
+    /// What [`host`] does when the last app holder lets go while the background runtime still
+    /// holds the node. The app's listeners point into a JS context that is going away; the receive
+    /// loops are still the ones the background runtime publishes through.
+    pub(crate) async fn detach_app_listeners(&self) {
+        if let Some(own) = self.own_subscription.lock().await.as_ref() {
+            own.listener.set(None);
         }
-        // Then serialize the slow path on its own lock. A second caller waits here rather than on
-        // `inner`, so everything that only needs to ask whether the node is up stays responsive
-        // while this one builds it.
-        let _starting = self.starting.lock().await;
-        // Re-check: whoever we queued behind may have finished the job while we waited.
-        if self.inner.lock().await.is_some() {
-            return Ok(());
-        }
-        // Claim every durable store BEFORE anything touches the network.
-        //
-        // The claims are process-wide, and while the app is mounted the native background runtime
-        // asks for them and is refused. Taken after the endpoint bind, every refusal would first
-        // have bound a second endpoint on our identity, spawned a router and opened the blob and
-        // docs stores, then dropped them unannounced. Refused here, it costs a directory lock and
-        // nothing else, which is what makes a refused claim safe to retry.
-        //
-        // Claim the ratchet session directory for this process (§4.2's structural single-writer
-        // guard). A second live writer is refused rather than tolerated, because with sequential
-        // state two writers is key reuse rather than a clobber.
-        {
-            let mut slot = self.sessions.lock().await;
-            if slot.is_none() {
-                std::fs::create_dir_all(&self.state_dir)
-                    .map_err(|e| LocationError::Network(e.to_string()))?;
-                let store = session_store::SessionStore::open(&self.state_dir, &self.identity_seed)
-                    .map_err(|e| LocationError::Network(e.to_string()))?;
-                *slot = Some(Arc::new(sessions::SessionManager::new(store)));
-            }
-        }
-        // The publish counter, claimed in the same breath and under the same rule. It shares the
-        // state dir because it shares the lifetime: both are per-identity, neither is recoverable
-        // from the replica without a scan, and both must be released when the node shuts down.
-        {
-            let mut slot = self.seq.lock().await;
-            if slot.is_none() {
-                let store = seq_store::SeqStore::open(&self.state_dir)
-                    .map_err(|e| LocationError::Network(e.to_string()))?;
-                *slot = Some(Arc::new(store));
-            }
-        }
-        // The drain path's own state. All three live beside the counter because they share its
-        // lifetime and its reason for existing: an OS location callback has to be able to read
-        // them before any JS module has loaded.
-        {
-            let mut slot = self.outbox.lock().await;
-            if slot.is_none() {
-                *slot = Some(Arc::new(
-                    outbox::Outbox::open(&self.state_dir)
-                        .map_err(|e| LocationError::Network(e.to_string()))?,
-                ));
-            }
-        }
-        {
-            let mut slot = self.recipients.lock().await;
-            if slot.is_none() {
-                *slot = Some(Arc::new(
-                    recipients::RecipientStore::open(&self.state_dir)
-                        .map_err(|e| LocationError::Network(e.to_string()))?,
-                ));
-            }
-        }
-        {
-            let mut slot = self.gate.lock().await;
-            if slot.is_none() {
-                *slot = Some(Arc::new(
-                    gate::GateStore::open(&self.state_dir)
-                        .map_err(|e| LocationError::Network(e.to_string()))?,
-                ));
-            }
-        }
-        {
-            let mut slot = self.own_log.lock().await;
-            if slot.is_none() {
-                *slot = Some(Arc::new(
-                    own_log::OwnLog::open(&self.state_dir)
-                        .map_err(|e| LocationError::Network(e.to_string()))?,
-                ));
-            }
-        }
-        {
-            let mut slot = self.transport.lock().await;
-            if slot.is_none() {
-                *slot = Some(Arc::new(
-                    transport::TransportStore::open(&self.state_dir)
-                        .map_err(|e| LocationError::Network(e.to_string()))?,
-                ));
-            }
-        }
-        {
-            let mut slot = self.delivery.lock().await;
-            if slot.is_none() {
-                *slot = Some(Arc::new(
-                    delivery::DeliveryStore::open(&self.state_dir)
-                        .map_err(|e| LocationError::Network(e.to_string()))?,
-                ));
-            }
-        }
-
-        let relay_mode = if relay_enabled {
-            relay::custom_relay_mode(&relay_urls, &relay_auth_token)
-                .map_err(LocationError::Network)?
-        } else {
-            iroh::RelayMode::Disabled
-        };
-        let secret = SecretKey::from_bytes(&self.identity_seed);
-        #[cfg(any(target_os = "android", target_vendor = "apple"))]
-        let endpoint_id = secret.public();
-
-        // Start from the N0 preset (IP transports + pkarr/DNS discovery) with our authenticated
-        // relay map. On mobile we
-        // ADD a BLE custom transport alongside these — we never clear IP transports or disable
-        // relay, so pairing/sync work both nearby (BLE) and over the internet.
-        //
-        // `memory` is an in-memory address lookup added ALONGSIDE the preset's DNS/pkarr lookups
-        // (Builder::address_lookup appends, it does not replace). `subscribe` seeds it with the
-        // direct addresses carried in each bootstrap ticket so gossip can dial peers directly.
-        let memory = MemoryLookup::new();
-        #[allow(unused_mut)]
-        let mut builder = Endpoint::builder(iroh::endpoint::presets::N0)
-            .secret_key(secret)
-            .relay_mode(relay_mode)
-            .address_lookup(memory.clone());
-        if !ip_enabled {
-            builder = builder.clear_ip_transports();
-        }
-
-        #[cfg(any(target_os = "android", target_vendor = "apple"))]
-        let ble = if ble_enabled {
-            let (b, handle) = ble::attach(builder, endpoint_id).await;
-            builder = b;
-            handle
-        } else {
-            ble::disabled()
-        };
-        #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
-        let ble = {
-            let _ = ble_enabled;
-            ble::disabled()
-        };
-
-        // Bounded for the same reason `ble::attach` is: this runs on the launch path, and an
-        // endpoint that never finishes binding must surface as a failed `start` the caller can
-        // retry, never as a `start` that hangs. Unlike BLE there is no degraded mode to fall back
-        // to — without an endpoint there is no node — so this one is an error, not a warning.
-        let endpoint = match tokio::time::timeout(ENDPOINT_BIND_TIMEOUT, builder.bind()).await {
-            Ok(result) => result.map_err(|e| LocationError::Network(e.to_string()))?,
-            Err(_) => {
-                tracing::warn!(
-                    timeout_ms = ENDPOINT_BIND_TIMEOUT.as_millis() as u64,
-                    "endpoint bind timed out"
-                );
-                return Err(LocationError::Network("endpoint bind timed out".to_owned()));
-            }
-        };
-
-        // Same-wifi/direct fast path: add mDNS (swarm-discovery) local-network address lookup
-        // ALONGSIDE the N0 preset's relay + DNS discovery — never replacing it. Added
-        // unconditionally on ALL targets: it's harmless on desktop and is the LAN fast path we
-        // want on mobile too (BLE above only covers the no-wifi nearby case). Two phones on one
-        // wifi can now discover + dial each other directly, with relay/DNS remaining as fallback.
-        // (On iOS/Android the OS may require a multicast entitlement / MulticastLock at runtime,
-        // but that's a manifest concern, not a build-time one; if mDNS can't start we log and
-        // continue on the relay path.)
-        if ip_enabled {
-            match MdnsAddressLookup::builder().build(endpoint.id()) {
-                Ok(mdns) => {
-                    if let Ok(services) = endpoint.address_lookup() {
-                        services.add(mdns);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("mDNS local discovery unavailable, using relay/DNS only: {e}")
-                }
-            }
-        }
-
-        let gossip = Gossip::builder().spawn(endpoint.clone());
-
-        // Durable trail + profile: persistent blobs store + docs replica, both on disk under
-        // data_dir. Trail and profile are separate single-writer namespaces on the shared replica.
-        std::fs::create_dir_all(&self.data_dir)
-            .map_err(|e| LocationError::Network(e.to_string()))?;
-        let blobs = FsStore::load(self.data_dir.join("blobs"))
-            .await
-            .map_err(|e| LocationError::Network(e.to_string()))?;
-        let docs = iroh_docs::protocol::Docs::persistent(self.data_dir.clone())
-            .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
-            .await
-            .map_err(|e| LocationError::Network(e.to_string()))?;
-
-        let router = Router::builder(endpoint.clone())
-            .accept(iroh_gossip::ALPN, gossip.clone())
-            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None))
-            .accept(iroh_docs::ALPN, docs.clone())
-            .accept(pairing::PAIR_ALPN, PairProtocol::new(self.pair.clone()))
-            .spawn();
-
-        let trail = Arc::new(
-            TrailDocs::init(docs.clone(), (*blobs).clone(), self.data_dir.clone())
-                .await
-                .map_err(|e| LocationError::Network(e.to_string()))?,
-        );
-        let profile = Arc::new(
-            ProfileDocs::init(docs, (*blobs).clone(), self.data_dir.clone())
-                .await
-                .map_err(|e| LocationError::Network(e.to_string()))?,
-        );
-        // Arm the profile namespace as soon as the engine exists, not just on the next publish:
-        // a friend who imported our read-ticket dials us to reconcile, and the live engine only
-        // serves namespaces `start_sync` has marked as syncing. Best-effort — `publish_profile`
-        // arms again, and a node that can't sync yet still holds the record locally.
-        if let Err(err) = profile.arm_publishing().await {
-            tracing::warn!(error = %err, "profile: could not arm the profile namespace at start");
-        }
-
-        // Wire the live handles into the pairing core so an Accept can mint our tickets, a
-        // completed pair imports the peer's profile/trail namespaces, and — since §4.2 — the bump
-        // installs the ratchet session it just rooted.
-        let sink: Arc<dyn ProfileSink> = Arc::new(self.profile_events.clone());
-        let session_manager = self
-            .sessions
-            .lock()
-            .await
-            .clone()
-            .ok_or(LocationError::NotStarted)?;
-        self.pair
-            .attach_runtime(
-                endpoint.clone(),
-                trail.clone(),
-                profile.clone(),
-                sink,
-                session_manager,
-            )
-            .await;
-
-        // Publish the built node last, under a lock held only for the assignment itself.
-        // Stamped with the node ordinal so an `iroh endpoint bound` in the log can be attributed
-        // to a specific node rather than only to a moment. `ble_attached` is here for the same
-        // reason: BLE attaches at CONSTRUCTION and can never be attached later, so whether this
-        // node has it is fixed now and is what `ble_available()` will answer for its whole life.
-        tracing::info!(
-            node.ordinal = self.ordinal,
-            ble_attached = ble.available(),
-            ble_enabled,
-            "node.start: endpoint is up"
-        );
-        *self.inner.lock().await = Some(Started {
-            endpoint,
-            gossip,
-            trail,
-            profile,
-            ble,
-            memory,
-            _router: router,
-        });
-        Ok(())
-    }
-
-    /// Shut down protocol handlers and close the endpoint before releasing this node.
-    /// Tear the node down.
-    ///
-    /// Every step here is logged, and that is not incidental. This function awaits four things that
-    /// can each block forever — the router shutdown and three async mutexes — and when one of them
-    /// did (2026-08-18, an iPhone stuck with a relay connection still open) the JS caller was left
-    /// with a promise that never settled, which wedged the process-wide session chain and left the
-    /// phone dark for 19 hours. The callers now bound their wait, but a bounded wait only tells you
-    /// *that* teardown hung. These markers tell you **where**: the last one logged is the await
-    /// that did not return.
-    pub async fn shutdown(&self) -> Result<(), LocationError> {
-        // Exclude an in-flight `start` before touching anything. `start` publishes to `inner` only
-        // at the very end, so without this a teardown landing mid-build takes `None`, tears down
-        // nothing, and then watches the build install a live node it believed it had killed —
-        // which is precisely the headless-vs-foreground clobber `native-runtime-owner.ts` exists
-        // to prevent, reintroduced one layer down.
-        //
-        // This is not a new wait: holding `inner` across the build used to serialize these two for
-        // free. Splitting the locks is what made it explicit, and the build is now bounded
-        // (`ATTACH_TIMEOUT` + `ENDPOINT_BIND_TIMEOUT`), so the wait is finite where it was not.
-        tracing::info!("shutdown: taking starting lock");
-        let _starting = self.starting.lock().await;
-        tracing::info!("shutdown: taking inner lock");
-        let started = self.inner.lock().await.take();
-        if let Some(started) = started {
-            tracing::info!("shutdown: closing router");
-            started
-                ._router
-                .shutdown()
-                .await
-                .map_err(|e| LocationError::Network(e.to_string()))?;
-            tracing::info!("shutdown: router closed");
-        }
-        tracing::info!("shutdown: taking listener lock");
         *self.listener.lock().await = None;
-        // Release the session-store writer claim, or `start` can never succeed again: the claim is
-        // process-global (§4.2 requires that — a per-module flag cannot see across the fresh JS
-        // context expo-task-manager hands each headless callback), so holding it past shutdown
-        // turns every lifecycle stop/start into a permanent `AlreadyOpen`.
-        //
-        // The ratchet state itself is on disk and unaffected; this drops only the claim and the
-        // in-memory desync counters. `pending_resync` deliberately survives — a stop/start in the
-        // same process should not abandon an in-flight resync exchange and force a second one.
-        //
-        // The pair runtime holds a handle too (it bootstraps sessions on a completed bump), and
-        // the claim is released only when the *last* `Arc` drops — so clearing our slot alone
-        // would leak it and make every restart `AlreadyOpen`. Detaching also matches what the
-        // runtime is: live endpoint + docs handles that are about to become invalid anyway.
-        tracing::info!("shutdown: detaching pair runtime");
-        self.pair.detach_runtime().await;
-        tracing::info!("shutdown: taking sessions lock");
-        *self.sessions.lock().await = None;
-        // Same rule for the publish counter: hold the slot past shutdown and the directory claim
-        // outlives the node, so the next `start` is refused and the device stops publishing.
-        tracing::info!("shutdown: taking seq lock");
-        *self.seq.lock().await = None;
-        // Two of these hold directory claims; releasing them is what lets the next `start` succeed.
-        *self.outbox.lock().await = None;
-        *self.recipients.lock().await = None;
-        *self.gate.lock().await = None;
-        *self.own_log.lock().await = None;
-        *self.transport.lock().await = None;
-        tracing::info!("shutdown: complete");
-        Ok(())
     }
 
-    /// Notify iroh that the device's network may have changed (wifi↔cellular roam, interface
-    /// up/down, IP reassignment).
-    ///
-    /// iroh's netmon auto-detects this on desktop, but Android's SELinux policy denies
-    /// `untrusted_app` the netlink route socket + `/sys/class/net` reads it relies on (the recurring
-    /// `avc: denied nlmsg_readpriv … netlink_route_socket` in logcat), so on Android iroh is blind to
-    /// roaming: after the device leaves a network its sockets stay bound to the dead interface and the
-    /// relay home is never re-derived, so cross-network sync silently dies. iroh exposes
-    /// [`Endpoint::network_change`] precisely for this — the Android module observes
-    /// `ConnectivityManager` and calls this on every default-network transition, prompting a socket
-    /// rebind + relay re-check. No-op before `start()`; harmless to over-call.
-    pub async fn network_changed(&self) {
-        if let Some(started) = self.live_opt().await {
-            // The rebind/relay re-check details show up as iroh's own magicsock/net_report
-            // events; this marker is the join point telling us WHY they fired.
-            tracing::info!("network_change: OS connectivity transition signaled");
-            started.endpoint.network_change().await;
-        }
-    }
-
-    /// This device's EndpointId (== envelope `author`).
-    pub fn endpoint_id(&self) -> Vec<u8> {
-        self.author.to_vec()
-    }
-
-    /// The ed25519 identity secret — persist in the OS secure store.
-    pub fn identity_secret(&self) -> Vec<u8> {
-        self.identity_seed.to_vec()
-    }
-
-    /// The X25519 receiving secret — persist in the OS secure store.
-    pub fn recv_secret(&self) -> Vec<u8> {
-        self.recv_secret.clone()
-    }
-
-    /// The X25519 receiving PUBLIC key — this is the "receiving key" you hand to a friend
-    /// so they can wrap fixes for you.
-    pub fn recv_public(&self) -> Vec<u8> {
-        self.recv_public.clone()
-    }
-
-    /// A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
-    pub async fn ticket(&self) -> Result<String, LocationError> {
-        let started = self.live().await?;
-        let addr = started.endpoint.addr();
-        Ok(EndpointTicket::new(addr).to_string())
-    }
-
-    /// Subscribe to a topic and start forwarding decrypted fixes to `listener`.
-    ///
-    /// `bootstrap` are peer EndpointTickets (e.g. from friends' contact cards) that are
-    /// already in the topic. Returns a handle used to publish our own fixes.
-    pub async fn subscribe(
+    /// Join `topic` and pump its inbound events into `listener` until the subscription is dropped.
+    async fn subscribe_topic(
         self: Arc<Self>,
-        topic: Vec<u8>,
+        topic_id: TopicId,
         bootstrap: Vec<String>,
-        listener: Arc<dyn FixListener>,
+        listener: ListenerCell,
     ) -> Result<Arc<Subscription>, LocationError> {
-        let topic_id = TopicId::from_bytes(
-            topic
-                .try_into()
-                .map_err(|_| LocationError::Decode("topic must be 32 bytes".into()))?,
-        );
-
         let started = self.live().await?;
 
         // Collect bootstrap peer ids AND seed each ticket's full node addr (id + LAN/direct
@@ -2498,16 +1252,7 @@ impl LocationNode {
         // relay/DNS resolution. The N0 preset's pkarr/DNS discovery still resolves peers over the
         // internet as a fallback. Seeding never fails, so it can't abort the subscribe; a
         // malformed ticket still surfaces the existing parse error.
-        let mut bootstrap_ids: Vec<EndpointId> = Vec::new();
-        for t in &bootstrap {
-            let ticket: EndpointTicket = t
-                .parse()
-                .map_err(|_| LocationError::Decode("bad endpoint ticket".into()))?;
-            started
-                .memory
-                .add_endpoint_info(ticket.endpoint_addr().clone());
-            bootstrap_ids.push(ticket.endpoint_addr().id);
-        }
+        let bootstrap_ids = seed_bootstrap(&started.memory, &bootstrap)?;
 
         let (sender, mut receiver) = started
             .gossip
@@ -2529,9 +1274,6 @@ impl LocationNode {
         // claim has been released.
         let node = self.clone();
         let cb = listener.clone();
-
-        // Remember the listener so node-level `sync_trail` can surface backfill / sync events.
-        *self.listener.lock().await = Some(listener.clone());
 
         // Pump inbound gossip events -> decrypt -> callback.
         let receive_task = tokio::spawn(async move {
@@ -2680,11 +1422,1485 @@ impl LocationNode {
 
         Ok(Arc::new(Subscription {
             node: self.clone(),
+            listener,
             endpoint: started.endpoint.clone(),
             neighbors,
             sender: Mutex::new(sender),
             receive_task: StdMutex::new(Some(receive_task)),
         }))
+    }
+
+    /// Grant the trail stash replication of our trail namespace and every friend's (see
+    /// [`stash`]). Does nothing when the stash is not opted into. The HTTP runs on its own task, so
+    /// no caller ever waits on the stash; what this awaits is local (the delivery store and one
+    /// docs ticket).
+    async fn grant_stash(&self, scope: StashGrant, reason: &'static str) {
+        use tracing::Instrument;
+        let Some(live) = self.live_opt().await else {
+            return;
+        };
+        let config = match self.delivery_store().await {
+            Ok(store) => store.get(),
+            Err(_) => return,
+        };
+        let Some((base_url, psk)) = config.stash() else {
+            return;
+        };
+        let base_url = base_url.to_string();
+        let tickets = match scope {
+            StashGrant::One(ticket) => vec![ticket],
+            StashGrant::All { floored } => {
+                let now = now_ms();
+                if floored && !stash::regrant_due(self.stash_grant_at.load(Ordering::Relaxed), now)
+                {
+                    return;
+                }
+                self.stash_grant_at.store(now, Ordering::Relaxed);
+                let mut tickets = Vec::new();
+                match live.trail.read_ticket(live.trail.own_namespace()).await {
+                    Ok(own) => tickets.push(own),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "stash grant: no ticket for our trail")
+                    }
+                }
+                tickets.extend(live.trail.friend_tickets());
+                tickets
+            }
+        };
+        if tickets.is_empty() {
+            return;
+        }
+        let span = tracing::info_span!(
+            "stash.grant",
+            sc.author = %telemetry::short_hex(&self.author),
+            reason,
+            namespaces = tickets.len(),
+            registered = tracing::field::Empty,
+            failed = tracing::field::Empty,
+        );
+        tokio::spawn(
+            async move {
+                let report = stash::register(&base_url, psk.as_deref(), &tickets).await;
+                let current = tracing::Span::current();
+                current.record("registered", report.registered);
+                current.record("failed", report.failed);
+            }
+            .instrument(span),
+        );
+    }
+
+    /// Clone this node's live handles and RELEASE the node lock. See [`Live`].
+    ///
+    /// Every method below that touches the endpoint, gossip or the docs engines starts here. The
+    /// rule it enforces is one line long and has cost us two multi-day outages when broken: the
+    /// `inner` guard must never be alive across an `await`.
+    async fn live(&self) -> Result<Live, LocationError> {
+        self.live_opt().await.ok_or(LocationError::NotStarted)
+    }
+
+    /// [`Self::live`] for the callers whose honest answer to "not started" is a default, not an
+    /// error (BLE capability reads, diagnostics).
+    async fn live_opt(&self) -> Option<Live> {
+        let guard = self.inner.lock().await;
+        let started = guard.as_ref()?;
+        Some(Live {
+            endpoint: started.endpoint.clone(),
+            gossip: started.gossip.clone(),
+            trail: started.trail.clone(),
+            profile: started.profile.clone(),
+            ble: started.ble.clone(),
+            memory: started.memory.clone(),
+        })
+    }
+}
+
+// The process-global `tracing` subscriber (Android logcat pipe + the optional OTLP developer
+// telemetry reload slot) lives in `telemetry.rs` — see the module docs there for the layering
+// and the `sc.*` correlation model.
+
+/// The device node: holds identity + receiving keys and, once started, the iroh
+/// endpoint + gossip router.
+#[derive(uniffi::Object)]
+pub struct LocationNode {
+    identity_seed: [u8; 32],
+    author: [u8; 32],
+    recv_secret: Vec<u8>,
+    recv_public: Vec<u8>,
+    /// Which node this is within this process. See [`NODE_ORDINAL`]; carried here so later spans
+    /// can say WHICH node they came from, not only that a node existed.
+    ordinal: u64,
+    /// When the last full stash grant ran (ms), for the floor on the untracked-slots trigger.
+    /// In memory on purpose: every process grants once at start regardless. See [`stash`].
+    stash_grant_at: AtomicU64,
+    /// On-disk root for the persistent docs replica + blobs store (durable trail). Derived from
+    /// the identity so it stays stable across restarts.
+    ///
+    /// This one is allowed to live in cache/temp: everything under it is *recoverable* — a purged
+    /// trail resyncs from the stash and from friends. Ratchet state is not, which is why it does
+    /// not live here; see [`state_dir`](Self::state_dir).
+    data_dir: PathBuf,
+    /// On-disk root for state that **cannot be re-derived or re-fetched** — today, the ratchet
+    /// session store (§4.2).
+    ///
+    /// Separate from `data_dir` because the two have opposite storage requirements, and getting
+    /// either wrong is a break rather than an inconvenience:
+    ///
+    /// | | cache / temp | app data dir |
+    /// |---|---|---|
+    /// | backup rollback → counter rewind → key reuse | impossible | must be excluded |
+    /// | OS purge → every session lost at once | likely | no |
+    ///
+    /// Sequential state has to survive an OS purge, so it belongs in the app data dir — and a
+    /// restored backup would rewind counters into key reuse, so the host is responsible for
+    /// excluding this path from backup *as well*. Both halves ship together: iOS stamps
+    /// `NSURLIsExcludedFromBackupKey` in `IrohLocationModule.swift`, Android excludes `files/` in
+    /// `plugins/withBackupExclusion.js`. Never point this at `data_dir` on a device.
+    state_dir: PathBuf,
+    inner: Mutex<Option<Started>>,
+    /// Serializes the drain path (`ingest_fix`, `heartbeat_fix`, `publish_introduction`) over the
+    /// gate and outbox. See [`publish::DrainLock`]. Never taken by anything else, so holding it
+    /// across the publish awaits stalls only another drain, which would have duplicated the work.
+    drain_lock: publish::DrainLock,
+    /// Serializes `start`, so building the endpoint does not have to hold [`inner`].
+    ///
+    /// `start` awaits the BLE radio coming up and the endpoint binding, neither of which is fast
+    /// and neither of which the OS promises to finish. Holding `inner` across them made every
+    /// unrelated call — and therefore the whole UI — wait on the slowest thing in startup; on
+    /// 2026-09-13 a wedged CoreBluetooth turned that into a 13 h outage ending in a locked splash
+    /// screen. The two locks separate "is the node up?" (cheap, contended, answered constantly)
+    /// from "is someone bringing it up?" (slow, rare, and only ever contended by a second caller
+    /// who would have had to wait anyway).
+    starting: Mutex<()>,
+    /// The most recently attached listener, reused to surface durable-trail (backfill / sync)
+    /// events from the node-level `sync_trail` call.
+    listener: Mutex<Option<Arc<dyn FixListener>>>,
+    /// The ONE subscription to this node's own topic, however many callers ask for it.
+    ///
+    /// The mounted app and the native background runtime publish through the same node (see
+    /// [`host`]), and each used to `subscribe` to the own topic itself. Two subscriptions are two
+    /// receive loops on one topic: every inbound envelope opened twice against the ratchet and
+    /// delivered twice. So the own topic is a slot, not a call — see [`Self::own_subscription`].
+    own_subscription: Mutex<Option<Arc<Subscription>>>,
+    /// Bilateral pairing core (`streetcryptid/pair/1`). Created at construction so its ALPN
+    /// handler can be registered on the router in `start`; its live handles are attached there.
+    pair: Arc<PairCore>,
+    /// Node-level queue of verified profile-update events (drained via `poll_profile_events`).
+    profile_events: ProfileEventQueue,
+    /// Per-friend Double Ratchet sessions (FORWARD-SECRECY §4.2). Created on `start`, because
+    /// [`SessionStore`](session_store::SessionStore) claims the session directory for the
+    /// process and that claim must be released on shutdown.
+    sessions: Mutex<Option<Arc<sessions::SessionManager>>>,
+    /// This device's monotonic publish counter (`seq_store.rs`). Created on `start` alongside the
+    /// session store and for the same reason: it claims a directory for the process, and that
+    /// claim has to be released on shutdown.
+    seq: Mutex<Option<Arc<seq_store::SeqStore>>>,
+    /// The three stores the native drain path needs to run with no JS context alive: what is
+    /// waiting to be sealed, who to seal it for, and where we are on the slot grid. Opened with
+    /// the node for the same reason as the counter — two of them claim directories.
+    outbox: Mutex<Option<Arc<outbox::Outbox>>>,
+    recipients: Mutex<Option<Arc<recipients::RecipientStore>>>,
+    gate: Mutex<Option<Arc<gate::GateStore>>>,
+    /// Every position this device put on the wire, until the app takes them into its own trail.
+    /// See [`own_log`] for why the replica cannot answer that.
+    own_log: Mutex<Option<Arc<own_log::OwnLog>>>,
+    /// The settings a background bootstrap needs before it can call `start` — see
+    /// [`crate::transport`]. Opened eagerly with the node rather than lazily, because the one
+    /// caller that needs it is the one with no JS context to fall back on.
+    transport: Mutex<Option<Arc<transport::TransportStore>>>,
+    /// Where a drained envelope has to be sent to actually leave the phone — see
+    /// [`crate::delivery`]. Opened with the others because the drain reads it on every wake, and a
+    /// wake with no JS context has nowhere else to get it.
+    delivery: Mutex<Option<Arc<delivery::DeliveryStore>>>,
+    /// Ephemerals minted by `begin_session` and awaiting the peer's half. Keyed by peer endpoint
+    /// id. Held in memory only: an unfinished bootstrap that does not survive a restart is a
+    /// bootstrap the user simply repeats, whereas one persisted to disk is a private key sitting
+    /// in storage for no reason.
+    pending_bootstrap: Mutex<HashMap<Vec<u8>, x25519_dalek::StaticSecret>>,
+    /// Digest of the control record (§4.6) this process last wrote to our `rsy` slot, so the
+    /// recovery pass — which runs on every drain — rewrites it only when its content or its
+    /// recipients change. Lost on restart, which costs one rewrite.
+    last_control: Mutex<Option<[u8; 32]>>,
+    /// Test-only offset applied to the session clock (see `advance_clock_for_tests`).
+    clock_offset_ms: std::sync::atomic::AtomicI64,
+}
+
+/// Internals kept out of the `#[uniffi::export]` block above — UniFFI exports every method in an
+/// exported impl, including private ones, and `SessionManager` is not an FFI type.
+impl LocationNode {
+    /// Drive §4.6 session restarts with every one of `peers` — recipients and watchers alike.
+    ///
+    /// Runs on every native drain, so a phone with no JS context alive still recovers; its common
+    /// case (nothing wrong) costs one state load per friend and one local replica scan. Three
+    /// steps, the policy for each living in [`restart`] so it can be tested without any of this:
+    ///
+    /// 1. **Follower: adopt.** A leader's restart header rides on the envelopes already in our
+    ///    replica. [`SessionManager::prime`](sessions::SessionManager::prime) joins the restarted
+    ///    session from it without consuming the fix inside — this process may be the native
+    ///    runtime, which has nobody to hand a fix to, and opening the envelope would spend the only
+    ///    key that decrypts it. On 2026-10-03 a Pixel whose app was not running sat on a broken
+    ///    session for hours because only a JS read ever looked at what arrived.
+    /// 2. **Decide.** A leader restarts on a request from the follower or on its own evidence; a
+    ///    follower asks, repeats, or withdraws ([`restart::plan_leader`],
+    ///    [`restart::plan_follower`]).
+    /// 3. **Publish our control record** — our prekeys, for our leaders to restart against, and
+    ///    our requests — when it has changed. A changed record holds the drain's push open
+    ///    ([`publish::RecoveryOutcome::in_progress`]), because a request nobody can read is not a
+    ///    request.
+    ///
+    /// `no_session` peers are never touched: there is no session to restart, and only pairing
+    /// roots one.
+    pub async fn recover_sessions(&self, peers: &[String]) -> publish::RecoveryOutcome {
+        use tracing::Instrument;
+        let span = tracing::info_span!(
+            "session.recover",
+            sc.author = %telemetry::short_hex(&self.author),
+            peers = peers.len(),
+            desynced = tracing::field::Empty,
+            primed = tracing::field::Empty,
+            restarted = tracing::field::Empty,
+            requested = tracing::field::Empty,
+            withdrawn = tracing::field::Empty,
+            await_prekey = tracing::field::Empty,
+            no_key = tracing::field::Empty,
+            control_written = tracing::field::Empty,
+            error = tracing::field::Empty,
+        );
+        async move {
+            let Ok(manager) = self.session_manager().await else {
+                return publish::RecoveryOutcome::default();
+            };
+            let now = self.now();
+            let span = tracing::Span::current();
+            let mut friends: Vec<[u8; 32]> = peers
+                .iter()
+                .filter_map(|hex| decode_endpoint(hex).ok())
+                .collect();
+            friends.sort();
+            friends.dedup();
+            let live = self.live().await.ok();
+
+            // What the replica holds: our leaders' latest envelopes (a restart may ride on them),
+            // and the control records of the friends we lead.
+            let mut leader_envelopes = Vec::new();
+            let mut peer_controls = HashMap::new();
+            if let Some(live) = live.as_ref() {
+                let leads_us = |peer: &[u8; 32]| manager.role(peer) == sessions::Role::Follower;
+                if friends.iter().any(leads_us) {
+                    match live.trail.read_latest_sealed().await {
+                        Ok(sealed) => {
+                            leader_envelopes = sealed
+                                .iter()
+                                .filter_map(|bytes| crypto::verify_v3(bytes).ok())
+                                .filter(|verified| {
+                                    friends.contains(&verified.author) && leads_us(&verified.author)
+                                })
+                                .collect();
+                        }
+                        Err(err) => {
+                            span.record("error", tracing::field::display(&err));
+                        }
+                    }
+                }
+                for peer in friends.iter().filter(|peer| !leads_us(peer)) {
+                    if let Some(control) = self.read_control_record(live, peer).await {
+                        peer_controls.insert(*peer, control);
+                    }
+                }
+            }
+
+            let report =
+                restart::run_pass(&manager, &friends, &leader_envelopes, &peer_controls, now);
+            if let Some(err) = report.errors.first() {
+                span.record("error", tracing::field::display(err));
+            }
+
+            // Our control record.
+            let (control_written, no_key) =
+                match self.publish_control(&manager, &friends, now).await {
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        span.record("error", tracing::field::display(&err));
+                        (false, 0)
+                    }
+                };
+
+            span.record("desynced", report.desynced);
+            span.record("primed", report.primed);
+            span.record("restarted", report.restarted);
+            span.record("requested", report.requested);
+            span.record("withdrawn", report.withdrawn);
+            span.record("await_prekey", report.await_prekey);
+            span.record("no_key", no_key);
+            span.record("control_written", control_written);
+            publish::RecoveryOutcome {
+                in_progress: control_written,
+                restored: report.primed + report.restarted,
+            }
+        }
+        .instrument(span)
+        .await
+    }
+
+    /// Wall-clock milliseconds as this node's session logic sees them. Production: `now_ms()`.
+    fn now(&self) -> u64 {
+        let offset = self.clock_offset_ms.load(Ordering::Relaxed);
+        now_ms().saturating_add_signed(offset)
+    }
+
+    /// Move this node's session clock (recovery and health verdicts). Tests only — it is how an
+    /// integration test reaches a state measured in hours, like a follower stuck without a
+    /// sending chain, without waiting for it.
+    #[doc(hidden)]
+    pub fn advance_clock_for_tests(&self, by_ms: i64) {
+        self.clock_offset_ms.fetch_add(by_ms, Ordering::Relaxed);
+    }
+
+    /// Where this node keeps state that cannot be re-fetched. Tests only — it is how an
+    /// integration test damages a session record the way storage failure would.
+    #[doc(hidden)]
+    pub fn state_dir_for_tests(&self) -> PathBuf {
+        self.state_dir.clone()
+    }
+
+    /// `peer`'s newest control record from our replica, if we can read one.
+    async fn read_control_record(
+        &self,
+        live: &Live,
+        peer: &[u8; 32],
+    ) -> Option<restart::ControlRecord> {
+        let payloads = live.trail.read_rsy(peer, &self.recv_secret).await.ok()?;
+        payloads
+            .iter()
+            .filter_map(|payload| restart::ControlRecord::decode(payload))
+            .max_by_key(|record| record.ts)
+    }
+
+    /// Seal our control record to every friend whose receiving key we know and write it to our
+    /// `rsy` slot, unless what we would write is what we last wrote. Returns whether it was
+    /// written, and how many friends had no key to seal to.
+    async fn publish_control(
+        &self,
+        manager: &sessions::SessionManager,
+        friends: &[[u8; 32]],
+        now: u64,
+    ) -> Result<(bool, u32), LocationError> {
+        let store = self.recipient_store().await.ok();
+        let mut keys = Vec::with_capacity(friends.len());
+        let mut no_key = 0u32;
+        for peer in friends {
+            let hex = encode_hex(peer);
+            let key = match store.as_ref().and_then(|s| s.key_for(&hex)) {
+                Some(key) => Some(key),
+                None => self.profile_recv_key(peer).await,
+            };
+            match key.as_deref().and_then(decode_hex) {
+                Some(raw) if raw.len() == 32 => keys.push(raw),
+                _ => no_key += 1,
+            }
+        }
+        Ok((self.write_control(manager, keys, now, false).await?, no_key))
+    }
+
+    /// Write our control record sealed to `keys`. `force` rewrites even an unchanged record.
+    async fn write_control(
+        &self,
+        manager: &sessions::SessionManager,
+        mut keys: Vec<Vec<u8>>,
+        now: u64,
+        force: bool,
+    ) -> Result<bool, LocationError> {
+        keys.sort();
+        keys.dedup();
+        if keys.is_empty() {
+            return Ok(false);
+        }
+        let record = restart::our_control_record(manager, now)
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+
+        // What the record says and who can read it — not when it was written.
+        let mut unstamped = record.clone();
+        unstamped.ts = 0;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&unstamped.encode().unwrap_or_default());
+        for key in &keys {
+            hasher.update(key);
+        }
+        let digest = *hasher.finalize().as_bytes();
+        let mut last = self.last_control.lock().await;
+        if !force && *last == Some(digest) {
+            return Ok(false);
+        }
+
+        let payload = record
+            .encode()
+            .ok_or_else(|| LocationError::Decode("encode control record".into()))?;
+        let envelope = crypto::seal(
+            &self.identity_seed,
+            &self.author,
+            0,
+            now,
+            0,
+            &payload,
+            &keys,
+        )?;
+        let live = self.live().await?;
+        let ns = live.trail.own_namespace();
+        live.trail
+            .write_rsy(ns, &self.author, envelope)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        *last = Some(digest);
+        tracing::info!(
+            sc.author = %telemetry::short_hex(&self.author),
+            sc.restart = "control",
+            recipients = keys.len(),
+            prekeys = record.prekeys.len(),
+            requests = record.requests.len(),
+            "published our restart control record"
+        );
+        Ok(true)
+    }
+
+    /// Shorten or restore the §4.5 lapse bound on this node's live sessions. Tests only — it is
+    /// how an integration test lapses a real pair without waiting a day.
+    #[doc(hidden)]
+    pub async fn set_t_lapse_ms_for_tests(&self, t_lapse_ms: u64) -> Result<(), LocationError> {
+        self.session_manager().await?.set_t_lapse_ms(t_lapse_ms);
+        Ok(())
+    }
+
+    /// Shrink or restore the ratchet acceptance window on this node's live sessions. Tests only —
+    /// it is how an integration test gets past the window without publishing that many fixes.
+    #[doc(hidden)]
+    pub async fn set_accept_window_for_tests(&self, window: u32) -> Result<(), LocationError> {
+        self.session_manager().await?.set_accept_window(window);
+        Ok(())
+    }
+
+    /// A friend's receiving key from their verified profile — the fallback when JS has not
+    /// mirrored one yet (a binary upgraded before its bundle, or a wake before the first launch).
+    async fn profile_recv_key(&self, peer: &[u8]) -> Option<String> {
+        let profile = self.live().await.ok()?.profile;
+        let record = profile.read_for_endpoint(peer).await.ok()??;
+        (!record.recv_pub.is_empty()).then(|| encode_hex(&record.recv_pub))
+    }
+
+    /// Record what the latest fix envelope was sealed for, for `device.health`.
+    async fn note_seal(&self, total: usize, dropped: &[String]) {
+        let Ok(store) = self.recipient_store().await else {
+            return;
+        };
+        let mut report = recipients::SealReport {
+            at: now_ms(),
+            recipients: total as u32,
+            dropped: dropped.len() as u32,
+            dropped_peers: dropped.to_vec(),
+            ..Default::default()
+        };
+        for entry in dropped {
+            match entry.rsplit_once(':').map(|(_, reason)| reason) {
+                Some("lapsed") => report.lapsed += 1,
+                Some("no_session") => report.no_session += 1,
+                _ => report.other += 1,
+            }
+        }
+        store.record_seal(report);
+    }
+
+    async fn session_manager(&self) -> Result<Arc<sessions::SessionManager>, LocationError> {
+        self.sessions
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
+
+    async fn outbox(&self) -> Result<Arc<outbox::Outbox>, LocationError> {
+        self.outbox
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
+
+    async fn recipient_store(&self) -> Result<Arc<recipients::RecipientStore>, LocationError> {
+        self.recipients
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
+
+    async fn transport_store(&self) -> Result<Arc<transport::TransportStore>, LocationError> {
+        self.transport
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
+
+    async fn delivery_store(&self) -> Result<Arc<delivery::DeliveryStore>, LocationError> {
+        self.delivery
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
+
+    /// Who each peer is, for `peer.contact` (see [`contact::PeerRoles`]).
+    ///
+    /// Reads the recipient and delivery stores, each behind its own small mutex — NOT the node-wide
+    /// `inner` lock — so it is safe on the gossip receive loop. A store that is not open yet yields
+    /// an empty answer (every peer `other`) rather than an error: this only labels telemetry.
+    async fn peer_roles(&self) -> contact::PeerRoles {
+        let friends: Vec<[u8; 32]> = match self.recipient_store().await {
+            Ok(store) => store
+                .get()
+                .iter()
+                .chain(store.watchers().iter())
+                .filter_map(|hex| decode_endpoint(hex).ok())
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        // The stash goes FIRST in the delivery list when it is opted into (`DeliveryConfig`), and
+        // only then; `PeerRoles::new` still lets a friend's recipient record win that position.
+        let stash = match self.delivery_store().await {
+            Ok(store) => {
+                let config = store.get();
+                config
+                    .stash_base_url
+                    .as_ref()
+                    .and(config.peer_tickets.first())
+                    .and_then(|ticket| ticket.parse::<EndpointTicket>().ok())
+                    .map(|ticket| *ticket.endpoint_addr().id.as_bytes())
+            }
+            Err(_) => None,
+        };
+        contact::PeerRoles::new(friends, stash)
+    }
+
+    async fn gate_store(&self) -> Result<Arc<gate::GateStore>, LocationError> {
+        self.gate
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
+
+    async fn seq_store(&self) -> Result<Arc<seq_store::SeqStore>, LocationError> {
+        self.seq
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)
+    }
+
+    /// Verify and open one inbound **ratcheted** envelope from the live gossip lane.
+    ///
+    /// The live lane is v3 for the same reason the durable one is: §4.3 asks for a ratchet header
+    /// on every envelope, and a hot-mode fix sealed to a long-term receiving key is a fix the
+    /// archive can decrypt forever once the device is seized. Hot and cold now share one schedule,
+    /// so a live session also advances the counters the cold cadence will use next.
+    ///
+    /// Three outcomes rather than a `Result`, because "not addressed to us" is the common case in
+    /// a pool — every envelope carries a wrap per recipient and only one is ever ours — and must
+    /// not be logged as a failure.
+    async fn open_ratcheted_envelope(&self, bytes: &[u8]) -> GossipOpen {
+        let Ok(verified) = crypto::verify_v3(bytes) else {
+            return GossipOpen::Failed;
+        };
+        if verified.author == self.author {
+            return GossipOpen::NotForUs; // our own broadcast, echoed back
+        }
+        let Ok(manager) = self.session_manager().await else {
+            return GossipOpen::Failed;
+        };
+        match manager.open(&verified.author, &verified, now_ms()) {
+            Ok(payload) => GossipOpen::Delivered {
+                author: verified.author,
+                seq: verified.seq,
+                payload,
+            },
+            Err(sessions::SessionError::NotForUs)
+            | Err(sessions::SessionError::Replayed)
+            | Err(sessions::SessionError::NoSession) => GossipOpen::NotForUs,
+            Err(_) => GossipOpen::Failed,
+        }
+    }
+
+    async fn read_latest_ratcheted_events_inner(&self) -> Result<Vec<RatchetEvent>, LocationError> {
+        let (trail, sealed) = {
+            let started = self.live().await?;
+            let sealed = started
+                .trail
+                .read_latest_sealed()
+                .await
+                .map_err(|e| LocationError::Network(e.to_string()))?;
+            (started.trail.clone(), sealed)
+        };
+        let manager = self.session_manager().await?;
+        let now = now_ms();
+
+        let mut verified = sealed
+            .into_iter()
+            .filter_map(|bytes| crypto::verify_v3(&bytes).ok())
+            .filter(|envelope| envelope.author != self.author)
+            .collect::<Vec<_>>();
+        // The fix and null lanes occupy separate LWW slots. If both current slots address us
+        // (for example just after a sharing-direction change), open them in seq order so the
+        // newer one does not advance the ratchet past the older activity record first.
+        verified.sort_unstable_by_key(|envelope| (envelope.author, envelope.seq));
+
+        let mut out = Vec::new();
+        for verified in verified {
+            let author = verified.author.to_vec();
+            let payload = match manager.open(&author, &verified, now) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    tracing::debug!(
+                        sc.author = %telemetry::short_hex(&author),
+                        sc.seq = verified.seq,
+                        sc.drop_reason = %err,
+                        "ratcheted envelope not opened"
+                    );
+                    continue;
+                }
+            };
+            let fix = match decode_fix_payload(&payload) {
+                Ok(fix) => fix,
+                Err(err) => {
+                    tracing::debug!(
+                        sc.author = %telemetry::short_hex(&author),
+                        sc.seq = verified.seq,
+                        error = %err,
+                        "ratchet response payload could not be decoded"
+                    );
+                    continue;
+                }
+            };
+            let kind = if fix.is_some() { "fix" } else { "null" };
+            tracing::debug!(
+                sc.author = %telemetry::short_hex(&author),
+                sc.seq = verified.seq,
+                sc.lane = kind,
+                source = "durable",
+                "ratchet response received"
+            );
+            // Who served this author's slot in the reconciliation that just ran. Absent for an
+            // entry that was already in the replica — this reports delivery, never mere presence.
+            let via_peer = trail.serving_peer(&author).await.map(|id| encode_hex(&id));
+            out.push(RatchetEvent {
+                author,
+                seq: verified.seq,
+                ts: verified.ts,
+                kind: kind.to_string(),
+                fix,
+                via_peer,
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// What happened to an inbound gossip envelope. See [`LocationNode::open_ratcheted_envelope`].
+enum GossipOpen {
+    Delivered {
+        author: [u8; 32],
+        seq: u64,
+        payload: zeroize::Zeroizing<Vec<u8>>,
+    },
+    /// Addressed to someone else, already seen, or from a peer we hold no session with. Ordinary.
+    NotForUs,
+    /// Not a v3 envelope, signature invalid, or the schedule refused the position.
+    Failed,
+}
+
+/// Session health and §4.6 restarts, as JS sees them. Recovery itself runs in the native drain
+/// ([`LocationNode::recover_sessions`]); these exist for the per-friend health badges and for the
+/// debug publish path.
+#[uniffi::export(async_runtime = "tokio")]
+impl LocationNode {
+    /// Whether this peer's session needs §4.6 recovery: a damaged record, `R` distinct envelopes
+    /// we cannot open, a peer lapsed past `T_lapse` (§4.5), or — following — no sending chain for
+    /// an hour.
+    pub async fn is_desynced(&self, peer_endpoint_hex: String) -> Result<bool, LocationError> {
+        let peer = decode_endpoint(&peer_endpoint_hex)?;
+        Ok(self.session_manager().await?.is_desynced(&peer, self.now()))
+    }
+
+    /// How many restarts have been installed with this peer in this process.
+    ///
+    /// §4.6 wants a restart *loop* to surface a "re-pair with this friend" prompt rather than
+    /// retrying forever, so this is deliberately a count rather than a boolean: the UI decides
+    /// where patience runs out, and the crypto layer does not pretend to know.
+    pub async fn resync_count(&self, peer_endpoint_hex: String) -> Result<u32, LocationError> {
+        let peer = decode_endpoint(&peer_endpoint_hex)?;
+        Ok(self.session_manager().await?.resync_count(&peer))
+    }
+
+    /// Publish our control record (§4.6) now, sealed to `recipient_recv_pubs`, whether or not it
+    /// changed. Returns our newest prekey's public half as hex.
+    ///
+    /// The native drain publishes it on its own; this is for a caller that wants it out now.
+    pub async fn publish_resync(
+        &self,
+        recipient_recv_pubs: Vec<String>,
+    ) -> Result<String, LocationError> {
+        let keys = recipient_recv_pubs
+            .iter()
+            .map(|h| decode_hex(h).ok_or_else(|| LocationError::Decode("bad recv key hex".into())))
+            .collect::<Result<Vec<_>, _>>()?;
+        let manager = self.session_manager().await?;
+        let now = self.now();
+        self.write_control(&manager, keys, now, true).await?;
+        let newest = manager
+            .prekeys_for_publication(now)
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        Ok(newest
+            .first()
+            .map(|p| encode_hex(&p.public))
+            .unwrap_or_default())
+    }
+
+    /// Run one recovery pass for this peer alone. Returns whether a session was installed —
+    /// restarted (leader) or adopted (follower).
+    pub async fn poll_resync(
+        &self,
+        peer_endpoint_hex: String,
+        _peer_recv_pub_hex: String,
+    ) -> Result<bool, LocationError> {
+        decode_endpoint(&peer_endpoint_hex)?;
+        Ok(self
+            .recover_sessions(std::slice::from_ref(&peer_endpoint_hex))
+            .await
+            .restored
+            > 0)
+    }
+
+    /// Retained for binding compatibility. Nothing about a restart is held in memory any more,
+    /// so there is nothing to clear.
+    pub async fn clear_resync(&self) {}
+}
+
+/// How a caller wants the node's two on-disk roots resolved.
+///
+/// Both variants have to be resolved *after* the identity is known, because every path here is
+/// scoped by the author hex and the author is only derivable once the key exists (it may have
+/// just been generated).
+enum NodeDirs {
+    /// OS temp, scoped by author. Host tests and the desktop CLI, where nothing purges anything
+    /// mid-run and there is no backup to be restored from.
+    Default,
+    /// Exact directories, used verbatim — the `cli` feature's `new_with_data_dir`, which keeps
+    /// deliberately separate replica stores and must not have them renamed underneath it.
+    #[cfg(feature = "cli")]
+    Exact(PathBuf),
+    /// Storage roots to scope per identity. The mobile path; see [`LocationNode::new_at_dirs`].
+    Roots { data: PathBuf, state: PathBuf },
+}
+
+/// How many `LocationNode`s this PROCESS has built, ever.
+///
+/// The node is meant to be process-wide and singular — the host bridges refcount it so a mounted
+/// app and a headless session adopt one node rather than clobbering each other. This counter is
+/// what proves whether that actually held, and it is the only place that can: it sits below every
+/// constructor and below every JS context, so it counts nodes in a process rather than nodes a
+/// context believes it has.
+///
+/// **An ordinal above 1 with no intervening `shutdown` means two live nodes on one identity.** That
+/// is not a degraded mode, it is two endpoints publishing the same endpoint id: a dial to that
+/// identity lands on whichever one the relay or BLE picked, so a pairing handshake can reach
+/// `verifying` on one node and have its `Accept` delivered to the other, which has never heard of
+/// the session. It was reachable-but-unproven on 2026-09-13 — the evidence was three
+/// `iroh endpoint bound` lines in a process that logged no shutdowns at all, which says a node was
+/// built but not which context built it, and there was no way to tell a rebuild from a duplicate.
+static NODE_ORDINAL: AtomicU64 = AtomicU64::new(0);
+
+fn new_location_node_at(
+    identity_secret: Option<Vec<u8>>,
+    recv_secret: Option<Vec<u8>>,
+    dirs: NodeDirs,
+) -> Result<Arc<LocationNode>, LocationError> {
+    telemetry::init_tracing();
+    let ordinal = NODE_ORDINAL.fetch_add(1, Ordering::Relaxed) + 1;
+    let secret = match identity_secret {
+        Some(bytes) => SecretKey::from_bytes(
+            &bytes
+                .try_into()
+                .map_err(|_| LocationError::Decode("bad identity key".into()))?,
+        ),
+        None => SecretKey::generate(),
+    };
+    let identity_seed = secret.to_bytes();
+    let author = secret.public().as_bytes().to_owned();
+
+    let (recv_secret, recv_public) = match recv_secret {
+        Some(sk) => {
+            // derive the public half from the stored secret for a stable id.
+            let both = derive_recv_public(&sk)?;
+            (sk, both)
+        }
+        None => {
+            let (sk, pk) = crypto::generate_recv_keypair();
+            (sk, pk)
+        }
+    };
+
+    // Off-device, both live in one directory: temp is the right answer there, and collapsing them
+    // keeps the CLI's on-disk layout exactly as it was. On a device they must diverge — see
+    // `NodeDirs` and `LocationNode::state_dir`.
+    let (data_dir, state_dir) = match dirs {
+        NodeDirs::Default => {
+            let dir = default_data_dir(&author);
+            (dir.clone(), dir)
+        }
+        #[cfg(feature = "cli")]
+        NodeDirs::Exact(dir) => (dir.clone(), dir),
+        NodeDirs::Roots { data, state } => {
+            let scope = encode_hex(&author);
+            (data.join(&scope), state.join(&scope))
+        }
+    };
+
+    let node = Arc::new(LocationNode {
+        identity_seed,
+        author,
+        recv_secret,
+        recv_public: recv_public.clone(),
+        data_dir,
+        state_dir,
+        inner: Mutex::new(None),
+        starting: Mutex::new(()),
+        drain_lock: publish::DrainLock::default(),
+        listener: Mutex::new(None),
+        own_subscription: Mutex::new(None),
+        pair: PairCore::new(identity_seed, author, recv_public),
+        profile_events: ProfileEventQueue::default(),
+        sessions: Mutex::new(None),
+        seq: Mutex::new(None),
+        outbox: Mutex::new(None),
+        recipients: Mutex::new(None),
+        gate: Mutex::new(None),
+        own_log: Mutex::new(None),
+        transport: Mutex::new(None),
+        delivery: Mutex::new(None),
+        pending_bootstrap: Mutex::new(HashMap::new()),
+        last_control: Mutex::new(None),
+        clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
+        ordinal,
+        stash_grant_at: AtomicU64::new(0),
+    });
+    tracing::info!(
+        node.ordinal = ordinal,
+        sc.author = %telemetry::short_hex(&author),
+        "node.construct: built a LocationNode in this process"
+    );
+    if ordinal > 1 {
+        // Loud on purpose. The bridges refcount precisely so this does not happen, and every way
+        // it still can (a second host module instance, an identity mismatch adopting nothing, a
+        // clobber) ends with two endpoints answering for one identity.
+        tracing::warn!(
+            node.ordinal = ordinal,
+            sc.author = %telemetry::short_hex(&author),
+            "node.construct: this process has now built more than one node for this identity"
+        );
+    }
+    Ok(node)
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl LocationNode {
+    /// Create (or restore) a node from persisted key material. Pass `None` to generate
+    /// fresh keys; then read `identity_secret()` / `recv_secret()` and persist them in
+    /// the OS secure store so the EndpointId + receiving key stay stable.
+    #[uniffi::constructor]
+    pub fn new(
+        identity_secret: Option<Vec<u8>>,
+        recv_secret: Option<Vec<u8>>,
+    ) -> Result<Arc<Self>, LocationError> {
+        new_location_node_at(identity_secret, recv_secret, NodeDirs::Default)
+    }
+
+    /// Create a node under host-supplied storage roots. **This is the constructor mobile must
+    /// use**; [`new`](Self::new) puts everything in the OS temp dir, which is right for host tests
+    /// and wrong for a device.
+    ///
+    /// Both roots are scoped per identity internally (`<root>/<author hex>`), because the host
+    /// cannot know the endpoint id before the node that derives it exists.
+    ///
+    /// - `data_root` — the recoverable trail replica and blobs. Cache is the correct home: it is
+    ///   large, it is re-fetchable, and it must never be restored from a backup.
+    /// - `state_root` — ratchet session state, which is **not** recoverable. This must be the
+    ///   app's private data dir (Android `filesDir`, iOS Application Support) *and* excluded from
+    ///   backup, since restoring an old copy rewinds send counters into key reuse. See
+    ///   [`LocationNode::state_dir`].
+    ///
+    /// Passing the same root for both is a bug on device in one direction and a break in the
+    /// other; the two have opposite requirements.
+    /// Build a node from the platform keystore, for a background wake with no JS context alive.
+    ///
+    /// The counterpart to [`new_at_dirs`](Self::new_at_dirs), which takes the secrets as arguments
+    /// because JS had already read them. Here nothing has: an OS location callback is the first
+    /// code to run, so the node asks the platform for the identity itself through
+    /// [`DeviceSecrets`].
+    ///
+    /// Fails with [`LocationError::NotStarted`] when the device has no identity yet. That is a
+    /// fresh install whose app has never been opened, and the correct response is to do nothing —
+    /// generating one here would mint an identity none of the user's friends have ever paired with,
+    /// and silently orphan the one the app creates later.
+    #[uniffi::constructor]
+    pub fn from_device_secrets(
+        secrets: Arc<dyn DeviceSecrets>,
+        data_root: String,
+        state_root: String,
+    ) -> Result<Arc<Self>, LocationError> {
+        let identity = secrets.identity_secret().ok_or(LocationError::NotStarted)?;
+        let recv = secrets.recv_secret().ok_or(LocationError::NotStarted)?;
+        new_location_node_at(
+            Some(identity),
+            Some(recv),
+            NodeDirs::Roots {
+                data: PathBuf::from(data_root),
+                state: PathBuf::from(state_root),
+            },
+        )
+    }
+
+    #[uniffi::constructor]
+    pub fn new_at_dirs(
+        identity_secret: Option<Vec<u8>>,
+        recv_secret: Option<Vec<u8>>,
+        data_root: String,
+        state_root: String,
+    ) -> Result<Arc<Self>, LocationError> {
+        new_location_node_at(
+            identity_secret,
+            recv_secret,
+            NodeDirs::Roots {
+                data: PathBuf::from(data_root),
+                state: PathBuf::from(state_root),
+            },
+        )
+    }
+
+    /// Bind the iroh endpoint + spawn the gossip router. Idempotent.
+    #[tracing::instrument(
+        name = "node.start",
+        skip_all,
+        fields(sc.author = %telemetry::short_hex(&self.author), relays = relay_urls.len())
+    )]
+    pub async fn start(
+        &self,
+        relay_urls: Vec<String>,
+        relay_auth_token: String,
+        relay_enabled: bool,
+        ip_enabled: bool,
+        ble_enabled: bool,
+    ) -> Result<(), LocationError> {
+        // Cheap check first, so a started node costs one uncontended lock and nothing else.
+        if self.inner.lock().await.is_some() {
+            return Ok(());
+        }
+        // Then serialize the slow path on its own lock. A second caller waits here rather than on
+        // `inner`, so everything that only needs to ask whether the node is up stays responsive
+        // while this one builds it.
+        let _starting = self.starting.lock().await;
+        // Re-check: whoever we queued behind may have finished the job while we waited.
+        if self.inner.lock().await.is_some() {
+            return Ok(());
+        }
+        // Claim every durable store BEFORE anything touches the network.
+        //
+        // The claims are process-wide, and while the app is mounted the native background runtime
+        // asks for them and is refused. Taken after the endpoint bind, every refusal would first
+        // have bound a second endpoint on our identity, spawned a router and opened the blob and
+        // docs stores, then dropped them unannounced. Refused here, it costs a directory lock and
+        // nothing else, which is what makes a refused claim safe to retry.
+        //
+        // Claim the ratchet session directory for this process (§4.2's structural single-writer
+        // guard). A second live writer is refused rather than tolerated, because with sequential
+        // state two writers is key reuse rather than a clobber.
+        {
+            let mut slot = self.sessions.lock().await;
+            if slot.is_none() {
+                std::fs::create_dir_all(&self.state_dir)
+                    .map_err(|e| LocationError::Network(e.to_string()))?;
+                let store = session_store::SessionStore::open(&self.state_dir, &self.identity_seed)
+                    .map_err(|e| LocationError::Network(e.to_string()))?;
+                *slot = Some(Arc::new(sessions::SessionManager::new(store, self.author)));
+            }
+        }
+        // The publish counter, claimed in the same breath and under the same rule. It shares the
+        // state dir because it shares the lifetime: both are per-identity, neither is recoverable
+        // from the replica without a scan, and both must be released when the node shuts down.
+        {
+            let mut slot = self.seq.lock().await;
+            if slot.is_none() {
+                let store = seq_store::SeqStore::open(&self.state_dir)
+                    .map_err(|e| LocationError::Network(e.to_string()))?;
+                *slot = Some(Arc::new(store));
+            }
+        }
+        // The drain path's own state. All three live beside the counter because they share its
+        // lifetime and its reason for existing: an OS location callback has to be able to read
+        // them before any JS module has loaded.
+        {
+            let mut slot = self.outbox.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    outbox::Outbox::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.recipients.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    recipients::RecipientStore::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.gate.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    gate::GateStore::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.own_log.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    own_log::OwnLog::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.transport.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    transport::TransportStore::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        {
+            let mut slot = self.delivery.lock().await;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    delivery::DeliveryStore::open(&self.state_dir)
+                        .map_err(|e| LocationError::Network(e.to_string()))?,
+                ));
+            }
+        }
+        // The namespaces to reopen live in `state_dir`, not beside the replica: the replica is in
+        // the cache directory on Android, and losing it must cost a re-sync, never a new identity.
+        // Read here, with the other local state and before the endpoint binds, so a book that will
+        // refuse the start does so without having touched the network.
+        let open_book = |file: &str| {
+            ns_book::NamespaceBook::open(&self.state_dir, file)
+                .map(Arc::new)
+                .map_err(|e| LocationError::Network(e.to_string()))
+        };
+        let trail_book = open_book(ns_book::TRAIL_BOOK_FILE)?;
+        let profile_book = open_book(ns_book::PROFILE_BOOK_FILE)?;
+
+        let relay_mode = if relay_enabled {
+            relay::custom_relay_mode(&relay_urls, &relay_auth_token)
+                .map_err(LocationError::Network)?
+        } else {
+            iroh::RelayMode::Disabled
+        };
+        let secret = SecretKey::from_bytes(&self.identity_seed);
+        #[cfg(any(target_os = "android", target_vendor = "apple"))]
+        let endpoint_id = secret.public();
+
+        // Start from the N0 preset (IP transports + pkarr/DNS discovery) with our authenticated
+        // relay map. On mobile we
+        // ADD a BLE custom transport alongside these — we never clear IP transports or disable
+        // relay, so pairing/sync work both nearby (BLE) and over the internet.
+        //
+        // `memory` is an in-memory address lookup added ALONGSIDE the preset's DNS/pkarr lookups
+        // (Builder::address_lookup appends, it does not replace). `subscribe` seeds it with the
+        // direct addresses carried in each bootstrap ticket so gossip can dial peers directly.
+        let memory = MemoryLookup::new();
+        #[allow(unused_mut)]
+        let mut builder = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(secret)
+            .relay_mode(relay_mode)
+            .address_lookup(memory.clone());
+        if !ip_enabled {
+            builder = builder.clear_ip_transports();
+        }
+
+        #[cfg(any(target_os = "android", target_vendor = "apple"))]
+        let ble = if ble_enabled {
+            let (b, handle) = ble::attach(builder, endpoint_id).await;
+            builder = b;
+            handle
+        } else {
+            ble::disabled()
+        };
+        #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
+        let ble = {
+            let _ = ble_enabled;
+            ble::disabled()
+        };
+
+        // Bounded for the same reason `ble::attach` is: this runs on the launch path, and an
+        // endpoint that never finishes binding must surface as a failed `start` the caller can
+        // retry, never as a `start` that hangs. Unlike BLE there is no degraded mode to fall back
+        // to — without an endpoint there is no node — so this one is an error, not a warning.
+        let endpoint = match tokio::time::timeout(ENDPOINT_BIND_TIMEOUT, builder.bind()).await {
+            Ok(result) => result.map_err(|e| LocationError::Network(e.to_string()))?,
+            Err(_) => {
+                tracing::warn!(
+                    timeout_ms = ENDPOINT_BIND_TIMEOUT.as_millis() as u64,
+                    "endpoint bind timed out"
+                );
+                return Err(LocationError::Network("endpoint bind timed out".to_owned()));
+            }
+        };
+
+        // Same-wifi/direct fast path: add mDNS (swarm-discovery) local-network address lookup
+        // ALONGSIDE the N0 preset's relay + DNS discovery — never replacing it. Added
+        // unconditionally on ALL targets: it's harmless on desktop and is the LAN fast path we
+        // want on mobile too (BLE above only covers the no-wifi nearby case). Two phones on one
+        // wifi can now discover + dial each other directly, with relay/DNS remaining as fallback.
+        // (On iOS/Android the OS may require a multicast entitlement / MulticastLock at runtime,
+        // but that's a manifest concern, not a build-time one; if mDNS can't start we log and
+        // continue on the relay path.)
+        if ip_enabled {
+            match MdnsAddressLookup::builder().build(endpoint.id()) {
+                Ok(mdns) => {
+                    if let Ok(services) = endpoint.address_lookup() {
+                        services.add(mdns);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("mDNS local discovery unavailable, using relay/DNS only: {e}")
+                }
+            }
+        }
+
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+
+        // Durable trail + profile: persistent blobs store + docs replica, both on disk under
+        // data_dir. Trail and profile are separate single-writer namespaces on the shared replica.
+        std::fs::create_dir_all(&self.data_dir)
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        let blobs = FsStore::load(self.data_dir.join("blobs"))
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        let docs = iroh_docs::protocol::Docs::persistent(self.data_dir.clone())
+            .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+
+        let router = Router::builder(endpoint.clone())
+            .accept(iroh_gossip::ALPN, gossip.clone())
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None))
+            .accept(iroh_docs::ALPN, docs.clone())
+            .accept(pairing::PAIR_ALPN, PairProtocol::new(self.pair.clone()))
+            .spawn();
+
+        let trail = Arc::new(
+            TrailDocs::init(
+                docs.clone(),
+                (*blobs).clone(),
+                self.data_dir.clone(),
+                Some(trail_book),
+            )
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?,
+        );
+        let profile = Arc::new(
+            ProfileDocs::init(
+                docs,
+                (*blobs).clone(),
+                self.data_dir.clone(),
+                Some(profile_book),
+            )
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))?,
+        );
+        // Arm the profile namespace as soon as the engine exists, not just on the next publish:
+        // a friend who imported our read-ticket dials us to reconcile, and the live engine only
+        // serves namespaces `start_sync` has marked as syncing. Best-effort — `publish_profile`
+        // arms again, and a node that can't sync yet still holds the record locally.
+        if let Err(err) = profile.arm_publishing().await {
+            tracing::warn!(error = %err, "profile: could not arm the profile namespace at start");
+        }
+
+        // Wire the live handles into the pairing core so an Accept can mint our tickets, a
+        // completed pair imports the peer's profile/trail namespaces, and — since §4.2 — the bump
+        // installs the ratchet session it just rooted.
+        let sink: Arc<dyn ProfileSink> = Arc::new(self.profile_events.clone());
+        let session_manager = self
+            .sessions
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)?;
+        self.pair
+            .attach_runtime(
+                endpoint.clone(),
+                trail.clone(),
+                profile.clone(),
+                sink,
+                session_manager,
+            )
+            .await;
+
+        // Publish the built node last, under a lock held only for the assignment itself.
+        // Stamped with the node ordinal so an `iroh endpoint bound` in the log can be attributed
+        // to a specific node rather than only to a moment. `ble_attached` is here for the same
+        // reason: BLE attaches at CONSTRUCTION and can never be attached later, so whether this
+        // node has it is fixed now and is what `ble_available()` will answer for its whole life.
+        tracing::info!(
+            node.ordinal = self.ordinal,
+            ble_attached = ble.available(),
+            ble_enabled,
+            "node.start: endpoint is up"
+        );
+        *self.inner.lock().await = Some(Started {
+            endpoint,
+            gossip,
+            trail,
+            profile,
+            ble,
+            memory,
+            _router: router,
+        });
+        // Every start re-grants the stash, app or background: a stash restart forgets every
+        // namespace, and this is the only path that runs in a process with no JS. Spawned.
+        self.grant_stash(StashGrant::All { floored: false }, "start")
+            .await;
+        Ok(())
+    }
+
+    /// Shut down protocol handlers and close the endpoint before releasing this node.
+    /// Tear the node down.
+    ///
+    /// Every step here is logged, and that is not incidental. This function awaits four things that
+    /// can each block forever — the router shutdown and three async mutexes — and when one of them
+    /// did (2026-08-18, an iPhone stuck with a relay connection still open) the JS caller was left
+    /// with a promise that never settled, which wedged the process-wide session chain and left the
+    /// phone dark for 19 hours. The callers now bound their wait, but a bounded wait only tells you
+    /// *that* teardown hung. These markers tell you **where**: the last one logged is the await
+    /// that did not return.
+    pub async fn shutdown(&self) -> Result<(), LocationError> {
+        // Exclude an in-flight `start` before touching anything. `start` publishes to `inner` only
+        // at the very end, so without this a teardown landing mid-build takes `None`, tears down
+        // nothing, and then watches the build install a live node it believed it had killed —
+        // which is precisely the headless-vs-foreground clobber `native-runtime-owner.ts` exists
+        // to prevent, reintroduced one layer down.
+        //
+        // This is not a new wait: holding `inner` across the build used to serialize these two for
+        // free. Splitting the locks is what made it explicit, and the build is now bounded
+        // (`ATTACH_TIMEOUT` + `ENDPOINT_BIND_TIMEOUT`), so the wait is finite where it was not.
+        tracing::info!("shutdown: taking starting lock");
+        let _starting = self.starting.lock().await;
+        tracing::info!("shutdown: taking inner lock");
+        let started = self.inner.lock().await.take();
+        // A router that fails to close must not stop the rest of this function. It used to `?` out
+        // here, which returned with every store below still claimed: the node was neither running
+        // nor releasable, and every later `start` on this identity was refused with `AlreadyOpen`
+        // until the process died. The error is still returned — after the claims are released.
+        let mut router_error = None;
+        if let Some(started) = started {
+            tracing::info!("shutdown: closing router");
+            match started._router.shutdown().await {
+                Ok(()) => tracing::info!("shutdown: router closed"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "shutdown: router did not close cleanly");
+                    router_error = Some(LocationError::Network(e.to_string()));
+                }
+            }
+        }
+        tracing::info!("shutdown: taking listener lock");
+        *self.listener.lock().await = None;
+        // The own-topic slot holds an `Arc<Subscription>`, whose receive task holds the node. Left
+        // in place it would keep a dead topic's loop alive and hand the next caller a subscription
+        // on a closed router.
+        tracing::info!("shutdown: taking own subscription lock");
+        *self.own_subscription.lock().await = None;
+        // Release the session-store writer claim, or `start` can never succeed again: the claim is
+        // process-global (§4.2 requires that — a per-module flag cannot see across the fresh JS
+        // context expo-task-manager hands each headless callback), so holding it past shutdown
+        // turns every lifecycle stop/start into a permanent `AlreadyOpen`.
+        //
+        // The ratchet state itself is on disk and unaffected; this drops only the claim and the
+        // in-memory miss counters. Nothing about a restart in flight lives in memory: the leader's
+        // unanswered restart header and the follower's request are both on disk (§4.6).
+        //
+        // The pair runtime holds a handle too (it bootstraps sessions on a completed bump), and
+        // the claim is released only when the *last* `Arc` drops — so clearing our slot alone
+        // would leak it and make every restart `AlreadyOpen`. Detaching also matches what the
+        // runtime is: live endpoint + docs handles that are about to become invalid anyway.
+        tracing::info!("shutdown: detaching pair runtime");
+        self.pair.detach_runtime().await;
+        tracing::info!("shutdown: taking sessions lock");
+        *self.sessions.lock().await = None;
+        // Same rule for the publish counter: hold the slot past shutdown and the directory claim
+        // outlives the node, so the next `start` is refused and the device stops publishing.
+        tracing::info!("shutdown: taking seq lock");
+        *self.seq.lock().await = None;
+        // Two of these hold directory claims; releasing them is what lets the next `start` succeed.
+        *self.outbox.lock().await = None;
+        *self.recipients.lock().await = None;
+        *self.gate.lock().await = None;
+        *self.own_log.lock().await = None;
+        *self.transport.lock().await = None;
+        *self.delivery.lock().await = None;
+        tracing::info!("shutdown: complete");
+        match router_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    /// Notify iroh that the device's network may have changed (wifi↔cellular roam, interface
+    /// up/down, IP reassignment).
+    ///
+    /// iroh's netmon auto-detects this on desktop, but Android's SELinux policy denies
+    /// `untrusted_app` the netlink route socket + `/sys/class/net` reads it relies on (the recurring
+    /// `avc: denied nlmsg_readpriv … netlink_route_socket` in logcat), so on Android iroh is blind to
+    /// roaming: after the device leaves a network its sockets stay bound to the dead interface and the
+    /// relay home is never re-derived, so cross-network sync silently dies. iroh exposes
+    /// [`Endpoint::network_change`] precisely for this — the Android module observes
+    /// `ConnectivityManager` and calls this on every default-network transition, prompting a socket
+    /// rebind + relay re-check. No-op before `start()`; harmless to over-call.
+    pub async fn network_changed(&self) {
+        if let Some(started) = self.live_opt().await {
+            // The rebind/relay re-check details show up as iroh's own magicsock/net_report
+            // events; this marker is the join point telling us WHY they fired.
+            tracing::info!("network_change: OS connectivity transition signaled");
+            started.endpoint.network_change().await;
+        }
+    }
+
+    /// This device's EndpointId (== envelope `author`).
+    pub fn endpoint_id(&self) -> Vec<u8> {
+        self.author.to_vec()
+    }
+
+    /// The ed25519 identity secret — persist in the OS secure store.
+    pub fn identity_secret(&self) -> Vec<u8> {
+        self.identity_seed.to_vec()
+    }
+
+    /// The X25519 receiving secret — persist in the OS secure store.
+    pub fn recv_secret(&self) -> Vec<u8> {
+        self.recv_secret.clone()
+    }
+
+    /// The X25519 receiving PUBLIC key — this is the "receiving key" you hand to a friend
+    /// so they can wrap fixes for you.
+    pub fn recv_public(&self) -> Vec<u8> {
+        self.recv_public.clone()
+    }
+
+    /// A shareable endpoint ticket (dialing info) for the contact card / bootstrap.
+    pub async fn ticket(&self) -> Result<String, LocationError> {
+        let started = self.live().await?;
+        let addr = started.endpoint.addr();
+        Ok(EndpointTicket::new(addr).to_string())
+    }
+
+    /// Subscribe to a topic and start forwarding decrypted fixes to `listener`.
+    ///
+    /// `bootstrap` are peer EndpointTickets (e.g. from friends' contact cards) that are
+    /// already in the topic. Returns a handle used to publish our own fixes.
+    ///
+    /// The node's OWN topic is the exception: it is routed to [`Self::own_subscription`], so a
+    /// second caller adopts the live subscription (joining its bootstrap peers and taking over its
+    /// events) instead of opening a second receive loop. Every other topic gets a fresh
+    /// subscription per call, as it always has.
+    pub async fn subscribe(
+        self: Arc<Self>,
+        topic: Vec<u8>,
+        bootstrap: Vec<String>,
+        listener: Arc<dyn FixListener>,
+    ) -> Result<Arc<Subscription>, LocationError> {
+        let topic_id = TopicId::from_bytes(
+            topic
+                .try_into()
+                .map_err(|_| LocationError::Decode("topic must be 32 bytes".into()))?,
+        );
+        if topic_id == self.own_topic() {
+            return self.own_subscription(bootstrap, Some(listener)).await;
+        }
+        // Remember the listener so node-level `sync_trail` can surface backfill / sync events.
+        *self.listener.lock().await = Some(listener.clone());
+        self.subscribe_topic(topic_id, bootstrap, ListenerCell::new(Some(listener)))
+            .await
+    }
+
+    /// The single subscription to this node's own topic: create it, or adopt the live one.
+    ///
+    /// Adopting joins `bootstrap`'s peers on the existing subscription and, when `listener` is
+    /// given, makes it the one events go to. `None` keeps whoever is listening — the background
+    /// runtime's call, which must never silence a mounted app — and creates the subscription
+    /// silent if there is none yet. A subscription whose receive loop has ended is replaced rather
+    /// than handed out.
+    ///
+    /// Removing a friend therefore does not drop them from this topic's swarm until the node next
+    /// restarts. That costs nothing: everything published here is sealed per recipient, and they
+    /// are no longer one.
+    pub async fn own_subscription(
+        self: Arc<Self>,
+        bootstrap: Vec<String>,
+        listener: Option<Arc<dyn FixListener>>,
+    ) -> Result<Arc<Subscription>, LocationError> {
+        use tracing::Instrument;
+        let span = tracing::info_span!(
+            "subscribe.own",
+            sc.author = %telemetry::short_hex(&self.author),
+            bootstrap = bootstrap.len(),
+            listener = listener.is_some(),
+            outcome = tracing::field::Empty,
+        );
+        let node = self.clone();
+        async move {
+            let mut slot = node.own_subscription.lock().await;
+            if let Some(existing) = slot.as_ref().filter(|sub| sub.is_live()).cloned() {
+                if let Some(listener) = &listener {
+                    existing.listener.set(Some(listener.clone()));
+                    *node.listener.lock().await = Some(listener.clone());
+                }
+                existing.join(&bootstrap).await?;
+                tracing::Span::current().record("outcome", "adopted");
+                return Ok(existing);
+            }
+            let outcome = if slot.is_some() {
+                "recreated"
+            } else {
+                "created"
+            };
+            if let Some(listener) = &listener {
+                *node.listener.lock().await = Some(listener.clone());
+            }
+            let created = node
+                .clone()
+                .subscribe_topic(node.own_topic(), bootstrap, ListenerCell::new(listener))
+                .await?;
+            *slot = Some(created.clone());
+            tracing::Span::current().record("outcome", outcome);
+            Ok(created)
+        }
+        .instrument(span)
+        .await
+    }
+
+    /// Whether `start` has bound an endpoint that has not since been shut down.
+    pub async fn is_started(&self) -> bool {
+        self.live_opt().await.is_some()
     }
 
     // ── Durable trail (iroh-docs) — see docs/social/ARCHITECTURE.md §5–6 ──────────────────
@@ -3290,14 +3506,35 @@ impl LocationNode {
     ///
     /// An empty ticket list is a valid configuration (stash off, no friends yet), not an unset one,
     /// so this never fails for being empty — the drain simply has no push to make.
+    ///
+    /// Opting into a stash (or moving to another one) grants it our namespaces at once; any other
+    /// write re-grants at most once per [`stash::REGRANT_FLOOR_MS`], which covers the app's call
+    /// on every launch without repeating the grant this node's start already made.
     pub async fn set_delivery_config(
         &self,
         config: delivery::DeliveryConfig,
     ) -> Result<(), LocationError> {
-        self.delivery_store()
-            .await?
+        let store = self.delivery_store().await?;
+        let stash_changed = store.get().stash_base_url != config.stash_base_url;
+        store
             .set(config)
-            .map_err(|e| LocationError::Network(e.to_string()))
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        self.grant_stash(
+            StashGrant::All {
+                floored: !stash_changed,
+            },
+            "delivery-config",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Grant the stash our namespaces now — what `syncStashGrants` in `location-sharing.ts` did
+    /// over HTTP from JS, which only ever ran on a foreground launch. Returns at once; the grant
+    /// runs on its own task and reports as a `stash.grant` span.
+    pub async fn grant_stash_now(&self) {
+        self.grant_stash(StashGrant::All { floored: false }, "app")
+            .await;
     }
 
     /// Where the native drain path will push right now. For diagnostics and `device.health`.
@@ -3429,6 +3666,10 @@ impl LocationNode {
                     "trail content upload: the stash is not tracking some slots; their bytes are \
                      not available for offline friends yet"
                 );
+                // A stash that has restarted answers exactly like this, and keeps doing so until
+                // someone registers our namespaces again. Floored: it repeats on every upload.
+                self.grant_stash(StashGrant::All { floored: true }, "untracked")
+                    .await;
             }
             Ok(report.uploaded)
         }
@@ -3665,7 +3906,8 @@ impl LocationNode {
             sc.author = %telemetry::short_hex(&self.author),
             sc.seq = seq,
             sc.lane = if null { "null" } else { "fix" },
-            sc.envelope = 3,
+            // Recorded once sealed: v4 while a restart header rides along, v3 otherwise.
+            sc.envelope = tracing::field::Empty,
             recipients = recipient_endpoints.len(),
             dropped = tracing::field::Empty,
             sc.drop_reason = tracing::field::Empty,
@@ -3707,6 +3949,9 @@ impl LocationNode {
                 &payload,
                 set.wraps,
             )?;
+            if let Some(v) = crypto::envelope_version(&envelope) {
+                tracing::Span::current().record("sc.envelope", v);
+            }
 
             let started = self.live().await?;
             let ns = started.trail.own_namespace();
@@ -3775,13 +4020,37 @@ impl LocationNode {
     /// Import a friend's docs **read-ticket** (from their contact card) so we replicate their trail
     /// namespace and can recover their missed fixes via [`sync_trail`]. This grants only
     /// replication; reading still requires our per-recipient wrap in each envelope (ARCHITECTURE §6).
+    ///
+    /// The namespace is recorded so every later start reopens it, JS or not (see [`ns_book`]), and
+    /// the stash is granted it at once.
     pub async fn import_doc_ticket(&self, ticket: String) -> Result<(), LocationError> {
         let started = self.live().await?;
         started
             .trail
             .import_ticket(&ticket)
             .await
-            .map(|_| ())
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        self.grant_stash(StashGrant::One(ticket), "import").await;
+        Ok(())
+    }
+
+    /// Stop replicating a removed friend's trail namespace, and stop reopening it on every start.
+    /// Returns whether we were replicating it. Call with the docs ticket the friend was added with.
+    pub async fn forget_doc_ticket(&self, ticket: String) -> Result<bool, LocationError> {
+        let started = self.live().await?;
+        started
+            .trail
+            .forget_ticket(&ticket)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// [`Self::forget_doc_ticket`] for the friend's profile namespace.
+    pub async fn forget_profile_ticket(&self, ticket: String) -> Result<bool, LocationError> {
+        let profile = self.live().await?.profile;
+        profile
+            .forget_ticket(&ticket)
+            .await
             .map_err(|e| LocationError::Network(e.to_string()))
     }
 
@@ -4378,7 +4647,7 @@ impl LocationNode {
                 let author = envelope.author.to_vec();
                 let payload = match manager.open(&author, &envelope, now_ms()) {
                     Ok(payload) => payload,
-                    Err(sessions::SessionError::NotForUs) => {
+                    Err(sessions::SessionError::NotForUs | sessions::SessionError::Replayed) => {
                         not_for_us += 1;
                         not_for_us_seqs.push(envelope.seq);
                         continue;
@@ -4845,6 +5114,8 @@ fn derive_recv_public(recv_secret: &[u8]) -> Result<Vec<u8>, LocationError> {
 #[derive(uniffi::Object)]
 pub struct Subscription {
     node: Arc<LocationNode>,
+    /// Where inbound events go. Swappable — see [`ListenerCell`].
+    listener: ListenerCell,
     /// For labelling the path to a neighbour (`delivery_label`) without the node lock.
     endpoint: Endpoint,
     /// Gossip neighbours right now — see where `subscribe` builds it.
@@ -5039,6 +5310,31 @@ impl publish::PublishSink for SubscriptionSink<'_> {
 }
 
 impl Subscription {
+    /// Whether the receive loop is still running. One that has ended (its topic stream closed or
+    /// errored) can still be published through by nobody, so it must not be handed out again.
+    pub(crate) fn is_live(&self) -> bool {
+        self.receive_task
+            .lock()
+            .ok()
+            .and_then(|task| task.as_ref().map(|handle| !handle.is_finished()))
+            .unwrap_or(false)
+    }
+
+    /// Add `bootstrap`'s peers to this live subscription's swarm.
+    async fn join(&self, bootstrap: &[String]) -> Result<(), LocationError> {
+        if bootstrap.is_empty() {
+            return Ok(());
+        }
+        let live = self.node.live().await?;
+        let ids = seed_bootstrap(&live.memory, bootstrap)?;
+        self.sender
+            .lock()
+            .await
+            .join_peers(ids)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
     /// After a successful broadcast: one `peer.contact` for each recipient that is a gossip
     /// neighbour, and the two counts on `gossip.publish`. Runs inside that span.
     async fn record_direct_sends(&self, wrapped: &[EndpointId]) {
@@ -5115,6 +5411,7 @@ impl Subscription {
             gate: gate_store.as_ref(),
             sink: &sink,
             quality: gate::FixQualityConfig::default(),
+            lock: &self.node.drain_lock,
         };
         engine
             .publish_introduction(now_ms)
@@ -5128,12 +5425,17 @@ impl Subscription {
     /// platform gives a background process a reliable one. `ingest_fix` only runs when the OS
     /// delivers a location, and on a stationary phone that can be never; the cadence still has to
     /// be uniform, because it is the one property of a sealed envelope the stash can read.
+    ///
+    /// `parked` is what the caller can prove about motion: `Some(true)` a confirmed stop,
+    /// `Some(false)` a stop just left, `None` a clock with no evidence either way (the JS timer).
+    /// Only the first stamps `parked` — see [`publish::Motion`] for the day it was unconditional.
     pub async fn heartbeat_fix(
         &self,
         subscription_id: String,
         battery: gate::BatteryState,
         interval_ms: u64,
         now_ms: u64,
+        parked: Option<bool>,
     ) -> Result<publish::IngestOutcome, LocationError> {
         let sink = SubscriptionSink {
             subscription: self,
@@ -5150,9 +5452,15 @@ impl Subscription {
             gate: gate_store.as_ref(),
             sink: &sink,
             quality: gate::FixQualityConfig::default(),
+            lock: &self.node.drain_lock,
         };
         engine
-            .heartbeat(battery, interval_ms, now_ms)
+            .heartbeat(
+                publish::Motion::from_parked(parked),
+                battery,
+                interval_ms,
+                now_ms,
+            )
             .await
             .map_err(|e| LocationError::Network(e.to_string()))
     }
@@ -5191,6 +5499,7 @@ impl Subscription {
             gate: gate_store.as_ref(),
             sink: &sink,
             quality: gate::FixQualityConfig::default(),
+            lock: &self.node.drain_lock,
         };
         engine
             .ingest(fix, battery, interval_ms, now_ms)
@@ -5266,7 +5575,8 @@ impl Subscription {
             sc.author = %telemetry::short_hex(&self.node.author),
             sc.seq = seq,
             sc.lane = if fix.is_none() { "null" } else { "fix" },
-            sc.envelope = 3,
+            // Recorded once sealed: v4 while a restart header rides along, v3 otherwise.
+            sc.envelope = tracing::field::Empty,
             sc.entry_hash = tracing::field::Empty,
             recipients = recipient_endpoints.len(),
             dropped = tracing::field::Empty,
@@ -5320,6 +5630,9 @@ impl Subscription {
                 &payload,
                 set.wraps,
             )?;
+            if let Some(v) = crypto::envelope_version(&envelope) {
+                tracing::Span::current().record("sc.envelope", v);
+            }
             tracing::Span::current().record(
                 "sc.entry_hash",
                 tracing::field::display(telemetry::envelope_hash(&envelope)),

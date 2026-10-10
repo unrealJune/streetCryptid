@@ -6,7 +6,10 @@ import org.jakebot.blew.BlePeripheralManager
 import uniffi.iroh_location.uniffiEnsureInitialized
 
 internal object IrohAndroidBootstrap {
-  @Volatile private var installed = false
+  /** Whether the native library is loaded — and so whether anything can have touched the node. */
+  @Volatile
+  var installed = false
+    private set
 
   @JvmStatic private external fun initializeNative(context: Context): Int
 

@@ -1,9 +1,11 @@
 import type { BumpStage, PairingFailure } from '../net/location-sharing';
+import type { ServicePhase } from './service-lifecycle';
 
 export type PairingRouteIntent = 'bump' | 'link' | 'redeem';
 
 export type ActivePairingStage =
   | 'loading'
+  | 'service-failed'
   | 'discovered'
   | 'verifying'
   | 'pair-failed'
@@ -25,6 +27,12 @@ export type ActivePairingStage =
   | 'bump-armed';
 
 interface ActivePairingStateInput {
+  /**
+   * Where the location-sharing service is in starting up. Every channel on this screen needs the
+   * node, so a service that is not up yet — or failed to come up — is said so first, rather than
+   * surfacing as whichever channel happened to try it (on 2026-10-03, as a Bump "NOTHING FOUND").
+   */
+  readonly servicePhase: ServicePhase;
   readonly intent: PairingRouteIntent;
   readonly pairingLoaded: boolean;
   readonly available: boolean;
@@ -53,6 +61,10 @@ interface ActivePairingStateInput {
  * the screen, and an expired link cannot trap someone after they return to Bump.
  */
 export function deriveActivePairingStage(input: ActivePairingStateInput): ActivePairingStage {
+  // Before every channel: none of them can work without the node. `idle` is left to the channel
+  // logic below, which already says "unavailable" where there is no native module at all.
+  if (input.servicePhase === 'failed' || input.servicePhase === 'stalled') return 'service-failed';
+  if (input.servicePhase === 'initializing') return 'loading';
   if (input.hasFriend) return 'discovered';
   if (input.hasVerification) return 'verifying';
   // Above every channel state and below the live ones. A pairing that broke is the most recent

@@ -400,55 +400,64 @@ private final class EventBridge: FixListener {
 }
 
 public final class IrohLocationModule: Module {
-  private var node: LocationNode?
   private var subscriptions: [String: Subscription] = [:]
   private var bridges: [String: EventBridge] = [:]
 
-  /// How many callers currently hold the node.
+  /// App leases THIS module instance holds on the process's node: one per `createNode` not yet
+  /// matched by a `shutdown`.
   ///
-  /// The node is process-wide (one `LocationNode` per process) but its callers are not: a mounted
-  /// app and a headless task session can both want it, and expo-task-manager restores its
-  /// persisted tasks at module scope, *before* React mounts, so the overlap is routine rather than
-  /// exotic. `createNode` used to `clearRuntime()` unconditionally, which meant the second caller
-  /// destroyed the first one's node — and silently, because JS kept a non-nil handle: `readTrail`
-  /// resolved `[]`, `safeDocTicket` returned nil, and every button that reached native threw. The
-  /// app rendered, the map panned, and nothing worked until relaunch.
-  ///
-  /// JS bounded that race with a 5s wait before creating the node. Measured over 7 days that wait
-  /// timed out on **11 of 11** launches that hit it — it never once resolved in time — so the
-  /// mitigation was reliably paying 5s of splash and then clobbering anyway.
-  ///
-  /// Refcounting removes the race instead of timing it: a second `createNode` for the same identity
-  /// adopts the live node, and `shutdown` only tears down when the last holder releases.
-  private var nodeRefs: Int = 0
+  /// The node is not this module's. `NodeHost` (Rust, `host.rs`) builds it, hands the SAME one to
+  /// every JS context and to `BackgroundLocationRuntime`, and shuts it down when the last lease is
+  /// returned. That replaced a per-instance node with a refcount, which let two JS contexts share
+  /// a node but left the background runtime building a rival one behind a claim race, an owner
+  /// flag and a bounded handover.
+  private var leases = 0
+  private var cachedNode: LocationNode?
+  private var cachedGeneration: UInt64 = .max
+  private let nodeLock = NSLock()
 
-  /// Tear the node down unconditionally, regardless of who still holds it.
+  /// The process's node while this module holds a lease, else nil.
   ///
-  /// Only for the paths that genuinely must rebuild — a different identity, or the last release.
-  private func clearRuntime() async throws {
+  /// Cached by `NodeHost.generation()`, which moves exactly when the host's answer does (a restart,
+  /// a replacement, the last release). A superseded handle is simply dropped; Swift frees it once
+  /// the last in-flight call on it returns.
+  private var node: LocationNode? {
+    nodeLock.lock()
+    defer { nodeLock.unlock() }
+    guard leases > 0 else { return nil }
+    let host = nodeHost()
+    let generation = host.generation()
+    if generation != cachedGeneration {
+      cachedNode = host.current()
+      cachedGeneration = generation
+    }
+    return cachedNode
+  }
+
+  /// Undo what this module set up AROUND the node — never the node itself, which is the host's.
+  ///
+  /// Dropping the subscriptions lets a friend's topic leave the swarm; the own-topic subscription
+  /// stays alive in the node's slot for the background runtime, silenced by the host once no app
+  /// holds the node.
+  private func clearModuleRuntime() {
     subscriptions.removeAll()
     bridges.removeAll()
-    try await node?.shutdown()
-    node = nil
-    nodeRefs = 0
+    nodeLock.lock()
+    cachedNode = nil
+    cachedGeneration = .max
+    nodeLock.unlock()
   }
 
-  /// Whether the live node was built for `identityHex`, so it can be adopted rather than rebuilt.
-  ///
-  /// A nil `identityHex` means "use whatever is stored", which is how the running node was built
-  /// too, so it matches. A non-nil one must equal the live node's secret: adopting across a real
-  /// identity change would silently run the app as the wrong device.
-  private func nodeMatchesIdentity(_ identityHex: String?) -> Bool {
-    guard let node = self.node else { return false }
-    guard let identityHex, !identityHex.isEmpty else { return true }
-    return hexToData(identityHex) == node.identitySecret()
-  }
+  /// Bounds a lease release; the JS side bounds its whole teardown again on the outside.
+  private static let shutdownBudgetMs: UInt64 = 5_000
+
+  /// Bounds the old node's shutdown inside a restart.
+  private static let restartBudgetMs: UInt64 = 5_000
 
   public func definition() -> ModuleDefinition {
     Name("IrohLocation")
-    // `onNativeFix` is the mounted-app handoff: the background runtime captures, but the writer
-    // claim is process-wide, so while the app is open it cannot own the node and hands the capture
-    // here instead. See `BackgroundLocationRuntime.eventSink`.
+    // `onNativeFix` is the mounted-app handoff: while the app is wired the background runtime hands
+    // its captures here rather than running them itself. See `BackgroundLocationRuntime.eventSink`.
     Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix")
 
     /// Whether this binary refcounts the node instead of clobbering it on a second `createNode`.
@@ -461,18 +470,6 @@ public final class IrohLocationModule: Module {
     }
 
     AsyncFunction("createNode") { (identityHex: String?, recvHex: String?) async throws -> [String: String] in
-      // Adopt rather than rebuild. The node is process-wide; the callers are not. See `nodeRefs`.
-      if let existing = self.node, self.nodeMatchesIdentity(identityHex) {
-        self.nodeRefs += 1
-        return [
-          "endpointId": dataToHex(existing.endpointId()),
-          "identitySecret": dataToHex(existing.identitySecret()),
-          "recvSecret": dataToHex(existing.recvSecret()),
-          "recvPublic": dataToHex(existing.recvPublic()),
-        ]
-      }
-      // Either there is no node, or it belongs to a different identity and must not be adopted.
-      try await self.clearRuntime()
       let roots = nodeStorageRoots()
       // Stamp the exclusion *before* the node can write a session into it — a blob that is
       // created and then backed up before the flag lands is exactly the rollback we are
@@ -480,13 +477,24 @@ public final class IrohLocationModule: Module {
       // should be structural rather than an artifact of where the dir happens to live.
       excludeFromBackup(roots.state)
       excludeFromBackup(roots.data)
-      let node = try LocationNode.newAtDirs(
+      let host = nodeHost()
+      let generationBefore = host.generation()
+      // Adopts the live node when the identity matches — including one the background runtime
+      // built and started on a JS-free launch — and builds otherwise. Never refused.
+      let node = try await host.acquireApp(
         identitySecret: identityHex.map(hexToData),
         recvSecret: recvHex.map(hexToData),
         dataRoot: roots.data.path,
         stateRoot: roots.state.path)
-      self.node = node
-      self.nodeRefs = 1
+      self.nodeLock.lock()
+      let heldBefore = self.leases
+      self.leases += 1
+      self.nodeLock.unlock()
+      // A replacement (a different identity) invalidates every subscription made on the old node.
+      if heldBefore > 0 && host.generation() != generationBefore {
+        self.subscriptions.removeAll()
+        self.bridges.removeAll()
+      }
       return [
         "endpointId": dataToHex(node.endpointId()),
         "identitySecret": dataToHex(node.identitySecret()),
@@ -496,6 +504,8 @@ public final class IrohLocationModule: Module {
     }
 
     AsyncFunction("start") { (relayUrls: [String], relayAuthToken: String, relayEnabled: Bool, ipEnabled: Bool, bleEnabled: Bool) async throws in
+      // Idempotent: if the background runtime already started this node from the stored settings,
+      // this is a no-op rather than the `AlreadyOpen` it used to be.
       try await self.node?.start(
         relayUrls: relayUrls,
         relayAuthToken: relayAuthToken,
@@ -504,13 +514,77 @@ public final class IrohLocationModule: Module {
         bleEnabled: bleEnabled)
     }
 
-    AsyncFunction("shutdown") { () async throws in
-      // Release this caller's hold; only the last one out actually tears the node down. A headless
-      // session ending must not nil the node the mounted app is using, which is the same clobber
-      // as before with the two sides swapped.
-      self.nodeRefs -= 1
-      if self.nodeRefs <= 0 {
-        try await self.clearRuntime()
+    AsyncFunction("shutdown") { () async in
+      // Return one lease. The host shuts the node down only when nobody — no other JS context, not
+      // the background runtime — still holds it.
+      self.nodeLock.lock()
+      guard self.leases > 0 else {
+        self.nodeLock.unlock()
+        return
+      }
+      self.leases -= 1
+      let last = self.leases == 0
+      self.nodeLock.unlock()
+      if last { self.clearModuleRuntime() }
+      _ = await nodeHost().release(holder: .app, timeoutMs: Self.shutdownBudgetMs)
+    }
+
+    /// Rebuild the node with new transport settings, keeping every holder's lease.
+    ///
+    /// What a settings change and a Bluetooth permission granted after construction both need. It
+    /// used to be `shutdown` + `createNode` + `start` from JS, which with a shared node would only
+    /// return this module's lease and adopt the same node back. The host starts the new node
+    /// before anyone else can, so it cannot come up on the stored (old) settings.
+    AsyncFunction("restartNode") {
+      (relayUrls: [String], relayAuthToken: String, relayEnabled: Bool, ipEnabled: Bool,
+        bleEnabled: Bool) async throws in
+      self.nodeLock.lock()
+      let held = self.leases
+      self.nodeLock.unlock()
+      guard held > 0 else {
+        throw Exception(name: "NoNode", description: "call createNode first")
+      }
+      // Every subscription belongs to the node being replaced; JS resubscribes afterwards.
+      self.subscriptions.removeAll()
+      self.bridges.removeAll()
+      _ = try await nodeHost().restart(
+        config: TransportConfig(
+          relayUrls: relayUrls, relayAuthToken: relayAuthToken, relayEnabled: relayEnabled,
+          ipEnabled: ipEnabled, bleEnabled: bleEnabled),
+        timeoutMs: Self.restartBudgetMs)
+    }
+
+    /// The host's view of who holds the node, for `device.health`.
+    Function("nodeHostSnapshot") { () -> [String: Any] in
+      let snapshot = nodeHost().snapshot()
+      return [
+        "generation": Double(snapshot.generation),
+        "hasNode": snapshot.hasNode,
+        "appLeases": Int(snapshot.appLeases),
+        "background": snapshot.background,
+        "builds": Double(snapshot.builds),
+        "adoptions": Double(snapshot.adoptions),
+        "replacements": Double(snapshot.replacements),
+        "restarts": Double(snapshot.restarts),
+        "shutdowns": Double(snapshot.shutdowns),
+        "shutdownFailures": Double(snapshot.shutdownFailures),
+        "shutdownTimeouts": Double(snapshot.shutdownTimeouts),
+      ]
+    }
+
+    // A module torn down without its JS calling `shutdown` (a reload, a crashed context) would
+    // otherwise hold its leases for the life of the process: the node would never be shut down
+    // and never have this module's listeners detached. Return them.
+    OnDestroy {
+      self.nodeLock.lock()
+      let held = self.leases
+      self.leases = 0
+      self.nodeLock.unlock()
+      guard held > 0 else { return }
+      Task {
+        for _ in 0..<held {
+          _ = await nodeHost().release(holder: .app, timeoutMs: IrohLocationModule.shutdownBudgetMs)
+        }
       }
     }
 
@@ -566,9 +640,10 @@ public final class IrohLocationModule: Module {
     /// Publish the slots that have come due without a new fix, reusing the last known position.
     /// Driven on a timer by the mounted app — neither platform gives a background process a
     /// reliable one, and the cadence has to stay uniform whether or not the phone is moving.
+    /// `parked` is the caller's motion claim (`nil` for none) — see `publish::Motion`.
     AsyncFunction("heartbeatFix") {
-      (subscriptionId: String, battery: [String: Any], intervalMs: Double) async throws
-        -> [String: Any?] in
+      (subscriptionId: String, battery: [String: Any], intervalMs: Double, parked: Bool?)
+        async throws -> [String: Any?] in
       guard let sub = self.subscriptions[subscriptionId] else {
         throw Exception(name: "NoSubscription", description: "no such subscription")
       }
@@ -577,6 +652,20 @@ public final class IrohLocationModule: Module {
           subscriptionId: subscriptionId,
           battery: batteryState(from: battery),
           intervalMs: UInt64(max(1, intervalMs)),
+          nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+          parked: parked))
+    }
+
+    /// Seal the last known position once for a recipient set that has just grown — a new friend's
+    /// first dot. Declared in the TS contract and called by `connectNewFriend` since it existed,
+    /// and exported by neither platform until the export-parity test found it.
+    AsyncFunction("publishIntroduction") { (subscriptionId: String) async throws -> [String: Any?] in
+      guard let sub = self.subscriptions[subscriptionId] else {
+        throw Exception(name: "NoSubscription", description: "no such subscription")
+      }
+      return ingestOutcomeToDict(
+        try await sub.publishIntroduction(
+          subscriptionId: subscriptionId,
           nowMs: UInt64(Date().timeIntervalSince1970 * 1000)))
     }
 
@@ -586,9 +675,6 @@ public final class IrohLocationModule: Module {
       // Wire the handoff before starting, or the first captures of a mounted session have nowhere
       // to go — and on a fresh install those are the only ones there are.
       BackgroundLocationRuntime.shared.eventSink = self
-      // JS is here, so JS owns the stores. Explicit rather than emergent: this is the call that
-      // means "a mounted app is driving", and the runtime must not try to build a rival node.
-      BackgroundLocationRuntime.shared.yieldOwnershipToApp()
       BackgroundLocationRuntime.shared.start()
       // Seed explicitly, because `start()` is idempotent: if the app-delegate bootstrap already
       // armed the ladder, `start()` returned without seeding and its own seed was captured before
@@ -654,35 +740,10 @@ public final class IrohLocationModule: Module {
     /// The difference from `stopNativeBackground` is the difference between the user switching
     /// sharing off and a process teardown, and only the first should disarm SLC, the stop fence and
     /// the persisted anchor. Dropping the sink is the point: with no JS to hand captures to, the
-    /// runtime rebuilds its own node and publishes them itself.
+    /// runtime publishes them itself, through the same node (its lease keeps it alive once the
+    /// app's `shutdown` returns the app's).
     Function("releaseNativeBackground") {
       BackgroundLocationRuntime.shared.eventSink = nil
-      BackgroundLocationRuntime.shared.release()
-    }
-
-    /// Take the stores back from the native runtime, bounded, before the app claims them.
-    ///
-    /// The counterpart to a background launch having armed the runtime with `owner = .native`.
-    /// `releaseNativeBackground` drops Swift references and returns; it does NOT free the Rust
-    /// writer claims, because `Subscription` and the spawned receive task each hold their own
-    /// `Arc<LocationNode>` and only `shutdown` nils them all. Without this, opening the app after
-    /// a background launch would meet `AlreadyOpen` and fail `init()` before `setServiceReady`.
-    ///
-    /// Bounded in Swift so the promise always settles — AGENTS.md's rule is about a promise that
-    /// never settles, and a Swift-side race guarantees it does whatever Rust decides to do.
-    /// Returns whether the shutdown completed; `false` still hands ownership over, because leaving
-    /// it `.native` would mean nothing could ever claim the stores again.
-    AsyncFunction("handOverNativeBackground") { (timeoutMs: Double) async -> Bool in
-      await BackgroundLocationRuntime.shared.yieldNode(timeoutMs: UInt64(max(0, timeoutMs)))
-    }
-
-    /// Whether the native runtime currently owns the stores — observed, not declared.
-    ///
-    /// `refusalReason()` in `headless-runtime.ts` refuses to build a second node on this answer, so
-    /// it has to be the fact rather than a launch's intent: reporting `.native` when this runtime
-    /// holds no node would block a headless session for nothing.
-    Function("nativeNodeOwner") { () -> String in
-      BackgroundLocationRuntime.shared.holdsNode ? "native" : "app"
     }
 
     // MARK: - Native publish state
@@ -949,6 +1010,28 @@ public final class IrohLocationModule: Module {
       try await node.pushTrail(peerTickets: peerTickets, traceparent: traceparent)
     }
 
+    /// The per-peer-deadline push. Declared in TS and called (guarded) for as long as it existed in
+    /// Rust, and exported by neither platform — so every push took the flat-budget fallback.
+    AsyncFunction("pushTrailBudgeted") {
+      (peers: [[String: Any]], traceparent: String?) async throws -> [[String: Any?]] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      let dials = peers.compactMap { dial -> PeerDial? in
+        guard let ticket = dial["ticket"] as? String else { return nil }
+        let budget = (dial["budgetMs"] as? NSNumber)?.doubleValue ?? 0
+        return PeerDial(ticket: ticket, budgetMs: UInt64(max(0, budget)))
+      }
+      let reports = try await node.pushTrailBudgeted(peers: dials, traceparent: traceparent)
+      return reports.map { report in
+        [
+          "peer": report.peer,
+          "outcome": report.outcome,
+          "latencyMs": report.latencyMs.map { Double($0) },
+          "entriesSent": Double(report.entriesSent),
+          "budgetMs": Double(report.budgetMs),
+        ]
+      }
+    }
+
     AsyncFunction("uploadTrailContent") { (baseUrl: String, psk: String?) async throws -> UInt64 in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return try await node.uploadTrailContent(baseUrl: baseUrl, psk: psk)
@@ -1003,6 +1086,25 @@ public final class IrohLocationModule: Module {
     AsyncFunction("importDocTicket") { (ticket: String) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       try await node.importDocTicket(ticket: ticket)
+    }
+
+    // Stop replicating a removed friend's trail / profile namespace, and stop reopening it on
+    // every start (`ns_book.rs`). Returns whether we were replicating it.
+    AsyncFunction("forgetDocTicket") { (ticket: String) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.forgetDocTicket(ticket: ticket)
+    }
+
+    AsyncFunction("forgetProfileTicket") { (ticket: String) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.forgetProfileTicket(ticket: ticket)
+    }
+
+    // Grant the trail stash our namespaces now (`stash.rs`). Returns at once; the HTTP runs on its
+    // own task and reports as a `stash.grant` span.
+    AsyncFunction("grantStash") { () async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      await node.grantStashNow()
     }
 
     Function("configureTelemetry") { (endpoint: String, instanceId: String) -> Bool in

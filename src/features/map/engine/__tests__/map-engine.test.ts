@@ -82,7 +82,9 @@ describe('MapEngine.buildRegion', () => {
     });
     const engine = makeEngine({
       getTile: (tile) => source.getTile(tile),
-      getPreview: () => coarse,
+      getPreview: async (_tiles, onStage) => {
+        await onStage({ tileZoom: 13, part: 'full' }, await coarse);
+      },
     });
     const destination = { ...baseRequest, camera: { center: [0.6, 0.4] as WorldPoint, zoom: 18 } };
     let publish!: (region: MapRegion) => void;

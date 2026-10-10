@@ -157,4 +157,25 @@ describe('LocationEngine — the running flag in front of the native pipeline', 
       }
     );
   });
+
+  it('makes no parked claim from a bare heartbeat or a flush', async () => {
+    // The mounted timer calls `heartbeat()` with no arguments whatever the phone is doing. On
+    // 2026-10-02 that tick stamped four hours of `parked` on an iPhone that was not parked.
+    const claims: (boolean | null)[] = [];
+    const drain: NativeDrain = {
+      ...drainStub(),
+      async heartbeat(_battery, _interval, parked): Promise<DrainOutcome> {
+        claims.push(parked);
+        return outcome({ enqueued: 0, published: 0 });
+      },
+    };
+    const engine = engineWith(drain);
+    await engine.start();
+
+    await engine.heartbeat();
+    await engine.flush();
+    await engine.heartbeat(undefined, true);
+
+    expect(claims).toEqual([null, null, true]);
+  });
 });
