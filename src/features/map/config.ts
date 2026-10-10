@@ -6,12 +6,14 @@ import { FixtureGeometrySource } from './tiles/fixture-source';
 import { FIXTURE_BOUNDS, FIXTURE_HOME } from './tiles/__fixtures__/caphill-tiles';
 import { BundleFetchByteSource } from './tiles/bundle-fetch';
 import { DecodingGeometrySource } from './tiles/decode-source';
+import { TerrariumElevationSource, type ElevationSource } from './tiles/elevation-source';
 import type { GeometrySource } from './tiles/geometry-source';
 import { MartinByteSource } from './tiles/martin-source';
 import { createNativeTileDecoder } from './tiles/native-tile-decoder';
+import { skiaImageDecoder } from './tiles/skia-image-decoder';
 import { createTileByteStore } from './tiles/sqlite-tile-store';
 import { CachedGeometrySource } from './tiles/tile-cache';
-import { TILE_BUNDLE_ANCHOR_ZOOM } from './tiles/tile-bundle';
+import { MartinTileBundleSource, TILE_BUNDLE_ANCHOR_ZOOM } from './tiles/tile-bundle';
 import { StreamingBundleSource } from './tiles/streaming-bundle-source';
 import type { TileByteStore } from './tiles/tile-bytes';
 import { WORLD_RECT, type DataZoomRange } from './tiles/tile-math';
@@ -97,6 +99,8 @@ export interface MapDataset {
   readonly home: WorldPoint;
   /** Where exploration state comes from: the real trail, or the demo walks. */
   readonly explorationMode: 'live' | 'demo';
+  /** Elevation for terrain shading; absent draws parkland with the canopy fallback. */
+  readonly elevation?: ElevationSource;
 }
 
 const SEATTLE_HOME = latLonToWorld({ lat: 47.6205, lon: -122.3169 }); // Capitol Hill
@@ -134,6 +138,7 @@ export function createMapDataset(): MapDataset {
 
   return {
     source,
+    elevation: createTerrainElevationSource(tileUrl),
     dataZooms: PLANET_DATA_ZOOMS,
     bounds: WORLD_RECT,
     minZoom: PLANET_CAMERA_MIN_ZOOM,
@@ -141,6 +146,38 @@ export function createMapDataset(): MapDataset {
     home: SEATTLE_HOME,
     explorationMode: 'live',
   };
+}
+
+/**
+ * The terrain tileset lives beside the vector one: `…/planet` → `…/terrain`
+ * (`GET {terrain}/{z}/{x}/{y}` up to z10, `GET {terrain}/bundle/v1/{x10}/{y10}/{z}`
+ * for z11–12). A server without it answers 404, which every layer below treats
+ * as "no tile" — the map then draws parkland with the canopy fallback.
+ */
+export function terrainUrlFor(tileUrl: string): string {
+  return tileUrl.replace(/\/+$/, '').replace(/\/[^/]+$/, '/terrain');
+}
+
+/**
+ * Terrarium elevation through the same privacy-quantized, SQLite-backed byte
+ * path as the vector tiles: fine tiles leave only as z10-anchored bundles.
+ */
+export function createTerrainElevationSource(
+  tileUrl: string,
+  store: TileByteStore = createTileByteStore()
+): ElevationSource {
+  const terrainUrl = terrainUrlFor(tileUrl);
+  return new TerrariumElevationSource(
+    new BundleFetchByteSource({
+      coarseUpstream: new MartinByteSource(terrainUrl),
+      bundleUpstream: new MartinTileBundleSource(terrainUrl),
+      store,
+      sourceId: 'terrain-v1',
+      anchorZoom: PRIVACY_ANCHOR_ZOOM,
+      ttlMs: TILE_TTL_MS,
+    }),
+    skiaImageDecoder
+  );
 }
 
 /** Assemble the live source exactly once so app code and diagnostic scripts cannot drift. */

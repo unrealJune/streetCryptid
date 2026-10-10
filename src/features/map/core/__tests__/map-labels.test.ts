@@ -4,7 +4,12 @@ import {
   PLACE_LABEL_BANDS,
   placeRankBudget,
   HOUSENUMBER_MIN_ZOOM,
+  chipWidthPx,
   labelWidthPx,
+  PEAK_LABEL_MIN_ZOOM,
+  PEAK_MARKER_PX,
+  peakElevationText,
+  peakRankBudget,
   LABEL_MIN_ZOOM,
   POI_LABEL_MIN_ZOOM,
   poiRankBudget,
@@ -12,7 +17,7 @@ import {
   selectMapLabels,
 } from '../map-labels';
 import type { RegionSpec } from '../region';
-import type { AreaFeature, MapGeometry, RoadClass, StreetWay, WorldPoint } from '../types';
+import type { AreaFeature, MapGeometry, MapPeak, RoadClass, StreetWay, WorldPoint } from '../types';
 import { packGeometry } from '../../tiles/packed-geometry';
 
 function specAt(zoom: number): RegionSpec {
@@ -496,5 +501,61 @@ describe('selectMapLabels — places (the region view: city nodes)', () => {
       { name: 'Washington', world: [0.5, 0.5] as WorldPoint, kind: 'state', rank: 1 },
     ];
     expect(labelsAt(15, { places })).toEqual([]);
+  });
+});
+
+describe('selectMapLabels — peaks', () => {
+  const peak = (name: string, world: WorldPoint, extra: Partial<MapPeak> = {}): MapPeak => ({
+    name,
+    world,
+    kind: 'peak',
+    ele: 924,
+    eleFt: 3031,
+    customaryFt: false,
+    rank: 1,
+    ...extra,
+  });
+
+  it('names a summit with its elevation from the range view down', () => {
+    const parts = { peaks: [peak('Mount Atago', [0.5, 0.5])] };
+    expect(labelsAt(PEAK_LABEL_MIN_ZOOM - 0.01, parts)).toHaveLength(0);
+    const [label] = labelsAt(PEAK_LABEL_MIN_ZOOM, parts);
+    expect(label).toMatchObject({ kind: 'peak', text: 'MOUNT ATAGO · 924 M', angle: 0 });
+  });
+
+  it('reads feet where the tileset says feet are customary', () => {
+    expect(peakElevationText({ ele: 913, eleFt: 2995, customaryFt: true })).toBe('2995 FT');
+    expect(peakElevationText({ ele: 913, eleFt: 2995, customaryFt: false })).toBe('913 M');
+    expect(peakElevationText({ customaryFt: false })).toBe('');
+    const [label] = labelsAt(12, {
+      peaks: [peak('Tiger', [0.5, 0.5], { ele: undefined, eleFt: undefined })],
+    });
+    expect(label.text).toBe('TIGER');
+  });
+
+  it('skips saddles and unnamed points', () => {
+    const found = labelsAt(12, {
+      peaks: [peak('Pass', [0.3, 0.3], { kind: 'saddle' }), peak('', [0.6, 0.6])],
+    });
+    expect(found).toHaveLength(0);
+  });
+
+  it('admits deeper ranks as you zoom in', () => {
+    const parts = { peaks: [peak('Minor', [0.5, 0.5], { rank: 4 })] };
+    expect(peakRankBudget(PEAK_LABEL_MIN_ZOOM)).toBe(2);
+    expect(labelsAt(PEAK_LABEL_MIN_ZOOM, parts)).toHaveLength(0);
+    expect(labelsAt(PEAK_LABEL_MIN_ZOOM + 2, parts)).toHaveLength(1);
+  });
+
+  it('keeps one chip per summit across a tile seam', () => {
+    const found = labelsAt(12, {
+      peaks: [peak('Hiei', [0.5, 0.5]), peak('Hiei', [0.5000001, 0.5])],
+    });
+    expect(found).toHaveLength(1);
+  });
+
+  it('reserves room for the summit marker in the collision box', () => {
+    expect(chipWidthPx('peak', 'HIEI')).toBe(labelWidthPx('HIEI') + PEAK_MARKER_PX);
+    expect(chipWidthPx('poi', 'HIEI')).toBe(labelWidthPx('HIEI'));
   });
 });

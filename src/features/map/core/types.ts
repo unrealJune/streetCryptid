@@ -128,6 +128,39 @@ export interface AeroWay {
   readonly points: readonly WorldPoint[];
 }
 
+/**
+ * OMT `landcover` classes drawn as ground cover, ordered so the numeric code (the
+ * index here) is what the packed geometry and the SCG1 buffer carry. `wood` and
+ * `grass` are absent on purpose: they stay parkland, which the dot field already
+ * draws (and, with elevation, shades as terrain).
+ */
+export const GROUND_KINDS = ['farmland', 'wetland', 'sand', 'rock', 'ice'] as const;
+
+export type GroundKind = (typeof GROUND_KINDS)[number];
+
+/** An {@link AreaFeature} carrying the landcover class it was decoded from. */
+export interface GroundArea extends AreaFeature {
+  readonly kind: GroundKind;
+}
+
+/**
+ * A summit from OpenMapTiles `mountain_peak` (point features only — the layer's
+ * ridge/cliff lines are not decoded). `ele` is metres and `eleFt` feet, both
+ * as the tileset rounds them; `customaryFt` is OMT's flag for places where feet
+ * are the customary unit, which is what the label shows.
+ */
+export interface MapPeak {
+  readonly name: string;
+  readonly world: WorldPoint;
+  /** OMT class: `peak`, `volcano`, `saddle`, … */
+  readonly kind: string;
+  readonly ele?: number;
+  readonly eleFt?: number;
+  readonly customaryFt: boolean;
+  /** Lower rank = more prominent. Absent when the source omits it. */
+  readonly rank?: number;
+}
+
 /** A named locality (city/town/suburb/neighbourhood) used for the island readout. */
 export interface Place {
   readonly name: string;
@@ -166,6 +199,13 @@ export interface MapGeometry {
   readonly pois?: readonly MapPoiFeature[];
   /** OpenMapTiles `housenumber` points — z14 only. */
   readonly houseNumbers?: readonly HouseNumberFeature[];
+  /**
+   * OpenMapTiles `landcover` classes that are not parkland ({@link GROUND_KINDS}).
+   * Optional like {@link buildings}: a pre-ground-cover SCG1 buffer carries none.
+   */
+  readonly groundCover?: readonly GroundArea[];
+  /** OpenMapTiles `mountain_peak` points. Optional for the same reason. */
+  readonly peaks?: readonly MapPeak[];
 }
 
 /** A named point of interest in world space (OpenMapTiles `poi`). */

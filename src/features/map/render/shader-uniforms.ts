@@ -1,13 +1,21 @@
 import { scaleFor } from '../core/camera';
 import { clamp } from '../core/color';
 import { DOT_STEP } from '../core/dot-style';
+import { SHADE_GAIN } from '../core/terrain';
 import type { MapPalette } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
 
 export { DOT_STEP } from '../core/dot-style';
 
 /** Total float count of the shader's numeric uniform block, in declaration order. */
-export const DOT_FIELD_UNIFORM_FLOATS = 15;
+export const DOT_FIELD_UNIFORM_FLOATS = 19;
+
+/**
+ * Period (region-logical px) the noise origin is wrapped to. The shader adds
+ * region-local px to it, so this only has to keep f32 exact (< 2^24) — a seam
+ * every 65 536 px at the anchor zoom is never on screen twice.
+ */
+export const NOISE_ORIGIN_WRAP = 65536;
 
 /** At/above this build zoom the field renders full street detail (LOD 0). */
 export const LOD_FULL_ZOOM = 14;
@@ -35,6 +43,8 @@ export interface DotFieldUniformInput {
   readonly lod?: number;
   /** Whether discovered/unexplored styling is visible. */
   readonly explorationEnabled?: boolean;
+  /** Whether the terrain texture carries elevation bands for this region. */
+  readonly hasElevation?: boolean;
 }
 
 /**
@@ -54,6 +64,7 @@ export function packDotFieldUniforms({
   reveal = 1,
   lod,
   explorationEnabled = true,
+  hasElevation = false,
 }: DotFieldUniformInput): number[] {
   const { rect, maskWidth, maskHeight, zoom } = region.spec;
   const scale = scaleFor(zoom); // region-logical px per world unit at anchor zoom
@@ -74,7 +85,16 @@ export function packDotFieldUniforms({
     explorationEnabled ? 1 : 0, // uExploration
     palette.effects?.neonGlow ?? 0, // uNeonGlow
     palette.effects?.scanlines ?? 0, // uScanlines
+    wrapNoise(rect.minX * scale),
+    wrapNoise(rect.minY * scale), // uNoiseOrigin
+    hasElevation ? 1 : 0, // uHasElev
+    SHADE_GAIN, // uShadeGain
   ];
+}
+
+/** Absolute region-logical px, wrapped in f64 before it ever reaches the f32 GPU. */
+function wrapNoise(px: number): number {
+  return ((px % NOISE_ORIGIN_WRAP) + NOISE_ORIGIN_WRAP) % NOISE_ORIGIN_WRAP;
 }
 
 /** Region-logical bitmap size (px) at the region's anchor zoom, before the device multiplier. */

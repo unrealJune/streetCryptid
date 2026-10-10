@@ -87,6 +87,22 @@ describe('wrapScg1 parity with the JS decoder', () => {
     expect(native.aeroAreas?.map((a) => a.kind)).toEqual(js.aeroAreas?.map((a) => a.kind));
     expect(native.aeroLines?.map((l) => l.kind)).toEqual(js.aeroLines?.map((l) => l.kind));
   });
+
+  it('matches the ground-cover section (farmland + wetland in this tile)', () => {
+    expect(js.groundCover?.length).toBe(19);
+    expect(native.groundCover?.map((g) => g.kind)).toEqual(js.groundCover?.map((g) => g.kind));
+    expect(ringPts(native.groundCover ?? [])).toBe(ringPts(js.groundCover ?? []));
+  });
+
+  it('matches mountain peaks, elevations and unit flag included', () => {
+    expect(js.peaks?.length).toBe(28); // 32 features, four of them unnamed
+    expect(native.peaks).toEqual(
+      js.peaks?.map((p) => ({
+        ...p,
+        world: [expect.closeTo(p.world[0], 6), expect.closeTo(p.world[1], 6)],
+      }))
+    );
+  });
 });
 
 /**
@@ -183,6 +199,8 @@ describe('wrapScg1 on a pre-transit buffer', () => {
   const poiBytes = (count: number): number => 4 + count * 4 * 4 + count * 2 * 4;
   /** house numbers: count + number i32 + x f32 + y f32. */
   const houseNumberBytes = (count: number): number => 4 + count * 4 + count * 2 * 4;
+  /** peaks: count + name/kind/rank/ele/eleFt i32 + customaryFt u8 + x f32 + y f32. */
+  const peakBytes = (count: number): number => 4 + count * 5 * 4 + align4(count) + count * 2 * 4;
 
   const tailBytes =
     classedLineBytes(full.transit) +
@@ -191,7 +209,9 @@ describe('wrapScg1 on a pre-transit buffer', () => {
     areaBytes(full.aeroAreas, true) +
     aeroLineBytes(full.aeroLines) +
     poiBytes(full.pois.length) +
-    houseNumberBytes(full.houseNumbers.length);
+    houseNumberBytes(full.houseNumbers.length) +
+    areaBytes(full.groundCover, true) +
+    peakBytes(full.peaks.length);
   const truncated = scg1.slice(0, scg1.byteLength - tailBytes);
 
   it('decodes the rest of the tile and reports no appended sections', () => {
@@ -203,6 +223,8 @@ describe('wrapScg1 on a pre-transit buffer', () => {
     expect(tile.aeroLines.count).toBe(0);
     expect(tile.pois).toHaveLength(0);
     expect(tile.houseNumbers).toHaveLength(0);
+    expect(tile.groundCover.count).toBe(0);
+    expect(tile.peaks).toHaveLength(0);
     expect(tile.streets.count).toBe(full.streets.count);
     expect(tile.places).toHaveLength(full.places.length);
   });

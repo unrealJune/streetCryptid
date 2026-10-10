@@ -49,12 +49,14 @@ describe('region path culling', () => {
       aeroAreas: [{ ...area, kind: 'apron' }],
       aeroLines: [{ kind: 'runway', points }],
       transit: [{ mode: 'subway', points }],
+      groundCover: [{ ...area, kind: 'rock' }],
     });
     expect(buildMaskPaths(packed, spec)).toEqual({
       streets: ['', '', '', '', ''],
       park: '',
       water: '',
       rivers: '',
+      ground: ['', '', '', '', ''],
     });
     expect(buildStructurePaths(packed, spec)).toEqual({
       buildings: '',

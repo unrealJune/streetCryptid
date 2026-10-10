@@ -1,13 +1,15 @@
-import { StyleSheet, Text } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import Animated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated';
 
 import { worldToScreen } from '../core/camera';
 import {
-  labelWidthPx,
+  chipWidthPx,
   LABEL_FONT_SIZE,
   LABEL_HEIGHT_PX,
   LABEL_LETTER_SPACING,
+  PEAK_MARKER_PX,
   type MapLabel,
+  type MapLabelKind,
 } from '../core/map-labels';
 import type { CameraState, MapPalette, Viewport } from '../core/types';
 
@@ -59,8 +61,10 @@ export function MapLabelLayer({
         // and the hex lattice wear: in the band where they appear the streets
         // have no names yet, so this is the only ink on the canvas. Deliberately
         // NOT the accent — that is the frontier rim's and the YOU locator's.
+        // Peaks wear the park ink: on this map a summit is a point on the
+        // parkland the terrain shading draws, and it should read as part of it.
         const rgb =
-          label.kind === 'area'
+          label.kind === 'area' || label.kind === 'peak'
             ? palette.parkLabel
             : label.kind === 'transit'
               ? palette.transit
@@ -73,6 +77,7 @@ export function MapLabelLayer({
             chipColor={chipColor}
             color={`rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`}
             key={label.id}
+            kind={label.kind}
             opacity={label.kind === 'housenumber' ? 0.62 : 1}
             scale={scale}
             text={label.text}
@@ -91,6 +96,7 @@ function MapLabelChip({
   angle,
   chipColor,
   color,
+  kind,
   opacity,
   scale,
   text,
@@ -102,6 +108,7 @@ function MapLabelChip({
   readonly angle: number;
   readonly chipColor: string;
   readonly color: string;
+  readonly kind: MapLabelKind;
   readonly opacity: number;
   readonly scale: SharedValue<number>;
   readonly text: string;
@@ -112,7 +119,7 @@ function MapLabelChip({
 }) {
   // The chip's width is computed, not measured, so what collides in
   // `core/map-labels.ts` is exactly what renders here.
-  const width = labelWidthPx(text);
+  const width = chipWidthPx(kind, text);
   // Translate the box so its CENTER lands on the anchor point, then rotate —
   // React Native rotates about the view's own center, so the chip pivots on the
   // road rather than swinging away from it.
@@ -134,6 +141,7 @@ function MapLabelChip({
       pointerEvents="none"
       style={[styles.chip, { backgroundColor: chipColor, opacity, width }, positionStyle]}
     >
+      {kind === 'peak' ? <View style={[styles.peakMark, { borderBottomColor: color }]} /> : null}
       <Text allowFontScaling={false} numberOfLines={1} style={[styles.text, { color }]}>
         {text}
       </Text>
@@ -144,6 +152,7 @@ function MapLabelChip({
 const styles = StyleSheet.create({
   chip: {
     alignItems: 'center',
+    flexDirection: 'row',
     borderRadius: 3,
     height: LABEL_HEIGHT_PX,
     justifyContent: 'center',
@@ -152,6 +161,17 @@ const styles = StyleSheet.create({
     top: 0,
     // Under the locators (zIndex 3): a friend or the YOU marker always wins.
     zIndex: 1,
+  },
+  // A summit triangle from borders: IBM Plex Mono has no ▲ glyph.
+  peakMark: {
+    borderBottomWidth: 6,
+    borderLeftColor: 'transparent',
+    borderLeftWidth: 3.5,
+    borderRightColor: 'transparent',
+    borderRightWidth: 3.5,
+    height: 0,
+    marginRight: PEAK_MARKER_PX - 7,
+    width: 0,
   },
   text: {
     fontFamily: 'IBMPlexMono_500Medium',

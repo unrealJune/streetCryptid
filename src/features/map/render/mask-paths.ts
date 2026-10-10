@@ -2,8 +2,8 @@ import { worldToScreen } from '../core/camera';
 import { regionMaskCamera, type RegionSpec } from '../core/region';
 import { roadClassVisible, roadWidthFor, type RoadLayerOptions } from '../core/road-lod';
 import { riverWidthFor } from '../core/water-lod';
-import type { ScreenPoint, WorldRect } from '../core/types';
-import type { PackedAreas, PackedGeometry } from '../tiles/packed-geometry';
+import { GROUND_KINDS, type ScreenPoint, type WorldRect } from '../core/types';
+import type { PackedAreas, PackedGeometry, PackedGroundAreas } from '../tiles/packed-geometry';
 import { featureBounds, intersectsBounds, ringBounds, tileLocalRect } from './geometry-bounds';
 
 /**
@@ -34,6 +34,11 @@ export interface MaskPaths {
   readonly water: string;
   /** SVG polyline for river centerlines; '' when empty. */
   readonly rivers: string;
+  /**
+   * Closed sub-paths per ground-cover kind (index = {@link GROUND_KINDS}), for
+   * the ground texture; '' when empty.
+   */
+  readonly ground: readonly string[];
 }
 
 type Project = (x: number, y: number) => ScreenPoint;
@@ -60,6 +65,7 @@ export function buildMaskPaths(
   const parkFills: string[] = [];
   const waterFills: string[] = [];
   const riverLines: string[] = [];
+  const groundFills: string[][] = GROUND_KINDS.map(() => []);
 
   for (const part of geometry.parts) {
     const { originX, originY } = part;
@@ -96,6 +102,7 @@ export function buildMaskPaths(
 
     pushFills(waterFills, part.water, project, rect);
     pushFills(parkFills, part.parks, project, rect);
+    pushGroundFills(groundFills, part.groundCover, project, rect);
   }
 
   return {
@@ -103,6 +110,7 @@ export function buildMaskPaths(
     park: parkFills.join(' '),
     water: waterFills.join(' '),
     rivers: riverLines.join(' '),
+    ground: groundFills.map((kind) => kind.join(' ')),
   };
 }
 
@@ -127,6 +135,27 @@ function pushFills(dst: string[], areas: PackedAreas, project: Project, rect: Wo
       if (!intersectsBounds(rings, r, rect)) continue;
       const line = polyline(areas.coords, areas.pointOff[r], areas.pointOff[r + 1], project);
       if (line) dst.push(`${line}Z`);
+    }
+  }
+}
+
+/** {@link pushFills} for ground cover, sorted into one batch per kind. */
+function pushGroundFills(
+  dst: string[][],
+  areas: PackedGroundAreas,
+  project: Project,
+  rect: WorldRect
+): void {
+  if (areas.count === 0) return;
+  const bounds = featureBounds(areas);
+  const rings = ringBounds(areas);
+  for (let i = 0; i < areas.count; i++) {
+    const batch = dst[areas.kind[i]];
+    if (!batch || !intersectsBounds(bounds, i, rect)) continue;
+    for (let r = areas.ringOff[i]; r < areas.ringOff[i + 1]; r++) {
+      if (!intersectsBounds(rings, r, rect)) continue;
+      const line = polyline(areas.coords, areas.pointOff[r], areas.pointOff[r + 1], project);
+      if (line) batch.push(`${line}Z`);
     }
   }
 }

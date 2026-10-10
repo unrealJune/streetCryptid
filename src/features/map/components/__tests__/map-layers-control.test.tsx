@@ -9,7 +9,13 @@ jest.mock('expo-symbols', () => ({
 }));
 jest.mock('@/global.css', () => ({}));
 
-const layers = { exploration: true, highways: true, transit: false, structures: true };
+const layers = {
+  exploration: true,
+  highways: true,
+  transit: false,
+  structures: true,
+  peaks: true,
+};
 
 describe('MapLayersControl', () => {
   let renderer: ReactTestRenderer;
@@ -113,5 +119,16 @@ describe('MapLayersControl', () => {
 
     act(() => row.props.onPress());
     expect(onChange).toHaveBeenCalledWith('structures', false);
+  });
+
+  it('toggles the peaks layer off', () => {
+    const onChange = jest.fn();
+    expand(onChange);
+
+    const row = renderer.root.findByProps({ accessibilityLabel: 'Peaks layer' });
+    expect(row.props.accessibilityState).toEqual({ checked: true });
+
+    act(() => row.props.onPress());
+    expect(onChange).toHaveBeenCalledWith('peaks', false);
   });
 });

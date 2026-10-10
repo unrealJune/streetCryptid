@@ -1,4 +1,5 @@
 import { scaleFor } from '../../core/camera';
+import { SHADE_GAIN } from '../../core/terrain';
 import type { MapPalette } from '../../core/types';
 import type { MapRegion } from '../../engine/map-engine';
 import { EMPTY_PACKED } from '../../tiles/packed-geometry';
@@ -6,6 +7,7 @@ import {
   DOT_FIELD_UNIFORM_FLOATS,
   DOT_STEP,
   lodForZoom,
+  NOISE_ORIGIN_WRAP,
   packDotFieldUniforms,
   regionLogicalSize,
 } from '../shader-uniforms';
@@ -83,6 +85,23 @@ describe('packDotFieldUniforms', () => {
     expect(u[11]).toBe(0); // uLod: build zoom 15 → full detail
     expect(u[12]).toBe(1); // uExploration defaults to visible
     expect(u.slice(13, 15)).toEqual([0, 0]); // renderer effects default off
+    expect(u[17]).toBe(0); // uHasElev defaults off: canopy fallback
+    expect(u[18]).toBe(SHADE_GAIN); // uShadeGain
+  });
+
+  it('pins the noise to the map: rect.min in anchor px, wrapped exactly in f64', () => {
+    const u = packDotFieldUniforms(base);
+    const scale = scaleFor(15);
+    expect(u[15]).toBeCloseTo((0.1 * scale) % NOISE_ORIGIN_WRAP, 6);
+    expect(u[16]).toBeCloseTo((0.2 * scale) % NOISE_ORIGIN_WRAP, 6);
+    for (const v of u.slice(15, 17)) {
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThan(NOISE_ORIGIN_WRAP);
+    }
+  });
+
+  it('flags elevation when the terrain texture carries it', () => {
+    expect(packDotFieldUniforms({ ...base, hasElevation: true })[17]).toBe(1);
   });
 
   it('honors a custom lattice step', () => {
