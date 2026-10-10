@@ -16,7 +16,7 @@ import { type RegionSpec } from '../core/region';
 import { roadWidthFor, type RoadLayerOptions } from '../core/road-lod';
 import { riverWidthFor } from '../core/water-lod';
 import type { PackedGeometry } from '../tiles/packed-geometry';
-import { buildMaskPaths } from './mask-paths';
+import { buildMaskPaths, type MaskPaths } from './mask-paths';
 
 /**
  * Build the region's feature mask on the GPU instead of the CPU.
@@ -45,8 +45,11 @@ export function buildMaskImage(
   spec: RegionSpec,
   layers?: RoadLayerOptions
 ): SkImage | null {
-  const paths = buildMaskPaths(geometry, spec, layers);
+  return buildMaskImageFromPaths(buildMaskPaths(geometry, spec, layers), spec);
+}
 
+/** {@link buildMaskImage} from paths already built (the terrain textures share them). */
+export function buildMaskImageFromPaths(paths: MaskPaths, spec: RegionSpec): SkImage | null {
   const recorder = Skia.PictureRecorder();
   const canvas = recorder.beginRecording(Skia.XYWHRect(0, 0, spec.maskWidth, spec.maskHeight));
   // Opaque black base: R=G=B=0 (no feature). Lighten only ever raises channels.

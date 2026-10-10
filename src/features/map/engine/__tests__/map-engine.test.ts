@@ -616,3 +616,50 @@ describe('MapEngine.prefetchPoints', () => {
     expect(source.prefetched).toHaveLength(0);
   });
 });
+
+describe('MapEngine elevation', () => {
+  it('carries the elevation for the built spec on the region', async () => {
+    const raster = { width: 1, height: 1, metres: new Float32Array([420]) };
+    const elevationFor = jest.fn(async () => raster);
+    const engine = new MapEngine({
+      source: new FakeSource(),
+      elevation: { elevationFor },
+      grid,
+      dataZooms,
+    });
+    const region = (await engine.buildRegion(baseRequest))!;
+    expect(region.elevation).toBe(raster);
+    expect(elevationFor).toHaveBeenCalledWith(region.spec);
+  });
+
+  it('never fails a build over elevation', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const engine = new MapEngine({
+      source: new FakeSource(),
+      elevation: { elevationFor: () => Promise.reject(new Error('terrain down')) },
+      grid,
+      dataZooms,
+    });
+    const region = (await engine.buildRegion(baseRequest))!;
+    expect(region.elevation).toBeNull();
+    expect(region.geometry).toBeDefined();
+  });
+
+  it('lands without elevation that is still loading past the grace period', async () => {
+    jest.useFakeTimers({ doNotFake: ['requestAnimationFrame', 'performance'] });
+    try {
+      const engine = new MapEngine({
+        source: new FakeSource(),
+        elevation: { elevationFor: () => new Promise(() => {}) },
+        grid,
+        dataZooms,
+      });
+      const built = engine.buildRegion(baseRequest);
+      await jest.advanceTimersByTimeAsync(5000);
+      const region = (await built)!;
+      expect(region.elevation).toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});

@@ -10,13 +10,14 @@
  * (names, the handful of places) is materialized.
  */
 
-import type { Place } from '../core/types';
+import type { MapPeak, Place } from '../core/types';
 import type {
   HouseNumber,
   MapPoi,
   PackedAeroAreas,
   PackedAeroLines,
   PackedAreas,
+  PackedGroundAreas,
   PackedLines,
   PackedStreets,
   PackedTile,
@@ -26,12 +27,15 @@ import {
   EMPTY_PACKED_AERO_AREAS,
   EMPTY_PACKED_AERO_LINES,
   EMPTY_PACKED_AREAS,
+  EMPTY_PACKED_GROUND_AREAS,
   EMPTY_PACKED_STREETS,
   EMPTY_PACKED_TRANSIT,
 } from './packed-geometry';
 import { addMapPerfMetric, type MapPerfMetricScope } from '../perf/map-perf';
 
 const SCG1_MAGIC = 0x31474353; // "SCG1" little-endian
+/** `i32::MIN`: a peak elevation the tile did not carry. */
+const PEAK_ELE_ABSENT = -2147483648;
 
 export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null): PackedTile {
   // Typed-array views require a 4-byte-aligned byteOffset; the native module's
@@ -211,6 +215,38 @@ export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null)
   const pois = p + 4 <= buf.byteLength ? readPois() : [];
   const houseNumbers = p + 4 <= buf.byteLength ? readHouseNumbers() : [];
 
+  // Ground cover + peaks, appended after house numbers, detected the same way.
+  // Ground cover shares the aeroway areas layout (a kind byte per feature).
+  const groundCover: PackedGroundAreas =
+    p + 12 <= buf.byteLength ? readAeroAreas() : EMPTY_PACKED_GROUND_AREAS;
+  const peaks = p + 4 <= buf.byteLength ? readPeaks() : [];
+
+  function readPeaks(): MapPeak[] {
+    const count = u32();
+    const nameRef = readI32(count);
+    const kindRef = readI32(count);
+    const rank = readI32(count);
+    const ele = readI32(count);
+    const eleFt = readI32(count);
+    const customaryFt = viewU8(count);
+    align4();
+    const xs = viewF32(count);
+    const ys = viewF32(count);
+    const out: MapPeak[] = new Array(count);
+    for (let i = 0; i < count; i++) {
+      out[i] = {
+        name: strings[nameRef[i]] ?? '',
+        world: [originX + xs[i], originY + ys[i]],
+        kind: strings[kindRef[i]] ?? '',
+        ele: ele[i] === PEAK_ELE_ABSENT ? undefined : ele[i],
+        eleFt: eleFt[i] === PEAK_ELE_ABSENT ? undefined : eleFt[i],
+        customaryFt: customaryFt[i] === 1,
+        rank: rank[i] >= 0 ? rank[i] : undefined,
+      };
+    }
+    return out;
+  }
+
   function readPois(): MapPoi[] {
     const count = u32();
     const nameRef = readI32(count);
@@ -291,5 +327,7 @@ export function wrapScg1(input: Uint8Array, metrics?: MapPerfMetricScope | null)
     places,
     pois,
     houseNumbers,
+    groundCover,
+    peaks,
   };
 }

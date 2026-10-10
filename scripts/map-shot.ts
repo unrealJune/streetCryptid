@@ -63,7 +63,8 @@ import {
 import { createExplorationRollup } from '../src/features/map/core/exploration-rollup';
 import { createH3Grid, realH3 } from '../src/features/map/core/h3-grid';
 import {
-  labelWidthPx,
+  chipWidthPx,
+  PEAK_MARKER_PX,
   selectMapLabels,
   LABEL_FONT_SIZE,
   LABEL_HEIGHT_PX,
@@ -106,7 +107,15 @@ import {
   buildingGhostInk,
   buildingStyleFor,
 } from '../src/features/map/core/structure-lod';
-import { lodForZoom } from '../src/features/map/render/shader-uniforms';
+import { lodForZoom, NOISE_ORIGIN_WRAP } from '../src/features/map/render/shader-uniforms';
+import {
+  encodeElevationBands,
+  groundCode,
+  PARK_EDGE_PX,
+  SHADE_GAIN,
+  type ElevationRaster,
+} from '../src/features/map/core/terrain';
+import type { MaskPaths } from '../src/features/map/render/mask-paths';
 import { mergePacked, type PackedGeometry } from '../src/features/map/tiles/packed-geometry';
 import { BundleFetchByteSource } from '../src/features/map/tiles/bundle-fetch';
 import { DecodingGeometrySource } from '../src/features/map/tiles/decode-source';
@@ -148,6 +157,9 @@ const PLACES: readonly Place[] = [
   // Home, and the densest built ground in the fixture set: downtown towers on
   // one side of I-5, Capitol Hill's blocks on the other.
   { id: 'seattle', label: 'Seattle — downtown / Capitol Hill', lat: 47.6097, lon: -122.3331 },
+  // Forested hills around a basin, a lake and the sea within one range view:
+  // what the terrain parkland, ground cover and peak labels are tuned on.
+  { id: 'kyoto', label: 'Kyoto — basin, Higashiyama, Lake Biwa', lat: 35.0116, lon: 135.7681 },
   // Open water at globe zoom: what `--cryptids` exists to show, and the one view
   // where the exploration ladder has deliberately gone dark.
   { id: 'pacific', label: 'North Pacific — open water', lat: 25, lon: -150 },
@@ -273,6 +285,7 @@ async function main(): Promise<void> {
         palette,
         layers,
         cellField,
+        elevation: null,
         typeface,
         boldTypeface,
         // The real selectors, called exactly as the app calls them.
@@ -341,6 +354,8 @@ interface ShotInput {
   layers: RoadLayerOptions;
   /** Baked exploration cells for this region, or null for a plain city render. */
   cellField: ReturnType<typeof buildCellField> | null;
+  /** Elevation for the region's mask pixels, or null for the canopy fallback. */
+  elevation: ElevationRaster | null;
   typeface: any;
   boldTypeface: any;
   /** Name chips to draw over the field (--labels), or null. */
@@ -360,6 +375,7 @@ function renderShot({
   palette,
   layers,
   cellField,
+  elevation,
   typeface,
   boldTypeface,
   labels,
@@ -367,6 +383,9 @@ function renderShot({
   chrome,
 }: ShotInput): Uint8Array {
   const mask = buildMask(CanvasKit, geometry, spec, layers);
+  const maskPaths = buildMaskPaths(geometry, spec, layers);
+  const ground = buildGround(CanvasKit, maskPaths, spec);
+  const terrain = buildTerrain(CanvasKit, maskPaths, spec, elevation);
   // Without --exploration an all-black cell texture is exactly what the shader
   // wants: explored is ignored (uExploration=0) and reveal order 0 means "fully
   // revealed" at uReveal=1. With it, the real baked cell state goes in instead.
@@ -399,6 +418,11 @@ function renderShot({
     cellField ? 1 : 0, // uExploration — fog of war only with --exploration
     palette.effects?.neonGlow ?? 0,
     palette.effects?.scanlines ?? 0,
+    // uNoiseOrigin, wrapped exactly as `packDotFieldUniforms` wraps it.
+    (((spec.rect.minX * scale) % NOISE_ORIGIN_WRAP) + NOISE_ORIGIN_WRAP) % NOISE_ORIGIN_WRAP,
+    (((spec.rect.minY * scale) % NOISE_ORIGIN_WRAP) + NOISE_ORIGIN_WRAP) % NOISE_ORIGIN_WRAP,
+    terrain.hasElevation ? 1 : 0, // uHasElev
+    SHADE_GAIN, // uShadeGain
   ];
 
   const shader = effect.makeShaderWithChildren(uniforms, [
@@ -415,6 +439,18 @@ function renderShot({
       CanvasKit.MipmapMode.None
     ),
     lut.makeShaderOptions(
+      CanvasKit.TileMode.Clamp,
+      CanvasKit.TileMode.Clamp,
+      CanvasKit.FilterMode.Linear,
+      CanvasKit.MipmapMode.None
+    ),
+    ground.makeShaderOptions(
+      CanvasKit.TileMode.Clamp,
+      CanvasKit.TileMode.Clamp,
+      CanvasKit.FilterMode.Nearest,
+      CanvasKit.MipmapMode.None
+    ),
+    terrain.image.makeShaderOptions(
       CanvasKit.TileMode.Clamp,
       CanvasKit.TileMode.Clamp,
       CanvasKit.FilterMode.Linear,
@@ -463,6 +499,8 @@ function renderShot({
   paint.delete();
   surface.delete();
   mask.delete();
+  ground.delete();
+  terrain.image.delete();
   cells.delete();
   return png as Uint8Array;
 }
@@ -657,13 +695,13 @@ function drawLabels(
   canvas.save();
   canvas.scale(PIXEL_RATIO, PIXEL_RATIO);
   for (const label of labels) {
-    const width = labelWidthPx(label.text);
+    const width = chipWidthPx(label.kind, label.text);
     const cx = (label.world[0] - spec.rect.minX) * scale - offX;
     const cy = (label.world[1] - spec.rect.minY) * scale - offY;
     if (cx < -width || cy < -LABEL_HEIGHT_PX || cx > VIEWPORT.width + width) continue;
 
     const rgb =
-      label.kind === 'area'
+      label.kind === 'area' || label.kind === 'peak'
         ? palette.parkLabel
         : label.kind === 'poi' || label.kind === 'housenumber'
           ? palette.building
@@ -689,7 +727,18 @@ function drawLabels(
     textPaint.setColor(CanvasKit.Color(rgb[0], rgb[1], rgb[2], alpha));
     textPaint.setAntiAlias(true);
     const advance = LABEL_FONT_SIZE * 0.6 + LABEL_LETTER_SPACING;
-    let x = -((label.text.length * advance) / 2);
+    // The peak chip leads with a drawn summit mark (render/map-labels.tsx).
+    const marker = label.kind === 'peak' ? PEAK_MARKER_PX : 0;
+    let x = -((label.text.length * advance + marker) / 2) + marker;
+    if (marker) {
+      const mark = CanvasKit.Path.MakeFromSVGString(
+        `M${x - marker + 3.5} -3L${x - marker + 7} 3L${x - marker} 3Z`
+      );
+      if (mark) {
+        canvas.drawPath(mark, textPaint);
+        mark.delete();
+      }
+    }
     for (const ch of label.text) {
       canvas.drawText(ch, x, LABEL_FONT_SIZE * 0.36, textPaint, font);
       x += advance;
@@ -902,6 +951,79 @@ function buildMask(
   const image = surface.makeImageSnapshot();
   surface.delete();
   return image;
+}
+
+/** CanvasKit twin of `buildGroundImage` in `render/terrain-image.ts`. */
+function buildGround(CanvasKit: any, paths: MaskPaths, spec: RegionSpec) {
+  const surface = CanvasKit.MakeSurface(spec.maskWidth, spec.maskHeight);
+  if (!surface) throw new Error('ground surface failed');
+  const canvas = surface.getCanvas();
+  canvas.clear(CanvasKit.BLACK);
+  paths.ground.forEach((svg, kindIndex) => {
+    if (!svg) return;
+    const path = CanvasKit.Path.MakeFromSVGString(svg);
+    if (!path) return;
+    path.setFillType(CanvasKit.FillType.Winding);
+    const paint = new CanvasKit.Paint();
+    paint.setColor(CanvasKit.Color(groundCode(kindIndex), 0, 0, 1));
+    paint.setBlendMode(CanvasKit.BlendMode.Src);
+    paint.setAntiAlias(false);
+    canvas.drawPath(path, paint);
+    paint.delete();
+    path.delete();
+  });
+  const image = surface.makeImageSnapshot();
+  surface.delete();
+  return image;
+}
+
+/** CanvasKit twin of `buildTerrainImage` in `render/terrain-image.ts`. */
+function buildTerrain(
+  CanvasKit: any,
+  paths: MaskPaths,
+  spec: RegionSpec,
+  elevation: ElevationRaster | null
+): { image: any; hasElevation: boolean } {
+  const encoded = elevation ? encodeElevationBands(elevation) : null;
+  const surface = CanvasKit.MakeSurface(spec.maskWidth, spec.maskHeight);
+  if (!surface) throw new Error('terrain surface failed');
+  const canvas = surface.getCanvas();
+  canvas.clear(CanvasKit.BLACK);
+  if (encoded) {
+    const rgba = new Uint8Array(spec.maskWidth * spec.maskHeight * 4);
+    for (let i = 0; i < encoded.bytes.length; i++) {
+      rgba[i * 4 + 1] = encoded.bytes[i];
+      rgba[i * 4 + 3] = 255;
+    }
+    const bands = imageFrom(CanvasKit, rgba, spec.maskWidth, spec.maskHeight);
+    canvas.drawImage(bands, 0, 0);
+    bands.delete();
+  }
+  if (paths.park) {
+    const path = CanvasKit.Path.MakeFromSVGString(paths.park);
+    if (path) {
+      path.setFillType(CanvasKit.FillType.Winding);
+      const logicalPerMask =
+        ((spec.rect.maxX - spec.rect.minX) * scaleFor(spec.zoom)) / spec.maskWidth;
+      const paint = new CanvasKit.Paint();
+      paint.setColor(CanvasKit.Color(255, 0, 0, 1));
+      paint.setAntiAlias(true);
+      paint.setBlendMode(CanvasKit.BlendMode.Lighten);
+      paint.setMaskFilter(
+        CanvasKit.MaskFilter.MakeBlur(
+          CanvasKit.BlurStyle.Normal,
+          PARK_EDGE_PX / logicalPerMask,
+          false
+        )
+      );
+      canvas.drawPath(path, paint);
+      paint.delete();
+      path.delete();
+    }
+  }
+  const image = surface.makeImageSnapshot();
+  surface.delete();
+  return { image, hasElevation: encoded !== null };
 }
 
 function imageFrom(CanvasKit: any, data: Uint8Array, width: number, height: number) {

@@ -26,7 +26,7 @@ import { CLASS_MIN_ZOOM } from './road-lod';
 import type { WorldPoint } from './types';
 import type { PackedAreas, PackedGeometry, PackedStreets } from '../tiles/packed-geometry';
 
-export type MapLabelKind = 'street' | 'area' | 'poi' | 'transit' | 'housenumber' | 'place';
+export type MapLabelKind = 'street' | 'area' | 'poi' | 'transit' | 'housenumber' | 'place' | 'peak';
 
 /** One placed label: where it goes in world space and how it is turned. */
 export interface MapLabel {
@@ -190,13 +190,59 @@ const MAX_AREA_LABELS = 5;
 const MAX_POI_LABELS = 14;
 const MAX_TRANSIT_STOP_LABELS = 10;
 const MAX_HOUSENUMBER_LABELS = 24;
+const MAX_PEAK_LABELS = 8;
 
 /** Extra breathing room around each placed chip when testing for collisions. */
 const COLLISION_MARGIN_PX = 3;
 
-/** Rendered width of a label chip, logical px. */
+/** Rendered width of a label chip's text and padding, logical px. */
 export function labelWidthPx(text: string): number {
   return text.length * LABEL_CHAR_PX + LABEL_PAD_PX;
+}
+
+/**
+ * Room a peak chip reserves for its summit marker (a drawn triangle — IBM Plex
+ * Mono has no ▲ glyph), logical px: the 7 px mark plus the gap after it.
+ */
+export const PEAK_MARKER_PX = 10;
+
+/** Rendered width of a whole chip of `kind`, marker included, logical px. */
+export function chipWidthPx(kind: MapLabelKind, text: string): number {
+  return labelWidthPx(text) + (kind === 'peak' ? PEAK_MARKER_PX : 0);
+}
+
+/**
+ * Below this zoom summits go unnamed. A peak is a landmark at the scale of a
+ * whole range, so — unlike POIs — it belongs to the zoomed-out views; the
+ * tileset's per-cell `rank` keeps the count sane there.
+ */
+export const PEAK_LABEL_MIN_ZOOM = 9;
+
+/** OMT `mountain_peak` classes worth a chip (saddles, ridges and the like are not). */
+const PEAK_CLASSES: ReadonlySet<string> = new Set(['peak', 'volcano']);
+
+/**
+ * How many OMT peak ranks to admit at `zoom` (1-based within the tileset's grid
+ * cell, lower = more prominent). Two at the range view, doubling every two zoom
+ * levels, so the hills around a city get named once you are looking at them.
+ */
+export function peakRankBudget(zoom: number): number {
+  return Math.max(1, Math.round(2 * Math.pow(2, (zoom - PEAK_LABEL_MIN_ZOOM) / 2)));
+}
+
+/**
+ * The elevation half of a peak chip. Metres everywhere except where OMT flags feet
+ * as the customary unit (`customary_ft`), which is what someone there reads on a
+ * trail sign. Empty when the tile carried no elevation.
+ */
+export function peakElevationText(peak: {
+  readonly ele?: number;
+  readonly eleFt?: number;
+  readonly customaryFt: boolean;
+}): string {
+  if (peak.customaryFt && peak.eleFt !== undefined) return `${peak.eleFt} FT`;
+  if (peak.ele !== undefined) return `${peak.ele} M`;
+  return '';
 }
 
 interface Candidate {
@@ -229,6 +275,7 @@ export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): Map
   const pois = poiCandidates(geometry, spec);
   const transitStops = transitStopCandidates(geometry, spec);
   const houseNumbers = houseNumberCandidates(geometry, spec);
+  const peaks = peakCandidates(geometry, spec);
 
   const placed: PlacedBox[] = [];
   const out: MapLabel[] = [];
@@ -257,6 +304,15 @@ export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): Map
   }
 
   for (const candidate of areas) tryPlace(candidate);
+
+  // Peaks after parks and before POIs: in the range views where they appear the
+  // POI tier has not started, and in the street views a summit is still the thing
+  // the hillside around you is named by.
+  let peakCount = 0;
+  for (const candidate of peaks) {
+    if (peakCount >= MAX_PEAK_LABELS) break;
+    if (tryPlace(candidate)) peakCount++;
+  }
 
   // POIs before streets: past `POI_LABEL_MIN_ZOOM` a named landmark is what a
   // person is actually looking for, and a service road's name is not worth
@@ -426,6 +482,42 @@ function transitStopCandidates(geometry: PackedGeometry, spec: RegionSpec): Cand
         world: poi.world,
         angle: 0,
         priority: -(poi.rank ?? 0),
+      });
+    }
+  }
+
+  const cx = (spec.rect.minX + spec.rect.maxX) / 2;
+  const cy = (spec.rect.minY + spec.rect.maxY) / 2;
+  const distSq = (c: Candidate) => (c.world[0] - cx) ** 2 + (c.world[1] - cy) ** 2;
+  return [...best.values()].sort((a, b) => distSq(a) - distSq(b) || b.priority - a.priority);
+}
+
+/**
+ * Named summits from OpenMapTiles `mountain_peak`, upright with their elevation.
+ * Ordered like POIs — nearest the camera first, because a region is nine times
+ * the view — with the higher summit winning ties.
+ */
+function peakCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] {
+  if (spec.zoom < PEAK_LABEL_MIN_ZOOM) return [];
+  const budget = peakRankBudget(spec.zoom);
+
+  // One chip per name: a summit on a tile seam arrives from both tiles.
+  const best = new Map<string, Candidate>();
+  for (const part of geometry.parts) {
+    for (const peak of part.peaks) {
+      if (!peak.name || !PEAK_CLASSES.has(peak.kind)) continue;
+      if ((peak.rank ?? budget) > budget) continue;
+      const name = peak.name.toUpperCase();
+      if (best.has(name)) continue;
+      const elevation = peakElevationText(peak);
+      const text = elevation ? `${name} · ${elevation}` : name;
+      best.set(name, {
+        id: `peak:${name}`,
+        kind: 'peak',
+        text,
+        world: peak.world,
+        angle: 0,
+        priority: peak.ele ?? 0,
       });
     }
   }
@@ -708,7 +800,7 @@ function measureRing(
  * which is the right way to err for label spacing.
  */
 function boxFor(candidate: Candidate, spec: RegionSpec, pxPerWorld: number): PlacedBox {
-  const halfW = labelWidthPx(candidate.text) / 2;
+  const halfW = chipWidthPx(candidate.kind, candidate.text) / 2;
   const halfH = LABEL_HEIGHT_PX / 2;
   const cos = Math.abs(Math.cos(candidate.angle));
   const sin = Math.abs(Math.sin(candidate.angle));

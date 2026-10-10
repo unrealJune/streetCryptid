@@ -18,6 +18,8 @@ export interface MapLayerToggles {
   readonly transit: boolean;
   /** Building footprints and airport surfaces drawn over the dot field. */
   readonly structures: boolean;
+  /** Named summits and their elevations. */
+  readonly peaks: boolean;
 }
 
 export type MapLayerId = keyof MapLayerToggles;
@@ -41,6 +43,7 @@ const LAYERS: { readonly id: MapLayerId; readonly title: string }[] = [
   { id: 'highways', title: 'Highways' },
   { id: 'transit', title: 'Transit' },
   { id: 'structures', title: 'Buildings' },
+  { id: 'peaks', title: 'Peaks' },
 ];
 
 const ROW_RADIUS = 12;

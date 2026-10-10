@@ -172,6 +172,7 @@ export function useMapEngine(
     () =>
       new MapEngine({
         source: dataset.source,
+        elevation: dataset.elevation,
         grid,
         dataZooms: dataset.dataZooms,
         onTiming: __DEV__
