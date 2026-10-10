@@ -499,7 +499,7 @@ export default function MapScreenBody() {
           style={[styles.attribution, { color: theme.chrome.steel }]}
           numberOfLines={1}
         >
-          © OPENSTREETMAP
+          © OPENSTREETMAP · COPERNICUS DEM
         </Text>
         <SettingsControl
           onPress={() => {

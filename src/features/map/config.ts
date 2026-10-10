@@ -6,7 +6,7 @@ import { FixtureGeometrySource } from './tiles/fixture-source';
 import { FIXTURE_BOUNDS, FIXTURE_HOME } from './tiles/__fixtures__/caphill-tiles';
 import { BundleFetchByteSource } from './tiles/bundle-fetch';
 import { DecodingGeometrySource } from './tiles/decode-source';
-import { TerrainRgbElevationSource, type ElevationSource } from './tiles/elevation-source';
+import { TerrariumElevationSource, type ElevationSource } from './tiles/elevation-source';
 import type { GeometrySource } from './tiles/geometry-source';
 import { MartinByteSource } from './tiles/martin-source';
 import { createNativeTileDecoder } from './tiles/native-tile-decoder';
@@ -159,7 +159,7 @@ export function terrainUrlFor(tileUrl: string): string {
 }
 
 /**
- * Terrain-RGB elevation through the same privacy-quantized, SQLite-backed byte
+ * Terrarium elevation through the same privacy-quantized, SQLite-backed byte
  * path as the vector tiles: fine tiles leave only as z10-anchored bundles.
  */
 export function createTerrainElevationSource(
@@ -167,12 +167,12 @@ export function createTerrainElevationSource(
   store: TileByteStore = createTileByteStore()
 ): ElevationSource {
   const terrainUrl = terrainUrlFor(tileUrl);
-  return new TerrainRgbElevationSource(
+  return new TerrariumElevationSource(
     new BundleFetchByteSource({
       coarseUpstream: new MartinByteSource(terrainUrl),
       bundleUpstream: new MartinTileBundleSource(terrainUrl),
       store,
-      sourceId: 'terrain-rgb-v1',
+      sourceId: 'terrain-v1',
       anchorZoom: PRIVACY_ANCHOR_ZOOM,
       ttlMs: TILE_TTL_MS,
     }),

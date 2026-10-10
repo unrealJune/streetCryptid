@@ -1,18 +1,19 @@
 import type { RegionSpec } from '../../core/region';
 import {
-  decodeTerrainRgb,
+  decodeTerrarium,
   TERRAIN_MAX_ZOOM,
-  TerrainRgbElevationSource,
+  TerrariumElevationSource,
   terrainZoomFor,
   type DecodedImage,
 } from '../elevation-source';
 import type { TileByteSource } from '../tile-bytes';
 import { tileWorldRect, type TileCoord } from '../tile-math';
 
-/** Terrain-RGB pixel for an elevation in metres. */
+/** Terrarium pixel for an elevation in metres (1/256 m precision). */
 function rgbFor(metres: number): [number, number, number] {
-  const v = Math.round((metres + 10000) * 10);
-  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+  const v = metres + 32768;
+  const whole = Math.floor(v);
+  return [(whole >> 8) & 255, whole & 255, Math.round((v - whole) * 256)];
 }
 
 /** A size×size image whose elevation is `f(px, py)`. */
@@ -40,12 +41,10 @@ function specOver(tile: TileCoord, zoom: number, mask = 32): RegionSpec {
   };
 }
 
-describe('decodeTerrainRgb', () => {
-  it('decodes Mapbox terrain-RGB to metres at 0.1 m', () => {
-    const decoded = decodeTerrainRgb(image(2, (x, y) => [-12.5, 0, 924.3, 8848][y * 2 + x]));
-    expect(Array.from(decoded).map((v) => Math.round(v * 10) / 10)).toEqual([
-      -12.5, 0, 924.3, 8848,
-    ]);
+describe('decodeTerrarium', () => {
+  it('decodes Terrarium to metres, below sea level included', () => {
+    const decoded = decodeTerrarium(image(2, (x, y) => [-12.5, 0, 924.25, 8848][y * 2 + x]));
+    expect(Array.from(decoded)).toEqual([-12.5, 0, 924.25, 8848]);
   });
 });
 
@@ -58,7 +57,7 @@ describe('terrainZoomFor', () => {
   });
 });
 
-describe('TerrainRgbElevationSource', () => {
+describe('TerrariumElevationSource', () => {
   // The fake decoder passes the image straight through as the tile's one part.
   const encoded = (img: DecodedImage) => [img as unknown as Uint8Array];
   const decode = (bytes: Uint8Array) => bytes as unknown as DecodedImage;
@@ -74,7 +73,7 @@ describe('TerrainRgbElevationSource', () => {
         return t.x === tile.x && t.y === tile.y ? encoded(image(256, (x) => x * 10)) : null;
       },
     };
-    const raster = (await new TerrainRgbElevationSource(bytes, decode).elevationFor(spec))!;
+    const raster = (await new TerrariumElevationSource(bytes, decode).elevationFor(spec))!;
     expect(requested).toEqual([tile]);
     expect(raster.width).toBe(16);
     // Mask pixel i covers DEM px 16i..16i+16; its centre is DEM px 16i + 7.5.
@@ -84,7 +83,7 @@ describe('TerrainRgbElevationSource', () => {
   });
 
   it('returns null where no terrain tile exists (open sea, or no terrain server)', async () => {
-    const source = new TerrainRgbElevationSource({ getTileBytes: async () => null }, decode);
+    const source = new TerrariumElevationSource({ getTileBytes: async () => null }, decode);
     expect(await source.elevationFor(specOver({ z: 10, x: 1, y: 1 }, 11.3))).toBeNull();
   });
 
@@ -92,7 +91,7 @@ describe('TerrainRgbElevationSource', () => {
     const tile = { z: 10, x: 5, y: 5 };
     let fetches = 0;
     const decoder = jest.fn(decode);
-    const source = new TerrainRgbElevationSource(
+    const source = new TerrariumElevationSource(
       {
         async getTileBytes() {
           fetches++;

@@ -18,11 +18,17 @@
  *   bun scripts/map-shot.ts --places seattle --zooms 17 --labels
  *   bun scripts/map-shot.ts --places pacific --zooms 3 --cryptids
  *   bun scripts/map-shot.ts --places seattle --zooms 17 --labels --transit
+ *   bun scripts/map-shot.ts --places kyoto --zooms 9.5,12 --labels --terrain-url https://…/terrain
  *
  * `--exploration` seeds the deterministic demo walk at the place and renders the
  * real exploration layer — the same `buildCellField` → cell-state texture →
  * ghost lattice + amber rim path the app runs — so the resolution ladder
  * (`core/cell-ladder.ts`) can be eyeballed rung by rung.
+ *
+ * `--terrain-url` shades parkland from a `/terrain` endpoint through the app's
+ * own elevation source (the map server, or its fixture-server with `-terrain`);
+ * without it the shot shows the canopy fallback, as a phone does before the
+ * terrain bake is live.
  *
  * `--labels` and `--cryptids` draw the two React overlays the shotter otherwise
  * cannot show: the name chips `selectMapLabels` places (street, park, POI, house
@@ -121,6 +127,11 @@ import { BundleFetchByteSource } from '../src/features/map/tiles/bundle-fetch';
 import { DecodingGeometrySource } from '../src/features/map/tiles/decode-source';
 import type { GeometrySource } from '../src/features/map/tiles/geometry-source';
 import { MartinByteSource } from '../src/features/map/tiles/martin-source';
+import {
+  TerrariumElevationSource,
+  type ElevationSource,
+  type ImageDecoder,
+} from '../src/features/map/tiles/elevation-source';
 import { createTileByteStore, InMemoryTileDb } from '../src/features/map/tiles/sqlite-tile-store';
 import { CachedGeometrySource } from '../src/features/map/tiles/tile-cache';
 import {
@@ -226,6 +237,11 @@ async function main(): Promise<void> {
     : CryptidThemes.daybreak.canvas;
   const lut = imageFrom(CanvasKit, buildPaletteLut(palette), 256, 3);
   const source = createSource(tileUrl!);
+  // Terrain through the app's own elevation source (privacy bundles, in-memory
+  // store), decoded by CanvasKit instead of device Skia.
+  const elevationSource = args.terrainUrl
+    ? createElevationSource(args.terrainUrl, canvasKitImageDecoder(CanvasKit))
+    : null;
 
   // One grid + one rollup for the whole run, exactly as `MapEngine` holds them,
   // so the coarse-rung ancestor sets are built once and reused across zooms.
@@ -285,7 +301,7 @@ async function main(): Promise<void> {
         palette,
         layers,
         cellField,
-        elevation: null,
+        elevation: elevationSource ? await elevationSource.elevationFor(spec) : null,
         typeface,
         boldTypeface,
         // The real selectors, called exactly as the app calls them.
@@ -333,6 +349,39 @@ function createSource(url: string): GeometrySource {
     ),
     256
   );
+}
+
+function createElevationSource(url: string, decode: ImageDecoder): ElevationSource {
+  return new TerrariumElevationSource(
+    new BundleFetchByteSource({
+      coarseUpstream: new MartinByteSource(url),
+      bundleUpstream: new MartinTileBundleSource(url),
+      store: createTileByteStore({ openDb: async () => new InMemoryTileDb() }),
+      sourceId: 'terrain-v1',
+      anchorZoom: TILE_BUNDLE_ANCHOR_ZOOM,
+      ttlMs: 30 * 24 * 60 * 60 * 1000,
+    }),
+    decode
+  );
+}
+
+/** CanvasKit twin of `tiles/skia-image-decoder.ts`. */
+function canvasKitImageDecoder(CanvasKit: any): ImageDecoder {
+  return (bytes) => {
+    const image = CanvasKit.MakeImageFromEncoded(bytes);
+    if (!image) return null;
+    const width = image.width();
+    const height = image.height();
+    const rgba = image.readPixels(0, 0, {
+      width,
+      height,
+      colorType: CanvasKit.ColorType.RGBA_8888,
+      alphaType: CanvasKit.AlphaType.Unpremul,
+      colorSpace: CanvasKit.ColorSpace.SRGB,
+    });
+    image.delete();
+    return rgba instanceof Uint8Array ? { width, height, rgba } : null;
+  };
 }
 
 async function loadGeometry(source: GeometrySource, spec: RegionSpec): Promise<PackedGeometry> {
@@ -1061,6 +1110,8 @@ interface Args {
   highways?: boolean;
   noStructures?: boolean;
   legacyRivers?: boolean;
+  /** A `/terrain` base url (e.g. a local fixture-server -terrain) to shade parkland from. */
+  terrainUrl?: string;
   scheme?: string;
   mode?: 'light' | 'dark';
 }
@@ -1084,6 +1135,7 @@ function parseArgs(argv: readonly string[]): Args {
     } else if (arg === '--highways') out.highways = true;
     else if (arg === '--no-structures') out.noStructures = true;
     else if (arg === '--legacy-rivers') out.legacyRivers = true;
+    else if (arg === '--terrain-url') out.terrainUrl = argv[++i];
     else throw new Error(`unknown flag ${arg}`);
   }
   return out;

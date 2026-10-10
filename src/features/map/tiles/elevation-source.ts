@@ -4,8 +4,9 @@ import type { TileByteSource, TilePayload } from './tile-bytes';
 import { tileKeyOf, tilesCovering, type TileCoord, type TileKey } from './tile-math';
 
 /**
- * Elevation for a region's mask pixels, from Mapbox terrain-RGB raster tiles
- * (WebP/PNG) served beside the vector tileset at `{base}/terrain`.
+ * Elevation for a region's mask pixels, from Terrarium-encoded raster tiles
+ * (WebP/PNG) served beside the vector tileset at `{base}/terrain` — the map
+ * server's bake of the Copernicus GLO-30 DEM, in integer metres.
  *
  * The tiles travel through the same privacy machinery as the vector ones: the
  * byte source is a `BundleFetchByteSource`, so z11–12 requests leave the app only
@@ -46,12 +47,12 @@ export function terrainZoomFor(spec: RegionSpec): number {
   return Math.max(0, Math.min(TERRAIN_MAX_ZOOM, z));
 }
 
-/** Mapbox terrain-RGB: metres = -10000 + (R·65536 + G·256 + B) · 0.1. */
-export function decodeTerrainRgb(image: DecodedImage): Float32Array {
+/** Terrarium: metres = R·256 + G + B/256 − 32768. */
+export function decodeTerrarium(image: DecodedImage): Float32Array {
   const { width, height, rgba } = image;
   const out = new Float32Array(width * height);
   for (let i = 0; i < out.length; i++) {
-    out[i] = -10000 + (rgba[i * 4] * 65536 + rgba[i * 4 + 1] * 256 + rgba[i * 4 + 2]) * 0.1;
+    out[i] = rgba[i * 4] * 256 + rgba[i * 4 + 1] + rgba[i * 4 + 2] / 256 - 32768;
   }
   return out;
 }
@@ -61,7 +62,7 @@ interface DemTile {
   readonly metres: Float32Array;
 }
 
-export class TerrainRgbElevationSource implements ElevationSource {
+export class TerrariumElevationSource implements ElevationSource {
   private readonly decoded = new Map<TileKey, DemTile | null>();
 
   constructor(
@@ -107,7 +108,7 @@ function decodeTile(payload: TilePayload | null, decodeImage: ImageDecoder): Dem
   if (!bytes || bytes.byteLength === 0) return null;
   const image = decodeImage(bytes);
   if (!image || image.width !== image.height || image.width === 0) return null;
-  return { size: image.width, metres: decodeTerrainRgb(image) };
+  return { size: image.width, metres: decodeTerrarium(image) };
 }
 
 /**
