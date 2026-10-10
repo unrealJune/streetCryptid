@@ -3,6 +3,7 @@ import type { FeatureCollection, Feature, LineString, Polygon, Point } from 'geo
 import geojsonvt from 'geojson-vt';
 import vtpbf from 'vt-pbf';
 
+import { mapName } from '../map-name';
 import {
   aeroAreaKindOf,
   aeroLineKindOf,
@@ -11,6 +12,43 @@ import {
   transitModeOf,
 } from '../mvt-mapping';
 import { tileWorldRect } from '../tile-math';
+
+describe('mapName', () => {
+  it.each([
+    [{ name: '京都', 'name:en': 'Kyoto', name_en: 'Kyoto City', 'name:latin': 'Kyōto' }, 'Kyoto'],
+    [{ name: '京都', name_en: 'Kyoto', 'name:latin': 'Kyōto' }, 'Kyoto'],
+    [{ name: '京都', 'name:en': ' ', 'name:latin': 'Kyōto' }, 'Kyōto'],
+    [{ name: '京都', name_en: 123, 'name:latin': 'Kyōto' }, 'Kyōto'],
+    [{ name: '京都', 'name:en': '京都', 'name:latin': 'Kyōto' }, 'Kyōto'],
+    [{ name: '京都', name_int: 'Kyoto' }, 'Kyoto'],
+    [{ 'name:en': '  Kyoto  ' }, 'Kyoto'],
+    [{ name: 'München' }, 'München'],
+    [{ name: 'Łódź' }, 'Łódź'],
+    [{ name: 'Đà Nẵng' }, 'Đà Nẵng'],
+    [{ name: 'Cafe\u0301 — São Tomé' }, 'Cafe\u0301 — São Tomé'],
+    [{ name: 'I-5 / Exit 42' }, 'I-5 / Exit 42'],
+    // No Latin name: the local one as written, never a stand-in reading.
+    [{ name: '京都' }, '京都'],
+    [{ name: ' 京都 ' }, '京都'],
+    [{ name: '京都', name_en: '京都' }, '京都'],
+    [{ name: 'Москва' }, 'Москва'],
+    [{ name: 'Αθήνα' }, 'Αθήνα'],
+    [{ name: 'القاهرة' }, 'القاهرة'],
+    [{ name: 'กรุงเทพ' }, 'กรุงเทพ'],
+    [{ name: 'Kyoto 京都' }, 'Kyoto 京都'],
+    [{ name: '、　「」' }, undefined],
+    [{ name: '京都\u202e' }, undefined],
+    [{ name: '京都\u2066' }, undefined],
+    [{ name: 'Kyoto\u202e' }, undefined],
+    [{ name: 'Kyoto\nStation' }, undefined],
+    [{ name: '---' }, undefined],
+    [{ name: '' }, undefined],
+    [{ name: 123 }, undefined],
+    [{}, undefined],
+  ])('selects a readable name from %j', (properties, expected) => {
+    expect(mapName(properties)).toBe(expected);
+  });
+});
 
 // ─── roadClassOf ───────────────────────────────────────────────────────────────
 
@@ -122,6 +160,114 @@ function buildAndDecode(
   const buf = vtpbf.fromGeojsonVt(layers, { version: 2 });
   return decodeMvtTile(new Uint8Array(buf), { z, x: tx, y: ty });
 }
+
+describe('map name policy across layers', () => {
+  it.each([
+    ['transportation', 'streets', 'LineString', 'primary'],
+    ['transportation', 'transit', 'LineString', 'rail'],
+    ['transportation_name', 'labelStreets', 'LineString', 'minor'],
+    ['park', 'parks', 'Polygon', 'park'],
+    ['landcover', 'parks', 'Polygon', 'wood'],
+    ['landuse', 'parks', 'Polygon', 'grass'],
+    ['place', 'places', 'Point', 'city'],
+    ['poi', 'pois', 'Point', 'cafe'],
+  ] as const)(
+    '%s/%s uses English or romanization without a raw name',
+    (layer, section, type, cls) => {
+      const geometry =
+        type === 'Point'
+          ? { type, coordinates: [0, 0] }
+          : type === 'LineString'
+            ? {
+                type,
+                coordinates: [
+                  [0, 0],
+                  [1, 1],
+                ],
+              }
+            : {
+                type,
+                coordinates: [
+                  [
+                    [0, 0],
+                    [1, 0],
+                    [1, 1],
+                    [0, 0],
+                  ],
+                ],
+              };
+      for (const properties of [
+        { name: '京都', 'name:en': 'Kyoto', 'name:latin': 'Kyōto' },
+        { name: '京都', name_en: 'Kyoto' },
+        { 'name:latin': 'Kyoto' },
+      ]) {
+        const decoded = buildAndDecode(
+          {
+            [layer]: {
+              type: 'FeatureCollection',
+              features: [{ type: 'Feature', geometry, properties: { ...properties, class: cls } }],
+            },
+          },
+          0,
+          0,
+          0
+        );
+        expect(decoded[section]).toHaveLength(1);
+        expect(decoded[section]?.[0].name).toBe('Kyoto');
+      }
+    }
+  );
+
+  it('keeps road and park geometry when their names are not text', () => {
+    const decoded = buildAndDecode(
+      {
+        transportation: {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              geometry: {
+                type: 'LineString',
+                coordinates: [
+                  [0, 0],
+                  [1, 1],
+                ],
+              },
+              properties: { class: 'primary', name: '---' },
+            },
+          ],
+        },
+        park: {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              geometry: {
+                type: 'Polygon',
+                coordinates: [
+                  [
+                    [0, 0],
+                    [1, 0],
+                    [1, 1],
+                    [0, 0],
+                  ],
+                ],
+              },
+              properties: { name: '\u202e' },
+            },
+          ],
+        },
+      },
+      0,
+      0,
+      0
+    );
+    expect(decoded.streets).toHaveLength(1);
+    expect(decoded.parks).toHaveLength(1);
+    expect(decoded.streets[0].name).toBeUndefined();
+    expect(decoded.parks[0].name).toBeUndefined();
+  });
+});
 
 // ─── Round-trip test ───────────────────────────────────────────────────────────
 
