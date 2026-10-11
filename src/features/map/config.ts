@@ -42,7 +42,12 @@ export const PLANET_CAMERA_MIN_ZOOM = 1;
  * then magnifies those vectors up to z18 without requesting additional tile zooms.
  */
 export const CAMERA_MAX_ZOOM = 18;
-export const CAMERA_INITIAL_ZOOM = 15;
+/**
+ * Where a launch opens: about 10 km across a phone, neighbourhood-to-neighbourhood, so the
+ * friends you share with are on screen without hunting. Deliberately wider than
+ * `LOCATE_MIN_ZOOM` — opening answers "where is everyone", Locate answers "where am I".
+ */
+export const CAMERA_INITIAL_ZOOM = 12;
 
 /**
  * Closest the camera is allowed to be when it flies somewhere on purpose — tapping a friend,
