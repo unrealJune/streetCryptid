@@ -29,6 +29,7 @@ import type {
   WorldPoint,
 } from '../core/types';
 import type { TileCoord } from './tile-math';
+import { mapName } from './map-name';
 import { tileWorldRect } from './tile-math';
 import { Utf8PbfReader } from './utf8-pbf-reader';
 
@@ -198,7 +199,7 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
   eachFeature('transportation', (f, layer) => {
     if (f.type !== GEOM_LINE) return;
     const omtClass = String(f.properties.class ?? '');
-    const name = typeof f.properties.name === 'string' ? f.properties.name : undefined;
+    const name = mapName(f.properties);
     const roadClass = roadClassOf(omtClass);
     if (roadClass === null) {
       const mode = transitModeOf(omtClass, String(f.properties.subclass ?? ''));
@@ -215,7 +216,7 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
 
   eachFeature('transportation_name', (f, layer) => {
     if (f.type !== GEOM_LINE) return;
-    const name = typeof f.properties.name === 'string' ? f.properties.name : undefined;
+    const name = mapName(f.properties);
     if (!name) return;
     const roadClass = roadClassOf(String(f.properties.class ?? ''));
     if (roadClass === null) return;
@@ -239,7 +240,7 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
 
   const pushPark = (f: VectorTileFeature, layer: VectorTileLayer) => {
     const rings = lines(layer, f);
-    const name = typeof f.properties.name === 'string' ? f.properties.name : undefined;
+    const name = mapName(f.properties);
     if (rings.length) parks.push({ name, rings });
   };
   eachFeature('park', (f, layer) => {
@@ -294,8 +295,8 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
   });
 
   eachFeature('poi', (f, layer) => {
-    const name = f.properties.name;
-    if (typeof name !== 'string' || !name) return;
+    const name = mapName(f.properties);
+    if (!name) return;
     const geom = f.loadGeometry();
     if (!geom.length || !geom[0].length) return;
     pois.push({
@@ -334,8 +335,8 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
   });
 
   eachFeature('place', (f, layer) => {
-    const name = f.properties.name;
-    if (typeof name !== 'string' || !name) return;
+    const name = mapName(f.properties);
+    if (!name) return;
     const geom = f.loadGeometry();
     if (!geom.length || !geom[0].length) return;
     const world = toWorld(layer, geom[0][0].x, geom[0][0].y);
