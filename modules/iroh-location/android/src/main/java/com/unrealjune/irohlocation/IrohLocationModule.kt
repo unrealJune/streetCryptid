@@ -562,7 +562,7 @@ class IrohLocationModule : Module() {
     Name("IrohLocation")
     // `onNativeFix` is the mounted-app handoff: while the app is wired the foreground service hands
     // its captures here rather than running them itself. See `IrohLocationModule.handOffCapture`.
-    Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix")
+    Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix", "onFriendsPulled")
 
     OnCreate {
       val context = checkNotNull(
@@ -1499,6 +1499,18 @@ class IrohLocationModule : Module() {
       if (parked != null) payload["parked"] = parked
       module.sendEvent("onNativeFix", payload)
       return true
+    }
+
+    /**
+     * Tell a mounted app the service pulled friends into the replica while it was off screen, so
+     * it re-reads the replica it already holds. The same `onFriendsPulled` payload as iOS.
+     */
+    fun notifyFriendsPulled(trigger: String, entries: Int, elapsedMs: Long) {
+      val module = sink?.get() ?: return
+      module.sendEvent(
+        "onFriendsPulled",
+        mapOf("trigger" to trigger, "entries" to entries, "elapsedMs" to elapsedMs),
+      )
     }
   }
 }

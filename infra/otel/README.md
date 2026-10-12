@@ -162,6 +162,7 @@ them describe a ping; all of them describe why there wasn't one.
 | `revive.arm` (`outcome`)                               | whether the iOS tripwire is actually armed, rather than only believed to be — `armed` \| `throttled` \| `task-undefined` \| `unavailable` \| `failed` |
 | `device.health` (`sharing.muted`)                      | this phone believes it is sharing and cannot — `foreground-permission` \| `background-permission` \| `location-task-stopped` \| `no-recipients`       |
 | `location.runtime` (`location.event`)                  | the iOS native location runtime describing itself, JS or no JS — see [below](#is-core-location-delivering-locationruntime)                            |
+| `friend.pull` (`pull.outcome`)                         | a native receive-side pull and what it cost against the OS's background allowance — see [below](#is-the-background-pull-safe-friendpull)              |
 
 ### Spans that say what the phone and its human were doing
 
@@ -525,6 +526,55 @@ Read a pulse like this:
 { name = "location.runtime" && span.location.event = "pulse" && span.location.state = "moving" && span.location.deliveries = 0 }
 ```
 
+## Is the background pull safe? (`friend.pull`)
+
+Until 2026-10-09 a pocketed iPhone whose app had been opened pulled friends on none of its wakes —
+the location background mode keeps that process resident and every capture went through the JS
+handoff, which never pulled — so a friend's dot was frozen until the app came back on screen
+(4892 wakes, 0 pulls over six hours on one phone). The native runtime now pulls there too, and a
+pull is the expensive half of a wake: up to 25 s waiting for a first event, which is the whole of
+an iOS background window. `friend.pull` is how that cost stays visible.
+
+Each pull runs under a background-task assertion with a deadline (`pull.budget_ms`, at most 20 s,
+clamped to what `backgroundTimeRemaining` leaves after a 5 s margin) and is recorded by
+`BackgroundLocationRuntime.pullFriendFixes` through `friend_pull.rs` (Android's
+`NativeBackgroundRuntime` records the same span, without the allowance). The network side of the
+same pass is its `trail.sync`, which now carries `sync.budget_ms`, `sync.entries` and how each
+namespace's wait ended (`sync.ns_content_ready` / `_idle` / `_no_answer` / `_deadline` /
+`_closed`).
+
+| `pull.outcome` | Means                                                                                                                                    |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `completed`    | the pass returned; `pull.entries` says whether it was worth it                                                                           |
+| `failed`       | the pass errored (every namespace failed, or the node was down); `pull.error`                                                            |
+| `expired`      | iOS's expiration handler ran mid-pull: we were about to be suspended. Emitted from the handler, so it ships only if the exporter gets to |
+| `stranded`     | the next pull found this one's in-flight mark: frozen or killed inside the pull. `pull.elapsed_ms` is the mark's age                     |
+
+The span is recorded after the fact, so its Tempo duration is ~0 — read `pull.elapsed_ms`. Read it
+like this:
+
+- `pull.overrun_ms > 0`: the deadline timer could not fire, so the process was frozen inside the
+  pull. One is a suspension; a pattern is the budget being wrong.
+- `pull.bg_remaining_end_ms` small: the pull finished near the edge of the allowance. Absent means
+  iOS reported no limit.
+- `pull.ns_no_answer` equal to `pull.namespaces`: nobody answered for anything — the whole pass was
+  spent on sleeping peers.
+- `pull.cpu_ms` is process-wide CPU across the pull (all threads); `pull.cpu_ms_rust` the core's
+  share. Waiting costs wall time, not CPU — a large CPU figure here is a real finding.
+
+Every outcome is also a durable counter on the next `device.health` (`wake.pull_*`), because the two
+that matter most — `expired` and `stranded` — are exactly the ones that may never ship as spans. A
+mounted app is told after a pull that brought something (`onFriendsPulled`) and re-reads the
+replica, recorded as `trail.refresh.native_pull` with `recovered`.
+
+```traceql
+# One phone's pulls.
+{ name = "friend.pull" && resource.service.instance.id = "84f86b144a" } | select(span.pull.outcome, span.pull.trigger, span.pull.elapsed_ms, span.pull.budget_ms, span.pull.entries)
+
+# Pulls that ran into the OS: cut off, stranded, or frozen past their budget.
+{ name = "friend.pull" && (span.pull.outcome =~ "expired|stranded" || span.pull.overrun_ms > 0) }
+```
+
 ## Tuning the per-peer dial budget
 
 Every durable push now grants each peer its **own** deadline, predicted by
@@ -707,6 +757,10 @@ foreground resume. Its value is in the _mismatches_:
 | `wake.cpu_ms_max` approaching 48000                                                                 | not "high": that is `MXCPUExceptionDiagnostic`'s threshold, the constant all 41 exceptions in the 2026-09 window reported                                                                                  |
 | `wake.window_open=true` on a record that is not mid-wake                                            | a previous wake never closed its window — the process was frozen or killed inside it                                                                                                                       |
 | `wake.wakes` large with `wake.syncs` at 0                                                           | the phone is being woken and publishing, but never pulling — friends' fixes only arrive on foreground                                                                                                      |
+| `wake.pull_expired` or `wake.pull_stranded` > 0                                                     | iOS cut a pull off or froze the process inside one — read `friend.pull`; the counters survive what the spans may not                                                                                       |
+| `wake.pull_overruns` > 0                                                                            | a pull came back well past its budget: the process was suspended mid-pull                                                                                                                                  |
+| `wake.pull_delivered` small against `wake.syncs`                                                    | most pulls bring nothing — the friends are not publishing, or the stash is not reachable                                                                                                                   |
+| `wake.pull_no_time` climbing                                                                        | wakes arrive with too little background time left to give a pull a budget                                                                                                                                  |
 | `bg.refresh.expired` present at all                                                                 | iOS is cutting the periodic refresh short. Invisible before this span existed: a terminated refresh and one that was never scheduled both leave a span that never ends                                     |
 
 `location.*` comes from the native runtime's `nativeBackgroundState()` (`BackgroundLocationRuntime`

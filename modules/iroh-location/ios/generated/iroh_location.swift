@@ -1633,6 +1633,17 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func publishWatermarks() async throws  -> PublishWatermarks
     
     /**
+     * [`Self::sync_latest`] with a wall-clock budget, reporting what the pass cost and found.
+     *
+     * For the native background runtimes, which pull inside a window the OS sizes and may end
+     * without warning. `budget_ms` bounds the whole pass (`None` keeps `sync_latest`'s natural
+     * timeouts, up to 25 s waiting for a first event plus 8 s per idle gap); a pass cut short
+     * keeps whatever had already landed, and the live engine goes on syncing behind it. The
+     * report is what the caller puts on its `friend.pull` span — see `infra/otel/README.md`.
+     */
+    func pullLatest(peerTickets: [String], budgetMs: UInt64?, traceparent: String?) async throws  -> PullReport
+    
+    /**
      * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
      * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
      * actually gets a published fix off the phone.**
@@ -3331,6 +3342,32 @@ open func publishWatermarks()async throws  -> PublishWatermarks  {
             completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
             freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePublishWatermarks_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * [`Self::sync_latest`] with a wall-clock budget, reporting what the pass cost and found.
+     *
+     * For the native background runtimes, which pull inside a window the OS sizes and may end
+     * without warning. `budget_ms` bounds the whole pass (`None` keeps `sync_latest`'s natural
+     * timeouts, up to 25 s waiting for a first event plus 8 s per idle gap); a pass cut short
+     * keeps whatever had already landed, and the live engine goes on syncing behind it. The
+     * report is what the caller puts on its `friend.pull` span — see `infra/otel/README.md`.
+     */
+open func pullLatest(peerTickets: [String], budgetMs: UInt64?, traceparent: String?)async throws  -> PullReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_pull_latest(
+                    self.uniffiCloneHandle(),
+                    FfiConverterSequenceString.lower(peerTickets),FfiConverterOptionUInt64.lower(budgetMs),FfiConverterOptionString.lower(traceparent)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePullReport_lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -5590,6 +5627,169 @@ public func FfiConverterTypeEnqueueOutcome_lower(_ value: EnqueueOutcome) -> Rus
 
 
 /**
+ * One `friend.pull` span.
+ */
+public struct FriendPullEvent: Equatable, Hashable {
+    public var outcome: FriendPullOutcome
+    /**
+     * The wake reason the pull rode (`movement`, `periodic`, `refresh`, …).
+     */
+    public var trigger: String
+    /**
+     * `active` / `inactive` / `background` — the app's state as UIKit reported it.
+     */
+    public var appState: String
+    /**
+     * Whether a mounted JS runtime held the capture sink, i.e. this is the resident-app case.
+     */
+    public var jsWired: Bool
+    /**
+     * The deadline handed to `pull_latest`.
+     */
+    public var budgetMs: UInt64
+    /**
+     * What iOS said was left of the background allowance before and after the pull. `None` when
+     * it reported no limit, which is what a resident location-mode process usually sees.
+     */
+    public var bgRemainingStartMs: UInt64?
+    public var bgRemainingEndMs: UInt64?
+    /**
+     * Monotonic wall time around the call, measured by the caller (for `Stranded`, the age of
+     * the mark it found).
+     */
+    public var elapsedMs: UInt64
+    /**
+     * Process CPU across the pull, all threads, and the Rust core's share of it.
+     */
+    public var cpuMs: UInt64?
+    public var cpuMsRust: UInt64?
+    /**
+     * Time since the previous pull started, against the floor that gates them.
+     */
+    public var sinceLastMs: UInt64?
+    public var floorMs: UInt64
+    /**
+     * The core's measurement, when the pass returned.
+     */
+    public var report: PullReport?
+    public var error: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(outcome: FriendPullOutcome, 
+        /**
+         * The wake reason the pull rode (`movement`, `periodic`, `refresh`, …).
+         */trigger: String, 
+        /**
+         * `active` / `inactive` / `background` — the app's state as UIKit reported it.
+         */appState: String, 
+        /**
+         * Whether a mounted JS runtime held the capture sink, i.e. this is the resident-app case.
+         */jsWired: Bool, 
+        /**
+         * The deadline handed to `pull_latest`.
+         */budgetMs: UInt64, 
+        /**
+         * What iOS said was left of the background allowance before and after the pull. `None` when
+         * it reported no limit, which is what a resident location-mode process usually sees.
+         */bgRemainingStartMs: UInt64?, bgRemainingEndMs: UInt64?, 
+        /**
+         * Monotonic wall time around the call, measured by the caller (for `Stranded`, the age of
+         * the mark it found).
+         */elapsedMs: UInt64, 
+        /**
+         * Process CPU across the pull, all threads, and the Rust core's share of it.
+         */cpuMs: UInt64?, cpuMsRust: UInt64?, 
+        /**
+         * Time since the previous pull started, against the floor that gates them.
+         */sinceLastMs: UInt64?, floorMs: UInt64, 
+        /**
+         * The core's measurement, when the pass returned.
+         */report: PullReport?, error: String?) {
+        self.outcome = outcome
+        self.trigger = trigger
+        self.appState = appState
+        self.jsWired = jsWired
+        self.budgetMs = budgetMs
+        self.bgRemainingStartMs = bgRemainingStartMs
+        self.bgRemainingEndMs = bgRemainingEndMs
+        self.elapsedMs = elapsedMs
+        self.cpuMs = cpuMs
+        self.cpuMsRust = cpuMsRust
+        self.sinceLastMs = sinceLastMs
+        self.floorMs = floorMs
+        self.report = report
+        self.error = error
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FriendPullEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFriendPullEvent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FriendPullEvent {
+        return
+            try FriendPullEvent(
+                outcome: FfiConverterTypeFriendPullOutcome.read(from: &buf), 
+                trigger: FfiConverterString.read(from: &buf), 
+                appState: FfiConverterString.read(from: &buf), 
+                jsWired: FfiConverterBool.read(from: &buf), 
+                budgetMs: FfiConverterUInt64.read(from: &buf), 
+                bgRemainingStartMs: FfiConverterOptionUInt64.read(from: &buf), 
+                bgRemainingEndMs: FfiConverterOptionUInt64.read(from: &buf), 
+                elapsedMs: FfiConverterUInt64.read(from: &buf), 
+                cpuMs: FfiConverterOptionUInt64.read(from: &buf), 
+                cpuMsRust: FfiConverterOptionUInt64.read(from: &buf), 
+                sinceLastMs: FfiConverterOptionUInt64.read(from: &buf), 
+                floorMs: FfiConverterUInt64.read(from: &buf), 
+                report: FfiConverterOptionTypePullReport.read(from: &buf), 
+                error: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FriendPullEvent, into buf: inout [UInt8]) {
+        FfiConverterTypeFriendPullOutcome.write(value.outcome, into: &buf)
+        FfiConverterString.write(value.trigger, into: &buf)
+        FfiConverterString.write(value.appState, into: &buf)
+        FfiConverterBool.write(value.jsWired, into: &buf)
+        FfiConverterUInt64.write(value.budgetMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.bgRemainingStartMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.bgRemainingEndMs, into: &buf)
+        FfiConverterUInt64.write(value.elapsedMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.cpuMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.cpuMsRust, into: &buf)
+        FfiConverterOptionUInt64.write(value.sinceLastMs, into: &buf)
+        FfiConverterUInt64.write(value.floorMs, into: &buf)
+        FfiConverterOptionTypePullReport.write(value.report, into: &buf)
+        FfiConverterOptionString.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFriendPullEvent_lift(_ buf: RustBuffer) throws -> FriendPullEvent {
+    return try FfiConverterTypeFriendPullEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFriendPullEvent_lower(_ value: FriendPullEvent) -> RustBuffer {
+    return FfiConverterTypeFriendPullEvent.lower(value)
+}
+
+
+/**
  * Everything the host knows, for `device.health` and for tests.
  */
 public struct HostSnapshot: Equatable, Hashable {
@@ -7534,6 +7734,143 @@ public func FfiConverterTypePublishWatermarks_lower(_ value: PublishWatermarks) 
 
 
 /**
+ * What one [`LocationNode::pull_latest`] pass cost and found. The same numbers are on its
+ * `trail.sync` span; returning them lets the native caller put them on `friend.pull` beside the
+ * things only it knows (the wake, the OS's time allowance, the CPU spent).
+ */
+public struct PullReport: Equatable, Hashable {
+    /**
+     * Wall time inside the pass. Read against the budget: well past it means the process was
+     * frozen mid-pull, since the deadline timer could not fire while it was.
+     */
+    public var elapsedMs: UInt64
+    public var peersRequested: UInt32
+    public var peersDialed: UInt32
+    /**
+     * Peers that delivered at least one entry.
+     */
+    public var peersDelivered: UInt32
+    /**
+     * Entries that landed in the replica.
+     */
+    public var entries: UInt32
+    /**
+     * Namespaces reconciled (our own plus one per friend).
+     */
+    public var namespaces: UInt32
+    /**
+     * Namespaces that errored before they could wait.
+     */
+    public var namespacesFailed: UInt32
+    /**
+     * How the others ended — see `docs::SyncEnd`. `ns_no_answer` is time spent on nobody.
+     */
+    public var nsContentReady: UInt32
+    public var nsClosed: UInt32
+    public var nsIdle: UInt32
+    public var nsNoAnswer: UInt32
+    public var nsDeadline: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Wall time inside the pass. Read against the budget: well past it means the process was
+         * frozen mid-pull, since the deadline timer could not fire while it was.
+         */elapsedMs: UInt64, peersRequested: UInt32, peersDialed: UInt32, 
+        /**
+         * Peers that delivered at least one entry.
+         */peersDelivered: UInt32, 
+        /**
+         * Entries that landed in the replica.
+         */entries: UInt32, 
+        /**
+         * Namespaces reconciled (our own plus one per friend).
+         */namespaces: UInt32, 
+        /**
+         * Namespaces that errored before they could wait.
+         */namespacesFailed: UInt32, 
+        /**
+         * How the others ended — see `docs::SyncEnd`. `ns_no_answer` is time spent on nobody.
+         */nsContentReady: UInt32, nsClosed: UInt32, nsIdle: UInt32, nsNoAnswer: UInt32, nsDeadline: UInt32) {
+        self.elapsedMs = elapsedMs
+        self.peersRequested = peersRequested
+        self.peersDialed = peersDialed
+        self.peersDelivered = peersDelivered
+        self.entries = entries
+        self.namespaces = namespaces
+        self.namespacesFailed = namespacesFailed
+        self.nsContentReady = nsContentReady
+        self.nsClosed = nsClosed
+        self.nsIdle = nsIdle
+        self.nsNoAnswer = nsNoAnswer
+        self.nsDeadline = nsDeadline
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PullReport: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePullReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PullReport {
+        return
+            try PullReport(
+                elapsedMs: FfiConverterUInt64.read(from: &buf), 
+                peersRequested: FfiConverterUInt32.read(from: &buf), 
+                peersDialed: FfiConverterUInt32.read(from: &buf), 
+                peersDelivered: FfiConverterUInt32.read(from: &buf), 
+                entries: FfiConverterUInt32.read(from: &buf), 
+                namespaces: FfiConverterUInt32.read(from: &buf), 
+                namespacesFailed: FfiConverterUInt32.read(from: &buf), 
+                nsContentReady: FfiConverterUInt32.read(from: &buf), 
+                nsClosed: FfiConverterUInt32.read(from: &buf), 
+                nsIdle: FfiConverterUInt32.read(from: &buf), 
+                nsNoAnswer: FfiConverterUInt32.read(from: &buf), 
+                nsDeadline: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PullReport, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.elapsedMs, into: &buf)
+        FfiConverterUInt32.write(value.peersRequested, into: &buf)
+        FfiConverterUInt32.write(value.peersDialed, into: &buf)
+        FfiConverterUInt32.write(value.peersDelivered, into: &buf)
+        FfiConverterUInt32.write(value.entries, into: &buf)
+        FfiConverterUInt32.write(value.namespaces, into: &buf)
+        FfiConverterUInt32.write(value.namespacesFailed, into: &buf)
+        FfiConverterUInt32.write(value.nsContentReady, into: &buf)
+        FfiConverterUInt32.write(value.nsClosed, into: &buf)
+        FfiConverterUInt32.write(value.nsIdle, into: &buf)
+        FfiConverterUInt32.write(value.nsNoAnswer, into: &buf)
+        FfiConverterUInt32.write(value.nsDeadline, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePullReport_lift(_ buf: RustBuffer) throws -> PullReport {
+    return try FfiConverterTypePullReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePullReport_lower(_ value: PullReport) -> RustBuffer {
+    return FfiConverterTypePullReport.lower(value)
+}
+
+
+/**
  * A decrypted ratcheted envelope read from the durable replica.
  *
  * `kind` is `fix` or `null`; `fix` is present only for the fix lane. Keeping null envelopes in
@@ -8249,6 +8586,104 @@ public func FfiConverterTypeFixRejection_lift(_ buf: RustBuffer) throws -> FixRe
 #endif
 public func FfiConverterTypeFixRejection_lower(_ value: FixRejection) -> RustBuffer {
     return FfiConverterTypeFixRejection.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * How a pull ended, or how it was found to have ended.
+ */
+
+public enum FriendPullOutcome: Equatable, Hashable {
+    
+    /**
+     * The pass returned. Whether anything arrived is in the report.
+     */
+    case completed
+    /**
+     * The pass returned an error (every namespace failed, or the node was not running).
+     */
+    case failed
+    /**
+     * iOS's background-task expiration handler ran while the pull was still in flight: the OS
+     * is about to suspend us, and the pull may not finish. Emitted from the handler itself.
+     */
+    case expired
+    /**
+     * The next pull found this one's in-flight mark still set: the process was frozen or killed
+     * before it could finish, so nothing else could report it. `elapsed_ms` is the mark's age.
+     */
+    case stranded
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FriendPullOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFriendPullOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = FriendPullOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FriendPullOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .completed
+        
+        case 2: return .failed
+        
+        case 3: return .expired
+        
+        case 4: return .stranded
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FriendPullOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .completed:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .expired:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .stranded:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFriendPullOutcome_lift(_ buf: RustBuffer) throws -> FriendPullOutcome {
+    return try FfiConverterTypeFriendPullOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFriendPullOutcome_lower(_ value: FriendPullOutcome) -> RustBuffer {
+    return FfiConverterTypeFriendPullOutcome.lower(value)
 }
 
 
@@ -9363,6 +9798,30 @@ fileprivate struct FfiConverterOptionTypeProfileView: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypePullReport: FfiConverterRustBuffer {
+    typealias SwiftType = PullReport?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePullReport.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePullReport.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeSasChallenge: FfiConverterRustBuffer {
     typealias SwiftType = SasChallenge?
 
@@ -10171,6 +10630,16 @@ public func meshSealFix(identitySecret: Data, recvSecret: Data, authorEndpointId
 })
 }
 /**
+ * Record one pull as a `friend.pull` span. Synchronous and cheap, like `record_location_runtime`;
+ * safe to call from an expiration handler.
+ */
+public func recordFriendPull(event: FriendPullEvent)  {try! rustCall() {
+    uniffi_iroh_location_fn_func_record_friend_pull(
+        FfiConverterTypeFriendPullEvent_lower(event),$0
+    )
+}
+}
+/**
  * The process-wide host. There is one per process, and it is the only thing that builds a node.
  */
 public func nodeHost() -> NodeHost  {
@@ -10290,6 +10759,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_mesh_seal_fix() != 60001) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_record_friend_pull() != 38676) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_node_host() != 26497) {
@@ -10491,6 +10963,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_publish_watermarks() != 59312) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_pull_latest() != 61053) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_push_trail() != 39469) {
