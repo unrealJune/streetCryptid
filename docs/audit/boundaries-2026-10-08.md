@@ -595,6 +595,72 @@ from Rust for both.
    reboot. They stop being where policy correctness is discovered, which is what they have been
    since September.
 
+### Does the motion machine need Core Location's types to decide? (researched 2026-10-12)
+
+**No.** Every decision in `BackgroundLocationRuntime.swift` reads scalars off Core Location
+objects and nothing else; the types are needed to observe and to act, never to choose. Read
+function by function:
+
+| Decision                       | Inputs actually used                                                                                                                      | Output                                               |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `isMovingFast`                 | `speed` (with `< 0` meaning unknown)                                                                                                      | bool                                                 |
+| `considerStopping`             | distance to candidate centre, distance to visit arrival, `horizontalAccuracy`, `timestamp`, wall clock, 50 m / 100 m / 180 s              | open candidate, hold cadence, enter stopped, abandon |
+| `considerDeparture`            | `horizontalAccuracy`, distance to anchor, 100 m                                                                                           | enter moving + heartbeat(parked: false)              |
+| `confirmDwelledCandidate`      | candidate age, newest fix `timestamp`, distance to centre, 50 m                                                                           | enter stopped                                        |
+| `didVisit`                     | `departureDate == distantFuture` (arrival), `arrivalDate`, `coordinate`, `horizontalAccuracy`, newest fix `timestamp` and distance, 100 m | unpark / park / stale / ignored                      |
+| `didExitRegion`                | `region.identifier == ours`                                                                                                               | enter moving + heartbeat                             |
+| `applyMovingCadence`           | `speed` bands (0.5, 3, 8 m/s)                                                                                                             | accuracy tier, distance filter, activity hint        |
+| `enterStopped` / `enterMoving` | whether a fence could be armed                                                                                                            | state, cadence, fence arm/clear, persist             |
+| `armStopAnchorFence`           | `isMonitoringAvailable`, `authorizationStatus == authorizedAlways`                                                                        | bool                                                 |
+
+That is five numbers per fix (lat, lon, horizontal accuracy, speed, timestamp), a geodesic
+distance (`gate.rs` already has `haversine_metres`), the wall clock, and four facts about the
+platform (fence available, authorised Always, a region exit with our identifier, a visit that is
+an arrival rather than a departure). Nothing consumes a `CLLocation` as a `CLLocation`.
+`LocationFix` already carries four of the five numbers; `speed_mps: Option<f64>` is the one
+addition. The outputs are a cadence triple (accuracy tier, distance filter, activity hint), arm or
+clear one circular fence, and start or stop the update streams, which are exactly the `Command`
+variants proposed above.
+
+What IS genuinely Core Location's, and how each becomes an adapter concern rather than a policy one:
+
+- **Monitored regions are OS-durable state.** `restoreCandidate` reads `manager.monitoredRegions`
+  at relaunch as evidence that the candidate fence survived. The adapter reports
+  `Event::Boot { fence_registered: bool, last_fix: Option<LocationFix> }`; the policy keeps its
+  own durable state in `state_dir` and reconciles.
+- **Sentinel dates.** `departureDate == .distantFuture` and `arrivalDate == .distantPast` become
+  `arrived: bool` and `Option<ts>` in the event.
+- **`manager.location`** is a free cached last fix. The adapter passes it as `Option<LocationFix>`
+  on the events that need it (`Refresh`, `Visit`).
+- **Platform behaviour the constants are tuned to**: the 20-region cap and the reliability floor of
+  small regions ([Apple, Region Monitoring](https://developer.apple.com/library/mac/documentation/UserExperience/Conceptual/LocationAwarenessPG/RegionMonitoring/RegionMonitoring.html);
+  practitioners put the floor near 100 m, which is where `stopAnchorRadiusM` sits), the
+  significant-change service's roughly 500 m granularity, visit delivery latency, and which wakes
+  relaunch a terminated app (an [open thread](https://developer.apple.com/forums/thread/826964)
+  reports iOS 26 no longer relaunching a force-quit app on a significant change). These are facts
+  about the host, not types: a `PlatformProfile { fence_available, fence_min_radius_m,
+slc_available, visits_available, relaunch_on: … }` record the adapter fills at boot, and the
+  policy branches on it. Today one of those branches is implicit and wrong for Android:
+  `enterStopped` declines a stop when no fence can be armed ("staying in moving"), so a device
+  without region monitoring could never park. Android has no fences and no visits (it uses
+  `LocationManager` directly, no Play Services), which is why it has only a ticker. A policy that
+  takes the profile parks on dwell plus departure radius when fences are unavailable, which is
+  what Android's ticker approximates by hand.
+- **Threading and locking, which is the one real constraint.** Core Location delivers on the
+  main run loop, decisions have to be made synchronously in the delegate (an
+  `allowsBackgroundLocationUpdates` set, a fence armed, a stream started before the process is
+  suspended), and the bootstrap runs this before any node exists. So `BackgroundPolicy` must be a
+  separate `uniffi::Object` with synchronous methods and its own small mutex and file-backed store,
+  in the shape of `GateStore`, never a method on `LocationNode` and never behind `inner` or the
+  tokio runtime. The `Command`s that do touch the node (`Ingest`, `Heartbeat`, `Pull`) are executed
+  by the adapter the way they are today, as detached async tasks.
+
+Conclusion for the plan: the 1,919 lines are an adapter and a policy interleaved, the policy
+half decides on numbers and booleans, and nothing in it needs to stay in Swift. The Android
+runtime is the same policy with most of it missing. One `BackgroundPolicy` with a
+`PlatformProfile` gives both platforms the same machine and the first native tests either has
+ever had.
+
 **Start with the pull, not the motion machine.** The friend pull is the smallest complete
 instance of the problem: brand new, written twice, six mirrored constants, a durable mark in two
 preference stores, and Rust already owns the bounded work. A `friend_pull::plan(trigger, now,
@@ -623,36 +689,47 @@ engine layer, which is policy in JS for the same reasons.
 
 ## Suggested order
 
-Each step is its own PR and leaves `just check-all` green.
+_Updated 2026-10-12 after the re-evaluation and the Core Location question._ Each step is its own
+PR and leaves `just check-all` green.
 
 1. **Delete what nothing calls.** Rust: four un-ratcheted `docs_write*`, two `read_latest*`,
    three session methods, `sync_latest_via_only`, `new_with_data_dir`, `publishResync`,
-   `clearResync`; mesh behind `cli`. TS/JS: `handOverNativeBackground`, `nativeNodeOwner`, the
-   `NodeHost` compat paths (`nativeAdoptsNode`, `isClaimRefusal`'s retry, the `shutdown` +
-   `createNode` branch), `ingestFixesHeadless`, the seven uncalled service methods, the iOS
-   benchmark profile, the eleven orphan modules, the `background/` barrel. **wasm**: the crate,
-   the CI job, `build-wasm`, the `#[path]` sharing; `IrohLocationModule.web.ts` becomes a stub.
-   CI regenerates the bindings. No behaviour change.
+   `clearResync`; move `publish_inner` and `docs_write_*_inner` out of the exported impls; mesh
+   behind `cli`. TS/JS: `handOverNativeBackground`, `nativeNodeOwner`, the `NodeHost` compat
+   paths (`nativeAdoptsNode`, `isClaimRefusal`'s retry, the `shutdown` + `createNode` branch),
+   `ingestFixesHeadless`, the seven uncalled service methods, the iOS benchmark profile, the
+   eleven orphan modules, the `background/` barrel. **wasm**: the crate, the CI job, `build-wasm`,
+   the `#[path]` sharing; `IrohLocationModule.web.ts` becomes a stub. No behaviour change.
 2. **Collapse the boolean-product names** with `Payload` and `Option<String>` traceparent;
-   `push_trail` becomes the budgeted one.
+   `push_trail` becomes the budgeted one. Make listener parameters non-optional (the ubrn
+   `Option<foreign trait>` bug, and they are never absent).
 3. **`force` on `ingest_fix`**, delete the JS publish pipeline, shadow seq, and resync driver.
-   This is the step that removes the most JS.
 4. **Version gate at `createNode`**, `IrohLocationApi` fully required, platform split, delete
-   the 57 guards. Typed health records.
-5. **Spike `uniffi-bindgen-react-native`** (see "What the field does"). On success the node API
-   moves out of the Expo module and the 38 mappers, the TS mirror, the `declare class` and the
-   web stub are generated or deleted; on failure, generated types plus the FFI-type discipline.
-   Ids as hex strings in Rust and total decoders either way.
-6. **Typed errors** with codes; delete the regex classifiers.
-7. **Android background: native geofence receiver + native device health**, then delete
-   `runRefresh`, `teardownBounded` and the `native-runtime-owner` chain. Fix the `revive-task.ts`
-   header either way.
-8. **Extract `PairingSession`** as a reducer; introduce `singleFlight` / `withTimeout` /
-   `changedSince`; then trail.
-9. **Native runtime always ingests; the JS engine becomes a listener.** Battery tiers move into
-   Rust. This is the first half of the motion machine.
-10. **Motion machine into Rust.**
-11. **Retire the web target** once `store-shots` runs on a simulator.
+   the 57 guards. Typed health records. `FriendPullEvent.trigger` and the other `String`
+   discriminants become enums.
+5. **Pull policy into Rust.** `friend_pull::plan(trigger, now, last_pull, remaining_ms)` plus the
+   open-pull mark in `state_dir`; Swift and Kotlin keep "begin task, call `pull_latest`, end
+   task". First instance of the seam, fixes the two-platform divergence that exists today, and
+   brings the first native adapter tests with it (XCTest target on the module; JUnit on Android
+   next to `cryptid-generator`'s).
+6. **`uniffi-bindgen-react-native` on a device** (the spike's unverified step): a dev-client
+   build with the generated package alongside the Expo module, `location-sharing.ts` pointed at
+   it for `createNode` / `start` / `subscribe` / `readLatest`. On success the node API leaves the
+   Expo module and the 38 mappers, the TS mirror, the `declare class` and the web stub go; on
+   failure, generated types plus the FFI-type discipline. Ids as hex strings in Rust and total
+   decoders either way. Newtypes + `customTypes` for `ts` / `seq` so they stay `number` in TS.
+7. **Typed errors** with codes; delete the regex classifiers.
+8. **`BackgroundPolicy` into Rust.** Motion, dwell, departure, cadence, fences and the parked
+   claim as one `step(state, event, now) -> Vec<Command>` with a `PlatformProfile`; durable
+   state in `state_dir`; Swift and Kotlin become an event adapter and a command executor each.
+   The AGENTS.md incidents become fixtures. Android gets dwell and parked for free. Then delete
+   `runRefresh`, `teardownBounded` and the `native-runtime-owner` chain, keeping only the
+   geofence self-heal (preferably as a native receiver) and `recordDeviceHealth`.
+9. **Native runtime always ingests; the JS engine becomes a listener.** Battery tiers join the
+   policy in Rust. Then extract `PairingSession` as a reducer and introduce `singleFlight` /
+   `withTimeout` / `changedSince`.
+10. **Retire the web target** once `store-shots` runs on a simulator.
 
-Steps 1 to 4 are mechanical and each is a day or less. Step 5 is the one worth designing before starting,
+Steps 1 to 4 are mechanical and each is a day or less. Step 5 is the smallest proof of the seam
+and should land before step 8 is designed. Step 6 is the one worth designing before starting,
 because it decides what every later record looks like.
