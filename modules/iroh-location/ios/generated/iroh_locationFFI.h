@@ -669,6 +669,11 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_publish_resync(uint64_t ptr
 uint64_t uniffi_iroh_location_fn_method_locationnode_publish_watermarks(uint64_t ptr
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_PULL_LATEST
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_PULL_LATEST
+uint64_t uniffi_iroh_location_fn_method_locationnode_pull_latest(uint64_t ptr, RustBuffer peer_tickets, RustBuffer budget_ms, RustBuffer traceparent
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_PUSH_TRAIL
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_PUSH_TRAIL
 uint64_t uniffi_iroh_location_fn_method_locationnode_push_trail(uint64_t ptr, RustBuffer peer_tickets, RustBuffer traceparent
@@ -1051,6 +1056,11 @@ RustBuffer uniffi_iroh_location_fn_func_mesh_open_fix(RustBuffer recv_secret, Ru
 RustBuffer uniffi_iroh_location_fn_func_mesh_seal_fix(RustBuffer identity_secret, RustBuffer recv_secret, RustBuffer author_endpoint_id, uint64_t seq, uint32_t mesh_epoch, RustBuffer fix, RustBuffer recipients, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_RECORD_FRIEND_PULL
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_RECORD_FRIEND_PULL
+void uniffi_iroh_location_fn_func_record_friend_pull(RustBuffer event, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_NODE_HOST
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_NODE_HOST
 uint64_t uniffi_iroh_location_fn_func_node_host(RustCallStatus *_Nonnull out_status
@@ -1426,6 +1436,12 @@ uint16_t uniffi_iroh_location_checksum_func_mesh_open_fix(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_SEAL_FIX
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_MESH_SEAL_FIX
 uint16_t uniffi_iroh_location_checksum_func_mesh_seal_fix(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_RECORD_FRIEND_PULL
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_RECORD_FRIEND_PULL
+uint16_t uniffi_iroh_location_checksum_func_record_friend_pull(void
     
 );
 #endif
@@ -1828,6 +1844,12 @@ uint16_t uniffi_iroh_location_checksum_method_locationnode_publish_resync(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_PUBLISH_WATERMARKS
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_PUBLISH_WATERMARKS
 uint16_t uniffi_iroh_location_checksum_method_locationnode_publish_watermarks(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_PULL_LATEST
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_PULL_LATEST
+uint16_t uniffi_iroh_location_checksum_method_locationnode_pull_latest(void
     
 );
 #endif

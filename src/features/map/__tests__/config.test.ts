@@ -2,8 +2,8 @@ import { createMapDataset, FIXTURE_DATA_ZOOMS, PLANET_DATA_ZOOMS } from '../conf
 import { FIXTURE_BOUNDS, FIXTURE_HOME } from '../tiles/__fixtures__/caphill-tiles';
 import type { TileBundleRequest } from '../tiles/tile-bundle';
 import { WORLD_RECT } from '../tiles/tile-math';
-import { TILE_STREAM_MEDIA_TYPE } from '../tiles/bundle-stream';
-import { streamFixture } from '../tiles/__fixtures__/stream-fixture';
+import { TILE_STREAM3_MEDIA_TYPE } from '../tiles/bundle-stream';
+import { stream3Fixture } from '../tiles/__fixtures__/stream-fixture';
 
 jest.mock('expo-crypto', () => ({
   CryptoDigestAlgorithm: { SHA256: 'SHA-256' },
@@ -65,7 +65,7 @@ describe('createMapDataset — live chain request shape', () => {
     global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       requests.push({ url, init });
-      const match = /\/bundle\/v2\/(\d+)\/(\d+)\/(\d+)$/.exec(url);
+      const match = /\/bundle\/v3\/(\d+)\/(\d+)\/(\d+)$/.exec(url);
       if (match) {
         const request: TileBundleRequest = {
           anchorZoom: 10,
@@ -73,7 +73,7 @@ describe('createMapDataset — live chain request shape', () => {
           anchorY: Number(match[2]),
           tileZoom: Number(match[3]),
         };
-        const bytes = streamFixture(request).all;
+        const bytes = stream3Fixture(request).all;
         let sent = false;
         return {
           status: 200,
@@ -81,9 +81,9 @@ describe('createMapDataset — live chain request shape', () => {
           headers: {
             get: (name: string) =>
               name === 'content-type'
-                ? TILE_STREAM_MEDIA_TYPE
+                ? TILE_STREAM3_MEDIA_TYPE
                 : name === 'etag'
-                  ? '"test-v2"'
+                  ? '"test-v3"'
                   : null,
           },
           body: {
@@ -111,9 +111,9 @@ describe('createMapDataset — live chain request shape', () => {
     await dataset.source.getTile({ z: 13, x: 1313, y: 2861 });
 
     expect(requests.map((request) => request.url)).toEqual([
-      'http://tiles.test/bundle/v2/164/357/13',
+      'http://tiles.test/bundle/v3/164/357/13',
     ]);
-    expect(requests[0].init?.headers).toEqual({ Accept: TILE_STREAM_MEDIA_TYPE });
+    expect(requests[0].init?.headers).toEqual({ Accept: TILE_STREAM3_MEDIA_TYPE });
   });
 
   it('a coarse tile uses the same planet source and passes through individually', async () => {

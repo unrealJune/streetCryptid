@@ -26,7 +26,9 @@ import { buildCellStateImage } from './cell-state-image';
 import { cellLatticePath, cellRimPath, exploredCellPath } from './cell-overlay-paths';
 import { GHOST_LATTICE_WIDTH } from '../core/hex-lattice';
 import { getDotFieldEffect } from './dot-field-shader';
-import { buildMaskImage } from './mask-image';
+import { buildMaskImageFromPaths } from './mask-image';
+import { buildMaskPaths } from './mask-paths';
+import { buildGroundImage, buildTerrainImage } from './terrain-image';
 import { buildHatchPath, buildStructurePaths } from './structure-paths';
 import { buildTransitPaths } from './transit-paths';
 import { TRANSIT_ALPHA, TRANSIT_CASING_ALPHA, transitWidthFor } from '../core/transit-lod';
@@ -81,9 +83,27 @@ function imageFromRgba(data: Uint8Array, width: number, height: number): SkImage
   return image;
 }
 
-/** The region's feature mask as a texture (R=street G=park B=water), built on GPU. */
-export function makeMaskImage(region: MapRegion, layers?: RoadLayerOptions): SkImage | null {
-  return buildMaskImage(region.geometry, region.spec, layers);
+/** The textures the dot field samples for a region's features, built on GPU. */
+export interface RegionTextures {
+  /** R=street G=park B=water. */
+  readonly mask: SkImage | null;
+  /** R=ground-cover code. */
+  readonly ground: SkImage | null;
+  /** R=park edge G=elevation bands. */
+  readonly terrain: SkImage | null;
+  readonly hasElevation: boolean;
+}
+
+/** One path build feeds all three, so the geometry is projected once. */
+export function makeRegionTextures(region: MapRegion, layers?: RoadLayerOptions): RegionTextures {
+  const paths = buildMaskPaths(region.geometry, region.spec, layers);
+  const terrain = buildTerrainImage(paths, region.spec, region.elevation);
+  return {
+    mask: buildMaskImageFromPaths(paths, region.spec),
+    ground: buildGroundImage(paths, region.spec),
+    terrain: terrain.image,
+    hasElevation: terrain.hasElevation,
+  };
 }
 
 /** The region's cell field baked as a texture (R=fraction G=jitter B=reveal order). */
@@ -100,6 +120,10 @@ export interface RegionImageInput {
   readonly region: MapRegion;
   readonly palette: MapPalette;
   readonly maskImage: SkImage;
+  readonly groundImage: SkImage;
+  readonly terrainImage: SkImage;
+  /** Whether `terrainImage` carries elevation bands (else the canopy fallback). */
+  readonly hasElevation?: boolean;
   readonly cellImage: SkImage;
   readonly lutImage: SkImage;
   /** Load reveal 0..1 (default 1 = fully shown); < 1 renders a cell-by-cell wipe. */
@@ -138,6 +162,9 @@ export function renderRegionImage({
   region,
   palette,
   maskImage,
+  groundImage,
+  terrainImage,
+  hasElevation = false,
   cellImage,
   lutImage,
   reveal = 1,
@@ -163,6 +190,7 @@ export function renderRegionImage({
     pixelRatio,
     reveal,
     explorationEnabled,
+    hasElevation,
   });
   if (__DEV__ && uniforms.length !== DOT_FIELD_UNIFORM_FLOATS) {
     console.warn(
@@ -184,6 +212,18 @@ export function renderRegionImage({
       MipmapMode.None
     ),
     lutImage.makeShaderOptions(TileMode.Clamp, TileMode.Clamp, FilterMode.Linear, MipmapMode.None),
+    groundImage.makeShaderOptions(
+      TileMode.Clamp,
+      TileMode.Clamp,
+      FilterMode.Nearest,
+      MipmapMode.None
+    ),
+    terrainImage.makeShaderOptions(
+      TileMode.Clamp,
+      TileMode.Clamp,
+      FilterMode.Linear,
+      MipmapMode.None
+    ),
   ]);
 
   const width = Math.max(1, Math.round(logical.width * pixelRatio));

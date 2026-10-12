@@ -60,9 +60,22 @@ pub const KID_LEN: usize = 8;
 pub const SESSION_ID_LEN: usize = 16;
 
 /// How far ahead of our receiving position a message may claim to be before we refuse to walk
-/// there. Bounds the work an unauthenticated counter can make us do; a peer further ahead than
-/// this is a desync, which §4.6 recovers by restarting the session rather than by scanning.
-pub const DEFAULT_ACCEPT_WINDOW: u32 = 512;
+/// there. Bounds the work a counter can make us do; a peer further ahead than this is a desync,
+/// which §4.6 recovers by restarting the session rather than by scanning.
+///
+/// Sized against how long a READER can be away, not against how often a sender publishes. The
+/// sender's chain only resets when it receives a new ratchet key from us, and we only produce
+/// one by opening something — which on iOS happens only while the app is mounted. Meanwhile
+/// every tick spends two positions (the gossip and docs lanes each call `next_wraps`). It was
+/// 512, sized for "a few hundred hashes" on the assumption that the peer replies each interval;
+/// that is ~21 h of not opening the app at the 5-minute cadence, and on 2026-10-09 a Pixel spent
+/// 570 positions on an iPhone whose owner had not opened the app for 25 h, which then could not
+/// open anything from it until a restart. 2^17 is ~7 months at the 5-minute cadence and ~18 h of
+/// iOS live mode at its ~1 s. A walk is one blake3 per position with no allocation, so the worst
+/// case is tens of milliseconds, and the counter is inside the author's signature: only a friend
+/// can ask for it. The window gates nothing about secrecy — skipped keys are never stored, and a
+/// chain key can be walked arbitrarily far by anyone who holds it, with or without this check.
+pub const DEFAULT_ACCEPT_WINDOW: u32 = 1 << 17;
 
 /// Default `T_lapse` (§4.2): 24 h without a fresh ratchet pub from the peer drops them from the
 /// wrap set until one arrives.

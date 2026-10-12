@@ -63,6 +63,13 @@ connectors:
       # vocabularies (`location_runtime.rs`), so a handful of series per device.
       - name: location.event
       - name: location.state
+      # `friend.pull` — how a native receive-side pull ended, which wake it rode, and whether a
+      # mounted app was backgrounded. Closed vocabularies (`friend_pull.rs`). The span is recorded
+      # after the fact, so its DURATION is ~0: read `pull.elapsed_ms` in Tempo, or `trail.sync`'s
+      # duration here.
+      - name: pull.outcome
+      - name: pull.trigger
+      - name: pull.app_state
     # Deliberately NOT `sc.author`, `sc.seq` or `sc.entry_hash`: those are per-envelope and would
     # make a new time series for every ping. Follow one envelope in Tempo; count them here.
     histogram:

@@ -7,7 +7,8 @@
 //! the JS/Hermes thread — the JS decoder allocated ~4.6M coordinate tuples per
 //! z13 bundle on the UI thread.
 //!
-//! Pure and dependency-free (no iroh/BLE), so `cargo test` exercises it on any host.
+//! Pure (no iroh/BLE; its only dependency is `flate2`'s pure-Rust inflater), so
+//! `cargo test` exercises it on any host.
 //!
 //! ## Coordinate precision
 //! World space is normalized Web Mercator ([0,1]² at z0). Storing absolute world
@@ -61,9 +62,16 @@
 //!   kind[count]       u8   (index into AERO_LINE_KINDS in core/types.ts)  (pad→4)
 //!   pointOff[count+1] u32
 //!   coords[2*totalPoints] f32
+//! -- pois --  count u32, nameRef/kindRef/subclassRef/rank[count] i32, x[count] f32, y[count] f32
+//! -- house numbers --  count u32, numberRef[count] i32, x[count] f32, y[count] f32
+//! -- ground cover (non-park `landcover`) --
+//!   same layout as aero areas; kind indexes GROUND_KINDS in core/types.ts
+//! -- peaks (`mountain_peak` points) --
+//!   count u32, nameRef/kindRef/rank/ele/eleFt[count] i32 (ele absent = i32::MIN),
+//!   customaryFt[count] u8 (pad→4), x[count] f32, y[count] f32
 //! ```
 //! Appended sections are ordered transit, label streets, buildings, aero areas,
-//! aero lines. A JS reader can detect each by "there are bytes left", so buffers
+//! aero lines, pois, house numbers, ground cover, peaks. A JS reader can detect each by "there are bytes left", so buffers
 //! from older native binaries still parse and simply carry no data for sections
 //! they predate.
 //! An "areas section" (rings grouped per feature): count u32, totalRings u32,
@@ -150,6 +158,7 @@ impl<'a> PbReader<'a> {
 // MVT value + geometry model
 // ---------------------------------------------------------------------------
 
+const GEOM_POINT: u64 = 1;
 const GEOM_LINE: u64 = 2;
 const GEOM_POLYGON: u64 = 3;
 const DEFAULT_EXTENT: u32 = 4096;
@@ -239,6 +248,30 @@ fn aero_line_kind_of(class: &str) -> Option<u8> {
     }
 }
 
+/// OMT `landcover.class` -> a `GROUND_KINDS` index, for the classes that are not
+/// parkland ([`is_park_landcover`] takes `wood`/`grass` first).
+///
+/// Mirrored exactly by `groundKindOf` in
+/// `src/features/map/tiles/mvt-mapping.ts` -- change both together.
+fn ground_kind_of(class: &str) -> Option<u8> {
+    match class {
+        "farmland" => Some(0),
+        "wetland" => Some(1),
+        "sand" => Some(2),
+        "rock" => Some(3),
+        "ice" => Some(4),
+        _ => None,
+    }
+}
+
+/// A peak elevation the tile did not carry, on the wire.
+const PEAK_ELE_ABSENT: i32 = i32::MIN;
+
+/// JS `Math.round` (half rounds up, toward +inf), so the mirrors agree on `ele`.
+fn js_round(v: f64) -> i32 {
+    (v + 0.5).floor() as i32
+}
+
 fn is_park_landcover(class: &str) -> bool {
     matches!(class, "grass" | "wood")
 }
@@ -267,6 +300,9 @@ struct Geometry {
     places: Vec<Place>,
     pois: Vec<Poi>,
     housenumbers: Vec<HouseNumber>,
+    /// Non-park `landcover`; `kind` indexes `GROUND_KINDS` (same shape as aero areas).
+    ground: Vec<AeroArea>,
+    peaks: Vec<Peak>,
     strings: Interner,
 }
 
@@ -314,6 +350,17 @@ struct Poi {
 /// OpenMapTiles `housenumber` point (z14 only): a street number, no name.
 struct HouseNumber {
     number: i32,
+    pos: [f32; 2],
+}
+
+/// OpenMapTiles `mountain_peak` point. Elevations are rounded like the JS mirror.
+struct Peak {
+    name: i32,
+    kind: i32,
+    rank: i32,
+    ele: i32,
+    ele_ft: i32,
+    customary_ft: bool,
     pos: [f32; 2],
 }
 
@@ -577,6 +624,20 @@ fn decode_feature(bytes: &[u8]) -> RawFeature {
 }
 
 impl Layer {
+    /// English-first map-language policy; mirrors tiles/map-name.ts: English,
+    /// then a real Latin name, then the local name as written. The bake runs
+    /// with `--transliterate=false`, so no Latin key holds ICU's guess (which
+    /// reads Japanese kanji as Mandarin pinyin). Raw tile caches keep all
+    /// translations so future locales can re-decode them.
+    fn map_name<'b>(&'b self, f: &RawFeature) -> Option<&'b str> {
+        let text = |key| self.prop(f, key).and_then(Value::as_str).map(trim_name);
+        ["name:en", "name_en", "name:latin", "name_int"]
+            .into_iter()
+            .filter_map(text)
+            .find(|name| is_latin_map_name(name))
+            .or_else(|| text("name").filter(|name| is_local_map_name(name)))
+    }
+
     /// Look up a feature property value by key name via its tag pairs.
     fn prop<'b>(&'b self, f: &RawFeature, key: &str) -> Option<&'b Value> {
         let mut i = 0;
@@ -590,6 +651,46 @@ impl Layer {
         }
         None
     }
+}
+
+/// Conservative Latin typography, not transliteration. Keep the accepted ranges
+/// and letter/number check in sync with tiles/map-name.ts.
+fn is_latin_map_name(name: &str) -> bool {
+    name.chars().all(|c| {
+        matches!(c,
+            '\u{0020}'..='\u{007e}' | '\u{00a0}'..='\u{00b4}' |
+            '\u{00b6}'..='\u{024f}' | '\u{0300}'..='\u{036f}' |
+            '\u{1e00}'..='\u{1eff}' | '\u{2000}'..='\u{2027}')
+    }) && name.chars().any(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '\u{00c0}'..='\u{00d6}' | '\u{00d8}'..='\u{00f6}' |
+                '\u{00f8}'..='\u{024f}' | '\u{1e00}'..='\u{1eff}')
+    })
+}
+
+/// JS `String.prototype.trim`: Unicode whitespace plus the BOM.
+fn trim_name(name: &str) -> &str {
+    name.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+}
+
+/// A local name is shown as written, minus anything that is not text: control
+/// characters (a newline breaks the one-line chip), bidi overrides/isolates
+/// (which reorder the chip), and names made only of spaces and punctuation.
+/// Keep the ranges in sync with `UNSAFE` / `NOT_TEXT` in tiles/map-name.ts.
+fn is_local_map_name(name: &str) -> bool {
+    let unsafe_char = |c: char| {
+        matches!(c,
+            '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}' | '\u{200e}' | '\u{200f}' |
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    };
+    let not_text = |c: char| {
+        c.is_whitespace()
+            || matches!(c,
+                '\u{feff}' | '\u{0021}'..='\u{002f}' | '\u{003a}'..='\u{0040}' |
+                '\u{005b}'..='\u{0060}' | '\u{007b}'..='\u{007e}' | '\u{00a1}'..='\u{00bf}' |
+                '\u{2000}'..='\u{206f}' | '\u{3000}'..='\u{303f}' | '\u{ff01}'..='\u{ff0f}')
+    };
+    !name.chars().any(unsafe_char) && !name.chars().all(not_text)
 }
 
 // ---------------------------------------------------------------------------
@@ -649,8 +750,7 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                     None
                 };
                 let name = layer
-                    .prop(f, "name")
-                    .and_then(|v| v.as_str())
+                    .map_name(f)
                     .map(|s| geo.strings.intern(s))
                     .unwrap_or(-1);
                 for line in decode_geometry(&f.geometry, proj) {
@@ -678,12 +778,9 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                 if f.geom_type != GEOM_LINE {
                     continue;
                 }
-                let Some(name) = layer.prop(f, "name").and_then(|v| v.as_str()) else {
+                let Some(name) = layer.map_name(f) else {
                     continue;
                 };
-                if name.is_empty() {
-                    continue;
-                }
                 let Some(road_class) = layer
                     .prop(f, "class")
                     .and_then(|v| v.as_str())
@@ -742,6 +839,15 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                         .unwrap_or("");
                     if is_park_landcover(class) {
                         push_park(layer, f, proj, geo);
+                    } else if let Some(kind) = ground_kind_of(class) {
+                        let rings = decode_geometry(&f.geometry, proj);
+                        if !rings.is_empty() {
+                            geo.ground.push(AeroArea {
+                                kind,
+                                name: -1,
+                                rings,
+                            });
+                        }
                     }
                 }
             }
@@ -805,12 +911,9 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
         }
         "place" => {
             for f in &layer.features {
-                let Some(name) = layer.prop(f, "name").and_then(|v| v.as_str()) else {
+                let Some(name) = layer.map_name(f) else {
                     continue;
                 };
-                if name.is_empty() {
-                    continue;
-                }
                 let rings = decode_geometry(&f.geometry, proj);
                 let Some(first) = rings.first().and_then(|r| r.first()) else {
                     continue;
@@ -836,12 +939,9 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
         }
         "poi" => {
             for f in &layer.features {
-                let Some(name) = layer.prop(f, "name").and_then(|v| v.as_str()) else {
+                let Some(name) = layer.map_name(f) else {
                     continue;
                 };
-                if name.is_empty() {
-                    continue;
-                }
                 let rings = decode_geometry(&f.geometry, proj);
                 let Some(first) = rings.first().and_then(|r| r.first()) else {
                     continue;
@@ -869,6 +969,40 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                     kind: kind_ref,
                     subclass: subclass_ref,
                     rank,
+                    pos: *first,
+                });
+            }
+        }
+        "mountain_peak" => {
+            for f in &layer.features {
+                if f.geom_type != GEOM_POINT {
+                    continue;
+                }
+                let Some(name) = layer.prop(f, "name").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                let rings = decode_geometry(&f.geometry, proj);
+                let Some(first) = rings.first().and_then(|r| r.first()) else {
+                    continue;
+                };
+                let name_ref = geo.strings.intern(name);
+                let kind_ref = geo.strings.intern(
+                    layer
+                        .prop(f, "class")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                );
+                let num = |key: &str| layer.prop(f, key).and_then(|v| v.as_num());
+                geo.peaks.push(Peak {
+                    name: name_ref,
+                    kind: kind_ref,
+                    rank: num("rank").map(|n| n as i32).unwrap_or(-1),
+                    ele: num("ele").map(js_round).unwrap_or(PEAK_ELE_ABSENT),
+                    ele_ft: num("ele_ft").map(js_round).unwrap_or(PEAK_ELE_ABSENT),
+                    customary_ft: num("customary_ft") == Some(1.0),
                     pos: *first,
                 });
             }
@@ -902,8 +1036,7 @@ fn push_park(layer: &Layer, f: &RawFeature, proj: &Proj, geo: &mut Geometry) {
         return;
     }
     let name = layer
-        .prop(f, "name")
-        .and_then(|v| v.as_str())
+        .map_name(f)
         .map(|s| geo.strings.intern(s))
         .unwrap_or(-1);
     geo.parks.push(Area { name, rings });
@@ -1129,6 +1262,36 @@ fn encode(geo: &Geometry, origin: (f64, f64)) -> Vec<u8> {
         w.f32(h.pos[1]);
     }
 
+    // ground cover + peaks ------------------------------------------------------
+    write_aero_areas(&mut w, &geo.ground);
+
+    w.u32(geo.peaks.len() as u32);
+    for p in &geo.peaks {
+        w.i32(p.name);
+    }
+    for p in &geo.peaks {
+        w.i32(p.kind);
+    }
+    for p in &geo.peaks {
+        w.i32(p.rank);
+    }
+    for p in &geo.peaks {
+        w.i32(p.ele);
+    }
+    for p in &geo.peaks {
+        w.i32(p.ele_ft);
+    }
+    for p in &geo.peaks {
+        w.u8(u8::from(p.customary_ft));
+    }
+    w.align4();
+    for p in &geo.peaks {
+        w.f32(p.pos[0]);
+    }
+    for p in &geo.peaks {
+        w.f32(p.pos[1]);
+    }
+
     w.buf
 }
 
@@ -1303,12 +1466,38 @@ pub fn decode_bundle(bundle: &[u8]) -> Result<Vec<u8>, String> {
     Ok(encode(&geo, (ox, oy)))
 }
 
-/// Decode one coarse XYZ tile (z ≤ anchor) into a flat SCG1 geometry buffer.
+/// Bound on one tile's inflated MVT, matching the map server's `mvt.MaxTileBytes`.
+pub const MAX_INFLATED_TILE_BYTES: usize = 16 << 20;
+
+/// Decode one tile into a flat SCG1 geometry buffer.
+///
+/// `bytes` is raw MVT, or one or more concatenated gzip members (SCB3 entries; a
+/// z14 tile arrives as its structure member followed by its labels member). A raw
+/// MVT can never start with `1f 8b`: `0x1f` would be field 3 with wire type 7.
+/// Gzip that is malformed or inflates past [`MAX_INFLATED_TILE_BYTES`] decodes
+/// as an empty tile, the same as a malformed protobuf.
 pub fn decode_tile(bytes: &[u8], z: u32, x: u32, y: u32) -> Vec<u8> {
     let (ox, oy, _) = tile_min(z, x, y);
     let mut geo = Geometry::default();
-    decode_tile_into(bytes, z, x, y, (ox, oy), &mut geo);
+    if let Some(raw) = inflate_tile(bytes) {
+        decode_tile_into(&raw, z, x, y, (ox, oy), &mut geo);
+    }
     encode(&geo, (ox, oy))
+}
+
+/// Raw MVT for a tile that may be gzip members; `None` when the gzip is unusable.
+fn inflate_tile(bytes: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
+    use std::io::Read;
+    if bytes.len() < 2 || bytes[0] != 0x1f || bytes[1] != 0x8b {
+        return Some(std::borrow::Cow::Borrowed(bytes));
+    }
+    let mut raw = Vec::new();
+    // MultiGzDecoder reads every member; a plain GzDecoder stops after the first.
+    flate2::read::MultiGzDecoder::new(bytes)
+        .take(MAX_INFLATED_TILE_BYTES as u64 + 1)
+        .read_to_end(&mut raw)
+        .ok()?;
+    (raw.len() <= MAX_INFLATED_TILE_BYTES).then_some(std::borrow::Cow::Owned(raw))
 }
 
 #[cfg(test)]
@@ -1444,6 +1633,152 @@ mod tests {
     }
 
     #[test]
+    fn map_name_policy_matches_ts() {
+        let cases: &[(&[(&str, &str)], Option<&str>)] = &[
+            (
+                &[
+                    ("name", "京都"),
+                    ("name:en", "Kyoto"),
+                    ("name_en", "Kyoto City"),
+                    ("name:latin", "Kyōto"),
+                ],
+                Some("Kyoto"),
+            ),
+            (
+                &[
+                    ("name", "京都"),
+                    ("name_en", "Kyoto"),
+                    ("name:latin", "Kyōto"),
+                ],
+                Some("Kyoto"),
+            ),
+            (
+                &[("name", "京都"), ("name:en", " "), ("name:latin", "Kyōto")],
+                Some("Kyōto"),
+            ),
+            (
+                &[
+                    ("name", "京都"),
+                    ("name:en", "京都"),
+                    ("name:latin", "Kyōto"),
+                ],
+                Some("Kyōto"),
+            ),
+            (&[("name", "京都"), ("name_int", "Kyoto")], Some("Kyoto")),
+            (&[("name:en", "  Kyoto  ")], Some("Kyoto")),
+            (&[("name", "München")], Some("München")),
+            (&[("name", "Łódź")], Some("Łódź")),
+            (&[("name", "Đà Nẵng")], Some("Đà Nẵng")),
+            (
+                &[("name", "Cafe\u{0301} — São Tomé")],
+                Some("Cafe\u{0301} — São Tomé"),
+            ),
+            (&[("name", "I-5 / Exit 42")], Some("I-5 / Exit 42")),
+            // No Latin name: the local one as written, never a stand-in reading.
+            (&[("name", "京都")], Some("京都")),
+            (&[("name", " 京都 ")], Some("京都")),
+            (&[("name", "京都"), ("name_en", "京都")], Some("京都")),
+            (&[("name", "Москва")], Some("Москва")),
+            (&[("name", "Αθήνα")], Some("Αθήνα")),
+            (&[("name", "القاهرة")], Some("القاهرة")),
+            (&[("name", "กรุงเทพ")], Some("กรุงเทพ")),
+            (&[("name", "Kyoto 京都")], Some("Kyoto 京都")),
+            (&[("name", "、　「」")], None),
+            (&[("name", "京都\u{202e}")], None),
+            (&[("name", "京都\u{2066}")], None),
+            (&[("name", "Kyoto\u{202e}")], None),
+            (&[("name", "Kyoto\nStation")], None),
+            (&[("name", "---")], None),
+            (&[("name", "")], None),
+            (&[], None),
+        ];
+        for (props, expected) in cases {
+            let layer = Layer {
+                name: "place".into(),
+                extent: 4096,
+                keys: props.iter().map(|(k, _)| (*k).into()).collect(),
+                values: props.iter().map(|(_, v)| Value::Str((*v).into())).collect(),
+                features: Vec::new(),
+            };
+            let f = RawFeature {
+                geom_type: 1,
+                tags: (0..props.len() as u32).flat_map(|i| [i, i]).collect(),
+                geometry: Vec::new(),
+            };
+            assert_eq!(layer.map_name(&f), *expected, "{props:?}");
+        }
+        let layer = Layer {
+            name: "place".into(),
+            extent: 4096,
+            keys: vec!["name_en".into(), "name:latin".into()],
+            values: vec![Value::Num(123.0), Value::Str("Kyōto".into())],
+            features: Vec::new(),
+        };
+        let f = RawFeature {
+            geom_type: 1,
+            tags: vec![0, 0, 1, 1],
+            geometry: Vec::new(),
+        };
+        assert_eq!(layer.map_name(&f), Some("Kyōto"));
+    }
+
+    #[test]
+    fn all_named_layers_use_map_name_policy() {
+        for (layer_name, class, geom_type) in [
+            ("transportation", "primary", GEOM_LINE),
+            ("transportation", "rail", GEOM_LINE),
+            ("transportation_name", "minor", GEOM_LINE),
+            ("park", "park", GEOM_POLYGON),
+            ("landcover", "wood", GEOM_POLYGON),
+            ("landuse", "grass", GEOM_POLYGON),
+            ("place", "city", 1),
+            ("poi", "cafe", 1),
+        ] {
+            for (key, value, expected) in [
+                ("name:en", "Kyoto", Some("Kyoto")),
+                ("name_en", "Kyoto", Some("Kyoto")),
+                ("name:latin", "Kyōto", Some("Kyōto")),
+                ("name", "京都", Some("京都")),
+                ("name", "---", None),
+            ] {
+                let tile = build_layer(
+                    layer_name,
+                    &["class", key],
+                    &[value_str(class), value_str(value)],
+                    &[(
+                        geom_type,
+                        vec![0, 0, 1, 1],
+                        geom_cmds(&[(0, 0), (100, 0), (100, 100)], geom_type == GEOM_POLYGON),
+                    )],
+                );
+                let mut geo = Geometry::default();
+                decode_tile_into(&tile, 0, 0, 0, (0.0, 0.0), &mut geo);
+                let names: Vec<i32> = match (layer_name, class) {
+                    ("transportation", "rail") => geo.transit.iter().map(|f| f.name).collect(),
+                    ("transportation", _) => geo.streets.iter().map(|f| f.name).collect(),
+                    ("transportation_name", _) => {
+                        geo.label_streets.iter().map(|f| f.name).collect()
+                    }
+                    ("place", _) => geo.places.iter().map(|f| f.name).collect(),
+                    ("poi", _) => geo.pois.iter().map(|f| f.name).collect(),
+                    _ => geo.parks.iter().map(|f| f.name).collect(),
+                };
+                if expected.is_none()
+                    && matches!(layer_name, "transportation_name" | "place" | "poi")
+                {
+                    assert!(names.is_empty());
+                } else {
+                    assert_eq!(names.len(), 1, "{layer_name}/{key}");
+                    assert_eq!(names[0] >= 0, expected.is_some());
+                    if let Some(expected) = expected {
+                        assert_eq!(geo.strings.list[names[0] as usize], expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn decodes_transportation_line_with_class_and_name() {
         // keys: class(0), name(1); values: "primary"(0), "Main St"(1)
         let layer = build_layer(
@@ -1490,6 +1825,78 @@ mod tests {
             geo.strings.list[geo.label_streets[0].name as usize],
             "East Pine Street"
         );
+    }
+
+    fn gzip(raw: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut zw = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        zw.write_all(raw).unwrap();
+        zw.finish().unwrap()
+    }
+
+    #[test]
+    fn decodes_concatenated_gzip_members_as_one_tile() {
+        let streets = build_layer(
+            "transportation",
+            &["class"],
+            &[value_str("primary")],
+            &[(
+                GEOM_LINE,
+                vec![0, 0],
+                geom_cmds(&[(0, 0), (100, 200)], false),
+            )],
+        );
+        let names = build_layer(
+            "transportation_name",
+            &["class", "name"],
+            &[value_str("minor"), value_str("East Pine Street")],
+            &[(
+                GEOM_LINE,
+                vec![0, 0, 1, 1],
+                geom_cmds(&[(0, 0), (100, 200)], false),
+            )],
+        );
+        let mut raw = streets.clone();
+        raw.extend_from_slice(&names);
+        let mut members = gzip(&streets);
+        members.extend_from_slice(&gzip(&names));
+
+        assert_eq!(inflate_tile(&members).unwrap().as_ref(), raw.as_slice());
+        assert_eq!(
+            decode_tile(&members, 14, 100, 200),
+            decode_tile(&raw, 14, 100, 200)
+        );
+        let mut geo = Geometry::default();
+        let o = tile_min(14, 100, 200);
+        decode_tile_into(
+            &inflate_tile(&members).unwrap(),
+            14,
+            100,
+            200,
+            (o.0, o.1),
+            &mut geo,
+        );
+        assert_eq!(geo.streets.len(), 1);
+        assert_eq!(geo.label_streets.len(), 1);
+    }
+
+    #[test]
+    fn unusable_gzip_decodes_as_an_empty_tile() {
+        let streets = build_layer(
+            "transportation",
+            &["class"],
+            &[value_str("primary")],
+            &[(
+                GEOM_LINE,
+                vec![0, 0],
+                geom_cmds(&[(0, 0), (100, 200)], false),
+            )],
+        );
+        let member = gzip(&streets);
+        assert!(inflate_tile(&member[..member.len() - 5]).is_none());
+        let bomb = gzip(&vec![0u8; MAX_INFLATED_TILE_BYTES + 1]);
+        assert!(inflate_tile(&bomb).is_none());
+        assert_eq!(decode_tile(&bomb, 14, 0, 0), decode_tile(&[], 14, 0, 0));
     }
 
     #[test]
@@ -1712,6 +2119,19 @@ mod tests {
         assert_eq!(geo.buildings.len(), 0, "buildings");
         assert_eq!(geo.aero_areas.len(), 4, "aeroAreas");
         assert_eq!(geo.aero_lines.len(), 45, "aeroLines");
+        // Non-park landcover (12 farmland + 7 wetland) and the named peaks east
+        // of Seattle (Tiger Mountain); counts match the JS decoder in scg1.test.ts.
+        assert_eq!(geo.ground.len(), 19, "groundCover");
+        assert_eq!(geo.peaks.len(), 28, "peaks");
+        let tiger = geo
+            .peaks
+            .iter()
+            .find(|p| geo.strings.list[p.name as usize] == "East Tiger Mountain")
+            .expect("East Tiger Mountain");
+        assert_eq!(
+            (tiger.ele, tiger.ele_ft, tiger.customary_ft),
+            (913, 2995, true)
+        );
         // Transit rides the same layer the roads come from; the JS decoder's
         // counts for this tile are asserted in scg1.test.ts / mvt-mapping.test.ts.
         assert!(!geo.transit.is_empty(), "transit");

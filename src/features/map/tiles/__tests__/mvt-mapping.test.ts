@@ -3,14 +3,53 @@ import type { FeatureCollection, Feature, LineString, Polygon, Point } from 'geo
 import geojsonvt from 'geojson-vt';
 import vtpbf from 'vt-pbf';
 
+import { mapName } from '../map-name';
 import {
   aeroAreaKindOf,
   aeroLineKindOf,
   decodeMvtTile,
+  groundKindOf,
   roadClassOf,
   transitModeOf,
 } from '../mvt-mapping';
 import { tileWorldRect } from '../tile-math';
+
+describe('mapName', () => {
+  it.each([
+    [{ name: '京都', 'name:en': 'Kyoto', name_en: 'Kyoto City', 'name:latin': 'Kyōto' }, 'Kyoto'],
+    [{ name: '京都', name_en: 'Kyoto', 'name:latin': 'Kyōto' }, 'Kyoto'],
+    [{ name: '京都', 'name:en': ' ', 'name:latin': 'Kyōto' }, 'Kyōto'],
+    [{ name: '京都', name_en: 123, 'name:latin': 'Kyōto' }, 'Kyōto'],
+    [{ name: '京都', 'name:en': '京都', 'name:latin': 'Kyōto' }, 'Kyōto'],
+    [{ name: '京都', name_int: 'Kyoto' }, 'Kyoto'],
+    [{ 'name:en': '  Kyoto  ' }, 'Kyoto'],
+    [{ name: 'München' }, 'München'],
+    [{ name: 'Łódź' }, 'Łódź'],
+    [{ name: 'Đà Nẵng' }, 'Đà Nẵng'],
+    [{ name: 'Cafe\u0301 — São Tomé' }, 'Cafe\u0301 — São Tomé'],
+    [{ name: 'I-5 / Exit 42' }, 'I-5 / Exit 42'],
+    // No Latin name: the local one as written, never a stand-in reading.
+    [{ name: '京都' }, '京都'],
+    [{ name: ' 京都 ' }, '京都'],
+    [{ name: '京都', name_en: '京都' }, '京都'],
+    [{ name: 'Москва' }, 'Москва'],
+    [{ name: 'Αθήνα' }, 'Αθήνα'],
+    [{ name: 'القاهرة' }, 'القاهرة'],
+    [{ name: 'กรุงเทพ' }, 'กรุงเทพ'],
+    [{ name: 'Kyoto 京都' }, 'Kyoto 京都'],
+    [{ name: '、　「」' }, undefined],
+    [{ name: '京都\u202e' }, undefined],
+    [{ name: '京都\u2066' }, undefined],
+    [{ name: 'Kyoto\u202e' }, undefined],
+    [{ name: 'Kyoto\nStation' }, undefined],
+    [{ name: '---' }, undefined],
+    [{ name: '' }, undefined],
+    [{ name: 123 }, undefined],
+    [{}, undefined],
+  ])('selects a readable name from %j', (properties, expected) => {
+    expect(mapName(properties)).toBe(expected);
+  });
+});
 
 // ─── roadClassOf ───────────────────────────────────────────────────────────────
 
@@ -122,6 +161,114 @@ function buildAndDecode(
   const buf = vtpbf.fromGeojsonVt(layers, { version: 2 });
   return decodeMvtTile(new Uint8Array(buf), { z, x: tx, y: ty });
 }
+
+describe('map name policy across layers', () => {
+  it.each([
+    ['transportation', 'streets', 'LineString', 'primary'],
+    ['transportation', 'transit', 'LineString', 'rail'],
+    ['transportation_name', 'labelStreets', 'LineString', 'minor'],
+    ['park', 'parks', 'Polygon', 'park'],
+    ['landcover', 'parks', 'Polygon', 'wood'],
+    ['landuse', 'parks', 'Polygon', 'grass'],
+    ['place', 'places', 'Point', 'city'],
+    ['poi', 'pois', 'Point', 'cafe'],
+  ] as const)(
+    '%s/%s uses English or romanization without a raw name',
+    (layer, section, type, cls) => {
+      const geometry =
+        type === 'Point'
+          ? { type, coordinates: [0, 0] }
+          : type === 'LineString'
+            ? {
+                type,
+                coordinates: [
+                  [0, 0],
+                  [1, 1],
+                ],
+              }
+            : {
+                type,
+                coordinates: [
+                  [
+                    [0, 0],
+                    [1, 0],
+                    [1, 1],
+                    [0, 0],
+                  ],
+                ],
+              };
+      for (const properties of [
+        { name: '京都', 'name:en': 'Kyoto', 'name:latin': 'Kyōto' },
+        { name: '京都', name_en: 'Kyoto' },
+        { 'name:latin': 'Kyoto' },
+      ]) {
+        const decoded = buildAndDecode(
+          {
+            [layer]: {
+              type: 'FeatureCollection',
+              features: [{ type: 'Feature', geometry, properties: { ...properties, class: cls } }],
+            },
+          },
+          0,
+          0,
+          0
+        );
+        expect(decoded[section]).toHaveLength(1);
+        expect(decoded[section]?.[0].name).toBe('Kyoto');
+      }
+    }
+  );
+
+  it('keeps road and park geometry when their names are not text', () => {
+    const decoded = buildAndDecode(
+      {
+        transportation: {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              geometry: {
+                type: 'LineString',
+                coordinates: [
+                  [0, 0],
+                  [1, 1],
+                ],
+              },
+              properties: { class: 'primary', name: '---' },
+            },
+          ],
+        },
+        park: {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              geometry: {
+                type: 'Polygon',
+                coordinates: [
+                  [
+                    [0, 0],
+                    [1, 0],
+                    [1, 1],
+                    [0, 0],
+                  ],
+                ],
+              },
+              properties: { name: '\u202e' },
+            },
+          ],
+        },
+      },
+      0,
+      0,
+      0
+    );
+    expect(decoded.streets).toHaveLength(1);
+    expect(decoded.parks).toHaveLength(1);
+    expect(decoded.streets[0].name).toBeUndefined();
+    expect(decoded.parks[0].name).toBeUndefined();
+  });
+});
 
 // ─── Round-trip test ───────────────────────────────────────────────────────────
 
@@ -544,5 +691,70 @@ describe('decodeMvtTile buildings and aeroway', () => {
     // The runway polygon contributed a closed ring, so it has more points than
     // the two-point line does.
     expect(geom.aeroLines![0].points.length).toBeGreaterThan(2);
+  });
+  it('routes landcover: wood/grass to parks, the rest of GROUND_KINDS to ground cover', () => {
+    const geom = decodeMvtTile(
+      tile({
+        landcover: [
+          feature(box(LON, LAT, d), { class: 'wood' }),
+          feature(box(LON + d * 3, LAT, d), { class: 'farmland' }),
+          feature(box(LON - d * 3, LAT, d), { class: 'rock' }),
+          feature(box(LON, LAT + d * 3, d), { class: 'ice' }),
+          feature(box(LON, LAT - d * 3, d), { class: 'unknown' }),
+          feature(seg(d * 0.4), { class: 'sand' }),
+        ],
+      }),
+      TILE
+    );
+    expect(geom.parks).toHaveLength(1);
+    expect(geom.groundCover?.map((g) => g.kind)).toEqual(['farmland', 'rock', 'ice']);
+  });
+
+  it('decodes named mountain peaks with elevations and the feet flag', () => {
+    const peak = (dx: number, properties: Feature['properties']) =>
+      feature({ type: 'Point', coordinates: [LON + dx, LAT] } satisfies Point, properties);
+    const geom = decodeMvtTile(
+      tile({
+        mountain_peak: [
+          peak(0, {
+            name: 'Tiger',
+            class: 'peak',
+            ele: 913,
+            ele_ft: 2995,
+            customary_ft: 1,
+            rank: 1,
+          }),
+          peak(d, { name: 'Atago', class: 'peak', ele: 924, ele_ft: 3031 }),
+          peak(d * 2, { class: 'peak', ele: 100 }),
+        ],
+      }),
+      TILE
+    );
+    expect(geom.peaks).toEqual([
+      expect.objectContaining({
+        name: 'Tiger',
+        kind: 'peak',
+        ele: 913,
+        eleFt: 2995,
+        customaryFt: true,
+        rank: 1,
+      }),
+      expect.objectContaining({ name: 'Atago', ele: 924, customaryFt: false, rank: undefined }),
+    ]);
+  });
+});
+
+describe('groundKindOf', () => {
+  it('maps the non-park landcover classes and nothing else', () => {
+    expect(['farmland', 'wetland', 'sand', 'rock', 'ice'].map(groundKindOf)).toEqual([
+      'farmland',
+      'wetland',
+      'sand',
+      'rock',
+      'ice',
+    ]);
+    expect(groundKindOf('wood')).toBeNull();
+    expect(groundKindOf('grass')).toBeNull();
+    expect(groundKindOf('')).toBeNull();
   });
 });

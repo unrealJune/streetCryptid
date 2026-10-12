@@ -1,11 +1,14 @@
 import {
   ByteQueue,
   InvalidTileStream,
+  STREAM3_MAX_BYTES,
   STREAM_MAX_BYTES,
+  TILE_STREAM3_MEDIA_TYPE,
   TILE_STREAM_MEDIA_TYPE,
   TileStreamDecoder,
   type HashBytes,
   type StageListener,
+  type StreamFormat,
 } from './bundle-stream';
 import { sharedBundleResumeStore, type BundleResumeStore } from './bundle-resume-store';
 import {
@@ -44,8 +47,14 @@ async function sha256(bytes: Uint8Array<ArrayBuffer>): Promise<Uint8Array> {
   return new Uint8Array(await crypto.digest('SHA-256', bytes));
 }
 
+/**
+ * Progressive bundle downloads: SCB3 (`/bundle/v3`) first, falling back to SCB2
+ * (`/bundle/v2`) on a server without it, and to complete SCB1 bundles
+ * (`/bundle/v1`) on one without either. Each fallback latches per instance.
+ */
 export class StreamingBundleSource implements TileBundleSource {
   private legacyOnly = false;
+  private v2Only = false;
   private readonly legacy: TileBundleSource;
 
   constructor(
@@ -64,7 +73,7 @@ export class StreamingBundleSource implements TileBundleSource {
     const release = await acquire();
     try {
       if (this.legacyOnly) return await this.legacy.getBundle(request);
-      return await this.download(request, onStage);
+      return await this.download(request, onStage, this.v2Only ? 2 : 3);
     } finally {
       release();
     }
@@ -72,17 +81,27 @@ export class StreamingBundleSource implements TileBundleSource {
 
   private async download(
     request: TileBundleRequest,
-    onStage?: StageListener
+    onStage: StageListener | undefined,
+    format: StreamFormat
   ): Promise<readonly TileBundleEntry[]> {
     let result: readonly TileBundleEntry[] | undefined;
-    const decoder = new TileStreamDecoder(request, this.hash, async (stage, entries) => {
-      if (stage.tileZoom === request.tileZoom) result = entries;
-      await onStage?.(stage, entries);
-    });
-    const url = `${this.sourceUrl.replace(/\/+$/, '')}/bundle/v2/${request.anchorX}/${request.anchorY}/${request.tileZoom}`;
+    const decoder = new TileStreamDecoder(
+      request,
+      this.hash,
+      async (stageRequest, entries, stage) => {
+        // The last stage at the requested zoom wins: SCB3's z14 labels part.
+        if (stage.tileZoom === request.tileZoom) result = entries;
+        await onStage?.(stageRequest, entries, stage);
+      },
+      format
+    );
+    const mediaType = format === 3 ? TILE_STREAM3_MEDIA_TYPE : TILE_STREAM_MEDIA_TYPE;
+    const maxBytes = format === 3 ? STREAM3_MAX_BYTES : STREAM_MAX_BYTES;
+    // Resume journals are keyed by URL, so v3 and v2 bytes never mix.
+    const url = `${this.sourceUrl.replace(/\/+$/, '')}/bundle/v${format}/${request.anchorX}/${request.anchorY}/${request.tileZoom}`;
     const store = await this.store();
     let saved = await store.state(url);
-    if (saved && (!strongEtag(saved.etag) || saved.size > STREAM_MAX_BYTES)) {
+    if (saved && (!strongEtag(saved.etag) || saved.size > maxBytes)) {
       await store.remove(url);
       saved = null;
     }
@@ -90,7 +109,7 @@ export class StreamingBundleSource implements TileBundleSource {
     const started = metrics ? perfNow() : 0;
     try {
       return await withRequestDeadline(async (signal) => {
-        const headers: Record<string, string> = { Accept: TILE_STREAM_MEDIA_TYPE };
+        const headers: Record<string, string> = { Accept: mediaType };
         if (saved?.size) {
           headers.Range = `bytes=${saved.size}-`;
           headers['If-Range'] = saved.etag;
@@ -100,6 +119,12 @@ export class StreamingBundleSource implements TileBundleSource {
           60_000,
           signal
         );
+        if ((response.status === 404 || response.status === 405) && format === 3) {
+          this.v2Only = true;
+          await store.remove(url);
+          console.warn('[map] tile server has no v3 stream endpoint; using v2');
+          return this.download(request, onStage, 2);
+        }
         if (response.status === 404 || response.status === 405) {
           this.legacyOnly = true;
           await store.remove(url);
@@ -121,10 +146,7 @@ export class StreamingBundleSource implements TileBundleSource {
         if (encoding && encoding !== 'identity') {
           throw new InvalidTileStream('Tile stream must not use HTTP content encoding');
         }
-        if (
-          !alreadyComplete &&
-          response.headers.get('content-type')?.split(';')[0] !== TILE_STREAM_MEDIA_TYPE
-        ) {
+        if (!alreadyComplete && response.headers.get('content-type')?.split(';')[0] !== mediaType) {
           throw new InvalidTileStream('Unexpected tile stream content type');
         }
         let expectedTotal: number | null = null;
@@ -136,7 +158,7 @@ export class StreamingBundleSource implements TileBundleSource {
             !match ||
             Number(match[1]) !== saved.size ||
             Number(match[2]) + 1 !== Number(match[3]) ||
-            Number(match[3]) > STREAM_MAX_BYTES ||
+            Number(match[3]) > maxBytes ||
             Number(match[3]) <= saved.size
           ) {
             throw new InvalidTileStream('Invalid tile stream resume response');
@@ -152,7 +174,7 @@ export class StreamingBundleSource implements TileBundleSource {
             if (
               !Number.isSafeInteger(expectedTotal) ||
               expectedTotal < 20 ||
-              expectedTotal > STREAM_MAX_BYTES
+              expectedTotal > maxBytes
             )
               throw new InvalidTileStream('Invalid tile stream length');
           }
@@ -186,8 +208,7 @@ export class StreamingBundleSource implements TileBundleSource {
               if (done) break;
               received += value.length;
               addMapPerfMetric('responseBytes', value.length, metrics);
-              if (received > STREAM_MAX_BYTES)
-                throw new InvalidTileStream('Tile stream exceeds limit');
+              if (received > maxBytes) throw new InvalidTileStream('Tile stream exceeds limit');
               journal.push(value);
               while (journal.size >= JOURNAL_CHUNK_BYTES) {
                 const bytes = journal.take(JOURNAL_CHUNK_BYTES);

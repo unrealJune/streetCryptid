@@ -7,10 +7,14 @@ export const TILE_BUNDLE_VERSION = 1;
 export const TILE_BUNDLE_ANCHOR_ZOOM = 10;
 export const TILE_BUNDLE_MAX_ZOOM = 14;
 export const TILE_BUNDLE_MAX_BYTES = 64 * 1024 * 1024;
+/** SCB1 flags bit: every non-empty entry is one complete gzip member (SCB3 payloads). */
+export const TILE_BUNDLE_FLAG_GZIP_ENTRIES = 0x01;
 
 const TILE_BUNDLE_MAGIC = [0x53, 0x43, 0x42, 0x31] as const; // SCB1
 const TILE_BUNDLE_HEADER_BYTES = 20;
 const EMPTY_TILE_LENGTH = 0xffffffff;
+/** A gzip header plus trailer around an empty deflate body. */
+const MIN_GZIP_MEMBER_BYTES = 18;
 const TILE_BUNDLE_TIMEOUT_MS = 60_000;
 
 export interface TileBundleRequest {
@@ -25,10 +29,37 @@ export interface TileBundleEntry {
   readonly bytes: Uint8Array | null;
 }
 
+/**
+ * Which MVT layers a stage's entries carry. SCB3 splits the z14 stage into
+ * `structure` (every layer but `housenumber` and `poi`) and `labels` (only those
+ * two); every other stage, and every v1/v2 stage, is `full`.
+ */
+export type StagePart = 'full' | 'structure' | 'labels';
+
+export interface StreamStage {
+  readonly tileZoom: number;
+  readonly part: StagePart;
+}
+
+/**
+ * Called once per stage, in stream order, before `getBundle` resolves. The
+ * stage descriptor is last so v2-era listeners `(request, entries)` still fit.
+ */
+export type StageListener = (
+  request: TileBundleRequest,
+  entries: readonly TileBundleEntry[],
+  stage: StreamStage
+) => Promise<void>;
+
 export interface TileBundleSource {
+  /**
+   * Resolves with the entries of the LAST stage: the requested zoom in full, or
+   * its `labels` part when the stream split it (the `structure` part reaches
+   * `onStage` first).
+   */
   getBundle(
     request: TileBundleRequest,
-    onStage?: (request: TileBundleRequest, entries: readonly TileBundleEntry[]) => Promise<void>
+    onStage?: StageListener
   ): Promise<readonly TileBundleEntry[]>;
 }
 
@@ -88,10 +119,16 @@ export function validateTileBundleEntries(
   }
 }
 
-/** Decode and strictly validate one SCB1 response against the request that produced it. */
+/**
+ * Decode and strictly validate one SCB1 response against the request that
+ * produced it. `flags` is the exact flags byte the caller's format requires:
+ * `0` for raw-MVT entries (v1/v2), {@link TILE_BUNDLE_FLAG_GZIP_ENTRIES} for
+ * SCB3, whose entries are returned still compressed.
+ */
 export function decodeTileBundle(
   bytes: Uint8Array,
-  request: TileBundleRequest
+  request: TileBundleRequest,
+  flags = 0
 ): readonly TileBundleEntry[] {
   validateRequest(request);
   if (bytes.byteLength < TILE_BUNDLE_HEADER_BYTES) {
@@ -105,7 +142,7 @@ export function decodeTileBundle(
   const version = view.getUint8(4);
   const anchorZoom = view.getUint8(5);
   const tileZoom = view.getUint8(6);
-  const flags = view.getUint8(7);
+  const actualFlags = view.getUint8(7);
   const anchorX = view.getUint32(8);
   const anchorY = view.getUint32(12);
   const entryCount = view.getUint32(16);
@@ -113,7 +150,8 @@ export function decodeTileBundle(
   if (version !== TILE_BUNDLE_VERSION) {
     throw new Error(`Unsupported tile bundle version ${version}`);
   }
-  if (flags !== 0) throw new Error(`Unsupported tile bundle flags ${flags}`);
+  if (actualFlags !== flags) throw new Error(`Unsupported tile bundle flags ${actualFlags}`);
+  const gzipEntries = (flags & TILE_BUNDLE_FLAG_GZIP_ENTRIES) !== 0;
   if (
     anchorZoom !== request.anchorZoom ||
     anchorX !== request.anchorX ||
@@ -144,6 +182,15 @@ export function decodeTileBundle(
     }
     if (offset + length > bytes.byteLength) {
       throw new Error('Tile bundle entry exceeds the response length');
+    }
+    if (
+      gzipEntries &&
+      (length < MIN_GZIP_MEMBER_BYTES ||
+        bytes[offset] !== 0x1f ||
+        bytes[offset + 1] !== 0x8b ||
+        bytes[offset + 2] !== 0x08)
+    ) {
+      throw new Error('Tile bundle entry is not a gzip member');
     }
     entries.push({ tile, bytes: bytes.slice(offset, offset + length) });
     offset += length;

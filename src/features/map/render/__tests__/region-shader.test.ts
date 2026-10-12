@@ -145,6 +145,8 @@ function draw(transitEnabled = true, structuresEnabled = true): Draw[] {
     region,
     palette: CryptidThemes.daybreak.canvas,
     maskImage: image,
+    groundImage: image,
+    terrainImage: image,
     cellImage: image,
     lutImage: image,
     explorationEnabled: false,

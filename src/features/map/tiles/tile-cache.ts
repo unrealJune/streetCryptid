@@ -1,4 +1,4 @@
-import type { GeometrySource } from './geometry-source';
+import type { GeometrySource, PreviewListener } from './geometry-source';
 import type { PackedGeometry } from './packed-geometry';
 import { tileKeyOf, type TileCoord, type TileKey } from './tile-math';
 import { addMapPerfMetric } from '../perf/map-perf';
@@ -21,8 +21,8 @@ export class CachedGeometrySource implements GeometrySource {
     return this.cache.has(tileKeyOf(tile.z, tile.x, tile.y));
   }
 
-  getPreview(tiles: readonly TileCoord[]): Promise<PackedGeometry | null> {
-    return this.upstream.getPreview?.(tiles) ?? Promise.resolve(null);
+  getPreview(tiles: readonly TileCoord[], onStage: PreviewListener): Promise<void> {
+    return this.upstream.getPreview?.(tiles, onStage) ?? Promise.resolve();
   }
 
   /**

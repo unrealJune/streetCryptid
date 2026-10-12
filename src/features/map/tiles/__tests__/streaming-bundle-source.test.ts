@@ -2,12 +2,18 @@ import { randomBytes } from 'node:crypto';
 
 import { StreamingBundleSource } from '../streaming-bundle-source';
 import { MemoryBundleResumeStore } from '../bundle-resume-store';
-import { TILE_STREAM_MEDIA_TYPE } from '../bundle-stream';
+import { TILE_STREAM3_MEDIA_TYPE, TILE_STREAM_MEDIA_TYPE } from '../bundle-stream';
 import { TILE_BUNDLE_MEDIA_TYPE } from '../tile-bundle';
-import { hashBytes, scb1, streamFixture, streamRequest } from '../__fixtures__/stream-fixture';
+import {
+  hashBytes,
+  scb1,
+  stream3Fixture,
+  streamFixture,
+  streamRequest,
+} from '../__fixtures__/stream-fixture';
 
-const url = 'https://tiles.test/planet/bundle/v2/164/357/11';
-const etag = '"dataset:v2:164:357:11"';
+const url = 'https://tiles.test/planet/bundle/v3/164/357/11';
+const etag = '"dataset:v3:164:357:11"';
 const original = global.fetch;
 
 function response(
@@ -17,7 +23,7 @@ function response(
   fail = false
 ): Response {
   const headers = {
-    'content-type': TILE_STREAM_MEDIA_TYPE,
+    'content-type': TILE_STREAM3_MEDIA_TYPE,
     etag,
     ...extra,
   };
@@ -51,7 +57,7 @@ afterEach(() => {
 
 it('resumes a dropped response after a new source instance from the durable prefix, not zero', async () => {
   const store = new MemoryBundleResumeStore();
-  const { all } = streamFixture(streamRequest, new Uint8Array(randomBytes(100_000)));
+  const { all } = stream3Fixture(streamRequest, new Uint8Array(randomBytes(100_000)));
   expect(all.length).toBeGreaterThan(262144);
   const fetchMock = jest
     .fn()
@@ -85,7 +91,7 @@ it('resumes a dropped response after a new source instance from the durable pref
 it('starts fresh if If-Range produces 200 for a changed representation', async () => {
   const store = new MemoryBundleResumeStore();
   await store.append(url, '"old"', 0, new Uint8Array([1, 2, 3]));
-  global.fetch = jest.fn(async () => response(streamFixture().all));
+  global.fetch = jest.fn(async () => response(stream3Fixture().all));
   const result = await new StreamingBundleSource(
     'https://tiles.test/planet',
     async () => store,
@@ -99,7 +105,7 @@ it('rejects inconsistent resumed ranges and discards the poisoned journal', asyn
   const store = new MemoryBundleResumeStore();
   await store.append(url, etag, 0, new Uint8Array([1, 2, 3]));
   global.fetch = jest.fn(async () =>
-    response(streamFixture().all, { 'content-range': 'bytes 4-10/11' }, 206)
+    response(stream3Fixture().all, { 'content-range': 'bytes 4-10/11' }, 206)
   );
   await expect(
     new StreamingBundleSource('https://tiles.test/planet', async () => store, hashBytes).getBundle(
@@ -111,7 +117,7 @@ it('rejects inconsistent resumed ranges and discards the poisoned journal', asyn
 
 it('recognizes a journal completed before process shutdown with a validated 416', async () => {
   const store = new MemoryBundleResumeStore();
-  const { all } = streamFixture();
+  const { all } = stream3Fixture();
   await store.append(url, etag, 0, all);
   global.fetch = jest.fn(async () =>
     response(new Uint8Array(), { 'content-range': `bytes */${all.length}` }, 416)
@@ -126,11 +132,12 @@ it('recognizes a journal completed before process shutdown with a validated 416'
   expect(await store.state(url)).toBeNull();
 });
 
-it('falls back to v1 only when the v2 endpoint is unsupported', async () => {
+it('falls back to v2, then v1, only when each endpoint is unsupported', async () => {
   const store = new MemoryBundleResumeStore();
   const legacy = scb1(streamRequest);
   global.fetch = jest
     .fn()
+    .mockResolvedValueOnce(response(new Uint8Array(), {}, 404))
     .mockResolvedValueOnce(response(new Uint8Array(), {}, 404))
     .mockResolvedValue({
       ok: true,
@@ -147,9 +154,64 @@ it('falls back to v1 only when the v2 endpoint is unsupported', async () => {
   await source.getBundle(streamRequest);
   expect(jest.mocked(fetch).mock.calls.map((call) => String(call[0]))).toEqual([
     url,
-    url.replace('/v2/', '/v1/'),
-    url.replace('/v2/', '/v1/'),
+    url.replace('/v3/', '/v2/'),
+    url.replace('/v3/', '/v1/'),
+    url.replace('/v3/', '/v1/'),
   ]);
+});
+
+it('uses the v2 stream once a server has answered v3 with 404', async () => {
+  const store = new MemoryBundleResumeStore();
+  const v2 = streamFixture(streamRequest, new Uint8Array([0x1a, 0]));
+  const v2Response = () => {
+    const r = response(v2.all, { 'content-type': TILE_STREAM_MEDIA_TYPE, etag: '"v2"' });
+    return r;
+  };
+  global.fetch = jest
+    .fn()
+    .mockResolvedValueOnce(response(new Uint8Array(), {}, 405))
+    .mockImplementation(async (_url, init) => {
+      expect(init.headers.Accept).toBe(TILE_STREAM_MEDIA_TYPE);
+      return v2Response();
+    });
+  const source = new StreamingBundleSource(
+    'https://tiles.test/planet',
+    async () => store,
+    hashBytes
+  );
+  const stages: string[] = [];
+  const entries = await source.getBundle(streamRequest, async (_r, _e, stage) => {
+    stages.push(`${stage.tileZoom}:${stage.part}`);
+  });
+  // v2 entries are raw MVT; nothing downstream needs to know which format delivered them.
+  expect(entries.map((e) => [...(e.bytes ?? [])])).toEqual(Array(4).fill([0x1a, 0]));
+  expect(stages).toEqual(['11:full']);
+  await source.getBundle(streamRequest);
+  expect(jest.mocked(fetch).mock.calls.map((call) => String(call[0]))).toEqual([
+    url,
+    url.replace('/v3/', '/v2/'),
+    url.replace('/v3/', '/v2/'),
+  ]);
+});
+
+it('delivers a z14 stream as overview, structure, then labels, resolving with the labels', async () => {
+  const request = { ...streamRequest, tileZoom: 14 };
+  const { all } = stream3Fixture(request, new Uint8Array([0x1a, 0]));
+  global.fetch = jest.fn(async () => response(all));
+  const stages: string[] = [];
+  const entries = await new StreamingBundleSource(
+    'https://tiles.test/planet',
+    async () => new MemoryBundleResumeStore(),
+    hashBytes
+  ).getBundle(request, async (_r, e, stage) => {
+    stages.push(`${stage.tileZoom}:${stage.part}:${e.length}`);
+  });
+  expect(stages).toEqual(['13:full:64', '14:structure:256', '14:labels:256']);
+  expect(entries).toHaveLength(256);
+  expect([...entries[0].bytes!.subarray(0, 3)]).toEqual([0x1f, 0x8b, 0x08]);
+  expect(jest.mocked(fetch).mock.calls[0][1]?.headers).toMatchObject({
+    Accept: TILE_STREAM3_MEDIA_TYPE,
+  });
 });
 
 it('does not downgrade on server failures', async () => {
@@ -165,7 +227,7 @@ it('does not downgrade on server failures', async () => {
 
 it('allows transfers longer than sixty seconds while bytes keep arriving', async () => {
   jest.useFakeTimers();
-  const { all } = streamFixture();
+  const { all } = stream3Fixture();
   const base = response(all);
   let read = 0;
   const reader = {
@@ -233,7 +295,7 @@ it('admits at most two active streams across source instances', async () => {
     (input) =>
       new Promise<Response>((resolve) => {
         const anchorX = Number(String(input).split('/').at(-3));
-        releases.push(() => resolve(response(streamFixture({ ...streamRequest, anchorX }).all)));
+        releases.push(() => resolve(response(stream3Fixture({ ...streamRequest, anchorX }).all)));
       })
   );
   const pending = [164, 165, 166].map((anchorX) =>

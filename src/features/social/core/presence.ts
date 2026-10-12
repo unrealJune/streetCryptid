@@ -451,7 +451,7 @@ export function msUntilPresenceRosterChanges(presences: readonly FriendPresence[
 /** How often a foregrounded app should reconcile, given who it is currently looking at. */
 export const PRESENCE_SYNC_MOVING_MS = 20_000;
 export const PRESENCE_SYNC_RECENT_MS = 60_000;
-export const PRESENCE_SYNC_IDLE_MS = 5 * 60_000;
+export const PRESENCE_SYNC_IDLE_MS = 90_000;
 
 /**
  * How long to wait before the next durable reconciliation while the app is open.
@@ -462,9 +462,13 @@ export const PRESENCE_SYNC_IDLE_MS = 5 * 60_000;
  * which on the measured fleet is the common case, not the exception.
  *
  * Scaled by what is actually on screen, because the cost is not symmetric: a friend who is moving
- * is the one case where a minute of staleness is visible as a wrong dot, while a roster of parked
- * friends can wait five minutes without anything on screen being untrue. Returns `null` for an
- * empty roster so a user with no friends holds no timer.
+ * is the one case where a minute of staleness is visible as a wrong dot. The idle rung used to be
+ * five minutes on the argument that a parked roster is not untrue while it waits — but the moment
+ * that matters is a parked friend STARTING to move, and nothing on screen can know that has
+ * happened except this poll. On 2026-10-09 the Pixel's on-screen pulls were mostly at the
+ * five-minute rung and the reported experience was "open it, wait, reopen it": reopening is an
+ * immediate pull. On screen a pull is cheap (p50 ~300 ms), so the idle rung is now 90 s. Returns
+ * `null` for an empty roster so a user with no friends holds no timer.
  */
 export function presenceSyncIntervalMs(presences: readonly FriendPresence[]): number | null {
   if (presences.length === 0) return null;

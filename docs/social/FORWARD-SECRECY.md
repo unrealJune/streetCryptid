@@ -479,9 +479,17 @@ Changes from v2 (`crypto.rs`):
 - **Rotating kids.** `kid = KDF_kid(CK at position (i, n))[..8]` instead of the stable
   `blake3(recvPub)[..8]`. The receiver knows which author an envelope is from (signed),
   holds exactly one session per author, and finds its wrap by computing candidate kids
-  while fast-forwarding its receiving chain — bounded by the acceptance window, a few
-  hundred hashes worst case. Outsiders can no longer link a recipient across envelopes
-  or across authors, closing the §1.1 shared-friend-graph leak.
+  while fast-forwarding its receiving chain — bounded by the acceptance window, one hash
+  per position. Outsiders can no longer link a recipient across envelopes or across
+  authors, closing the §1.1 shared-friend-graph leak.
+- **The acceptance window is sized by reader absence, not cadence** (`2^17` positions).
+  A sender's chain resets only when the reader answers, the reader answers only by
+  _opening_ something (on iOS, only while the app is mounted), and every tick spends two
+  positions (the live and durable lanes each seal). The original 512 assumed a reply every
+  interval; it ran out after ~21 h of a friend not opening the app, and on 2026-10-09 left
+  an iPhone unable to open anything from its friend until a §4.6 restart. The window bounds
+  work only — no skipped key is stored, and anyone holding a chain key can walk it as far
+  as they like regardless — so it is set wide: ~7 months at the 5-minute cadence.
 - **KDF domain separation.** All derivations use `blake3::derive_key` with distinct
   contexts (`sc-dr/v1/rk`, `/ck`, `/mk`, `/kid`, `/boot`), matching the existing
   `mesh.rs` convention.

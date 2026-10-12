@@ -1,6 +1,10 @@
 import type { TileCoord } from './tile-math';
 import type { PackedGeometry } from './packed-geometry';
 import { EMPTY_PACKED, mergePacked } from './packed-geometry';
+import type { StreamStage } from './tile-bundle';
+
+/** Receives each preview stage's decoded geometry, coarsest first. */
+export type PreviewListener = (stage: StreamStage, geometry: PackedGeometry) => Promise<void>;
 
 /**
  * Where map geometry comes from — the seam between the pure pipeline and the
@@ -13,7 +17,13 @@ export interface GeometrySource {
    * for tiles the source simply doesn't carry. Honors `signal` when provided.
    */
   getTile(tile: TileCoord, signal?: AbortSignal): Promise<PackedGeometry>;
-  getPreview?(tiles: readonly TileCoord[]): Promise<PackedGeometry | null>;
+  /**
+   * Cold z14 regions only: hands `onStage` each complete coarse stage of the
+   * detail streams covering `tiles` — the z13 overview, then (SCB3) the z14
+   * structure part — while the full detail is still downloading. Resolves once
+   * no further stage will come.
+   */
+  getPreview?(tiles: readonly TileCoord[], onStage: PreviewListener): Promise<void>;
 
   /**
    * Best-effort cache warm for tiles likely to be needed soon (idle prefetch of

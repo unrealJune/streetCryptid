@@ -40,6 +40,8 @@ export interface TileDb {
   totalBytes(): Promise<number>;
   /** Delete up to `n` least-recently-used rows; resolves to how many were deleted. */
   evictOldest(n: number): Promise<number>;
+  /** Delete every row in a namespace (a retired tileset representation). */
+  deleteSource(source: string): Promise<void>;
 }
 
 export interface TileStoreOptions {
@@ -107,6 +109,16 @@ class DbTileByteStore implements TileByteStore {
     return write;
   }
 
+  deleteSource(sourceId: string): Promise<void> {
+    const write = this.writes.then(async () => {
+      await this.fallback.deleteSource(sourceId);
+      const db = await this.db();
+      await db?.deleteSource(sourceId);
+    });
+    this.writes = write.catch(() => {});
+    return write;
+  }
+
   private async writeMany(
     sourceId: string,
     entries: readonly { tile: TileCoord; bytes: Uint8Array | null }[],
@@ -169,6 +181,12 @@ export class InMemoryTileDb implements TileDb {
       .slice(0, n);
     for (const [key] of oldest) this.rows.delete(key);
     return oldest.length;
+  }
+
+  async deleteSource(source: string): Promise<void> {
+    for (const key of [...this.rows.keys()]) {
+      if (key.startsWith(`${source}|`)) this.rows.delete(key);
+    }
   }
 }
 
@@ -309,5 +327,9 @@ export class SqliteTileDb implements TileDb {
       n
     );
     return res.changes;
+  }
+
+  async deleteSource(source: string): Promise<void> {
+    await this.db.runAsync('DELETE FROM tiles WHERE source = ?', source);
   }
 }
