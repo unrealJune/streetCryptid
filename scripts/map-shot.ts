@@ -27,7 +27,8 @@
  * shader's nearby-dot sampling distance, --road-contrast blends street ink toward
  * the background without changing dot radius, --road-glow scales the theme halo.
  * Use separate --out directories for each experiment; filenames describe the
- * scene, not the tuning. --fixture uses bundled real Capitol Hill OSM geometry,
+ * scene, not the tuning. Each PNG gets a JSON sidecar recording its settings
+ * (never server URLs). --fixture uses bundled real Capitol Hill OSM geometry,
  * needs no tile URL, and rejects views beyond its small coverage rectangle.
  *
  * `--exploration` seeds the deterministic demo walk at the place and renders the
@@ -381,8 +382,11 @@ async function main(): Promise<void> {
             highways: layers.highways,
             exploration: args.exploration ?? false,
             labels: args.labels ?? false,
+            cryptids: args.cryptids ?? false,
             structures: !args.noStructures,
             transit: args.transit ?? false,
+            legacyRivers: args.legacyRivers ?? false,
+            terrain: args.terrainUrl !== undefined,
             roadWidth: args.roadWidth ?? 1,
             roadDilation: args.roadDilation ?? 1,
             roadContrast: args.roadContrast ?? 1,

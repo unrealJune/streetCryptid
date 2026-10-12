@@ -1,0 +1,201 @@
+{
+  "purpose": "Screenshot-only road styling review; no production style has been selected or changed.",
+  "baseCommit": "0b6933c339b207c58bf8dbd047d0c1efa29103dd",
+  "source": "Bundled real Capitol Hill OpenStreetMap geometry, not a synthetic street layout.",
+  "attribution": "© OpenStreetMap contributors",
+  "viewportLogicalPixels": [390, 780],
+  "renderPixels": [780, 1560],
+  "comparisonPanelPixels": [390, 780],
+  "composition": "All panels are uniformly reduced to logical screen size; no image-specific retouching.",
+  "renderedFrames": 26,
+  "commonFlags": ["--fixture", "--highways"],
+  "controls": {
+    "width": "Multiplier of existing zoom/class-dependent mask stroke width.",
+    "dilation": "Multiplier of nearby-dot sampling distance, retaining the existing class gate.",
+    "contrast": "Street color blended toward the background, independently of dot size.",
+    "glow": "Multiplier of palette neon glow. Seattle has none; tested separately with Tokyo dark."
+  },
+  "options": {
+    "baseline": {
+      "flags": [],
+      "width": 1,
+      "dilation": 1,
+      "contrast": 1,
+      "glow": 1
+    },
+    "A": {
+      "name": "Crisp and thinner",
+      "flags": ["--road-width", "0.65"],
+      "width": 0.65,
+      "dilation": 1,
+      "contrast": 1,
+      "glow": 1,
+      "assessment": "Shortlisted alternate: crisp network, especially in light mode; more assertive than C."
+    },
+    "B": {
+      "name": "Quieter, not thinner",
+      "flags": ["--road-dilation", "0.25", "--road-contrast", "0.7", "--road-glow", "0.3"],
+      "width": 1,
+      "dilation": 0.25,
+      "contrast": 0.7,
+      "glow": 0.3,
+      "assessment": "Diagnostic: reduces glare but remains broad, particularly washed-out in light mode."
+    },
+    "C": {
+      "name": "Balanced",
+      "flags": [
+        "--road-width",
+        "0.7",
+        "--road-dilation",
+        "0.5",
+        "--road-contrast",
+        "0.85",
+        "--road-glow",
+        "0.4"
+      ],
+      "width": 0.7,
+      "dilation": 0.5,
+      "contrast": 0.85,
+      "glow": 0.4,
+      "assessment": "Balanced on Seattle light/dark; close-zoom connections and exploration labels remain visible. Tokyo loses some neon energy, motivating F. Not an approved production profile."
+    },
+    "D": {
+      "name": "Full correction, no dilation",
+      "flags": ["--road-width", "0.4", "--road-dilation", "0", "--road-glow", "0"],
+      "width": 0.4,
+      "dilation": 0,
+      "contrast": 1,
+      "glow": 0,
+      "assessment": "Rejected in this sample: fragile streets and conspicuous parallel motorway stripes."
+    },
+    "E": {
+      "name": "Refined after first review",
+      "flags": [
+        "--road-width",
+        "0.65",
+        "--road-dilation",
+        "0.25",
+        "--road-contrast",
+        "0.85",
+        "--road-glow",
+        "0.4"
+      ],
+      "width": 0.65,
+      "dilation": 0.25,
+      "contrast": 0.85,
+      "glow": 0.4,
+      "assessment": "Second-round test: more delicate than C, without a clear aesthetic gain; C better sustains the network."
+    },
+    "F": {
+      "name": "Balanced, preserving theme glow",
+      "flags": ["--road-width", "0.7", "--road-dilation", "0.5", "--road-contrast", "0.85"],
+      "width": 0.7,
+      "dilation": 0.5,
+      "contrast": 0.85,
+      "glow": 1,
+      "assessment": "Recommended direction, narrowly ahead of A: retains more neon presence than C without baseline bulk. Identical to C in Seattle, whose palette has no glow; separately rendered in Tokyo dark. Motorway mass and striping remain."
+    }
+  },
+  "sheets": [
+    {
+      "file": "round1-dark-z15.png",
+      "rows": [
+        {
+          "flags": ["--zooms", "15", "--scheme", "seattle", "--mode", "dark"],
+          "columns": ["baseline", "A", "B", "D"]
+        }
+      ]
+    },
+    {
+      "file": "round2-shortlist-z15.png",
+      "rows": [
+        {
+          "flags": ["--zooms", "15", "--scheme", "seattle", "--mode", "dark"],
+          "columns": ["baseline", "A", "C", "E"]
+        },
+        {
+          "flags": ["--zooms", "15", "--scheme", "seattle", "--mode", "light"],
+          "columns": ["baseline", "A", "C", "B"]
+        }
+      ]
+    },
+    {
+      "file": "detail-exploration.png",
+      "rows": [
+        [
+          {
+            "option": "baseline",
+            "flags": ["--zooms", "17", "--scheme", "seattle", "--mode", "light"]
+          },
+          {
+            "option": "C",
+            "flags": ["--zooms", "17", "--scheme", "seattle", "--mode", "light"]
+          },
+          {
+            "option": "baseline",
+            "flags": ["--zooms", "15", "--scheme", "tokyo", "--mode", "dark"]
+          }
+        ],
+        [
+          {
+            "option": "baseline",
+            "flags": [
+              "--zooms",
+              "16",
+              "--scheme",
+              "seattle",
+              "--mode",
+              "dark",
+              "--exploration",
+              "--labels"
+            ]
+          },
+          {
+            "option": "C",
+            "flags": [
+              "--zooms",
+              "16",
+              "--scheme",
+              "seattle",
+              "--mode",
+              "dark",
+              "--exploration",
+              "--labels"
+            ]
+          },
+          {
+            "option": "C",
+            "flags": ["--zooms", "15", "--scheme", "tokyo", "--mode", "dark"]
+          }
+        ]
+      ]
+    },
+    {
+      "file": "theme-refinement.png",
+      "rows": [
+        {
+          "flags": ["--zooms", "15", "--scheme", "tokyo", "--mode", "dark"],
+          "columns": ["baseline", "A", "C", "F"]
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "No live tile URL was available. Fixture coverage supports these z15–17 views, not citywide z11–14 comparisons, other cities, or rural scenes.",
+    "The screenshotter rejects fixture views outside its geographic bounds rather than presenting missing streets as successful decluttering.",
+    "The fixture geometry is OSM-derived but does not reproduce the live server's complete cartographic zoom generalization.",
+    "The motorway slab remains visually dominant; these experiments do not establish a fix for stacked parallel carriageways.",
+    "These are static CanvasKit captures, not device-GPU, pinch/LOD-transition, or frame-rate tests.",
+    "Exploration uses the existing deterministic demo walk. Actual friends and live trails are not present.",
+    "No production width-unit conversion, class-visibility thresholds, or zoom-dependent contrast/dilation policy has been changed."
+  ],
+  "validation": {
+    "check": "just check: 198 suites, 2051 tests passed; typecheck, lint, format and release-telemetry checks passed.",
+    "neutralControls": "All four controls explicitly set to 1 produced a byte-identical PNG to baseline.",
+    "baselineAndNeutralPngSha256": "dbc60e6296654eb42d0abd3c35fbbcce20605089e0425dfa9132b89f5b437d57",
+    "unchangedRoadLodSha256": "5777b04bcd9f5ea55a7720f56a41005752c72d8e52c68dcb1a55d02260323789",
+    "unchangedShippingShaderSha256": "33cbce6833afe8a0fdf2ed0df9cfc6557ca967ec4f9dfd8ae1cabe9cee293851",
+    "codeql": "No alerts.",
+    "review": "Built-in code review unavailable; separate read-only code reviewer found no significant issues."
+  }
+}
