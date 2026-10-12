@@ -158,6 +158,17 @@ Conventions when changing that code:
   `BGTaskSchedulerPermittedIdentifiers` (`app.json`). `location.stop_via` (`dwell` / `visit` /
   `refresh`) says which one parked a phone. Android's `NativeBackgroundRuntime` pulls friends too
   (`pullFriendFixes`), floored at 5 min.
+- **A relaunched process on a walk wakes on the MOVING fence, not the stream.** The same rule
+  stops a walk too: on 2026-10-11 an iPhone 14 Pro left its stop fence with the app reclaimed and
+  was relaunched into `moving`, after which iOS ran it for about a minute at a time (3:16, 3:20,
+  3:23, 3:28, 3:35, 3:43, 3:53, 4:03 pm) and published six positions in fifty minutes. SLC wants
+  ~500 m and a visit wants a stop, so nothing else woke it. `armMovingFence` keeps a 150 m exit
+  region (`sc.moving-fence`) centred on the freshest fix while `moving` with no stop candidate;
+  its exit (`wake_reason=moving_fence`) restarts the stream and the next fix moves it. Only a fresh
+  (≤30 s), precise (≤100 m) fix may centre it, and it asks `requestState` because a region
+  registered around a spot the phone has already left never reports an exit — and for the same
+  reason a crossing must NOT re-centre on `manager.location`, the fix just left, or `outside`
+  repeats forever. `location.moving_fence_armed` reports what the OS holds.
 - **One drain run at a time, per node (`publish::DrainLock`).** "Idempotent per slot" held only for
   SEQUENTIAL callers: UniFFI polls each foreign call on the host's thread, so concurrent
   `heartbeat_fix`/`ingest_fix` calls both found the slot due, and two drains peeked the same outbox

@@ -100,6 +100,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     case refresh
     /// A `CLVisit` — Core Location's own arrival/departure detector. See `didVisit`.
     case visit
+    /// The phone walked out of the fence `moving` keeps around its last fix. See `armMovingFence`.
+    case movingFence = "moving_fence"
   }
 
   /// Which mechanism confirmed a stop.
@@ -147,6 +149,24 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   private static let stoppedAccuracy: CLLocationAccuracy = kCLLocationAccuracyThreeKilometers
 
   private static let stopAnchorRegionId = "sc.stop-anchor"
+
+  /// Radius of the moving fence. Big enough that region monitoring — Wi-Fi/cell derived, and
+  /// unreliable below ~100 m — reports the crossing at all; small enough that a walk crosses it
+  /// every couple of minutes, which is the cadence the fence exists to buy.
+  private static let movingFenceRadiusM: CLLocationDistance = 150
+
+  /// How far a fix must be from the moving fence's centre before the fence is moved to it. A
+  /// process kept running delivers every 20-50 m, and re-registering a region on each of those
+  /// would be churn for nothing.
+  private static let movingFenceRecentreM: CLLocationDistance = 50
+
+  /// A fix may centre the moving fence only while it still describes where the phone IS. A fence
+  /// registered around a spot the phone has already left never reports an exit — the region is
+  /// born `outside` and has nothing to cross.
+  private static let movingFenceMaxFixAge: TimeInterval = 30
+  private static let movingFenceMaxAccuracyM: CLLocationAccuracy = 100
+
+  private static let movingFenceRegionId = "sc.moving-fence"
 
   // MARK: - State
 
@@ -206,6 +226,16 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// relied on to arrive — see `considerStopping`. Not persisted itself: the region outlives the
   /// process in Core Location, and a restored `stopCandidate` re-adopts it.
   private var candidateFence: CLLocation?
+
+  /// The centre of the fence `moving` keeps under the phone, or `nil` when none is armed. See
+  /// `armMovingFence`. Not persisted: the region outlives the process in Core Location, and `start`
+  /// re-adopts it.
+  private var movingFence: CLLocation?
+
+  /// Whether `armMovingFence` is waiting on its `requestState` answer. Core Location also calls
+  /// `didDetermineState` on every crossing, alongside `didExitRegion`, and only the answer to our
+  /// own question is a crossing the exit callback will not also report.
+  private var movingFenceStatePending = false
 
   /// Whether `manager` was created on the main thread, i.e. whether its callbacks can arrive at all.
   /// See `shared`.
@@ -331,6 +361,11 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // that is not moving is the 2026-10-06 shape: the OS said "arrived", and nothing delivered.
       "visit_pending": visitArrival != nil,
       "candidate_fence_armed": candidateFence != nil,
+      // What the OS holds, not what we asked for. `moving` with this `false` on a phone whose
+      // process was relaunched in the background is a walk that only SLC and visits can wake.
+      "moving_fence_armed": manager.monitoredRegions.contains {
+        $0.identifier == Self.movingFenceRegionId
+      },
     ]
     if let stopCandidate {
       snapshot["candidate_age_ms"] = Int(Date().timeIntervalSince(stopCandidate.since) * 1000)
@@ -411,6 +446,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       state = .moving
       applyMovingCadence()
     }
+    // Rung 4, `moving` only: the fence an earlier process left under a walk is still held by Core
+    // Location, and may be what launched this one.
+    adoptMovingFence()
     // Seed the gate from the cached position, BEFORE starting the stream.
     //
     // Nothing else in the system will. Until something has passed the gate there is no
@@ -561,6 +599,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     manager.stopUpdatingLocation()
     manager.stopMonitoringSignificantLocationChanges()
     clearStopAnchorFence()
+    clearMovingFence()
     manager.stopMonitoringVisits()
     manager.allowsBackgroundLocationUpdates = false
     NativeRefreshTask.cancel()
@@ -693,6 +732,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // The speculative fence has just been re-armed at `anchor` by the guard above and is now the
     // real one; what it was centred on no longer matters.
     candidateFence = nil
+    // The anchor fence is the way out now; a moving fence left beside it would fire on the first
+    // 150 m of the next departure and say nothing the anchor fence does not.
+    clearMovingFence()
     applyStoppedCadence()
     manager.startUpdatingLocation()
     persistState()
@@ -712,6 +754,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     clearStopAnchorFence()
     applyMovingCadence()
     manager.startUpdatingLocation()
+    // Usually a no-op — the cache is rarely fresh enough — and the stream's first delivery arms it
+    // instead. But a relaunch may be suspended before that delivery lands, and then this is the
+    // only fence the walk gets.
+    if let here = manager.location { armMovingFence(around: here) }
     persistState()
     note(reason)
     reporter.event(.transition, reason: reason.rawValue)
@@ -793,6 +839,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// where it needs to be; if it is not, `abandonStopCandidate` takes it away again.
   private func openStopCandidate(at location: CLLocation) {
     stopCandidate = (centre: location, since: Date())
+    // The candidate fence takes over as the tripwire; `didUpdateLocations` re-arms the moving one
+    // if the candidate is abandoned.
+    clearMovingFence()
     // A failed arm is not a new failure — `enterStopped` would refuse for the same two reasons, and
     // says so. It does mean the dwell below is now the only thing keeping this process alive.
     candidateFence = armStopAnchorFence(at: location) ? location : nil
@@ -881,6 +930,91 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     for region in manager.monitoredRegions where region.identifier == Self.stopAnchorRegionId {
       manager.stopMonitoring(for: region)
     }
+  }
+
+  /// Keep a fence under a moving phone, so walking out of it wakes us again.
+  ///
+  /// The stop-anchor fence answers "has a parked phone left?"; nothing answered "is a moving phone
+  /// still moving?" for a process that is not kept running. `allowsBackgroundLocationUpdates`
+  /// keeps a process resident only for updates started in the FOREGROUND, so one relaunched in the
+  /// background — by the stop fence, SLC or a visit, i.e. every walk that starts with the app
+  /// reclaimed — gets a burst of a minute or so per wake and is then suspended with the stream
+  /// still "running". On 2026-10-11 an iPhone 14 Pro walked 3:15-4:06 pm that way: woken at 3:16,
+  /// 3:20, 3:23, 3:28, 3:35, 3:43, 3:53, 4:03, silent in between, six positions in fifty minutes.
+  /// SLC wants ~500 m and a visit wants a stop, so neither fires on a walk.
+  ///
+  /// A region exit does, and it relaunches a terminated app to deliver it. Each wake re-centres
+  /// the fence on its freshest fix, so the next exit is the next wake: roughly every two minutes on
+  /// foot, with no indicator and nothing kept resident.
+  ///
+  /// Only a fresh, precise fix may centre it — see `movingFenceMaxFixAge`. A process that IS kept
+  /// running re-centres only every `movingFenceRecentreM`, and never needs the exit at all.
+  private func armMovingFence(around location: CLLocation) {
+    guard running, state == .moving, stopCandidate == nil else { return }
+    guard location.horizontalAccuracy >= 0,
+      location.horizontalAccuracy <= Self.movingFenceMaxAccuracyM,
+      Date().timeIntervalSince(location.timestamp) <= Self.movingFenceMaxFixAge
+    else { return }
+    if let centre = movingFence, location.distance(from: centre) < Self.movingFenceRecentreM {
+      return
+    }
+    guard CLLocationManager.isMonitoringAvailable(for: CLCircularRegion.self),
+      manager.authorizationStatus == .authorizedAlways
+    else { return }
+    clearMovingFence()
+    let region = CLCircularRegion(
+      center: location.coordinate,
+      radius: Self.movingFenceRadiusM,
+      identifier: Self.movingFenceRegionId)
+    region.notifyOnExit = true
+    region.notifyOnEntry = false
+    manager.startMonitoring(for: region)
+    movingFence = location
+    movingFenceStatePending = true
+    // A phone that has outrun the fix the fence was centred on is already outside it, and a region
+    // born `outside` never reports an exit. Ask, and treat `outside` as the exit it would have been.
+    manager.requestState(for: region)
+  }
+
+  private func clearMovingFence() {
+    for region in manager.monitoredRegions where region.identifier == Self.movingFenceRegionId {
+      manager.stopMonitoring(for: region)
+    }
+    movingFence = nil
+    movingFenceStatePending = false
+  }
+
+  /// Take back the moving fence an earlier process registered, or drop it if we are not moving.
+  private func adoptMovingFence() {
+    let held = manager.monitoredRegions.first { $0.identifier == Self.movingFenceRegionId }
+    guard let held = held as? CLCircularRegion else { return }
+    if state == .moving {
+      movingFence = CLLocation(latitude: held.center.latitude, longitude: held.center.longitude)
+    } else {
+      clearMovingFence()
+    }
+  }
+
+  /// The phone has left the moving fence: wake the stream, and let its first fix move the fence.
+  private func crossedMovingFence() {
+    guard running, state == .moving else {
+      clearMovingFence()
+      return
+    }
+    reporter.event(.fenceExit, reason: WakeReason.movingFence.rawValue)
+    note(.movingFence)
+    // Forget the centre but keep the region: the next fresh fix re-centres regardless of distance,
+    // and until then the old region costs nothing.
+    movingFence = nil
+    movingFenceStatePending = false
+    applyMovingCadence()
+    manager.startUpdatingLocation()
+    // Deliberately NOT re-armed from `manager.location` here: that is the fix the phone just left,
+    // and centring on it would answer `requestState` with `outside` again, forever.
+    // Claims nothing about motion: it fills a due slot from the last accepted fix, so a wake that
+    // gets no fresh position still says the phone is alive.
+    let battery = Self.battery()
+    Task { await self.heartbeat(battery: battery, parked: nil) }
   }
 
   // MARK: - Persistence
@@ -1093,6 +1227,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       if state == .stopped {
         Task { await self.heartbeat(battery: battery, parked: true) }
       } else {
+        // Only a FRESH delivery may move the fence — a redelivery is a position already left.
+        armMovingFence(around: location)
         let fix = Self.fix(from: location)
         Task { await self.ingest(fix: fix, battery: battery) }
       }
@@ -1150,6 +1286,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   func locationManager(
     _ manager: CLLocationManager, didExitRegion region: CLRegion
   ) {
+    if region.identifier == Self.movingFenceRegionId {
+      crossedMovingFence()
+      return
+    }
     guard region.identifier == Self.stopAnchorRegionId else { return }
     reporter.event(.fenceExit)
     // The whole point of the stopped state: exit is event-driven, so we are responsive to movement
@@ -1161,6 +1301,19 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     enterMoving(reason: .geofenceExit)
     let battery = Self.battery()
     Task { await self.heartbeat(battery: battery, parked: false) }
+  }
+
+  /// The answer to `armMovingFence`'s `requestState`. Only `outside` on the moving fence means
+  /// anything: the phone outran the fix the fence was centred on, which is the exit Core Location
+  /// will never report for a region it was registered outside of.
+  func locationManager(
+    _ manager: CLLocationManager, didDetermineState regionState: CLRegionState,
+    for region: CLRegion
+  ) {
+    guard region.identifier == Self.movingFenceRegionId, movingFenceStatePending else { return }
+    movingFenceStatePending = false
+    guard regionState == .outside else { return }
+    crossedMovingFence()
   }
 
   /// Core Location's own verdict that the phone has arrived somewhere, or left.
@@ -1382,8 +1535,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   ) {
     // A fence we could not arm is a resurrection rung we do not have. SLC still covers us, but this
     // is worth saying out loud rather than inferring later from an absence.
-    NSLog("[iroh-location] stop-anchor fence failed to arm: \(error.localizedDescription)")
-    reporter.event(.fenceFailed, detail: error.localizedDescription)
+    let id = region?.identifier ?? "unknown"
+    NSLog("[iroh-location] fence \(id) failed to arm: \(error.localizedDescription)")
+    if id == Self.movingFenceRegionId { movingFence = nil }
+    reporter.event(.fenceFailed, reason: id, detail: error.localizedDescription)
   }
 
   // MARK: - Node lifecycle
@@ -1506,9 +1661,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// exists to protect. Two gates:
   ///
   /// - a durable floor between pulls, so a burst of deliveries is still one pull: five minutes on a
-  ///   wake that means something moved (`movement`, `geofence_exit`, `relaunch`, `visit`) or the
-  ///   rare `refresh` the OS hands a parked phone, fifteen on a `periodic` tick from the parked
-  ///   coarse stream, which is a clock rather than news;
+  ///   wake that means something moved (`movement`, `geofence_exit`, `moving_fence`, `relaunch`,
+  ///   `visit`) or the rare `refresh` the OS hands a parked phone, fifteen on a `periodic` tick from
+  ///   the parked coarse stream, which is a clock rather than news;
   /// - and a wall-clock budget, clamped to what iOS says is left of the background allowance, so a
   ///   pull ends on our deadline rather than on the OS's.
   ///
@@ -1536,7 +1691,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     let trigger = lastWakeReason
     let floorMs: Double
     switch trigger {
-    case .movement, .geofenceExit, .relaunch, .refresh, .visit: floorMs = Self.syncFloorMs
+    case .movement, .geofenceExit, .movingFence, .relaunch, .refresh, .visit:
+      floorMs = Self.syncFloorMs
     case .periodic: floorMs = Self.parkedSyncFloorMs
     case .coarseDeparture, .stateChange, .seed: return
     }
