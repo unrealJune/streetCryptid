@@ -19,6 +19,16 @@
  *   bun scripts/map-shot.ts --places pacific --zooms 3 --cryptids
  *   bun scripts/map-shot.ts --places seattle --zooms 17 --labels --transit
  *   bun scripts/map-shot.ts --places kyoto --zooms 9.5,12 --labels --terrain-url https://…/terrain
+ *   bun scripts/map-shot.ts --fixture --zooms 15,16,17 --scheme seattle --mode dark
+ *   bun scripts/map-shot.ts --fixture --road-width 0.7 --road-dilation 0.5 --road-contrast 0.85
+ *
+ * Road-study controls affect this screenshotter ONLY, never the app. All default
+ * to 1 (unchanged): --road-width scales mask strokes, --road-dilation scales the
+ * shader's nearby-dot sampling distance, --road-contrast blends street ink toward
+ * the background without changing dot radius, --road-glow scales the theme halo.
+ * Use separate --out directories for each experiment; filenames describe the
+ * scene, not the tuning. --fixture uses bundled real Capitol Hill OSM geometry,
+ * needs no tile URL, and rejects views beyond its small coverage rectangle.
  *
  * `--exploration` seeds the deterministic demo walk at the place and renders the
  * real exploration layer — the same `buildCellField` → cell-state texture →
@@ -44,7 +54,7 @@ import { dirname, join, resolve } from 'node:path';
 
 import { scaleFor, visibleWorldRect } from '../src/features/map/core/camera';
 import { DOT_STEP, lineDotIntervals } from '../src/features/map/core/dot-style';
-import { latLonToWorld } from '../src/features/map/core/mercator';
+import { latLonToWorld, worldToLatLon } from '../src/features/map/core/mercator';
 import {
   buildPaletteLut,
   computeRegionSpec,
@@ -127,6 +137,8 @@ import { BundleFetchByteSource } from '../src/features/map/tiles/bundle-fetch';
 import { DecodingGeometrySource } from '../src/features/map/tiles/decode-source';
 import type { GeometrySource } from '../src/features/map/tiles/geometry-source';
 import { MartinByteSource } from '../src/features/map/tiles/martin-source';
+import { FixtureGeometrySource } from '../src/features/map/tiles/fixture-source';
+import { FIXTURE_BOUNDS, FIXTURE_HOME } from '../src/features/map/tiles/__fixtures__/caphill-tiles';
 import {
   TerrariumElevationSource,
   type ElevationSource,
@@ -204,7 +216,7 @@ const HALO_PASSES = 4;
 
 const args = parseArgs(process.argv.slice(2));
 const tileUrl = process.env.EXPO_PUBLIC_TILE_URL;
-if (!tileUrl) {
+if (!tileUrl && !args.fixture) {
   console.error('EXPO_PUBLIC_TILE_URL is unset — `set -a && . ./.env.local` first.');
   process.exit(2);
 }
@@ -217,14 +229,39 @@ async function main(): Promise<void> {
   const CanvasKit = await CanvasKitInit({
     locateFile: (file: string) => join(canvasKitDir, file),
   });
-  const effect = CanvasKit.RuntimeEffect.Make(DOT_FIELD_SKSL);
+  // Keep the shipping shader byte-for-byte for the baseline. Fail loudly if a
+  // source edit moves an experiment's seam rather than silently photographing it.
+  let shaderSource = DOT_FIELD_SKSL;
+  const replaceOnce = (from: string, to: string) => {
+    if (shaderSource.split(from).length !== 2) {
+      throw new Error(`road-study shader seam changed: ${from}`);
+    }
+    shaderSource = shaderSource.replace(from, to);
+  };
+  if (args.roadDilation !== undefined && args.roadDilation !== 1) {
+    replaceOnce(
+      'float o = uStep * 0.4;',
+      `float o = uStep * ${(0.4 * args.roadDilation).toFixed(6)};`
+    );
+  }
+  if (args.roadContrast !== undefined && args.roadContrast !== 1) {
+    replaceOnce(
+      'color = rampLut(val, 0.0);\n    isArea = 0.0; kind = 0;',
+      `color = mix(uBg, rampLut(val, 0.0), ${args.roadContrast.toFixed(6)});\n    isArea = 0.0; kind = 0;`
+    );
+  }
+  const effect = CanvasKit.RuntimeEffect.Make(shaderSource);
   if (!effect) throw new Error('dot-field shader failed to compile under CanvasKit');
 
   const outDir = resolve(args.out ?? '/tmp/map-shots');
   await mkdir(outDir, { recursive: true });
 
-  const places = args.places ? PLACES.filter((p) => args.places!.includes(p.id)) : PLACES;
-  const zooms = args.zooms ?? DEFAULT_ZOOMS;
+  const places = args.fixture
+    ? [{ id: 'caphill', label: 'Capitol Hill — bundled OSM', ...worldToLatLon(FIXTURE_HOME) }]
+    : args.places
+      ? PLACES.filter((p) => args.places!.includes(p.id))
+      : PLACES;
+  const zooms = args.zooms ?? (args.fixture ? [15, 16, 17] : DEFAULT_ZOOMS);
   const layers: RoadLayerOptions = { highways: args.highways ?? false };
   const selectedScheme = args.scheme
     ? BUILT_IN_MAP_COLOR_SCHEMES.find((scheme) => scheme.id === args.scheme)
@@ -236,7 +273,7 @@ async function main(): Promise<void> {
     ? selectedScheme[args.mode ?? 'light']
     : CryptidThemes.daybreak.canvas;
   const lut = imageFrom(CanvasKit, buildPaletteLut(palette), 256, 3);
-  const source = createSource(tileUrl!);
+  const source = args.fixture ? new FixtureGeometrySource() : createSource(tileUrl!);
   // Terrain through the app's own elevation source (privacy bundles, in-memory
   // store), decoded by CanvasKit instead of device Skia.
   const elevationSource = args.terrainUrl
@@ -282,7 +319,20 @@ async function main(): Promise<void> {
 
     for (const zoom of zooms) {
       const camera: CameraState = { center: home, zoom };
-      const spec = computeRegionSpec(camera, VIEWPORT, { dataZooms: PLANET_DATA_ZOOMS });
+      if (args.fixture) {
+        const view = visibleWorldRect(camera, VIEWPORT);
+        if (
+          view.minX < FIXTURE_BOUNDS.minX ||
+          view.maxX > FIXTURE_BOUNDS.maxX ||
+          view.minY < FIXTURE_BOUNDS.minY ||
+          view.maxY > FIXTURE_BOUNDS.maxY
+        ) {
+          throw new Error(`z${zoom} exceeds fixture coverage; use a live tile URL for wider views`);
+        }
+      }
+      const spec = computeRegionSpec(camera, VIEWPORT, {
+        dataZooms: args.fixture ? { min: 12, max: 14 } : PLANET_DATA_ZOOMS,
+      });
       const geometry = await loadGeometry(source, spec);
       // The ladder decides the resolution; `spec.cellRes` is null once the
       // camera drops below its coarsest rung, which is exactly when the layer
@@ -317,6 +367,31 @@ async function main(): Promise<void> {
       const suffix = selectedScheme ? `-${selectedScheme.id}-${args.mode ?? 'light'}` : '';
       const file = join(outDir, `${place.id}-z${zoom}${suffix}.png`);
       await writeFile(file, png);
+      await writeFile(
+        file.replace(/\.png$/, '.json'),
+        JSON.stringify(
+          {
+            source: args.fixture ? 'bundled-capitol-hill-osm' : 'live-tiles',
+            place: place.id,
+            zoom,
+            viewport: VIEWPORT,
+            pixelRatio: PIXEL_RATIO,
+            scheme: selectedScheme?.id ?? 'daybreak',
+            mode: selectedScheme ? (args.mode ?? 'light') : 'light',
+            highways: layers.highways,
+            exploration: args.exploration ?? false,
+            labels: args.labels ?? false,
+            structures: !args.noStructures,
+            transit: args.transit ?? false,
+            roadWidth: args.roadWidth ?? 1,
+            roadDilation: args.roadDilation ?? 1,
+            roadContrast: args.roadContrast ?? 1,
+            roadGlow: args.roadGlow ?? 1,
+          },
+          null,
+          2
+        ) + '\n'
+      );
       console.log(
         `${file}  ${place.label} z${zoom}  mask ${spec.maskWidth}x${spec.maskHeight}` +
           (args.exploration
@@ -465,7 +540,7 @@ function renderShot({
     1, // uReveal
     lodForZoom(spec.zoom), // uLod
     cellField ? 1 : 0, // uExploration — fog of war only with --exploration
-    palette.effects?.neonGlow ?? 0,
+    (palette.effects?.neonGlow ?? 0) * (args.roadGlow ?? 1),
     palette.effects?.scanlines ?? 0,
     // uNoiseOrigin, wrapped exactly as `packDotFieldUniforms` wraps it.
     (((spec.rect.minX * scale) % NOISE_ORIGIN_WRAP) + NOISE_ORIGIN_WRAP) % NOISE_ORIGIN_WRAP,
@@ -990,7 +1065,7 @@ function buildMask(
   for (let cls = 0; cls < paths.streets.length; cls++) {
     const width = roadWidthFor(cls, spec.zoom);
     if (width === null) continue;
-    stroke(paths.streets[cls], [ROAD_VALUES[cls], 0, 0], width);
+    stroke(paths.streets[cls], [ROAD_VALUES[cls], 0, 0], width * (args.roadWidth ?? 1));
   }
   fill(paths.park, [0, 255, 0]);
   fill(paths.water, [0, 0, 255]);
@@ -1114,6 +1189,11 @@ interface Args {
   terrainUrl?: string;
   scheme?: string;
   mode?: 'light' | 'dark';
+  fixture?: boolean;
+  roadWidth?: number;
+  roadDilation?: number;
+  roadContrast?: number;
+  roadGlow?: number;
 }
 
 function parseArgs(argv: readonly string[]): Args {
@@ -1136,7 +1216,29 @@ function parseArgs(argv: readonly string[]): Args {
     else if (arg === '--no-structures') out.noStructures = true;
     else if (arg === '--legacy-rivers') out.legacyRivers = true;
     else if (arg === '--terrain-url') out.terrainUrl = argv[++i];
-    else throw new Error(`unknown flag ${arg}`);
+    else if (arg === '--fixture') out.fixture = true;
+    else if (
+      arg === '--road-width' ||
+      arg === '--road-dilation' ||
+      arg === '--road-contrast' ||
+      arg === '--road-glow'
+    ) {
+      const value = Number(argv[++i]);
+      const min = arg === '--road-width' ? 0.1 : 0;
+      if (!Number.isFinite(value) || value < min || value > 1) {
+        throw new Error(`${arg} expects a number between ${min} and 1`);
+      }
+      if (arg === '--road-width') out.roadWidth = value;
+      else if (arg === '--road-dilation') out.roadDilation = value;
+      else if (arg === '--road-contrast') out.roadContrast = value;
+      else out.roadGlow = value;
+    } else throw new Error(`unknown flag ${arg}`);
+  }
+  if (out.fixture && (out.places || out.terrainUrl)) {
+    throw new Error('--fixture cannot be combined with --places or --terrain-url');
+  }
+  if (out.zooms?.some((zoom) => !Number.isFinite(zoom) || zoom < 1 || zoom > 18)) {
+    throw new Error('--zooms expects finite zooms between 1 and 18');
   }
   return out;
 }
