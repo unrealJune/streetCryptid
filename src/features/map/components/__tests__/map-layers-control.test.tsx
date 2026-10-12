@@ -131,4 +131,26 @@ describe('MapLayersControl', () => {
     act(() => row.props.onPress());
     expect(onChange).toHaveBeenCalledWith('peaks', false);
   });
+
+  it('closes the popover and opens peak cutoffs without toggling the layer', () => {
+    const onOpenPeakSettings = jest.fn();
+    const onExpandedChange = jest.fn();
+    const onChange = jest.fn();
+    act(() => {
+      renderer = create(
+        <MapLayersControl
+          expanded
+          layers={layers}
+          theme={CryptidThemes.daybreak}
+          onChange={onChange}
+          onExpandedChange={onExpandedChange}
+          onOpenPeakSettings={onOpenPeakSettings}
+        />
+      );
+    });
+    act(() => renderer.root.findByProps({ accessibilityLabel: 'Peak cutoffs' }).props.onPress());
+    expect(onExpandedChange).toHaveBeenCalledWith(false);
+    expect(onOpenPeakSettings).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
+  });
 });

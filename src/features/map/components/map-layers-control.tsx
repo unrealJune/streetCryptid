@@ -36,6 +36,7 @@ interface MapLayersControlProps {
   readonly expanded: boolean;
   onChange(layer: MapLayerId, enabled: boolean): void;
   onExpandedChange(expanded: boolean): void;
+  onOpenPeakSettings?(): void;
 }
 
 const LAYERS: { readonly id: MapLayerId; readonly title: string }[] = [
@@ -70,6 +71,7 @@ export function MapLayersControl({
   expanded,
   onChange,
   onExpandedChange,
+  onOpenPeakSettings,
 }: MapLayersControlProps) {
   const { chrome } = theme;
   const glass = useGlassAvailable();
@@ -94,6 +96,21 @@ export function MapLayersControl({
               theme={theme}
             />
           ))}
+          {onOpenPeakSettings ? (
+            <IslandPressable
+              accessibilityLabel="Peak cutoffs"
+              accessibilityRole="button"
+              onPress={() => {
+                onExpandedChange(false);
+                onOpenPeakSettings();
+              }}
+              radius={ROW_RADIUS}
+              style={styles.row}
+              theme={theme}
+            >
+              <Text style={[styles.title, { color: chrome.ink }]}>Peak cutoffs…</Text>
+            </IslandPressable>
+          ) : null}
         </View>
       ) : null}
 

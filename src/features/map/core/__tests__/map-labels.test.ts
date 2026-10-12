@@ -1,6 +1,7 @@
 import { scaleFor } from '../camera';
 import {
   AREA_LABEL_MIN_ZOOM,
+  DEFAULT_PEAK_LABEL_OPTIONS,
   PLACE_LABEL_BANDS,
   placeRankBudget,
   HOUSENUMBER_MIN_ZOOM,
@@ -563,6 +564,80 @@ describe('selectMapLabels — peaks', () => {
     expect(peakRankBudget(PEAK_LABEL_MIN_ZOOM)).toBe(2);
     expect(labelsAt(PEAK_LABEL_MIN_ZOOM, parts)).toHaveLength(0);
     expect(labelsAt(PEAK_LABEL_MIN_ZOOM + 2, parts)).toHaveLength(1);
+  });
+
+  it('preserves the default selection when options are supplied explicitly', () => {
+    const packed = packGeometry(
+      geometry({
+        peaks: [peak('Ranked', [0.4, 0.4]), peak('Unranked', [0.6, 0.6], { rank: undefined })],
+      })
+    );
+    for (const zoom of [8, 9, 11, 15]) {
+      expect(selectMapLabels(packed, specAt(zoom), DEFAULT_PEAK_LABEL_OPTIONS)).toEqual(
+        selectMapLabels(packed, specAt(zoom))
+      );
+    }
+  });
+
+  it('applies a configurable inclusive minimum zoom without changing automatic rank budgets', () => {
+    const packed = packGeometry(geometry({ peaks: [peak('Summit', [0.5, 0.5])] }));
+    const options = { ...DEFAULT_PEAK_LABEL_OPTIONS, minZoom: 8 };
+    expect(selectMapLabels(packed, specAt(7.99), options)).toHaveLength(0);
+    expect(selectMapLabels(packed, specAt(8), options)).toHaveLength(1);
+    expect(selectMapLabels(packed, specAt(10), { ...options, minZoom: 11 })).toHaveLength(0);
+  });
+
+  it('applies an inclusive manual rank cutoff and independently excludes unranked peaks', () => {
+    const packed = packGeometry(
+      geometry({
+        peaks: [
+          peak('Rank 3', [0.4, 0.4], { rank: 3 }),
+          peak('Rank 4', [0.5, 0.5], { rank: 4 }),
+          peak('Unranked', [0.6, 0.6], { rank: undefined }),
+        ],
+      })
+    );
+    const options = { ...DEFAULT_PEAK_LABEL_OPTIONS, maxRank: 3 };
+    expect(selectMapLabels(packed, specAt(9), options).map((label) => label.id)).toEqual([
+      'peak:RANK 3',
+      'peak:UNRANKED',
+    ]);
+    for (const zoom of [9, 15]) {
+      expect(
+        selectMapLabels(packed, specAt(zoom), { ...options, includeUnranked: false }).map(
+          (label) => label.id
+        )
+      ).toEqual(['peak:RANK 3']);
+    }
+  });
+
+  it('raises and lowers the peak cap, retains nearest-first order, and permits zero', () => {
+    const packed = packGeometry(
+      geometry({
+        peaks: Array.from({ length: 12 }, (_, index) =>
+          peak(`Summit ${index}`, [0.5, 0.5 + index * 0.001])
+        ),
+      })
+    );
+    expect(selectMapLabels(packed, specAt(12))).toHaveLength(8);
+    expect(
+      selectMapLabels(packed, specAt(12), {
+        ...DEFAULT_PEAK_LABEL_OPTIONS,
+        maxLabels: 12,
+      })
+    ).toHaveLength(12);
+    expect(
+      selectMapLabels(packed, specAt(12), {
+        ...DEFAULT_PEAK_LABEL_OPTIONS,
+        maxLabels: 1,
+      }).map((label) => label.id)
+    ).toEqual(['peak:SUMMIT 0']);
+    expect(
+      selectMapLabels(packed, specAt(12), {
+        ...DEFAULT_PEAK_LABEL_OPTIONS,
+        maxLabels: 0,
+      })
+    ).toEqual([]);
   });
 
   it('keeps one chip per summit across a tile seam', () => {
