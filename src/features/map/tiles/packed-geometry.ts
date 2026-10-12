@@ -20,7 +20,10 @@ import type {
   AeroLineKind,
   AeroWay,
   AreaFeature,
+  GroundArea,
+  GroundKind,
   MapGeometry,
+  MapPeak,
   Place,
   RiverWay,
   RoadClass,
@@ -29,7 +32,7 @@ import type {
   TransitWay,
   WorldPoint,
 } from '../core/types';
-import { AERO_AREA_KINDS, AERO_LINE_KINDS, TRANSIT_MODES } from '../core/types';
+import { AERO_AREA_KINDS, AERO_LINE_KINDS, GROUND_KINDS, TRANSIT_MODES } from '../core/types';
 
 /** Struct-of-arrays polylines (streets add road class + names). */
 export interface PackedLines {
@@ -76,6 +79,11 @@ export interface PackedAeroAreas extends PackedAreas {
   readonly kind: Uint8Array;
 }
 
+/** Areas carrying a class byte: `kind` holds the {@link GROUND_KINDS} index. */
+export interface PackedGroundAreas extends PackedAreas {
+  readonly kind: Uint8Array;
+}
+
 /** Lines carrying a class byte: `kind` holds the {@link AERO_LINE_KINDS} index. */
 export interface PackedAeroLines extends PackedLines {
   readonly kind: Uint8Array;
@@ -91,6 +99,11 @@ export const EMPTY_PACKED_AREAS: PackedAreas = {
 };
 
 export const EMPTY_PACKED_AERO_AREAS: PackedAeroAreas = {
+  ...EMPTY_PACKED_AREAS,
+  kind: new Uint8Array(0),
+};
+
+export const EMPTY_PACKED_GROUND_AREAS: PackedGroundAreas = {
   ...EMPTY_PACKED_AREAS,
   kind: new Uint8Array(0),
 };
@@ -129,6 +142,10 @@ export interface PackedTile {
   readonly pois: readonly MapPoi[];
   /** OpenMapTiles `housenumber` points — z14 only, empty otherwise. */
   readonly houseNumbers: readonly HouseNumber[];
+  /** Non-park `landcover` areas, classed by {@link GROUND_KINDS}; empty from an old binary. */
+  readonly groundCover: PackedGroundAreas;
+  /** OpenMapTiles `mountain_peak` points; empty from an old binary. */
+  readonly peaks: readonly MapPeak[];
 }
 
 /** A named point of interest, positioned in world space. */
@@ -188,7 +205,9 @@ export function packedTileToGeometry(tile: PackedTile): PackedGeometry {
     tile.aeroLines.count === 0 &&
     tile.places.length === 0 &&
     tile.pois.length === 0 &&
-    tile.houseNumbers.length === 0;
+    tile.houseNumbers.length === 0 &&
+    tile.groundCover.count === 0 &&
+    tile.peaks.length === 0;
   return empty ? EMPTY_PACKED : { parts: [tile], places: tile.places };
 }
 
@@ -313,6 +332,12 @@ export function packGeometry(g: MapGeometry): PackedGeometry {
     return { ...packLines(ways), kind };
   })(g.aeroLines ?? []);
 
+  const groundCover = ((areas: readonly GroundArea[]): PackedGroundAreas => {
+    const kind = new Uint8Array(areas.length);
+    for (let i = 0; i < areas.length; i++) kind[i] = GROUND_KINDS.indexOf(areas[i].kind);
+    return { ...packAreas(areas), kind };
+  })(g.groundCover ?? []);
+
   const tile: PackedTile = {
     originX: 0,
     originY: 0,
@@ -328,6 +353,8 @@ export function packGeometry(g: MapGeometry): PackedGeometry {
     places: g.places,
     pois: g.pois ?? [],
     houseNumbers: g.houseNumbers ?? [],
+    groundCover,
+    peaks: g.peaks ?? [],
   };
   return packedTileToGeometry(tile);
 }
@@ -345,6 +372,11 @@ export function asTransitMode(v: number): TransitMode {
 /** Narrow a raw kind byte to the {@link AeroAreaKind} union for callers. */
 export function asAeroAreaKind(v: number): AeroAreaKind {
   return AERO_AREA_KINDS[v] ?? 'apron';
+}
+
+/** Narrow a raw kind byte to the {@link GroundKind} union for callers. */
+export function asGroundKind(v: number): GroundKind {
+  return GROUND_KINDS[v] ?? 'farmland';
 }
 
 /** Narrow a raw kind byte to the {@link AeroLineKind} union for callers. */
@@ -367,6 +399,7 @@ export function unpackPacked(g: PackedGeometry): MapGeometry {
   const buildings: AreaFeature[] = [];
   const aeroAreas: AeroArea[] = [];
   const aeroLines: AeroWay[] = [];
+  const groundCover: GroundArea[] = [];
 
   for (const part of g.parts) {
     const { originX, originY } = part;
@@ -426,6 +459,14 @@ export function unpackPacked(g: PackedGeometry): MapGeometry {
         rings: ringsOf(aa, i),
       });
     }
+    const gc = part.groundCover;
+    for (let i = 0; i < gc.count; i++) {
+      groundCover.push({
+        kind: asGroundKind(gc.kind[i]),
+        name: gc.names[i],
+        rings: ringsOf(gc, i),
+      });
+    }
     const al = part.aeroLines;
     for (let i = 0; i < al.count; i++) {
       aeroLines.push({
@@ -448,5 +489,7 @@ export function unpackPacked(g: PackedGeometry): MapGeometry {
     places: [...g.places],
     pois: g.parts.flatMap((part) => [...part.pois]),
     houseNumbers: g.parts.flatMap((part) => [...part.houseNumbers]),
+    groundCover,
+    peaks: g.parts.flatMap((part) => [...part.peaks]),
   };
 }

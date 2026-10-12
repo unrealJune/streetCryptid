@@ -14,8 +14,11 @@ import type {
   AeroLineKind,
   AeroWay,
   AreaFeature,
+  GroundArea,
+  GroundKind,
   HouseNumberFeature,
   MapGeometry,
+  MapPeak,
   MapPoiFeature,
   Place,
   RiverWay,
@@ -128,10 +131,32 @@ export function aeroLineKindOf(omtClass: string): AeroLineKind | null {
   }
 }
 
+/**
+ * OMT `landcover.class` → a ground-cover kind, for the classes that are not
+ * parkland ({@link PARK_LANDCOVER} takes `wood`/`grass` first). Everything else
+ * returns null.
+ *
+ * Mirrored exactly by `ground_kind_of` in
+ * `modules/iroh-location/rust/src/mvt.rs` — change both together.
+ */
+export function groundKindOf(omtClass: string): GroundKind | null {
+  switch (omtClass) {
+    case 'farmland':
+    case 'wetland':
+    case 'sand':
+    case 'rock':
+    case 'ice':
+      return omtClass;
+    default:
+      return null;
+  }
+}
+
 /** Landcover/landuse classes that read as parkland in the dot field. */
 const PARK_LANDCOVER = new Set(['grass', 'wood']);
 const PARK_LANDUSE = new Set(['cemetery', 'grass', 'recreation_ground', 'stadium', 'pitch']);
 
+const GEOM_POINT = 1;
 const GEOM_LINE = 2;
 const GEOM_POLYGON = 3;
 
@@ -153,6 +178,8 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
   const places: Place[] = [];
   const pois: MapPoiFeature[] = [];
   const houseNumbers: HouseNumberFeature[] = [];
+  const groundCover: GroundArea[] = [];
+  const peaks: MapPeak[] = [];
 
   function toWorld(layer: VectorTileLayer, px: number, py: number): WorldPoint {
     return [rect.minX + (px / layer.extent) * spanX, rect.minY + (py / layer.extent) * spanY];
@@ -219,8 +246,16 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
     if (f.type === GEOM_POLYGON) pushPark(f, layer);
   });
   eachFeature('landcover', (f, layer) => {
-    if (f.type === GEOM_POLYGON && PARK_LANDCOVER.has(String(f.properties.class ?? '')))
+    if (f.type !== GEOM_POLYGON) return;
+    const omtClass = String(f.properties.class ?? '');
+    if (PARK_LANDCOVER.has(omtClass)) {
       pushPark(f, layer);
+      return;
+    }
+    const kind = groundKindOf(omtClass);
+    if (kind === null) return;
+    const rings = lines(layer, f);
+    if (rings.length) groundCover.push({ kind, rings });
   });
   eachFeature('landuse', (f, layer) => {
     if (f.type === GEOM_POLYGON && PARK_LANDUSE.has(String(f.properties.class ?? '')))
@@ -280,6 +315,24 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
     houseNumbers.push({ number, world: toWorld(layer, geom[0][0].x, geom[0][0].y) });
   });
 
+  eachFeature('mountain_peak', (f, layer) => {
+    if (f.type !== GEOM_POINT) return;
+    const name = f.properties.name;
+    if (typeof name !== 'string' || !name) return;
+    const geom = f.loadGeometry();
+    if (!geom.length || !geom[0].length) return;
+    const { ele, ele_ft: eleFt, rank } = f.properties;
+    peaks.push({
+      name,
+      world: toWorld(layer, geom[0][0].x, geom[0][0].y),
+      kind: String(f.properties.class ?? ''),
+      ele: typeof ele === 'number' ? Math.round(ele) : undefined,
+      eleFt: typeof eleFt === 'number' ? Math.round(eleFt) : undefined,
+      customaryFt: f.properties.customary_ft === 1,
+      rank: typeof rank === 'number' ? rank : undefined,
+    });
+  });
+
   eachFeature('place', (f, layer) => {
     const name = f.properties.name;
     if (typeof name !== 'string' || !name) return;
@@ -307,5 +360,7 @@ export function decodeMvtTile(data: Uint8Array, tile: TileCoord): MapGeometry {
     pois,
     houseNumbers,
     places,
+    groundCover,
+    peaks,
   };
 }

@@ -81,7 +81,7 @@ import { RegionRenderCache } from './render-bundle-cache';
 import {
   makeCellStateImage,
   makeLutImage,
-  makeMaskImage,
+  makeRegionTextures,
   renderRegionImage,
 } from './region-shader';
 import { getRevealMaskEffect } from './reveal-mask-shader';
@@ -242,6 +242,7 @@ export function MapView({
   highwaysEnabled = true,
   transitEnabled = false,
   structuresEnabled = true,
+  peaksEnabled = true,
   accessibilityLabel,
   onSelectSelf,
   onSelectFriend,
@@ -270,6 +271,8 @@ export function MapView({
   transitEnabled?: boolean;
   /** Draw building footprints and aeroway surfaces (default true). */
   structuresEnabled?: boolean;
+  /** Name summits with their elevations (default true). */
+  peaksEnabled?: boolean;
   accessibilityLabel?: string;
   onSelectSelf?: () => void;
   onSelectFriend?: (friendId: string) => void;
@@ -380,18 +383,21 @@ export function MapView({
     const measure = isMapPerfRunEnabled();
     const started = measure ? perfNow() : 0;
     const maskStarted = measure ? perfNow() : 0;
-    const maskImage = makeMaskImage(region, { highways: highwaysEnabled });
+    const textures = makeRegionTextures(region, { highways: highwaysEnabled });
     const maskMs = measure ? perfNow() - maskStarted : 0;
     const cellStarted = measure ? perfNow() : 0;
     const cellImage = makeCellStateImage(region);
     const cellTextureMs = measure ? perfNow() - cellStarted : 0;
     const rasterStarted = measure ? perfNow() : 0;
     const image =
-      maskImage && cellImage && lutImage
+      textures.mask && textures.ground && textures.terrain && cellImage && lutImage
         ? renderRegionImage({
             region,
             palette: theme.canvas,
-            maskImage,
+            maskImage: textures.mask,
+            groundImage: textures.ground,
+            terrainImage: textures.terrain,
+            hasElevation: textures.hasElevation,
             cellImage,
             lutImage,
             explorationEnabled: renderExploration,
@@ -437,9 +443,10 @@ export function MapView({
         // chips too, or the map grows labels for things that are not drawn.
         if (!highwaysEnabled && label.roadClass === HIGHWAY_CLASS) return false;
         if (!transitEnabled && label.kind === 'transit') return false;
+        if (!peaksEnabled && label.kind === 'peak') return false;
         return true;
       }),
-    [region, highwaysEnabled, transitEnabled]
+    [region, highwaysEnabled, transitEnabled, peaksEnabled]
   );
 
   const animateProfileCamera = useCallback(

@@ -62,9 +62,16 @@
 //!   kind[count]       u8   (index into AERO_LINE_KINDS in core/types.ts)  (pad→4)
 //!   pointOff[count+1] u32
 //!   coords[2*totalPoints] f32
+//! -- pois --  count u32, nameRef/kindRef/subclassRef/rank[count] i32, x[count] f32, y[count] f32
+//! -- house numbers --  count u32, numberRef[count] i32, x[count] f32, y[count] f32
+//! -- ground cover (non-park `landcover`) --
+//!   same layout as aero areas; kind indexes GROUND_KINDS in core/types.ts
+//! -- peaks (`mountain_peak` points) --
+//!   count u32, nameRef/kindRef/rank/ele/eleFt[count] i32 (ele absent = i32::MIN),
+//!   customaryFt[count] u8 (pad→4), x[count] f32, y[count] f32
 //! ```
 //! Appended sections are ordered transit, label streets, buildings, aero areas,
-//! aero lines. A JS reader can detect each by "there are bytes left", so buffers
+//! aero lines, pois, house numbers, ground cover, peaks. A JS reader can detect each by "there are bytes left", so buffers
 //! from older native binaries still parse and simply carry no data for sections
 //! they predate.
 //! An "areas section" (rings grouped per feature): count u32, totalRings u32,
@@ -151,6 +158,7 @@ impl<'a> PbReader<'a> {
 // MVT value + geometry model
 // ---------------------------------------------------------------------------
 
+const GEOM_POINT: u64 = 1;
 const GEOM_LINE: u64 = 2;
 const GEOM_POLYGON: u64 = 3;
 const DEFAULT_EXTENT: u32 = 4096;
@@ -240,6 +248,30 @@ fn aero_line_kind_of(class: &str) -> Option<u8> {
     }
 }
 
+/// OMT `landcover.class` -> a `GROUND_KINDS` index, for the classes that are not
+/// parkland ([`is_park_landcover`] takes `wood`/`grass` first).
+///
+/// Mirrored exactly by `groundKindOf` in
+/// `src/features/map/tiles/mvt-mapping.ts` -- change both together.
+fn ground_kind_of(class: &str) -> Option<u8> {
+    match class {
+        "farmland" => Some(0),
+        "wetland" => Some(1),
+        "sand" => Some(2),
+        "rock" => Some(3),
+        "ice" => Some(4),
+        _ => None,
+    }
+}
+
+/// A peak elevation the tile did not carry, on the wire.
+const PEAK_ELE_ABSENT: i32 = i32::MIN;
+
+/// JS `Math.round` (half rounds up, toward +inf), so the mirrors agree on `ele`.
+fn js_round(v: f64) -> i32 {
+    (v + 0.5).floor() as i32
+}
+
 fn is_park_landcover(class: &str) -> bool {
     matches!(class, "grass" | "wood")
 }
@@ -268,6 +300,9 @@ struct Geometry {
     places: Vec<Place>,
     pois: Vec<Poi>,
     housenumbers: Vec<HouseNumber>,
+    /// Non-park `landcover`; `kind` indexes `GROUND_KINDS` (same shape as aero areas).
+    ground: Vec<AeroArea>,
+    peaks: Vec<Peak>,
     strings: Interner,
 }
 
@@ -315,6 +350,17 @@ struct Poi {
 /// OpenMapTiles `housenumber` point (z14 only): a street number, no name.
 struct HouseNumber {
     number: i32,
+    pos: [f32; 2],
+}
+
+/// OpenMapTiles `mountain_peak` point. Elevations are rounded like the JS mirror.
+struct Peak {
+    name: i32,
+    kind: i32,
+    rank: i32,
+    ele: i32,
+    ele_ft: i32,
+    customary_ft: bool,
     pos: [f32; 2],
 }
 
@@ -743,6 +789,15 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                         .unwrap_or("");
                     if is_park_landcover(class) {
                         push_park(layer, f, proj, geo);
+                    } else if let Some(kind) = ground_kind_of(class) {
+                        let rings = decode_geometry(&f.geometry, proj);
+                        if !rings.is_empty() {
+                            geo.ground.push(AeroArea {
+                                kind,
+                                name: -1,
+                                rings,
+                            });
+                        }
                     }
                 }
             }
@@ -870,6 +925,40 @@ fn ingest_layer(layer: &Layer, proj: &Proj, geo: &mut Geometry) {
                     kind: kind_ref,
                     subclass: subclass_ref,
                     rank,
+                    pos: *first,
+                });
+            }
+        }
+        "mountain_peak" => {
+            for f in &layer.features {
+                if f.geom_type != GEOM_POINT {
+                    continue;
+                }
+                let Some(name) = layer.prop(f, "name").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                let rings = decode_geometry(&f.geometry, proj);
+                let Some(first) = rings.first().and_then(|r| r.first()) else {
+                    continue;
+                };
+                let name_ref = geo.strings.intern(name);
+                let kind_ref = geo.strings.intern(
+                    layer
+                        .prop(f, "class")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                );
+                let num = |key: &str| layer.prop(f, key).and_then(|v| v.as_num());
+                geo.peaks.push(Peak {
+                    name: name_ref,
+                    kind: kind_ref,
+                    rank: num("rank").map(|n| n as i32).unwrap_or(-1),
+                    ele: num("ele").map(js_round).unwrap_or(PEAK_ELE_ABSENT),
+                    ele_ft: num("ele_ft").map(js_round).unwrap_or(PEAK_ELE_ABSENT),
+                    customary_ft: num("customary_ft") == Some(1.0),
                     pos: *first,
                 });
             }
@@ -1128,6 +1217,36 @@ fn encode(geo: &Geometry, origin: (f64, f64)) -> Vec<u8> {
     }
     for h in &geo.housenumbers {
         w.f32(h.pos[1]);
+    }
+
+    // ground cover + peaks ------------------------------------------------------
+    write_aero_areas(&mut w, &geo.ground);
+
+    w.u32(geo.peaks.len() as u32);
+    for p in &geo.peaks {
+        w.i32(p.name);
+    }
+    for p in &geo.peaks {
+        w.i32(p.kind);
+    }
+    for p in &geo.peaks {
+        w.i32(p.rank);
+    }
+    for p in &geo.peaks {
+        w.i32(p.ele);
+    }
+    for p in &geo.peaks {
+        w.i32(p.ele_ft);
+    }
+    for p in &geo.peaks {
+        w.u8(u8::from(p.customary_ft));
+    }
+    w.align4();
+    for p in &geo.peaks {
+        w.f32(p.pos[0]);
+    }
+    for p in &geo.peaks {
+        w.f32(p.pos[1]);
     }
 
     w.buf
@@ -1811,6 +1930,19 @@ mod tests {
         assert_eq!(geo.buildings.len(), 0, "buildings");
         assert_eq!(geo.aero_areas.len(), 4, "aeroAreas");
         assert_eq!(geo.aero_lines.len(), 45, "aeroLines");
+        // Non-park landcover (12 farmland + 7 wetland) and the named peaks east
+        // of Seattle (Tiger Mountain); counts match the JS decoder in scg1.test.ts.
+        assert_eq!(geo.ground.len(), 19, "groundCover");
+        assert_eq!(geo.peaks.len(), 28, "peaks");
+        let tiger = geo
+            .peaks
+            .iter()
+            .find(|p| geo.strings.list[p.name as usize] == "East Tiger Mountain")
+            .expect("East Tiger Mountain");
+        assert_eq!(
+            (tiger.ele, tiger.ele_ft, tiger.customary_ft),
+            (913, 2995, true)
+        );
         // Transit rides the same layer the roads come from; the JS decoder's
         // counts for this tile are asserted in scg1.test.ts / mvt-mapping.test.ts.
         assert!(!geo.transit.is_empty(), "transit");

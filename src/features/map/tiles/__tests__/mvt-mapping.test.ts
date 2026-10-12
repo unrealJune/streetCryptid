@@ -7,6 +7,7 @@ import {
   aeroAreaKindOf,
   aeroLineKindOf,
   decodeMvtTile,
+  groundKindOf,
   roadClassOf,
   transitModeOf,
 } from '../mvt-mapping';
@@ -544,5 +545,70 @@ describe('decodeMvtTile buildings and aeroway', () => {
     // The runway polygon contributed a closed ring, so it has more points than
     // the two-point line does.
     expect(geom.aeroLines![0].points.length).toBeGreaterThan(2);
+  });
+  it('routes landcover: wood/grass to parks, the rest of GROUND_KINDS to ground cover', () => {
+    const geom = decodeMvtTile(
+      tile({
+        landcover: [
+          feature(box(LON, LAT, d), { class: 'wood' }),
+          feature(box(LON + d * 3, LAT, d), { class: 'farmland' }),
+          feature(box(LON - d * 3, LAT, d), { class: 'rock' }),
+          feature(box(LON, LAT + d * 3, d), { class: 'ice' }),
+          feature(box(LON, LAT - d * 3, d), { class: 'unknown' }),
+          feature(seg(d * 0.4), { class: 'sand' }),
+        ],
+      }),
+      TILE
+    );
+    expect(geom.parks).toHaveLength(1);
+    expect(geom.groundCover?.map((g) => g.kind)).toEqual(['farmland', 'rock', 'ice']);
+  });
+
+  it('decodes named mountain peaks with elevations and the feet flag', () => {
+    const peak = (dx: number, properties: Feature['properties']) =>
+      feature({ type: 'Point', coordinates: [LON + dx, LAT] } satisfies Point, properties);
+    const geom = decodeMvtTile(
+      tile({
+        mountain_peak: [
+          peak(0, {
+            name: 'Tiger',
+            class: 'peak',
+            ele: 913,
+            ele_ft: 2995,
+            customary_ft: 1,
+            rank: 1,
+          }),
+          peak(d, { name: 'Atago', class: 'peak', ele: 924, ele_ft: 3031 }),
+          peak(d * 2, { class: 'peak', ele: 100 }),
+        ],
+      }),
+      TILE
+    );
+    expect(geom.peaks).toEqual([
+      expect.objectContaining({
+        name: 'Tiger',
+        kind: 'peak',
+        ele: 913,
+        eleFt: 2995,
+        customaryFt: true,
+        rank: 1,
+      }),
+      expect.objectContaining({ name: 'Atago', ele: 924, customaryFt: false, rank: undefined }),
+    ]);
+  });
+});
+
+describe('groundKindOf', () => {
+  it('maps the non-park landcover classes and nothing else', () => {
+    expect(['farmland', 'wetland', 'sand', 'rock', 'ice'].map(groundKindOf)).toEqual([
+      'farmland',
+      'wetland',
+      'sand',
+      'rock',
+      'ice',
+    ]);
+    expect(groundKindOf('wood')).toBeNull();
+    expect(groundKindOf('grass')).toBeNull();
+    expect(groundKindOf('')).toBeNull();
   });
 });

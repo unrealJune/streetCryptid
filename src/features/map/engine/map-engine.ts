@@ -14,7 +14,9 @@ import {
   shouldPrefetchRegion,
   type RegionSpec,
 } from '../core/region';
+import type { ElevationRaster } from '../core/terrain';
 import type { CameraState, Place, Viewport, WorldPoint, WorldRect } from '../core/types';
+import type { ElevationSource } from '../tiles/elevation-source';
 import type { GeometrySource } from '../tiles/geometry-source';
 import { mergeGeometry } from '../tiles/geometry-source';
 import type { PackedGeometry } from '../tiles/packed-geometry';
@@ -57,6 +59,11 @@ export interface MapRegion {
    * its zoom band, which is exactly the granularity the label LOD needs.
    */
   readonly labels: readonly MapLabel[];
+  /**
+   * Elevation for every mask pixel, when a terrain source covers the region.
+   * Absent (or null) draws parkland with the canopy fallback instead of terrain.
+   */
+  readonly elevation?: ElevationRaster | null;
   /** Exploration revision represented by the immutable cell field. */
   readonly explorationVersion: number;
   /** Phase-level timings captured when this immutable region was built. */
@@ -106,6 +113,8 @@ export type BuildProgressListener = (progress: BuildProgress) => void;
 
 export interface MapEngineOptions {
   readonly source: GeometrySource;
+  /** Elevation for terrain shading. Optional: without it parks use the canopy fallback. */
+  readonly elevation?: ElevationSource;
   readonly grid: H3Grid;
   /** The tileset's data zoom range. */
   readonly dataZooms: DataZoomRange;
@@ -125,6 +134,7 @@ export interface MapEngineOptions {
  */
 export class MapEngine {
   private readonly source: GeometrySource;
+  private readonly elevation?: ElevationSource;
   private readonly grid: H3Grid;
   private readonly dataZooms: DataZoomRange;
   private readonly onTiming?: (timing: RegionTiming) => void;
@@ -151,6 +161,7 @@ export class MapEngine {
 
   constructor(options: MapEngineOptions) {
     this.source = options.source;
+    this.elevation = options.elevation;
     this.grid = options.grid;
     this.dataZooms = options.dataZooms;
     this.onTiming = options.onTiming;
@@ -337,6 +348,14 @@ export class MapEngine {
     }
 
     const t0 = now();
+    // Elevation loads beside the vectors and never fails a build: a region
+    // without it draws parkland with the canopy fallback.
+    const elevation = this.elevation
+      ? this.elevation.elevationFor(spec).catch((error: unknown) => {
+          console.warn('[map] elevation unavailable:', error);
+          return null;
+        })
+      : Promise.resolve(null);
     // Set once full detail is in hand: a preview stage landing after it is wasted work.
     let detailLoaded = false;
     const streamedPreview =
@@ -384,12 +403,18 @@ export class MapEngine {
 
     const geometry = mergeGeometry(parts);
     const t2 = now();
-    const region = await this.buildFromGeometry(request, spec, geometry, {
-      tiles: tiles.length,
-      coldStart,
-      sourceMs: t1 - t0,
-      mergeMs: t2 - t1,
-    });
+    const region = await this.buildFromGeometry(
+      request,
+      spec,
+      geometry,
+      {
+        tiles: tiles.length,
+        coldStart,
+        sourceMs: t1 - t0,
+        mergeMs: t2 - t1,
+      },
+      await withDeadline(elevation, ELEVATION_GRACE_MS)
+    );
     this.last = region;
     this.onTiming?.(region.timing);
     return region;
@@ -399,7 +424,8 @@ export class MapEngine {
     request: RegionRequest,
     spec: RegionSpec,
     geometry: PackedGeometry,
-    sourceTiming: Pick<RegionTiming, 'tiles' | 'coldStart' | 'sourceMs' | 'mergeMs'>
+    sourceTiming: Pick<RegionTiming, 'tiles' | 'coldStart' | 'sourceMs' | 'mergeMs'>,
+    elevation: ElevationRaster | null = null
   ): Promise<MapRegion> {
     const queuedAt = now();
     // Cached tile promises otherwise chain region builds/renders through
@@ -469,12 +495,36 @@ export class MapEngine {
       cellField,
       places: geometry.places,
       labels: selectMapLabels(geometry, spec),
+      elevation,
       explorationVersion: request.explorationVersion,
       timing,
     };
 
     return region;
   }
+}
+
+/**
+ * How long a finished vector build waits for elevation that is still loading.
+ * Elevation only shades parkland, so it must never hold a map hostage: past this
+ * the region lands with the canopy fallback.
+ */
+const ELEVATION_GRACE_MS = 1500;
+
+function withDeadline<T>(promise: Promise<T | null>, ms: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(null);
+      }
+    );
+  });
 }
 
 function now(): number {
