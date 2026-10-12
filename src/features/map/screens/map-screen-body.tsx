@@ -105,6 +105,7 @@ export default function MapScreenBody() {
     highways: true,
     transit: false,
     structures: true,
+    peaks: true,
   });
   const explorationEnabled = layers.exploration;
   const setLayer = useCallback((layer: MapLayerId, enabled: boolean) => {
@@ -415,7 +416,9 @@ export default function MapScreenBody() {
         explorationEnabled ? 'Exploration overlay on.' : 'Exploration overlay off.'
       } ${layers.highways ? 'Highways shown.' : 'Highways hidden.'} ${
         layers.transit ? 'Transit overlay on.' : 'Transit overlay off.'
-      } ${layers.structures ? 'Buildings shown.' : 'Buildings hidden.'} ${locationCopy} ${
+      } ${layers.structures ? 'Buildings shown.' : 'Buildings hidden.'} ${
+        layers.peaks ? 'Peaks shown.' : 'Peaks hidden.'
+      } ${locationCopy} ${
         mapFriends.length > 0
           ? `${mapFriends.length} friend${mapFriends.length === 1 ? '' : 's'} on the map: ${friendNames}.`
           : 'No friend locations are available.'
@@ -471,6 +474,7 @@ export default function MapScreenBody() {
           highwaysEnabled={layers.highways}
           transitEnabled={layers.transit}
           structuresEnabled={layers.structures}
+          peaksEnabled={layers.peaks}
           key={mapSessionKey}
           onReadout={onReadout}
           initialCenter={initialCenter}
@@ -495,7 +499,7 @@ export default function MapScreenBody() {
           style={[styles.attribution, { color: theme.chrome.steel }]}
           numberOfLines={1}
         >
-          © OPENSTREETMAP
+          © OPENSTREETMAP · COPERNICUS DEM
         </Text>
         <SettingsControl
           onPress={() => {
@@ -609,6 +613,7 @@ function MapSession({
   highwaysEnabled,
   transitEnabled,
   structuresEnabled,
+  peaksEnabled,
   onReadout,
   onSelectFriend,
   onSelectSelf,
@@ -628,6 +633,7 @@ function MapSession({
   highwaysEnabled: boolean;
   transitEnabled: boolean;
   structuresEnabled: boolean;
+  peaksEnabled: boolean;
   onReadout(readout: MapReadout): void;
   onSelectFriend(friendId: string): void;
   onSelectSelf(): void;
@@ -645,6 +651,7 @@ function MapSession({
       highwaysEnabled={highwaysEnabled}
       transitEnabled={transitEnabled}
       structuresEnabled={structuresEnabled}
+      peaksEnabled={peaksEnabled}
       onReadout={onReadout}
       initialCenter={sessionCenter}
       locateTarget={locateTarget}

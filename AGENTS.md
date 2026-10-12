@@ -112,6 +112,20 @@ Conventions when changing that code:
   on 2026-09-29 an iPhone reported 88 s in one window and nothing could say whether that was 88 s
   in a minute (an exception) or across twenty (7%), or whose it was. `rust` is ONE thread: UniFFI's
   tokio runtime is async-compat's current-thread `async-compat/tokio-1`, iroh's endpoint included.
+- **A pocketed app pulls friends natively, under a deadline, and every pull is watched.** On
+  2026-10-09 the fleet showed a foreground-launched iPhone, backgrounded and resident, taking 4892
+  wakes and 0 pulls in six hours: `pullFriendFixes` ran only when the native runtime owned the node,
+  and a mounted app's own pull clock (`presenceSyncIntervalMs`) stops off screen. It now pulls
+  from the `handOff` path too, declining only while the app is `active`; the parked coarse stream
+  (`periodic`) pulls on a 15 min floor, everything else on 5. A pull goes through
+  `pull_latest(budget)` — `sync_all_until` stops at the deadline and keeps what landed — under a
+  `beginBackgroundTask` assertion, with the budget clamped to `backgroundTimeRemaining` minus a
+  margin. `friend.pull` records each one (and `expired` from the expiration handler, `stranded`
+  from the next pull finding the durable in-flight mark); `wake.pull_*` counts the same, because
+  the outcomes that matter are the ones that may never ship. A mounted app is sent
+  `onFriendsPulled` and re-reads the replica — a local read, never a second dial. Android had the
+  same hole (the service keeps the app mounted, so every capture is a hand-off) and pulls the same
+  way after a hand-off while no activity is in the foreground. See `infra/otel/README.md`.
 - **`bg.wake` and `bg.backfill` do not exist.** They went dead when capture moved into Rust — the
   location wake is native and emits no JS span at all. Six e2e scenarios asserted them,
   `background-location-e2e.sh` gated its PASS on `bg.wake > 0` so it could never pass, and two
@@ -454,6 +468,16 @@ Conventions when changing that code:
   button. Before changing it, check whether `node.rebind{trigger="ble-arm"}` is actually firing on
   phones whose Bluetooth is fine: attach is asynchronous, so "not yet" and "no" are the same answer
   at that call site. It was NOT the cause of the 2026-09-13 pairing failures.
+- **On Apple, iroh's DNS is mDNSResponder, never a nameserver list** (`rust/src/system_dns.rs`).
+  iroh's default resolver cannot read iOS's DNS config, so it fell back to querying Google's
+  8.8.8.8 directly from every iPhone. An iPhone 16 that could not reach it failed every relay
+  lookup for weeks (2026-09-17 to 2026-10-11, never once completing a relay probe) while its
+  telemetry, resolving through the OS, shipped fine. Every query now goes through
+  `DNSServiceQueryRecord`, which honours VPNs, encrypted-DNS profiles, split DNS and Private Relay.
+  Do not "fix" a DNS problem by feeding iroh nameserver IPs (`res_9_getservers` included): any
+  list is wrong behind one of those. Failures log under `iroh_location::system_dns` as
+  `system dns: <type> <host> failed: <reason>`. Android reads the real system DNS over JNI and
+  keeps iroh's default.
 - Guard newly added native exports anyway (`typeof mod.configureTelemetry === 'function'`). Not
   because of bindgen now, but because a phone can be running an older binary than the JS bundle.
 

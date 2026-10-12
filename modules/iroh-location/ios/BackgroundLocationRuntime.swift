@@ -1428,6 +1428,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     }
     reporter.noteHandOff()
     DispatchQueue.main.async { sink.sendEvent("onNativeFix", payload) }
+    // The app publishes this capture; receiving is still ours while it is off screen, since its own
+    // pull clock only runs on screen. `pullFriendFixes` declines when the app is active.
+    Task { await self.pullFriendFixes() }
   }
 
   /// Run one captured fix through gate → outbox → seal → send.
@@ -1502,32 +1505,191 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// so an ungated pull on every coarse tick is a new way to spend the exact budget this work
   /// exists to protect. Two gates:
   ///
-  /// - only on a wake that means something moved (`movement`, `geofence_exit`, `relaunch`,
-  ///   `visit`), or the rare `refresh` the OS hands a parked phone, never
-  ///   on a `periodic` tick from the parked coarse stream, which fires purely as a clock;
-  /// - and a durable floor between pulls, so a burst of deliveries is still one pull.
+  /// - a durable floor between pulls, so a burst of deliveries is still one pull: five minutes on a
+  ///   wake that means something moved (`movement`, `geofence_exit`, `relaunch`, `visit`) or the
+  ///   rare `refresh` the OS hands a parked phone, fifteen on a `periodic` tick from the parked
+  ///   coarse stream, which is a clock rather than news;
+  /// - and a wall-clock budget, clamped to what iOS says is left of the background allowance, so a
+  ///   pull ends on our deadline rather than on the OS's.
+  ///
+  /// ## Also for a mounted app in the background
+  ///
+  /// Not only the JS-free wake. A foreground-launched app that is then pocketed stays resident
+  /// (the location background mode), takes every capture through `handOff`, and until 2026-10-09
+  /// pulled on none of them: the fleet showed 4892 wakes and 0 pulls across six hours on one
+  /// iPhone, and every friend's dot frozen until the app was opened. The one case left out is the
+  /// app ON SCREEN, which pulls for itself every 20 s – 5 min (`presenceSyncIntervalMs`). After a
+  /// pull a mounted app is told (`onFriendsPulled`) so it re-reads the replica it already holds.
+  ///
+  /// ## Watched, because the failure it risks is silent
+  ///
+  /// Each pull is a `friend.pull` span (see `friend_pull.rs`) with the wake, the budget, iOS's
+  /// remaining allowance before and after, and the CPU it cost; and a `wake.pull_*` counter in
+  /// `BackgroundWakeLedger`, which survives a process that does not. A pull iOS cuts off is
+  /// reported twice over: by the background task's expiration handler while it is happening
+  /// (`expired`), and by the next pull, which finds the in-flight mark it never cleared
+  /// (`stranded`).
   ///
   /// Failures are swallowed on purpose: a pull that could not reach anyone must not fail the
   /// publish that has already succeeded, and the next wake tries again.
   private func pullFriendFixes() async {
-    switch lastWakeReason {
-    case .movement, .geofenceExit, .relaunch, .refresh, .visit: break
-    case .periodic, .coarseDeparture, .stateChange, .seed: return
+    let trigger = lastWakeReason
+    let floorMs: Double
+    switch trigger {
+    case .movement, .geofenceExit, .relaunch, .refresh, .visit: floorMs = Self.syncFloorMs
+    case .periodic: floorMs = Self.parkedSyncFloorMs
+    case .coarseDeparture, .stateChange, .seed: return
     }
-    let now = Date().timeIntervalSince1970 * 1000
-    let last = UserDefaults.standard.double(forKey: Self.lastSyncKey)
-    guard now - last >= Self.syncFloorMs else { return }
-    UserDefaults.standard.set(now, forKey: Self.lastSyncKey)
+    let wired = eventSink != nil
+    let appState = await MainActor.run { UIApplication.shared.applicationState }
+    if wired && appState == .active { return }
+
+    // Floor and in-flight check in one synchronous step, so concurrent deliveries cannot both
+    // pass. An in-flight pull older than any budget allows is one that never came back.
+    guard let claim = claimPull(floorMs: floorMs) else { return }
+    defer { releasePull(claim.startedAt) }
+    let nowMs = claim.nowMs
+    let sinceLastMs: UInt64? = claim.lastMs > 0 ? UInt64(max(0, nowMs - claim.lastMs)) : nil
+
+    // A mark left by an earlier pull means that pull never returned: the process was frozen or
+    // killed inside it. Nothing else can say so.
+    if let stranded = BackgroundWakeLedger.takeOpenPull() {
+      BackgroundWakeLedger.notePullStranded()
+      recordFriendPull(
+        event: FriendPullEvent(
+          outcome: .stranded, trigger: stranded.trigger, appState: "unknown", jsWired: false,
+          budgetMs: stranded.budgetMs, bgRemainingStartMs: nil, bgRemainingEndMs: nil,
+          elapsedMs: UInt64(max(0, nowMs - stranded.startedAtMs)), cpuMs: nil, cpuMsRust: nil,
+          sinceLastMs: nil, floorMs: UInt64(floorMs), report: nil, error: nil))
+      NSLog("[iroh-location] previous pull (\(stranded.trigger)) never returned")
+    }
 
     guard let node = nodeHost().current() else { return }
+    let peerTickets: [String]
     do {
-      let config = try await node.deliveryConfig()
-      guard !config.peerTickets.isEmpty else { return }
-      try await node.syncLatest(peerTickets: config.peerTickets, traceparent: nil)
-      BackgroundWakeLedger.noteSync()
-      NSLog("[iroh-location] pulled from \(config.peerTickets.count) peer(s)")
+      peerTickets = try await node.deliveryConfig().peerTickets
     } catch {
-      NSLog("[iroh-location] pull failed, next wake retries: \(error.localizedDescription)")
+      NSLog("[iroh-location] pull skipped, no delivery config: \(error.localizedDescription)")
+      return
+    }
+    guard !peerTickets.isEmpty else { return }
+
+    // Ask iOS for time BEFORE reading how much is left: a relaunched process servicing a delivery
+    // has seconds, and the assertion is what turns that into the ~30 s a pull can use.
+    let task = PullBackgroundTask()
+    let remainingStart: TimeInterval = await MainActor.run {
+      task.begin { [weak task] in
+        // On main, from iOS, with the pull still running: we are about to be suspended.
+        guard let task, let ctx = task.expire() else { return }
+        BackgroundWakeLedger.notePullExpired()
+        recordFriendPull(
+          event: FriendPullEvent(
+            outcome: .expired, trigger: ctx.trigger, appState: ctx.appState, jsWired: ctx.wired,
+            budgetMs: ctx.budgetMs, bgRemainingStartMs: ctx.remainingStartMs,
+            bgRemainingEndMs: 0,
+            elapsedMs: UInt64(max(0, Date().timeIntervalSince(ctx.startedAt) * 1000)),
+            cpuMs: nil, cpuMsRust: nil, sinceLastMs: ctx.sinceLastMs, floorMs: ctx.floorMs,
+            report: nil, error: nil))
+        NSLog("[iroh-location] background time expired mid-pull (\(ctx.trigger))")
+      }
+      return UIApplication.shared.backgroundTimeRemaining
+    }
+    let remainingStartMs = Self.finiteMs(remainingStart)
+    let budgetMs = Self.pullBudget(remainingMs: remainingStartMs)
+    guard let budgetMs else {
+      BackgroundWakeLedger.notePullNoTime()
+      NSLog("[iroh-location] pull skipped: \(remainingStartMs ?? 0) ms of background time left")
+      await MainActor.run { task.end() }
+      return
+    }
+
+    let stateLabel = Self.label(appState)
+    let startedAt = Date()
+    task.arm(
+      PullBackgroundTask.Context(
+        trigger: trigger.rawValue, appState: stateLabel, wired: wired, budgetMs: budgetMs,
+        remainingStartMs: remainingStartMs, startedAt: startedAt, sinceLastMs: sinceLastMs,
+        floorMs: UInt64(floorMs)))
+    let mark = BackgroundWakeLedger.openPull(trigger: trigger.rawValue, budgetMs: budgetMs)
+    let cpuStart = BackgroundWakeLedger.cpuMs()
+    let rustStart = BackgroundWakeLedger.groupCpuMs()[.rust]
+
+    var report: PullReport?
+    var failure: String?
+    do {
+      report = try await node.pullLatest(
+        peerTickets: peerTickets, budgetMs: budgetMs, traceparent: nil)
+    } catch {
+      failure = error.localizedDescription
+    }
+
+    let elapsedMs = max(0, Date().timeIntervalSince(startedAt) * 1000)
+    let cpuMs = max(0, BackgroundWakeLedger.cpuMs() - cpuStart)
+    let rustMs = rustStart.flatMap { start in
+      BackgroundWakeLedger.groupCpuMs()[.rust].map { max(0, $0 - start) }
+    }
+    BackgroundWakeLedger.closePull(mark)
+    let remainingEnd: TimeInterval = await MainActor.run {
+      let left = UIApplication.shared.backgroundTimeRemaining
+      task.end()
+      return left
+    }
+    let overran = elapsedMs > Double(budgetMs) + Self.pullOverrunSlackMs
+
+    BackgroundWakeLedger.noteSync()
+    BackgroundWakeLedger.notePull(
+      elapsedMs: elapsedMs, cpuMs: cpuMs, delivered: (report?.entries ?? 0) > 0,
+      failed: failure != nil, deadlineHit: (report?.nsDeadline ?? 0) > 0, overran: overran)
+    recordFriendPull(
+      event: FriendPullEvent(
+        outcome: failure == nil ? .completed : .failed, trigger: trigger.rawValue,
+        appState: stateLabel, jsWired: wired, budgetMs: budgetMs,
+        bgRemainingStartMs: remainingStartMs, bgRemainingEndMs: Self.finiteMs(remainingEnd),
+        elapsedMs: UInt64(elapsedMs), cpuMs: UInt64(cpuMs), cpuMsRust: rustMs.map { UInt64($0) },
+        sinceLastMs: sinceLastMs, floorMs: UInt64(floorMs), report: report, error: failure))
+
+    if let failure {
+      NSLog("[iroh-location] pull failed, next wake retries: \(failure)")
+      return
+    }
+    let entries = report?.entries ?? 0
+    NSLog(
+      "[iroh-location] pulled \(entries) entr(ies) from \(peerTickets.count) peer(s) in "
+        + "\(Int(elapsedMs)) ms (budget \(budgetMs), \(stateLabel), \(trigger.rawValue))")
+    // A mounted app draws friends from its own store, filled from the replica only when it reads
+    // it; say there is something to read, so the map is current the moment it is opened.
+    if wired, entries > 0, let sink = eventSink {
+      let payload: [String: Any] = [
+        "trigger": trigger.rawValue, "entries": Int(entries), "elapsedMs": Int(elapsedMs),
+      ]
+      DispatchQueue.main.async { sink.sendEvent("onFriendsPulled", payload) }
+    }
+  }
+
+  /// The budget for one pull given iOS's remaining allowance, or `nil` when there is too little
+  /// left to be worth starting. Leaves `pullSafetyMs` for the work after the pull and for
+  /// `endBackgroundTask`, since an assertion still held when the allowance runs out gets the
+  /// process killed rather than suspended.
+  private static func pullBudget(remainingMs: UInt64?) -> UInt64? {
+    guard let remainingMs else { return pullBudgetMs }
+    let usable = remainingMs > pullSafetyMs ? remainingMs - pullSafetyMs : 0
+    let budget = min(pullBudgetMs, usable)
+    return budget >= pullMinBudgetMs ? budget : nil
+  }
+
+  /// `backgroundTimeRemaining` as milliseconds, or `nil` for the "no limit" it reports while the
+  /// app is active (`.greatestFiniteMagnitude`).
+  private static func finiteMs(_ seconds: TimeInterval) -> UInt64? {
+    guard seconds.isFinite, seconds < 24 * 3600 else { return nil }
+    return UInt64(max(0, seconds) * 1000)
+  }
+
+  private static func label(_ state: UIApplication.State) -> String {
+    switch state {
+    case .active: return "active"
+    case .inactive: return "inactive"
+    case .background: return "background"
+    @unknown default: return "unknown"
     }
   }
 
@@ -1535,6 +1697,53 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// Minimum gap between receive-side pulls. Five minutes matches the default publish slot, so a
   /// phone in motion pulls about as often as it sends and no more.
   private static let syncFloorMs: Double = 5 * 60 * 1000
+  /// The floor on the parked coarse stream's clock ticks: three publish slots. A parked phone's
+  /// friends still move, but nothing about its own wake says they did.
+  private static let parkedSyncFloorMs: Double = 15 * 60 * 1000
+  /// The most one pull may take. A pass that is answered finishes in about a second (`trail.sync`
+  /// p50 150–350 ms over 2026-10-02..09); the rest of a long one is waiting on peers that are
+  /// asleep, which is the time a background window cannot spare.
+  private static let pullBudgetMs: UInt64 = 20_000
+  /// Below this there is no point starting: a cold dial alone takes longer.
+  private static let pullMinBudgetMs: UInt64 = 3_000
+  /// Kept back from iOS's allowance for everything after the pull.
+  private static let pullSafetyMs: UInt64 = 5_000
+  /// Past the budget by more than this, the deadline timer could not have been running.
+  private static let pullOverrunSlackMs: Double = 2_000
+  /// An in-memory in-flight pull older than budget + this is treated as gone.
+  private static let pullStaleSlackMs: Double = 60_000
+
+  private let pullLock = NSLock()
+  /// When the pull in flight started, or `nil`. Guarded by `pullLock`.
+  private var pullStartedAt: Date?
+
+  /// Pass the floor and take the in-flight slot in one step, so concurrent deliveries cannot both
+  /// get through. Synchronous on purpose: the lock is never held across an await. An in-flight
+  /// pull older than any budget allows is one that never came back, and does not block.
+  private func claimPull(floorMs: Double) -> (nowMs: Double, lastMs: Double, startedAt: Date)? {
+    pullLock.lock()
+    defer { pullLock.unlock() }
+    let now = Date()
+    if let inFlight = pullStartedAt,
+      now.timeIntervalSince(inFlight) * 1000 < Double(Self.pullBudgetMs) + Self.pullStaleSlackMs
+    {
+      return nil
+    }
+    let nowMs = now.timeIntervalSince1970 * 1000
+    let lastMs = UserDefaults.standard.double(forKey: Self.lastSyncKey)
+    guard nowMs - lastMs >= floorMs else { return nil }
+    UserDefaults.standard.set(nowMs, forKey: Self.lastSyncKey)
+    pullStartedAt = now
+    return (nowMs, lastMs, now)
+  }
+
+  /// Give the slot back — only if it is still ours. A pull that hung past the staleness bound has
+  /// already been replaced, and must not release its successor's slot when it finally returns.
+  private func releasePull(_ startedAt: Date) {
+    pullLock.lock()
+    if pullStartedAt == startedAt { pullStartedAt = nil }
+    pullLock.unlock()
+  }
 
   /// One line per wake that did something, so a quiet phone and a broken one look different in the
   /// device log. The equivalent spans reach the collector from the Rust side.
@@ -1646,4 +1855,65 @@ private final class SilentFixListener: FixListener {
   ) {}
   func onOpaque(author: Data, seq: UInt64) {}
   func onStatus(status: String) {}
+}
+
+/// The background-task assertion one pull holds, and the context its expiration handler reports.
+///
+/// iOS calls the expiration handler on main while the pull may still be running, and the pull's
+/// own completion ends the task on whatever thread it finishes on — so ending is idempotent and
+/// both sides go through the lock. `expire()` returns the context only to the first caller, and
+/// only while the pull is armed, so an expiry is reported once and never for a pull that already
+/// returned.
+private final class PullBackgroundTask: @unchecked Sendable {
+  struct Context {
+    let trigger: String
+    let appState: String
+    let wired: Bool
+    let budgetMs: UInt64
+    let remainingStartMs: UInt64?
+    let startedAt: Date
+    let sinceLastMs: UInt64?
+    let floorMs: UInt64
+  }
+
+  private let lock = NSLock()
+  private var id: UIBackgroundTaskIdentifier = .invalid
+  private var context: Context?
+  private var expired = false
+
+  /// Call on main. `onExpire` runs on main, before the assertion is ended for it.
+  func begin(onExpire: @escaping () -> Void) {
+    let id = UIApplication.shared.beginBackgroundTask(withName: "sc.friend-pull") { [weak self] in
+      onExpire()
+      self?.end()
+    }
+    lock.lock()
+    self.id = id
+    lock.unlock()
+  }
+
+  func arm(_ context: Context) {
+    lock.lock()
+    self.context = context
+    lock.unlock()
+  }
+
+  /// The context to report an expiry with, or `nil` when it is not this call's to report.
+  func expire() -> Context? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !expired, let context else { return nil }
+    expired = true
+    return context
+  }
+
+  /// End the assertion. Idempotent; call on main.
+  func end() {
+    lock.lock()
+    let id = self.id
+    self.id = .invalid
+    context = nil
+    lock.unlock()
+    if id != .invalid { UIApplication.shared.endBackgroundTask(id) }
+  }
 }
