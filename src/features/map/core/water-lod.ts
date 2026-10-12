@@ -19,7 +19,7 @@ import { clamp } from './color';
 /**
  * Base river stroke width at full detail, mask px. Sized off the same ladder as
  * {@link ROAD_WIDTHS}: the mock put a river at roughly a primary road's weight,
- * so this tracks `ROAD_WIDTHS[3]` (3.8) rather than a motorway's 5.0.
+ * so this stays near `ROAD_WIDTHS[3]` (3.42) rather than a motorway's 4.5.
  */
 export const RIVER_WIDTH = 3.6;
 
