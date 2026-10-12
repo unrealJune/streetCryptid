@@ -1,6 +1,6 @@
 # Boundary audit: Rust ⇄ native ⇄ JS contracts
 
-_2026-10-08, against `main` at 8d87323 (v2.17.0)._
+_2026-10-08, against `main` at 8d87323 (v2.17.0). Re-evaluated 2026-10-12 against 0b6933c (v2.21.1); see the section of that name._
 
 This is a read of the three-language seam in `modules/iroh-location` and its one JS consumer,
 `src/features/social/net/location-sharing.ts`, asking a functional programmer's questions: is
@@ -468,6 +468,144 @@ typed surface, and the field's answer is to keep the typed surface and generate 
   `PublishSink` trait is already the right shape for that. Apply `step(state, event) ->
 (state, commands)` to the two machines that lack it (motion, pairing orchestration), and keep
   the snapshot-plus-diff reactivity in mind when the view model grows.
+
+## Re-evaluated 2026-10-12 against `main` at 0b6933c (v2.21.1)
+
+Main moved 94 files and 6.7k lines since the baseline; most of it is the map (tiles, terrain,
+sunlight). The boundary-relevant part is #155 (native friend pull), #154 (ratchet acceptance
+window), #159 (system DNS on Apple), and the AGENTS.md entries for each. Merged into this branch
+without conflict.
+
+**What the findings look like now.** Every number was re-measured with the same regex on both
+revisions, which also corrected two baseline counts (the audit's first table counted
+`IrohLocationApi` and the service with looser patterns).
+
+| Measure                                           | 8d87323           | 0b6933c                                                                                                                                      |
+| ------------------------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `IrohLocationApi` methods / optional              | 99 / 57           | 99 / 57                                                                                                                                      |
+| `typeof mod.x === 'function'` guards              | 57                | 57                                                                                                                                           |
+| `LocationSharingService` lines / fields / methods | 5,565 / 157 / 160 | 5,606 / 159 / 161                                                                                                                            |
+| `lib.rs` lines                                    | 5,934             | 6,055                                                                                                                                        |
+| `BackgroundLocationRuntime.swift` lines           | 1,649             | 1,919                                                                                                                                        |
+| `BackgroundWakeLedger.swift` lines                | 312               | 422                                                                                                                                          |
+| `NativeBackgroundRuntime.kt` lines                | 257               | 364                                                                                                                                          |
+| Node methods reachable from no binding caller     | 22                | 22 (+ `docsWriteInner`, `docsWriteRatchetedInner`, `startStored`, `isStarted`, `recordOwnPublished` now visible in the regenerated bindings) |
+| Orphan JS modules                                 | 11                | 11                                                                                                                                           |
+| Uncalled public service methods                   | 7                 | 7                                                                                                                                            |
+| Swift + Kotlin tests for `iroh-location`          | 0                 | 0                                                                                                                                            |
+
+Findings 1 to 9 stand unchanged: `publishFix` still has one caller, `handOverNativeBackground`
+and `nativeNodeOwner` are still declared and implemented nowhere, `publish_inner` is still on the
+surface, `own_subscription` still takes `Option<Arc<dyn FixListener>>`, `ingestFixesHeadless` is
+still uncalled, and the `mesh_*` exports are still reachable only from tests. The spike's
+generated bindings are unaffected except that `pull_latest`, `record_friend_pull`,
+`FriendPullOutcome`, `FriendPullEvent` and `PullReport` join the surface.
+
+**What is new, and it sharpens finding 6 rather than softening it.** #155 added the
+friend-pull policy to BOTH native runtimes by hand: a floor per trigger (5 min, 15 min when
+parked), a budget (20 s) clamped to `backgroundTimeRemaining` minus a margin, a durable
+in-flight mark whose presence at the next pull means `stranded`, and the `expired` path. Swift
+holds it as five `static let` constants plus `claimPull` / `pullBudget` and the ledger's
+`openPull` / `closePull` / `takeOpenPull` in `UserDefaults`; Kotlin holds the same floors and
+budget as `const val`s plus `LAST_SYNC_KEY` in `SharedPreferences` and an `AtomicBoolean`. Rust's
+`friend_pull.rs` holds the outcome enum, the event record, `overrun_ms`, and the span; the
+decision is not in it. Two days after the audit said the background policy is written per
+platform and untested, the newest background policy was written per platform and untested.
+Smaller echoes of finding 8 in the same change: `FriendPullEvent.trigger` is a `String` on
+every side although Swift has `WakeReason` as an enum, `OnFriendsPulledEvent.trigger` is
+`string` in TS, and the service subscribes with `mod.addListener?.(...)`, a 58th guard in
+optional-call spelling.
+
+Two things in the merge are the pattern to keep. `pull_latest(budget)` with `sync_all_until`
+puts the bounded network work in Rust and hands native a report, which is exactly the split
+finding 6 asks for. And `onFriendsPulled` makes the mounted app a listener that re-reads the
+replica, which is the shape finding 9 recommends for the JS engine.
+
+The one wasm-sensitive change (`docs.rs` +216 lines, `#[path]`-included by the browser crate)
+adds no `tokio`, `std::fs` or `cfg` dependencies, so finding 10 is unchanged. `system_dns.rs` is
+`cfg(target_vendor = "apple")` inside the crate, which is the right place for a platform
+difference and not a bridge concern.
+
+## Where the native seam should lie, and how to test it
+
+The question underneath the last two findings is where the line between Swift/Kotlin and Rust
+belongs. The current line is: Rust is the engine (node, envelopes, gate, slots, drain, recovery,
+now the bounded pull), and native is sensors plus OS lifecycle plus **policy**. Policy is the
+problem. Counted today, the decisions made natively are: moving / stopped / candidate state,
+dwell confirmation (180 s), departure radius (100 m plus a 50 m jitter band), cadence by speed,
+the parked claim on a heartbeat, visit-arrival lifetime (6 h), redelivery heartbeat floor (60 s),
+pull floors by trigger, pull budget from remaining time, stranded detection, and the wake-ledger
+counters. Sixteen named constants in Swift, six in Kotlin, no two platforms agreeing on the set,
+and zero tests on either side: the only native test in the repository is
+`cryptid-generator`'s Kotlin parsing test, `just test-android` runs only that, and the CI `Native`
+job runs shell tests, `cargo test` and the bindings check. Rust, by contrast, has 517 test
+functions across 18 integration files plus the module tests, including the model-based
+five-operation check on `NodeHost`. Every background incident in AGENTS.md since September is a
+policy bug in the untested layer.
+
+**The seam: native owns effects, Rust owns decisions.** Concretely, one `BackgroundPolicy` in
+Rust with the shape the audit already proposed for motion, widened to the whole background
+runtime:
+
+```rust
+pub enum Event { Delivery(LocationFix), Visit { arrived: bool, at: LocationFix }, FenceExit,
+                 Tick, Refresh, Relaunch, AppState(AppState), BackgroundTime { remaining_ms: u64 },
+                 TaskExpired, Battery(BatteryState) }
+pub enum Command { SetCadence(Cadence), ArmFence(LocationFix, f64), ClearFence,
+                   Ingest(LocationFix), Heartbeat(Motion), Pull { budget_ms: u64 },
+                   BeginBackgroundTask, EndBackgroundTask, ScheduleRefresh { earliest_s: u64 },
+                   Notify(AppEvent) }
+pub fn step(state: &mut PolicyState, ev: Event, now_ms: u64) -> Vec<Command>;
+```
+
+`PolicyState` (motion state, stop candidate, anchor, last pull, open pull mark) lives in the
+node's `state_dir` beside `GateState`, so the durable marks that are in `UserDefaults` on one
+platform and `SharedPreferences` on the other become one store with one test. Swift and Kotlin
+shrink to two adapters each: a delegate that maps OS callbacks to `Event` (Core Location, visits,
+region exits, `applicationState`, `backgroundTimeRemaining`, battery) and an executor that runs
+`Command` against the OS (`CLLocationManager` settings, `beginBackgroundTask`, the foreground
+service, `BGTaskScheduler`, the JS event sink). What stays native because it is genuinely the OS:
+keychain and keystore, MetricKit, the CPU-time sampling in the wake ledger (measured natively,
+reported into Rust as an event), notification channels, and the launch bootstrap. The
+`BackgroundLocationRuntime.swift` of today is 1,919 lines; the adapter pair should be a few
+hundred, and the Kotlin pair about the same, with the same `Event` and `Command` types generated
+from Rust for both.
+
+**The testing story that follows from that seam has four layers, and each has a home.**
+
+1. **Policy, in Rust, where the tests already are.** Unit tests on `step` for each rule, and the
+   `host/tests.rs` style model check over event sequences. The incidents in AGENTS.md become
+   fixtures: the 2026-09-29 relaunch suspended mid-dwell, the 2026-10-02 redelivery every 30 s for
+   73 minutes, the 2026-10-07 app opened at a stop, the 2026-10-09 4,892 wakes and zero pulls. Each
+   is a sequence of `Event`s with an asserted `Command` list, and each is a test that would have
+   failed before its fix. `tests/mesh_vectors.rs` already reads cross-language JSON fixtures; the
+   policy traces use the same mechanism.
+2. **Adapters, natively, against a fake.** With policy out, a Swift adapter test is "a `CLVisit`
+   with `departureDate == distantFuture` produces `Event::Visit { arrived: true }`" and "a
+   `SetCadence` command sets `desiredAccuracy` and `distanceFilter` to these values", against a
+   recorded command sink. That is an XCTest target on the module (it needs the field-soak Mac or a
+   macOS CI runner, both of which exist now) and a JUnit target on Android that runs on Linux CI
+   next to `cryptid-generator`'s. These tests are small because the adapters are small; the reason
+   there are none today is that there is nothing in the native layer small enough to test.
+3. **Contract, generated and checked.** The UniFFI checksum at load, `check-bindings` for Swift
+   and Kotlin, and (per the spike) the generated TypeScript checked the same way. A record or enum
+   that changes in Rust fails CI in every consumer before it fails on a phone.
+4. **Devices, for what only devices can tell you.** The field soak and `scripts/e2e` stay for
+   integration: does iOS actually relaunch on a visit, does the foreground service survive a
+   reboot. They stop being where policy correctness is discovered, which is what they have been
+   since September.
+
+**Start with the pull, not the motion machine.** The friend pull is the smallest complete
+instance of the problem: brand new, written twice, six mirrored constants, a durable mark in two
+preference stores, and Rust already owns the bounded work. A `friend_pull::plan(trigger, now,
+last_pull, remaining_ms) -> Option<PullPlan>` plus the open-mark in `state_dir` moves the policy,
+leaves native as "begin task, call `pull_latest`, end task", and gives both platforms the same
+floors by construction. It is one PR, it fixes a divergence that exists today, and it is the
+template for the motion machine.
+
+For JS the same principle holds with a lighter touch: the service keeps UI orchestration and
+presence, receives events, and the ubrn spike covers the contract. The place to look is finding 9's
+engine layer, which is policy in JS for the same reasons.
 
 ## What is right, and should be the pattern
 
