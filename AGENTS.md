@@ -22,6 +22,12 @@ map, the `sc.*` join-key correlation model (entry-hash based; there is deliberat
 end-to-end trace because payloads are E2E-encrypted), and the TraceQL cookbook for debugging
 dropped location pings across devices and the trail-stash server.
 
+**Query it with `scripts/telemetry/{tq,tr,lq}.sh`** (TraceQL search, full trace, LogQL). Grafana
+resolves publicly but routes only over the tailnet. In a Claude Code web session,
+`scripts/claude-web/session-start.sh` (a SessionStart hook) joins the tailnet as an ephemeral
+userspace node and the helpers route through its SOCKS5 listener; it needs `TS_AUTHKEY` and
+`GRAFANA_TOKEN` set on the cloud environment, and `*.tailscale.com` in its network allowlist.
+
 Conventions when changing that code:
 
 - Instrumentation lives at drop-decision points and stamps `sc.author` / `sc.seq` /
