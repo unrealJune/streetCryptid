@@ -7,7 +7,9 @@
 #
 # Needs, in the cloud environment's settings:
 #   TS_AUTHKEY     ephemeral, pre-authorized auth key tagged tag:claude-web
+#   GRAFANA_URL    Grafana base URL
 #   GRAFANA_TOKEN  Viewer service-account token
+#   GRAFANA_ADDR   (optional) Grafana's tailnet IP, to skip name resolution over the tailnet
 # and network access to pkgs.tailscale.com and *.tailscale.com (control plane + DERP). UDP does
 # not leave the sandbox, so every packet rides DERP over 443.
 set -u
@@ -47,8 +49,14 @@ if ! "$DIR/tailscale" --socket="$SOCK" status >/dev/null 2>&1; then
     [ -S "$SOCK" ] && break
     sleep 0.2
   done
-  if ! timeout 45 "$DIR/tailscale" --socket="$SOCK" up --authkey="$TS_AUTHKEY" \
-    --hostname="claude-web-$(hostname | cut -c1-12)" --accept-dns=false >>"$LOG" 2>&1; then
+  # The key goes in by file, not argv, so it never shows up in `ps`.
+  KEYFILE="$DIR/authkey"
+  (umask 077 && printf '%s' "$TS_AUTHKEY" >"$KEYFILE")
+  timeout 45 "$DIR/tailscale" --socket="$SOCK" up --auth-key="file:$KEYFILE" \
+    --hostname="claude-web-$(hostname | cut -c1-12)" --accept-dns=false >>"$LOG" 2>&1
+  UP=$?
+  rm -f "$KEYFILE"
+  if [ "$UP" -ne 0 ]; then
     echo "claude-web: tailscale up failed; see $LOG"
     exit 0
   fi

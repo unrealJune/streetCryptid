@@ -25,8 +25,9 @@ dropped location pings across devices and the trail-stash server.
 **Query it with `scripts/telemetry/{tq,tr,lq}.sh`** (TraceQL search, full trace, LogQL). Grafana
 resolves publicly but routes only over the tailnet. In a Claude Code web session,
 `scripts/claude-web/session-start.sh` (a SessionStart hook) joins the tailnet as an ephemeral
-userspace node and the helpers route through its SOCKS5 listener; it needs `TS_AUTHKEY` and
-`GRAFANA_TOKEN` set on the cloud environment, and `*.tailscale.com` in its network allowlist.
+userspace node and the helpers route through its SOCKS5 listener; it needs `TS_AUTHKEY`,
+`GRAFANA_URL` and `GRAFANA_TOKEN` set on the cloud environment, and `*.tailscale.com` in its
+network allowlist. The repo is public: the Grafana host and token stay out of it.
 
 Conventions when changing that code:
 
