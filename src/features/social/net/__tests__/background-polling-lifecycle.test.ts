@@ -232,9 +232,9 @@ describe('pairing polling across the app lifecycle', () => {
   });
 
   /**
-   * The guard that makes the stop stick. `onPairReady`, `rebindNodeInner` and `armBump` all call
-   * `startPairingPolling`, and none of them knows the app is in a pocket — so stopping the loop
-   * without also refusing to re-arm it would be undone by the next unrelated event.
+   * The guard that makes the stop stick. `onPairReady`, `rebindNodeInner` and `armBump` all ask
+   * for a poll, and none of them knows the app is in a pocket — so stopping the loop without also
+   * refusing what they ask would be undone by the next unrelated event. The driver's gate refuses.
    */
   it('cannot be re-armed while backgrounded', async () => {
     const svc = await started();
@@ -243,7 +243,7 @@ describe('pairing polling across the app lifecycle', () => {
     const atBackground = mockHolder.mod.pollPairEventCalls;
 
     // Exactly what those three call sites do.
-    (svc as unknown as { startPairingPolling(): void }).startPairingPolling();
+    await (svc as unknown as { pollPairingOnce(): Promise<void> }).pollPairingOnce();
     await settle();
     await pollFor(30_000);
 
