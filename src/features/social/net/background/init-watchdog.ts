@@ -62,3 +62,23 @@ export function awaitInitBounded(
     );
   });
 }
+
+/**
+ * Whether an attempt still `initializing` has outlived the watchdog by the WALL CLOCK.
+ *
+ * {@link awaitInitBounded}'s timer is a `setTimeout`, and a backgrounded Android app's JS timers do
+ * not run, so the watchdog can be overdue without having fired. On 2026-10-13 a Pixel 10 launched,
+ * went to the background 10 s later mid-`init`, and came back 11 minutes on: the foreground
+ * listener asked whether to retry first, saw `initializing` and declined; the overdue timer fired a
+ * moment later and marked the attempt `stalled` with nobody left to act on it. The foreground check
+ * now asks the clock instead of waiting for the timer. `elapsedMs` is the service's own
+ * `initElapsedMs()`, which is 0 until `init()` itself starts — so the permission prompts before
+ * it, which a human may legitimately sit on, never count.
+ */
+export function isInitOverdue(
+  phase: string,
+  elapsedMs: number,
+  watchdogMs: number = INIT_WATCHDOG_MS
+): boolean {
+  return phase === 'initializing' && elapsedMs >= watchdogMs;
+}

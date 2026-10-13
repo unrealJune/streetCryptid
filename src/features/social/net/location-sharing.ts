@@ -436,6 +436,13 @@ const BUMP_EXPIRY_CHECK_MS = 1000;
 const FRIEND_WIRING_TEARDOWN_TIMEOUT_MS = 2000;
 
 /**
+ * When a post-ready step (see {@link LocationSharingService.startPostReadyWork}) is reported as
+ * overrunning. It is not cancelled — native work cannot be — but the `app.init.step` span goes out
+ * at this point naming it, rather than when (or if) it returns.
+ */
+const POST_READY_STEP_REPORT_MS = 20_000;
+
+/**
  * The gap between the first re-arm of a friend's profile replication and the second.
  *
  * The FIRST attempt is not delayed at all — {@link LocationSharingService.onPairReady} makes it
@@ -852,6 +859,8 @@ export class LocationSharingService {
   private backgroundAccess: BackgroundAccess = 'unknown';
   /** Acknowledge-time friend wiring still in flight. See {@link awaitFriendWiring}. */
   private readonly friendWiring = new Set<Promise<void>>();
+  /** Post-ready steps still in flight. See {@link startPostReadyWork}. */
+  private readonly postReadyWork = new Set<Promise<void>>();
   private latestLocalFix: LocationFix | null = null;
   private shutdownPromise: Promise<void> | null = null;
 
@@ -1217,18 +1226,75 @@ export class LocationSharingService {
     this.pushDeliveryConfig();
     // The cadence used to be a setting. Drop the stored choice so nothing can read it back.
     await clearLegacyShareInterval(this.kv).catch(() => undefined);
-    if (interactive) {
-      await this.markInitPhase('pairing', interactive);
-      await this.importFriendProfiles();
-      await this.syncStashGrants();
-      this.startPairingPolling();
-      await this.pollPairingOnce();
-    }
     // Reaching `ready` is the only thing that clears the watermark, so a value left on disk always
     // means an init that did not get here — never one that merely took a while.
     this.initPhase = null;
     await clearInitWatermark(this.kv).catch(() => undefined);
     this.setStatus('ready');
+    if (interactive) this.startPostReadyWork();
+  }
+
+  /**
+   * Profile reads, the stash grant and the first pairing poll: what used to be init's `pairing`
+   * phase, now started once the service is ready and never awaited by it.
+   *
+   * None of it is needed for a working map — profiles are on disk already, the grant belongs to the
+   * node, and the poll loop runs on its own timer — but all of it crosses into native code that
+   * waits on the docs engine or the pairing locks. On 2026-10-13 a Pixel 10's init sat in `pairing`
+   * for 11+ minutes on a launch whose iroh DNS was failing outright, and because `ready` was behind
+   * it, the map stayed on the positions it had loaded from disk: a friend who had pushed to that
+   * very phone an hour earlier read "out of contact 4 hr". Nothing said which of the four calls
+   * it was, so each one is now a {@link boundedStep} that names itself if it overruns.
+   */
+  private startPostReadyWork(): void {
+    // Synchronously, so the loop is live when `init` returns, exactly as before.
+    this.startPairingPolling();
+    this.boundedStep('profiles', () => this.importFriendProfiles());
+    this.boundedStep('stash-grant', () => this.syncStashGrants());
+    this.boundedStep('pairing-poll', () => this.pollPairingOnce());
+  }
+
+  /**
+   * Run one post-ready step and report it as an `app.init.step` span: `ok`, `error`, or — if it
+   * is still running after {@link POST_READY_STEP_REPORT_MS} — `overrun`, emitted at that moment,
+   * because a step that never returns would otherwise never report at all. One that lands after
+   * that reports again as `late`, with how long it really took.
+   */
+  private boundedStep(step: string, run: () => Promise<void>): void {
+    const started = Date.now();
+    let overran = false;
+    const report = (outcome: 'ok' | 'error' | 'overrun' | 'late', error?: unknown): void => {
+      const span = getTelemetry().startSpan('app.init.step', {
+        attributes: { 'init.step': step, outcome, elapsed_ms: Date.now() - started },
+      });
+      if (error !== undefined) span.recordError(error);
+      span.end();
+    };
+    const timer = setTimeout(() => {
+      overran = true;
+      report('overrun');
+      void this.flushDevTelemetry().catch(() => undefined);
+    }, POST_READY_STEP_REPORT_MS);
+    // Don't hold jest's event loop open on our account; no-op in RN/Hermes.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    const work = Promise.resolve()
+      .then(run)
+      .then(
+        () => report(overran ? 'late' : 'ok'),
+        (error: unknown) => report(overran ? 'late' : 'error', error)
+      )
+      .finally(() => {
+        clearTimeout(timer);
+        this.postReadyWork.delete(work);
+      });
+    this.postReadyWork.add(work);
+  }
+
+  /** Wait for post-ready steps still in flight; for shutdown and tests, like {@link awaitFriendWiring}. */
+  async awaitPostReadyWork(): Promise<void> {
+    while (this.postReadyWork.size > 0) {
+      await Promise.allSettled([...this.postReadyWork]);
+    }
   }
 
   /**
@@ -3792,7 +3858,7 @@ export class LocationSharingService {
     // teardown await on this path (AGENTS.md: never `await` native teardown unbounded) — a
     // subscribe that is itself stuck must not become the reason shutdown never returns.
     await Promise.race([
-      this.awaitFriendWiring(),
+      Promise.all([this.awaitFriendWiring(), this.awaitPostReadyWork()]),
       new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, FRIEND_WIRING_TEARDOWN_TIMEOUT_MS);
         // Same reason as the poll timers: don't hold jest's event loop open on our account.

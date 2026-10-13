@@ -1290,6 +1290,65 @@ describe('LocationSharingService — the read path does not need the node', () =
   });
 });
 
+describe('LocationSharingService — ready does not wait on post-ready work', () => {
+  beforeEach(() => {
+    mockHolder.mod = new FakeNativeModule();
+    mockHolder.stashConfig = null;
+    setTelemetryForTesting(undefined);
+    resetEventLogForTesting();
+  });
+
+  it('reaches ready while the first pairing poll never returns, and names each step', async () => {
+    // 2026-10-13: a Pixel 10's init sat in the old `pairing` phase for 11+ minutes, so the map
+    // never left the positions it had loaded from disk. Those calls now run after `ready`.
+    const pollable = mockHolder.mod as unknown as Record<string, unknown>;
+    pollable.pollPairEvents = async () => [];
+    pollable.pollProfileEvents = async () => [];
+    pollable.listPairSessions = () => new Promise(() => {});
+    pollable.nearbyBlePeers = async () => [];
+    pollable.bleCapabilities = async () => ({ pairingReady: false });
+    const sent: {
+      resourceSpans?: {
+        scopeSpans?: {
+          spans?: { name: string; attributes: { key: string; value: unknown }[] }[];
+        }[];
+      }[];
+    }[] = [];
+    const telemetry = createTelemetry({
+      endpoint: 'http://collector.test',
+      transport: async (_url, body) => {
+        sent.push(JSON.parse(body) as (typeof sent)[number]);
+      },
+    });
+    setTelemetryForTesting(telemetry);
+
+    const svc = makeService();
+    const statuses: string[] = [];
+    const unsubscribe = svc.onChange((snapshot) => statuses.push(snapshot.status));
+    await svc.init('@me', 'mothman');
+    unsubscribe();
+    expect(statuses.at(-1)).toBe('ready');
+
+    await flush();
+    await telemetry.flush();
+    const steps = sent
+      .flatMap((payload) => payload.resourceSpans?.[0]?.scopeSpans?.[0]?.spans ?? [])
+      .filter((span) => span.name === 'app.init.step')
+      .map((span) => {
+        const attr = (key: string) => span.attributes.find((a) => a.key === key)?.value;
+        return [attr('init.step'), attr('outcome')];
+      });
+    expect(steps).toEqual(
+      expect.arrayContaining([
+        [{ stringValue: 'profiles' }, { stringValue: 'ok' }],
+        [{ stringValue: 'stash-grant' }, { stringValue: 'ok' }],
+      ])
+    );
+    // The hung poll has not reported: it overruns only after its report bound.
+    expect(steps.some(([step]) => JSON.stringify(step).includes('pairing-poll'))).toBe(false);
+  });
+});
+
 describe('LocationSharingService — native node adoption', () => {
   beforeEach(() => {
     mockHolder.mod = new FakeNativeModule();

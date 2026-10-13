@@ -28,7 +28,11 @@ import {
 } from '@/features/social/core/presence';
 import type { IncomingFix, LocationFix } from '@/features/social/core/types';
 import { type TrailPoint } from '@/features/social/net/background/trail-store';
-import { awaitInitBounded, INIT_WATCHDOG_MS } from '@/features/social/net/background/init-watchdog';
+import {
+  awaitInitBounded,
+  INIT_WATCHDOG_MS,
+  isInitOverdue,
+} from '@/features/social/net/background/init-watchdog';
 import {
   canRetryService,
   INITIAL_SERVICE_LIFECYCLE,
@@ -211,6 +215,41 @@ function transitionService(event: ServiceLifecycleEvent): ServiceLifecycle {
     lifecycleListeners.forEach((listener) => listener());
   }
   return sharedLifecycle;
+}
+
+/**
+ * Mark an attempt `stalled` and say so with `app.init.timeout` — once, from whichever notices
+ * first: the watchdog's timer, or a foreground resume that finds it overdue by the clock (see
+ * `isInitOverdue`). Returns whether this call was the one that moved it.
+ *
+ * The span carries the phase because that is the question the data could not answer on 2026-09-18:
+ * the journal stopped after `node.create` and nothing said what came next. Emitted from the live
+ * process, so it lands even when the durable watermark is only read by some later launch.
+ */
+function reportInitStalled(
+  service: LocationSharingService,
+  attempt: number,
+  trigger: 'watchdog' | 'foreground'
+): boolean {
+  const before = sharedLifecycle;
+  const after = transitionService({
+    type: 'watchdog',
+    attempt,
+    initPhase: service.currentInitPhase(),
+  });
+  if (after === before) return false;
+  getTelemetry()
+    .startSpan('app.init.timeout', {
+      attributes: {
+        'init.phase': service.currentInitPhase() ?? 'unknown',
+        'init.elapsed_ms': service.initElapsedMs(),
+        watchdog_ms: INIT_WATCHDOG_MS,
+        trigger,
+        'sc.drop_reason': 'init-timeout',
+      },
+    })
+    .end();
+  return true;
 }
 
 function subscribeToLifecycle(onChange: () => void): () => void {
@@ -478,27 +517,10 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
           }
         }
         if (outcome === 'timeout') {
-          // The span carries the phase because that is the question the data could not answer on
-          // 2026-09-18: the journal stopped after `node.create` and nothing said what came next.
-          // Emitted from the live process, so it lands even when the durable watermark is only
-          // read by some later launch that may never come.
-          getTelemetry()
-            .startSpan('app.init.timeout', {
-              attributes: {
-                'init.phase': service.currentInitPhase() ?? 'unknown',
-                'init.elapsed_ms': service.initElapsedMs(),
-                watchdog_ms: INIT_WATCHDOG_MS,
-                'sc.drop_reason': 'init-timeout',
-              },
-            })
-            .end();
           // Let the stalled init keep running — it may still land — but mark it stalled, so a
-          // foreground resume (or a retry button) can rebuild rather than wait again.
-          transitionService({
-            type: 'watchdog',
-            attempt,
-            initPhase: service.currentInitPhase(),
-          });
+          // foreground resume (or a retry button) can rebuild rather than wait again. A no-op when
+          // a foreground resume already did both.
+          reportInitStalled(service, attempt, 'watchdog');
           // And if it DOES land, that is a working service. This used to be ignored: the service
           // came up and the UI kept saying it had not, until the next foreground discarded it.
           void pending.then(
@@ -559,6 +581,11 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
    * would restart a healthy launch out from under itself. See `canRetryService`.
    */
   const retryServiceFrom = useCallback((trigger: 'foreground' | 'user'): boolean => {
+    // The watchdog's timer may not have run while the app was in the background; the clock has.
+    const service = sharedService;
+    if (service && isInitOverdue(sharedLifecycle.phase, service.initElapsedMs())) {
+      reportInitStalled(service, sharedLifecycle.attempt, 'foreground');
+    }
     if (!canRetryService(sharedLifecycle)) return false;
     getTelemetry()
       .startSpan('app.init.recover', {
