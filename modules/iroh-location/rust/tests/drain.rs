@@ -728,11 +728,191 @@ async fn a_heartbeat_inside_a_covered_slot_publishes_nothing() {
         .unwrap();
 
     let out = engine
-        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, now + 1_000)
+        .heartbeat(Motion::Unknown, healthy_battery(), INTERVAL, now + 1_000)
         .await
         .unwrap();
 
     assert_eq!(out.enqueued, 0);
+    assert_eq!(h.sink.sent.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_repeated_parked_tick_inside_a_covered_slot_publishes_nothing() {
+    // Only a CHANGE is news. A parked phone's coarse clock ticks many times per slot.
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    let engine = h.engine();
+    engine
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    engine
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, base + INTERVAL)
+        .await
+        .unwrap();
+    let sent_before = h.sink.sent.lock().unwrap().len();
+
+    let out = engine
+        .heartbeat(
+            Motion::Parked,
+            healthy_battery(),
+            INTERVAL,
+            base + INTERVAL + 1_000,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(out.enqueued, 0);
+    assert_eq!(h.sink.sent.lock().unwrap().len(), sent_before);
+}
+
+// --- A change of `parked` is news -----------------------------------------------------------------
+//
+// 2026-10-13: an iPhone sealed its 19:10 slot `live` on a coarse departure and was suspended in
+// the same second. Anything it concluded afterwards inside that slot was saved and never sent, and
+// a friend read "updated 47 min ago" about a phone sitting still.
+
+#[tokio::test]
+async fn a_stop_confirmed_inside_a_covered_slot_goes_out_at_once() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    let slot_before = h.gate.get().last_published_slot;
+
+    let confirmed = base + 3 * MINUTE;
+    let out = h
+        .engine()
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, confirmed)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        out.enqueued, 1,
+        "the declaration, though the slot is covered"
+    );
+    assert_eq!(out.published, 1);
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(stamps.len(), 2);
+    assert_eq!(stamps[1].0, Some(iroh_location::FIX_STATE_PARKED));
+    assert_eq!(stamps[1].1, Some(180), "sealed when the stop was confirmed");
+    assert_eq!(
+        h.gate.get().last_published_slot,
+        slot_before,
+        "extra, not early: the grid is untouched"
+    );
+}
+
+#[tokio::test]
+async fn the_envelope_after_a_declaration_still_comes_due_on_the_grid() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    h.engine()
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, base + MINUTE)
+        .await
+        .unwrap();
+
+    let out = h
+        .engine()
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, base + INTERVAL)
+        .await
+        .unwrap();
+    assert_eq!(out.enqueued, 1, "exactly the next slot, no more");
+}
+
+#[tokio::test]
+async fn retracting_a_stop_inside_a_covered_slot_goes_out_at_once() {
+    // The other direction: a fence exit must not leave "parked here" standing until the next
+    // slot, which on a phone that has just been suspended again may be a long way off.
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+
+    let left = base + INTERVAL + MINUTE;
+    let out = h
+        .engine()
+        .heartbeat(Motion::Moving, healthy_battery(), INTERVAL, left)
+        .await
+        .unwrap();
+
+    assert_eq!(out.enqueued, 1);
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_NO_FIX)
+    );
+}
+
+#[tokio::test]
+async fn walking_out_of_a_stop_inside_a_covered_slot_goes_out_at_once() {
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+
+    let walked = base + INTERVAL + MINUTE;
+    let out = h
+        .engine()
+        .ingest(
+            fix_north(walked, 12.0, 150.0),
+            healthy_battery(),
+            INTERVAL,
+            walked,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(out.enqueued, 1);
+    let sent = h.sink.sent.lock().unwrap();
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(sent[sent.len() - 1].1, walked, "carrying the fix that left");
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_LIVE)
+    );
+}
+
+#[tokio::test]
+async fn a_fix_at_the_stop_inside_a_covered_slot_is_not_news() {
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+    let sent_before = h.sink.sent.lock().unwrap().len();
+
+    let at = base + INTERVAL + MINUTE;
+    let out = h
+        .engine()
+        .ingest(fix_north(at, 12.0, 20.0), healthy_battery(), INTERVAL, at)
+        .await
+        .unwrap();
+
+    assert_eq!(out.enqueued, 0);
+    assert_eq!(h.sink.sent.lock().unwrap().len(), sent_before);
+}
+
+#[tokio::test]
+async fn a_declaration_on_critical_battery_stays_suspended() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    let flat = BatteryState {
+        level: 0.02,
+        charging: false,
+        low_power: false,
+    };
+
+    let out = h
+        .engine()
+        .heartbeat(Motion::Parked, flat, INTERVAL, base + MINUTE)
+        .await
+        .unwrap();
+
+    assert!(out.suspended);
     assert_eq!(h.sink.sent.lock().unwrap().len(), 1);
 }
 
@@ -1078,28 +1258,30 @@ async fn a_backfilled_burst_is_stamped_as_one_wake() {
 
 #[tokio::test]
 async fn a_parked_tick_that_fills_no_slot_still_records_that_the_phone_parked() {
-    // `plan.due == 0` is the COMMON case on a parked phone: the current slot is already covered,
-    // so the tick enqueues nothing. It has still learned the device has settled, and a leftover
-    // envelope from an earlier failed drain must not go out stamped `live` from a parked phone.
+    // `plan.due == 0` is the COMMON case on a parked phone: the current slot is already covered.
+    // The declaration goes out as an off-grid envelope, but that send can fail like any other, and
+    // the stamp must survive it: a leftover envelope from a failed drain must not go out stamped
+    // `live` from a parked phone.
     let h = Harness::new();
     let base = INTERVAL * 10;
     h.engine()
         .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
         .await
         .unwrap();
+    *h.sink.fail_after.lock().unwrap() = Some(1);
 
-    // Same slot: nothing comes due.
+    // Same slot: nothing comes due, and the declaration's own envelope cannot be sent.
     let out = h
         .engine()
         .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, base + 1_000)
         .await
         .unwrap();
-    assert_eq!(out.enqueued, 0, "precondition: this tick filled no slot");
+    assert_eq!(out.published, 0, "precondition: nothing reached the wire");
 
     assert_eq!(
         h.gate.0.lock().unwrap().last_state,
         Some(iroh_location::FIX_STATE_PARKED),
-        "the parked declaration is persisted by the tick that had nothing to send"
+        "the parked declaration is persisted by the tick that could not send it"
     );
 }
 
@@ -1632,7 +1814,7 @@ async fn recovery_runs_even_when_nothing_was_due() {
         .unwrap();
 
     h.engine()
-        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, now + 1_000)
+        .heartbeat(Motion::Unknown, healthy_battery(), INTERVAL, now + 1_000)
         .await
         .unwrap();
 
@@ -1742,7 +1924,7 @@ async fn shortening_the_interval_does_not_republish_what_already_went_out() {
 
     let inside = start + 11 * MINUTE;
     let out = engine
-        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, inside)
+        .heartbeat(Motion::Unknown, healthy_battery(), INTERVAL, inside)
         .await
         .unwrap();
     assert_eq!(
@@ -1752,7 +1934,7 @@ async fn shortening_the_interval_does_not_republish_what_already_went_out() {
 
     let after = start + fifteen + MINUTE;
     let out = engine
-        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, after)
+        .heartbeat(Motion::Unknown, healthy_battery(), INTERVAL, after)
         .await
         .unwrap();
     assert_eq!(out.enqueued, 1, "exactly the one new 5-minute slot");

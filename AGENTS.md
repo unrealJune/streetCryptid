@@ -184,9 +184,11 @@ Conventions when changing that code:
   from the delivery path, which falls silent exactly when it matters — probing the main thread
   first (`main_stalled` when it cannot answer), plus a span per transition, visit, fence exit and
   Core Location error. Anything new the runtime decides goes on it; see `infra/otel/README.md`.
-- **A heartbeat states what it knows about motion, and only a proven stop says `parked`.**
+- **A heartbeat states what it knows about motion, and only a FENCED stop says `parked`.**
   `heartbeat_fix` takes `parked: Option<bool>` (`publish::Motion`): `Some(true)` from a confirmed
-  dwell, a visit arrival, a parked coarse tick or Android's no-delivery ticker; `Some(false)` from a
+  dwell, a visit arrival, a parked coarse tick, Android's no-delivery ticker, or — on an iPhone
+  launched in the background — a stop candidate the moment its fence is armed
+  (`speculativeStop`); `Some(false)` from a
   stop just left (retracts a standing `parked` to `no-fix`); `None` from any clock — the mounted
   JS timer, a refresh while moving — which keeps whatever the last evidence stamped. It used to stamp
   `parked` unconditionally, and on 2026-10-02 the JS timer published four hours of "parked here"
@@ -196,6 +198,25 @@ Conventions when changing that code:
   `considerDeparture`), or a fix the gate refused, keeps `parked`; only leaving that radius or
   `Some(false)` ends it. On 2026-10-07 opening the app at a stop sealed two `live` envelopes, the
   process was then suspended, and friends read "out of contact" about a phone sitting still.
+  **A relaunched iPhone does not live to prove a stop, so it declares one it has fenced.** On
+  2026-10-13 an iPhone sealed its 19:10 slot `live` on a coarse departure, opened a stop candidate
+  the same second and was suspended; nothing woke it, and a friend read "updated 47 min ago" about a
+  phone sitting still. Three changes close it, and each is load-bearing:
+  (1) **A change of `parked` is published at once** (`publish::parked_changed`): when the slot is
+  already covered, `heartbeat`/`ingest` queue one extra envelope off the grid, like an
+  introduction (`last_published_slot` is not advanced). Without it every declaration below is saved
+  and sent by a wake that may never come. The stash sees an off-grid publish at the transition —
+  accepted, since iOS parked publishing already rides irregular wakes. (2) **A coarse departure is
+  provisional** (`unverifiedDeparture`): `considerDeparture` goes to `moving` but keeps the stop's
+  fence armed and sends no claim, and the first precise fix answers it (`checkDeparture`, judged
+  like `gate::still_parked`) — still there resumes the stop on its original anchor
+  (`stop_via=resumed`), gone retracts. (3) **A fenced candidate is a stop on the wire, for a
+  process launched in the background** (`speculativeStop`, gated on
+  `BackgroundLocationRuntime.launchedInBackground` and the app not being active): the candidate's
+  `sc.stop-anchor` region is the same exit `stopped` relies on, so the claim is exactly as
+  retractable — its exit retracts, and `abandonStopCandidate` owes one. A claim is settled in the
+  same task as the fix that caused it (`settleClaims`), fix first, so the drain anchors a
+  declaration on that fix and judges it against the right stop.
 - **A position Core Location hands back is not a capture.** `didUpdateLocations` drops a location
   whose timestamp is not newer than the last one delivered: on 2026-10-02 one fix came back every
   30 s for 73 minutes, the first two went out `live` 5-9 minutes stale, and the rest read as a
@@ -336,7 +357,8 @@ Conventions when changing that code:
   **The declaration goes out on the delivery that CONFIRMS the stop**, not on a later tick: a
   background-relaunched iOS process is suspended between deliveries, so the parked coarse stream's
   next tick may never come, and on 2026-09-29 waiting for it made the last envelope before the
-  silence read `live`.
+  silence read `live`. And the envelope goes out even when that delivery's slot is already
+  covered — see `parked_changed` above.
 - **The wire is append-only, `Option`-only, and end-only.** `decode_fix_payload` decodes across the
   padding's zero fill, so appended `Option` fields read as `None` on a payload from an older sender
   (postcard writes `None` as `0x00`, and `unpad` has already proven the fill is zero). That is what
